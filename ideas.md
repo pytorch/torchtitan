@@ -4531,3 +4531,13 @@
   Planned command or config overrides: Active batch176 command with `NCCL_MIN_NCHANNELS=16`.
   Success criteria and expected risk: Success is step-10 tps above 13,659. Risk is worse overlap or extra communication-kernel resource use.
   Result: discarded at source state `e4c2251b`; 13,647 tps and 168.91 GiB. This is close but below the active recipe, so keep default NCCL channel selection.
+
+- Idea: batch172 with Triton RoPE active source
+  Current best source commit: a92cebb4
+  Source: batch176 is near the memory ceiling and only slightly beats batch168, while batch172 had not been measured after the custom Triton RoPE source change.
+  Expected mechanism: A lower-memory neighbor might reduce allocator pressure or hit a better scheduling point while retaining most of the batch176 collective amortization.
+  Supporting evidence: `local_batch_size=172` remains valid for the loss chunks4 MXFP8 dim1 row tiling because `172 * 32 = 5,504 = 43 * 128`.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active Triton RoPE command with `--training.local_batch_size=172`.
+  Success criteria and expected risk: Success is step-10 tps above 13,659 or a clearly better memory/performance tradeoff. Risk is lower useful work per step.
+  Result: discarded at source state `a92cebb4`; 13,399 tps and 166.24 GiB. Keep batch176 active.

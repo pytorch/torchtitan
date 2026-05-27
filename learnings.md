@@ -12898,3 +12898,28 @@ Interpretation:
 
 - Forcing a higher minimum NCCL channel count is valid and close, but it does not beat the active default channel selection on the batch176 recipe.
 - Keep the active communication recipe unchanged.
+
+## Experiment 513: Batch172 With Triton RoPE Active Source
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=172 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run513-triton-rope-batch172-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run513-triton-rope-batch172-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 13,399.
+- Step 10 peak memory: 166.24 GiB, 93.21%.
+- No allocator retries were logged.
+- Loss moved from 12.53186 at step 1 to 5.51795 at step 10.
+
+Interpretation:
+
+- Batch172 is valid and lower-memory on the final Triton RoPE source, but it is slower than batch176.
+- The immediate lower-neighbor shape does not offer a better tradeoff; keep batch176 active.
