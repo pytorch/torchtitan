@@ -12,25 +12,28 @@ from typing import TYPE_CHECKING
 
 from renderers import Message, Renderer, ToolSpec
 
-from torchtitan.experiments.rl.envs.message_env import MessageEnv, MessageStep
-from torchtitan.experiments.rl.envs.types import RolloutStatus
+from torchtitan.experiments.rl.envs.message_env import MessageEnv, MsgResponseStep
+from torchtitan.experiments.rl.rollouts.types import RolloutStatus
 
 if TYPE_CHECKING:
     from torchtitan.experiments.rl.actors.generator import Completion
 
 
+# TODO: the name "EnvLimits" is not settled — fields are framework-level
+# wrapper policy (timeouts, context overflow). Reconsider once we have
+# more envs (tool, browser) and a clearer sense of what knobs cluster.
 @dataclass(kw_only=True, slots=True)
-class RendererEnvConfig:
-    """Operational policy applied at the ``RendererEnv`` boundary.
-
-    Reward fields removed per doc 37 Option B; rubric owns all reward
-    assignment. The remaining fields are framework-level limits the
-    wrapper enforces (timeouts, context overflow).
-    """
+class EnvLimits:
+    """Operational policy applied at the ``RendererEnv`` boundary."""
 
     max_trajectory_tokens: int | None = None
+    """Hard cap on ``prompt_tokens + generation_tokens`` per turn; ``None`` disables."""
+
     max_generation_tokens: int | None = None
+    """Reserved tokens for the upcoming generation when checking overflow."""
+
     step_timeout_s: float | None = 1800.0
+    """Wall-clock timeout for one ``MessageEnv.step_message`` call."""
 
 
 @dataclass(kw_only=True, slots=True)
@@ -39,23 +42,22 @@ class TokenizedTurn:
 
     Returned by both ``RendererEnv.initial_prompt()`` and
     ``RendererEnv.step_completion(completion)``.
-
-    Fields:
-        next_token_ids: Prompt for the NEXT generator call.
-            ``None`` on terminal step.
-            On initial: the initial prompt the model sees on turn 0.
-            After non-terminal step_completion: prompt for turn N+1.
-        next_messages: Full conversation snapshot at the next-prompt point.
-        last_env_step: The env's response to the previous turn.
-            ``None`` on initial.
-        last_response_messages: Messages appended this turn (parsed assistant
-            message + env's tool / user replies). Empty on initial.
     """
 
-    next_token_ids: list[int] | None
+    next_token_ids: list[int] | None  # [L_prompt] or None
+    """Prompt for the NEXT generator call. ``None`` on terminal step.
+    On initial: the initial prompt the model sees on turn 0.
+    After non-terminal step_completion: prompt for turn N+1."""
+
     next_messages: list[Message]
-    last_env_step: MessageStep | None = None
+    """Full conversation snapshot at the next-prompt point."""
+
+    last_env_step: MsgResponseStep | None = None
+    """The env's response to the previous turn. ``None`` on initial."""
+
     last_response_messages: list[Message] = field(default_factory=list)
+    """Messages appended this turn (parsed assistant message + env's
+    tool / user replies). Empty on initial."""
 
 
 class RendererEnv:
@@ -64,12 +66,12 @@ class RendererEnv:
     IS an env from the driver's view but does NOT inherit ``MessageEnv``.
     Owns the renderer plumbing, length-stop / parse-error / timeout
     classification, and context-overflow checks. Rewards live on the
-    rubric; ``MessageStep.reward`` is always ``None`` here.
+    rubric; ``MsgResponseStep.reward`` is always ``None`` here.
 
     Args:
         message_env: The user's ``MessageEnv`` subclass instance.
         renderer: Renderer from ``RendererConfig.build``.
-        config: Token-level policy knobs.
+        limits: Framework-level wrapper policy (timeouts, overflow caps).
 
     Example:
 
@@ -88,23 +90,25 @@ class RendererEnv:
         *,
         message_env: MessageEnv,
         renderer: Renderer,
-        config: RendererEnvConfig | None = None,
+        limits: EnvLimits | None = None,
     ) -> None:
         self._message_env = message_env
         self._renderer = renderer
-        self._config = config or RendererEnvConfig()
-        self._tools: list[ToolSpec] = []
+        self._limits = limits or EnvLimits()
+        self._tools: list[ToolSpec] | None = None
         self._messages: list[Message] = []
         self._last_prompt_ids: list[int] = []
 
     async def initial_prompt(self) -> TokenizedTurn:
         init = await self._message_env.reset()
         self._messages = list(init.messages)
-        self._tools = list(init.tools)
+        # Renderer chat templates often emit a different tools-section
+        # depending on None vs empty list; store None when no tools.
+        self._tools = list(init.tools) if init.tools else None
         token_ids = await asyncio.to_thread(
             self._renderer.render_ids,
             messages=self._messages,
-            tools=self._tools or None,
+            tools=self._tools,
             add_generation_prompt=True,
         )
         if self._is_overflow(prompt_len=len(token_ids)):
@@ -155,7 +159,7 @@ class RendererEnv:
             assistant["tool_calls"] = parsed.tool_calls
 
         # Apply the user's env step under a timeout
-        timeout = self._config.step_timeout_s
+        timeout = self._limits.step_timeout_s
         try:
             if timeout is None:
                 env_step = await self._message_env.step_message(assistant)
@@ -188,13 +192,13 @@ class RendererEnv:
             previous_prompt_ids=self._last_prompt_ids,
             previous_completion_ids=list(completion.token_ids),
             new_messages=env_step.messages,
-            tools=self._tools or None,
+            tools=self._tools,
         )
         if bridged is None:
             next_token_ids = await asyncio.to_thread(
                 self._renderer.render_ids,
                 messages=self._messages,
-                tools=self._tools or None,
+                tools=self._tools,
                 add_generation_prompt=True,
             )
         else:
@@ -221,10 +225,10 @@ class RendererEnv:
         await self._message_env.close()
 
     def _is_overflow(self, *, prompt_len: int) -> bool:
-        cap = self._config.max_trajectory_tokens
+        cap = self._limits.max_trajectory_tokens
         if cap is None:
             return False
-        reserve = self._config.max_generation_tokens or 0
+        reserve = self._limits.max_generation_tokens or 0
         return prompt_len + reserve > cap
 
 
@@ -233,7 +237,7 @@ def _terminal(
     next_messages: list[Message],
     status: RolloutStatus,
 ) -> TokenizedTurn:
-    """Build a terminal TokenizedTurn carrying a status-only MessageStep.
+    """Build a terminal TokenizedTurn carrying a status-only MsgResponseStep.
 
     Reward stays ``None``; the rubric assigns reward off-env per doc 37
     Option B (rubric owns all reward semantics).
@@ -241,6 +245,6 @@ def _terminal(
     return TokenizedTurn(
         next_token_ids=None,
         next_messages=next_messages,
-        last_env_step=MessageStep(done=True, status=status),
+        last_env_step=MsgResponseStep(done=True, status=status),
         last_response_messages=[],
     )

@@ -10,15 +10,12 @@ from dataclasses import dataclass, field
 
 from renderers import Renderer
 
-from torchtitan.experiments.rl.envs import DatasetOutput, RendererEnv, RendererEnvConfig
+from torchtitan.experiments.rl.envs import EnvLimits, RendererEnv
 from torchtitan.experiments.rl.recipes import Task
 from torchtitan.experiments.rl.recipes.sum_digits.data import SumDigitsDataset
 from torchtitan.experiments.rl.recipes.sum_digits.env import SumDigitsEnv
-from torchtitan.experiments.rl.recipes.sum_digits.grader import (
-    reward_correct,
-    reward_format,
-)
-from torchtitan.experiments.rl.rubrics import Rubric
+from torchtitan.experiments.rl.recipes.sum_digits.grader import SumDigitsRubric
+from torchtitan.experiments.rl.rollouts.types import DatasetOutput
 
 
 class SumDigitsTask(Task):
@@ -26,21 +23,16 @@ class SumDigitsTask(Task):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Task.Config):
-        seed: int = 42
-        correctness_weight: float = 1.0
-        format_weight: float = 0.3
-        renderer_env_config: RendererEnvConfig = field(
-            default_factory=RendererEnvConfig
+        dataset: SumDigitsDataset.Config = field(
+            default_factory=SumDigitsDataset.Config
         )
+        rubric: SumDigitsRubric.Config = field(default_factory=SumDigitsRubric.Config)
+        env_limits: EnvLimits = field(default_factory=EnvLimits)
 
     def __init__(self, config: Config) -> None:
-        self._config = config
-        self.dataset = SumDigitsDataset(seed=config.seed)
-        self.rubric = Rubric(
-            funcs=[reward_correct, reward_format],
-            weights=[config.correctness_weight, config.format_weight],
-        )
-        self.renderer_env_config = config.renderer_env_config
+        self.dataset = config.dataset.build()
+        self.rubric = config.rubric.build()
+        self.env_limits = config.env_limits
 
     def make_envs(
         self,
@@ -53,7 +45,7 @@ class SumDigitsTask(Task):
             RendererEnv(
                 message_env=SumDigitsEnv(env_input=example.env_input),
                 renderer=renderer,
-                config=self.renderer_env_config,
+                limits=self.env_limits,
             )
             for _ in range(group_size)
         ]

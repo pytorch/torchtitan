@@ -6,36 +6,20 @@
 
 from torchtitan.experiments.rl.envs.message_env import (
     MessageEnv,
-    MessageReset,
-    MessageStep,
+    MsgResponseReset,
+    MsgResponseStep,
 )
 from torchtitan.experiments.rl.envs.renderer_env import (
+    EnvLimits,
     RendererEnv,
-    RendererEnvConfig,
     TokenizedTurn,
-)
-from torchtitan.experiments.rl.envs.types import (
-    DatasetOutput,
-    last_assistant_text,
-    Rollout,
-    rollout_output_to_episode,
-    RolloutStatus,
-    RolloutTurn,
-    validate_rollout_output,
 )
 
 __all__ = [
-    "DatasetOutput",
+    "EnvLimits",
     "MessageEnv",
-    "MessageReset",
-    "MessageStep",
+    "MsgResponseReset",
+    "MsgResponseStep",
     "RendererEnv",
-    "RendererEnvConfig",
-    "Rollout",
-    "RolloutStatus",
-    "RolloutTurn",
     "TokenizedTurn",
-    "last_assistant_text",
-    "rollout_output_to_episode",
-    "validate_rollout_output",
 ]

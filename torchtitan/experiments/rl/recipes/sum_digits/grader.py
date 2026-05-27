@@ -7,18 +7,19 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
-from torchtitan.experiments.rl.envs import last_assistant_text, Rollout
 from torchtitan.experiments.rl.recipes.sum_digits.data import SumDigitsInput
+from torchtitan.experiments.rl.rollouts import last_assistant_text, Rollout
+from torchtitan.experiments.rl.rubrics import RewardFn, Rubric
 
 
 _ANSWER_RE = re.compile(r"\[ANSWER\]\s*(-?\d+)")
 _FORMAT_RE = re.compile(r"\[ANSWER\]\s*-?\d+")
 
 
-async def reward_correct(rollout: Rollout, env_input: object) -> float:
+async def reward_correct(rollout: Rollout, env_input: SumDigitsInput) -> float:
     """1.0 if the last ``[ANSWER] <n>`` matches the target, else 0.0."""
-    assert isinstance(env_input, SumDigitsInput)
     text = last_assistant_text(rollout)
     matches = _ANSWER_RE.findall(text)
     if not matches:
@@ -29,3 +30,25 @@ async def reward_correct(rollout: Rollout, env_input: object) -> float:
 async def reward_format(rollout: Rollout, env_input: object) -> float:
     """1.0 if a ``[ANSWER] <n>`` tag is present anywhere in the response."""
     return 1.0 if _FORMAT_RE.search(last_assistant_text(rollout)) else 0.0
+
+
+class SumDigitsRubric(Rubric):
+    """SumDigits rubric: weighted ``reward_correct`` + ``reward_format``."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Rubric.Config):
+        correctness_weight: float = 1.0
+        """Weight on the answer-matches-target reward."""
+
+        format_weight: float = 0.3
+        """Weight on the ``[ANSWER] <n>`` tag-presence reward."""
+
+    def register_funcs(self) -> list[RewardFn]:
+        cfg = self._config
+        return [
+            RewardFn(fn=reward_correct, weight=cfg.correctness_weight),
+            RewardFn(fn=reward_format, weight=cfg.format_weight),
+        ]
+
+
+__all__ = ["SumDigitsRubric", "reward_correct", "reward_format"]

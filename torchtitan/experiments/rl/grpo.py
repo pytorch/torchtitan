@@ -54,20 +54,19 @@ from torchtitan.experiments.rl.actors.generator import (
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import Batcher
-from torchtitan.experiments.rl.envs import (
-    DatasetOutput,
-    last_assistant_text,
-    RendererEnv,
-    Rollout,
-    rollout_output_to_episode,
-    RolloutStatus,
-    RolloutTurn,
-    TokenizedTurn,
-    validate_rollout_output,
-)
+from torchtitan.experiments.rl.envs import RendererEnv, TokenizedTurn
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.recipes import Task
 from torchtitan.experiments.rl.renderer import RendererConfig
+from torchtitan.experiments.rl.rollouts import (
+    DatasetOutput,
+    last_assistant_text,
+    prepare_rollout_metrics,
+    Rollout,
+    rollout_to_episode,
+    RolloutStatus,
+    RolloutTurn,
+)
 from torchtitan.experiments.rl.types import Episode
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
@@ -185,45 +184,36 @@ class Provisioner:
         return _bootstrap
 
 
-def _log_samples(items: list[Episode] | list[Completion]) -> None:
-    """Log the first sample per prompt for debugging."""
+def _log_samples(episodes: list[Episode]) -> None:
+    """Log the first episode per prompt for debugging."""
     seen_prompts: set[int] = set()
-    for item in items:
-        if item.prompt_idx in seen_prompts:
+    for ep in episodes:
+        if ep.prompt_idx in seen_prompts:
             continue
-        seen_prompts.add(item.prompt_idx)
-        reward_str = f" reward={item.reward:+.1f}" if hasattr(item, "reward") else ""
-        logger.info(f"  [prompt {item.prompt_idx}]{reward_str}")
-        logger.info(f"       A: {item.text[:300].replace(chr(10), ' ').strip()}")
+        seen_prompts.add(ep.prompt_idx)
+        logger.info(f"  [prompt {ep.prompt_idx}] reward={ep.reward:+.1f}")
+        logger.info(f"       A: {ep.text[:300].replace(chr(10), ' ').strip()}")
 
 
-# TODO: we have rewards all over the place in some functions. Lets see what we can consolidate
-# in some function like this
-def _prepare_reward_metrics(
-    prefix: str,
-    rollouts: list[Rollout],
-) -> list[m.Metric]:
-    """One ``Mean`` metric per observed reward component across rollouts.
+def _overflow_rollouts(
+    group_id: str,
+    initial_turns: list[TokenizedTurn],
+) -> list[Rollout]:
+    """Build placeholder ``TRUNCATED_OVERFLOW`` rollouts for a group whose
+    initial prompt overflowed before any generation happened.
 
-    Example::
-
-        rollouts = [
-            Rollout(reward_components={"correctness": 1.0, "format": 0.5}, ...),
-            Rollout(reward_components={"correctness": 0.0}, ...),
-        ]
-        _prepare_reward_metrics("reward/component", rollouts)
-        # -> [
-        #      Metric("reward/component/correctness", Mean(sum=1.0, count=2)),  # 0.5
-        #      Metric("reward/component/format",      Mean(sum=0.5, count=1)),  # 0.5 - "format" only in rollout 0
-        #    ]
+    No turns are attached — there's no usable training data — so
+    ``_build_episodes`` skips them. They still appear in the rollout
+    metrics so truncation rate stays honest.
     """
-    values_by_name: dict[str, list[float]] = defaultdict(list)
-    for rollout in rollouts:
-        for name, value in rollout.reward_components.items():
-            values_by_name[name].append(float(value))
     return [
-        m.Metric(f"{prefix}/{name}", m.Mean.from_list(values))
-        for name, values in sorted(values_by_name.items())
+        Rollout(
+            group_id=group_id,
+            sample_idx=sample_idx,
+            status=RolloutStatus.TRUNCATED_OVERFLOW,
+            turns=[],
+        )
+        for sample_idx, _ in enumerate(initial_turns)
     ]
 
 
@@ -274,7 +264,6 @@ async def _do_group_step(
             status=status,
             turns=[turn],
         )
-        validate_rollout_output(rollout)
         rollouts.append(rollout)
     return rollouts
 
@@ -666,10 +655,16 @@ class RLTrainer(Configurable):
                 *(env.initial_prompt() for env in all_envs)
             )
 
-            # One prompt per group; vLLM fans out to sampling.n siblings
-            prompts = [
-                list(initial_turns[g_idx * group_size].next_token_ids or [])
+            # Skip the generator for groups whose initial prompt already overflowed;
+            # they're emitted as TRUNCATED_OVERFLOW rollouts below.
+            runnable_groups = [
+                g_idx
                 for g_idx in range(num_groups)
+                if initial_turns[g_idx * group_size].next_token_ids is not None
+            ]
+            prompts = [
+                list(initial_turns[g_idx * group_size].next_token_ids)
+                for g_idx in runnable_groups
             ]
 
             completions, gen_metrics = self._get_rank_0_value(
@@ -685,20 +680,26 @@ class RLTrainer(Configurable):
                     f"expected {expected} completions, got {len(completions)}"
                 )
 
-            # Bucket by source prompt index
+            # completion.prompt_idx is the index into `prompts` (i.e. into runnable_groups)
             completions_by_group: dict[int, list[Completion]] = defaultdict(list)
             for c in completions:
-                completions_by_group[c.prompt_idx].append(c)
+                completions_by_group[runnable_groups[c.prompt_idx]].append(c)
 
             # Step + score each group. Per-group failures are isolated: a
             # broken group is logged and skipped, the rest proceed.
             # TODO: narrow to expected exception types once tool/sandbox envs land.
+            # TODO: decide whether to drop the whole group when one sample fails
+            # mid-turn. Single-turn + identical prompts means siblings shouldn't
+            # diverge today, but multi-turn will surface this.
             rollouts: list[Rollout] = []
             num_failed_groups = 0
             for g_idx in range(num_groups):
                 group_initial = initial_turns[
                     g_idx * group_size : (g_idx + 1) * group_size
                 ]
+                if g_idx not in completions_by_group:
+                    rollouts.extend(_overflow_rollouts(group_ids[g_idx], group_initial))
+                    continue
                 try:
                     group_rollouts = await _do_group_step(
                         envs=envs_per_group[g_idx],
@@ -749,9 +750,9 @@ class RLTrainer(Configurable):
         sampling = replace(
             self.config.generator.sampling, stop_token_ids=self._stop_token_ids
         )
-        # TODO: Add a check max_tokens = min(max_tokens, context_window - model_input.length)
-        # and pass max_tokens to the generator call or skip the call if max_tokens<=0.
-        # Do the same for validation.
+        # TODO: per-prompt max_tokens clamp (context_window - len(prompt)) so we
+        # don't over-allocate generation budget on long prompts. Initial-prompt
+        # overflow is already handled by RendererEnv + _run_rollouts.
         rollouts, generation_metrics = await self._run_rollouts(
             task=self._train,
             num_groups=num_groups,
@@ -762,24 +763,8 @@ class RLTrainer(Configurable):
             metrics_prefix="generator",
         )
 
-        # Metrics
-        response_lens = [len(t.response_token_ids) for r in rollouts for t in r.turns]
-        prompt_lens = [r.turns[0].prompt_token_ids for r in rollouts if r.turns]
-        prompt_lens = [len(p) for p in prompt_lens]
-        total_lens = [p + r for p, r in zip(prompt_lens, response_lens, strict=True)]
-        truncated = [r.status.is_truncated() for r in rollouts]
-        rollout_metrics: list[m.Metric] = [
-            m.Metric("rollout/response_length", m.Mean.from_list(response_lens)),
-            m.Metric("rollout/response_length", m.Max.from_list(response_lens)),
-            m.Metric("rollout/prompt_length", m.Mean.from_list(prompt_lens)),
-            m.Metric("rollout/prompt_length", m.Max.from_list(prompt_lens)),
-            m.Metric("rollout/total_length", m.Max.from_list(total_lens)),
-            m.Metric("rollout/truncation_rate", m.Mean.from_list(truncated)),
-        ]
+        rollout_metrics = prepare_rollout_metrics("rollout", rollouts)
         rollout_metrics += generation_metrics
-        rollout_metrics += _prepare_reward_metrics(
-            prefix="reward/component", rollouts=rollouts
-        )
         return rollouts, rollout_metrics
 
     @staticmethod
@@ -790,8 +775,6 @@ class RLTrainer(Configurable):
         """Group rollouts by ``group_id``, apply mean-baseline advantage, emit metrics."""
         groups: dict[str, list[Rollout]] = {}
         for rollout in rollouts:
-            if rollout.group_id is None:
-                raise ValueError("rollout missing group_id")
             groups.setdefault(rollout.group_id, []).append(rollout)
         group_id_to_idx = {gid: i for i, gid in enumerate(sorted(groups))}
 
@@ -807,13 +790,12 @@ class RLTrainer(Configurable):
             # Population standard deviation; NaN for an empty group.
             group_stds.append(statistics.pstdev(rewards))
             for rollout in group:
-                if rollout.reward is None:
+                # Skip rollouts with no usable training data (e.g. initial-prompt
+                # overflow → empty turns).
+                if rollout.reward is None or not rollout.turns:
                     continue
-                # Single-turn: exactly one RolloutTurn per Rollout.
                 rollout.advantage = rollout.reward - group_mean
-                episode = rollout_output_to_episode(
-                    rollout, text=last_assistant_text(rollout)
-                )
+                episode = rollout_to_episode(rollout, text=last_assistant_text(rollout))
                 episodes.append(replace(episode, prompt_idx=group_id_to_idx[group_id]))
 
         num_groups = len(groups)
@@ -878,30 +860,17 @@ class RLTrainer(Configurable):
 
         if self.config.log_samples:
             preview = [
-                rollout_output_to_episode(r, text=last_assistant_text(r))
+                rollout_to_episode(r, text=last_assistant_text(r))
                 for r in rollouts
                 if r.reward is not None
             ]
             _log_samples(preview)
 
-        response_lens = [len(t.response_token_ids) for r in rollouts for t in r.turns]
-        validation_metrics: list[m.Metric] = [
-            m.Metric(
-                "validation/reward",
-                m.SummaryStats.from_list(
-                    [r.reward for r in rollouts if r.reward is not None]
-                ),
-            ),
-            m.Metric(
-                "validation/response_length",
-                m.Mean.from_list(response_lens),
-            ),
-            m.Metric("validation/num_samples", m.NoReduce(float(len(rollouts)))),
-        ]
-        validation_metrics += generation_metrics
-        validation_metrics += _prepare_reward_metrics(
-            prefix="validation/reward/component", rollouts=rollouts
+        validation_metrics = prepare_rollout_metrics("validation", rollouts)
+        validation_metrics.append(
+            m.Metric("validation/num_samples", m.NoReduce(float(len(rollouts))))
         )
+        validation_metrics += generation_metrics
 
         t_validate_s = time.perf_counter() - t_validate_start
         validation_metrics.append(m.Metric("timing/validate", m.NoReduce(t_validate_s)))

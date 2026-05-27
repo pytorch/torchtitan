@@ -8,13 +8,9 @@ from __future__ import annotations
 
 from renderers import Message
 
-from torchtitan.experiments.rl.envs import (
-    MessageEnv,
-    MessageReset,
-    MessageStep,
-    RolloutStatus,
-)
+from torchtitan.experiments.rl.envs import MessageEnv, MsgResponseReset, MsgResponseStep
 from torchtitan.experiments.rl.recipes.sum_digits.data import SumDigitsInput
+from torchtitan.experiments.rl.rollouts.types import RolloutStatus
 
 
 SYSTEM_PROMPT = """\
@@ -37,17 +33,17 @@ class SumDigitsEnv(MessageEnv):
     def __init__(self, *, env_input: SumDigitsInput) -> None:
         self._numbers = env_input.numbers
 
-    async def reset(self) -> MessageReset:
+    async def reset(self) -> MsgResponseReset:
         question = f"What is the total digit sum of {self._numbers}?"
-        return MessageReset(
+        return MsgResponseReset(
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": question},
             ]
         )
 
-    async def step_message(self, msg: Message) -> MessageStep:
+    async def step_message(self, msg: Message) -> MsgResponseStep:
         """Single-turn env: terminate immediately. The rubric scores the
         rollout off-env from ``msg`` content; nothing here depends on the
         assistant's message."""
-        return MessageStep(messages=[], done=True, status=RolloutStatus.COMPLETED)
+        return MsgResponseStep(messages=[], done=True, status=RolloutStatus.COMPLETED)

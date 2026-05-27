@@ -12,13 +12,15 @@ from torchtitan.experiments.rl.recipes.sum_digits.env import SumDigitsEnv
 from torchtitan.experiments.rl.recipes.sum_digits.grader import (
     reward_correct,
     reward_format,
+    SumDigitsRubric,
 )
-from torchtitan.experiments.rl.recipes.sum_digits.recipe import SumDigitsTask
+from torchtitan.experiments.rl.recipes.sum_digits.task import SumDigitsTask
 
 __all__ = [
     "SumDigitsDataset",
     "SumDigitsEnv",
     "SumDigitsInput",
+    "SumDigitsRubric",
     "SumDigitsTask",
     "reward_correct",
     "reward_format",

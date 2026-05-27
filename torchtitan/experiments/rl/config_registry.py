@@ -26,7 +26,7 @@ from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import Batcher
 from torchtitan.experiments.rl.grpo import GRPOLoss, RLTrainer
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
-from torchtitan.experiments.rl.recipes.sum_digits import SumDigitsTask
+from torchtitan.experiments.rl.recipes.sum_digits import SumDigitsDataset, SumDigitsTask
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.models.qwen3 import model_registry
 
@@ -42,8 +42,8 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
         # TODO: rename this train/validation, its horrible.
-        train=SumDigitsTask.Config(seed=42),
-        validation=SumDigitsTask.Config(seed=99),
+        train=SumDigitsTask.Config(dataset=SumDigitsDataset.Config(seed=42)),
+        validation=SumDigitsTask.Config(dataset=SumDigitsDataset.Config(seed=99)),
         renderer=RendererConfig(name="qwen3"),
         metrics=MetricsProcessor.Config(),
         batcher=Batcher.Config(
@@ -98,8 +98,8 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         num_prompts_per_step=5,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        train=SumDigitsTask.Config(seed=42),
-        validation=SumDigitsTask.Config(seed=99),
+        train=SumDigitsTask.Config(dataset=SumDigitsDataset.Config(seed=42)),
+        validation=SumDigitsTask.Config(dataset=SumDigitsDataset.Config(seed=99)),
         renderer=RendererConfig(name="qwen3"),
         metrics=MetricsProcessor.Config(),
         batcher=Batcher.Config(
@@ -155,8 +155,8 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
         num_prompts_per_step=5,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        train=SumDigitsTask.Config(seed=42),
-        validation=SumDigitsTask.Config(seed=99),
+        train=SumDigitsTask.Config(dataset=SumDigitsDataset.Config(seed=42)),
+        validation=SumDigitsTask.Config(dataset=SumDigitsDataset.Config(seed=99)),
         renderer=RendererConfig(name="qwen3"),
         metrics=MetricsProcessor.Config(),
         batcher=Batcher.Config(
@@ -215,8 +215,8 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
         num_prompts_per_step=5,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        train=SumDigitsTask.Config(seed=42),
-        validation=SumDigitsTask.Config(seed=99),
+        train=SumDigitsTask.Config(dataset=SumDigitsDataset.Config(seed=42)),
+        validation=SumDigitsTask.Config(dataset=SumDigitsDataset.Config(seed=99)),
         renderer=RendererConfig(name="qwen3"),
         metrics=MetricsProcessor.Config(),
         batcher=Batcher.Config(
