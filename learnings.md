@@ -10876,3 +10876,26 @@ Interpretation:
 
 - Coarser LL buffering does not improve the visible `RING_LL` FSDP collective path on the explicit-NVLS active recipe.
 - Keep default `NCCL_LL_BUFFSIZE`.
+
+## Experiment 438: MXFP8 Dim1 CUDA Cast Path On Explicit-NVLS Active Recipe
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run438-mxfp8-dim1-cuda-nvls-active > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily changed the TorchTitan MXFP8 linear monkeypatch and shared gate/up custom autograd path to request `MXFP8Dim1CastKernelChoice.CUDA` instead of `TRITON`.
+- Restored Triton dim1 casts after the result.
+
+Result:
+
+- Status: crash before step 1.
+- Failure: TorchAO CUDA MXFP8 quantize raised `RuntimeError: invalid argument` from `mxfp8_quantize.cuh` line 367.
+
+Interpretation:
+
+- The CUDA dim1 cast path is still not viable on this stack, even after the final shared gate/up source and valid chunking shape.
+- Keep the Triton dim1 override despite its 128-row tile constraints and visible cast cost.
