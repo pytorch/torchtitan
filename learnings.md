@@ -10899,3 +10899,31 @@ Interpretation:
 
 - The CUDA dim1 cast path is still not viable on this stack, even after the final shared gate/up source and valid chunking shape.
 - Keep the Triton dim1 override despite its 128-row tile constraints and visible cast cost.
+
+## Experiment 439: Cached MXFP8 lm_head Forward Weight Casts
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run439-cached-mxfp8-lm-head-weight-nvls-active > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily added a custom MXFP8 linear path for `lm_head` that cached the forward dim0 MXFP8 weight tensor using the high-precision weight shape, dtype, and version.
+- The intent was to avoid recasting the same `lm_head` weight across the four `ChunkedCELoss` chunks in a step.
+- Restored the default `lm_head` path after the result.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,182.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 167.77 GiB, 94.07%.
+- No allocator retries were logged.
+- Loss moved from 12.44393 at step 1 to 4.74612 at step 10.
+
+Interpretation:
+
+- The cached `lm_head` weight path is valid, but the extra cached MX tensor raises memory by about 0.8 GiB and does not beat the active recipe.
+- Repeated `lm_head` forward weight casts are not the dominant remaining limiter for this command.
