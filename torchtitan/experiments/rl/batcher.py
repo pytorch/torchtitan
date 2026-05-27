@@ -19,13 +19,11 @@ from torchtitan.experiments.rl.types import Episode, TrainingBatch
 
 
 class Batcher(Configurable):
-    """Packs episodes into ``[B, seq_len]`` batches for the trainer.
+    """Packs ``list[Episode]`` into ``[grad_accum_steps][dp_degree]``
+    microbatches, where each microbatch is a ``TrainingBatch`` of shape
+    ``[local_batch_size, seq_len]``.
 
-    The controller collects rollouts until the total response tokens reach
-    ``num_tokens_target`` (= ``global_batch_size * seq_len``), then
-    packs all collected episodes into fixed-length rows, truncates to
-    ``global_batch_size``, and splits into
-    ``[grad_accum_steps][dp_degree]`` microbatches.
+    ``gradient_accumulation_steps = global_batch_size // (local_batch_size * dp_degree)``
     """
 
     @dataclass(kw_only=True, slots=True)

@@ -770,9 +770,10 @@ class RLTrainer(Configurable):
             rollout_metrics: list[m.Metric] = []
             collected_tokens = 0
             group_offset = 0
-            # NOTE: num_tokens_target is a proxy because collected_tokens counts
-            # raw response tokens, while the batcher adds prompt tokens and
-            # padding when packing into fixed-length rows.
+            # num_tokens_target (= global_batch_size * seq_len) is the stop
+            # condition for collected tokens before a train step can proceed.
+            # NOTE: this is a proxy — packing adds padding to fill fixed-length
+            # rows, so actual token consumption may exceed collected_tokens.
             num_tokens_target = self.batcher.num_tokens_target(self.trainer_dp_degree)
             while collected_tokens < num_tokens_target:
                 new_trajectories, new_metrics = self._collect_rollouts(
