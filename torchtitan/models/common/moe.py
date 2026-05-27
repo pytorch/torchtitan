@@ -13,7 +13,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
 
 from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
@@ -86,6 +86,11 @@ class GroupedExperts(Module):
         DTensor→local conversion on entry and local→DTensor(Partial) wrapping
         on exit. The forward body operates on plain local tensors.
         """
+        bs, slen, dim = x.shape
+        top_k = top_scores.size(-1)
+        x = x.view(bs * slen, dim)
+        top_scores = top_scores.view(bs * slen, top_k)
+        selected_experts_indices = selected_experts_indices.view(bs * slen, top_k)
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices
         )
@@ -142,17 +147,17 @@ class TokenChoiceTopKRouter(Module):
         self, scores: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Balanced round-robin expert assignment.
-        Returns (selected_experts_indices [N, K] LongTensor, top_scores [N, K] FloatTensor).
+        Returns (selected_experts_indices (bs, slen, top_k) LongTensor, top_scores (bs, slen, top_k) FloatTensor).
         """
-        n_tokens = scores.size(0)
+        bs, slen, _ = scores.shape
         # Round-robin indices with exact balance
         selected_experts_indices = (
             torch.arange(
-                n_tokens * self.top_k, device=scores.device, dtype=torch.int64
-            ).reshape(n_tokens, self.top_k)
+                bs * slen * self.top_k, device=scores.device, dtype=torch.int64
+            ).reshape(bs, slen, self.top_k)
             % self.num_experts
         )
-        top_scores = scores.gather(dim=1, index=selected_experts_indices)  # [N,K]
+        top_scores = scores.gather(dim=-1, index=selected_experts_indices)
         return selected_experts_indices, top_scores
 
     def _get_node_limited_routing_scores(
@@ -163,10 +168,10 @@ class TokenChoiceTopKRouter(Module):
             and set expert scores in non-selected groups as -inf
 
         Args:
-            scores_for_choice: Router scores with expert_bias (if any), shape (bs*slen, num_experts)
+            scores_for_choice: Router scores with expert_bias (if any), shape (bs, slen, num_experts)
 
         Returns:
-            scores_for_choice: shape (bs*slen, num_experts)
+            scores_for_choice: shape (bs, slen, num_experts)
         """
         if self.num_limited_groups is None:
             raise ValueError(
@@ -180,8 +185,8 @@ class TokenChoiceTopKRouter(Module):
         experts_per_group = self.num_experts // self.num_expert_groups
         if experts_per_group < 2:
             raise ValueError(f"experts_per_group ({experts_per_group}) must be >= 2")
-        scores_grouped = scores_for_choice.view(
-            -1, self.num_expert_groups, experts_per_group
+        scores_grouped = scores_for_choice.unflatten(
+            -1, (self.num_expert_groups, experts_per_group)
         )
         top2_scores_in_group, _ = scores_grouped.topk(2, dim=-1)
         group_scores = top2_scores_in_group.sum(dim=-1)
@@ -189,11 +194,11 @@ class TokenChoiceTopKRouter(Module):
             group_scores, k=self.num_limited_groups, dim=-1, sorted=False
         )
         group_mask = torch.ones_like(group_scores, dtype=torch.bool)
-        group_mask.scatter_(1, group_idx, False)  # False = selected groups (keep)
+        group_mask.scatter_(-1, group_idx, False)  # False = selected groups (keep)
         # Mask out experts from non-selected groups
         scores_for_choice = scores_grouped.masked_fill(
             group_mask.unsqueeze(-1), float("-inf")
-        ).view(-1, self.num_experts)
+        ).flatten(-2)
 
         return scores_for_choice
 
@@ -202,20 +207,19 @@ class TokenChoiceTopKRouter(Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
-            x (torch.Tensor): Input tensor with shape ``(bs*slen, dim)``.
+            x (torch.Tensor): Input tensor with shape ``(bs, slen, dim)``.
             expert_bias (torch.Tensor | None, optional): Optional bias tensor for experts with shape ``(num_experts,)``.
                 Used for load balancing. Defaults to None.
 
         Returns:
             tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
                 - top_scores (torch.Tensor):
-                    Routing scores for selected experts with shape ``(bs*slen, top_k)``.
+                    Routing scores for selected experts with shape ``(bs, slen, top_k)``.
                 - selected_experts_indices (torch.Tensor):
-                    Expert indices selected for each token with shape ``(bs*slen, top_k)``.
+                    Expert indices selected for each token with shape ``(bs, slen, top_k)``.
                 - num_tokens_per_expert (torch.Tensor):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
-        # scores shape (bs*slen, num_experts)
         # Compute gate in float32 to help stability of expert load balancing.
         with torch.autocast(device_type=x.device.type, dtype=torch.float32):
             scores = self.gate(x)
@@ -225,7 +229,7 @@ class TokenChoiceTopKRouter(Module):
         if self.score_func == "sigmoid":
             scores = torch.sigmoid(scores)
         elif self.score_func == "softmax":
-            scores = F.softmax(scores, dim=1)
+            scores = F.softmax(scores, dim=-1)
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
@@ -237,10 +241,10 @@ class TokenChoiceTopKRouter(Module):
             scores_for_choice, k=self.top_k, dim=-1, sorted=False
         )
 
-        # top scores shape (bs*slen, top_k)
+        # top scores shape (bs, slen, top_k)
         # NOTE: The expert_bias is only used for routing. The gating value
         #       top_scores is still derived from the original scores.
-        top_scores = scores.gather(dim=1, index=selected_experts_indices)
+        top_scores = scores.gather(dim=-1, index=selected_experts_indices)
 
         # debug override: balanced round-robin routing
         if self._debug_force_load_balance:
@@ -341,9 +345,8 @@ class MoE(Module):
         the GroupedExperts boundary.
         """
         bs, slen, dim = x.shape
-        x = x.view(-1, dim)
 
-        # top_scores and selected_experts_indices shape (bs*slen, top_k)
+        # top_scores and selected_experts_indices shape (bs, slen, top_k)
         # num_tokens_per_expert shape (num_experts,)
         (
             top_scores,
@@ -370,14 +373,15 @@ class MoE(Module):
         ):
             # Sync the combine operation before using routed_output.
             # This inserts a CUDA stream wait, ensuring combine is complete before
-            # the subsequent addition or reshape operations read routed output.
+            # the subsequent addition or view operations read routed output.
             from torchtitan.distributed.deepep.deepep import sync_combine
 
             sync_combine()
 
+        out = out.view(bs, slen, dim)
         if shared_out is not None:
             out = out + shared_out
-        return out.reshape(bs, slen, dim)
+        return out
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         assert isinstance(buffer_device, torch.device)

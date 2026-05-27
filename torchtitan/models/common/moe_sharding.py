@@ -65,7 +65,8 @@ def _shared_expert_colwise_config(enable_ep: bool, enable_sp: bool) -> ShardingC
     """Colwise shared-expert FFN (w1/w3).
 
     Mirrors ``ColwiseParallel(input_layouts=...)``: input is all-gathered
-    to Replicate for the column-sharded matmul; output is Shard(1).
+    to Replicate for the column-sharded matmul; output is Shard(2)
+    (feature dim for 3-D activations from MoE).
     """
     sp_layout = Shard(1) if enable_sp else Replicate()
     input_layout = Replicate() if not enable_ep else sp_layout
@@ -76,7 +77,7 @@ def _shared_expert_colwise_config(enable_ep: bool, enable_sp: bool) -> ShardingC
         },
         in_src_shardings={"input": dense_activation_placement(tp=input_layout)},
         in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
-        out_dst_shardings=dense_activation_placement(tp=Shard(1)),
+        out_dst_shardings=dense_activation_placement(tp=Shard(2)),
     )
 
 
@@ -84,8 +85,9 @@ def _shared_expert_rowwise_config() -> ShardingConfig:
     """Rowwise shared-expert FFN (w2), output stays DTensor(Partial).
 
     Mirrors ``RowwiseParallel(output_layouts=Partial(), use_local_output=False)``:
-    input Shard(1) from upstream colwise; rowwise matmul produces Partial;
-    output stays DTensor(Partial) — reduction happens at the MoE boundary.
+    input Shard(2) (feature dim of 3-D activation) from upstream colwise;
+    rowwise matmul produces Partial; output stays DTensor(Partial) — reduction
+    happens at the MoE boundary.
     """
     return ShardingConfig(
         state_shardings={
@@ -94,7 +96,7 @@ def _shared_expert_rowwise_config() -> ShardingConfig:
             # Partial to match the rowwise matmul output placement.
             "bias": dense_param_placement(tp=Replicate()),
         },
-        in_src_shardings={"input": dense_activation_placement(tp=Shard(1))},
+        in_src_shardings={"input": dense_activation_placement(tp=Shard(2))},
         out_dst_shardings=dense_activation_placement(tp=Partial()),
     )
 
@@ -103,7 +105,8 @@ def _router_gate_config(*, enable_ep: bool) -> ShardingConfig:
     """Router gate: Replicate weights, output stays DTensor.
 
     EP off: input Replicate, gate computes on all tokens, output DTensor(Replicate).
-    EP on:  input redistributed to Shard(0), gate computes on local shard, output DTensor(Shard(0)).
+    EP on:  input Shard(1) (slen dim of 3-D activation), gate computes on
+            local shard, output DTensor(Shard(1)).
     """
     state = {
         "weight": dense_param_placement(tp=Replicate()),
@@ -112,12 +115,13 @@ def _router_gate_config(*, enable_ep: bool) -> ShardingConfig:
     if enable_ep:
         return ShardingConfig(
             state_shardings=state,
-            in_dst_shardings={"input": dense_activation_placement(tp=Shard(0))},
-            out_dst_shardings=dense_activation_placement(tp=Shard(0)),
+            in_dst_shardings={"input": dense_activation_placement(tp=Shard(1))},
+            out_dst_shardings=dense_activation_placement(tp=Shard(1)),
         )
     else:
         return ShardingConfig(
             state_shardings=state,
+            in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
             out_dst_shardings=dense_activation_placement(tp=Replicate()),
         )
 
@@ -230,8 +234,8 @@ def set_moe_sharding_config(
         state_shardings: dict[str, NamedPlacement] = {
             name: expert_param_placement_sparse() for name in expert_param_layout
         }
-        experts_in_layout = dense_activation_placement(tp=Shard(0))
-        experts_in_grad_layout = dense_activation_placement(tp=Shard(0))
+        experts_in_layout = dense_activation_placement(tp=Shard(1))
+        experts_in_grad_layout = dense_activation_placement(tp=Shard(1))
     else:
         state_shardings = {
             name: expert_param_placement_dense(tp_placement=placement)

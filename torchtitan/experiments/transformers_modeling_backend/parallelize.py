@@ -20,12 +20,15 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+from torchtitan.distributed.fsdp import (
+    disable_fsdp_gradient_division,
+    enable_fsdp_symm_mem,
+    get_fsdp_reshard_after_forward_policy,
+)
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.transformers_modeling_backend.compile import (
     apply_compile_sparse,
 )
-from torchtitan.models.llama3.parallelize import disable_fsdp_gradient_division
 from torchtitan.tools.logging import logger
 
 
@@ -111,30 +114,27 @@ def parallelize_hf_transformers(
         else:
             apply_compile(model, compile_config)
 
-    if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "fsdp")
-        else:
-            dp_mesh_dim_names = ("fsdp",)
+    dp_mesh_dim_names = (
+        ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+    )
 
-        edp_mesh_names = (
-            ["dp_replicate", "efsdp"]
-            if parallel_dims.dp_replicate_enabled
-            else ["efsdp"]
-        )
-        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+    edp_mesh_names = (
+        ["dp_replicate", "efsdp"] if parallel_dims.dp_replicate_enabled else ["efsdp"]
+    )
+    edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
-        apply_fsdp(
-            model,
-            parallel_dims.get_mesh(list(dp_mesh_dim_names)),
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-            pp_enabled=parallel_dims.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
-            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-            ep_degree=parallel_dims.ep,
-            dp_mod_ep_mesh=edp_mesh,
-        )
+    apply_fsdp(
+        model,
+        parallel_dims.get_mesh(dp_mesh_dim_names),
+        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+        pp_enabled=parallel_dims.pp_enabled,
+        cpu_offload=training.enable_cpu_offload,
+        reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+        enable_symm_mem=parallelism.enable_fsdp_symm_mem,
+        ep_degree=parallel_dims.ep,
+        dp_mod_ep_mesh=edp_mesh,
+    )
 
     if training.enable_cpu_offload:
         logger.info("Applied CPU Offloading to the model")
@@ -161,6 +161,8 @@ def apply_fsdp(
     reshard_after_forward_policy: str = "default",
     ep_degree: int = 1,
     dp_mod_ep_mesh: DeviceMesh | None = None,
+    gradient_divide_factor: int | None = None,
+    enable_symm_mem: bool = False,
 ):
     """Apply data parallelism (via FSDP2) to the model.
 
@@ -260,6 +262,9 @@ def apply_fsdp(
         )
 
     fully_shard(model, **fsdp_config)
+
+    if enable_symm_mem:
+        enable_fsdp_symm_mem(model)
 
     # Disable FSDP's automatic gradient division for all FSDP modules
     disable_fsdp_gradient_division(model)
