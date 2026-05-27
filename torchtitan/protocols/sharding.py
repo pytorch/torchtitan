@@ -52,19 +52,6 @@ PlacementLike = NamedPlacement | PlacementSpec
 
 
 @dataclass(kw_only=True, slots=True)
-class LocalSpmdConfig:
-    """Spec for modules computing on local tensors.
-
-    Wraps forward with local SPMD typechecking. Input placements come from
-    ``ShardingConfig.in_dst_shardings`` and output placements from
-    ``ShardingConfig.out_src_shardings``.
-    """
-
-    def to_dict(self) -> dict:
-        return {"repr": repr(self)}
-
-
-@dataclass(kw_only=True, slots=True)
 class ShardingConfig:
     """Declarative sharding for a Module's states and activations.
 
@@ -95,7 +82,7 @@ class ShardingConfig:
             Required for ``spmd.redistribute``.
         out_dst_shardings: Desired output placement after redistribution.
             ``None`` means no output redistribution.
-        local_spmd: If set, wraps forward for local SPMD typechecking.
+        local_spmd: Wrap forward for local SPMD typechecking.
     """
 
     state_shardings: dict[str, PlacementLike] = field(default_factory=dict)
@@ -104,8 +91,7 @@ class ShardingConfig:
     in_dst_shardings: dict[str, PlacementLike] | None = None
     out_src_shardings: PlacementLike | tuple[PlacementLike, ...] | None = None
     out_dst_shardings: PlacementLike | None = None
-    local_spmd: LocalSpmdConfig | None = None
-    mesh_reinterpret: NamedPlacement | None = None
+    local_spmd: bool = False
 
     def axes(self) -> set[str]:
         """Return mesh axes referenced by this sharding config."""

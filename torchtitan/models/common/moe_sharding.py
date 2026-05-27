@@ -13,7 +13,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_placement,
 )
-from torchtitan.protocols.sharding import LocalSpmdConfig, NamedPlacement, ShardingConfig
+from torchtitan.protocols.sharding import NamedPlacement, ShardingConfig
 from torchtitan.protocols.types import MeshAxisName
 
 
@@ -111,7 +111,7 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
         in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
         out_src_shardings=dense_activation_placement(tp=spmd.P),
         out_dst_shardings=dense_sequence_placement(tp=sp_layout),
-        local_spmd=LocalSpmdConfig(),
+        local_spmd=True,
     )
 
 

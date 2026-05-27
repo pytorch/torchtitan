@@ -12,7 +12,6 @@ from torchtitan.models.common.decoder import _decoder_spmd_input_config
 from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
 from torchtitan.models.qwen3.sharding import set_qwen3_sharding_config
 from torchtitan.protocols.sharding import (
-    LocalSpmdConfig,
     NamedPlacement,
     ShardingConfig,
 )
@@ -150,7 +149,7 @@ def set_qwen3_vl_vision_sharding_config(
         },
         in_dst_shardings={"input": activation_placement()},
         out_src_shardings=activation_placement(),
-        local_spmd=LocalSpmdConfig(),
+        local_spmd=True,
     )
 
 

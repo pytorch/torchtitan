@@ -12,7 +12,6 @@ from torchtitan.models.common.decoder_sharding import (
     inner_attention_spmd_sharding_config,
 )
 from torchtitan.protocols.sharding import (
-    LocalSpmdConfig,
     NamedPlacement,
     ShardingConfig,
 )
@@ -45,7 +44,7 @@ def flux_model_config() -> ShardingConfig:
             "y": flux_batch_placement(),
         },
         out_src_shardings=flux_sequence_placement(),
-        local_spmd=LocalSpmdConfig(),
+        local_spmd=True,
     )
 
 
