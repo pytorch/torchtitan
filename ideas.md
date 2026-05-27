@@ -4461,3 +4461,13 @@
   Planned command or config overrides: Active event-cache-disabled command.
   Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is that the gather is not a bottleneck or that monkeypatching changes compile/scheduling behavior.
   Result: discarded at source state `f574f23b+dirty`; 12,280 tps and 163.15 GiB. The patch saves about 0.8 GiB but slows throughput, so restore the active attention path.
+
+- Idea: custom Triton sequential RoPE kernel
+  Current best source commit: dab36ae7
+  Source: run505 showed the redundant-position gather alone is not the win, but run481 still shows RoPE-adjacent slice/mul/copy work. User explicitly allowed replacing operators with custom kernels.
+  Expected mechanism: replace Qwen3's cos/sin RoPE expression (`slice`, `cat`, multiply, add, cast) with one Triton forward kernel and one analytic backward kernel for the sequential causal positions used by this command.
+  Supporting evidence: Qwen3's RoPE cache duplicates cos/sin across half dimensions, so the rotation can be implemented as direct pairwise half-dimension math without materializing `_rotate_half()`.
+  Planned source/config changes: add a Qwen3-specific Triton autograd function in `parallelize.py` and monkeypatch attention modules to use it.
+  Planned command or config overrides: Active event-cache-disabled command.
+  Success criteria and expected risk: Success is step-10 tps above 12,454 with finite loss. Risk is custom backward error, Triton JIT overhead, or worse scheduling.
+  Result: kept at source state `dab36ae7+dirty`; 13,622 tps and 162.66 GiB. Standalone forward/backward checks matched the existing RoPE path exactly for Qwen3's duplicated cos/sin cache. This is the new active peak.

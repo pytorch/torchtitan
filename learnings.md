@@ -12681,3 +12681,38 @@ Interpretation:
 - The sequential RoPE fast path is correct for this causal SDPA command and saves about 0.8 GiB of peak memory.
 - It is still slower than the active recipe, so avoiding the repeated-position RoPE gather is not enough to offset the changed scheduling/graph behavior.
 - Do not keep this patch or spend the small memory saving on larger batches: nearby final-stack batch172 and batch176 were already slower, and run505 starts below the active batch168 point.
+
+## Experiment 506: Custom Triton Sequential RoPE Kernel
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run506-triton-sequential-rope-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run506-triton-sequential-rope-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Added a Qwen3-specific Triton autograd function for sequential cos/sin RoPE in `parallelize.py`.
+- The forward kernel computes the paired half-rotation directly for Q and K.
+- The backward kernel applies the analytic inverse rotation for the input gradient.
+- Monkeypatched Qwen3 attention modules to use this custom RoPE kernel for the causal SDPA command.
+
+Validation:
+
+- A standalone GPU check matched `apply_rotary_emb_cos_sin()` exactly for Qwen3's duplicated cos/sin cache format.
+- Forward max delta: 0.0.
+- Backward max delta: 0.0.
+
+Result:
+
+- Status: keep.
+- Step 10 `tps`: 13,622.
+- Step 10 peak memory: 162.66 GiB, 91.20%.
+- No allocator retries were logged.
+- Loss moved from 12.35322 at step 1 to 7.08747 at step 10, with finite overall-decreasing behavior.
+
+Interpretation:
+
+- The earlier sequential RoPE monkeypatch only removed redundant position gathering and was slower; replacing the actual RoPE elementwise/slice/cat path with one custom Triton forward/backward pair is the useful change.
+- This is a new measured peak, +1,168 tps over run479's 12,454 peak while also reducing peak memory by about 1.29 GiB.
+- The active source now includes the Triton sequential RoPE replacement. The next likely step is to profile this new peak before deciding whether to spend the memory headroom on batch shape, loss chunks, or another custom operator.

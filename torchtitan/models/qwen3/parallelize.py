@@ -11,8 +11,12 @@ This file is intentionally strategy-free. Autoresearch is expected to replace
 command, model flavor, and cluster/system it is optimizing for.
 """
 
+import types
+
 import torch
 import torch.nn.functional as F
+import triton
+import triton.language as tl
 from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 
 from torchtitan.config import (
@@ -33,6 +37,112 @@ from torchtitan.components.quantization.mx import (
 )
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.tools.logging import logger
+
+
+@triton.jit
+def _sequential_rope_forward_kernel(
+    x_ptr,
+    rope_ptr,
+    out_ptr,
+    total: tl.constexpr,
+    seq_len: tl.constexpr,
+    num_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < total
+    d = offsets % head_dim
+    tmp = offsets // head_dim
+    s = (tmp // num_heads) % seq_len
+    half = head_dim // 2
+    first_half = d < half
+    other_offsets = tl.where(first_half, offsets + half, offsets - half)
+    x = tl.load(x_ptr + offsets, mask=mask).to(tl.float32)
+    other = tl.load(x_ptr + other_offsets, mask=mask).to(tl.float32)
+    cos = tl.load(rope_ptr + s * (head_dim * 2) + d, mask=mask).to(tl.float32)
+    sin = tl.load(rope_ptr + s * (head_dim * 2) + head_dim + d, mask=mask).to(
+        tl.float32
+    )
+    rotated = tl.where(first_half, -other, other)
+    tl.store(out_ptr + offsets, x * cos + rotated * sin, mask=mask)
+
+
+@triton.jit
+def _sequential_rope_backward_kernel(
+    grad_ptr,
+    rope_ptr,
+    out_ptr,
+    total: tl.constexpr,
+    seq_len: tl.constexpr,
+    num_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < total
+    d = offsets % head_dim
+    tmp = offsets // head_dim
+    s = (tmp // num_heads) % seq_len
+    half = head_dim // 2
+    first_half = d < half
+    other_offsets = tl.where(first_half, offsets + half, offsets - half)
+    grad = tl.load(grad_ptr + offsets, mask=mask).to(tl.float32)
+    other_grad = tl.load(grad_ptr + other_offsets, mask=mask).to(tl.float32)
+    cos = tl.load(rope_ptr + s * (head_dim * 2) + d, mask=mask).to(tl.float32)
+    sin = tl.load(rope_ptr + s * (head_dim * 2) + head_dim + d, mask=mask).to(
+        tl.float32
+    )
+    rotated_grad = tl.where(first_half, other_grad, -other_grad)
+    tl.store(out_ptr + offsets, grad * cos + rotated_grad * sin, mask=mask)
+
+
+class _SequentialRoPE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, rope_cache: torch.Tensor) -> torch.Tensor:
+        x = x.contiguous()
+        rope_cache = rope_cache.contiguous()
+        out = torch.empty_like(x)
+        _, seq_len, num_heads, head_dim = x.shape
+        block = 256
+        grid = (triton.cdiv(x.numel(), block),)
+        _sequential_rope_forward_kernel[grid](
+            x,
+            rope_cache,
+            out,
+            x.numel(),
+            seq_len,
+            num_heads,
+            head_dim,
+            BLOCK=block,
+        )
+        ctx.save_for_backward(rope_cache)
+        ctx.shape = x.shape
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_out: torch.Tensor):
+        (rope_cache,) = ctx.saved_tensors
+        grad_out = grad_out.contiguous()
+        grad_x = torch.empty_like(grad_out)
+        _, seq_len, num_heads, head_dim = ctx.shape
+        block = 256
+        grid = (triton.cdiv(grad_out.numel(), block),)
+        _sequential_rope_backward_kernel[grid](
+            grad_out,
+            rope_cache,
+            grad_x,
+            grad_out.numel(),
+            seq_len,
+            num_heads,
+            head_dim,
+            BLOCK=block,
+        )
+        return grad_x, None
+
+
+def _sequential_rope(x: torch.Tensor, rope_cache: torch.Tensor) -> torch.Tensor:
+    return _SequentialRoPE.apply(x, rope_cache)
 
 
 def _enable_shared_mxfp8_gate_up_input_cast(model: Qwen3Model) -> None:
@@ -137,6 +247,61 @@ def _compile_qwen3_qkv_linear(model: Qwen3Model, compile_config: CompileConfig) 
     )
 
 
+def _enable_triton_sequential_rope(model: Qwen3Model) -> None:
+    patched_count = 0
+
+    def _forward_with_triton_rope(
+        self,
+        x: torch.Tensor,
+        rope_cache: torch.Tensor,
+        attention_masks,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        bs, seqlen, _ = x.shape
+        xq, xk, xv = self.qkv_linear(x)
+
+        if self.q_norm is not None or self.k_norm is not None:
+            assert self.q_norm is not None and self.k_norm is not None
+            xq = self.q_norm(xq)
+            xk = self.k_norm(xk)
+
+        if self.use_rope:
+            if self.rope_backend != "cos_sin":
+                raise NotImplementedError(
+                    "Triton sequential RoPE only supports cos_sin"
+                )
+            else:
+                xq = _sequential_rope(xq, rope_cache)
+                xk = _sequential_rope(xk, rope_cache)
+
+        if isinstance(attention_masks, dict):
+            mask_key = "rope" if self.use_rope else "nope"
+            attention_masks = attention_masks[mask_key]
+
+        output = self.inner_attention(
+            xq,
+            xk,
+            xv,
+            attention_masks=attention_masks,
+            scale=self.scaling,
+            enable_gqa=self.enable_gqa,
+        ).contiguous()
+        output = output.view(bs, seqlen, -1)
+        return self.wo(output)
+
+    for layer in model.layers.values():
+        attention = getattr(layer, "attention", None)
+        if attention is None:
+            continue
+        attention.forward = types.MethodType(_forward_with_triton_rope, attention)
+        patched_count += 1
+
+    logger.info(
+        "Enabled Triton sequential RoPE for %s Qwen3 attention modules",
+        patched_count,
+    )
+
+
 def parallelize_qwen3(
     model: Qwen3Model,
     *,
@@ -173,6 +338,7 @@ def parallelize_qwen3(
             "Qwen3 baseline FSDP bootstrap does not support CPU offload."
         )
 
+    _enable_triton_sequential_rope(model)
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
     _enable_shared_mxfp8_qkv_input_cast(model)
