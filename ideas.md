@@ -4191,3 +4191,13 @@
   Planned command or config overrides: Active compiled-Q/K/V command.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is another missing runtime CUTE module or slower attention.
   Result: crashed before step 1 at source state `431aa5d7` plus dirty source. The shim bypassed `ampere_helpers`, but Inductor's generated CUTE Flex kernel imports `flash_attn.cute.block_sparsity`, which is absent from installed `flash-attn==2.8.3`. Restore SDPA.
+
+- Idea: NCCL_PROGRESS_APPENDOP_FREQ=16 on compiled-Q/K/V active recipe
+  Current best source commit: 0d8845f5
+  Source: older pre-Q/K/V-compile experiments showed this NCCL proxy posting cadence knob in the high band, and Q/K/V compile changed launch/copy pressure.
+  Expected mechanism: Less frequent proxy posted-op polling may reduce communication scheduling overhead or rank skew for the current FSDP collective pattern.
+  Supporting evidence: run450 still shows rank-skewed FSDP collectives, but the Q/K/V compile boundary reduced Python/copy overhead enough that NCCL scheduling could interact differently.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix active command with `NCCL_PROGRESS_APPENDOP_FREQ=16`.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is worse communication progress.
+  Result: discarded at source state `0d8845f5`; 12,246 tps and 163.95 GiB peak memory. Keep default NCCL progress append-op cadence.
