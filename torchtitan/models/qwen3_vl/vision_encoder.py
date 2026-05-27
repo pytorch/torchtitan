@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn as nn
@@ -307,7 +307,8 @@ class PatchMerger(Module):
     ``use_postshuffle_norm``: If True, apply LayerNorm after spatial reshape
     (norm dim = hidden_size * spatial_merge_size^2). If False, apply
     before reshape (norm dim = hidden_size). DeepStack mergers use
-    postshuffle norm; the main merger uses pre-shuffle norm.
+    postshuffle norm; the main merger uses pre-shuffle norm. The caller
+    must set ``norm.normalized_shape`` to match the chosen mode.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -329,13 +330,7 @@ class PatchMerger(Module):
         self.merged_hidden_size = config.hidden_size * (config.spatial_merge_size**2)
         self.use_postshuffle_norm = config.use_postshuffle_norm
 
-        norm_dim = (
-            self.merged_hidden_size
-            if config.use_postshuffle_norm
-            else config.hidden_size
-        )
-        norm_config = replace(config.norm, normalized_shape=norm_dim)
-        self.norm = norm_config.build()
+        self.norm = config.norm.build()
         self.linear_fc1 = config.fc1.build()
         self.act_fn = config.act_fn.build()
         self.linear_fc2 = config.fc2.build()
@@ -526,54 +521,28 @@ class Qwen3VLVisionEncoder(Module):
     class Config(Module.Config):
         """Configuration for Qwen3-VL Vision Encoder (ViT)."""
 
-        dim: int = 1280
-        ffn_dim: int = 5120
-        n_layers: int = 32
-        n_heads: int = 16
-
-        patch_size: int = 16
-        temporal_patch_size: int = 2
-        in_channels: int = 3
+        dim: int
+        n_heads: int
         spatial_merge_size: int = 2
-
-        out_hidden_size: int = 3584  # maps to LLM hidden size
         num_position_embeddings: int = 4096
-        rope_theta: float = 10000.0
 
         # DeepStack: layer indices for extracting intermediate visual features
         deepstack_visual_indices: list[int] = field(default_factory=lambda: [7, 15, 23])
 
-        # Per-layer configs for vision encoder sub-modules.
-        # Shared across all layers; setting sharding_config on these
-        # applies to every layer that builds from them.
-        patch_embed_proj: Linear.Config
-        attn_qkv: Linear.Config
-        attn_proj: Linear.Config
-        mlp_fc1: Linear.Config
-        mlp_fc2: Linear.Config
-        merger_fc1: Linear.Config
-        merger_fc2: Linear.Config
-        block_norm: "LayerNorm.Config"
-        merger_norm: "LayerNorm.Config"
-        mlp_act_fn: "GELU.Config" = field(
-            default_factory=lambda: GELU.Config(approximate="tanh")
-        )
-        attn_inner_attention: "VisionInnerAttention.Config"
+        # Sub-module configs (built in the registry).
+        patch_embed: "PatchEmbed.Config"
+        rotary_pos_emb: "VisionRotaryEmbedding.Config"
+        layers: list["VisionTransformerBlock.Config"]
+        merger: "PatchMerger.Config"
+        deepstack_mergers: list["PatchMerger.Config"]
 
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
         self.spatial_merge_size = config.spatial_merge_size
-        self.patch_size = config.patch_size
         self.spatial_merge_unit = config.spatial_merge_size**2
 
-        self.patch_embed = PatchEmbed.Config(
-            patch_size=config.patch_size,
-            temporal_patch_size=config.temporal_patch_size,
-            in_channels=config.in_channels,
-            embed_dim=config.dim,
-            proj=config.patch_embed_proj,
-        ).build()
+        self.patch_embed = config.patch_embed.build()
 
         # nn.Parameter (not nn.Embedding) because we interpolate the weight directly
         self.num_position_embeddings = config.num_position_embeddings
@@ -582,64 +551,20 @@ class Qwen3VLVisionEncoder(Module):
         )
         self.num_grid_per_side = int(config.num_position_embeddings**0.5)
 
-        head_dim = config.dim // config.n_heads
-        self.rotary_pos_emb = VisionRotaryEmbedding.Config(
-            dim=head_dim // 2, theta=config.rope_theta
-        ).build()
+        self.rotary_pos_emb = config.rotary_pos_emb.build()
         # Cached RoPE freq table — recomputed only when max_hw grows
         self._cached_freq_table: torch.Tensor | None = None
 
         self.layers = ModuleDict(
-            {
-                str(idx): VisionTransformerBlock.Config(
-                    dim=config.dim,
-                    n_heads=config.n_heads,
-                    attn=VisionAttention.Config(
-                        dim=config.dim,
-                        n_heads=config.n_heads,
-                        qkv=config.attn_qkv,
-                        proj=config.attn_proj,
-                        inner_attention=config.attn_inner_attention,
-                    ),
-                    mlp=VisionMLP.Config(
-                        fc1=config.mlp_fc1,
-                        fc2=config.mlp_fc2,
-                        act_fn=config.mlp_act_fn,
-                    ),
-                    norm1=config.block_norm,
-                    norm2=config.block_norm,
-                ).build()
-                for idx in range(config.n_layers)
-            }
+            {str(idx): layer.build() for idx, layer in enumerate(config.layers)}
         )
 
-        self.merger = PatchMerger.Config(
-            hidden_size=config.dim,
-            out_hidden_size=config.out_hidden_size,
-            spatial_merge_size=config.spatial_merge_size,
-            fc1=config.merger_fc1,
-            fc2=config.merger_fc2,
-            norm=config.merger_norm,
-            act_fn=config.mlp_act_fn,
-        ).build()
+        self.merger = config.merger.build()
 
         # DeepStack mergers for intermediate layers
-        # DeepStack mergers use postshuffle norm (norm after spatial reshape)
         self.deepstack_visual_indices = config.deepstack_visual_indices
         self.deepstack_merger_list = ModuleList(
-            [
-                PatchMerger.Config(
-                    hidden_size=config.dim,
-                    out_hidden_size=config.out_hidden_size,
-                    spatial_merge_size=config.spatial_merge_size,
-                    fc1=config.merger_fc1,
-                    fc2=config.merger_fc2,
-                    norm=config.merger_norm,
-                    act_fn=config.mlp_act_fn,
-                    use_postshuffle_norm=True,
-                ).build()
-                for _ in range(len(config.deepstack_visual_indices))
-            ]
+            [cfg.build() for cfg in config.deepstack_mergers]
         )
 
     def compute_position_embeddings(
