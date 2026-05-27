@@ -10207,3 +10207,108 @@ Interpretation:
 - The targeted high-precision wgrad version avoids some MXFP8 cast work but replaces it with much more expensive high-precision GEMM/memory pressure.
 - This validates the broader run400 conclusion at a narrower scope: keep MXFP8 wgrad for the active recipe.
 - Restore `config.wgrad_with_hp` in the shared gate/up custom path.
+
+## Experiment 412: Shared MXFP8 With AdamW Weight Decay 0
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run412-mxfp8-shared-gate-up-input-cast-weight-decay0-feed-forward-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the committed shared MXFP8 gate/up input-cast source.
+
+Result:
+
+- Status: keep / new measured peak.
+- Step 10 `tps`: 12,221.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.95 GiB, 93.61%.
+- No allocator retries were logged.
+- Loss moved from 12.58355 at step 1 to 6.94533 at step 10.
+
+Interpretation:
+
+- `optimizer.weight_decay=0.0` is a small but measurable win on the current shared-cast recipe.
+- This knob was noisy earlier on the BF16/SDPA path; on the current MXFP8 shared-cast path it is the new measured peak, but should be treated as optimizer-behavior-changing.
+- Test adjacent optimizer choices rather than exact rerun immediately.
+
+## Experiment 413: Shared MXFP8 With Adam Weight Decay 0
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.name=Adam --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run413-mxfp8-shared-gate-up-input-cast-adam-weight-decay0-feed-forward-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the committed shared MXFP8 gate/up input-cast source.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,184.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.95 GiB, 93.61%.
+- No allocator retries were logged.
+- Loss moved from 12.55098 at step 1 to 5.18109 at step 10.
+
+Interpretation:
+
+- Adam with zero weight decay is valid and still high-band, but it does not beat AdamW with zero weight decay.
+- Keep AdamW as the active optimizer class.
+
+## Experiment 414: Shared MXFP8 Weight Decay 0 With NCCL CGA Cluster Size 2
+
+Command:
+
+```bash
+NCCL_CGA_CLUSTER_SIZE=2 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run414-mxfp8-shared-gate-up-input-cast-weight-decay0-nccl-cga-cluster-size2-feed-forward-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the committed shared MXFP8 gate/up input-cast source.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,058.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.95 GiB, 93.61%.
+- No allocator retries were logged.
+- Loss moved from 12.28142 at step 1 to 5.80874 at step 10.
+
+Interpretation:
+
+- The earlier high-band `NCCL_CGA_CLUSTER_SIZE=2` knob does not compose with the new shared-cast plus weight-decay-zero recipe.
+- Keep default CGA cluster sizing.
+
+## Experiment 415: Shared MXFP8 Weight Decay 0 With Loss Chunks 8
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=8 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run415-mxfp8-shared-gate-up-input-cast-weight-decay0-loss-chunks8-feed-forward-compile-lbs168-last-layer-no-reshard-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the committed shared MXFP8 gate/up input-cast source.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,992.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 167.34 GiB, 93.83%.
+- No allocator retries were logged.
+- Loss moved from 12.24902 at step 1 to 8.76569 at step 10.
+
+Interpretation:
+
+- Increasing loss chunks from 4 to 8 does not reduce memory on this recipe and adds overhead.
+- Keep loss chunks4 for the current best.
