@@ -4701,3 +4701,13 @@
   Planned command or config overrides: Active qk_norm_rope command with `--training.local_batch_size=180`.
   Success criteria and expected risk: Success is sustained steps 11-20 average above 14,003 without allocator retries. Risk is the known 96%+ HBM pressure and unstable throughput.
   Result: discarded at source state `19f61c75`; run530 averaged 13,963 tps over steps 11-20 at 172.47 GiB (96.70%). Keep batch176 and do not retest larger batches without a memory-reducing source change.
+
+- Idea: compile outer Qwen3 block RMSNorm helpers
+  Current best source commit: 116d305d
+  Source: run527 profile shows the Q/K norm plus RoPE helper reduced Q/K RMSNorm cost, but outer block RMSNorms still remain outside compiled regions.
+  Expected mechanism: Compile narrow functional helpers for `attention_norm(x)` and `ffn_norm(x)` while keeping SDPA, MXFP8 linears, FSDP wrappers, and whole-layer state out of the compiled boundary.
+  Supporting evidence: The narrow Q/K norm helper succeeded where whole-attention and whole-layer compile failed.
+  Planned source/config changes: Add a `block_norms` compile component and monkeypatch the Qwen3 block forward to call compiled RMSNorm helpers.
+  Planned command or config overrides: Active qk_norm_rope command with `--compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,block_norms`.
+  Success criteria and expected risk: Success is sustained throughput above 14,003. Risk is extra activation lifetime from compiled region outputs and higher HBM.
+  Result: kept as memory-risky at source state `116d305d+dirty`; compiling residual+RMSNorm sustained 14,059 tps at 172.88 GiB, while compiling only the outer RMSNorm calls sustained 14,070 tps at the same 172.88 GiB. Keep the outer-RMSNorm-only source as the throughput branch, but the safer point remains the previous 168.91 GiB source.

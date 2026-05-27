@@ -159,6 +159,14 @@ def _qk_norm_rope(
     return _sequential_rope(xq, rope_cache), _sequential_rope(xk, rope_cache)
 
 
+def _rms_norm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    return F.rms_norm(x, (x.shape[-1],), weight, eps)
+
+
 def _enable_shared_mxfp8_gate_up_input_cast(model: Qwen3Model) -> None:
     patched_count = 0
 
@@ -258,6 +266,54 @@ def _compile_qwen3_qkv_linear(model: Qwen3Model, compile_config: CompileConfig) 
     logger.info(
         "Compiling %s Qwen3 attention Q/K/V projection modules",
         compiled_count,
+    )
+
+
+def _enable_compiled_block_norms(
+    model: Qwen3Model, compile_config: CompileConfig
+) -> None:
+    compiled_rms_norm = torch.compile(
+        _rms_norm,
+        backend=compile_config.backend,
+        fullgraph=True,
+    )
+    patched_count = 0
+
+    def _forward_with_compiled_block_norms(
+        self,
+        x: torch.Tensor,
+        freqs_cis: torch.Tensor,
+        attention_masks,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        attention_input = compiled_rms_norm(
+            x,
+            self.attention_norm.weight,
+            self.attention_norm.eps,
+        )
+        attention_output = self.attention(
+            attention_input, freqs_cis, attention_masks, positions
+        )
+        x = x + attention_output
+        ffn_input = compiled_rms_norm(
+            x,
+            self.ffn_norm.weight,
+            self.ffn_norm.eps,
+        )
+
+        if self.moe_enabled:
+            x = x + self.moe(ffn_input)
+        else:
+            x = x + self.feed_forward(ffn_input)
+        return x
+
+    for layer in model.layers.values():
+        layer.forward = types.MethodType(_forward_with_compiled_block_norms, layer)
+        patched_count += 1
+
+    logger.info(
+        "Compiling Qwen3 block RMSNorm helpers for %s layers",
+        patched_count,
     )
 
 
@@ -385,6 +441,8 @@ def parallelize_qwen3(
         _compile_qwen3_qkv_linear(model, compile_config)
     if compile_config.enable and "feed_forward" in compile_config.components:
         _compile_qwen3_feed_forward(model, compile_config)
+    if compile_config.enable and "block_norms" in compile_config.components:
+        _enable_compiled_block_norms(model, compile_config)
 
     fsdp_mesh = parallel_dims.get_mesh("fsdp")
     mp_policy = MixedPrecisionPolicy(

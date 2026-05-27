@@ -13364,3 +13364,101 @@ Interpretation:
 
 - Batch180 is numerically clean on this source, but sustained throughput is below the active batch176 step-10 peak while using substantially more HBM.
 - Keep the active batch176 command and close larger-batch retesting until a source change materially lowers memory or per-token work.
+
+## Experiment 531: Compiled Residual Plus Block RMSNorm Helpers
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,block_norms --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run531-compile-block-norms-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run531-compile-block-norms-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Added a `block_norms` compile component.
+- Patched each Qwen3 block forward to call a compiled helper for the input `attention_norm` and a compiled helper that returns both `x + attention_output` and `ffn_norm(x + attention_output)`.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 14,182.
+- Step 10 peak memory: 172.88 GiB, 96.93%.
+- Loss moved from 12.48454 at step 1 to 8.37818 at step 10.
+
+Interpretation:
+
+- Compiling outer block norm work can improve throughput, but this helper raises live memory substantially.
+- Validate over 20 steps and compare against a lower-memory helper shape before accepting.
+
+## Experiment 532: Compiled Residual Plus Block RMSNorm Helpers, 20-Step Stability
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=20 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,block_norms --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run532-compile-block-norms-20step-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run532-compile-block-norms-20step-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Same residual-plus-RMSNorm `block_norms` source as run531.
+
+Result:
+
+- Status: discard.
+- Sustained steps 11-20 average `tps`: 14,059.
+- Peak memory: 172.88 GiB, 96.93%.
+- Loss moved from 12.43731 at step 1 to 3.65417 at step 20.
+
+Interpretation:
+
+- The source is numerically clean and sustains above the old 14,003 peak, but the memory cost is high.
+- A variant that compiles only the two outer RMSNorm calls is slightly faster and no worse for memory, so discard this residual-plus-norm helper shape.
+
+## Experiment 533: Compiled Outer Block RMSNorm Helpers
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,block_norms --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run533-compile-outer-rmsnorms-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run533-compile-outer-rmsnorms-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Changed the `block_norms` component to compile only a standalone `F.rms_norm` helper.
+- The block forward now uses compiled helpers for `attention_norm(x)` and `ffn_norm(x)` while keeping residual addition eager.
+
+Result:
+
+- Status: keep as a short-run signal.
+- Step 10 `tps`: 14,249.
+- Step 10 peak memory: 172.88 GiB, 96.93%.
+- Loss moved from 12.49320 at step 1 to 7.21221 at step 10.
+
+Interpretation:
+
+- The high memory comes from the outer norm compile path itself, not from returning the residual and normalized tensor together.
+- Validate the source over 20 steps before treating the step-10 peak as real.
+
+## Experiment 534: Compiled Outer Block RMSNorm Helpers, 20-Step Stability
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=20 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,block_norms --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run534-compile-outer-rmsnorms-20step-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run534-compile-outer-rmsnorms-20step-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Same compiled outer RMSNorm helper source as run533.
+
+Result:
+
+- Status: keep, memory-risky.
+- Sustained steps 11-20 average `tps`: 14,070.
+- Peak memory: 172.88 GiB, 96.93%.
+- Loss moved from 12.22705 at step 1 to 3.91372 at step 20.
+
+Interpretation:
+
+- This is the new highest sustained non-profile throughput point, but it is not a safe-memory point.
+- The previous batch176 fullgraph Q/K norm plus RoPE source remains the safer 168.91 GiB point; this source is the throughput-focused branch.
