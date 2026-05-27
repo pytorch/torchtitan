@@ -89,11 +89,13 @@ class Episode:
 class TrainingBatch:
     """Packed training batch for the RL trainer.
 
-    Per-token fields use "probability of current token" convention
-    (not shifted): ``logprobs[i] = log p(token_i | context up to i-1)``.
+    Each episode's raw tokens (length N) are split into
+    ``token_ids = raw[:-1]`` and ``labels = raw[1:]`` (both length
+    N-1), matching the pre-training dataloader convention.
     """
 
     token_ids: torch.Tensor  # [B, L]
+    labels: torch.Tensor  # [B, L]
     positions: torch.Tensor  # [B, L]
     generator_logprobs: torch.Tensor  # [B, L]
     loss_mask: torch.Tensor  # [B, L]

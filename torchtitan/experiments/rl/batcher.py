@@ -117,17 +117,27 @@ class Batcher(Configurable):
         return microbatches, num_global_valid_tokens, packing_metrics
 
     def _pack_episodes(self, episodes: list[Episode]) -> Iterator[dict]:
-        """Pack all episodes into [1, seq_len] rows."""
+        """Pack all episodes into [1, seq_len] rows.
+
+        Each episode's raw tokens (length N) are split per sample into
+        ``input_ids = raw[:-1]`` and ``labels = raw[1:]`` (both length
+        N-1), matching the pre-training dataloader convention.
+        """
 
         def _iterate_samples() -> Iterator[dict]:
             for ep in episodes:
                 prompt_len = len(ep.prompt_token_ids)
                 response_len = len(ep.token_ids)
+                raw_ids = ep.prompt_token_ids + ep.token_ids
+                gen_lp = [0.0] * prompt_len + ep.token_logprobs
+                loss_mask = [0.0] * prompt_len + [1.0] * response_len
+                advantages = [0.0] * prompt_len + [ep.advantage] * response_len
                 yield {
-                    "input_ids": ep.prompt_token_ids + ep.token_ids,
-                    "generator_logprobs": [0.0] * prompt_len + ep.token_logprobs,
-                    "loss_mask": [0.0] * prompt_len + [1.0] * response_len,
-                    "advantages": [0.0] * prompt_len + [ep.advantage] * response_len,
+                    "input_ids": raw_ids[:-1],
+                    "labels": raw_ids[1:],
+                    "generator_logprobs": gen_lp[:-1],
+                    "loss_mask": loss_mask[:-1],
+                    "advantages": advantages[:-1],
                 }
 
         yield from pack(
@@ -135,6 +145,7 @@ class Batcher(Configurable):
             max_seq_length=self.seq_len,
             pad_values={
                 "input_ids": self.pad_id,
+                "labels": self.pad_id,
                 "generator_logprobs": 0.0,
                 "loss_mask": 0.0,
                 "advantages": 0.0,
@@ -148,6 +159,7 @@ class Batcher(Configurable):
         """Concatenate packed rows into a single [B, L] TrainingBatch."""
         return TrainingBatch(
             token_ids=torch.cat([r["input_ids"] for r in rows]),
+            labels=torch.cat([r["labels"] for r in rows]),
             positions=torch.cat([r["positions"] for r in rows]),
             generator_logprobs=torch.cat([r["generator_logprobs"] for r in rows]),
             loss_mask=torch.cat([r["loss_mask"] for r in rows]),
