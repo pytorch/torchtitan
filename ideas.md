@@ -4241,3 +4241,13 @@
   Planned command or config overrides: Prefix active command with `TORCH_NCCL_AVOID_RECORD_STREAMS=0 TORCH_NCCL_CUDA_EVENT_CACHE=0`.
   Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is worse scheduling or extra stream-record overhead.
   Result: discarded at source state `f083910a`; 12,216 tps and 163.95 GiB. Keep default record-stream behavior with event-cache disabled.
+
+- Idea: NCCL_PROGRESS_APPENDOP_FREQ=16 with event-cache disabled
+  Current best source commit: 6f3abedb
+  Source: run481 kept NCCL/FSDP scheduling as the active optimization surface after event-cache disable.
+  Expected mechanism: Less frequent NCCL proxy append-op posting could reduce scheduling overhead or smooth rank skew when paired with event-cache disabled behavior.
+  Supporting evidence: the progress knob was tested alone in run478 and lost, but event-cache disable changes the ProcessGroupNCCL synchronization path, so the interaction needed one direct measurement.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix active command with `NCCL_PROGRESS_APPENDOP_FREQ=16 TORCH_NCCL_CUDA_EVENT_CACHE=0`.
+  Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is worse communication progress.
+  Result: discarded at source state `6f3abedb`; 12,258 tps and 163.95 GiB. Close this interaction and avoid neighboring progress-frequency probes without new profile evidence.
