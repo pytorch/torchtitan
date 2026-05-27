@@ -4031,3 +4031,13 @@
   Planned command or config overrides: Active compiled-Q/K/V command.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is BF16 GEMM losing more than MXFP8 overhead saves.
   Result: discarded at source state `448b5b45` plus dirty source; 11,922 tps and 163.95 GiB. Restore full MXFP8 conversion.
+
+- Idea: NCCL_MAX_CTAS=64 on active recipe
+  Current best source commit: 06ae67e4
+  Source: `NCCL_MAX_CTAS=16` was too restrictive, so test the opposite direction for collective occupancy.
+  Expected mechanism: Giving NCCL more CTA budget may reduce rank-skewed collective tails enough to beat any GEMM-overlap cost.
+  Supporting evidence: Run450 still shows large reduce-scatter/all-gather skew.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix active command with `NCCL_MAX_CTAS=64`.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is worse GEMM overlap.
+  Result: discarded at source state `06ae67e4`; 12,368 tps and 163.95 GiB. Close, but below the active peak.
