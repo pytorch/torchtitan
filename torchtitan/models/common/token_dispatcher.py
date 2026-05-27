@@ -269,36 +269,38 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         # EP all-to-all below produces (R, D) where R != N.
         (
             routed_input_ND,
-            num_tokens_per_expert_E,
+            num_local_tokens_per_expert_E,
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
         ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
 
         # generate the input splits and output splits for all-to-all
         with torch.no_grad():
-            num_tokens_per_expert_eEP = all_to_all_single(
-                num_tokens_per_expert_E,
+            num_global_tokens_per_local_expert_eEP = all_to_all_single(
+                num_local_tokens_per_expert_E,
                 None,
                 None,
                 group=self.ep_mesh,
             )
             # Need to wait explicitly because it is used by a triton kernel later
             # which doesn't realize that AsyncCollectiveTensor needs unwrapping
-            num_tokens_per_expert_eEP = torch.ops._c10d_functional.wait_tensor(
-                num_tokens_per_expert_eEP
+            num_global_tokens_per_local_expert_eEP = (
+                torch.ops._c10d_functional.wait_tensor(
+                    num_global_tokens_per_local_expert_eEP
+                )
             )
             # non_blocking=True is safe in eager, but under torch.compile the
             # async D2H transfer can race with the subsequent .tolist()/.item()
             # calls, producing stale values and failing unbacked-symint guards.
             non_blocking = not torch.compiler.is_compiling()
             input_splits = (
-                num_tokens_per_expert_E.view(ep_size, -1)
+                num_local_tokens_per_expert_E.view(ep_size, -1)
                 .sum(dim=1)
                 .to(torch.device("cpu"), non_blocking=non_blocking)
             )
             # NOTE: this would incur a device-to-host sync
             output_splits = (
-                num_tokens_per_expert_eEP.view(ep_size, -1)
+                num_global_tokens_per_local_expert_eEP.view(ep_size, -1)
                 .sum(dim=1)
                 .to(torch.device("cpu"), non_blocking=False)
             )
@@ -315,7 +317,8 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
         # Reorder from rank-major to expert-major via _permute.
         #
-        # num_tokens_per_expert_eEP layout after all-to-all (e = local experts, EP = EP ranks):
+        # num_global_tokens_per_local_expert_eEP layout after all-to-all
+        # (e = local experts, EP = EP ranks):
         #   (e0,r0), (e1,r0), ..., (e0,r1), (e1,r1), ...  (rank-major)
         # _permute reshuffles to:
         #   (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
@@ -323,10 +326,10 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             input_shape,
             routed_input_RD,
             permuted_indices,
-            num_tokens_per_local_expert_e,
+            num_global_tokens_per_local_expert_e,
         ) = self._permute(
             routed_input_RD,
-            num_tokens_per_expert_eEP,
+            num_global_tokens_per_local_expert_eEP,
         )
 
         metadata = AllToAllDispatchMetadata(
@@ -337,12 +340,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             input_splits=input_splits_list,
             output_splits=output_splits_list,
         )
-        return routed_input_RD, num_tokens_per_local_expert_e, metadata
+        return routed_input_RD, num_global_tokens_per_local_expert_e, metadata
 
     def _permute(
         self,
         routed_input_RD,
-        num_tokens_per_expert_eEP,
+        num_global_tokens_per_local_expert_eEP,
     ):
         """Reorder tokens from rank-major to expert-major layout.
 
@@ -350,21 +353,21 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         Output layout: (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
 
         Collapses token count matrix ``t_mat`` from ``(EP, e)`` to
-        ``num_tokens_per_local_expert_e`` ``(e,)`` by summing across ranks.
+        ``num_global_tokens_per_local_expert_e`` ``(e,)`` by summing across ranks.
         """
-        assert self.ep_mesh is not None, "ep_mesh must be set"
         ep_size = self.ep_mesh.size()
-        num_local_experts = num_tokens_per_expert_eEP.shape[0] // ep_size
-        device = num_tokens_per_expert_eEP.device
-        total = num_tokens_per_expert_eEP.sum()
+        e = num_global_tokens_per_local_expert_eEP.shape[0] // ep_size
+        device = num_global_tokens_per_local_expert_eEP.device
+        total = num_global_tokens_per_local_expert_eEP.sum()
 
         # (EP, e) matrix of token counts per (rank, local_expert)
-        t_mat = num_tokens_per_expert_eEP.view(ep_size, num_local_experts)
+        t_mat = num_global_tokens_per_local_expert_eEP.view(ep_size, e)
 
         # Where each (r, e) segment starts in the input (rank-major order)
         input_starts = (
-            num_tokens_per_expert_eEP.cumsum(0) - num_tokens_per_expert_eEP
-        ).view(ep_size, num_local_experts)
+            num_global_tokens_per_local_expert_eEP.cumsum(0)
+            - num_global_tokens_per_local_expert_eEP
+        ).view(ep_size, e)
 
         # Transpose to expert-major (e, EP) and flatten
         segment_lens = t_mat.t().reshape(-1)
@@ -382,12 +385,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             - output_starts[seg_ids]
         )
 
-        num_tokens_per_local_expert_e = t_mat.sum(0)
+        num_global_tokens_per_local_expert_e = t_mat.sum(0)
         return (
             routed_input_RD.shape,
             routed_input_RD[permuted_indices, :],
             permuted_indices,
-            num_tokens_per_local_expert_e,
+            num_global_tokens_per_local_expert_e,
         )
 
     def _unpermute(self, routed_output_RD, input_shape, permuted_indices):
@@ -501,7 +504,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
     def _permute(
         self,
         routed_input_RD,
-        num_tokens_per_expert_eEP,
+        num_global_tokens_per_local_expert_eEP,
     ):
         # FP8/MXFP8 require groups to be permuted to expert major order AND
         # padded to nearest multiple of 16.
@@ -511,19 +514,18 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         # implementation of GroupedExperts, as it does not need padding.
         from torchao.prototype.moe_training.ep.permute import permute_and_pad
 
-        assert self.ep_mesh is not None, "ep_mesh must be set"
         ep_size = self.ep_mesh.size()
-        e = num_tokens_per_expert_eEP.shape[0] // ep_size
+        e = num_global_tokens_per_local_expert_eEP.shape[0] // ep_size
 
         (
             input_shape,
             routed_input_RD,
             permuted_indices,
-            num_tokens_per_expert_group_padded_e,
+            num_global_tokens_per_local_expert_padded_e,
             _group_offsets,
         ) = permute_and_pad(
             routed_input_RD,
-            num_tokens_per_expert_eEP,
+            num_global_tokens_per_local_expert_eEP,
             ep_size,
             e,
             self.pad_multiple,
@@ -532,7 +534,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             input_shape,
             routed_input_RD,
             permuted_indices,
-            num_tokens_per_expert_group_padded_e,
+            num_global_tokens_per_local_expert_padded_e,
         )
 
     def _unpermute(self, routed_output_RD, input_shape, permuted_indices):
