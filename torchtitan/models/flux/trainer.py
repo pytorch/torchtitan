@@ -30,7 +30,7 @@ from torchtitan.models.flux.utils import (
     preprocess_data,
 )
 from torchtitan.models.flux.sharding import flux_sequence_placement
-from torchtitan.protocols.module import named_placement_to_assert_type
+from torchtitan.protocols.module import placement_to_assert_type
 from torchtitan.trainer import Trainer
 
 
@@ -255,20 +255,13 @@ class FluxTrainer(Trainer):
             "y": clip_encodings,
             "timesteps": timesteps,
         }
-        typecheck_scope = (
-            spmd.typecheck(local=False)
-            if self.config.debug.spmd_typechecking
-            else contextlib.nullcontext()
-        )
-
         with set_current_mesh(self.parallel_dims.get_activated_mesh(["dp", "cp"])):
-            with self.train_context(), typecheck_scope:
+            with self.train_context():
                 if self.config.debug.spmd_typechecking:
                     if isinstance(global_valid_tokens, torch.Tensor):
                         spmd.assert_type(global_valid_tokens, spmd.R)
-                    target_type, target_partition_spec = named_placement_to_assert_type(
-                        flux_sequence_placement(),
-                        target.ndim,
+                    target_type, target_partition_spec = placement_to_assert_type(
+                        flux_sequence_placement()
                     )
                     spmd.assert_type(
                         target,

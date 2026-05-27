@@ -17,7 +17,7 @@ from torch.distributed.tensor import DTensor
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
-from torchtitan.protocols.module import named_placement_to_assert_type
+from torchtitan.protocols.module import placement_to_assert_type
 from torchtitan.protocols.types import MeshAxisName
 from torchtitan.tools.logging import logger
 
@@ -612,9 +612,8 @@ class Qwen3VLModel(Qwen3Model):
                 positions=positions,
             )
             if spmd.is_type_checking():
-                mrope_types, mrope_partition_spec = named_placement_to_assert_type(
-                    {MeshAxisName.DP: spmd.S(0), MeshAxisName.TP: spmd.R},
-                    freqs_cis.ndim,
+                mrope_types, mrope_partition_spec = placement_to_assert_type(
+                    {MeshAxisName.DP: spmd.S(0), MeshAxisName.TP: spmd.R}
                 )
                 spmd.assert_type(
                     freqs_cis,

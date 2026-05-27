@@ -4,8 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import contextlib
 import dataclasses
+import contextlib
 import json
 import os
 import re
@@ -52,8 +52,8 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
-from torchtitan.protocols.module import named_placement_to_assert_type, preserve_buffer_spmd
-from torchtitan.protocols.types import MeshAxisName
+from torchtitan.protocols.module import placement_to_assert_type, preserve_buffer_spmd
+from torchtitan.protocols.sharding import is_placement_like
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
@@ -471,7 +471,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             base_folder=config.dump_folder,
         )
 
-        self.train_context = dist_utils.get_train_context(False)
+        self.train_context = dist_utils.get_train_context(
+            spmd_typechecking=config.debug.spmd_typechecking,
+        )
 
         if isinstance(self.loss_fn, ChunkedCELoss):
             self.loss_fn.enable_sp = (
@@ -650,6 +652,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
 
+        if is_spmd_active():
+            self._annotate_inputs_spmd(inputs, labels, extra_inputs, extra_kwargs)
+
         return inputs, labels, extra_inputs, extra_kwargs
 
     @sl.log_trace_span("fwd_bwd")
@@ -662,20 +667,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
-        typecheck_scope = (
-            spmd.typecheck(local=False)
-            if self.config.debug.spmd_typechecking
-            else contextlib.nullcontext()
-        )
-
         inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
             input_dict, labels
         )
-
-        if is_spmd_active() and isinstance(global_valid_tokens, torch.Tensor):
-            spmd.assert_type(global_valid_tokens, spmd.I)
-        if is_spmd_active():
-            self._annotate_inputs_spmd(inputs, labels, extra_inputs, extra_kwargs)
 
         debug_mode = None
         debug_context = contextlib.nullcontext()
@@ -698,25 +692,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     targets, losses = (
                         (labels, []) if self.pp_has_last_stage else (None, None)
                     )
-                    with typecheck_scope:
-                        if self.pp_has_first_stage:
-                            self.pp_schedule.step(
-                                inputs,
-                                **extra_inputs,
-                                **extra_kwargs,
-                                target=targets,
-                                losses=losses,
-                                loss_kwargs=loss_kwargs,
-                                return_outputs=False,
-                            )
-                        else:
-                            self.pp_schedule.step(
-                                **extra_kwargs,
-                                target=targets,
-                                losses=losses,
-                                loss_kwargs=loss_kwargs,
-                                return_outputs=False,
-                            )
+                    if self.pp_has_first_stage:
+                        self.pp_schedule.step(
+                            inputs,
+                            **extra_inputs,
+                            **extra_kwargs,
+                            target=targets,
+                            losses=losses,
+                            loss_kwargs=loss_kwargs,
+                            return_outputs=False,
+                        )
+                    else:
+                        self.pp_schedule.step(
+                            **extra_kwargs,
+                            target=targets,
+                            losses=losses,
+                            loss_kwargs=loss_kwargs,
+                            return_outputs=False,
+                        )
 
             # accumulate losses across pipeline microbatches
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
@@ -731,15 +724,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             assert len(model_parts) == 1
             with debug_context, hash_context:
                 with self.train_context():
-                    with typecheck_scope:
-                        pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                        if (
-                            isinstance(pred, DTensor)
-                            and not self.config.parallelism.full_dtensor
-                            and self.config.parallelism.disable_loss_parallel
-                        ):
-                            pred = pred.to_local()
-                        loss = self.loss_fn(pred, labels, global_valid_tokens)
+                    pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                    if (
+                        isinstance(pred, DTensor)
+                        and not self.config.parallelism.full_dtensor
+                        and self.config.parallelism.disable_loss_parallel
+                    ):
+                        pred = pred.to_local()
+                    loss = self.loss_fn(pred, labels, global_valid_tokens)
                     del pred
                     loss.backward()
 
@@ -829,42 +821,33 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         Called after ``post_dataloading_process`` so that tensors created
         there (e.g. positions) are also annotated.
         """
-        spmd_input_config = getattr(self.model_config, "spmd_input_config", None)
-        if spmd_input_config is None:
-            raise NotImplementedError(
-                f"{type(self.model_config).__name__} does not define "
-                "spmd_input_config for SPMD typechecking."
-            )
+        cfg = self.model_config.spmd_input_config
+        if cfg is None:
+            return
 
-        def is_named_placement(x: object) -> bool:
-            return isinstance(x, dict) and all(isinstance(k, MeshAxisName) for k in x)
-
-        def annotate_input_type(value: object, placements: object) -> None:
+        def annotate_type(value: object, placements: object) -> None:
             if not isinstance(value, torch.Tensor):
                 return
-            types, partition_spec = named_placement_to_assert_type(
-                placements,
-                value.ndim,
-            )
+            types, partition_spec = placement_to_assert_type(placements)
             if types:
                 spmd.assert_type(value, types, partition_spec=partition_spec)
 
         def annotate_tree(value: object, placements: object) -> None:
             pytree.tree_map(
-                annotate_input_type,
+                annotate_type,
                 value,
                 placements,
-                is_leaf=is_named_placement,
+                is_leaf=is_placement_like,
             )
 
-        if spmd_input_config.inputs is not None:
-            annotate_tree(inputs, spmd_input_config.inputs)
-        if spmd_input_config.labels is not None:
-            annotate_tree(labels, spmd_input_config.labels)
-        for name, placements in spmd_input_config.extra_inputs.items():
+        if cfg.inputs is not None:
+            annotate_tree(inputs, cfg.inputs)
+        if cfg.labels is not None:
+            annotate_tree(labels, cfg.labels)
+        for name, placements in cfg.extra_inputs.items():
             if name in extra_inputs:
                 annotate_tree(extra_inputs[name], placements)
-        for name, placements in spmd_input_config.extra_kwargs.items():
+        for name, placements in cfg.extra_kwargs.items():
             if name in extra_kwargs:
                 annotate_tree(extra_kwargs[name], placements)
 
@@ -898,6 +881,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         else:
             global_valid_tokens = local_valid_tokens.float()
 
+        if is_spmd_active() and isinstance(global_valid_tokens, torch.Tensor):
+            spmd.assert_type(global_valid_tokens, spmd.I)
+
         # Process each microbatch: move to GPU, forward/backward, then free
         accumulated_losses = []
         for input_dict, labels in microbatches:
@@ -907,15 +893,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     input_dict[k] = v.to(self.device)
             labels = labels.to(self.device)
 
-            with set_current_mesh(
-                parallel_dims.get_activated_mesh(["dp", "cp", "tp"])
-            ):
-                loss = self.forward_backward_step(
-                    input_dict=input_dict,
-                    labels=labels,
-                    # pyrefly: ignore [bad-argument-type]
-                    global_valid_tokens=global_valid_tokens,
-                )
+            loss = self.forward_backward_step(
+                input_dict=input_dict,
+                labels=labels,
+                # pyrefly: ignore [bad-argument-type]
+                global_valid_tokens=global_valid_tokens,
+            )
             accumulated_losses.append(loss.detach())
 
         if self._debug_state_hashes_enabled():
@@ -1015,7 +998,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     self.gc_handler.run(self.step)
 
                     try:
-                        self.train_step(data_iterator)
+                        with set_current_mesh(
+                            self.parallel_dims.get_activated_mesh(["dp", "cp", "tp"])
+                        ):
+                            self.train_step(data_iterator)
                     except DataloaderExhaustedError:
                         logger.warning("Ran out of data; last step was canceled.")
                         break

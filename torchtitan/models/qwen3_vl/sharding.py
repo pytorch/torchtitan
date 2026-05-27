@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 
-from torchtitan.models.common.decoder import _decoder_spmd_input_config
+from torchtitan.models.common.decoder import decoder_spmd_input_config
 from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
 from torchtitan.models.qwen3.sharding import set_qwen3_sharding_config
 from torchtitan.protocols.sharding import (
@@ -30,7 +30,7 @@ TP = MeshAxisName.TP
 
 
 def qwen3_vl_spmd_input_config():
-    config = _decoder_spmd_input_config()
+    config = decoder_spmd_input_config()
     multimodal_input: NamedPlacement = {DP: spmd.V, TP: spmd.I}
     config.extra_inputs.update(
         {
