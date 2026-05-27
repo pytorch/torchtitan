@@ -19,11 +19,13 @@ __all__ = ["Embedding"]
 
 
 class Embedding(nn.Embedding, Module):
-    """Configurable nn.Embedding with optional vocab-parallel TP support.
+    """Configurable nn.Embedding.
 
-    Without TP, forward is standard ``F.embedding``.
-    With SPMD TP, each rank looks up its local vocab shard, masks out-of-range
-    tokens, and reduces partial outputs to the configured TP output layout.
+    Uses diamond inheritance (nn.Embedding + Module) so that:
+    - The module hierarchy stays flat (no extra wrapper layer).
+    - All nn.Embedding logic (forward, state_dict, etc.) is reused as-is.
+    - The Module protocol is satisfied and ``build()`` is inherited from
+      ``Configurable.Config``.
     """
 
     @dataclass(kw_only=True, slots=True)
