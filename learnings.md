@@ -13656,3 +13656,31 @@ Interpretation:
 - Directly patching the norm modules recovers a real part of the norm compile benefit without the `block_norms` memory cliff.
 - The absolute sustained throughput branch remains `block_norms` at 14,070 tps and 172.88 GiB, but `norm_modules` is the new best safe-memory branch.
 - This also explains the split-block result: the memory cliff was caused by replacing the full block forward, not by compiling RMSNorm itself.
+
+## Experiments 545-546: Batch180 With Compiled Norm Modules
+
+Commands:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,norm_modules --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=180 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run545-norm-modules-batch180-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run545-norm-modules-batch180-event-cache0.run.log 2>&1
+
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=20 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,norm_modules --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=180 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run546-norm-modules-batch180-20step-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run546-norm-modules-batch180-20step-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the kept `norm_modules` source.
+
+Result:
+
+- Status: keep as a memory-risky middle point.
+- Run545 step 10 `tps`: 14,367.
+- Run546 sustained steps 11-20 average `tps`: 14,046.
+- Peak memory: 172.47 GiB, 96.70%.
+- Run546 loss moved from 12.44132 at step 1 to 3.40881 at step 20.
+
+Interpretation:
+
+- Batch180 benefits from the `norm_modules` source and is stronger than the previous batch180 validation.
+- The longer run still does not beat the 14,070 tps `block_norms` throughput branch.
+- Keep batch180/norm_modules only as a middle Pareto point: faster than safe batch176/norm_modules, lower-memory than batch176/block_norms, but not the absolute throughput winner.

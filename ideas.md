@@ -4771,3 +4771,13 @@
   Planned command or config overrides: Active batch176 command with `norm_modules` replacing `block_norms`.
   Success criteria and expected risk: Success is sustained throughput above the prior safe 14,003 point at 168.91 GiB, or matching the 14,070 throughput branch without the 172.88 GiB memory cliff. Risk is per-module method patching adding dispatcher overhead or not being captured by Dynamo.
   Result: kept at source state `5e4202e5+dirty`; run543 reached 14,240 tps at 168.91 GiB, and run544 sustained 14,023 tps over steps 11-20 at 168.91 GiB. This is the new safe-memory branch.
+
+- Idea: spend norm_modules memory headroom on batch180
+  Current best source commit: 70df98a9
+  Source: `norm_modules` restores the 168.91 GiB memory level while improving sustained throughput over the previous safe branch.
+  Expected mechanism: Batch180 may amortize FSDP collectives and GEMM launches better if the `norm_modules` source keeps enough of the norm compile benefit without the `block_norms` memory cliff.
+  Supporting evidence: Earlier batch180 on the qk_norm source sustained only 13,963 tps, but the new source has a materially higher batch176 short sample.
+  Planned source/config changes: None.
+  Planned command or config overrides: Use the `norm_modules` command with `--training.local_batch_size=180`.
+  Success criteria and expected risk: Success is sustained throughput above 14,070 with finite loss. Risk is returning to the known batch180 memory-risk line and losing throughput after warmup.
+  Result: kept as a middle point at source state `70df98a9`; run545 reached 14,367 tps at step 10, but run546 sustained 14,046 tps over steps 11-20 at 172.47 GiB. It beats the safe batch176 norm_modules branch but not the memory-risky `block_norms` throughput branch.
