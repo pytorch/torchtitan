@@ -12054,3 +12054,28 @@ Interpretation:
 
 - The event-cache-disabled win is not explained by less GEMM or MXFP8 cast work; those buckets are effectively flat.
 - The remaining useful surface is communication/runtime scheduling around FSDP collectives, not more source edits that target the already-compiled GEMMs.
+
+## Experiment 482: Event Cache Disabled With TORCH_NCCL_AVOID_RECORD_STREAMS=0
+
+Command:
+
+```bash
+TORCH_NCCL_AVOID_RECORD_STREAMS=0 TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run482-event-cache0-avoid-record-streams0 > outputs/autoresearch/may19-qwen3-14b/run482-event-cache0-avoid-record-streams0.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,216.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Loss moved from 12.46355 at step 1 to 6.67819 at step 10.
+
+Interpretation:
+
+- `TORCH_NCCL_AVOID_RECORD_STREAMS=0` does not compose with the event-cache-disabled active recipe.
+- Keep the default record-stream behavior and continue probing different communication scheduling levers one at a time.

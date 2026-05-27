@@ -4231,3 +4231,13 @@
   Planned command or config overrides: Active event-cache-disabled command with profiler enabled for iteration 10.
   Success criteria and expected risk: Success is a clean profile trace. Profiled tps is diagnostic and not used alone for ranking.
   Result: kept as diagnostic at source state `4f1714c0`; profiled step-10 tps 12,132 and 163.95 GiB. Compared with run450, NVJET GEMM is essentially flat at 1004.9 -> 1001.2 ms/rank, MXFP8 dim1 casts are flat at 649.7 -> 649.6 ms/rank, and compiled-region wrapper time is slightly lower at 901.4 -> 897.3 ms/rank. NCCL all-gather drops 616.2 -> 570.5 ms/rank while reduce-scatter rises 1080.0 -> 1160.1 ms/rank in this profiled sample. The next probes should target communication scheduling interactions rather than more GEMM/MXFP8 source micro-edits.
+
+- Idea: TORCH_NCCL_AVOID_RECORD_STREAMS=0 with event-cache disabled
+  Current best source commit: f083910a
+  Source: run481 shows the active remaining surface is ProcessGroupNCCL/FSDP scheduling rather than GEMM or MXFP8 cast work.
+  Expected mechanism: Re-enabling record-stream avoidance behavior may change tensor/event lifetime handling around FSDP collectives and interact with the disabled CUDA event cache.
+  Supporting evidence: event-cache disable itself helped, so related ProcessGroupNCCL stream/event lifetime knobs are plausible, but should be tested one at a time.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix active command with `TORCH_NCCL_AVOID_RECORD_STREAMS=0 TORCH_NCCL_CUDA_EVENT_CACHE=0`.
+  Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is worse scheduling or extra stream-record overhead.
+  Result: discarded at source state `f083910a`; 12,216 tps and 163.95 GiB. Keep default record-stream behavior with event-cache disabled.
