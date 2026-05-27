@@ -191,9 +191,7 @@ class VLLMModelWrapper(Module):
         class _InferenceConfig:
             parallelism: ParallelismConfig
 
-        self.config.update_from_config(
-            config=_InferenceConfig(parallelism=parallelism)
-        )
+        self.config.update_from_config(config=_InferenceConfig(parallelism=parallelism))
 
         # TODO: Check if it's possible to apply meta init
         self.model = self.config.build()

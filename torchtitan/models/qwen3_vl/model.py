@@ -12,6 +12,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 
@@ -63,9 +64,7 @@ class Qwen3VLModel(Qwen3Model):
             config,
             **kwargs,
         ) -> None:
-            Decoder.Config.update_from_config(
-                self, config=config, **kwargs
-            )
+            Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
 
             from torchtitan.models.qwen3_vl.sharding import set_qwen3_vl_sharding_config

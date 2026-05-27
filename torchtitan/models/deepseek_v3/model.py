@@ -188,9 +188,7 @@ class DeepSeekV3Model(Decoder):
             config,
             **kwargs,
         ) -> None:
-            Decoder.Config.update_from_config(
-                self, config=config, **kwargs
-            )
+            Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
 
             from torchtitan.trainer import Trainer

@@ -73,9 +73,7 @@ class Llama3Model(Decoder):
             config,
             **kwargs,
         ) -> None:
-            Decoder.Config.update_from_config(
-                self, config=config, **kwargs
-            )
+            Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
 
             if parallelism.context_parallel_degree > 1 and isinstance(
