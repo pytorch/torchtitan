@@ -10462,3 +10462,29 @@ Interpretation:
 
 - Explicit `NCCL_NVLS_ENABLE=1` composes with the shared-cast plus `weight_decay=0.0` recipe and beats run412 by 28 tps.
 - The improvement is small enough to be in the noisy band, but it is a fresh command variant and now belongs in the active best command until displaced.
+
+## Experiment 422: Shared MXFP8 Weight Decay 0 With Explicit NCCL NVLS And Batch172
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=172 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run422-mxfp8-shared-gate-up-input-cast-weight-decay0-nccl-nvls-enable-feed-forward-compile-lbs172-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the committed shared MXFP8 gate/up input-cast source.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,961.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 169.82 GiB, 95.22%.
+- No allocator retries were logged.
+- Loss moved from 12.43583 at step 1 to 6.13947 at step 10.
+
+Interpretation:
+
+- Explicit NVLS does not make the larger batch172 shape worthwhile; it remains slower and crosses the preferred 95% memory line.
+- Keep local batch168 for the active recipe.
