@@ -11664,3 +11664,29 @@ Interpretation:
 
 - Increasing loss chunks from 4 to 8 does not pair well with the compiled-Q/K/V active source.
 - Keep `loss.num_chunks=4`.
+
+## Experiment 467: Inductor Coordinate Descent On Compiled-QKV Graph
+
+Command:
+
+```bash
+TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run467-coordinate-descent-compiled-qkv > outputs/autoresearch/may19-qwen3-14b/run467-coordinate-descent-compiled-qkv.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,274.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Loss moved from 12.36882 at step 1 to 6.20921 at step 10.
+
+Interpretation:
+
+- Coordinate-descent tuning remains below the default Inductor settings even after adding the compiled Q/K/V boundary.
+- Keep default Inductor settings.

@@ -4081,3 +4081,13 @@
   Planned command or config overrides: Active command with `--loss.num_chunks=8`.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is repeated loss/lm_head overhead.
   Result: discarded at source state `df6e0f92`; 12,111 tps and 164.36 GiB. Keep chunks4.
+
+- Idea: Inductor coordinate descent on compiled-Q/K/V active recipe
+  Current best source commit: a6022b03
+  Source: prior coordinate-descent tuning predated the new compiled Q/K/V projection boundary.
+  Expected mechanism: Coordinate descent may choose better schedules for the current compiled graph set.
+  Supporting evidence: The compiled graph set changed materially in run449.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix active command with `TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1`.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is no better schedule or compile overhead.
+  Result: discarded at source state `a6022b03`; 12,274 tps and 163.95 GiB. Keep default Inductor settings.
