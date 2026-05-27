@@ -88,15 +88,14 @@ def verify_logprob_identity(
     Args:
         generator_logprobs: [B, L] generator logprobs from TrainingBatch.
         policy_logprobs: [B, L] trainer-computed logprobs.
-        loss_mask: [B, L] binary mask; 1.0 for response tokens.
+        loss_mask: [B, L] bool mask; True for response tokens.
         num_global_valid_tokens: Total response tokens across all DP ranks.
 
     Returns:
         PartialLogprobDrift.
     """
-    mask = loss_mask.bool()
-    ref_flat = generator_logprobs[mask].float()
-    policy_flat = policy_logprobs[mask].float()
+    ref_flat = generator_logprobs[loss_mask].float()
+    policy_flat = policy_logprobs[loss_mask].float()
 
     if ref_flat.numel() == 0:
         zero = torch.zeros((), dtype=torch.float32, device=generator_logprobs.device)

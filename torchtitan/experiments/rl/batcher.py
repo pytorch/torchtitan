@@ -58,6 +58,8 @@ class Batcher(Configurable):
                 gradient accumulation matches a single large-batch step.
             packing_metrics: list of Metric objects for logging.
         """
+        # TODO: Consider consuming the iterator lazily instead of
+        # materializing all rows upfront.
         packed_rows = list(self._pack_episodes(episodes))
 
         global_batch_size = self.global_batch_size
@@ -130,7 +132,7 @@ class Batcher(Configurable):
                 response_len = len(ep.token_ids)
                 raw_ids = ep.prompt_token_ids + ep.token_ids
                 gen_lp = [0.0] * prompt_len + ep.token_logprobs
-                loss_mask = [0.0] * prompt_len + [1.0] * response_len
+                loss_mask = [False] * prompt_len + [True] * response_len
                 advantages = [0.0] * prompt_len + [ep.advantage] * response_len
                 yield {
                     "input_ids": raw_ids[:-1],
@@ -147,7 +149,7 @@ class Batcher(Configurable):
                 "input_ids": self.pad_id,
                 "labels": self.pad_id,
                 "generator_logprobs": 0.0,
-                "loss_mask": 0.0,
+                "loss_mask": False,
                 "advantages": 0.0,
             },
         )
