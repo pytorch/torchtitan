@@ -4111,3 +4111,13 @@
   Planned command or config overrides: Active compiled-Q/K/V command.
   Success criteria and expected risk: Success is step-10 tps above 12,387 with finite loss. Risk is blocking Inductor's existing fusion.
   Result: discarded at source state `5a423a5a` plus dirty source; 12,321 tps and 163.95 GiB. Restore the original `F.silu(w1_out) * w3_out` expression.
+
+- Idea: NCCL_MIN_CTAS=16 on active recipe
+  Current best source commit: ba6cfd3c
+  Source: `NCCL_MIN_CTAS=32` lost, but a lower minimum may be less disruptive while still altering collective resources.
+  Expected mechanism: Slightly raising the minimum CTA count could reduce collective tail without hurting overlap as much as 32.
+  Supporting evidence: Max-CTA tuning was nonmonotonic but did not beat peak.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix active command with `NCCL_MIN_CTAS=16`.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is no effect or worse overlap.
+  Result: discarded at source state `ba6cfd3c`; 12,328 tps and 163.95 GiB. Close min-CTA tuning.
