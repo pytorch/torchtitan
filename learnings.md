@@ -11559,3 +11559,29 @@ Interpretation:
 
 - Raising the NCCL CTA cap to 64 is valid and close, but still below the active measured peak.
 - The active unset/default NCCL CTA count remains best among tested CTA-count variants.
+
+## Experiment 463: NCCL_MAX_CTAS=128
+
+Command:
+
+```bash
+NCCL_MAX_CTAS=128 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run463-nccl-max-ctas-128 > outputs/autoresearch/may19-qwen3-14b/run463-nccl-max-ctas-128.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,319.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Loss moved from 12.53056 at step 1 to 5.83121 at step 10.
+
+Interpretation:
+
+- Raising the NCCL CTA cap further to 128 regresses relative to 64 and the active peak.
+- Close max-CTA tuning for this active recipe; use the default max CTA behavior.

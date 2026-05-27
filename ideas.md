@@ -4041,3 +4041,13 @@
   Planned command or config overrides: Prefix active command with `NCCL_MAX_CTAS=64`.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is worse GEMM overlap.
   Result: discarded at source state `06ae67e4`; 12,368 tps and 163.95 GiB. Close, but below the active peak.
+
+- Idea: NCCL_MAX_CTAS=128 on active recipe
+  Current best source commit: 8b89fa76
+  Source: `NCCL_MAX_CTAS=64` was close but below peak, so test whether a larger cap reduces collective tails further.
+  Expected mechanism: More CTA budget may accelerate FSDP collectives enough to compensate for overlap cost.
+  Supporting evidence: The max-CTA curve had not yet been checked above 64.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix active command with `NCCL_MAX_CTAS=128`.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is worse compute/comm overlap.
+  Result: discarded at source state `8b89fa76`; 12,319 tps and 163.95 GiB. Close max-CTA tuning and keep default.
