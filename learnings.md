@@ -12330,3 +12330,28 @@ Interpretation:
 
 - Per-layer compile is blocked independent of fullgraph mode.
 - Continue using the smaller proven compile components: `loss,feed_forward,qkv_linear`.
+
+## Experiment 493: Event Cache Disabled With Tensor Register Allocator Hook
+
+Command:
+
+```bash
+TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=1 TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run493-event-cache0-tensor-register-allocator-hook > outputs/autoresearch/may19-qwen3-14b/run493-event-cache0-tensor-register-allocator-hook.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,152.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Loss moved from 12.70619 at step 1 to 5.89980 at step 10.
+
+Interpretation:
+
+- The tensor-register allocator hook is valid with `TORCH_NCCL_CUDA_EVENT_CACHE=0`, but it slows the active compiled-Q/K/V recipe.
+- Registration-path changes remain less promising than the event-cache-only ProcessGroupNCCL behavior.

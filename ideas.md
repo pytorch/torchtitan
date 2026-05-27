@@ -4331,3 +4331,13 @@
   Planned command or config overrides: Active event-cache-disabled command with `--compile.components=loss,layer`.
   Success criteria and expected risk: Success is a valid 10-step run above 12,454. Risk is compiler instability from attention masks, MXFP8 tensor wrappers, or FSDP wrapping.
   Result: both variants crashed before step 1. Fullgraph (`a099091d`) and non-fullgraph (`ffd4bed6`) hit the same Inductor `RecursionError` in fake-tensor metadata comparison on the MXFP8/FSDP view path. Remove the failed component; keep `loss,feed_forward,qkv_linear` as the active compile granularity.
+
+- Idea: ProcessGroupNCCL tensor-register allocator hook with event-cache disabled
+  Current best source commit: 2934b677
+  Source: run481 and later probes point at ProcessGroupNCCL/FSDP scheduling; the allocator registration hook had only been tested on an older stack without the event-cache-disabled compiled-Q/K/V recipe.
+  Expected mechanism: `TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=1` may change registration/lifetime behavior for FSDP collective buffers and interact with disabled CUDA event caching.
+  Supporting evidence: previous NCCL-side registration knobs were valid but below peak; this is a PyTorch ProcessGroupNCCL-side mechanism and composes with the current event-cache change.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix active command with `TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=1 TORCH_NCCL_CUDA_EVENT_CACHE=0`.
+  Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is extra registration overhead or no useful interaction.
+  Result: discarded at source state `2934b677`; 12,152 tps and 163.95 GiB. The hook is valid but slower, so keep the event-cache-disabled recipe without allocator-hook registration.
