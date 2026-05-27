@@ -26,6 +26,7 @@ IGNORE_INDEX = -100
 
 LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
+
 def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
     return torch.nn.functional.cross_entropy(
@@ -38,11 +39,7 @@ def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
 
 @spmd.register_autograd_function
 class _LossParallelCrossEntropy(torch.autograd.Function):
-    """Vocab-parallel cross entropy with a fused sharded-logits backward.
-
-    Inputs are ``logits: [B, L, V/tp]`` and TP-invariant ``labels: [B, L]``.
-    The output is a scalar sum-reduced loss that is invariant on TP ranks.
-    """
+    """Vocab-parallel cross entropy with a fused sharded-logits backward."""
 
     @staticmethod
     def typecheck_forward(
@@ -157,9 +154,8 @@ class BaseLoss(ABC, Configurable):
         pass
 
     @abstractmethod
-    def __init__(
-        self, config: Config, *, compile_config: CompileConfig | None = None
-    ): ...
+    def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
+        ...
 
     def _maybe_compile(self, compile_config: CompileConfig | None) -> None:
         if (
@@ -326,11 +322,6 @@ class ChunkedCELoss(BaseLoss):
         computes partial CE on its ``V/tp`` slice, with an internal
         all-reduce for the correct log-sum-exp.
 
-    SPMD composability:
-        The chunk loop body runs inside a local SPMD boundary that strips all
-        SPMD types — chunking, flatten, and CE operate on plain local tensors.
-        The boundary re-annotates outputs on exit.
-
     CP: Further chunks the local sequence dimension. Works out of the box.
 
     Compile: ce_loss can be compiled independently; lm_head is not compiled.
@@ -365,12 +356,6 @@ class ChunkedCELoss(BaseLoss):
         *,
         global_valid_tokens: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Chunk loop body: chunk → lm_head → CE → backward → accumulate.
-
-        Operates on plain local tensors when called via local SPMD.
-
-        Returns (total_loss, accumulated_grad_buffer).
-        """
         from torch.distributed._composable.fsdp import FSDPModule
 
         num_chunks = self.num_chunks
@@ -378,10 +363,7 @@ class ChunkedCELoss(BaseLoss):
         fsdp_enabled = isinstance(lm_head, FSDPModule)
         requires_grad = h_detached.requires_grad
 
-        # Split hidden states and labels into chunks along seq dim.
         # Use .contiguous() to break shared storage from torch.chunk().
-        # TODO: With CP enabled, chunking along dim=1 should happen inside
-        # local SPMD so it operates on local tensors.
         h_chunks = [
             c.contiguous().detach().requires_grad_(requires_grad)
             for c in torch.chunk(h_detached, num_chunks, dim=1)
@@ -482,13 +464,6 @@ class ChunkedCELoss(BaseLoss):
         return total_loss, grad_accumulator.result()
 
     def _spmd_out_types(self, h_detached: torch.Tensor) -> tuple:
-        """Build expected output types for (total_loss, accumulated_grad).
-
-        total_loss: P on all DP axes (including CP) — each rank has a partial
-            loss sum from its local batch/seq tokens. I@tp because TP loss
-            computation is duplicated after the vocab-parallel reductions.
-        accumulated_grad: same types as h_detached (the input).
-        """
         loss_type: dict = {}
         mesh_axis_names = spmd.current_mesh_names() or {}
         for axis_name in ("dp", "cp"):
@@ -565,21 +540,18 @@ class ChunkedCELoss(BaseLoss):
 
         accumulated_grad = grad_buffer.to(hidden_states.dtype)
 
-        # Return a differentiable loss via _DecoderOutputGradientBackProp. When
-        # .backward() is called (by the trainer or PP schedule), autograd
-        # calls _DecoderOutputGradientBackProp.backward which returns accumulated_grad
-        # as the gradient for hidden_states, propagating through the decoder.
         return _DecoderOutputGradientBackProp.apply(
             hidden_states, accumulated_grad, total_loss
         )
 
 
+@spmd.register_autograd_function
 class _DecoderOutputGradientBackProp(torch.autograd.Function):
     """Bridges chunked lm_head backward with decoder backward via autograd.
 
     Forward takes hidden_states (connected to decoder graph), the accumulated
-    gradient from chunked lm_head backward, and the loss value. Returns the
-    loss value as a differentiable tensor.
+    gradient from chunked lm_head backward, and the loss value. Returns a
+    detached loss with this Function as its grad_fn.
 
     Backward returns accumulated_grad as the gradient for hidden_states.
     Autograd then propagates this through the decoder layers automatically —
@@ -592,7 +564,6 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         accumulated_grad: torch.Tensor,
         loss: torch.Tensor,
     ) -> torch.Tensor:
-        """Output has the same type as ``loss`` (3rd arg)."""
         result = _DecoderOutputGradientBackProp.apply(
             hidden_states, accumulated_grad, loss
         )
@@ -609,8 +580,6 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         loss: torch.Tensor,
     ) -> torch.Tensor:
         ctx.save_for_backward(accumulated_grad)
-        # Return a tensor with the correct loss value. We clone to avoid
-        # in-place issues, and the grad_fn comes from this Function.
         return loss.detach().clone()
 
     @staticmethod
@@ -623,8 +592,8 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         # decoder graph — equivalent to hidden_states.backward(accumulated_grad)
         # but expressed as a return value so autograd handles the traversal
         # in a single pass (no "backward through graph twice" error).
+        # Note: this is not safe if downstream accidentally runs tensor ops after
+        # the loss returns, which would produce a non-trivial grad_output that we need
+        # to properly handle. The complicated part is that grad_output might not be
+        # on the same device mesh as accumlated_grad.
         return accumulated_grad, None, None
-
-
-spmd.register_autograd_function(_LossParallelCrossEntropy)
-spmd.register_autograd_function(_DecoderOutputGradientBackProp)

@@ -11,7 +11,7 @@ import spmd_types as spmd
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
-    dense_sequence_placement,
+    dense_sp_placement,
 )
 from torchtitan.protocols.sharding import NamedPlacement, ShardingConfig
 from torchtitan.protocols.types import MeshAxisName
@@ -101,16 +101,23 @@ def _tokens_per_expert_placement(*, enable_ep: bool) -> NamedPlacement:
 
 def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
     """``ShardingConfig`` at the MoE boundary."""
-    sp_layout = spmd.S(1) if enable_sp else spmd.I
     return ShardingConfig(
         state_shardings={
             "expert_bias": dense_param_placement(tp=spmd.R),
             "tokens_per_expert": _tokens_per_expert_placement(enable_ep=enable_ep),
         },
-        in_src_shardings={"x": dense_sequence_placement(tp=sp_layout)},
+        in_src_shardings={
+            "x": dense_sp_placement()
+            if enable_sp
+            else dense_activation_placement(tp=spmd.I)
+        },
         in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
         out_src_shardings=dense_activation_placement(tp=spmd.P),
-        out_dst_shardings=dense_sequence_placement(tp=sp_layout),
+        out_dst_shardings=(
+            dense_sp_placement()
+            if enable_sp
+            else dense_activation_placement(tp=spmd.I)
+        ),
         local_spmd=True,
     )
 

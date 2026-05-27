@@ -11,7 +11,7 @@ import spmd_types as spmd
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
-    dense_sequence_placement,
+    dense_sp_placement,
     norm_config,
     rowwise_config,
     set_decoder_sharding_config,
@@ -95,7 +95,9 @@ def _set_gpt_oss_layer_sharding(
     attention.sharding_config = ShardingConfig(
         state_shardings={"sinks": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings={
-            "x": dense_sequence_placement(tp=attn_x_placement),
+            "x": dense_sp_placement()
+            if enable_sp
+            else dense_activation_placement(tp=spmd.I),
             "freqs_cis": dense_param_placement(tp=spmd.R),
         },
         in_dst_shardings={

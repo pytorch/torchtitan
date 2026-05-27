@@ -12,7 +12,7 @@ from torchtitan.models.common.decoder_sharding import (
     colwise_config,
     dense_activation_placement,
     dense_param_placement,
-    dense_sequence_placement,
+    dense_sp_placement,
     norm_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
@@ -96,7 +96,9 @@ def _set_deepseek_v3_layer_sharding(
     # MLA attention input: x is gathered to Replicate; freqs_cis always Replicate.
     attention.sharding_config = ShardingConfig(
         in_src_shardings={
-            "x": dense_sequence_placement(tp=attn_x_placement),
+            "x": dense_sp_placement()
+            if enable_sp
+            else dense_activation_placement(tp=spmd.I),
             "freqs_cis": dense_param_placement(tp=spmd.R),
         },
         in_dst_shardings={
@@ -104,7 +106,11 @@ def _set_deepseek_v3_layer_sharding(
             "freqs_cis": dense_param_placement(tp=spmd.R),
         },
         out_src_shardings=dense_activation_placement(tp=spmd.P),
-        out_dst_shardings=dense_sequence_placement(tp=attn_x_placement),
+        out_dst_shardings=(
+            dense_sp_placement()
+            if enable_sp
+            else dense_activation_placement(tp=spmd.I)
+        ),
         local_spmd=True,
     )
     # Low-rank projections and norms keep Replicate weights on TP. We still

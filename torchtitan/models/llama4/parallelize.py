@@ -169,7 +169,7 @@ def apply_fsdp(
         cast_forward_inputs=False,
     )
     fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
-    if dp_mesh_dims is not None:
+    if dp_mesh_dims is not None and dp_mesh.size() > 1:
         fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
@@ -273,7 +273,7 @@ def apply_fsdp(
                     dp_mesh_dims: DataParallelMeshDims | None = None,
                     spmd_mesh: DeviceMesh | None = None,
                 ) -> FSDPMeshInfo:
-                    if dp_mesh_dims is not None:
+                    if dp_mesh_dims is not None and mesh.size() > 1:
                         return _get_mesh_info_from_named_dims(
                             spmd_mesh if spmd_mesh is not None else mesh,
                             dp_mesh_dims,
