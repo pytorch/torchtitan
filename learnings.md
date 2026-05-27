@@ -11116,3 +11116,30 @@ Interpretation:
 
 - The same profiler-guided input-cast sharing that helped FFN also helps Qwen3's separate attention Q/K/V projections.
 - This is a small but real peak over run421 (12,249 tps), with essentially unchanged memory.
+
+## Experiment 447: Shared Q/K/V grad_input With In-Place Add
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run447-shared-qkv-grad-input-inplace-add-nvls-active > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily changed the new shared Q/K/V custom autograd backward to accumulate `grad_input` parts with in-place adds.
+- Restored the run446 source after the result.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,127.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.97 GiB, 93.62%.
+- No allocator retries were logged.
+- Loss moved from 12.46336 at step 1 to 5.57228 at step 10.
+
+Interpretation:
+
+- In-place Q/K/V `grad_input` accumulation is valid, but it does not improve the measured final step.
+- Keep the simpler run446 shared-Q/K/V implementation.
