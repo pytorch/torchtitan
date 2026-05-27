@@ -889,6 +889,36 @@ class InductorRegionExtractor(RegionExtractor):
                 continue
             sub_gm, placeholder_info, output_nodes = result
 
+            # Strip trailing transpose / t from the region so the
+            # subgraph always produces contiguous output. The view op
+            # stays in the parent graph and operates on the kernel's
+            # contiguous result (zero-cost view, no copy).
+            _TRAILING_VIEW_OPS = {
+                torch.ops.aten.t.default,
+                torch.ops.aten.transpose.int,
+            }
+            stripped = set()
+            new_output_nodes = []
+            for out_n in output_nodes:
+                if (
+                    out_n.op == "call_function"
+                    and out_n.target in _TRAILING_VIEW_OPS
+                    and isinstance(out_n.args[0], torch.fx.Node)
+                    and out_n.args[0] in set(comp)
+                ):
+                    new_output_nodes.append(out_n.args[0])
+                    stripped.add(out_n)
+                else:
+                    new_output_nodes.append(out_n)
+            if stripped:
+                output_nodes = new_output_nodes
+                comp = [n for n in comp if n not in stripped]
+                # Rebuild the subgraph without the stripped nodes.
+                result = _extract_subgraph(comp, gm)
+                if result is None:
+                    continue
+                sub_gm, placeholder_info, output_nodes = result
+
             # External inputs: the original-graph nodes referenced by the
             # subgraph's placeholders.  Already recorded in placeholder_info.
             ext_inputs = [info["orig_node"] for info in placeholder_info]
@@ -916,6 +946,22 @@ _EXTRACTORS: dict[str, type[RegionExtractor]] = {
 }
 
 
+# Ops worth fusing as a standalone single-compute-op region. These are
+# heavy enough that wrapping in a custom op has net-positive value even
+# without multi-op fusion, because inductor can compile them into an
+# optimized triton kernel (vs the default eager CUDA kernel).
+_STANDALONE_WORTH_FUSING = frozenset(
+    {
+        "aten._fused_rms_norm.default",
+        "aten._fused_rms_norm_backward.default",
+        "aten.silu.default",
+        "aten.silu_backward.default",
+        "aten._log_softmax.default",
+        "aten._log_softmax_backward_data.default",
+    }
+)
+
+
 def _filter_regions(
     regions: list[Region],
     *,
@@ -937,7 +983,12 @@ def _filter_regions(
         if len(r.nodes) < min_ops:
             continue
         if r.num_compute_ops < min_compute_ops:
-            continue
+            # Still accept if the region contains a standalone-worthy op.
+            has_standalone = any(
+                str(n.target) in _STANDALONE_WORTH_FUSING for n in r.nodes
+            )
+            if not has_standalone:
+                continue
         result.append(r)
 
     return result, hash_counts
