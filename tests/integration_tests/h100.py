@@ -19,7 +19,6 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
     same root config file.
     """
     integration_tests_flavors = [
-        # TODO: re-enable this test once the async TP issue is fixed
         OverrideDefinitions(
             [
                 [
@@ -30,7 +29,6 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             ],
             "2D async TP compile",
             "2d_asynctp_compile",
-            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -52,7 +50,6 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             "fsdp_symm_mem",
             ngpu=2,
         ),
-        # TODO: re-enable this test once the async TP issue is fixed
         OverrideDefinitions(
             [
                 [
@@ -67,7 +64,6 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             "FSDP+async TP+PP+torch.compile+Float8",
             "fsdp+tp+cp+compile+float8",
             ngpu=8,
-            disabled=True,
         ),
         OverrideDefinitions(
             [
