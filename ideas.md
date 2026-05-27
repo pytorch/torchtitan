@@ -4641,3 +4641,13 @@
   Planned command or config overrides: Active batch176 reshape command.
   Success criteria and expected risk: Success is step-10 tps above 13,734 or a meaningful peak-memory drop that justifies reopening batch180. Risk is autograd version-counter failure or no effect if RoPE outputs are not peak-live.
   Result: discarded at source state `ea5891f2+dirty`; 13,593 tps at the same 168.91 GiB peak. Restore out-of-place Triton RoPE and do not reopen batch180 on this basis.
+
+- Idea: separate tok_embeddings FSDP with endpoint prefetch
+  Current best source commit: 6e386f7d
+  Source: the root FSDP wrapper still owns `tok_embeddings`, which is a large parameter table not covered by the per-layer or lm_head child FSDP units.
+  Expected mechanism: Wrapping `tok_embeddings` separately and prefetching between embeddings and layer 0 may reduce root-wrapper residency or hide endpoint communication.
+  Supporting evidence: Earlier embedding-wrap variants were shape/source dependent, and the final stack has a different memory/communication balance after MXFP8 shared casts, Q/K/V compile, Triton RoPE, and event-cache disable.
+  Planned source/config changes: Add `fully_shard(model.tok_embeddings, **fsdp_config)` and endpoint forward/backward prefetch edges.
+  Planned command or config overrides: Active batch176 reshape command.
+  Success criteria and expected risk: Success is step-10 tps above 13,734 or lower memory without loss regression. Risk is extra endpoint scheduling overhead or higher live all-gather memory.
+  Result: discarded at source state `6e386f7d+dirty`; 13,471 tps at 169.43 GiB (95.00%) with a poor loss trajectory. Restore the accepted root-wrapper embedding layout.
