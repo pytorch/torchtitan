@@ -11611,3 +11611,30 @@ Interpretation:
 
 - Re-testing max autotune is justified after adding the compiled Q/K/V boundary, but the default Inductor settings are still faster.
 - Do not keep max autotune for the active compiled-Q/K/V recipe.
+
+## Experiment 465: Q/K/V Compile mode=reduce-overhead
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run465-qkv-compile-reduce-overhead > outputs/autoresearch/may19-qwen3-14b/run465-qkv-compile-reduce-overhead.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily added `mode="reduce-overhead"` only to the `qkv_linear.compile(...)` call.
+- Restored the default Q/K/V compile call after the result.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,160.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 167.25 GiB, 93.78%.
+- No allocator retries were logged.
+- Loss moved from 12.58362 at step 1 to 5.43733 at step 10.
+
+Interpretation:
+
+- `mode="reduce-overhead"` is compatible with the Q/K/V wrapper but causes large early overhead, higher memory, and lower steady throughput.
+- Keep the default compile mode for Q/K/V.

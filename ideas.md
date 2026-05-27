@@ -4061,3 +4061,13 @@
   Planned command or config overrides: Prefix active command with `TORCHINDUCTOR_MAX_AUTOTUNE=1 TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1`.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is compile overhead with no better steady-state kernels.
   Result: discarded at source state `6ba86487`; 12,252 tps and 163.95 GiB. Keep default Inductor settings.
+
+- Idea: qkv_linear compile mode reduce-overhead
+  Current best source commit: c8a5d735
+  Source: run449 made Q/K/V compile useful, so test a narrower compile mode only on that boundary rather than global Inductor flags.
+  Expected mechanism: `mode="reduce-overhead"` may reduce runtime wrapper overhead for the small repeated Q/K/V graph.
+  Supporting evidence: The profile win from Q/K/V compile was mostly copy/subclass overhead, not GEMM speed.
+  Planned source/config changes: Temporarily pass `mode="reduce-overhead"` to `qkv_linear.compile(...)`.
+  Planned command or config overrides: Active compiled-Q/K/V command.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is cudagraph/reduce-overhead mode increasing memory or compile overhead.
+  Result: discarded at source state `c8a5d735` plus dirty source; 12,160 tps and 167.25 GiB. Restore the default Q/K/V compile mode.
