@@ -4521,3 +4521,13 @@
   Planned command or config overrides: Active batch176 Triton RoPE command.
   Success criteria and expected risk: Success is step-10 tps above 13,659. Risk is lower occupancy or worse register pressure from the larger block.
   Result: discarded at source state `5d140d03+dirty`; 13,594 tps and 168.91 GiB. Keep `BLOCK=256`.
+
+- Idea: NCCL_MIN_NCHANNELS=16 on batch176
+  Current best source commit: e4c2251b
+  Source: run510 still shows large worst-rank NCCL reduce-scatter/all-gather time even though batch176 improved average collective amortization.
+  Expected mechanism: Raising the minimum NCCL channel count may increase collective parallelism and reduce worst-rank time for the large FSDP collectives.
+  Supporting evidence: Channel count had not been tested on the final event-cache-disabled Triton-RoPE batch176 stack.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active batch176 command with `NCCL_MIN_NCHANNELS=16`.
+  Success criteria and expected risk: Success is step-10 tps above 13,659. Risk is worse overlap or extra communication-kernel resource use.
+  Result: discarded at source state `e4c2251b`; 13,647 tps and 168.91 GiB. This is close but below the active recipe, so keep default NCCL channel selection.
