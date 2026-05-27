@@ -4671,3 +4671,13 @@
   Planned command or config overrides: Active batch176 command with `--compile.components=loss,feed_forward,qkv_linear,qk_norm_rope`.
   Success criteria and expected risk: Success is step-10 tps above 13,734 without memory regression. Risk is graph-break overhead or a compiler/autograd failure around the Triton RoPE custom function.
   Result: kept at source state `4def0007+dirty`; 13,949 tps at 168.91 GiB. This is the new active recipe.
+
+- Idea: profile Q/K RMSNorm plus Triton RoPE helper
+  Current best source commit: ef128236
+  Source: run526 changed the active bottleneck mix by compiling the Q/K norm plus RoPE helper, so run515 is stale.
+  Expected mechanism: Confirm whether the win came from RMSNorm/RoPE reduction or from incidental scheduling variance.
+  Supporting evidence: The run526 source directly targets a profiler-visible RMSNorm bucket.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active qk_norm_rope command with profiler enabled for iteration 10.
+  Success criteria and expected risk: Success is a clean trace. Profiled tps is diagnostic, not used for non-profile ranking.
+  Result: kept as diagnostic at source state `ef128236`; profiled step-10 tps was 14,083. Parsed traces show RMSNorm down about 125 -> 43 ms/rank, while GEMM/MXFP8 and reduce-scatter remain the main exposed buckets.

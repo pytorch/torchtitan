@@ -13260,3 +13260,34 @@ Interpretation:
 - A narrow attention-prefix compile boundary succeeds where full attention/layer compile failed.
 - The win likely comes from reducing eager overhead around Q/K RMSNorm plus the custom RoPE boundary without involving attention masks, SDPA, or MXFP8 output projection state.
 - This is the new active source and command. Next profile should be taken from this recipe before more attention-prefix source work.
+
+## Experiment 527: Profile Q/K RMSNorm Plus RoPE Active Recipe
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run527-profile-qk-norm-rope-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run527-profile-qk-norm-rope-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the kept `qk_norm_rope` component from run526.
+
+Result:
+
+- Status: keep as diagnostic.
+- Profiled step 10 `tps`: 14,083.
+- Step 10 peak memory: 168.91 GiB, 94.71%.
+- Loss moved from 12.40618 at step 1 to 7.10848 at step 10.
+
+Profiler comparison versus run515:
+
+- Average parsed RMSNorm kernel time fell from about 125 ms/rank to 43 ms/rank.
+- Average all-gather time fell from about 660 ms/rank to 559 ms/rank in this sample, while reduce-scatter stayed around 1,000 ms/rank.
+- GEMM/scaled-mm and MXFP8 cast time are roughly flat to slightly higher: GEMM about 845 -> 858 ms/rank, dim1 casts about 203 -> 208 ms/rank.
+- RoPE remains about 30 ms/rank and attention remains about 72 ms/rank.
+
+Interpretation:
+
+- The Q/K norm plus RoPE helper primarily removes RMSNorm overhead; the next likely targets are GEMM/MXFP8 cast work and rank-skewed FSDP collectives.
+- Further pure attention-backend work remains low priority unless it also improves GEMM/cast or collective overlap.
