@@ -95,6 +95,7 @@ def parallelize_gptoss(
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
+        enable_symm_mem=parallelism.enable_fsdp_symm_mem,
         dp_mesh_dims=dp_mesh_dims,
         edp_mesh_dims=edp_mesh_dims,
     )

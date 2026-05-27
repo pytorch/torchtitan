@@ -379,11 +379,11 @@ class VisionInnerAttention(Module):
     which is not evenly divisible by TP.
 
     Sharding (declared via ``LocalMapConfig`` in ``sharding.py``):
-    ``qkv`` enters as ``DTensor(Shard(-1))`` on TP; ``local_map`` unwraps
-    to a plain local with the heads dim already TP-sharded. The attention
-    output ``(N, L, n_heads, head_dim)`` re-wraps to ``DTensor(Shard(2))``,
-    which the caller reshapes into ``DTensor(Shard(-1))`` for the
-    downstream rowwise ``self.proj``.
+    ``qkv`` enters as ``DTensor(Shard(2))`` on TP (``Shard(-1)`` on the
+    3D activation). ``local_map`` unwraps to a plain local with the heads
+    dim already TP-sharded. The 4D attention output re-wraps to
+    ``DTensor(Shard(2))``, which the caller reshapes into
+    ``DTensor(Shard(-1))`` for the downstream rowwise ``self.proj``.
     """
 
     @dataclass(kw_only=True, slots=True)
