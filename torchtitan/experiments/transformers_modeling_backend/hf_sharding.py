@@ -20,7 +20,7 @@ are handled by ``model.parallelize()`` directly.
 """
 
 import torch.nn as nn
-from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
@@ -150,21 +150,10 @@ def _apply_layer_tp(layer: nn.Module, tp_mesh, *, enable_sp: bool) -> None:
             sequence_dim=2, use_local_output=True
         )
 
-    # GLM-5 DSA indexer
+    # GLM-5 DSA indexer — operates on local tensors (inputs are already
+    # local from PrepareModuleInput on self_attn + NoParallel on q_a_*).
     if hasattr(attn, "indexer"):
-        indexer = attn.indexer
-
-        def _indexer_to_local_pre_hook(module, args):
-            def _to_local(x):
-                if isinstance(x, DTensor):
-                    return x.to_local()
-                if isinstance(x, tuple):
-                    return tuple(_to_local(v) for v in x)
-                return x
-
-            return tuple(_to_local(a) for a in args)
-
-        indexer.register_forward_pre_hook(_indexer_to_local_pre_hook)
+        plan["self_attn.indexer"] = NoParallel(use_local_output=True)
 
     # Dense MLP (non-MoE layers only)
     if not getattr(layer, "moe_enabled", False):
