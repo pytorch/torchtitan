@@ -11294,3 +11294,57 @@ Interpretation:
 
 - Shape-specializing the Q/K/V projection wrapper compile is valid, but it does not beat the default `fullgraph=True` compile path.
 - This mirrors the earlier FFN `dynamic=False` result enough to avoid further dynamic-shape specialization unless a new compile boundary is introduced.
+
+## Experiment 453: Existing FusedQKVLinear For 14B With Q/K/V Compile
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run453-fused-qkv-linear-14b > outputs/autoresearch/may19-qwen3-14b/run453-fused-qkv-linear-14b.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily enabled the existing `FusedQKVLinear` config path for Qwen3 14B by passing `fuse_qkv=True`.
+- Temporarily made the shared Q/K/V MXFP8 patch skip modules that do not expose separate `wq`, `wk`, and `wv`.
+- Restored the active separate-Q/K/V source after the fused experiments.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,352.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 170.78 GiB, 95.75%.
+- No allocator retries were logged.
+- Loss moved from 12.21758 at step 1 to 6.44405 at step 10.
+
+Interpretation:
+
+- The fused projection is valid and keeps the parameter count unchanged, but it is slower than the compiled separate-Q/K/V active recipe and crosses the preferred memory risk line.
+- The fused layout likely reduces some projection launch/GEMM fragmentation, but its activation/autograd footprint is materially worse in this FSDP/MXFP8 setup.
+
+## Experiment 454: Existing FusedQKVLinear Without Q/K/V Compile
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run454-fused-qkv-no-qkv-compile > outputs/autoresearch/may19-qwen3-14b/run454-fused-qkv-no-qkv-compile.run.log 2>&1
+```
+
+Source changes:
+
+- Same temporary fused-QKV source as run453, but launched without the `qkv_linear` compile component.
+- Restored the active separate-Q/K/V source after stopping the run.
+
+Result:
+
+- Status: discard / stopped early.
+- Last observed `tps`: 3,132 at step 4.
+- Step 4 peak memory: 173.88 GiB, 97.50%.
+- CUDA memory allocation retries accumulated by step 4.
+- Loss moved from 12.41837 at step 1 to 14.67487 at step 4.
+
+Interpretation:
+
+- Fused QKV without compiling the projection wrapper is dominated: memory rises above the risk line, allocator retries begin, and throughput collapses.
+- Do not pursue the existing fused-QKV module further on this batch/seq/FSDP recipe without a separate memory-footprint fix.

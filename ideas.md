@@ -3951,3 +3951,13 @@
   Planned command or config overrides: Active compiled-Q/K/V batch168 command.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is the same specialization penalty observed for FFN compile.
   Result: discarded at source state `25da7c08` plus dirty source; 12,250 tps and 163.95 GiB. Restore the default Q/K/V compile call.
+
+- Idea: existing fused QKV projection for 14B
+  Current best source commit: 822b65f1
+  Source: run450 shows Q/K/V compile mostly removes copy/subclass overhead but leaves NVJET GEMM time flat, so reducing Q/K/V GEMM fragmentation is the next direct operator-level idea.
+  Expected mechanism: Use the existing `FusedQKVLinear` path to replace three separate Q/K/V projections with one larger projection, then split the output into Q, K, and V.
+  Supporting evidence: The config helpers already support `fuse_qkv=True`, and the total parameter count should remain unchanged.
+  Planned source/config changes: Temporarily enable `fuse_qkv=True` for Qwen3 14B and make the shared-Q/K/V patch skip fused modules; test with and without the `qkv_linear` compile component.
+  Planned command or config overrides: Active command first with `--compile.components=loss,feed_forward,qkv_linear`, then without `qkv_linear` if the first result suggests compile overhead or memory is the issue.
+  Success criteria and expected risk: Success is step-10 tps above 12,387 and memory below the risk line. Risk is higher activation/autograd memory from the fused output layout.
+  Result: discarded at source state `822b65f1` plus dirty source. With `qkv_linear` compile it reached 12,352 tps but 170.78 GiB; without `qkv_linear` compile it was stopped at step 4 after allocator retries, 173.88 GiB, and 3,132 tps. Restore separate Q/K/V.
