@@ -7,14 +7,14 @@
 """Sharding types for config-based SPMD parallelization.
 
 ``ShardingConfig`` is set on ``Module.Config`` by ``set_sharding_config()``
-and read by ``Module.parallelize(parallel_dims)``. All placements use
-``NamedPlacement`` (dict keyed by mesh axis name) so they are self-documenting
-and support multi-dimensional meshes.
+and read by ``Module.parallelize(parallel_dims)``. Placements are keyed by mesh
+axis name so they are self-documenting and support multi-dimensional meshes.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 
 import spmd_types as spmd
+from torch.utils._pytree import tree_map_only
 
 from torchtitan.protocols.types import MeshAxisName
 
@@ -22,10 +22,33 @@ from torchtitan.protocols.types import MeshAxisName
 # Per-axis SPMD type, keyed by mesh axis name. ``MeshAxisName`` is a StrEnum,
 # so these keys can be passed directly to spmd_types APIs that accept strings.
 NamedPlacement = dict[MeshAxisName, spmd.PerMeshAxisSpmdType]
+NamedPartitionSpecEntry = MeshAxisName | tuple[MeshAxisName, ...] | None
+NamedPartitionSpec = tuple[NamedPartitionSpecEntry, ...]
+_MESH_AXIS_NAMES = {axis.value for axis in MeshAxisName}
 
 
 def _mesh_axis_name(axis_name: object) -> str:
     return axis_name.value if hasattr(axis_name, "value") else str(axis_name)
+
+
+def _is_mesh_axis_key(key: object) -> bool:
+    return _mesh_axis_name(key) in _MESH_AXIS_NAMES
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class PlacementSpec:
+    """Placement with explicit global partition spec ordering.
+
+    Use this only when multiple mesh axes shard the same tensor dimension. The
+    ``placement`` field must use local SPMD types (``R``, ``I``, ``V``, ``P``)
+    and put ``V`` on every axis named by ``partition_spec``.
+    """
+
+    placement: NamedPlacement
+    partition_spec: NamedPartitionSpec
+
+
+PlacementLike = NamedPlacement | PlacementSpec
 
 
 @dataclass(kw_only=True, slots=True)
@@ -45,7 +68,8 @@ class LocalSpmdConfig:
 class ShardingConfig:
     """Declarative sharding for a Module's states and activations.
 
-    All placements use ``NamedPlacement`` keyed by mesh axis name.
+    Placements are usually ``NamedPlacement``. Use ``PlacementSpec`` only for
+    explicit ordering when multiple axes shard the same tensor dimension.
 
     Completely dtype-agnostic at this moment — quantization (Float8/MXFP8) is
     orthogonal.
@@ -57,9 +81,10 @@ class ShardingConfig:
     Attributes:
         state_shardings: Parameter/buffer placements. Outer dict keys are
             param/buffer names, e.g. ``{"weight": {TP: spmd.S(0)}}``.
-        state_tp_ir: Local parameter names to convert from I@tp at rest to R@tp
-            during forward compute. Temporary SPMD escape hatch for replicated
-            parameters that need TP gradient reduction semantics.
+        state_shardings_compute: Parameter/buffer placements for forward
+            compute when they differ from ``state_shardings``. Outer dict keys
+            are param/buffer names, e.g. ``{"weight": {TP: spmd.R}}`` for a
+            norm weight that is ``I@TP`` at rest but ``R@TP`` during compute.
         in_src_shardings: Source placements of inputs, keyed by ``forward()``
             arg name. Declares what the input's placement is before any
             redistribution.
@@ -73,37 +98,50 @@ class ShardingConfig:
         local_spmd: If set, wraps forward for local SPMD typechecking.
     """
 
-    state_shardings: dict[str, NamedPlacement] = field(default_factory=dict)
-    state_tp_ir: set[str] = field(default_factory=set)
-    in_src_shardings: dict[str, NamedPlacement] | None = None
-    in_dst_shardings: dict[str, NamedPlacement] | None = None
-    out_src_shardings: NamedPlacement | tuple[NamedPlacement, ...] | None = None
-    out_dst_shardings: NamedPlacement | None = None
+    state_shardings: dict[str, PlacementLike] = field(default_factory=dict)
+    state_shardings_compute: dict[str, PlacementLike] = field(default_factory=dict)
+    in_src_shardings: dict[str, PlacementLike] | None = None
+    in_dst_shardings: dict[str, PlacementLike] | None = None
+    out_src_shardings: PlacementLike | tuple[PlacementLike, ...] | None = None
+    out_dst_shardings: PlacementLike | None = None
     local_spmd: LocalSpmdConfig | None = None
     mesh_reinterpret: NamedPlacement | None = None
 
     def axes(self) -> set[str]:
         """Return mesh axes referenced by this sharding config."""
-
-        def add_axes(named: NamedPlacement | None) -> None:
-            if named is None:
-                return
-            axes.update(_mesh_axis_name(axis_name) for axis_name in named)
-
         axes: set[str] = set()
-        for named in self.state_shardings.values():
-            add_axes(named)
-        for shardings in (self.in_src_shardings, self.in_dst_shardings):
-            if shardings is not None:
-                for named in shardings.values():
-                    add_axes(named)
-        if isinstance(self.out_src_shardings, tuple):
-            for named in self.out_src_shardings:
-                add_axes(named)
-        else:
-            add_axes(self.out_src_shardings)
-        add_axes(self.out_dst_shardings)
-        add_axes(self.mesh_reinterpret)
+
+        def is_placement(value: object) -> bool:
+            return (
+                isinstance(value, PlacementSpec)
+                or (
+                    isinstance(value, dict)
+                    and len(value) > 0
+                    and all(_is_mesh_axis_key(key) for key in value)
+                )
+            )
+
+        def collect_axes(placement: PlacementLike) -> PlacementLike:
+            named = (
+                placement.placement
+                if isinstance(placement, PlacementSpec)
+                else placement
+            )
+            axes.update(_mesh_axis_name(axis_name) for axis_name in named)
+            if isinstance(placement, PlacementSpec):
+                for entry in placement.partition_spec:
+                    if entry is None:
+                        continue
+                    entry_axes = entry if isinstance(entry, tuple) else (entry,)
+                    axes.update(_mesh_axis_name(axis_name) for axis_name in entry_axes)
+            return placement
+
+        tree_map_only(
+            is_placement,
+            collect_axes,
+            tuple(getattr(self, field.name) for field in fields(self)),
+            is_leaf=is_placement,
+        )
         return axes
 
     def to_dict(self) -> dict:
@@ -115,10 +153,10 @@ class ShardingConfig:
 class SpmdInputConfig:
     """Model-owned trainer input annotations for the SPMD path."""
 
-    inputs: NamedPlacement | None = None
-    labels: NamedPlacement | None = None
-    extra_inputs: dict[str, NamedPlacement] = field(default_factory=dict)
-    extra_kwargs: dict[str, NamedPlacement] = field(default_factory=dict)
+    inputs: PlacementLike | None = None
+    labels: PlacementLike | None = None
+    extra_inputs: dict[str, PlacementLike] = field(default_factory=dict)
+    extra_kwargs: dict[str, PlacementLike] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}
