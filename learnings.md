@@ -13626,3 +13626,33 @@ Interpretation:
 - The fused residual/RMSNorm forward is correct enough for a smoke test, but it does not beat native/compiled scheduling in the full run.
 - The wide hidden-dim Triton row kernel likely loses enough efficiency that the saved add/read traffic does not matter.
 - Remove the custom op and keep the existing `block_norms` throughput branch.
+
+## Experiments 543-544: Compiled Outer RMSNorm Modules
+
+Commands:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,norm_modules --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run543-compiled-norm-modules-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run543-compiled-norm-modules-batch176-event-cache0.run.log 2>&1
+
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=20 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,norm_modules --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run544-compiled-norm-modules-20step-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run544-compiled-norm-modules-20step-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Added a `norm_modules` compile component.
+- The component method-patches each outer `attention_norm` and `ffn_norm` module to call the compiled `_rms_norm` helper.
+- Unlike `block_norms`, it leaves the original Qwen3 block forward intact.
+
+Result:
+
+- Status: keep.
+- Run543 step 10 `tps`: 14,240.
+- Run544 sustained steps 11-20 average `tps`: 14,023.
+- Peak memory: 168.91 GiB, 94.71%.
+- Run544 loss moved from 12.34135 at step 1 to 3.49472 at step 20.
+
+Interpretation:
+
+- Directly patching the norm modules recovers a real part of the norm compile benefit without the `block_norms` memory cliff.
+- The absolute sustained throughput branch remains `block_norms` at 14,070 tps and 172.88 GiB, but `norm_modules` is the new best safe-memory branch.
+- This also explains the split-block result: the memory cliff was caused by replacing the full block forward, not by compiling RMSNorm itself.

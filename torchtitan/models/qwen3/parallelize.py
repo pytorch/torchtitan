@@ -317,6 +317,30 @@ def _enable_compiled_block_norms(
     )
 
 
+def _enable_compiled_norm_modules(
+    model: Qwen3Model, compile_config: CompileConfig
+) -> None:
+    compiled_rms_norm = torch.compile(
+        _rms_norm,
+        backend=compile_config.backend,
+        fullgraph=True,
+    )
+    patched_count = 0
+
+    def _compiled_norm_forward(self, x: torch.Tensor) -> torch.Tensor:
+        return compiled_rms_norm(x, self.weight, self.eps)
+
+    for layer in model.layers.values():
+        for norm in (layer.attention_norm, layer.ffn_norm):
+            norm.forward = types.MethodType(_compiled_norm_forward, norm)
+            patched_count += 1
+
+    logger.info(
+        "Compiling %s Qwen3 outer RMSNorm modules with torch.compile",
+        patched_count,
+    )
+
+
 def _enable_triton_sequential_rope(
     model: Qwen3Model, compile_config: CompileConfig
 ) -> None:
@@ -443,6 +467,8 @@ def parallelize_qwen3(
         _compile_qwen3_feed_forward(model, compile_config)
     if compile_config.enable and "block_norms" in compile_config.components:
         _enable_compiled_block_norms(model, compile_config)
+    if compile_config.enable and "norm_modules" in compile_config.components:
+        _enable_compiled_norm_modules(model, compile_config)
 
     fsdp_mesh = parallel_dims.get_mesh("fsdp")
     mp_policy = MixedPrecisionPolicy(

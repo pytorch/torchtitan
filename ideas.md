@@ -4761,3 +4761,13 @@
   Planned command or config overrides: Active batch176 command with `residual_rms_norm` replacing `block_norms`.
   Success criteria and expected risk: Success is tps above the sustained 14,070 branch or memory below 172.88 GiB with safe-branch throughput. Risk is the wide 5120-dim Triton row kernel being slower than native RMSNorm despite less memory traffic.
   Result: discarded at source state `40f511e0+dirty`; run542 reached 14,013 tps at 172.88 GiB and had a noisy loss trend. Remove the custom source.
+
+- Idea: compile outer RMSNorm modules without monkeypatching block forward
+  Current best source commit: 5e4202e5
+  Source: `block_norms` improves throughput but raises memory; split tests showed the memory cliff follows the patched block-forward boundary, not simply the number of compiled norm calls.
+  Expected mechanism: Patch only `attention_norm.forward` and `ffn_norm.forward` to call the compiled RMSNorm helper, leaving the original block forward and residual adds unchanged.
+  Supporting evidence: The narrow Q/K norm helper succeeded, and the direct block-forward split proved that changing the broader block boundary is the likely source of the memory cliff.
+  Planned source/config changes: Add a `norm_modules` compile component that method-patches the 80 outer Qwen3 RMSNorm modules.
+  Planned command or config overrides: Active batch176 command with `norm_modules` replacing `block_norms`.
+  Success criteria and expected risk: Success is sustained throughput above the prior safe 14,003 point at 168.91 GiB, or matching the 14,070 throughput branch without the 172.88 GiB memory cliff. Risk is per-module method patching adding dispatcher overhead or not being captured by Dynamo.
+  Result: kept at source state `5e4202e5+dirty`; run543 reached 14,240 tps at 168.91 GiB, and run544 sustained 14,023 tps over steps 11-20 at 168.91 GiB. This is the new safe-memory branch.
