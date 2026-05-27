@@ -4251,3 +4251,13 @@
   Planned command or config overrides: Prefix active command with `NCCL_PROGRESS_APPENDOP_FREQ=16 TORCH_NCCL_CUDA_EVENT_CACHE=0`.
   Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is worse communication progress.
   Result: discarded at source state `6f3abedb`; 12,258 tps and 163.95 GiB. Close this interaction and avoid neighboring progress-frequency probes without new profile evidence.
+
+- Idea: forward-only FSDP prefetch on event-cache-disabled compiled-QKV recipe
+  Current best source commit: e53d7608
+  Source: run481 showed lower all-gather but higher reduce-scatter in the event-cache-disabled profile sample, raising the question of whether backward prefetch is now over-driving backward collectives.
+  Expected mechanism: Keep the layer-to-next/lm_head forward prefetch chain but remove backward prefetch so backward reduce-scatter traffic is launched less aggressively.
+  Supporting evidence: the older forward-only test was before Q/K/V compile and event-cache disable, so the current collective balance warranted one retest.
+  Planned source/config changes: Temporarily remove `set_modules_to_backward_prefetch` calls from `parallelize_qwen3()`.
+  Planned command or config overrides: Active event-cache-disabled command.
+  Success criteria and expected risk: Success is step-10 tps above 12,454 with finite loss. Risk is worse overlap and delayed backward all-gathers.
+  Result: discarded at source state `e53d7608`; 12,000 tps and 163.95 GiB, with loss rising through early steps before ending at 8.63673. Restore the bidirectional one-module prefetch schedule.

@@ -213,6 +213,9 @@ def parallelize_qwen3(
         for layer, next_layer in zip(layers, layers[1:]):
             layer.set_modules_to_forward_prefetch([next_layer])
         layers[-1].set_modules_to_forward_prefetch([model.lm_head])
+        model.lm_head.set_modules_to_backward_prefetch([layers[-1]])
+        for layer, prev_layer in zip(reversed(layers[1:]), reversed(layers[:-1])):
+            layer.set_modules_to_backward_prefetch([prev_layer])
 
     disable_fsdp_gradient_division(model)
     logger.info(
