@@ -12600,3 +12600,30 @@ Interpretation:
 - Seq112/local-batch192 improves over seq96/local-batch224 but still does not beat the active seq128/local-batch168 shape.
 - Because both shorter-sequence probes preserve the same total tokens and 5,376-row loss chunks, the final stack's seq128 preference appears to be a broader compute/communication scheduling effect rather than loss tiling.
 - Close the shorter-sequence shape branch unless a later trace specifically points back to attention cost.
+
+## Experiment 503: Layer Compile With Cloned Residual Outputs
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,layer_clones --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run503-layer-compile-cloned-residual-outputs > outputs/autoresearch/may19-qwen3-14b/run503-layer-compile-cloned-residual-outputs.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily monkeypatched each Qwen3 decoder layer to clone attention and feed-forward outputs before the residual additions.
+- Temporarily compiled full decoder layers under a new `layer_clones` compile component.
+- Restored the active source stack after the run.
+
+Result:
+
+- Status: crash.
+- The run failed before step 1.
+- The log still emitted the FSDP2 warning that `FSDPMXFP8Linear` returned a view tensor.
+- Failure signature: `torch._inductor.exc.InductorError: RecursionError: maximum recursion depth exceeded` in `torch/_inductor/fx_utils.py:is_fake_tensor_same`.
+
+Interpretation:
+
+- Decoder-layer compile is not blocked solely by residual in-place/view consumption; cloning the residual branch outputs did not move the failure.
+- The blocker is deeper in the MXFP8/FSDP wrapper and Inductor fake-tensor metadata path.
+- Keep the narrower `loss,feed_forward,qkv_linear` compile granularity and stop spending runs on whole-layer compile variants unless the MXFP8/FSDP view issue is fixed upstream or isolated in a smaller reproducer.

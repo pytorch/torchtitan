@@ -4431,3 +4431,13 @@
   Planned command or config overrides: Active event-cache-disabled command with `--training.seq_len=112 --training.local_batch_size=192`.
   Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is another lower-throughput shape and no memory benefit.
   Result: discarded at source state `84f86ec8`; 12,313 tps and 163.95 GiB. Seq128/local batch168 remains the best final-stack shape.
+
+- Idea: decoder-layer compile with cloned residual outputs
+  Current best source commit: 8afc3687
+  Source: whole-layer compile crashed with Inductor fake-tensor recursion and emitted an FSDP2 MXFP8 view warning; test whether residual use of view-like module outputs is the direct trigger.
+  Expected mechanism: clone the attention and feed-forward outputs before residual additions, then compile the decoder layer, avoiding the FSDP warning's in-place/view hazard.
+  Supporting evidence: the failure warning explicitly points to FSDP-wrapped MXFP8Linear returning a view tensor and in-place users dropping hooks.
+  Planned source/config changes: temporary Qwen3 layer forward monkeypatch plus `layer_clones` compile component.
+  Planned command or config overrides: Active event-cache-disabled command with `--compile.components=loss,layer_clones`.
+  Success criteria and expected risk: Success is a valid 10-step run above 12,454. Risk is the same Inductor recursion or clone overhead.
+  Result: crashed at source state `8afc3687+dirty`; cloning residual branch outputs did not unblock layer compile. The run still logged the FSDP2 `FSDPMXFP8Linear` view warning and hit the same `torch._inductor.exc.InductorError: RecursionError: maximum recursion depth exceeded` before step 1. Stop retrying layer compile without a deeper MXFP8/FSDP/Inductor fix.
