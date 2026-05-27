@@ -4271,3 +4271,13 @@
   Planned command or config overrides: Prefix active command with `TORCH_NCCL_HIGH_PRIORITY=1 TORCH_NCCL_CUDA_EVENT_CACHE=0`.
   Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is hurting compute/communication overlap by over-prioritizing collectives.
   Result: discarded at source state `7b4bd985`; 12,311 tps and 163.95 GiB. Keep default NCCL stream priority.
+
+- Idea: remove loss compile from event-cache-disabled compiled-QKV recipe
+  Current best source commit: 0248af0e
+  Source: after FFN and Q/K/V compile, verify that the historical `loss` compile component is still useful rather than leftover baggage.
+  Expected mechanism: Removing loss compile could reduce compiler/runtime wrapper overhead if the loss path is no longer the bottleneck.
+  Supporting evidence: run481 shows compute and cast buckets are flat, but the loss compile boundary had not been isolated on the final event-cache-disabled recipe.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active command with `--compile.components=feed_forward,qkv_linear`.
+  Success criteria and expected risk: Success is step-10 tps above 12,454 or a lower-memory tie. Risk is higher memory or slower loss/lm_head handling.
+  Result: discarded at source state `0248af0e`; 11,976 tps and 171.82 GiB, above the preferred memory risk line. Keep `loss` in the active compile components.
