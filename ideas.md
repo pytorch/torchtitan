@@ -4301,3 +4301,13 @@
   Planned command or config overrides: Active event-cache-disabled command.
   Success criteria and expected risk: Success is a valid 10-step run above 12,454. Risk is that the compiled FlashAttention extension is still absent.
   Result: crashed at source state `41883410`; varlen still imports `flash_attn_interface`, which fails because `flash_attn_3` is missing. Restore SDPA.
+
+- Idea: varlen attention with vendored FlashAttention 3 installed
+  Current best source commit: 6ab75081
+  Source: run488 showed the blocker was the missing FA3 extension, and the local PyTorch checkout contains the Hopper FA3 package.
+  Expected mechanism: Install the vendored `flash_attn_3` package and rerun varlen attention so packed-document attention can use FA3 rather than SDPA.
+  Supporting evidence: the narrowed vendored build completed, and import probing passed for `flash_attn_interface`, `flash_attn_3`, and `hopper.flash_attn_interface`.
+  Planned source/config changes: Temporarily set Qwen3 14B `attn_backend="varlen"`.
+  Planned command or config overrides: Active event-cache-disabled command with `/home/avenkataraman/github/pytorch/third_party/flash-attention/hopper` and `/home/avenkataraman/github/pytorch/third_party/flash-attention` prepended to `PYTHONPATH`.
+  Success criteria and expected risk: Success is a valid 10-step run above 12,454. Risk is that FA3's supported device matrix does not include this host.
+  Result: crashed at source state `6ab75081`; the import blocker is gone, but PyTorch FA3 rejects the B200/SM100 host with `FA3 requires compute capability 9.0`. Restore SDPA; varlen remains blocked unless FA3 gains an SM100 path or the capability gate is intentionally bypassed and validated.

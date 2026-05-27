@@ -12227,3 +12227,34 @@ Interpretation:
 
 - Varlen attention remains blocked by the compiled FlashAttention 3 extension, separate from the CUTE Python API issue found in run487.
 - SDPA remains the only working attention backend for the current local environment and packed-document training command.
+
+## Experiment 489: Varlen Attention With Vendored FlashAttention 3
+
+Setup:
+
+- Built and installed the local PyTorch vendored Hopper FlashAttention 3 package from `/home/avenkataraman/github/pytorch/third_party/flash-attention/hopper`.
+- Narrowed the build to the Qwen3-relevant path with BF16 hdim128 SM90 kernels and disabled FP16/FP8/unused head dimensions and optional KV paths.
+- Import probe passed for `flash_attn_interface`, `flash_attn_3`, and `hopper.flash_attn_interface` with the vendored flash-attention paths on `PYTHONPATH`.
+
+Command:
+
+```bash
+PYTHONPATH=/home/avenkataraman/github/pytorch/third_party/flash-attention/hopper:/home/avenkataraman/github/pytorch/third_party/flash-attention:$PYTHONPATH TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run489-varlen-vendored-fa3-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run489-varlen-vendored-fa3-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily set Qwen3 14B `attn_backend="varlen"`.
+- Restored `attn_backend="sdpa"` after the crash.
+
+Result:
+
+- Status: crash before step 1.
+- The missing `flash_attn_interface` blocker is resolved.
+- New failure: PyTorch FA3 rejects the local host with `RuntimeError: FA3 flash_attention forward unsupported: FA3 requires compute capability 9.0`.
+
+Interpretation:
+
+- Varlen attention is not currently viable on this B200/SM100 host through PyTorch FA3, even with the vendored FA3 extension installed.
+- The attention alternatives now have backend-specific SM100 blockers: Flex FLASH reaches a CUTE SM100 block-sparse correction crash, while varlen reaches FA3 and is rejected by the FA3 compute-capability gate.
+- SDPA remains the active attention backend.
