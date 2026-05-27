@@ -11638,3 +11638,29 @@ Interpretation:
 
 - `mode="reduce-overhead"` is compatible with the Q/K/V wrapper but causes large early overhead, higher memory, and lower steady throughput.
 - Keep the default compile mode for Q/K/V.
+
+## Experiment 466: Loss Chunks8 On Compiled-QKV Recipe
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=8 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run466-loss-chunks8-compiled-qkv > outputs/autoresearch/may19-qwen3-14b/run466-loss-chunks8-compiled-qkv.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,111.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 164.36 GiB, 92.16%.
+- No allocator retries were logged.
+- Loss moved from 12.28826 at step 1 to 7.55597 at step 10.
+
+Interpretation:
+
+- Increasing loss chunks from 4 to 8 does not pair well with the compiled-Q/K/V active source.
+- Keep `loss.num_chunks=4`.

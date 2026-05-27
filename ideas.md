@@ -4071,3 +4071,13 @@
   Planned command or config overrides: Active compiled-Q/K/V command.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is cudagraph/reduce-overhead mode increasing memory or compile overhead.
   Result: discarded at source state `c8a5d735` plus dirty source; 12,160 tps and 167.25 GiB. Restore the default Q/K/V compile mode.
+
+- Idea: loss chunks8 on compiled-Q/K/V active recipe
+  Current best source commit: df6e0f92
+  Source: loss chunk tuning was done before the final compiled-Q/K/V source, and memory changed after run449.
+  Expected mechanism: More loss chunks might reduce loss/lm_head memory pressure enough to improve scheduling, at the cost of more chunk overhead.
+  Supporting evidence: Chunks4 and chunks8 were both valid on earlier source states; chunks4 was best before Q/K/V compile.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active command with `--loss.num_chunks=8`.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is repeated loss/lm_head overhead.
+  Result: discarded at source state `df6e0f92`; 12,111 tps and 164.36 GiB. Keep chunks4.
