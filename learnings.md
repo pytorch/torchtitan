@@ -12750,3 +12750,39 @@ Interpretation:
 
 - The new Triton RoPE kernel removed the targeted RoPE expression bottleneck.
 - The next source work should either reduce MXFP8/GEMM work further or reduce launch/collective exposure around Q/K/V and FFN; pure attention backend work is even less likely to pay now.
+
+## Experiment 508: Combined Q/K Triton RoPE Launch
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run508-combined-qk-triton-rope-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run508-combined-qk-triton-rope-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily replaced the separate Q and K custom RoPE autograd calls with a combined Q/K autograd function.
+- The combined Triton forward and backward kernels process Q then K in one launch.
+- Restored the separate Q and K custom RoPE source after the result.
+
+Validation:
+
+- Standalone GPU check against `apply_rotary_emb_cos_sin()`:
+- Forward Q max delta: 7.63e-06.
+- Forward K max delta: 0.0.
+- Backward Q max delta: 0.0.
+- Backward K max delta: 0.0.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 13,351.
+- Step 10 peak memory: 163.15 GiB, 91.48%.
+- No allocator retries were logged.
+- Loss moved from 12.45018 at step 1 to 5.13701 at step 10.
+
+Interpretation:
+
+- Combining Q and K into one Triton launch is valid but slower than the simpler separate custom RoPE calls from run506.
+- The likely issue is that the combined kernel's pointer selection and mixed Q/K head counts add enough overhead to erase launch-count savings.
+- Keep the separate Q and K custom RoPE implementation.

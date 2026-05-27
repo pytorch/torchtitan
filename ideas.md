@@ -4481,3 +4481,13 @@
   Planned command or config overrides: Active event-cache-disabled command with profiler enabled for iteration 10.
   Success criteria and expected risk: Success is a clean profile trace. Profiled tps is diagnostic and not used for ranking.
   Result: kept as diagnostic at source state `a8e92ef4`; profiled step-10 tps was 13,426. Trace confirms the RoPE expression is no longer the bottleneck; broad NCCL and GEMM/MXFP8 buckets dominate.
+
+- Idea: combine Q and K Triton RoPE launches
+  Current best source commit: 1f152213
+  Source: run507 shows the custom RoPE kernels now cost about 54 ms/rank, and the current implementation launches separate forward/backward kernels for Q and K.
+  Expected mechanism: combine Q and K RoPE into one custom autograd op so each layer uses one forward and one backward RoPE launch instead of two forward and two backward launches.
+  Supporting evidence: launch count is high across 40 layers, and the Q/K tensors share the same RoPE cache and head_dim.
+  Planned source/config changes: temporarily replace `_SequentialRoPE` with a combined Q/K Triton autograd function in `parallelize.py`.
+  Planned command or config overrides: Active event-cache-disabled command.
+  Success criteria and expected risk: Success is step-10 tps above 13,622. Risk is slower pointer-selection math from mixed Q/K shapes.
+  Result: discarded at source state `1f152213+dirty`; 13,351 tps and 163.15 GiB. The combined kernel is valid but slower, so keep the separate Q and K custom RoPE calls.
