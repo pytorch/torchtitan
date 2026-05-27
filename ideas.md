@@ -4341,3 +4341,13 @@
   Planned command or config overrides: Prefix active command with `TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=1 TORCH_NCCL_CUDA_EVENT_CACHE=0`.
   Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is extra registration overhead or no useful interaction.
   Result: discarded at source state `2934b677`; 12,152 tps and 163.95 GiB. The hook is valid but slower, so keep the event-cache-disabled recipe without allocator-hook registration.
+
+- Idea: disable explicit NVLS on the event-cache-disabled recipe
+  Current best source commit: 9bf1d113
+  Source: explicit NVLS was added before the final event-cache-disabled compiled-Q/K/V recipe, so isolate whether it is still contributing or simply inherited.
+  Expected mechanism: If event-cache disable is the true communication win and NVLS is neutral or harmful, disabling NVLS could simplify the active command or improve NCCL scheduling.
+  Supporting evidence: run481 showed event-cache disable shifts collective timing, so older NVLS conclusions may not fully transfer.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active command with `NCCL_NVLS_ENABLE=0` instead of `NCCL_NVLS_ENABLE=1`.
+  Success criteria and expected risk: Success is step-10 tps above 12,454 or a lower-memory tie. Risk is slower collectives if NVLS remains beneficial.
+  Result: discarded at source state `9bf1d113`; 12,217 tps and 163.95 GiB. Keep explicit `NCCL_NVLS_ENABLE=1` in the active command.
