@@ -4181,3 +4181,13 @@
   Planned command or config overrides: Active command with `--training.local_batch_size=176`.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is allocator pressure or communication tail growth.
   Result: discarded at source state `36a44c0f`; 12,248 tps and 170.24 GiB peak memory. Close local-batch tuning around the active compiled-Q/K/V recipe.
+
+- Idea: FlexAttention FLASH backend with local CUTE import shim
+  Current best source commit: 431aa5d7
+  Source: the user installed flash-attn and CUTLASS dependencies after the earlier Flex FLASH/CUTE blocker.
+  Expected mechanism: Use FlexAttention's FLASH backend to reduce attention kernel time versus SDPA while keeping the active MXFP8 and FSDP recipe.
+  Supporting evidence: Import probing showed the installed package still lacks `cutlass.utils.ampere_helpers`, but a local `sys.modules` shim for `SMEM_CAPACITY` lets `flash_attn.cute` import.
+  Planned source/config changes: Temporarily add a Qwen3-local `cutlass.utils.ampere_helpers` shim and set `model_registry("14B", attn_backend="flex_flash", ...)`.
+  Planned command or config overrides: Active compiled-Q/K/V command.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is another missing runtime CUTE module or slower attention.
+  Result: crashed before step 1 at source state `431aa5d7` plus dirty source. The shim bypassed `ampere_helpers`, but Inductor's generated CUTE Flex kernel imports `flash_attn.cute.block_sparsity`, which is absent from installed `flash-attn==2.8.3`. Restore SDPA.

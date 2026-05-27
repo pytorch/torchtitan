@@ -11918,3 +11918,27 @@ Interpretation:
 
 - Batch176 is valid but slower and memory-riskier than the active batch168 recipe.
 - Batch-size tuning on the compiled-Q/K/V stack is closed: 164 and 176 are slower, 170 is tile-incompatible, and 172 was already slower.
+
+## Experiment 477: Flex FLASH With CUTE Import Shim
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run477-flex-flash-shim-compiled-qkv > outputs/autoresearch/may19-qwen3-14b/run477-flex-flash-shim-compiled-qkv.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily set Qwen3 14B `attn_backend="flex_flash"`.
+- Temporarily installed a Qwen3-local runtime shim for `cutlass.utils.ampere_helpers.SMEM_CAPACITY`.
+- Restored SDPA and removed the shim after the crash.
+
+Result:
+
+- Status: crash before step 1.
+- Failure: `ModuleNotFoundError: No module named 'flash_attn.cute.block_sparsity'` from Inductor's generated CUTE FlexAttention kernel.
+
+Interpretation:
+
+- The earlier `cutlass.utils.ampere_helpers` blocker can be bypassed, but the installed `flash-attn==2.8.3` package is still incompatible with PyTorch's current CUTE FlexAttention lowering because it lacks `flash_attn.cute.block_sparsity`.
+- Flex FLASH remains dependency-version blocked locally; the active SDPA recipe is restored.
