@@ -77,23 +77,14 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen3VLVisionEncoder.Config") -> None:
         state_shardings={"pos_embed": dense_param_placement(tp=Replicate())},
     )
 
-    # Flat Linear.Config fields on Qwen3VLVisionEncoder.Config are shared
-    # across all layers; one sharding_config assignment propagates to every
-    # layer that builds from them.
-    ve_cfg.patch_embed_proj.sharding_config = _replicate_linear_config()
-    ve_cfg.attn_qkv.sharding_config = colwise_config()
-    ve_cfg.attn_proj.sharding_config = rowwise_config()
-    ve_cfg.mlp_fc1.sharding_config = colwise_config()
-    ve_cfg.mlp_fc2.sharding_config = rowwise_config()
-    ve_cfg.merger_fc1.sharding_config = colwise_config()
-    ve_cfg.merger_fc2.sharding_config = rowwise_config()
+    ve_cfg.patch_embed.proj.sharding_config = _replicate_linear_config()
 
     # qkv is a 3D activation from colwise attn.qkv: Shard(-1) resolves
     # to Shard(2). Use explicit Shard(2) to match local_map's strict
     # placement-equality check.
     qkv_placements = dense_activation_placement(tp=Shard(2))
     out_placements = dense_activation_placement(tp=Shard(2))
-    ve_cfg.attn_inner_attention.sharding_config = ShardingConfig(
+    inner_attention_sharding = ShardingConfig(
         in_dst_shardings={"qkv": qkv_placements},
         out_src_shardings=out_placements,
         local_map=LocalMapConfig(in_grad_placements=(qkv_placements,)),
@@ -105,8 +96,20 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen3VLVisionEncoder.Config") -> None:
             "bias": dense_param_placement(tp=Replicate()),
         },
     )
-    ve_cfg.block_norm.sharding_config = vision_norm
-    ve_cfg.merger_norm.sharding_config = vision_norm
+
+    for layer_cfg in ve_cfg.layers:
+        layer_cfg.attn.qkv.sharding_config = colwise_config()
+        layer_cfg.attn.proj.sharding_config = rowwise_config()
+        layer_cfg.attn.inner_attention.sharding_config = inner_attention_sharding
+        layer_cfg.mlp.fc1.sharding_config = colwise_config()
+        layer_cfg.mlp.fc2.sharding_config = rowwise_config()
+        layer_cfg.norm1.sharding_config = vision_norm
+        layer_cfg.norm2.sharding_config = vision_norm
+
+    for merger_cfg in [ve_cfg.merger, *ve_cfg.deepstack_mergers]:
+        merger_cfg.fc1.sharding_config = colwise_config()
+        merger_cfg.fc2.sharding_config = rowwise_config()
+        merger_cfg.norm.sharding_config = vision_norm
 
 
 def _replicate_linear_config() -> ShardingConfig:

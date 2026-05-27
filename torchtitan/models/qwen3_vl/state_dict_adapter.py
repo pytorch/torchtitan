@@ -206,13 +206,13 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
                 # Linear weight (out, C*T*H*W) -> Conv3d weight (out, C, T, H, W)
                 # Plain reshape since both use channel-first (c pt ph pw) layout.
                 if tt_key == "vision_encoder.patch_embed.proj.weight":
-                    encoder = self.model_config.vision_encoder
+                    patch_embed = self.model_config.vision_encoder.patch_embed
                     hf_value = value.reshape(
                         value.shape[0],
-                        encoder.in_channels,
-                        encoder.temporal_patch_size,
-                        encoder.patch_size,
-                        encoder.patch_size,
+                        patch_embed.in_channels,
+                        patch_embed.temporal_patch_size,
+                        patch_embed.patch_size,
+                        patch_embed.patch_size,
                     )
                 hf_state_dict[hf_key] = hf_value
 
