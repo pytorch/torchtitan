@@ -10312,3 +10312,47 @@ Interpretation:
 
 - Increasing loss chunks from 4 to 8 does not reduce memory on this recipe and adds overhead.
 - Keep loss chunks4 for the current best.
+
+## Experiment 416: Shared MXFP8 Weight Decay 0 With Loss Chunks 3
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=3 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run416-mxfp8-shared-gate-up-input-cast-weight-decay0-loss-chunks3-feed-forward-compile-lbs168-last-layer-no-reshard-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the committed shared MXFP8 gate/up input-cast source.
+
+Result:
+
+- Status: crash before step 1.
+- Failure: `AssertionError: unsupported` in `triton_to_mxfp8_dim1`, from `assert n_rows % max_row_tile_size == 0`.
+
+Interpretation:
+
+- Although the nominal token count is divisible by 128, the chunked loss path does not produce a Triton-dim1-compatible shape for chunks3.
+- Keep using known-valid chunk counts for this MXFP8 Triton dim1 setup.
+
+## Experiment 417: Shared MXFP8 Weight Decay 0 With Loss Chunks 6
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=6 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run417-mxfp8-shared-gate-up-input-cast-weight-decay0-loss-chunks6-feed-forward-compile-lbs168-last-layer-no-reshard-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the committed shared MXFP8 gate/up input-cast source.
+
+Result:
+
+- Status: crash before step 1.
+- Failure: `AssertionError: unsupported` in `triton_to_mxfp8_dim1`, from `assert n_rows % max_row_tile_size == 0`.
+
+Interpretation:
+
+- Chunks6 is not valid for the current compiled MXFP8 Triton dim1 loss path.
+- Close the loss-chunk axis for batch168: chunks4 is the fastest valid setting; chunks8 is valid but slower; chunks3 and chunks6 crash.
