@@ -13837,3 +13837,27 @@ Interpretation:
 - Activation-checkpoint early-stop is valid and memory-neutral.
 - It is a near miss on the short-run metric but does not beat run543's 14,240 tps short sample or justify a sustained validation.
 - Keep the default checkpoint early-stop setting for the current best.
+
+## Experiment 554: Combine Activation Checkpoint Early Stop And No RNG Preservation
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,norm_modules --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --activation-checkpoint.early-stop --activation-checkpoint.no-preserve-rng-state --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run554-ac-early-stop-no-preserve-rng-norm-modules-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run554-ac-early-stop-no-preserve-rng-norm-modules-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 14,077.
+- Peak memory: 168.91 GiB, 94.71%.
+- Loss moved from 12.44077 at step 1 to 7.30562 at step 10.
+
+Interpretation:
+
+- Combining the two activation-checkpoint overhead knobs regresses versus either single knob.
+- The checkpoint toggle axis is closed for the current source; neither RNG preservation, early-stop, nor their combination beats the kept `norm_modules` branch.

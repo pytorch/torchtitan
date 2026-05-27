@@ -4831,3 +4831,13 @@
   Planned command or config overrides: Active batch176 `norm_modules` command with `--activation-checkpoint.early-stop`.
   Success criteria and expected risk: Success is step-10 throughput above the kept norm_modules short sample with unchanged memory. Risk is no effect because the full block outputs require most recomputation anyway.
   Result: discarded at source state `d16adaaa`; run553 completed with the same 168.91 GiB peak and reached 14,209 tps at step 10, below the kept 14,240 short sample. Do not validate further unless a later source path changes checkpointed-region structure.
+
+- Idea: combine activation-checkpoint early-stop and no RNG preservation
+  Current best source commit: 844c3750
+  Source: both checkpoint overhead knobs were individually valid and memory-neutral, so one combined run can close the interaction.
+  Expected mechanism: Remove RNG stash/restore overhead and allow early recompute stop in the same checkpointed regions.
+  Supporting evidence: The single early-stop run was a near miss at 14,209 tps, while no-preserve-RNG was valid at 14,121 tps.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active batch176 `norm_modules` command with both `--activation-checkpoint.early-stop` and `--activation-checkpoint.no-preserve-rng-state`.
+  Success criteria and expected risk: Success is step-10 throughput above the kept norm_modules short sample with unchanged memory. Risk is interaction overhead or no useful early-stop opportunity.
+  Result: discarded at source state `844c3750`; run554 reached only 14,077 tps at the same 168.91 GiB peak. Close checkpoint-wrapper toggles on the current source.
