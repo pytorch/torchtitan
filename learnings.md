@@ -10850,3 +10850,29 @@ Interpretation:
 
 - The wrapper proves `lm_head` can be compiled if Dynamo is given a local frame, but it raises peak memory by about 2 GiB and remains below the explicit-NVLS active recipe.
 - Do not keep `lm_head` compilation in the current stack.
+
+## Experiment 437: Explicit-NVLS Active Recipe With NCCL_LL_BUFFSIZE=4194304
+
+Command:
+
+```bash
+NCCL_LL_BUFFSIZE=4194304 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run437-ll-buffsize-4m-nvls-active > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,108.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.95 GiB, 93.61%.
+- No allocator retries were logged.
+- Loss moved from 12.40163 at step 1 to 6.47833 at step 10.
+
+Interpretation:
+
+- Coarser LL buffering does not improve the visible `RING_LL` FSDP collective path on the explicit-NVLS active recipe.
+- Keep default `NCCL_LL_BUFFSIZE`.
