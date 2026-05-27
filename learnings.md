@@ -11007,3 +11007,31 @@ Interpretation:
 
 - Async unshard does not compose with the explicit-NVLS MXFP8 recipe: it raises memory, lowers throughput, and produces a bad short loss trend.
 - Keep the default FSDP unshard behavior.
+
+## Experiment 443: Force FSDP SUM Reductions
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run443-force-sum-reduction-nvls-active > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily called `set_force_sum_reduction_for_comms(True)` on each FSDP-wrapped transformer layer, `lm_head`, and root model.
+- This isolates NCCL `SUM` reductions from the default no-op premultiplied reduction path after TorchTitan disables FSDP gradient division.
+- Restored the default FSDP reduction setting after the result.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,142.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.95 GiB, 93.61%.
+- No allocator retries were logged.
+- Loss moved from 12.36258 at step 1 to 5.54262 at step 10.
+
+Interpretation:
+
+- Forcing SUM reductions is numerically sane and valid, but it does not improve the exposed reduce-scatter path.
+- Keep the default FSDP reduction communication op.
