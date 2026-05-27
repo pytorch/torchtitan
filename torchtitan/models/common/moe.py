@@ -258,9 +258,13 @@ class TokenChoiceTopKRouter(Module):
             top_scores = top_scores / denominator
         top_scores = top_scores * self.route_scale
 
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
+        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward.
+        # ``torch.histc`` has no DTensor support, so run it on local indices under full_dtensor.
+        indices_for_histc = selected_experts_indices.view(-1)
+        if isinstance(indices_for_histc, DTensor):
+            indices_for_histc = indices_for_histc.to_local()
         num_tokens_per_expert = torch.histc(
-            selected_experts_indices.view(-1),
+            indices_for_histc,
             bins=self.num_experts,
             min=0,
             max=self.num_experts,
@@ -360,6 +364,18 @@ class MoE(Module):
         #       first in the forward pass, and then in the backward pass. However, this has no
         #       effect on the expert bias update thanks to the torch.sign() operator.
         with torch.no_grad():
+            # Under full_dtensor, tokens_per_expert is a Partial DTensor while
+            # num_tokens_per_expert (from router's histc on local indices) is
+            # plain. Wrap the local count as DTensor with matching placement so
+            # the in-place add stays on the same SPMD mesh.
+            if isinstance(self.tokens_per_expert, DTensor) and not isinstance(
+                num_tokens_per_expert, DTensor
+            ):
+                num_tokens_per_expert = DTensor.from_local(
+                    num_tokens_per_expert,
+                    self.tokens_per_expert.device_mesh,
+                    self.tokens_per_expert.placements,
+                )
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
         out = self.experts(x, top_scores, selected_experts_indices)
