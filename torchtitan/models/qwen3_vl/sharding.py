@@ -111,7 +111,7 @@ def set_qwen3_vl_vision_sharding_config(
         for linear_cfg in (attn.proj, mlp.fc2):
             config = rowwise_config()
             if linear_cfg.bias:
-                config.state_tp_ir = {"bias"}
+                config.state_shardings_compute = {"bias": {DP: spmd.R, TP: spmd.R}}
             linear_cfg.sharding_config = config
 
         for merger in merger_configs:
@@ -124,7 +124,9 @@ def set_qwen3_vl_vision_sharding_config(
 
             fc2_config = rowwise_config()
             if merger.fc2.bias:
-                fc2_config.state_tp_ir = {"bias"}
+                fc2_config.state_shardings_compute = {
+                    "bias": {DP: spmd.R, TP: spmd.R}
+                }
             merger.fc2.sharding_config = fc2_config
     else:
         for linear_cfg in (
