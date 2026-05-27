@@ -6,6 +6,7 @@
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 from torch.nn.attention.flex_attention import and_masks
 
@@ -27,8 +28,33 @@ from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
+from torchtitan.protocols.sharding import NamedPlacement, SpmdInputConfig
+from torchtitan.protocols.types import MeshAxisName
 
-__all__ = ["Decoder", "TransformerBlock"]
+__all__ = [
+    "Decoder",
+    "TransformerBlock",
+    "decoder_spmd_input_config",
+    "decoder_token_placement",
+]
+
+
+def decoder_token_placement(*, tp_type: spmd.PerMeshAxisSpmdType) -> NamedPlacement:
+    return {
+        MeshAxisName.DP: spmd.S(0),
+        MeshAxisName.CP: spmd.S(1),
+        MeshAxisName.TP: tp_type,
+    }
+
+
+def decoder_spmd_input_config() -> SpmdInputConfig:
+    inputs = decoder_token_placement(tp_type=spmd.R)
+    labels = decoder_token_placement(tp_type=spmd.I)
+    return SpmdInputConfig(
+        inputs=inputs,
+        labels=labels,
+        extra_kwargs={"positions": inputs},
+    )
 
 
 # TODO: we can unify the TransformerBlock impl across all models when
