@@ -155,16 +155,6 @@ def compile_time_passes(
         remove_identity_slice_pass,
         normalize_view_ops_as_reshape,
         functools.partial(
-            tag_with_memory_policy_pass,
-            config=config,
-        ),
-        functools.partial(
-            apply_cpu_offload_pass,
-            prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
-            defer_n_layers=config.compile.cpu_offload_defer_n_layers,
-        ),
-        selective_activation_remat_pass,
-        functools.partial(
             joint_transformer_block_bucketing_reordering_pass,
             module_bucket_plans=get_default_transformer_block_buckets(n_layers),
             enable_fsdp_ag_rs_overlap=config.compile.enable_fsdp_ag_rs_overlap,
