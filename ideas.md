@@ -4001,3 +4001,13 @@
   Planned command or config overrides: Active command with `--metrics.log_freq=2`.
   Success criteria and expected risk: Success is reported step-10 tps above 12,387. Risk is no practical reduction in the measured interval.
   Result: discarded at source state `deaf2282`; step-10 tps was 12,257 at 163.95 GiB. Keep `metrics.log_freq=1`.
+
+- Idea: TORCH_NCCL_AVOID_RECORD_STREAMS=0 on active recipe
+  Current best source commit: 7af0858b
+  Source: run450 still shows rank-skewed FSDP collectives, and PyTorch NCCL stream-recording behavior can affect synchronization/overlap.
+  Expected mechanism: Allowing NCCL record-stream behavior may change tensor lifetime synchronization enough to improve collective overlap.
+  Supporting evidence: This targets FSDP/NCCL behavior without changing kernels, batch shape, or source.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the active command with `TORCH_NCCL_AVOID_RECORD_STREAMS=0`.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is no effect or extra synchronization overhead.
+  Result: discarded at source state `7af0858b`; 12,336 tps and 163.95 GiB. Keep the active NCCL stream behavior.
