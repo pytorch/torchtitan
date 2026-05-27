@@ -163,6 +163,10 @@ class SamplingConfig:
     max_tokens: int = 100
     """Maximum number of tokens to generate per completion."""
 
+    stop_token_ids: list[int] = field(default_factory=list)
+    """Renderer-supplied role-boundary stop tokens (e.g. Qwen3 ``<|im_end|>``).
+    Filled per call from ``renderer.get_stop_token_ids()`` by the controller."""
+
 
 class VLLMGenerator(Actor, Configurable):
     """
@@ -410,6 +414,7 @@ class VLLMGenerator(Actor, Configurable):
                 top_p=_sampling_config.top_p,
                 max_tokens=_sampling_config.max_tokens,
                 n=_sampling_config.n,
+                stop_token_ids=list(_sampling_config.stop_token_ids) or None,
                 seed=self.config.debug.seed,
                 logprobs=1,
                 output_kind=RequestOutputKind.FINAL_ONLY,

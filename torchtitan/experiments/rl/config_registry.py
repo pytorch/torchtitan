@@ -26,7 +26,8 @@ from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import Batcher
 from torchtitan.experiments.rl.grpo import GRPOLoss, RLTrainer
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
-from torchtitan.experiments.rl.sum_digits import SumDigitsEnv
+from torchtitan.experiments.rl.recipes.sum_digits import SumDigitsTask
+from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.models.qwen3 import model_registry
 
 
@@ -40,10 +41,10 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         num_prompts_per_step=5,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
-        validation_env=SumDigitsEnv.Config(
-            seed=99, correctness_reward=1.0, format_reward=0.3
-        ),
+        # TODO: rename this train/validation, its horrible.
+        train=SumDigitsTask.Config(seed=42),
+        validation=SumDigitsTask.Config(seed=99),
+        renderer=RendererConfig(name="qwen3"),
         metrics=MetricsProcessor.Config(),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
@@ -97,10 +98,9 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         num_prompts_per_step=5,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
-        validation_env=SumDigitsEnv.Config(
-            seed=99, correctness_reward=1.0, format_reward=0.3
-        ),
+        train=SumDigitsTask.Config(seed=42),
+        validation=SumDigitsTask.Config(seed=99),
+        renderer=RendererConfig(name="qwen3"),
         metrics=MetricsProcessor.Config(),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
@@ -155,10 +155,9 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
         num_prompts_per_step=5,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
-        validation_env=SumDigitsEnv.Config(
-            seed=99, correctness_reward=1.0, format_reward=0.3
-        ),
+        train=SumDigitsTask.Config(seed=42),
+        validation=SumDigitsTask.Config(seed=99),
+        renderer=RendererConfig(name="qwen3"),
         metrics=MetricsProcessor.Config(),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
@@ -203,7 +202,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
 
 
 def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
-    """On-policy GRPO config for Qwen3-0.6B under same parallelism (4 GPUs: 2 gen + 2 train).
+    """On-policy GRPO config for Qwen3-0.6B (4 GPUs: 2 gen + 2 train).
 
     Enables deterministic + batch-invariant mode for true on-policy RL training.
     """
@@ -216,10 +215,9 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
         num_prompts_per_step=5,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
-        validation_env=SumDigitsEnv.Config(
-            seed=99, correctness_reward=1.0, format_reward=0.3
-        ),
+        train=SumDigitsTask.Config(seed=42),
+        validation=SumDigitsTask.Config(seed=99),
+        renderer=RendererConfig(name="qwen3"),
         metrics=MetricsProcessor.Config(),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),

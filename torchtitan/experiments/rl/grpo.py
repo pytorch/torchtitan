@@ -29,7 +29,8 @@ import statistics
 import time
 from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field, replace
 
 # must run before torch import
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -46,11 +47,28 @@ from torchtitan.config import (
     Configurable,
     ParallelismConfig,
 )
-from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
+from torchtitan.experiments.rl.actors.generator import (
+    Completion,
+    SamplingConfig,
+    VLLMGenerator,
+)
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import Batcher
+from torchtitan.experiments.rl.envs import (
+    DatasetOutput,
+    last_assistant_text,
+    RendererEnv,
+    Rollout,
+    rollout_output_to_episode,
+    RolloutStatus,
+    RolloutTurn,
+    TokenizedTurn,
+    validate_rollout_output,
+)
 from torchtitan.experiments.rl.observability import metrics as m
-from torchtitan.experiments.rl.types import Completion, Episode, Trajectory
+from torchtitan.experiments.rl.recipes import Task
+from torchtitan.experiments.rl.renderer import RendererConfig
+from torchtitan.experiments.rl.types import Episode
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -179,41 +197,86 @@ def _log_samples(items: list[Episode] | list[Completion]) -> None:
         logger.info(f"       A: {item.text[:300].replace(chr(10), ' ').strip()}")
 
 
+# TODO: we have rewards all over the place in some functions. Lets see what we can consolidate
+# in some function like this
 def _prepare_reward_metrics(
     prefix: str,
-    trajectories: list[Trajectory],
+    rollouts: list[Rollout],
 ) -> list[m.Metric]:
-    """One ``Mean`` metric per observed reward component across trajectories.
+    """One ``Mean`` metric per observed reward component across rollouts.
 
     Example::
 
-        trajectories = [
-            Trajectory(
-                sample_idx=0,
-                prompt_token_ids=p0,
-                transitions=[(c0, Step(rewards={"correctness": 1.0, "format": 0.5}, done=True))],
-            ),
-            Trajectory(
-                sample_idx=1,
-                prompt_token_ids=p1,
-                transitions=[(c1, Step(rewards={"correctness": 0.0}, done=True))],
-            ),
+        rollouts = [
+            Rollout(reward_components={"correctness": 1.0, "format": 0.5}, ...),
+            Rollout(reward_components={"correctness": 0.0}, ...),
         ]
-        _prepare_reward_metrics("reward/component", trajectories)
+        _prepare_reward_metrics("reward/component", rollouts)
         # -> [
         #      Metric("reward/component/correctness", Mean(sum=1.0, count=2)),  # 0.5
-        #      Metric("reward/component/format",      Mean(sum=0.5, count=1)),  # 0.5 - "format" only in trajectory 0
+        #      Metric("reward/component/format",      Mean(sum=0.5, count=1)),  # 0.5 - "format" only in rollout 0
         #    ]
     """
     values_by_name: dict[str, list[float]] = defaultdict(list)
-    for trajectory in trajectories:
-        for _completion, step in trajectory.transitions:
-            for name, value in step.rewards.items():
-                values_by_name[name].append(float(value))
+    for rollout in rollouts:
+        for name, value in rollout.reward_components.items():
+            values_by_name[name].append(float(value))
     return [
         m.Metric(f"{prefix}/{name}", m.Mean.from_list(values))
         for name, values in sorted(values_by_name.items())
     ]
+
+
+@sl.log_trace_span("step_group")
+async def _do_group_step(
+    *,
+    envs: list[RendererEnv],
+    group_id: str,
+    initial_turns: list[TokenizedTurn],
+    completions: list[Completion],
+) -> list[Rollout]:
+    """Step each env in the group and pack the results into Rollouts.
+
+    Reward is left unset on the returned rollouts; the controller calls
+    the task's rubric to fill ``reward`` and ``reward_components``.
+    """
+    stepped_turns: list[TokenizedTurn] = await asyncio.gather(
+        *(env.step_completion(c) for env, c in zip(envs, completions, strict=True))
+    )
+    # TODO(do_single_rollout PR): enable multi-turn; delete this guard.
+    for env_idx, st in enumerate(stepped_turns):
+        if st.next_token_ids is not None:
+            raise RuntimeError(
+                f"env {group_id}/{env_idx} returned a non-terminal turn; "
+                "the controller is single-turn only. Multi-turn requires "
+                "the do_single_rollout driver."
+            )
+    rollouts: list[Rollout] = []
+    for sample_idx, (initial, completion, stepped) in enumerate(
+        zip(initial_turns, completions, stepped_turns, strict=True)
+    ):
+        env_step = stepped.last_env_step
+        status = (
+            env_step.status
+            if env_step and env_step.status is not None
+            else RolloutStatus.COMPLETED
+        )
+        turn = RolloutTurn(
+            prompt_token_ids=list(initial.next_token_ids or []),
+            response_token_ids=list(completion.token_ids),
+            response_logprobs=list(completion.token_logprobs),
+            policy_version=completion.policy_version,
+            response_messages=list(stepped.last_response_messages),
+        )
+        rollout = Rollout(
+            group_id=group_id,
+            sample_idx=sample_idx,
+            status=status,
+            turns=[turn],
+        )
+        validate_rollout_output(rollout)
+        rollouts.append(rollout)
+    return rollouts
 
 
 class RLTrainer(Configurable):
@@ -246,11 +309,19 @@ class RLTrainer(Configurable):
         num_validation_samples: int = 20
         """Number of held-out prompts scored greedily (temp=0, n=1) per validation pass."""
 
-        env: Configurable.Config = field(default=None)  # type: ignore[assignment]
-        """Env config for training rollouts."""
+        train: Task.Config = field(default=None)  # type: ignore[assignment]
+        """Training task: dataset + rubric + env construction + token-boundary policy."""
 
-        validation_env: Configurable.Config = field(default=None)  # type: ignore[assignment]
-        """Env config for validation rollouts."""
+        validation: Task.Config = field(default=None)  # type: ignore[assignment]
+        """Validation task."""
+
+        renderer: RendererConfig = field(default_factory=RendererConfig)
+        """Message <-> token renderer (upstream ``renderers`` library)."""
+
+        async_executor_max_workers: int = 64
+        """Worker count for the default ``asyncio.to_thread`` executor.
+        Load-bearing for concurrent renderer calls at
+        ``num_prompts_per_step * group_size`` rollouts."""
 
         log_samples: bool = False
         """Log first completion per episode during training and validation."""
@@ -280,6 +351,10 @@ class RLTrainer(Configurable):
                     "(weights are synced from the trainer via TorchStore). "
                     "Set generator.checkpoint.enable=False."
                 )
+            if self.train is None:
+                raise ValueError("train is required")
+            if self.validation is None:
+                raise ValueError("validation is required")
 
             if self.trainer.debug.batch_invariant:
                 if not self.trainer.debug.deterministic:
@@ -316,6 +391,10 @@ class RLTrainer(Configurable):
         self.tokenizer = HuggingFaceTokenizer(tokenizer_path=config.hf_assets_path)
         # TODO: Use tokenizer.pad_id when available, falling back to eos_id.
         self.batcher = Batcher(config.batcher, pad_id=self.tokenizer.eos_id)
+        self.renderer = config.renderer.build(model_path=config.hf_assets_path)
+        self._stop_token_ids = list(self.renderer.get_stop_token_ids())
+        self._train: Task = config.train.build()
+        self._validation: Task = config.validation.build()
 
     async def close(self):
         """Best-effort: tear down actors, close metric backends, then stop proc meshes."""
@@ -409,6 +488,13 @@ class RLTrainer(Configurable):
                 nodes (no heterogeneous node configurations). Required when
                 host_mesh is provided.
         """
+        # Scale the default thread executor so concurrent renderer calls
+        # (asyncio.to_thread inside RendererEnv) don't queue at the
+        # default min(32, os.cpu_count() + 4) cap.
+        asyncio.get_running_loop().set_default_executor(
+            ThreadPoolExecutor(max_workers=self.config.async_executor_max_workers)
+        )
+
         config = self.config
 
         self.trainer_world_size = self._compute_world_size(config.trainer.parallelism)
@@ -538,13 +624,119 @@ class RLTrainer(Configurable):
         with sl.log_trace_span("generator_pull_model_state_dict"):
             self.generator.pull_model_state_dict.call(0).get()
 
+    @sl.log_trace_span("_run_rollouts")
+    async def _run_rollouts(
+        self,
+        *,
+        task: Task,
+        num_groups: int,
+        group_size: int,
+        sampling: SamplingConfig,
+        step: int,
+        group_offset: int,
+        metrics_prefix: str,
+    ) -> tuple[list[Rollout], list[m.Metric]]:
+        """Build N groups, run one batched generate, distribute completions,
+        step + score each group.
+
+        Single-turn only; multi-turn arrives with the ``do_single_rollout``
+        driver. Reward assignment lives in the rubric (env returns no
+        reward); see ``rubrics.Rubric.score_group``.
+        """
+        # Build groups: one example per group, group_size envs per example
+        examples: list[DatasetOutput] = []
+        envs_per_group: list[list[RendererEnv]] = []
+        group_ids: list[str] = []
+        for g in range(num_groups):
+            example = task.dataset.sample_example()
+            examples.append(example)
+            envs_per_group.append(
+                task.make_envs(
+                    example=example,
+                    group_size=group_size,
+                    renderer=self.renderer,
+                )
+            )
+            group_ids.append(f"{example.env_name}/step={step}/group={group_offset + g}")
+
+        all_envs = [env for envs in envs_per_group for env in envs]
+        try:
+            # Render initial prompts (one per env; all siblings in a group are identical at turn 0)
+            initial_turns: list[TokenizedTurn] = await asyncio.gather(
+                *(env.initial_prompt() for env in all_envs)
+            )
+
+            # One prompt per group; vLLM fans out to sampling.n siblings
+            prompts = [
+                list(initial_turns[g_idx * group_size].next_token_ids or [])
+                for g_idx in range(num_groups)
+            ]
+
+            completions, gen_metrics = self._get_rank_0_value(
+                self.generator.generate.call(
+                    prompts,
+                    sampling_config=sampling,
+                    metrics_prefix=metrics_prefix,
+                ).get()
+            )
+            expected = len(prompts) * sampling.n
+            if len(completions) != expected:
+                raise RuntimeError(
+                    f"expected {expected} completions, got {len(completions)}"
+                )
+
+            # Bucket by source prompt index
+            completions_by_group: dict[int, list[Completion]] = defaultdict(list)
+            for c in completions:
+                completions_by_group[c.prompt_idx].append(c)
+
+            # Step + score each group. Per-group failures are isolated: a
+            # broken group is logged and skipped, the rest proceed.
+            # TODO: narrow to expected exception types once tool/sandbox envs land.
+            rollouts: list[Rollout] = []
+            num_failed_groups = 0
+            for g_idx in range(num_groups):
+                group_initial = initial_turns[
+                    g_idx * group_size : (g_idx + 1) * group_size
+                ]
+                try:
+                    group_rollouts = await _do_group_step(
+                        envs=envs_per_group[g_idx],
+                        group_id=group_ids[g_idx],
+                        initial_turns=group_initial,
+                        completions=completions_by_group[g_idx],
+                    )
+                    scored = await task.rubric.score_group(
+                        group_rollouts, examples[g_idx].env_input
+                    )
+                    for rollout, r in zip(group_rollouts, scored, strict=True):
+                        rollout.reward = r.reward
+                        rollout.reward_components = r.components
+                    rollouts.extend(group_rollouts)
+                except Exception:
+                    logger.exception(
+                        "group %s failed; dropping its rollouts",
+                        group_ids[g_idx],
+                    )
+                    num_failed_groups += 1
+        finally:
+            await asyncio.gather(
+                *(env.close() for env in all_envs), return_exceptions=True
+            )
+
+        gen_metrics = list(gen_metrics)
+        gen_metrics.append(
+            m.Metric("rollout/group_failures", m.NoReduce(float(num_failed_groups)))
+        )
+        return rollouts, gen_metrics
+
     @sl.log_trace_span("_collect_rollouts")
-    def _collect_rollouts(
+    async def _collect_rollouts(
         self,
         num_groups: int,
         step: int,
         group_offset: int,
-    ) -> tuple[list[Trajectory], list[m.Metric]]:
+    ) -> tuple[list[Rollout], list[m.Metric]]:
         """Collect group rollouts and emit completion-shape rollout metrics.
 
         Args:
@@ -553,38 +745,29 @@ class RLTrainer(Configurable):
             group_offset: Starting group index so that env ``group_idx``
                 values are unique across collection rounds within a step.
         """
-        envs = [
-            self.config.env.build(step=step, group_idx=group_offset + i)
-            for i in range(num_groups)
-        ]
+        group_size = self.config.generator.sampling.n
+        sampling = replace(
+            self.config.generator.sampling, stop_token_ids=self._stop_token_ids
+        )
         # TODO: Add a check max_tokens = min(max_tokens, context_window - model_input.length)
         # and pass max_tokens to the generator call or skip the call if max_tokens<=0.
         # Do the same for validation.
-        tokenized_prompts = [
-            self.tokenizer.encode(env.prompt, add_bos=True, add_eos=False)
-            for env in envs
-        ]
-        completions, generation_metrics = self._get_rank_0_value(
-            self.generator.generate.call(tokenized_prompts).get()
+        rollouts, generation_metrics = await self._run_rollouts(
+            task=self._train,
+            num_groups=num_groups,
+            group_size=group_size,
+            sampling=sampling,
+            step=step,
+            group_offset=group_offset,
+            metrics_prefix="generator",
         )
 
-        trajectories: list[Trajectory] = []
-        with sl.log_trace_span("score"):
-            for c in completions:
-                step_result = envs[c.prompt_idx].step(c.text)
-                trajectories.append(
-                    Trajectory(
-                        sample_idx=c.prompt_idx,
-                        prompt_token_ids=tokenized_prompts[c.prompt_idx],
-                        transitions=[(c, step_result)],
-                    )
-                )
-
         # Metrics
-        response_lens = [len(c.token_ids) for c in completions]
-        prompt_lens = [len(t.prompt_token_ids) for t in trajectories]
+        response_lens = [len(t.response_token_ids) for r in rollouts for t in r.turns]
+        prompt_lens = [r.turns[0].prompt_token_ids for r in rollouts if r.turns]
+        prompt_lens = [len(p) for p in prompt_lens]
         total_lens = [p + r for p, r in zip(prompt_lens, response_lens, strict=True)]
-        truncated = [c.finish_reason == "length" for c in completions]
+        truncated = [r.status.is_truncated() for r in rollouts]
         rollout_metrics: list[m.Metric] = [
             m.Metric("rollout/response_length", m.Mean.from_list(response_lens)),
             m.Metric("rollout/response_length", m.Max.from_list(response_lens)),
@@ -595,42 +778,43 @@ class RLTrainer(Configurable):
         ]
         rollout_metrics += generation_metrics
         rollout_metrics += _prepare_reward_metrics(
-            prefix="reward/component", trajectories=trajectories
+            prefix="reward/component", rollouts=rollouts
         )
-        return trajectories, rollout_metrics
+        return rollouts, rollout_metrics
 
     @staticmethod
     @sl.log_trace_span("_build_episodes")
     def _build_episodes(
-        trajectories: list[Trajectory],
+        rollouts: list[Rollout],
     ) -> tuple[list[Episode], list[m.Metric]]:
-        """Group trajectories by sample, apply mean-baseline advantage, emit metrics."""
-        groups: dict[int, list[Trajectory]] = {}
-        for t in trajectories:
-            groups.setdefault(t.sample_idx, []).append(t)
+        """Group rollouts by ``group_id``, apply mean-baseline advantage, emit metrics."""
+        groups: dict[str, list[Rollout]] = {}
+        for rollout in rollouts:
+            if rollout.group_id is None:
+                raise ValueError("rollout missing group_id")
+            groups.setdefault(rollout.group_id, []).append(rollout)
+        group_id_to_idx = {gid: i for i, gid in enumerate(sorted(groups))}
 
         episodes: list[Episode] = []
         group_stds: list[float] = []
-        for sample_idx, group in groups.items():
-            rewards = [t.total_reward for t in group]
+        for group_id, group in groups.items():
+            rewards = [
+                float(rollout.reward) for rollout in group if rollout.reward is not None
+            ]
+            if not rewards:
+                continue
             group_mean = sum(rewards) / len(rewards)
             # Population standard deviation; NaN for an empty group.
-            group_stds.append(statistics.pstdev(float(r) for r in rewards))
-            for t in group:
-                # Single-turn: exactly one (completion, step) per trajectory.
-                c, _ = t.transitions[0]
-                episodes.append(
-                    Episode(
-                        policy_version=c.policy_version,
-                        prompt_idx=sample_idx,
-                        prompt_token_ids=t.prompt_token_ids,
-                        text=c.text,
-                        token_ids=c.token_ids,
-                        token_logprobs=c.token_logprobs,
-                        reward=t.total_reward,
-                        advantage=t.total_reward - group_mean,
-                    )
+            group_stds.append(statistics.pstdev(rewards))
+            for rollout in group:
+                if rollout.reward is None:
+                    continue
+                # Single-turn: exactly one RolloutTurn per Rollout.
+                rollout.advantage = rollout.reward - group_mean
+                episode = rollout_output_to_episode(
+                    rollout, text=last_assistant_text(rollout)
                 )
+                episodes.append(replace(episode, prompt_idx=group_id_to_idx[group_id]))
 
         num_groups = len(groups)
         zero_std_frac = (
@@ -674,55 +858,49 @@ class RLTrainer(Configurable):
         """
         t_validate_start = time.perf_counter()
         num_samples = self.config.num_validation_samples
-        envs = [
-            self.config.validation_env.build(step=0, group_idx=i)
-            for i in range(num_samples)
-        ]
         greedy = SamplingConfig(
             n=1,
             temperature=0.0,
             top_p=1.0,
             max_tokens=self.config.generator.sampling.max_tokens,
+            stop_token_ids=self._stop_token_ids,
         )
 
-        tokenized_prompts: list[list[int]] = [
-            self.tokenizer.encode(env.prompt, add_bos=True, add_eos=False)
-            for env in envs
-        ]
-        completions, generation_metrics = self._get_rank_0_value(
-            self.generator.generate.call(
-                tokenized_prompts,
-                sampling_config=greedy,
-                metrics_prefix="validation_generator",
-            ).get()
+        rollouts, generation_metrics = await self._run_rollouts(
+            task=self._validation,
+            num_groups=num_samples,
+            group_size=1,
+            sampling=greedy,
+            step=0,
+            group_offset=0,
+            metrics_prefix="validation_generator",
         )
-
-        trajectories = [
-            Trajectory(
-                sample_idx=i,
-                prompt_token_ids=tokenized_prompts[i],
-                transitions=[(c, envs[i].step(c.text))],
-            )
-            for i, c in enumerate(completions)
-        ]
 
         if self.config.log_samples:
-            _log_samples(completions)
+            preview = [
+                rollout_output_to_episode(r, text=last_assistant_text(r))
+                for r in rollouts
+                if r.reward is not None
+            ]
+            _log_samples(preview)
 
+        response_lens = [len(t.response_token_ids) for r in rollouts for t in r.turns]
         validation_metrics: list[m.Metric] = [
             m.Metric(
                 "validation/reward",
-                m.SummaryStats.from_list([t.total_reward for t in trajectories]),
+                m.SummaryStats.from_list(
+                    [r.reward for r in rollouts if r.reward is not None]
+                ),
             ),
             m.Metric(
                 "validation/response_length",
-                m.Mean.from_list([len(c.token_ids) for c in completions]),
+                m.Mean.from_list(response_lens),
             ),
-            m.Metric("validation/num_samples", m.NoReduce(float(len(trajectories)))),
+            m.Metric("validation/num_samples", m.NoReduce(float(len(rollouts)))),
         ]
         validation_metrics += generation_metrics
         validation_metrics += _prepare_reward_metrics(
-            prefix="validation/reward/component", trajectories=trajectories
+            prefix="validation/reward/component", rollouts=rollouts
         )
 
         t_validate_s = time.perf_counter() - t_validate_start
@@ -766,7 +944,7 @@ class RLTrainer(Configurable):
             # token budget. The Batcher then packs, truncates to
             # global_batch_size rows, and splits into microbatches.
             t_rollout_start = time.perf_counter()
-            trajectories: list[Trajectory] = []
+            rollouts: list[Rollout] = []
             rollout_metrics: list[m.Metric] = []
             collected_tokens = 0
             group_offset = 0
@@ -775,17 +953,17 @@ class RLTrainer(Configurable):
             # padding when packing into fixed-length rows.
             num_tokens_target = self.batcher.num_tokens_target(self.trainer_dp_degree)
             while collected_tokens < num_tokens_target:
-                new_trajectories, new_metrics = self._collect_rollouts(
+                new_rollouts, new_metrics = await self._collect_rollouts(
                     num_groups, step=step, group_offset=group_offset
                 )
-                trajectories.extend(new_trajectories)
+                rollouts.extend(new_rollouts)
                 rollout_metrics.extend(new_metrics)
                 collected_tokens += sum(
-                    len(c.token_ids) for t in new_trajectories for c, _ in t.transitions
+                    len(t.response_token_ids) for r in new_rollouts for t in r.turns
                 )
                 group_offset += num_groups
 
-            episodes, episode_metrics = self._build_episodes(trajectories)
+            episodes, episode_metrics = self._build_episodes(rollouts)
             t_rollout_s = time.perf_counter() - t_rollout_start
 
             if self.config.log_samples:
