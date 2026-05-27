@@ -145,12 +145,12 @@ class TestCPVarlenMetadata(TestCase):
         self.assertEqual(self._seg_lens(per_rank[0]), ([10, 6, 2, 14], [10, 6, 40, 14]))
         self.assertEqual(self._seg_lens(per_rank[1]), ([32], [38]))
 
-        # k_local_indices compose the K-gather with the inverse permutation.
+        # k_global_gather_indices compose the K-gather with the inverse permutation.
         # Rank 1 K covers original [10..48) -> [10..16) stays, [16..48) +16.
         expected_rank1 = torch.tensor(
             list(range(10, 16)) + list(range(32, 64)), dtype=torch.long
         )
-        self.assertEqual(per_rank[1].k_local_indices, expected_rank1)
+        self.assertEqual(per_rank[1].k_global_gather_indices, expected_rank1)
         # Rank 0 K-gather covers originals [0..10), [10..16), [10..50), [50..64).
         expected_rank0 = torch.tensor(
             list(range(10))
@@ -161,7 +161,7 @@ class TestCPVarlenMetadata(TestCase):
             + list(range(18, 32)),
             dtype=torch.long,
         )
-        self.assertEqual(per_rank[0].k_local_indices, expected_rank0)
+        self.assertEqual(per_rank[0].k_global_gather_indices, expected_rank0)
 
     def test_one_token_segment(self) -> None:
         # 1-token doc + 7-token doc; seq_len=8, CP=2.
@@ -173,7 +173,7 @@ class TestCPVarlenMetadata(TestCase):
     def test_multi_batch_multi_doc_spanning(self) -> None:
         # B=2, per-batch docs [10, 22] -> packed cu_seq_q =
         # [0, 10, 32, 42, 64]. CP=2, shard_len=16.
-        # Rank 0: per-batch [0..16) -> 4 segments; k_local_indices must
+        # Rank 0: per-batch [0..16) -> 4 segments; k_global_gather_indices must
         # pick out [0..10), [10..16), [32..42), [42..48) from packed K.
         meta = _build_varlen_meta([0, 10, 32], B=2, seq_len=32)
         per_rank = self._run(meta, cp_world_size=2, B=2, seq_len=32)
@@ -186,7 +186,7 @@ class TestCPVarlenMetadata(TestCase):
             + list(range(42, 48)),
             dtype=torch.long,
         )
-        self.assertEqual(per_rank[0].k_local_indices, expected_rank0_k)
+        self.assertEqual(per_rank[0].k_global_gather_indices, expected_rank0_k)
 
     def test_multi_batch_headtail(self) -> None:
         # B=2, single doc per batch (cu_seq_q=[0,32,64]). CP=2, headtail
@@ -221,7 +221,7 @@ class TestCPVarlenMetadata(TestCase):
             + list(range(40, 48)),
             dtype=torch.long,
         )
-        self.assertEqual(per_rank[0].k_local_indices, expected_rank0_k)
+        self.assertEqual(per_rank[0].k_global_gather_indices, expected_rank0_k)
         # Rank 1 owns rearranged [8..24] of each batch. The two halves are
         # contiguous in globals, so each batch contributes one segment.
         self.assertEqual(self._seg_lens(per_rank[1]), ([16, 16], [24, 24]))
@@ -234,7 +234,7 @@ class TestCPVarlenMetadata(TestCase):
             + list(range(56, 64)),
             dtype=torch.long,
         )
-        self.assertEqual(per_rank[1].k_local_indices, expected_rank1_k)
+        self.assertEqual(per_rank[1].k_global_gather_indices, expected_rank1_k)
 
     def test_cp_world_size_4(self) -> None:
         # CP=4 exercises off-by-one in the per-rank boundary math.

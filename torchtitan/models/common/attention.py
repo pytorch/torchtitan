@@ -144,8 +144,12 @@ class VarlenAttention(Module):
                     "Varlen attention under CP only supports causal masking "
                     f"(window_size=(-1, 0)); got window_size={self.window_size}."
                 )
-            xk_packed = xk_packed.index_select(0, attention_masks.k_local_indices)
-            xv_packed = xv_packed.index_select(0, attention_masks.k_local_indices)
+            xk_packed = xk_packed.index_select(
+                0, attention_masks.k_global_gather_indices
+            )
+            xv_packed = xv_packed.index_select(
+                0, attention_masks.k_global_gather_indices
+            )
 
         # Some operators can upcast under AMP, but varlen attention currently only
         # supports bf16/fp16 inputs. If this changes, or fp16 training support is
