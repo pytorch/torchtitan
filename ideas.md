@@ -4781,3 +4781,13 @@
   Planned command or config overrides: Use the `norm_modules` command with `--training.local_batch_size=180`.
   Success criteria and expected risk: Success is sustained throughput above 14,070 with finite loss. Risk is returning to the known batch180 memory-risk line and losing throughput after warmup.
   Result: kept as a middle point at source state `70df98a9`; run545 reached 14,367 tps at step 10, but run546 sustained 14,046 tps over steps 11-20 at 172.47 GiB. It beats the safe batch176 norm_modules branch but not the memory-risky `block_norms` throughput branch.
+
+- Idea: static-specialize the compiled norm_modules helper
+  Current best source commit: 322ae189
+  Source: `norm_modules` is now the best safe branch; its compiled helper has fixed shapes in the active command.
+  Expected mechanism: Passing `dynamic=False` to `torch.compile` for the RMSNorm helper may reduce guard/dynamic-shape overhead in the module-level compiled norm calls.
+  Supporting evidence: The helper signature is small and shape-stable at fixed batch/sequence/hidden dimensions.
+  Planned source/config changes: Add `dynamic=False` only to `_enable_compiled_norm_modules`.
+  Planned command or config overrides: Active batch176 `norm_modules` command.
+  Success criteria and expected risk: Success is step-10 throughput above the kept norm_modules short sample or same throughput with lower memory. Risk is no effect because the helper was already effectively static.
+  Result: discarded at source state `322ae189+dirty`; run548 reached 14,014 tps at 168.91 GiB. Restore the dynamic default.

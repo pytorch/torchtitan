@@ -13712,3 +13712,26 @@ Interpretation:
 
 - `norm_modules` gets the compiled-RMSNorm behavior while avoiding part, but not all, of the all-gather exposure added by `block_norms`.
 - The remaining hard bottlenecks are still MXFP8 GEMM/cast and FSDP collectives; more attention/RoPE/RMSNorm work is unlikely to move the roofline much.
+
+## Experiment 548: `dynamic=False` For Compiled Norm Modules
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,norm_modules --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run548-norm-modules-dynamic-false-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run548-norm-modules-dynamic-false-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily added `dynamic=False` to the `torch.compile` call inside `_enable_compiled_norm_modules`.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 14,014.
+- Peak memory: 168.91 GiB, 94.71%.
+
+Interpretation:
+
+- Static specialization does not help the norm-module helper.
+- Restore the default compiled helper.
