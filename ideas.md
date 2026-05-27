@@ -4321,3 +4321,13 @@
   Planned command or config overrides: Active event-cache-disabled command plus `--optimizer.implementation=fused_opt_states_bf16`.
   Success criteria and expected risk: Success is step-10 tps above 12,454 or clearly lower peak memory that enables a higher batch. Risk is weaker short-run loss behavior from BF16 optimizer states.
   Result: discarded at source state `4816c3fd`; 12,442 tps and 163.95 GiB. It is close to the active peak but does not beat it and does not lower printed peak memory, so keep the default fused optimizer.
+
+- Idea: compile Qwen3 decoder layers as broader model portions
+  Current best source commits: a099091d, ffd4bed6
+  Source: the active recipe compiles only `loss`, `feed_forward`, and `qkv_linear`; broader per-layer compile could fuse RMSNorm/residual/attention setup around those hot regions.
+  Expected mechanism: Compile each decoder layer after shared MXFP8 input-cast patches and before FSDP wrapping, using `--compile.components=loss,layer` to avoid double-wrapping the existing FFN/QKV component compiles.
+  Supporting evidence: the user explicitly asked to consider compiling portions when full model compile crashes, and per-layer boundaries are the next coarser granularity after FFN/QKV.
+  Planned source/config changes: Add a temporary `layer` compile component in `parallelize_qwen3()`.
+  Planned command or config overrides: Active event-cache-disabled command with `--compile.components=loss,layer`.
+  Success criteria and expected risk: Success is a valid 10-step run above 12,454. Risk is compiler instability from attention masks, MXFP8 tensor wrappers, or FSDP wrapping.
+  Result: both variants crashed before step 1. Fullgraph (`a099091d`) and non-fullgraph (`ffd4bed6`) hit the same Inductor `RecursionError` in fake-tensor metadata comparison on the MXFP8/FSDP view path. Remove the failed component; keep `loss,feed_forward,qkv_linear` as the active compile granularity.

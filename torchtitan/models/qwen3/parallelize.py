@@ -137,18 +137,6 @@ def _compile_qwen3_qkv_linear(model: Qwen3Model, compile_config: CompileConfig) 
     )
 
 
-def _compile_qwen3_layers(model: Qwen3Model, compile_config: CompileConfig) -> None:
-    compiled_count = 0
-    for layer in model.layers.values():
-        layer.compile(backend=compile_config.backend, fullgraph=False)
-        compiled_count += 1
-
-    logger.info(
-        "Compiling %s Qwen3 decoder layers with torch.compile",
-        compiled_count,
-    )
-
-
 def parallelize_qwen3(
     model: Qwen3Model,
     *,
@@ -189,8 +177,6 @@ def parallelize_qwen3(
         apply_compile(model, compile_config)
     _enable_shared_mxfp8_qkv_input_cast(model)
     _enable_shared_mxfp8_gate_up_input_cast(model)
-    if compile_config.enable and "layer" in compile_config.components:
-        _compile_qwen3_layers(model, compile_config)
     if compile_config.enable and "qkv_linear" in compile_config.components:
         _compile_qwen3_qkv_linear(model, compile_config)
     if compile_config.enable and "feed_forward" in compile_config.components:

@@ -12284,3 +12284,49 @@ Interpretation:
 - BF16 fused optimizer states are a near miss but do not beat the active peak of 12,454 tps.
 - Peak memory is unchanged at the printed resolution, so this does not open a higher local-batch follow-up.
 - Keep the default fused optimizer implementation for the active recipe.
+
+## Experiment 491: Fullgraph Decoder-Layer Compile
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,layer --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run491-event-cache0-compile-layer > outputs/autoresearch/may19-qwen3-14b/run491-event-cache0-compile-layer.run.log 2>&1
+```
+
+Source changes:
+
+- Added a temporary `layer` compile component that calls `layer.compile(..., fullgraph=True)` for each Qwen3 decoder layer after the shared MXFP8 input-cast patches and before FSDP wrapping.
+
+Result:
+
+- Status: crash before step 1.
+- Failure: `torch._inductor.exc.InductorError: RecursionError: maximum recursion depth exceeded` in `torch/_inductor/fx_utils.py:is_fake_tensor_same`.
+- The log also reports the FSDP2 warning that an FSDP-wrapped `FSDPMXFP8Linear` returned a view tensor.
+
+Interpretation:
+
+- Coarser full-layer compile is blocked by an Inductor fake-tensor metadata recursion on the current MXFP8/FSDP view path.
+- This explains why the narrower `feed_forward` and `qkv_linear` compile boundaries are more robust than compiling the whole decoder layer.
+
+## Experiment 492: Non-Fullgraph Decoder-Layer Compile
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,layer --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run492-event-cache0-compile-layer-nonfullgraph > outputs/autoresearch/may19-qwen3-14b/run492-event-cache0-compile-layer-nonfullgraph.run.log 2>&1
+```
+
+Source changes:
+
+- Changed the temporary `layer` compile component to `fullgraph=False`.
+- Removed the failed `layer` component from the active source after this run.
+
+Result:
+
+- Status: crash before step 1.
+- Failure: same `torch._inductor.exc.InductorError: RecursionError: maximum recursion depth exceeded` in `torch/_inductor/fx_utils.py:is_fake_tensor_same`.
+
+Interpretation:
+
+- Per-layer compile is blocked independent of fullgraph mode.
+- Continue using the smaller proven compile components: `loss,feed_forward,qkv_linear`.
