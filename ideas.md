@@ -4821,3 +4821,13 @@
   Planned command or config overrides: Active batch176 `norm_modules` command with `--activation-checkpoint.no-preserve-rng-state`.
   Success criteria and expected risk: Success is step-10 throughput above the kept norm_modules short sample with unchanged memory. Risk is no effect or loss noise if there is hidden RNG use.
   Result: discarded at source state `368dbe2a`; run552 completed with falling loss and the same 168.91 GiB peak, but reached only 14,121 tps. Keep the default checkpoint RNG setting unless a later source path exposes larger checkpoint-wrapper overhead.
+
+- Idea: enable activation-checkpoint early-stop
+  Current best source commit: d16adaaa
+  Source: full activation checkpointing uses recompute, and the `early_stop` option has not been tested on the current `norm_modules` stack.
+  Expected mechanism: Early-stop may avoid rematerializing values that are no longer needed during checkpointed backward recompute.
+  Supporting evidence: The active profile remains sensitive to recompute and launch/overlap interactions even after the norm compile work.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active batch176 `norm_modules` command with `--activation-checkpoint.early-stop`.
+  Success criteria and expected risk: Success is step-10 throughput above the kept norm_modules short sample with unchanged memory. Risk is no effect because the full block outputs require most recomputation anyway.
+  Result: discarded at source state `d16adaaa`; run553 completed with the same 168.91 GiB peak and reached 14,209 tps at step 10, below the kept 14,240 short sample. Do not validate further unless a later source path changes checkpointed-region structure.
