@@ -12,6 +12,7 @@ from torchtitan.models.common.decoder_sharding import (
     colwise_config,
     dense_activation_placement,
     dense_param_placement,
+    dense_sequence_placement,
     norm_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
@@ -95,7 +96,7 @@ def _set_deepseek_v3_layer_sharding(
     # MLA attention input: x is gathered to Replicate; freqs_cis always Replicate.
     attention.sharding_config = ShardingConfig(
         in_src_shardings={
-            "x": dense_activation_placement(tp=attn_x_placement),
+            "x": dense_sequence_placement(tp=attn_x_placement),
             "freqs_cis": dense_param_placement(tp=spmd.R),
         },
         in_dst_shardings={
@@ -103,7 +104,7 @@ def _set_deepseek_v3_layer_sharding(
             "freqs_cis": dense_param_placement(tp=spmd.R),
         },
         out_src_shardings=dense_activation_placement(tp=spmd.P),
-        out_dst_shardings=dense_activation_placement(tp=attn_x_placement),
+        out_dst_shardings=dense_sequence_placement(tp=attn_x_placement),
         local_spmd=LocalSpmdConfig(),
     )
     # Low-rank projections and norms keep Replicate weights on TP. We still
@@ -111,7 +112,7 @@ def _set_deepseek_v3_layer_sharding(
     # without mixing plain Tensor + DTensor in the matmul.
     replicate_weight = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.I)},
-        state_tp_ir={"weight"},
+        state_shardings_compute={"weight": dense_param_placement(tp=spmd.R)},
     )
     attention.wkv_a.sharding_config = replicate_weight
     attention.kv_norm.sharding_config = replicate_weight

@@ -11,6 +11,7 @@ import spmd_types as spmd
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
+    dense_sequence_placement,
 )
 from torchtitan.protocols.sharding import LocalSpmdConfig, NamedPlacement, ShardingConfig
 from torchtitan.protocols.types import MeshAxisName
@@ -78,13 +79,13 @@ def _router_gate_config(*, enable_ep: bool, has_bias: bool = False) -> ShardingC
     """Router gate: replicated weights, output stays DTensor."""
     del enable_ep
     state_shardings = {"weight": dense_param_placement(tp=spmd.I)}
-    state_tp_ir = {"weight"}
+    state_shardings_compute = {"weight": dense_param_placement(tp=spmd.R)}
     if has_bias:
         state_shardings["bias"] = dense_param_placement(tp=spmd.I)
-        state_tp_ir.add("bias")
+        state_shardings_compute["bias"] = dense_param_placement(tp=spmd.R)
     return ShardingConfig(
         state_shardings=state_shardings,
-        state_tp_ir=state_tp_ir,
+        state_shardings_compute=state_shardings_compute,
     )
 
 
@@ -106,10 +107,10 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
             "expert_bias": dense_param_placement(tp=spmd.R),
             "tokens_per_expert": _tokens_per_expert_placement(enable_ep=enable_ep),
         },
-        in_src_shardings={"x": dense_activation_placement(tp=sp_layout)},
+        in_src_shardings={"x": dense_sequence_placement(tp=sp_layout)},
         in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
         out_src_shardings=dense_activation_placement(tp=spmd.P),
-        out_dst_shardings=dense_activation_placement(tp=sp_layout),
+        out_dst_shardings=dense_sequence_placement(tp=sp_layout),
         local_spmd=LocalSpmdConfig(),
     )
 
@@ -158,14 +159,14 @@ def set_moe_sharding_config(
         state_shardings: dict[str, NamedPlacement] = {
             name: expert_param_placement_sparse() for name in expert_param_layout
         }
-        state_tp_ir: set[str] = set()
+        state_shardings_compute: dict[str, NamedPlacement] = {}
     elif enable_tp:
         state_shardings = {
             name: expert_param_placement_dense(tp_placement=placement)
             for name, placement in expert_param_layout.items()
         }
-        state_tp_ir = {
-            name
+        state_shardings_compute = {
+            name: expert_param_placement_dense(tp_placement=spmd.R)
             for name, placement in expert_param_layout.items()
             if name.endswith("bias") and placement is spmd.I
         }
@@ -174,9 +175,9 @@ def set_moe_sharding_config(
             name: expert_param_placement_dense(tp_placement=spmd.I)
             for name in expert_param_layout
         }
-        state_tp_ir = set()
+        state_shardings_compute = {}
 
     moe_cfg.experts.sharding_config = ShardingConfig(
         state_shardings=state_shardings,
-        state_tp_ir=state_tp_ir,
+        state_shardings_compute=state_shardings_compute,
     )

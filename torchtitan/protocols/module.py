@@ -31,6 +31,9 @@ from torchtitan.distributed.spmd_state import (
 from torchtitan.protocols.sharding import (
     LocalSpmdConfig,
     NamedPlacement,
+    NamedPartitionSpec,
+    PlacementLike,
+    PlacementSpec,
     ShardingConfig,
 )
 from torchtitan.protocols.types import MeshAxisName
@@ -56,22 +59,99 @@ def preserve_buffer_spmd(model: nn.Module) -> Iterator[None]:
             spmd.assert_type(buf, saved[fqn])
 
 
+def _active_axis_names(
+    axis_name: MeshAxisName,
+    mesh_names: dict,
+) -> tuple[MeshAxisName, ...]:
+    if axis_name == MeshAxisName.DP and MeshAxisName.DP not in mesh_names:
+        return tuple(
+            axis
+            for axis in (MeshAxisName.DP_REPLICATE, MeshAxisName.DP_SHARD)
+            if axis in mesh_names
+        )
+    return (axis_name,) if axis_name in mesh_names else ()
+
+
 def named_placement_to_spmd(named: NamedPlacement) -> NamedPlacement:
     """Drop axes that are not present in the active spmd_types mesh."""
     mesh_names = spmd.current_mesh_names()
     if mesh_names is None:
         return {}
-    resolved = dict(named)
-    if MeshAxisName.DP in resolved and MeshAxisName.DP not in mesh_names:
-        dp_value = resolved.pop(MeshAxisName.DP)
-        for axis_name in (MeshAxisName.DP_REPLICATE, MeshAxisName.DP_SHARD):
-            if axis_name in mesh_names:
-                resolved[axis_name] = dp_value
-    return {
-        axis_name: value
-        for axis_name, value in resolved.items()
-        if axis_name in mesh_names
-    }
+    resolved: NamedPlacement = {}
+    for axis_name, value in named.items():
+        for active_axis_name in _active_axis_names(axis_name, mesh_names):
+            resolved[active_axis_name] = value
+    return resolved
+
+
+def _resolve_named_partition_spec(
+    named: NamedPartitionSpec,
+    ndim: int | None = None,
+) -> tuple[spmd.PartitionSpec | None, NamedPlacement]:
+    if ndim is not None and len(named) != ndim:
+        raise ValueError(
+            f"partition_spec length {len(named)} must match tensor ndim {ndim}."
+        )
+    mesh_names = spmd.current_mesh_names()
+    if mesh_names is None:
+        return None, {}
+
+    entries = []
+    shard_types: NamedPlacement = {}
+    for dim, entry in enumerate(named):
+        active_axes: list[MeshAxisName] = []
+        for axis_name in () if entry is None else (
+            entry if isinstance(entry, tuple) else (entry,)
+        ):
+            for active_axis_name in _active_axis_names(axis_name, mesh_names):
+                if active_axis_name in shard_types:
+                    raise ValueError(
+                        f"Axis {active_axis_name} appears multiple times in "
+                        "partition_spec."
+                    )
+                active_axes.append(active_axis_name)
+                shard_types[active_axis_name] = spmd.S(dim)
+        if not active_axes:
+            entries.append(None)
+        elif len(active_axes) == 1:
+            entries.append(active_axes[0])
+        else:
+            entries.append(tuple(active_axes))
+
+    partition_spec = spmd.PartitionSpec(*entries) if shard_types else None
+    return partition_spec, shard_types
+
+
+def _validate_placement_spec(
+    spec: PlacementSpec,
+    resolved_placement: NamedPlacement,
+    shard_types: NamedPlacement,
+) -> None:
+    for axis_name, value in spec.placement.items():
+        if isinstance(value, spmd.Shard):
+            raise ValueError(
+                "PlacementSpec.placement must use local SPMD types only. "
+                f"Got {value} on axis {axis_name}."
+            )
+    for axis_name in shard_types:
+        if resolved_placement.get(axis_name) is not spmd.V:
+            raise ValueError(
+                "PlacementSpec.placement must set every partition_spec axis to "
+                f"spmd.V. Axis {axis_name} has "
+                f"{resolved_placement.get(axis_name)!r}."
+            )
+
+
+def placement_to_spmd(
+    placement: PlacementLike,
+    ndim: int | None = None,
+) -> NamedPlacement:
+    if isinstance(placement, PlacementSpec):
+        resolved = named_placement_to_spmd(placement.placement)
+        _, shard_types = _resolve_named_partition_spec(placement.partition_spec, ndim)
+        _validate_placement_spec(placement, resolved, shard_types)
+        return {**resolved, **shard_types}
+    return named_placement_to_spmd(placement)
 
 
 def named_placement_to_assert_type(
@@ -84,6 +164,25 @@ def named_placement_to_assert_type(
     shard_types: NamedPlacement = {}
     for axis_name, value in resolved.items():
         if isinstance(value, spmd.Shard):
+            dim = value.dim if value.dim >= 0 else ndim + value.dim
+            if dim < 0 or dim >= ndim:
+                raise ValueError(
+                    f"NamedPlacement shards tensor dim {value.dim}, but tensor ndim "
+                    f"is {ndim}."
+                )
+            for existing_axis_name, existing_value in shard_types.items():
+                existing_dim = (
+                    existing_value.dim
+                    if existing_value.dim >= 0
+                    else ndim + existing_value.dim
+                )
+                if existing_dim == dim:
+                    raise ValueError(
+                        "NamedPlacement cannot determine partition order when "
+                        f"tensor dim {dim} is sharded on multiple mesh axes "
+                        f"({existing_axis_name}, {axis_name}). Use PlacementSpec "
+                        "with an explicit partition_spec."
+                    )
             local_type[axis_name] = spmd.V
             shard_types[axis_name] = value
         else:
@@ -94,9 +193,23 @@ def named_placement_to_assert_type(
         partition_spec = shard_types_to_partition_spec(
             shard_types,
             ndim,
-            axis_order=tuple(resolved.keys()),
         )
     return local_type, partition_spec
+
+
+def placement_to_assert_type(
+    placement: PlacementLike,
+    ndim: int,
+) -> tuple[spmd.LocalSpmdType, spmd.PartitionSpec | None]:
+    if isinstance(placement, PlacementSpec):
+        resolved = named_placement_to_spmd(placement.placement)
+        partition_spec, shard_types = _resolve_named_partition_spec(
+            placement.partition_spec,
+            ndim,
+        )
+        _validate_placement_spec(placement, resolved, shard_types)
+        return resolved, partition_spec
+    return named_placement_to_assert_type(placement, ndim)
 
 
 def redistribute_spmd_per_axis(
@@ -330,8 +443,10 @@ class Module(nn.Module, Configurable):
                     is_param=False,
                 )
 
-            if sharding_config.state_tp_ir:
-                self._install_spmd_tp_ir_param_hook(sharding_config.state_tp_ir)
+            if sharding_config.state_shardings_compute:
+                self._convert_to_compute_state_with_hook(
+                    sharding_config.state_shardings_compute
+                )
 
             self._cache_pos_arg_names()
 
@@ -345,7 +460,7 @@ class Module(nn.Module, Configurable):
             if not isinstance(t, torch.Tensor) or not spmd.has_local_type(t):
                 return t
             assert _mesh_reinterpret is not None
-            resolved_reinterpret = named_placement_to_spmd(_mesh_reinterpret)
+            resolved_reinterpret = placement_to_spmd(_mesh_reinterpret, t.ndim)
             return spmd.reinterpret_mesh(t, resolved_reinterpret, inplace=True)
 
         def with_redistribution(*args: Any, **kwargs: Any) -> Any:
@@ -357,45 +472,85 @@ class Module(nn.Module, Configurable):
 
         self.forward = with_redistribution
 
-    def _install_spmd_tp_ir_param_hook(self, param_names: set[str]) -> None:
-        """Convert configured I@tp params to R@tp for forward compute."""
+    @staticmethod
+    def _convert_state(
+        tensor: torch.Tensor,
+        mesh,
+        rest_types: NamedPlacement,
+        compute_types: NamedPlacement,
+    ) -> torch.Tensor:
+        device_type = tensor.device.type
+        bwd = {
+            "op_dtype": torch.get_autocast_dtype(device_type)
+            if torch.is_autocast_enabled(device_type)
+            else tensor.dtype,
+            "out_dtype": tensor.dtype,
+        }
+        for axis_name, dst_t in compute_types.items():
+            src_t = rest_types.get(axis_name)
+            if src_t is None or src_t == dst_t:
+                continue
+            pg = mesh.get_group(axis_name)
+            if dist.get_world_size(pg) > 1:
+                tensor = spmd.convert(
+                    tensor,
+                    pg,
+                    src=src_t,
+                    dst=dst_t,
+                    backward_options=bwd,
+                )
+        return tensor
+
+    def _convert_to_compute_state_with_hook(
+        self,
+        state_shardings_compute: dict[str, PlacementLike],
+    ) -> None:
+        """Temporarily convert configured states to their forward placements."""
         if not is_spmd_active():
             return
         mesh = current_mesh()
         assert mesh is not None
-        if "tp" not in mesh.mesh_dim_names:
-            return
-        tp_pg = mesh.get_group("tp")
-        if dist.get_world_size(tp_pg) == 1:
-            return
 
-        param_names = set(param_names)
-        original_params: dict[str, torch.Tensor] = {}
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
+        state_types = {
+            name: (
+                placement_to_spmd(sharding_config.state_shardings[name]),
+                placement_to_spmd(compute_named),
+            )
+            for name, compute_named in state_shardings_compute.items()
+        }
+        originals: dict[str, tuple[torch.Tensor, bool]] = {}
+
+        def get_state(module: nn.Module, name: str) -> tuple[torch.Tensor, bool]:
+            if name in module._parameters:
+                return module._parameters[name], True
+            return module._buffers[name], False
+
+        def set_state(
+            module: nn.Module,
+            name: str,
+            tensor: torch.Tensor,
+            *,
+            is_param: bool,
+        ) -> None:
+            if is_param:
+                module._parameters[name] = tensor
+            else:
+                module._buffers[name] = tensor
 
         def pre_hook(module, args):
-            original_params.clear()
-            for name in param_names:
-                param = module._parameters[name]
-                original_params[name] = param
-                device_type = param.device.type
-                op_dtype = (
-                    torch.get_autocast_dtype(device_type)
-                    if torch.is_autocast_enabled(device_type)
-                    else param.dtype
-                )
-                bwd = {"op_dtype": op_dtype, "out_dtype": param.dtype}
-                module._parameters[name] = spmd.convert(
-                    param,
-                    tp_pg,
-                    src=spmd.I,
-                    dst=spmd.R,
-                    backward_options=bwd,
-                )
+            originals.clear()
+            for name, (rest_types, compute_types) in state_types.items():
+                tensor, is_param = get_state(module, name)
+                originals[name] = (tensor, is_param)
+                converted = self._convert_state(tensor, mesh, rest_types, compute_types)
+                set_state(module, name, converted, is_param=is_param)
 
         def post_hook(module, args, output):
-            for name, param in original_params.items():
-                module._parameters[name] = param
-            original_params.clear()
+            for name, (tensor, is_param) in originals.items():
+                set_state(module, name, tensor, is_param=is_param)
+            originals.clear()
 
         self.register_forward_pre_hook(pre_hook, with_kwargs=False)
         self.register_forward_hook(post_hook, always_call=True)
@@ -404,7 +559,7 @@ class Module(nn.Module, Configurable):
         self,
         name: str,
         tensor: torch.Tensor,
-        named_placement: NamedPlacement,
+        named_placement: PlacementLike,
         *,
         is_param: bool,
     ) -> None:
@@ -413,7 +568,12 @@ class Module(nn.Module, Configurable):
         SPMD values → physical TP shard (if applicable) + ``spmd.assert_type``.
         """
         mesh = current_mesh()
-        named_placement = named_placement_to_spmd(named_placement) if mesh else {}
+        local_type, partition_spec = (
+            placement_to_assert_type(named_placement, tensor.ndim)
+            if mesh
+            else ({}, None)
+        )
+        named_placement = placement_to_spmd(named_placement, tensor.ndim) if mesh else {}
         # Validate and collect shards. Values must be raw per-axis types.
         shard_dims: dict[int, str] = {}
         for axis_name, value in named_placement.items():
@@ -444,9 +604,12 @@ class Module(nn.Module, Configurable):
 
         # annotate the registered param/buffer (not the input tensor)
         registered = self._parameters[name] if is_param else self._buffers[name]
-        types = named_placement
-        if types:
-            spmd.assert_type(registered, types)
+        if local_type:
+            spmd.assert_type(
+                registered,
+                local_type,
+                partition_spec=partition_spec,
+            )
 
     def local_spmd(
         self,
@@ -457,27 +620,27 @@ class Module(nn.Module, Configurable):
         assert sharding_config is not None
         pos_arg_names = self._cache_pos_arg_names()
         in_dst = sharding_config.in_dst_shardings or {}
-        resolved_in: tuple[NamedPlacement | None, ...] = tuple(
-            named_placement_to_spmd(in_dst[name]) if name in in_dst else None
+        resolved_in: tuple[PlacementLike | None, ...] = tuple(
+            in_dst[name] if name in in_dst else None
             for name in pos_arg_names
         )
         out_src = sharding_config.out_src_shardings
         if out_src is None:
-            resolved_out: tuple[NamedPlacement | None, ...] = ()
+            resolved_out: tuple[PlacementLike | None, ...] = ()
         elif isinstance(out_src, tuple):
-            resolved_out = tuple(named_placement_to_spmd(p) for p in out_src)
+            resolved_out = out_src
         else:
-            resolved_out = (named_placement_to_spmd(out_src),)
+            resolved_out = (out_src,)
 
         def assert_types(
             tensors: Iterable[Any],
-            specs: Iterable[NamedPlacement | None],
+            specs: Iterable[PlacementLike | None],
         ) -> None:
             if not spmd.is_type_checking():
                 return
             for tensor, types in zip(tensors, specs):
                 if isinstance(tensor, torch.Tensor) and types is not None and types:
-                    local_type, partition_spec = named_placement_to_assert_type(
+                    local_type, partition_spec = placement_to_assert_type(
                         types,
                         tensor.ndim,
                     )
@@ -494,9 +657,7 @@ class Module(nn.Module, Configurable):
                 assert_types(
                     kwargs.values(),
                     tuple(
-                        named_placement_to_spmd(in_dst[name])
-                        if name in in_dst
-                        else None
+                        in_dst[name] if name in in_dst else None
                         for name in kwargs
                     ),
                 )
@@ -550,8 +711,8 @@ class Module(nn.Module, Configurable):
             if not isinstance(value, torch.Tensor):
                 continue
             if name in in_src_shardings and name in in_dst_shardings:
-                src_types = named_placement_to_spmd(in_src_shardings[name])
-                dst_types = named_placement_to_spmd(in_dst_shardings[name])
+                src_types = placement_to_spmd(in_src_shardings[name], value.ndim)
+                dst_types = placement_to_spmd(in_dst_shardings[name], value.ndim)
                 value = redistribute_spmd_per_axis(value, src_types, dst_types)
             new_kwargs[name] = value
 
@@ -583,8 +744,8 @@ class Module(nn.Module, Configurable):
             )
             if out_src is None:
                 out_src = out_dst
-            src_types = named_placement_to_spmd(out_src)
-            dst_types = named_placement_to_spmd(out_dst)
+            src_types = placement_to_spmd(out_src, outputs.ndim)
+            dst_types = placement_to_spmd(out_dst, outputs.ndim)
             outputs = redistribute_spmd_per_axis(outputs, src_types, dst_types)
         return outputs
 
