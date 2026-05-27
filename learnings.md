@@ -11035,3 +11035,27 @@ Interpretation:
 
 - Forcing SUM reductions is numerically sane and valid, but it does not improve the exposed reduce-scatter path.
 - Keep the default FSDP reduction communication op.
+
+## Experiment 444: Shared Gate/Up grad_input With MXFP8 addmm
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run444-shared-gate-up-grad-input-addmm-nvls-active > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily changed the shared gate/up custom autograd backward from `mm(...) + mm(...)` to one `mm` followed by MXFP8 `addmm`.
+- The goal was to remove the separate add/allocation for `grad_input`.
+- Restored the original expression after the result.
+
+Result:
+
+- Status: crash before step 1.
+- Failure: `RuntimeError: Bias must be size 5120 but got 110100480`.
+
+Interpretation:
+
+- TorchAO's MXFP8 `addmm` dispatch routes to scaled-mm with bias semantics that require a vector bias, not a full matrix accumulator.
+- The direct `addmm` replacement cannot be used for the gate/up `grad_input` accumulation.
