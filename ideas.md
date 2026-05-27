@@ -4471,3 +4471,13 @@
   Planned command or config overrides: Active event-cache-disabled command.
   Success criteria and expected risk: Success is step-10 tps above 12,454 with finite loss. Risk is custom backward error, Triton JIT overhead, or worse scheduling.
   Result: kept at source state `dab36ae7+dirty`; 13,622 tps and 162.66 GiB. Standalone forward/backward checks matched the existing RoPE path exactly for Qwen3's duplicated cos/sin cache. This is the new active peak.
+
+- Idea: profile Triton RoPE active recipe
+  Current best source commit: a8e92ef4
+  Source: run506 moved the throughput peak by +1,168 tps, so the next bottleneck should be identified from a fresh trace.
+  Expected mechanism: profile step 10 with the committed Triton RoPE source and compare against run481 to see which bucket became limiting.
+  Supporting evidence: the prior profile was before the custom operator replacement and should not drive the next source change blindly.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active event-cache-disabled command with profiler enabled for iteration 10.
+  Success criteria and expected risk: Success is a clean profile trace. Profiled tps is diagnostic and not used for ranking.
+  Result: kept as diagnostic at source state `a8e92ef4`; profiled step-10 tps was 13,426. Trace confirms the RoPE expression is no longer the bottleneck; broad NCCL and GEMM/MXFP8 buckets dominate.

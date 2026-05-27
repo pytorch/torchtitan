@@ -12716,3 +12716,37 @@ Interpretation:
 - The earlier sequential RoPE monkeypatch only removed redundant position gathering and was slower; replacing the actual RoPE elementwise/slice/cat path with one custom Triton forward/backward pair is the useful change.
 - This is a new measured peak, +1,168 tps over run479's 12,454 peak while also reducing peak memory by about 1.29 GiB.
 - The active source now includes the Triton sequential RoPE replacement. The next likely step is to profile this new peak before deciding whether to spend the memory headroom on batch shape, loss chunks, or another custom operator.
+
+## Experiment 507: Profile Triton RoPE Active Recipe
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run507-profile-triton-rope-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run507-profile-triton-rope-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the committed Triton sequential RoPE source.
+
+Result:
+
+- Status: keep as profile data.
+- Profiled step 10 `tps`: 13,426.
+- Step 10 peak memory: 162.66 GiB, 91.20%.
+- No allocator retries were logged.
+- Loss moved from 12.52468 at step 1 to 6.42998 at step 10.
+- Traces were written under `outputs/autoresearch/may19-qwen3-14b/run507-profile-triton-rope-event-cache0/profiling/traces/iteration_10`.
+
+Trace comparison against run481:
+
+- Custom RoPE kernels now cost about 54 ms/rank total in the broad parser, with rank0 showing about 14 ms forward and 15 ms backward by exact kernel name.
+- Slice/copy/view bucket dropped from about 2,499 ms/rank to about 2,023 ms/rank.
+- SDPA FlashAttention bucket dropped from about 214 ms/rank to about 138 ms/rank, likely because Q/K layout and neighboring ops changed enough to reduce attention-side reshape/clone overhead.
+- GEMM/MXFP8 work is now clearly dominant again: broad scaled-mm/GEMM bucket rose to about 1,700 ms/rank, with the same large `nvjet_sm100_qqtst_128x256...` kernel still the main local kernel.
+- NCCL remains rank-skewed and large: broad NCCL bucket averages about 1,982 ms/rank, with rank6 still worst at about 2,705 ms.
+
+Interpretation:
+
+- The new Triton RoPE kernel removed the targeted RoPE expression bottleneck.
+- The next source work should either reduce MXFP8/GEMM work further or reduce launch/collective exposure around Q/K/V and FFN; pure attention backend work is even less likely to pay now.
