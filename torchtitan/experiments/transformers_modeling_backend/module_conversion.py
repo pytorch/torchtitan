@@ -6,17 +6,32 @@
 
 """Convert plain HF nn.Module instances to TorchTitan Module protocol.
 
-Uses ``Module.from_nn_module`` to dynamically create classes that inherit
-from both the original HF class and ``Module``, then swaps ``__class__``
-on existing instances. This gives every HF module the ``parallelize()``,
-``_shard_states()``, and ``_sharding_config`` capabilities without changing
-any module state, forward behavior, or state_dict keys.
+Dynamically creates classes that inherit from both the original HF class
+and ``Module``, then swaps ``__class__`` on existing instances. This gives
+every HF module the ``parallelize()``, ``_shard_states()``, and
+``_sharding_config`` capabilities without changing any module state,
+forward behavior, or state_dict keys.
 """
 
 import torch.nn as nn
 
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
+
+_module_class_cache: dict[type, type] = {}
+
+
+def _make_module_class(nn_cls: type) -> type:
+    """Create a class inheriting from both Module and nn_cls.
+
+    Results are cached so repeated calls for the same class return
+    the same type object.
+    """
+    if nn_cls in _module_class_cache:
+        return _module_class_cache[nn_cls]
+    new_cls = type(nn_cls.__name__, (Module, nn_cls), {})
+    _module_class_cache[nn_cls] = new_cls
+    return new_cls
 
 
 def convert_hf_to_module(model: nn.Module) -> None:
@@ -38,7 +53,7 @@ def convert_hf_to_module(model: nn.Module) -> None:
                     f"(__slots__ incompatible with __class__ swap)"
                 )
             else:
-                child.__class__ = Module.from_nn_module(cls)
+                child.__class__ = _make_module_class(cls)
         convert_hf_to_module(child)
 
     logger.info("Converted HF modules to Module protocol")
