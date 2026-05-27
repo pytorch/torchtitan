@@ -11241,3 +11241,29 @@ Interpretation:
 - The Q/K/V compile boundary primarily removes eager/autograd wrapper overhead and copies around the projection path; it does not materially improve the GEMM kernels themselves.
 - The lower memory and lower copy/subclass overhead explain why run449 can improve throughput without changing GEMM counts.
 - Remaining opportunities are now either converting the memory savings into more batch, reducing GEMM/cast work further, or addressing rank-skewed FSDP collective exposure.
+
+## Experiment 451: Batch172 On Compiled-QKV Active Recipe
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=172 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run451-batch172-compile-qkv-active > outputs/autoresearch/may19-qwen3-14b/run451-batch172-compile-qkv-active.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,187.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.98 GiB, 93.62%.
+- No allocator retries were logged.
+- Loss moved from 12.55072 at step 1 to 7.79919 at step 10.
+
+Interpretation:
+
+- The memory recovered by compiling the Q/K/V projection wrapper is enough to run batch172 safely, but the shape is slower than batch168.
+- This argues against immediately testing batch176 on the same recipe; the prior batch sweep was already nonmonotonic, and the first higher neighbor under the new source regressed.

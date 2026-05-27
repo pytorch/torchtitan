@@ -3931,3 +3931,13 @@
   Planned command or config overrides: Active compiled-Q/K/V command with profiler active on step 10.
   Success criteria and expected risk: Success is complete rank traces; profiled tps is diagnostic only.
   Result: kept as profile data at source state `08becbe2`; profiled step 10 reached 12,176 tps and 163.95 GiB. Trace comparison shows large drops in `aten::copy_` and `PythonSubclass` overhead, modest MXFP8 cast-time reduction, flat NVJET GEMM time, and persistent rank-skewed FSDP collectives.
+
+- Idea: batch172 on compiled-Q/K/V active recipe
+  Current best source commit: 6abf05c5
+  Source: run449 recovered about 3 GiB versus the previous active recipe, and run450 shows copy/subclass overhead is lower.
+  Expected mechanism: Use the memory savings for more tokens per step while keeping the same seq128/loss-chunks4 tile constraints.
+  Supporting evidence: Batch172 is the next valid local batch above 168 because `local_batch_size * 32` must be divisible by the MXFP8 dim1 tile size under loss chunks4.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active compiled-Q/K/V command with `--training.local_batch_size=172`.
+  Success criteria and expected risk: Success is step-10 tps above 12,387 with memory below the risk line. Risk is a worse shape/schedule point despite fitting.
+  Result: discarded at source state `6abf05c5`; 12,187 tps and 166.98 GiB. Keep batch168 and do not prioritize batch176 without a new reason.
