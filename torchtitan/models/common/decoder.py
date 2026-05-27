@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
@@ -32,10 +32,15 @@ from torchtitan.protocols.module import Module, ModuleDict
 from torchtitan.protocols.sharding import NamedPlacement, SpmdInputConfig
 from torchtitan.protocols.types import MeshAxisName
 
-__all__ = ["Decoder", "TransformerBlock"]
+__all__ = [
+    "Decoder",
+    "TransformerBlock",
+    "decoder_spmd_input_config",
+    "decoder_token_placement",
+]
 
 
-def _decoder_token_placement(*, tp_type: spmd.PerMeshAxisSpmdType) -> NamedPlacement:
+def decoder_token_placement(*, tp_type: spmd.PerMeshAxisSpmdType) -> NamedPlacement:
     return {
         MeshAxisName.DP: spmd.S(0),
         MeshAxisName.CP: spmd.S(1),
@@ -43,9 +48,9 @@ def _decoder_token_placement(*, tp_type: spmd.PerMeshAxisSpmdType) -> NamedPlace
     }
 
 
-def _decoder_spmd_input_config() -> SpmdInputConfig:
-    inputs = _decoder_token_placement(tp_type=spmd.R)
-    labels = _decoder_token_placement(tp_type=spmd.I)
+def decoder_spmd_input_config() -> SpmdInputConfig:
+    inputs = decoder_token_placement(tp_type=spmd.R)
+    labels = decoder_token_placement(tp_type=spmd.I)
     return SpmdInputConfig(
         inputs=inputs,
         labels=labels,
@@ -101,9 +106,6 @@ class Decoder(BaseModel):
         # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
         # and fix the typing here
         layers: list  # list[TransformerBlock.Config] or subclass configs
-        spmd_input_config: SpmdInputConfig = field(
-            default_factory=_decoder_spmd_input_config
-        )
 
         def validate_context_parallel_attention(
             self,

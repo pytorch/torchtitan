@@ -53,7 +53,9 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    assert training.seq_len % parallel_dims.seq_len_divisor == 0, f"""
+    assert (
+        training.seq_len % parallel_dims.seq_len_divisor == 0
+    ), f"""
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
@@ -150,7 +152,7 @@ def apply_fsdp(
         cast_forward_inputs=False,
     )
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
-    if dp_mesh_dims is not None:
+    if dp_mesh_dims is not None and dp_mesh.size() > 1:
         # pyrefly: ignore[bad-typed-dict-key]
         fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
