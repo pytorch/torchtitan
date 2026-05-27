@@ -4261,3 +4261,13 @@
   Planned command or config overrides: Active event-cache-disabled command.
   Success criteria and expected risk: Success is step-10 tps above 12,454 with finite loss. Risk is worse overlap and delayed backward all-gathers.
   Result: discarded at source state `e53d7608`; 12,000 tps and 163.95 GiB, with loss rising through early steps before ending at 8.63673. Restore the bidirectional one-module prefetch schedule.
+
+- Idea: TORCH_NCCL_HIGH_PRIORITY=1 with event-cache disabled
+  Current best source commit: 7b4bd985
+  Source: FSDP collectives remain a large rank-skewed bucket after run481, and the simple event/record/progress knobs did not improve the active peak.
+  Expected mechanism: High-priority NCCL streams may improve overlap or reduce collective tail latency by letting communication run ahead of lower-priority compute work.
+  Supporting evidence: previous high-priority tests were before the final Q/K/V compile plus event-cache-disabled recipe.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix active command with `TORCH_NCCL_HIGH_PRIORITY=1 TORCH_NCCL_CUDA_EVENT_CACHE=0`.
+  Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is hurting compute/communication overlap by over-prioritizing collectives.
+  Result: discarded at source state `7b4bd985`; 12,311 tps and 163.95 GiB. Keep default NCCL stream priority.

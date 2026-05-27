@@ -12130,3 +12130,28 @@ Interpretation:
 
 - Backward prefetch remains important even after Q/K/V compile and event-cache disable.
 - The reduce-scatter-heavy profile sample should not be interpreted as evidence to weaken the backward prefetch chain; the active bidirectional prefetch schedule is restored.
+
+## Experiment 485: Event Cache Disabled With TORCH_NCCL_HIGH_PRIORITY=1
+
+Command:
+
+```bash
+TORCH_NCCL_HIGH_PRIORITY=1 TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run485-event-cache0-torch-nccl-high-priority > outputs/autoresearch/may19-qwen3-14b/run485-event-cache0-torch-nccl-high-priority.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,311.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Loss moved from 12.43607 at step 1 to 5.48408 at step 10.
+
+Interpretation:
+
+- High-priority NCCL streams are valid on the final event-cache-disabled compiled-Q/K/V recipe but remain below the active peak.
+- Keep default stream priority; the simple ProcessGroupNCCL scheduling knobs tested after run481 did not find another improvement beyond `TORCH_NCCL_CUDA_EVENT_CACHE=0`.
