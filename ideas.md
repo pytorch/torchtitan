@@ -4091,3 +4091,13 @@
   Planned command or config overrides: Prefix active command with `TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1`.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is no better schedule or compile overhead.
   Result: discarded at source state `a6022b03`; 12,274 tps and 163.95 GiB. Keep default Inductor settings.
+
+- Idea: NCCL_MIN_CTAS=32 on active recipe
+  Current best source commit: 74dff22a
+  Source: max-CTA tuning did not beat peak, but min-CTA tuning changes the lower bound rather than the cap.
+  Expected mechanism: A higher minimum CTA count may reduce collective tail latency without the same cap-induced starvation.
+  Supporting evidence: run450 still has rank-skewed FSDP collectives.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix active command with `NCCL_MIN_CTAS=32`.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is worse overlap.
+  Result: discarded at source state `74dff22a`; 12,309 tps and 163.95 GiB. Keep default min CTA behavior.
