@@ -11844,3 +11844,25 @@ Interpretation:
 
 - Root no-reshard is still slower on the final compiled-Q/K/V stack and costs about 3.65 GiB versus the active recipe.
 - Keep only the final transformer layer on no-reshard and keep the root wrapper resharding after forward.
+
+## Experiment 474: Batch170 On Compiled-QKV Stack
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=170 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run474-batch170-compiled-qkv > outputs/autoresearch/may19-qwen3-14b/run474-batch170-compiled-qkv.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: crash before step 1.
+- Failure: `AssertionError: unsupported` from the TorchAO Triton MXFP8 dim1 cast path.
+
+Interpretation:
+
+- With `seq_len=128`, batch170 gives 21,760 rows, which is not divisible by the 512-row tile required by this Triton path.
+- Viable neighboring batch sizes must move in increments of 4 at this sequence length.

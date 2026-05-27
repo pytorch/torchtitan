@@ -4151,3 +4151,13 @@
   Planned command or config overrides: Active compiled-Q/K/V command.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is higher peak memory and no overlap win.
   Result: discarded at source state `4a61fefd` plus dirty source; 12,160 tps and 167.60 GiB peak memory. Restore root resharding.
+
+- Idea: local batch size 170 on compiled-Q/K/V active recipe
+  Current best source commit: 24487c30
+  Source: after Q/K/V compile, only batch172 had been tested above the active batch168 point.
+  Expected mechanism: Batch170 might improve token throughput while using less memory than batch172.
+  Supporting evidence: Active batch168 has memory headroom, but batch172 is valid and slower/higher-memory.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active command with `--training.local_batch_size=170`.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is MXFP8 tile-shape incompatibility.
+  Result: crashed before step 1 at source state `24487c30`; `local_batch_size * seq_len = 21760` is not divisible by the Triton MXFP8 dim1 512-row tile, triggering `AssertionError: unsupported`.
