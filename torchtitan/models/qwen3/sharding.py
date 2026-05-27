@@ -26,6 +26,13 @@ if TYPE_CHECKING:
     from torchtitan.models.qwen3.model import Qwen3Model, Qwen3TransformerBlock
 
 
+_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
+    "w1": spmd.S(1),
+    "w2": spmd.S(2),
+    "w3": spmd.S(1),
+}
+
+
 def set_qwen3_sharding_config(
     config: "Qwen3Model.Config",
     *,
@@ -35,7 +42,16 @@ def set_qwen3_sharding_config(
     enable_ep: bool,
     chunked_loss: bool,
 ) -> None:
-    """Fill ``sharding_config`` on all Qwen3 sub-configs."""
+    """Fill ``sharding_config`` on all Qwen3 sub-configs.
+
+    Dense sub-configs (attention, norms, dense FFN) are populated
+    unconditionally — ``Module.parallelize`` filters disabled axes
+    at runtime.
+
+    MoE sub-configs (router, shared experts, routed experts) are
+    populated unconditionally — ``resolve_mesh`` filters disabled
+    axes at runtime.
+    """
 
     set_decoder_sharding_config(
         config,
@@ -59,7 +75,12 @@ def _set_qwen3_layer_sharding(
     enable_sp: bool,
     enable_ep: bool,
 ) -> None:
-    """Set sharding on one Qwen3 transformer layer."""
+    """Set sharding on one Qwen3 transformer layer.
+
+    Attention and norms are sharded on all blocks (MoE and non-MoE).
+    Dense FFN is only sharded on non-MoE blocks; MoE FFN is routed
+    through ``set_moe_sharding_config``.
+    """
     attention = layer_cfg.attention
     assert isinstance(attention, GQAttention.Config)
 
@@ -81,6 +102,7 @@ def _set_qwen3_layer_sharding(
             out_dst_shardings=dense_activation_placement(tp=spmd.S(2)),
         )
 
+    # Dense FFN (non-MoE layers only)
     if layer_cfg.feed_forward is not None:
         set_dense_ffn_sharding(
             layer_cfg.feed_forward,
@@ -88,10 +110,12 @@ def _set_qwen3_layer_sharding(
             enable_sp=enable_sp,
         )
 
+    # MoE FFN (MoE-enabled layers only).
     if layer_cfg.moe is not None:
         set_moe_sharding_config(
             layer_cfg.moe,
             enable_tp=enable_tp,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
+            expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )

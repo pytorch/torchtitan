@@ -21,6 +21,13 @@ if TYPE_CHECKING:
     from torchtitan.models.llama4.model import Llama4Model, Llama4TransformerBlock
 
 
+_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
+    "w1": spmd.S(1),
+    "w2": spmd.S(2),
+    "w3": spmd.S(1),
+}
+
+
 def set_llama4_sharding_config(
     config: "Llama4Model.Config",
     *,
@@ -31,7 +38,16 @@ def set_llama4_sharding_config(
     enable_ep: bool,
     chunked_loss: bool,
 ) -> None:
-    """Fill ``sharding_config`` on all Llama4 sub-configs."""
+    """Fill ``sharding_config`` on all Llama4 sub-configs.
+
+    Dense sub-configs (attention, norms, dense FFN) are populated
+    unconditionally — ``Module.parallelize`` filters disabled axes
+    at runtime.
+
+    MoE sub-configs (router, shared experts, routed experts) are
+    populated unconditionally — ``resolve_mesh`` filters disabled
+    axes at runtime.
+    """
 
     set_decoder_sharding_config(
         config,
@@ -60,9 +76,8 @@ def _set_llama4_layer_sharding(
     """Set sharding on one Llama4 transformer layer.
 
     Attention and norms are sharded on all blocks (MoE and non-MoE).
-    Dense FFN is sharded on non-MoE blocks. MoE blocks get full
-    sharding configs for the wrapper, router, shared experts, and
-    routed experts.
+    Dense FFN is only sharded on non-MoE blocks; MoE FFN is routed
+    through ``set_moe_sharding_config``.
     """
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.attention_norm.sharding_config = norm
@@ -72,6 +87,7 @@ def _set_llama4_layer_sharding(
     set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
     set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)
 
+    # Dense FFN (non-MoE layers only)
     if layer_cfg.feed_forward is not None:
         set_dense_ffn_sharding(
             layer_cfg.feed_forward,
@@ -79,6 +95,7 @@ def _set_llama4_layer_sharding(
             enable_sp=enable_sp,
         )
 
+    # MoE FFN (MoE-enabled layers only).
     if layer_cfg.moe is not None:
         set_moe_sharding_config(
             layer_cfg.moe,
@@ -86,4 +103,5 @@ def _set_llama4_layer_sharding(
             enable_cp=enable_cp,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
+            expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
