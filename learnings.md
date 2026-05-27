@@ -12952,3 +12952,37 @@ Interpretation:
 - This is a new measured non-profile peak, +75 tps over run509.
 - The win is consistent with the run510 copy/reshape bucket still being material after the RoPE custom kernel.
 - The active source now keeps the `reshape` flattening path.
+
+## Experiment 515: Profile Attention Output Reshape Active Source
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run515-profile-attn-output-reshape-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run515-profile-attn-output-reshape-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the committed attention-output reshape source.
+
+Result:
+
+- Status: keep as profile data.
+- Profiled step 10 `tps`: 13,513.
+- Step 10 peak memory: 168.91 GiB, 94.71%.
+- No allocator retries were logged.
+- Loss moved from 12.32766 at step 1 to 5.44410 at step 10.
+- Traces were written under `outputs/autoresearch/may19-qwen3-14b/run515-profile-attn-output-reshape-batch176-event-cache0/profiling/traces/iteration_10`.
+
+Trace comparison against run510:
+
+- The broad copy/slice/view bucket did not show a clean decrease in this profiled sample: about 522 ms/rank in run510 versus about 531 ms/rank in run515.
+- NCCL was noisier/worse in this profile: about 1,662 ms/rank in run510 versus about 1,761 ms/rank in run515, with worst rank around 2,772 ms.
+- Broad GEMM/MXFP8 work was also slightly higher: scaled-mm/GEMM about 1,406 -> 1,433 ms/rank and MXFP8 cast/quant about 730 -> 736 ms/rank.
+- Exact RoPE and attention remained stable: RoPE about 56 ms/rank and SDPA about 33 ms/rank.
+
+Interpretation:
+
+- The non-profile run514 is still the ranking result, but the profile does not prove the win came from less measured copy time.
+- Treat the reshape source as a valid measured improvement, but avoid further speculative layout micro-edits without a sharper trace signal.
+- Remaining high-probability bottlenecks are still GEMM/MXFP8 cast work and rank-skewed NCCL collectives.

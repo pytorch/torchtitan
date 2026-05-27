@@ -4551,3 +4551,13 @@
   Planned command or config overrides: Active batch176 Triton RoPE command.
   Success criteria and expected risk: Success is step-10 tps above 13,659. Risk is no change if SDPA output already forced the same copy internally.
   Result: kept at source state `3665b43b+dirty`; 13,734 tps and 168.91 GiB. This is the new active non-profile peak.
+
+- Idea: profile attention-output reshape active source
+  Current best source commit: 9e7a7b43
+  Source: run514 made a small source win in the attention output flattening path, so a fresh trace should check whether the copy/reshape bucket moved.
+  Expected mechanism: Compare against run510 to identify whether the `reshape` win came from less copy time or from shifted scheduling/noise.
+  Supporting evidence: The source diff targets a profiler-visible bucket, and the current best changed.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active batch176 reshape command with profiler enabled for iteration 10.
+  Success criteria and expected risk: Success is a clean profile trace. Profiled tps is diagnostic and not used for ranking.
+  Result: kept as diagnostic at source state `9e7a7b43`; profiled step-10 tps was 13,513. The broad copy bucket did not drop cleanly, and the profile was dominated by noisier NCCL plus GEMM/MXFP8 work. Keep the reshape source due to run514, but do not chase more layout micro-edits without stronger evidence.
