@@ -3971,3 +3971,13 @@
   Planned command or config overrides: Active compiled-Q/K/V batch168 command.
   Success criteria and expected risk: Success is step-10 tps above 12,387 with finite loss. Risk is extra collective/scheduling overhead and worse loss behavior from changed FSDP ordering.
   Result: discarded at source state `2195625b` plus dirty source; 12,110 tps and 163.87 GiB with worse short loss trajectory. Restore per-layer FSDP.
+
+- Idea: compile attention output projections
+  Current best source commit: efab4475
+  Source: run450 shows compile can remove projection wrapper overhead, and `attention.wo` is another repeated MXFP8 projection outside the already compiled Q/K/V and FFN boundaries.
+  Expected mechanism: Compile each `attention.wo` module to reduce eager/autograd wrapper overhead around the output projection.
+  Supporting evidence: Q/K/V projection compile succeeded where broader attention compile failed; `wo` is also a narrow projection boundary.
+  Planned source/config changes: Temporarily add an `attention_wo` compile component in `parallelize_qwen3()`.
+  Planned command or config overrides: Active command with `--compile.components=loss,feed_forward,qkv_linear,attention_wo`.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is extra compiled activation residency or no compiled benefit for a single linear.
+  Result: discarded at source state `efab4475` plus dirty source; 12,290 tps and 169.22 GiB. Keep only FFN and Q/K/V compile boundaries.

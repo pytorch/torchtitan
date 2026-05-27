@@ -11375,3 +11375,30 @@ Interpretation:
 
 - Splitting the largest FFN submodule into its own nested FSDP unit is valid and slightly lowers memory, but loses throughput to extra FSDP scheduling/collective overhead.
 - The short loss path is also worse than the active recipe, so this is not a candidate to keep.
+
+## Experiment 456: Compile Attention Output Projection
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,attention_wo --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run456-compile-attention-wo > outputs/autoresearch/may19-qwen3-14b/run456-compile-attention-wo.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily added an `attention_wo` compile component that compiles each layer's attention output projection module.
+- Restored the active source after the result.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,290.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 169.22 GiB, 94.88%.
+- No allocator retries were logged.
+- Loss moved from 12.39447 at step 1 to 6.43650 at step 10.
+
+Interpretation:
+
+- The attention output projection compile boundary is valid, but it costs too much memory and does not improve throughput.
+- Keep the successful compile surfaces limited to FFN and Q/K/V projection wrappers.
