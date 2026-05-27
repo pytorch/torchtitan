@@ -4681,3 +4681,13 @@
   Planned command or config overrides: Active qk_norm_rope command with profiler enabled for iteration 10.
   Success criteria and expected risk: Success is a clean trace. Profiled tps is diagnostic, not used for non-profile ranking.
   Result: kept as diagnostic at source state `ef128236`; profiled step-10 tps was 14,083. Parsed traces show RMSNorm down about 125 -> 43 ms/rank, while GEMM/MXFP8 and reduce-scatter remain the main exposed buckets.
+
+- Idea: fullgraph Q/K RMSNorm plus Triton RoPE helper
+  Current best source commit: ce3db3af
+  Source: the active helper uses `fullgraph=False` to avoid broader attention compile failures, but an isolated CUDA check showed this narrow helper can compile with `fullgraph=True`.
+  Expected mechanism: Fullgraph capture may reduce graph-break overhead around the Q/K RMSNorm plus RoPE helper without including SDPA, masks, or output projection.
+  Supporting evidence: The helper has a small explicit Tensor/float signature and the custom Triton RoPE autograd function compiled in the toy check.
+  Planned source/config changes: Change only the helper compile call to `fullgraph=True`.
+  Planned command or config overrides: Active qk_norm_rope batch176 command.
+  Success criteria and expected risk: Success is step-10 tps above 13,949 without memory or loss regression. Risk is real-model compile failure despite the isolated toy test.
+  Result: kept at source state `ce3db3af+dirty`; 14,003 tps at 168.91 GiB. This is the new active non-profile peak.

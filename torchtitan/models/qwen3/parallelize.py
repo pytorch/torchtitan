@@ -270,7 +270,7 @@ def _enable_triton_sequential_rope(
         compiled_qk_norm_rope = torch.compile(
             _qk_norm_rope,
             backend=compile_config.backend,
-            fullgraph=False,
+            fullgraph=True,
         )
 
     def _forward_with_triton_rope(
