@@ -13684,3 +13684,31 @@ Interpretation:
 - Batch180 benefits from the `norm_modules` source and is stronger than the previous batch180 validation.
 - The longer run still does not beat the 14,070 tps `block_norms` throughput branch.
 - Keep batch180/norm_modules only as a middle Pareto point: faster than safe batch176/norm_modules, lower-memory than batch176/block_norms, but not the absolute throughput winner.
+
+## Experiment 547: Profile Compiled Norm Modules
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,norm_modules --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run547-profile-norm-modules-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run547-profile-norm-modules-batch176-event-cache0.run.log 2>&1
+```
+
+Result:
+
+- Status: keep as diagnostic.
+- Profiled step 10 `tps`: 14,183.
+- Peak memory: 168.91 GiB, 94.71%.
+
+Profiler comparison:
+
+- Total kernel time across ranks: run527 qk_norm_rope 18.45 s, run535 block_norms 19.32 s, run547 norm_modules 18.83 s.
+- Large MXFP8/GEMM `nvjet` bucket is flat: about 6.65 s -> 6.73 s -> 6.62 s.
+- MXFP8 casts are flat: dim1 about 1.67 s, dim0 about 0.53 s across all three profiles.
+- Reduce-scatter is similar: about 4.01 s -> 4.12 s -> 4.10 s.
+- All-gather sits between qk_norm_rope and block_norms: about 2.12 s -> 2.84 s -> 2.51 s.
+- Compiled outer RMSNorm kernels are present in both block_norms and norm_modules, about 0.31 s total across ranks.
+
+Interpretation:
+
+- `norm_modules` gets the compiled-RMSNorm behavior while avoiding part, but not all, of the all-gather exposure added by `block_norms`.
+- The remaining hard bottlenecks are still MXFP8 GEMM/cast and FSDP collectives; more attention/RoPE/RMSNorm work is unlikely to move the roofline much.
