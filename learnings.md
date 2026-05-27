@@ -10640,3 +10640,29 @@ Interpretation:
 
 - Forcing LL128 is slower than the default protocol on the final explicit-NVLS recipe.
 - Keep default NCCL protocol selection with `NCCL_CTA_POLICY=2` and `NCCL_NVLS_ENABLE=1`.
+
+## Experiment 429: Explicit-NVLS Active Recipe With CUTE DSL GEMM Autotune
+
+Command:
+
+```bash
+CUTEDSL_ENABLE_AUTOTUNING=1 TORCHINDUCTOR_MAX_AUTOTUNE=1 TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1 TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS=CUTEDSL,TRITON,ATEN NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run429-cutedsl-autotune-nvls-active > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,159.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.95 GiB, 93.61%.
+- No allocator retries were logged.
+- Loss moved from 12.35849 at step 1 to 7.86514 at step 10.
+
+Interpretation:
+
+- The correct CUTE DSL flag is `CUTEDSL_ENABLE_AUTOTUNING=1`; Inductor only considers CUTE DSL for GEMM autotune when `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS` includes `CUTEDSL`.
+- This flag stack is valid but below the current explicit-NVLS peak. The compiled feed-forward boundary is not benefiting from CUTE DSL autotune enough to offset overhead or different kernel choices.
