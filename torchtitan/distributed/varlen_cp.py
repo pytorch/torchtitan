@@ -13,12 +13,14 @@ Houses :class:`CPVarlenMetadata`, the CP-specific extension of
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 
 import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.experimental._context_parallel._load_balancer import (
     _LoadBalancer,
+    _PTRRLoadBalancer,
 )
 
 from torchtitan.models.common.attention import VarlenMetadata
@@ -246,3 +248,102 @@ class CPVarlenMetadata(VarlenMetadata):
             max_k=max_k,
             k_global_gather_indices=k_global_gather_indices.to(torch.long),
         )
+
+
+class VarlenPTRRLoadBalancer(_LoadBalancer):
+    """Processing-Time based Round-Robin (PTRR) load balancer for
+    varlen attention.
+
+    Supports causal ``(-1, 0)`` and sliding-window causal ``(W, 0)`` masking.
+    Bidirectional or lookahead masks are not supported.
+
+    Estimates per-Q-block work directly from ``cu_seq_q`` (no ``BlockMask`` needed).
+    Per-block work is the sum of per-token work over the block. The same scheduling
+    primitive (``_PTRRLoadBalancer.ptrr_scheduling``) is reused.
+
+    Outputs a ``(B, S)`` permutation tensor where each batch element is
+    rearranged independently -- important when documents differ across the batch.
+    """
+
+    def __init__(
+        self,
+        cu_seq_q: torch.Tensor,
+        *,
+        batch_size: int,
+        seq_length: int,
+        world_size: int,
+        block_size: int = 1024,
+        window_size: tuple[int, int] = (-1, 0),
+    ):
+        if seq_length % block_size != 0:
+            raise ValueError(
+                f"seq_length {seq_length} must be divisible by block_size {block_size}."
+            )
+        num_blocks = seq_length // block_size
+        if num_blocks % world_size != 0:
+            raise ValueError(
+                f"num_blocks (seq_length / block_size = {num_blocks}) "
+                f"must be divisible by world_size {world_size}."
+            )
+
+        self.cu_seq_q = cu_seq_q
+        self.batch_size = batch_size
+        self.seq_length = seq_length
+        self.world_size = world_size
+        self.block_size = block_size
+        self.window_size = window_size
+
+    def _generate_indices(self, restore: bool = False) -> torch.Tensor:
+        """Generate token indices (or inverse) for load balancing.
+
+        Returns a ``(B, S)`` int64 tensor. When ``restore=False`` the result
+        is the forward permutation: ``indices[b, i]`` is the original token
+        position to be placed at slot ``i`` of batch ``b`` after PTRR
+        rebalancing. When ``restore=True`` the result is its inverse
+        (``argsort`` of the forward permutation).
+
+        Note the ``(B, S)`` output shape, vs upstream
+        :class:`_LoadBalancer`'s ``(1, S)`` or ``(B, S)`` contract: PTRR
+        rebalances every batch independently because document structure can
+        vary across the batch.
+        """
+        B = self.batch_size
+        S = self.seq_length
+        W = self.world_size
+        block_size = self.block_size
+        num_blocks = S // block_size
+
+        device = self.cu_seq_q.device
+        cu_seq_q = self.cu_seq_q.to(torch.long)
+
+        # Per-token work = number of visible K positions for this token.
+        # Causal (-1, 0): offset_in_doc + 1.
+        # Sliding window (W, 0): min(W, offset + 1).
+        positions = torch.arange(B * S, device=device, dtype=torch.long)
+        doc_id = torch.searchsorted(cu_seq_q, positions, right=True) - 1
+        work_per_token = positions - cu_seq_q[doc_id] + 1  # (B*S,)
+        left = self.window_size[0]
+        if left >= 0:
+            work_per_token = work_per_token.clamp(max=left)
+
+        # Per-block work: sum of token work within each block, per batch.
+        work_per_block = work_per_token.view(B, num_blocks, block_size).sum(dim=-1)
+        # (B, num_blocks)
+
+        batch_ptrr = torch.vmap(
+            functools.partial(_PTRRLoadBalancer.ptrr_scheduling, group_size=W)
+        )
+        ptrr_blocks = batch_ptrr(work_per_block)  # (B, W, num_blocks_per_rank)
+        ptrr_blocks = ptrr_blocks.reshape(B, -1)  # (B, num_blocks)
+
+        # Expand block indices to token indices.
+        block_indices = torch.arange(num_blocks * block_size, device=device).view(
+            num_blocks, block_size
+        )  # (num_blocks, block_size)
+        indices = block_indices[ptrr_blocks].view(B, -1)  # (B, S)
+
+        if restore:
+            # pyrefly: ignore[missing-argument]
+            indices = torch.vmap(torch.argsort)(indices)
+
+        return indices
