@@ -4221,3 +4221,13 @@
   Planned command or config overrides: Prefix active command with `TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_MAX_CTAS=64`.
   Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is worse overlap from too much collective occupancy.
   Result: discarded at source state `a71c658c`; 12,270 tps and 163.95 GiB peak memory. Keep default max-CTA behavior with event-cache disabled.
+
+- Idea: profile event-cache-disabled active recipe
+  Current best source commit: 4f1714c0
+  Source: run479 made `TORCH_NCCL_CUDA_EVENT_CACHE=0` the active peak, but the mechanism needed a fresh trace.
+  Expected mechanism: The trace should identify whether the win is from reduced compute, less MXFP8 cast work, or different FSDP/NCCL scheduling.
+  Supporting evidence: run450 had detailed trace buckets for the pre-event-cache compiled-Q/K/V recipe.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active event-cache-disabled command with profiler enabled for iteration 10.
+  Success criteria and expected risk: Success is a clean profile trace. Profiled tps is diagnostic and not used alone for ranking.
+  Result: kept as diagnostic at source state `4f1714c0`; profiled step-10 tps 12,132 and 163.95 GiB. Compared with run450, NVJET GEMM is essentially flat at 1004.9 -> 1001.2 ms/rank, MXFP8 dim1 casts are flat at 649.7 -> 649.6 ms/rank, and compiled-region wrapper time is slightly lower at 901.4 -> 897.3 ms/rank. NCCL all-gather drops 616.2 -> 570.5 ms/rank while reduce-scatter rises 1080.0 -> 1160.1 ms/rank in this profiled sample. The next probes should target communication scheduling interactions rather than more GEMM/MXFP8 source micro-edits.

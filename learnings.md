@@ -12020,3 +12020,37 @@ Interpretation:
 
 - The close old `NCCL_MAX_CTAS=64` probe does not combine well with disabled ProcessGroupNCCL event caching.
 - Keep event-cache disabled, but leave NCCL max CTA behavior at default.
+
+## Experiment 481: Profile Event-Cache-Disabled Active Recipe
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run481-profile-event-cache0-active > outputs/autoresearch/may19-qwen3-14b/run481-profile-event-cache0-active.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: keep as diagnostic profile; profiled tps is not used for ranking.
+- Step 10 `tps`: 12,132.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Loss moved from 12.54622 at step 1 to 6.83037 at step 10.
+
+Trace comparison versus run450:
+
+- NVJET GEMM: 1004.9 -> 1001.2 ms/rank average.
+- MXFP8 dim1 casts: 649.7 -> 649.6 ms/rank average.
+- MXFP8 dim0 casts: 140.7 -> 140.3 ms/rank average.
+- Compiled-region wrapper: 901.4 -> 897.3 ms/rank average.
+- NCCL all-gather: 616.2 -> 570.5 ms/rank average.
+- NCCL reduce-scatter: 1080.0 -> 1160.1 ms/rank average.
+
+Interpretation:
+
+- The event-cache-disabled win is not explained by less GEMM or MXFP8 cast work; those buckets are effectively flat.
+- The remaining useful surface is communication/runtime scheduling around FSDP collectives, not more source edits that target the already-compiled GEMMs.
