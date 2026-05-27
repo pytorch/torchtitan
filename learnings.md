@@ -11968,3 +11968,29 @@ Interpretation:
 
 - The older high-band NCCL progress knob does not compose with the final compiled-Q/K/V recipe.
 - Keep the default NCCL proxy append-op polling behavior.
+
+## Experiment 479: TORCH_NCCL_CUDA_EVENT_CACHE=0 On Compiled-QKV Stack
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run479-torch-nccl-cuda-event-cache0-compiled-qkv > outputs/autoresearch/may19-qwen3-14b/run479-torch-nccl-cuda-event-cache0-compiled-qkv.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: keep; new measured peak.
+- Step 10 `tps`: 12,454.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Loss moved from 12.43342 at step 1 to 6.50984 at step 10.
+
+Interpretation:
+
+- Disabling the ProcessGroupNCCL CUDA event cache improves the final compiled-Q/K/V recipe by 67 tps over run449.
+- The active command now includes `TORCH_NCCL_CUDA_EVENT_CACHE=0` in addition to `NCCL_NVLS_ENABLE=1` and `NCCL_CTA_POLICY=2`.

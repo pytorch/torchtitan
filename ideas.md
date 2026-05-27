@@ -4201,3 +4201,13 @@
   Planned command or config overrides: Prefix active command with `NCCL_PROGRESS_APPENDOP_FREQ=16`.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is worse communication progress.
   Result: discarded at source state `0d8845f5`; 12,246 tps and 163.95 GiB peak memory. Keep default NCCL progress append-op cadence.
+
+- Idea: TORCH_NCCL_CUDA_EVENT_CACHE=0 on compiled-Q/K/V active recipe
+  Current best source commit: d689d576
+  Source: `TORCH_NCCL_CUDA_EVENT_CACHE=0` sampled high on an older stack and had not been retested after Q/K/V compile reduced launch/copy overhead.
+  Expected mechanism: Disabling ProcessGroupNCCL CUDA event caching changes event lifetime and synchronization behavior around FSDP collectives, possibly reducing rank skew or stale event overhead.
+  Supporting evidence: run450 still shows rank-skewed FSDP collectives and scalar sync/cuda event interaction remains visible in the trace.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix active command with `TORCH_NCCL_CUDA_EVENT_CACHE=0`.
+  Success criteria and expected risk: Success is step-10 tps above 12,387 with finite loss. Risk is extra event allocation overhead.
+  Result: kept at source state `d689d576`; 12,454 tps and 163.95 GiB peak memory. This is a new measured peak, so make `TORCH_NCCL_CUDA_EVENT_CACHE=0` part of the active command.
