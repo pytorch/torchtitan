@@ -145,6 +145,20 @@ def _sequential_rope(x: torch.Tensor, rope_cache: torch.Tensor) -> torch.Tensor:
     return _SequentialRoPE.apply(x, rope_cache)
 
 
+def _qk_norm_rope(
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    q_eps: float,
+    k_eps: float,
+    rope_cache: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    xq = F.rms_norm(xq, (xq.shape[-1],), q_weight, q_eps)
+    xk = F.rms_norm(xk, (xk.shape[-1],), k_weight, k_eps)
+    return _sequential_rope(xq, rope_cache), _sequential_rope(xk, rope_cache)
+
+
 def _enable_shared_mxfp8_gate_up_input_cast(model: Qwen3Model) -> None:
     patched_count = 0
 
@@ -247,8 +261,17 @@ def _compile_qwen3_qkv_linear(model: Qwen3Model, compile_config: CompileConfig) 
     )
 
 
-def _enable_triton_sequential_rope(model: Qwen3Model) -> None:
+def _enable_triton_sequential_rope(
+    model: Qwen3Model, compile_config: CompileConfig
+) -> None:
     patched_count = 0
+    compiled_qk_norm_rope = None
+    if compile_config.enable and "qk_norm_rope" in compile_config.components:
+        compiled_qk_norm_rope = torch.compile(
+            _qk_norm_rope,
+            backend=compile_config.backend,
+            fullgraph=False,
+        )
 
     def _forward_with_triton_rope(
         self,
@@ -259,13 +282,26 @@ def _enable_triton_sequential_rope(model: Qwen3Model) -> None:
     ) -> torch.Tensor:
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.qkv_linear(x)
+        rope_applied = False
 
         if self.q_norm is not None or self.k_norm is not None:
             assert self.q_norm is not None and self.k_norm is not None
-            xq = self.q_norm(xq)
-            xk = self.k_norm(xk)
+            if compiled_qk_norm_rope is not None and self.use_rope:
+                xq, xk = compiled_qk_norm_rope(
+                    xq,
+                    xk,
+                    self.q_norm.weight,
+                    self.k_norm.weight,
+                    self.q_norm.eps,
+                    self.k_norm.eps,
+                    rope_cache,
+                )
+                rope_applied = True
+            else:
+                xq = self.q_norm(xq)
+                xk = self.k_norm(xk)
 
-        if self.use_rope:
+        if self.use_rope and not rope_applied:
             if self.rope_backend != "cos_sin":
                 raise NotImplementedError(
                     "Triton sequential RoPE only supports cos_sin"
@@ -300,6 +336,8 @@ def _enable_triton_sequential_rope(model: Qwen3Model) -> None:
         "Enabled Triton sequential RoPE for %s Qwen3 attention modules",
         patched_count,
     )
+    if compiled_qk_norm_rope is not None:
+        logger.info("Compiling Qwen3 Q/K RMSNorm plus RoPE helper with torch.compile")
 
 
 def parallelize_qwen3(
@@ -338,7 +376,7 @@ def parallelize_qwen3(
             "Qwen3 baseline FSDP bootstrap does not support CPU offload."
         )
 
-    _enable_triton_sequential_rope(model)
+    _enable_triton_sequential_rope(model, compile_config)
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
     _enable_shared_mxfp8_qkv_input_cast(model)

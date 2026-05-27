@@ -4661,3 +4661,13 @@
   Planned command or config overrides: Active batch176 command with `--loss.num_chunks=2`.
   Success criteria and expected risk: Success is step-10 tps above 13,734 without allocator pressure. Risk is crossing the loss/lm_head memory cliff.
   Result: discarded at source state `5bc112d1`; 13,560 tps at 173.62 GiB (97.35%) with early loss spikes. Keep chunks4 and do not test chunks1 at batch176.
+
+- Idea: compile Q/K RMSNorm plus Triton RoPE helper
+  Current best source commit: 4def0007
+  Source: run515 still shows meaningful RMSNorm and RoPE/attention-prefix overhead, but full attention and layer compile crash or regress.
+  Expected mechanism: Compile only a functional helper that performs Q/K RMSNorm and the existing Triton RoPE, excluding SDPA, masks, output projection, and the rest of the layer.
+  Supporting evidence: A small CUDA test showed the helper can compile with `fullgraph=False` and run backward. This boundary is narrower than failed attention-module compile and broader than RMSNorm-only module compile.
+  Planned source/config changes: Add a `qk_norm_rope` compile component and route Q/K norm+RoPE through the compiled helper when enabled.
+  Planned command or config overrides: Active batch176 command with `--compile.components=loss,feed_forward,qkv_linear,qk_norm_rope`.
+  Success criteria and expected risk: Success is step-10 tps above 13,734 without memory regression. Risk is graph-break overhead or a compiler/autograd failure around the Triton RoPE custom function.
+  Result: kept at source state `4def0007+dirty`; 13,949 tps at 168.91 GiB. This is the new active recipe.

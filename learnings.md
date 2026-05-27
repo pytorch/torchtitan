@@ -13233,3 +13233,30 @@ Interpretation:
 
 - Reducing loss chunks from 4 to 2 increases peak memory by about 4.7 GiB and does not beat the accepted chunks4 throughput.
 - Close lower loss-chunk counts at batch176; the current recipe is already near the memory cliff.
+
+## Experiment 526: Compile Q/K RMSNorm Plus Triton RoPE Helper
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run526-compile-qk-norm-rope-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run526-compile-qk-norm-rope-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Added a `qk_norm_rope` compile component.
+- The component compiles a functional helper that applies Q/K `F.rms_norm` and the existing custom Triton RoPE, while still excluding SDPA and the attention output projection from the compiled region.
+- The helper uses `fullgraph=False`, which avoids the broader attention-module fake-tensor recursion seen in earlier runs.
+
+Result:
+
+- Status: keep.
+- Step 10 `tps`: 13,949.
+- Step 10 peak memory: 168.91 GiB, 94.71%.
+- Loss moved cleanly from 12.38015 at step 1 to 5.67957 at step 10.
+
+Interpretation:
+
+- A narrow attention-prefix compile boundary succeeds where full attention/layer compile failed.
+- The win likely comes from reducing eager overhead around Q/K RMSNorm plus the custom RoPE boundary without involving attention masks, SDPA, or MXFP8 output projection state.
+- This is the new active source and command. Next profile should be taken from this recipe before more attention-prefix source work.
