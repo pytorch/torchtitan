@@ -4561,3 +4561,13 @@
   Planned command or config overrides: Active batch176 reshape command with profiler enabled for iteration 10.
   Success criteria and expected risk: Success is a clean profile trace. Profiled tps is diagnostic and not used for ranking.
   Result: kept as diagnostic at source state `9e7a7b43`; profiled step-10 tps was 13,513. The broad copy bucket did not drop cleanly, and the profile was dominated by noisier NCCL plus GEMM/MXFP8 work. Keep the reshape source due to run514, but do not chase more layout micro-edits without stronger evidence.
+
+- Idea: NCCL_MIN_NCHANNELS=8 on reshape active source
+  Current best source commit: 632d6f34
+  Source: `NCCL_MIN_NCHANNELS=16` was close but slower, and the reshape profile still showed rank-skewed NCCL time.
+  Expected mechanism: A smaller channel floor may improve collective parallelism without the resource pressure of 16 channels.
+  Supporting evidence: Channel count remains one of the few unclosed NCCL axes on the final reshape source, and run515 still showed worst-rank NCCL around 2.77 s in the profiled sample.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active reshape command with `NCCL_MIN_NCHANNELS=8`.
+  Success criteria and expected risk: Success is step-10 tps above 13,734. Risk is the same worse-overlap behavior as `NCCL_MIN_NCHANNELS=16`.
+  Result: discarded at source state `632d6f34`; 13,555 tps and 168.91 GiB. Keep default NCCL channel selection and stop nearby channel-floor probes.

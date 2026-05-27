@@ -12986,3 +12986,28 @@ Interpretation:
 - The non-profile run514 is still the ranking result, but the profile does not prove the win came from less measured copy time.
 - Treat the reshape source as a valid measured improvement, but avoid further speculative layout micro-edits without a sharper trace signal.
 - Remaining high-probability bottlenecks are still GEMM/MXFP8 cast work and rank-skewed NCCL collectives.
+
+## Experiment 516: NCCL_MIN_NCHANNELS=8 On Reshape Active Source
+
+Command:
+
+```bash
+NCCL_MIN_NCHANNELS=8 TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run516-nccl-min-nchannels8-reshape-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run516-nccl-min-nchannels8-reshape-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 13,555.
+- Step 10 peak memory: 168.91 GiB, 94.71%.
+- No allocator retries were logged.
+- Loss moved from 12.39055 at step 1 to 6.12527 at step 10.
+
+Interpretation:
+
+- A less aggressive NCCL channel floor is also slower than the default channel selection.
+- Close the NCCL channel-floor branch unless a later source change materially alters the collective balance.
