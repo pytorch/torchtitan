@@ -83,7 +83,7 @@ class GroupedExperts(Module):
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
-        The outer MoE ``LocalSpmdConfig`` makes this a local tensor region.
+        The outer MoE sharding config makes this a local tensor region.
         """
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices

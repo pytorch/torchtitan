@@ -20,7 +20,7 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.deepseek_v3.model import Attention
-from torchtitan.protocols.sharding import LocalSpmdConfig, ShardingConfig
+from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.deepseek_v3.model import (
@@ -105,7 +105,7 @@ def _set_deepseek_v3_layer_sharding(
         },
         out_src_shardings=dense_activation_placement(tp=spmd.P),
         out_dst_shardings=dense_sequence_placement(tp=attn_x_placement),
-        local_spmd=LocalSpmdConfig(),
+        local_spmd=True,
     )
     # Low-rank projections and norms keep Replicate weights on TP. We still
     # distribute them (Replicate DTensor) so DTensor activations flow through
