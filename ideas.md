@@ -4451,3 +4451,13 @@
   Planned command or config overrides: Active event-cache-disabled command with `--metrics.log_freq=10`.
   Success criteria and expected risk: Success is step-10 tps above 12,454 with finite loss at steps 1 and 10. Risk is a non-comparable or slower averaged measurement window.
   Result: discarded at source state `125d00d5`; step-10 tps fell to 12,018 with 163.95 GiB peak memory and finite decreasing loss. Keep `--metrics.log_freq=1`.
+
+- Idea: sequential RoPE fast path for causal SDPA
+  Current best source commit: f574f23b
+  Source: the active Qwen3 14B command uses causal SDPA, and the trainer passes a repeated arange `positions` tensor. That makes `apply_rotary_emb_cos_sin()` gather the same RoPE rows for every batch item instead of using its sequential slice path.
+  Expected mechanism: monkeypatch Qwen3 attention to call RoPE with `positions=None`, avoiding redundant per-batch RoPE cache gather work and possibly reducing copy/slice overhead visible in run481 traces.
+  Supporting evidence: run481 shows meaningful copy/slice/mul work around attention and RoPE, while for causal masks the positions are equivalent to `0..seq_len-1`.
+  Planned source/config changes: temporary attention-forward monkeypatch in `parallelize.py`.
+  Planned command or config overrides: Active event-cache-disabled command.
+  Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is that the gather is not a bottleneck or that monkeypatching changes compile/scheduling behavior.
+  Result: discarded at source state `f574f23b+dirty`; 12,280 tps and 163.15 GiB. The patch saves about 0.8 GiB but slows throughput, so restore the active attention path.
