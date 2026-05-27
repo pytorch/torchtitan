@@ -4051,3 +4051,13 @@
   Planned command or config overrides: Prefix active command with `NCCL_MAX_CTAS=128`.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is worse compute/comm overlap.
   Result: discarded at source state `8b89fa76`; 12,319 tps and 163.95 GiB. Close max-CTA tuning and keep default.
+
+- Idea: Inductor max autotune on compiled-Q/K/V active recipe
+  Current best source commit: 6ba86487
+  Source: prior max-autotune experiments predated the new `qkv_linear` compile boundary.
+  Expected mechanism: Autotune may choose better generated kernels for the now-compiled Q/K/V wrapper and FFN graph.
+  Supporting evidence: Run449 changed the compiled graph set and improved throughput/memory, so old compile-flag results are not fully conclusive.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix active command with `TORCHINDUCTOR_MAX_AUTOTUNE=1 TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1`.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is compile overhead with no better steady-state kernels.
+  Result: discarded at source state `6ba86487`; 12,252 tps and 163.95 GiB. Keep default Inductor settings.
