@@ -4571,3 +4571,13 @@
   Planned command or config overrides: Active reshape command with `NCCL_MIN_NCHANNELS=8`.
   Success criteria and expected risk: Success is step-10 tps above 13,734. Risk is the same worse-overlap behavior as `NCCL_MIN_NCHANNELS=16`.
   Result: discarded at source state `632d6f34`; 13,555 tps and 168.91 GiB. Keep default NCCL channel selection and stop nearby channel-floor probes.
+
+- Idea: disable metrics color printing
+  Current best source commit: b77c6ea0
+  Source: profiler traces show large metric scalar/logging overhead around logged steps, and color formatting is a cheap isolated part of the rank0 log path.
+  Expected mechanism: Removing ANSI color formatting may slightly reduce per-step logging overhead without changing the metric cadence or model computation.
+  Supporting evidence: `MetricsProcessor.Config` exposes `disable_color_printing`, and this is an isolated CLI-only test.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active reshape command with `--metrics.disable_color_printing`.
+  Success criteria and expected risk: Success is step-10 tps above 13,734. Risk is no effect because scalar synchronization, not string formatting, dominates.
+  Result: discarded at source state `b77c6ea0`; 13,626 tps and 168.91 GiB. Keep default metric color formatting.
