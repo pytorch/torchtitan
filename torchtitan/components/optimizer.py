@@ -540,7 +540,9 @@ def register_moe_load_balancing_hook(
                     expert_bias_delta_E = moe.load_balance_coeff * torch.sign(
                         tokens_per_expert_E.mean() - tokens_per_expert_E
                     )
-                    expert_bias_delta_E = expert_bias_delta_E - expert_bias_delta_E.mean()
+                    expert_bias_delta_E = (
+                        expert_bias_delta_E - expert_bias_delta_E.mean()
+                    )
                     # pyrefly: ignore [missing-attribute]
                     moe.expert_bias_E.add_(expert_bias_delta_E)
                     # pyrefly: ignore [missing-attribute]

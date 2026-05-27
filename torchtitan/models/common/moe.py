@@ -104,10 +104,14 @@ class GroupedExperts(Module):
         x_TD = x_BLD.view(T, D)
         topk_scores_TK = topk_scores_BLK.view(T, K)
         topk_expert_ids_TK = topk_expert_ids_BLK.view(T, K)
-        routed_input_RD, num_tokens_per_expert_E, metadata = (
-            self.token_dispatcher.dispatch(x_TD, topk_scores_TK, topk_expert_ids_TK)
+        (
+            routed_input_RD,
+            num_tokens_per_expert_E,
+            metadata,
+        ) = self.token_dispatcher.dispatch(x_TD, topk_scores_TK, topk_expert_ids_TK)
+        routed_output_RD = self._experts_forward(
+            routed_input_RD, num_tokens_per_expert_E
         )
-        routed_output_RD = self._experts_forward(routed_input_RD, num_tokens_per_expert_E)
         return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
 
     def parallelize(self, parallel_dims) -> None:
@@ -355,7 +359,7 @@ class MoE(Module):
         operates on DTensors — the DTensor→local conversion happens at
         the GroupedExperts boundary.
         """
-        bs, slen, dim = x_BLD.shape
+        B, L, D = x_BLD.shape
 
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # num_tokens_per_expert_E shape (E,)
@@ -391,7 +395,7 @@ class MoE(Module):
 
             sync_combine()
 
-        out_BLD = out_TD.view(bs, slen, dim)
+        out_BLD = out_TD.view(B, L, D)
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD
         return out_BLD
