@@ -190,7 +190,7 @@ def qwen3_14b() -> Trainer.Config:
         hf_assets_path="./tests/assets/tokenizer",
         model_spec=model_registry(
             "14B",
-            attn_backend="flex",
+            attn_backend="sdpa",
             converters=[
                 MXFP8LinearConverter.Config(model_compile_enabled=True),
             ],

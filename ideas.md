@@ -4381,3 +4381,13 @@
   Planned command or config overrides: Active event-cache-disabled command with vendored flash-attention on `PYTHONPATH`.
   Success criteria and expected risk: Success is a valid 10-step run above 12,454. Risk is a later CUTE runtime failure or slower attention kernels.
   Result: discarded at source state `c49a164d`; patched Flex FLASH completes 10 steps but reaches only 12,006 tps at 163.95 GiB. Keep SDPA active; the patch is useful diagnostically because it converts Flex FLASH from crash to valid-but-slower.
+
+- Idea: plain FlexAttention on the event-cache-disabled compiled-Q/K/V recipe
+  Current best source commit: 977e095e
+  Source: patched Flex FLASH is valid but slower; isolate whether the slowdown comes from FlexAttention in general or the CUTE FLASH backend specifically.
+  Expected mechanism: Plain FlexAttention uses the Triton FlexAttention path and may avoid the CUTE FLASH overhead while preserving block-mask semantics.
+  Supporting evidence: earlier plain FlexAttention was valid but slower on older stacks; the current event-cache-disabled compiled-Q/K/V recipe changed the surrounding bottleneck balance.
+  Planned source/config changes: Temporarily set Qwen3 14B `attn_backend="flex"`.
+  Planned command or config overrides: Active event-cache-disabled command.
+  Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is slower generic FlexAttention kernels or worse short-run loss behavior.
+  Result: discarded at source state `977e095e`; 12,409 tps and 163.95 GiB. This is close, and faster than patched Flex FLASH, but still below the SDPA event-cache peak. Keep SDPA active.
