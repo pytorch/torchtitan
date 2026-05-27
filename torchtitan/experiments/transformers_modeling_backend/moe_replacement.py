@@ -29,9 +29,9 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
 )
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 
@@ -51,7 +51,8 @@ def prepare_native_moe_configs(model: nn.Module, config) -> None:
         if not getattr(layer, "moe_enabled", False):
             continue
 
-        moe_params = _probe_hf_moe_block(layer.mlp, config)
+        moe_block = _get_moe_block(layer)
+        moe_params = _probe_hf_moe_block(moe_block, config)
         moe_config = _build_moe_config(moe_params, config)
         layer._native_moe_config = moe_config
 
@@ -73,7 +74,7 @@ def build_and_swap_native_moe(
     1. Set sharding config on the MoE.Config (now that EP/TP is known)
     2. Build the native MoE module
     3. Initialize parameters and buffers
-    4. Swap into ``layer.mlp``, set ``layer.moe`` for load-balancing hook
+    4. Swap into the layer's MoE attribute, set ``layer.moe`` for load-balancing hook
 
     Args:
         model: The HFTransformerModel with ``_native_moe_config`` stored on
@@ -114,12 +115,44 @@ def build_and_swap_native_moe(
         native_moe.to_empty(device=torch.device("cpu"))
         native_moe.init_states(buffer_device=torch.device("cpu"))
 
-        layer.mlp = native_moe
+        # Swap the native MoE into the layer's original attribute
+        # (``mlp`` for most models, ``feed_forward`` for Llama4).
+        moe_attr = _get_moe_attr_name(layer)
+        setattr(layer, moe_attr, native_moe)
         object.__setattr__(layer, "moe", native_moe)
+
+        # Llama4 decoder forward unpacks ``(output, router_logits)`` when
+        # ``is_moe_layer`` is True.  The native MoE returns a plain tensor,
+        # so disable the unpacking.
+        if getattr(layer, "is_moe_layer", False):
+            layer.is_moe_layer = False
 
         del layer._native_moe_config
 
     logger.info("Built and swapped native MoE modules into the model")
+
+
+# ---------------------------------------------------------------------------
+# MoE attribute helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_moe_attr_name(layer: nn.Module) -> str:
+    """Return the attribute name holding the MoE block on a decoder layer.
+
+    Most models use ``mlp``; Llama4 uses ``feed_forward``.
+    """
+    for name in ("mlp", "feed_forward"):
+        if hasattr(layer, name):
+            return name
+    raise AttributeError(
+        f"Layer {type(layer).__name__} has neither 'mlp' nor 'feed_forward'"
+    )
+
+
+def _get_moe_block(layer: nn.Module) -> nn.Module:
+    """Return the MoE block module from a decoder layer."""
+    return getattr(layer, _get_moe_attr_name(layer))
 
 
 # ---------------------------------------------------------------------------
@@ -143,9 +176,28 @@ def _probe_hf_moe_block(moe_block: nn.Module, config) -> dict:
     num_experts = _resolve_num_experts(experts, gate, moe_block, config)
     dim = config.hidden_size
 
-    # Intermediate size: all HF MoE models use fused gate_up_proj (E, 2*I, H)
+    # Intermediate size: HF MoE models use fused gate_up_proj.
+    # Standard layout: (E, 2*I, H) — dim 1 is 2*I.
+    # Llama4 layout: (E, H, 2*I) — dim 2 is 2*I (transposed).
     if hasattr(experts, "gate_up_proj"):
-        moe_intermediate_size = experts.gate_up_proj.shape[1] // 2
+        shape = experts.gate_up_proj.shape
+        # Standard: shape[1] == 2*I, shape[2] == H == dim
+        # Transposed: shape[1] == H == dim, shape[2] == 2*I
+        if shape[2] == dim and shape[1] != dim:
+            # Standard layout
+            moe_intermediate_size = shape[1] // 2
+        elif shape[1] == dim and shape[2] != dim:
+            # Transposed layout (Llama4)
+            moe_intermediate_size = shape[2] // 2
+        else:
+            # Both dims match H (e.g. 2*I == H), fall back to config
+            if (
+                hasattr(config, "moe_intermediate_size")
+                and config.moe_intermediate_size
+            ):
+                moe_intermediate_size = config.moe_intermediate_size
+            else:
+                moe_intermediate_size = shape[1] // 2
     elif hasattr(config, "moe_intermediate_size") and config.moe_intermediate_size:
         moe_intermediate_size = config.moe_intermediate_size
     else:
@@ -182,6 +234,11 @@ def _probe_hf_moe_block(moe_block: nn.Module, config) -> dict:
     # Shared experts
     shared_expert_info = _probe_shared_experts(moe_block, config)
 
+    # Score-before-experts: Llama4 multiplies routing weights into the
+    # input before expert computation.  Detect by inspecting the MoE
+    # block's forward source for the ``score * input`` pattern.
+    score_before_experts = _resolve_score_before_experts(moe_block)
+
     return {
         "num_experts": num_experts,
         "dim": dim,
@@ -195,6 +252,7 @@ def _probe_hf_moe_block(moe_block: nn.Module, config) -> dict:
         "load_balance_coeff": load_balance_coeff,
         "comm_backend": comm_backend,
         "shared_expert_info": shared_expert_info,
+        "score_before_experts": score_before_experts,
     }
 
 
@@ -248,7 +306,40 @@ def _resolve_score_func(gate: nn.Module | None, config) -> str:
             "Native MoE router supports 'softmax' and 'sigmoid'."
         )
 
+    # Llama4 uses sigmoid without e_score_correction_bias.
+    # Detect by inspecting the router's forward source for ``sigmoid``.
+    if gate is not None:
+        import inspect
+
+        try:
+            src = inspect.getsource(type(gate).forward)
+            if "sigmoid" in src:
+                return "sigmoid"
+        except (OSError, TypeError):
+            pass
+
     return "softmax"
+
+
+def _resolve_score_before_experts(moe_block: nn.Module) -> bool:
+    """Detect whether routing scores are applied before expert computation.
+
+    Llama4 multiplies ``routing_weights * hidden_states`` before calling
+    ``self.experts(...)``.  Most other HF MoE models apply scores after.
+    Detect by inspecting the MoE block's forward source.
+    """
+    import inspect
+
+    try:
+        src = inspect.getsource(type(moe_block).forward)
+    except (OSError, TypeError):
+        return False
+
+    # Llama4 pattern: ``routed_in = ... * router_scores...`` before experts
+    if "routed_in" in src and "router_scores" in src:
+        return True
+
+    return False
 
 
 def _probe_shared_experts(moe_block: nn.Module, config) -> dict | None:
@@ -354,7 +445,7 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         num_experts=params["num_experts"],
         top_k=params["top_k"],
         param_init=_EXPERT_INIT,
-        score_before_experts=False,
+        score_before_experts=params.get("score_before_experts", False),
         comm_backend=params["comm_backend"],
     )
 
