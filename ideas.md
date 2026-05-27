@@ -3961,3 +3961,13 @@
   Planned command or config overrides: Active command first with `--compile.components=loss,feed_forward,qkv_linear`, then without `qkv_linear` if the first result suggests compile overhead or memory is the issue.
   Success criteria and expected risk: Success is step-10 tps above 12,387 and memory below the risk line. Risk is higher activation/autograd memory from the fused output layout.
   Result: discarded at source state `822b65f1` plus dirty source. With `qkv_linear` compile it reached 12,352 tps but 170.78 GiB; without `qkv_linear` compile it was stopped at step 4 after allocator retries, 173.88 GiB, and 3,132 tps. Restore separate Q/K/V.
+
+- Idea: nested FSDP for feed-forward modules
+  Current best source commit: 2195625b
+  Source: run450 shows rank-skewed FSDP collectives remain large, and FFN is the largest per-layer submodule.
+  Expected mechanism: Shard each feed-forward module as an inner FSDP unit before sharding the transformer layer, giving FSDP a narrower all-gather/reduce-scatter boundary around the largest compiled submodule.
+  Supporting evidence: Per-layer FSDP has large rank-skewed reduce-scatter; exposing the FFN boundary might improve overlap or reduce peak memory.
+  Planned source/config changes: Temporarily call `fully_shard(layer.feed_forward, **fsdp_config)` before `fully_shard(layer, ...)`.
+  Planned command or config overrides: Active compiled-Q/K/V batch168 command.
+  Success criteria and expected risk: Success is step-10 tps above 12,387 with finite loss. Risk is extra collective/scheduling overhead and worse loss behavior from changed FSDP ordering.
+  Result: discarded at source state `2195625b` plus dirty source; 12,110 tps and 163.87 GiB with worse short loss trajectory. Restore per-layer FSDP.

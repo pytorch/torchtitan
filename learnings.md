@@ -11348,3 +11348,30 @@ Interpretation:
 
 - Fused QKV without compiling the projection wrapper is dominated: memory rises above the risk line, allocator retries begin, and throughput collapses.
 - Do not pursue the existing fused-QKV module further on this batch/seq/FSDP recipe without a separate memory-footprint fix.
+
+## Experiment 455: Nested FSDP On Feed-Forward Modules
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run455-nested-fsdp-feed-forward > outputs/autoresearch/may19-qwen3-14b/run455-nested-fsdp-feed-forward.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily applied `fully_shard(feed_forward, **fsdp_config)` before sharding each containing transformer layer.
+- Restored per-layer FSDP after the result.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,110.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.87 GiB, 91.88%.
+- No allocator retries were logged.
+- Loss moved from 12.36002 at step 1 to 8.97488 at step 10.
+
+Interpretation:
+
+- Splitting the largest FFN submodule into its own nested FSDP unit is valid and slightly lowers memory, but loses throughput to extra FSDP scheduling/collective overhead.
+- The short loss path is also worse than the active recipe, so this is not a candidate to keep.
