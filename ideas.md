@@ -4361,3 +4361,13 @@
   Planned command or config overrides: Active command plus `--optimizer.implementation=foreach`.
   Success criteria and expected risk: Success is step-10 tps above 12,454 or a lower-memory tie. Risk is slower optimizer kernels or weaker startup behavior.
   Result: discarded at source state `7c9127fc`; 12,202 tps and 163.95 GiB. Keep the default fused optimizer.
+
+- Idea: NCCL CGA cluster size 2 with event-cache disabled
+  Current best source commit: 6205c762
+  Source: earlier CGA cluster-size probes were on older source stacks; the active stack now has compiled Q/K/V and disabled ProcessGroupNCCL event caching.
+  Expected mechanism: Smaller CGA clustering may alter NCCL kernel resource use and improve overlap with NVJET GEMMs on the current collective schedule.
+  Supporting evidence: CGA size 2 was slightly better than size 4 on an older FFN-compile stack, though both were below peak.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix active command with `NCCL_CGA_CLUSTER_SIZE=2` while keeping `TORCH_NCCL_CUDA_EVENT_CACHE=0`.
+  Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is worse NCCL/GEMM overlap.
+  Result: discarded at source state `6205c762`; 12,273 tps and 163.95 GiB. Keep default CGA clustering.
