@@ -140,7 +140,7 @@ def _compile_qwen3_qkv_linear(model: Qwen3Model, compile_config: CompileConfig) 
 def _compile_qwen3_layers(model: Qwen3Model, compile_config: CompileConfig) -> None:
     compiled_count = 0
     for layer in model.layers.values():
-        layer.compile(backend=compile_config.backend, fullgraph=True)
+        layer.compile(backend=compile_config.backend, fullgraph=False)
         compiled_count += 1
 
     logger.info(
