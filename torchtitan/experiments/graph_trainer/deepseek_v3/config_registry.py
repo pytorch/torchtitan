@@ -66,6 +66,12 @@ def graph_trainer_deepseek_v3_16b() -> GraphTrainer.Config:
     return config
 
 
+def graph_trainer_deepseek_v3_16b_sdpa() -> GraphTrainer.Config:
+    config = graph_trainer_deepseek_v3_16b()
+    config.model_spec = model_registry("16B", attn_backend="sdpa")
+    return config
+
+
 def graph_trainer_deepseek_v3_671b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_671b(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
