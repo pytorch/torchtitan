@@ -4011,3 +4011,13 @@
   Planned command or config overrides: Prefix the active command with `TORCH_NCCL_AVOID_RECORD_STREAMS=0`.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is no effect or extra synchronization overhead.
   Result: discarded at source state `7af0858b`; 12,336 tps and 163.95 GiB. Keep the active NCCL stream behavior.
+
+- Idea: NCCL_MAX_CTAS=16 on active recipe
+  Current best source commit: 873bc788
+  Source: run450 shows FSDP collectives and GEMM competing for step time; NCCL CTA count can change collective occupancy.
+  Expected mechanism: Capping NCCL CTAs may leave more SM resources for overlap with GEMM.
+  Supporting evidence: CTA policy affects the active recipe, and max CTAs is a narrower resource-allocation knob than changing algorithms.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix active command with `NCCL_MAX_CTAS=16`.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is starving collectives and lowering throughput.
+  Result: discarded at source state `873bc788`; 12,216 tps and 163.95 GiB. Keep active CTA behavior.
