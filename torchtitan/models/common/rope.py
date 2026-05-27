@@ -174,9 +174,9 @@ class RoPE(Module):
                 * math.log(cfg.original_seq_len / (cfg.beta_fast * 2 * math.pi))
                 / math.log(base)
             )
-            assert 0 < low < high < d_half - 1, (
-                f"Invalid YaRN params: 0 < {low} < {high} < {d_half - 1}"
-            )
+            assert (
+                0 < low < high < d_half - 1
+            ), f"Invalid YaRN params: 0 < {low} < {high} < {d_half - 1}"
 
             ramp = (torch.arange(d_half, dtype=torch.float32) - low) / (high - low)
             mask = 1 - ramp.clamp(0, 1)
@@ -227,7 +227,7 @@ def _reshape_for_broadcast_complex(
         assert freqs_cis.shape == (seqlen, x.shape[-1])
         shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
         return freqs_cis.view(*shape)
-    elif positions.shape == (x.shape[0], seqlen):
+    elif positions.shape == (x.shape[0], seqlen):  # non-broadcasting path
         freqs_cis_expanded = freqs_cis[None, :, None, :].expand(x.shape[0], -1, -1, -1)
         freqs_cis = torch.gather(
             freqs_cis_expanded,
@@ -263,7 +263,7 @@ def _reshape_for_broadcast_cos_sin(
         assert rope_cache.shape == (seqlen, head_dim * 2)
         shape = [-1, seqlen, 1, head_dim * 2]
         return rope_cache.view(*shape)
-    elif positions.shape == (bz, seqlen):
+    elif positions.shape == (bz, seqlen):  # non-broadcasting path
         rope_cache_expanded = rope_cache[None, :, None, :].expand(bz, -1, -1, -1)
         rope_cache = torch.gather(
             rope_cache_expanded,
