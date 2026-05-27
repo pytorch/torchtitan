@@ -13787,3 +13787,28 @@ Interpretation:
 - CUTE DSL GEMM autotune is runnable with the current `qkv_linear` + `qk_norm_rope` + `norm_modules` stack.
 - It still does not improve throughput and it raises memory above both kept batch176 branches.
 - Close the CUTE DSL/autotune combination for this stack; default Inductor GEMM selection remains better.
+
+## Experiment 552: Disable Activation Checkpoint RNG Preservation
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,norm_modules --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --activation-checkpoint.no-preserve-rng-state --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run552-ac-no-preserve-rng-norm-modules-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run552-ac-no-preserve-rng-norm-modules-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 14,121.
+- Peak memory: 168.91 GiB, 94.71%.
+- Loss moved from 12.28861 at step 1 to 6.64890 at step 10.
+
+Interpretation:
+
+- Disabling RNG preservation for activation checkpointing is valid for this run and does not change peak memory.
+- It does not beat the kept `norm_modules` short-run sample, so checkpoint RNG stash/restore is not a meaningful remaining bottleneck.
+- Keep the default activation-checkpoint behavior for the current best.

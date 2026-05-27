@@ -4811,3 +4811,13 @@
   Planned command or config overrides: Active batch176 `norm_modules` command with `CUTEDSL_ENABLE_AUTOTUNING=1`, `TORCHINDUCTOR_MAX_AUTOTUNE=1`, `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1`, and `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS=CUTEDSL,TRITON,ATEN`.
   Success criteria and expected risk: Success is step-10 throughput above the kept norm_modules short sample without memory growth. Risk is compile/autotune overhead, less favorable selected kernels, or extra memory.
   Result: discarded at source state `3bcc3fd0`; run550 completed but reached only 14,088 tps at 173.27 GiB. CUTE DSL is valid on the current stack but remains slower and memory-riskier than default Inductor GEMM selection.
+
+- Idea: disable activation-checkpoint RNG preservation
+  Current best source commit: 368dbe2a
+  Source: Qwen3 dense blocks do not use dropout or other RNG-dependent operations, while full activation checkpointing defaults to preserving RNG state.
+  Expected mechanism: `--activation-checkpoint.no-preserve-rng-state` may remove checkpoint wrapper RNG stash/restore overhead during recompute without changing model math for this workload.
+  Supporting evidence: The active config uses full activation checkpointing and profile time remains sensitive to small overheads after the norm compile work.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active batch176 `norm_modules` command with `--activation-checkpoint.no-preserve-rng-state`.
+  Success criteria and expected risk: Success is step-10 throughput above the kept norm_modules short sample with unchanged memory. Risk is no effect or loss noise if there is hidden RNG use.
+  Result: discarded at source state `368dbe2a`; run552 completed with falling loss and the same 168.91 GiB peak, but reached only 14,121 tps. Keep the default checkpoint RNG setting unless a later source path exposes larger checkpoint-wrapper overhead.
