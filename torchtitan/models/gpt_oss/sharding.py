@@ -11,6 +11,7 @@ import spmd_types as spmd
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
+    dense_sequence_placement,
     norm_config,
     rowwise_config,
     set_decoder_sharding_config,
@@ -94,7 +95,7 @@ def _set_gpt_oss_layer_sharding(
     attention.sharding_config = ShardingConfig(
         state_shardings={"sinks": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings={
-            "x": dense_activation_placement(tp=attn_x_placement),
+            "x": dense_sequence_placement(tp=attn_x_placement),
             "freqs_cis": dense_param_placement(tp=spmd.R),
         },
         in_dst_shardings={
@@ -104,7 +105,7 @@ def _set_gpt_oss_layer_sharding(
     )
     set_qkv_linear_sharding(attention.qkv_linear)
     wo_config = rowwise_config(output_sp=enable_sp)
-    wo_config.state_tp_ir = {"bias"}
+    wo_config.state_shardings_compute = {"bias": dense_param_placement(tp=spmd.R)}
     attention.wo.sharding_config = wo_config
 
     # GPT-OSS flash attention always returns (output, lse).
