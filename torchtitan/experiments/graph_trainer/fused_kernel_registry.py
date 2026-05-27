@@ -884,60 +884,84 @@ class InductorRegionExtractor(RegionExtractor):
             if any(_is_unfusable(n) for n in comp if n.op == "call_function"):
                 continue
 
-            result = _extract_subgraph(comp, gm)
-            if result is None:
-                continue
-            sub_gm, placeholder_info, output_nodes = result
+            # Split forward / backward nodes so each sub-component is
+            # topologically contiguous.  The partitioner merges connected
+            # fusible nodes regardless of the fwd/bwd boundary (e.g.
+            # recomputed rms_norm in the backward section connects to
+            # original forward inputs).  Replacing such a region with a
+            # single call_function is impossible because the fwd and bwd
+            # parts execute at different times.
+            fwd_nodes = [n for n in comp if not n.meta.get("autograd_backward")]
+            bwd_nodes = [n for n in comp if n.meta.get("autograd_backward")]
+            sub_comps = [c for c in [fwd_nodes, bwd_nodes] if c]
+            if not sub_comps:
+                sub_comps = [comp]
 
-            # Strip trailing transpose / t from the region so the
-            # subgraph always produces contiguous output. The view op
-            # stays in the parent graph and operates on the kernel's
-            # contiguous result (zero-cost view, no copy).
-            _TRAILING_VIEW_OPS = {
-                torch.ops.aten.t.default,
-                torch.ops.aten.transpose.int,
-            }
-            stripped = set()
-            new_output_nodes = []
-            for out_n in output_nodes:
-                if (
-                    out_n.op == "call_function"
-                    and out_n.target in _TRAILING_VIEW_OPS
-                    and isinstance(out_n.args[0], torch.fx.Node)
-                    and out_n.args[0] in set(comp)
-                ):
-                    new_output_nodes.append(out_n.args[0])
-                    stripped.add(out_n)
-                else:
-                    new_output_nodes.append(out_n)
-            if stripped:
-                output_nodes = new_output_nodes
-                comp = [n for n in comp if n not in stripped]
-                # Rebuild the subgraph without the stripped nodes.
-                result = _extract_subgraph(comp, gm)
-                if result is None:
-                    continue
-                sub_gm, placeholder_info, output_nodes = result
-
-            # External inputs: the original-graph nodes referenced by the
-            # subgraph's placeholders.  Already recorded in placeholder_info.
-            ext_inputs = [info["orig_node"] for info in placeholder_info]
-
-            order = {n: i for i, n in enumerate(gm.graph.nodes)}
-            nodes_sorted = sorted(comp, key=lambda n: order.get(n, 0))
-            norm_fqn = _normalize_fqn(_get_node_fqn(nodes_sorted[0]))
-
-            region = Region(
-                nodes=nodes_sorted,
-                external_inputs=ext_inputs,
-                output_nodes=output_nodes,
-                norm_fqn=norm_fqn,
-                subgraph_gm=sub_gm,
-                inputs_info=placeholder_info,
-            )
-            all_regions.append(region)
+            for sub_comp in sub_comps:
+                # Re-split into connected components after the fwd/bwd
+                # split — severing fwd↔bwd edges may disconnect nodes.
+                for cc in _split_connected(sub_comp):
+                    self._extract_and_append(cc, gm, all_regions)
 
         return gm, all_regions
+
+    @staticmethod
+    def _extract_and_append(
+        comp: list[torch.fx.Node],
+        gm: torch.fx.GraphModule,
+        all_regions: list[Region],
+    ) -> None:
+        """Build a Region from a node list and append to all_regions."""
+        # Skip view-only sub-components
+        if all(is_view_node(n) or n.op != "call_function" for n in comp):
+            return
+
+        result = _extract_subgraph(comp, gm)
+        if result is None:
+            return
+        sub_gm, placeholder_info, output_nodes = result
+
+        # Strip trailing transpose / t so the subgraph always produces
+        # contiguous output. The view stays in the parent graph.
+        _TRAILING_VIEW_OPS = {
+            torch.ops.aten.t.default,
+            torch.ops.aten.transpose.int,
+        }
+        stripped = set()
+        new_output_nodes = []
+        for out_n in output_nodes:
+            if (
+                out_n.op == "call_function"
+                and out_n.target in _TRAILING_VIEW_OPS
+                and isinstance(out_n.args[0], torch.fx.Node)
+                and out_n.args[0] in set(comp)
+            ):
+                new_output_nodes.append(out_n.args[0])
+                stripped.add(out_n)
+            else:
+                new_output_nodes.append(out_n)
+        if stripped:
+            output_nodes = new_output_nodes
+            comp = [n for n in comp if n not in stripped]
+            result = _extract_subgraph(comp, gm)
+            if result is None:
+                return
+            sub_gm, placeholder_info, output_nodes = result
+
+        ext_inputs = [info["orig_node"] for info in placeholder_info]
+        order = {n: i for i, n in enumerate(gm.graph.nodes)}
+        nodes_sorted = sorted(comp, key=lambda n: order.get(n, 0))
+        norm_fqn = _normalize_fqn(_get_node_fqn(nodes_sorted[0]))
+
+        region = Region(
+            nodes=nodes_sorted,
+            external_inputs=ext_inputs,
+            output_nodes=output_nodes,
+            norm_fqn=norm_fqn,
+            subgraph_gm=sub_gm,
+            inputs_info=placeholder_info,
+        )
+        all_regions.append(region)
 
 
 _EXTRACTORS: dict[str, type[RegionExtractor]] = {
@@ -1013,7 +1037,7 @@ def _load_kernel_fn(kernel_dir: Path, filename: str = "kernel.py") -> Callable |
         spec.loader.exec_module(mod)
         return getattr(mod, "kernel_function", None)
     except Exception as e:
-        logger.debug(f"Failed to load kernel from {kernel_path}: {e}")
+        import sys; print(f"Failed to load kernel from {kernel_path}: {e}")
         return None
 
 
@@ -1185,7 +1209,7 @@ def _make_inductor_callable(region: Region) -> Callable | None:
     for inp_node in region.external_inputs:
         val = inp_node.meta.get("val")
         if val is None:
-            logger.debug(
+            import sys; print(
                 f"Region input {inp_node.name} has no fake meta; "
                 "skipping inductor compilation."
             )
@@ -1390,6 +1414,7 @@ def _format_subgraph_as_model(subgraph_gm: torch.fx.GraphModule) -> str:
         include_stride=True,
         include_device=True,
         expanded_def=True,
+        additional_meta=["autograd_backward"],
     )
     code = code.replace("class GraphModule(", "class Model(", 1)
     return code
@@ -1591,15 +1616,21 @@ def _replace_region_with_kernel(
     """
     graph = gm.graph
     nodes = region.nodes
-    external_inputs = region.external_inputs
     output_nodes = region.output_nodes
 
-    # Find a valid insertion point:
-    #  - AFTER all external inputs are defined
-    #  - BEFORE the earliest external user of any output_node
-    # If no valid point exists, raise to skip this region.
+    # Derive external inputs from CURRENT graph edges, not the stale
+    # Region.external_inputs list. Prior replacements may have rewired
+    # edges so that inputs now flow through kernel call nodes at
+    # different topological positions.
     node_order = {n: i for i, n in enumerate(graph.nodes)}
     region_set = set(nodes)
+    external_inputs: list[torch.fx.Node] = []
+    seen_inputs: set[str] = set()
+    for n in nodes:
+        for arg in _iter_node_args(n):
+            if arg not in region_set and arg.name not in seen_inputs:
+                seen_inputs.add(arg.name)
+                external_inputs.append(arg)
 
     latest_input_pos = max(
         (node_order.get(inp, -1) for inp in external_inputs),
@@ -1784,23 +1815,34 @@ def fused_kernel_pass(
     replaced = 0
     skipped_invalid = 0
     live_nodes: set[str] = {n.name for n in work_gm.graph.nodes}
+    skip_reasons: Counter[str] = Counter()
     for pos, h, r in instances:
         if h not in hash_best:
             continue
-        if not all(n.name in live_nodes for n in r.nodes):
+        missing = [n.name for n in r.nodes if n.name not in live_nodes]
+        if missing:
             skipped_invalid += 1
+            skip_reasons[h] += 1
+            if skip_reasons[h] <= 2:
+                logger.info(
+                    f"SKIP_NODE {h} pos={pos} "
+                    f"missing={len(missing)}/{len(r.nodes)} "
+                    f"e.g.={missing[0]}"
+                )
             continue
-        if not all(inp.name in live_nodes for inp in r.external_inputs):
-            skipped_invalid += 1
-            continue
+        # NOTE: we intentionally do NOT check r.external_inputs here.
+        # Prior replacements may have erased an external_input node and
+        # rewired its users to a kernel call via replace_all_uses_with.
+        # The Region's external_inputs list holds stale references, but
+        # the actual graph edges are valid.
         best_fn, _ = hash_best[h]
         try:
             _replace_region_with_kernel(work_gm, r, best_fn)
         except RuntimeError as e:
-            # Topological-order conflict: external_inputs and external
-            # users straddle the region.  Skip safely.
-            logger.debug(f"Skipping {h}: {e}")
             skipped_invalid += 1
+            skip_reasons[f"{h}_TOPO"] += 1
+            if skip_reasons[f"{h}_TOPO"] <= 2:
+                logger.info(f"SKIP_TOPO {h} pos={pos}: {e}")
             continue
         live_nodes = {n.name for n in work_gm.graph.nodes}
         replaced += 1
