@@ -4101,3 +4101,13 @@
   Planned command or config overrides: Prefix active command with `NCCL_MIN_CTAS=32`.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is worse overlap.
   Result: discarded at source state `74dff22a`; 12,309 tps and 163.95 GiB. Keep default min CTA behavior.
+
+- Idea: custom SwiGLU autograd in compiled FFN path
+  Current best source commit: 5a423a5a
+  Source: run450 trace still shows visible `MulBackward0` and elementwise work around FFN SwiGLU.
+  Expected mechanism: A custom autograd boundary for `silu(gate) * up` may reduce backward graph overhead or improve compiler fusion.
+  Supporting evidence: The FFN gate/up path is already patched and compiled, making this a narrow source change.
+  Planned source/config changes: Temporarily add a custom `SwiGLU` autograd function and use it in the patched FFN forward.
+  Planned command or config overrides: Active compiled-Q/K/V command.
+  Success criteria and expected risk: Success is step-10 tps above 12,387 with finite loss. Risk is blocking Inductor's existing fusion.
+  Result: discarded at source state `5a423a5a` plus dirty source; 12,321 tps and 163.95 GiB. Restore the original `F.silu(w1_out) * w3_out` expression.

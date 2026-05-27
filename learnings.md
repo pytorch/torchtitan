@@ -11716,3 +11716,30 @@ Interpretation:
 
 - Raising the NCCL minimum CTA count to 32 is valid but below the active recipe.
 - Keep the default NCCL min CTA behavior.
+
+## Experiment 469: Custom SwiGLU Autograd Boundary
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run469-custom-swiglu-autograd > outputs/autoresearch/may19-qwen3-14b/run469-custom-swiglu-autograd.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily replaced `F.silu(w1_out) * w3_out` in the patched FFN path with a custom autograd SwiGLU helper.
+- Restored the original expression after the result.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,321.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Loss moved from 12.43094 at step 1 to 7.36835 at step 10.
+
+Interpretation:
+
+- The custom autograd boundary is compatible with compile but slower than the default expression.
+- Inductor's existing fused Triton kernels for the SwiGLU expression are better than this manual autograd decomposition.
