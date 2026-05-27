@@ -10745,3 +10745,27 @@ Interpretation:
 
 - High-priority NCCL remains noisy and does not improve the final step throughput on the explicit-NVLS active recipe.
 - Keep default NCCL stream priority.
+
+## Experiment 433: Explicit-NVLS Active Recipe With Non-Fullgraph Transformer-Block Compile
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,blocks_partial --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run433-blocks-partial-compile-nvls-active > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily added a `blocks_partial` compile component that compiles each Qwen3 transformer block with `fullgraph=False` after the shared MXFP8 gate/up patch.
+- Did not separately compile `feed_forward` for this probe.
+- The source was restored after the result.
+
+Result:
+
+- Status: crash before step 1.
+- Failure: `torch._inductor.exc.InductorError: RecursionError: maximum recursion depth exceeded`.
+
+Interpretation:
+
+- Allowing graph breaks at the transformer-block boundary is still not enough to avoid the MXFP8/Inductor recursion failure.
+- Keep model/block compile closed for this stack; the useful stable boundary remains `loss,feed_forward`.
