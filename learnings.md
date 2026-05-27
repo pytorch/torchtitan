@@ -13036,3 +13036,29 @@ Interpretation:
 
 - Removing ANSI color formatting from the rank0 metrics log is valid but does not improve reported throughput.
 - Keep the active metrics configuration unchanged.
+
+## Experiment 518: Batch180 With Reshape Active Source
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=180 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run518-batch180-reshape-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run518-batch180-reshape-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard as memory-risky/unstable.
+- Step 10 `tps`: 13,767.
+- Step 10 peak memory: 172.47 GiB, 96.70%.
+- No allocator retries were logged.
+- Loss moved from 12.35314 at step 1 to 7.02574 at step 10, but step 10 was higher than step 9.
+- Throughput collapsed mid-run: step 5 was 6,385 tps, step 6 was 3,497 tps, and step 7 was 4,087 tps before recovering.
+
+Interpretation:
+
+- Batch180 can sample above the batch176 peak, but it is above the preferred memory ceiling and not clearly stable over 10 steps.
+- Keep batch176 as the active command unless a source change saves memory or a longer stability run is explicitly needed for this risky point.

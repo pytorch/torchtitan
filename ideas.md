@@ -4581,3 +4581,13 @@
   Planned command or config overrides: Active reshape command with `--metrics.disable_color_printing`.
   Success criteria and expected risk: Success is step-10 tps above 13,734. Risk is no effect because scalar synchronization, not string formatting, dominates.
   Result: discarded at source state `b77c6ea0`; 13,626 tps and 168.91 GiB. Keep default metric color formatting.
+
+- Idea: batch180 with reshape active source
+  Current best source commit: fb18bcd3
+  Source: batch176 is close to the memory ceiling, but batch180 is tile-compatible and may convert additional memory into throughput.
+  Expected mechanism: Larger local batch improves GEMM/collective amortization if the allocator remains stable.
+  Supporting evidence: `local_batch_size=180` keeps total token rows divisible by the 512-row MXFP8 dim1 shape constraint: `180 * 128 = 45 * 512`.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active reshape command with `--training.local_batch_size=180`.
+  Success criteria and expected risk: Success is a material step-10 tps win with stable steps and acceptable memory. Risk is crossing the memory-risk line or hitting allocator/step-time instability.
+  Result: discarded at source state `fb18bcd3`; step-10 tps sampled 13,767, but peak memory was 172.47 GiB (96.70%) and steps 5-7 collapsed to 6,385 / 3,497 / 4,087 tps. Keep batch176 active.
