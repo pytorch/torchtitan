@@ -10980,3 +10980,30 @@ Interpretation:
 
 - Coordinate descent tuning alone is valid on the MXFP8 shared-cast plus explicit-NVLS recipe, but it does not beat the active peak.
 - Keep default Inductor tuning; max autotune, CUTE DSL autotune, `dynamic=False`, and coordinate descent are all below the active recipe.
+
+## Experiment 442: FSDP Async Unshard On Explicit-NVLS Active Recipe
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run442-async-unshard-nvls-active > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily called `_set_unshard_async_op(True)` on each FSDP-wrapped transformer layer, `lm_head`, and root model after `fully_shard`.
+- Restored the default unshard path after the result.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,050.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 168.24 GiB, 94.33%.
+- No allocator retries were logged.
+- Loss moved from 12.46597 at step 1 to 15.72218 at step 10, failing the short-run loss sanity signal.
+
+Interpretation:
+
+- Async unshard does not compose with the explicit-NVLS MXFP8 recipe: it raises memory, lowers throughput, and produces a bad short loss trend.
+- Keep the default FSDP unshard behavior.
