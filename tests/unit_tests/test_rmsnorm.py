@@ -9,7 +9,7 @@ import unittest
 import torch
 import torch.nn as nn
 
-from torchtitan.models.common.rmsnorm import RMSNorm
+from torchtitan.models.common.nn_modules import RMSNorm
 
 
 class TestRMSNorm(unittest.TestCase):
