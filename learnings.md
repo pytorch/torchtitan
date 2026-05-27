@@ -13209,3 +13209,27 @@ Interpretation:
 
 - Splitting the embedding table out of the root wrapper does not reduce the current memory cliff; it raises peak memory and adds enough scheduling/numerical noise to hurt the run.
 - Restore the accepted root-wrapper embedding layout and keep the existing layer-to-layer plus final-layer/lm_head prefetch chain.
+
+## Experiment 525: Batch176 With Loss Chunks2
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=2 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run525-loss-chunks2-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run525-loss-chunks2-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 13,560.
+- Step 10 peak memory: 173.62 GiB, 97.35%.
+- Loss moved from 12.60781 at step 1 to 6.87626 at step 10, but spiked to 14.81906 and 17.35239 at steps 3-4.
+
+Interpretation:
+
+- Reducing loss chunks from 4 to 2 increases peak memory by about 4.7 GiB and does not beat the accepted chunks4 throughput.
+- Close lower loss-chunk counts at batch176; the current recipe is already near the memory cliff.

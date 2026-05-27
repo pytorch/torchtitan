@@ -4651,3 +4651,13 @@
   Planned command or config overrides: Active batch176 reshape command.
   Success criteria and expected risk: Success is step-10 tps above 13,734 or lower memory without loss regression. Risk is extra endpoint scheduling overhead or higher live all-gather memory.
   Result: discarded at source state `6e386f7d+dirty`; 13,471 tps at 169.43 GiB (95.00%) with a poor loss trajectory. Restore the accepted root-wrapper embedding layout.
+
+- Idea: loss chunks2 at batch176
+  Current best source commit: 5bc112d1
+  Source: the active command uses `loss.num_chunks=4`; fewer chunks may reduce repeated lm_head/loss loop overhead but increases per-chunk activation memory.
+  Expected mechanism: Halving the loss chunk count reduces loss-path chunk iterations while preserving MXFP8 row tiling because `176 * 64` is divisible by 128.
+  Supporting evidence: Earlier chunks2 tests were not on the final batch176/event-cache-disabled/Triton-RoPE source.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active batch176 command with `--loss.num_chunks=2`.
+  Success criteria and expected risk: Success is step-10 tps above 13,734 without allocator pressure. Risk is crossing the loss/lm_head memory cliff.
+  Result: discarded at source state `5bc112d1`; 13,560 tps at 173.62 GiB (97.35%) with early loss spikes. Keep chunks4 and do not test chunks1 at batch176.
