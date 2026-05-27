@@ -4731,3 +4731,13 @@
   Planned command or config overrides: Active block_norms command with `--training.local_batch_size=172`.
   Success criteria and expected risk: Success is tps above 14,003 with memory at or below the pre-block_norms 168.91 GiB point. Risk is losing too much batch amortization.
   Result: discarded at source state `bf4f67bc`; 13,791 tps at 169.71 GiB (95.16%). Do not keep tuning batch size around `block_norms`.
+
+- Idea: fuse Q/K RMSNorm plus RoPE forward
+  Current best source commit: eb2b4938
+  Source: run535 profile still shows Q/K normalization plus RoPE work in the attention prefix, and the user allowed custom operator replacement.
+  Expected mechanism: A Triton forward kernel can read each Q/K row once, compute RMSNorm, immediately apply sequential RoPE, and save `rstd` for the native RMSNorm backward.
+  Supporting evidence: A CUDA smoke test matched `F.rms_norm` plus the existing Triton RoPE path within bf16 precision and produced matching gradients.
+  Planned source/config changes: Add a custom autograd function for fused Q/K RMSNorm plus RoPE forward, using the existing Triton RoPE backward and native `aten._fused_rms_norm_backward`.
+  Planned command or config overrides: Active `block_norms` command at batch176.
+  Success criteria and expected risk: Success is sustained steps 11-20 above 14,070 with sane loss, or a clear memory/throughput Pareto improvement. Risk is extra autograd overhead or lower-quality generated code versus Inductor/native RMSNorm.
+  Result: discarded at source state `eb2b4938+dirty`; short run538 reached 14,146 tps at 170.14 GiB, but run539 sustained only 13,959 tps over steps 11-20 at 170.14 GiB. Remove the fused source patch.

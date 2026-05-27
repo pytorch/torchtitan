@@ -13542,3 +13542,33 @@ Interpretation:
 
 - Reducing the batch size does not turn the `block_norms` source into a better safe-memory point.
 - Keep batch176 for the throughput branch and the pre-`block_norms` batch176 source as the safer memory branch.
+
+## Experiments 538-539: Fused Q/K RMSNorm Plus RoPE Forward
+
+Commands:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,block_norms --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run538-fused-qk-rmsnorm-rope-blocknorms-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run538-fused-qk-rmsnorm-rope-blocknorms-batch176-event-cache0.run.log 2>&1
+
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=20 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,block_norms --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run539-fused-qk-rmsnorm-rope-20step-blocknorms-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run539-fused-qk-rmsnorm-rope-20step-blocknorms-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily replaced the Q/K RMSNorm plus RoPE helper with a custom autograd function.
+- The forward path used a Triton kernel to compute RMSNorm and sequential RoPE together.
+- The backward path used the existing Triton RoPE backward followed by native `aten._fused_rms_norm_backward`.
+
+Result:
+
+- Status: discard.
+- Run538 step 10 `tps`: 14,146.
+- Run539 sustained steps 11-20 average `tps`: 13,959.
+- Peak memory: 170.14 GiB, 95.40%.
+- Run539 loss moved from 12.31132 at step 1 to 3.38217 at step 20.
+
+Interpretation:
+
+- The fused forward reduces peak memory versus the compiled outer block RMSNorm throughput branch, but it does not improve sustained throughput.
+- This path likely trades native/Inductor RMSNorm scheduling for a small custom-kernel win that is not large enough to overcome extra autograd/compiler overhead.
+- Restore the committed Q/K RMSNorm plus Triton RoPE source.
