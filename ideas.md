@@ -4691,3 +4691,13 @@
   Planned command or config overrides: Active qk_norm_rope batch176 command.
   Success criteria and expected risk: Success is step-10 tps above 13,949 without memory or loss regression. Risk is real-model compile failure despite the isolated toy test.
   Result: kept at source state `ce3db3af+dirty`; 14,003 tps at 168.91 GiB. This is the new active non-profile peak.
+
+- Idea: batch180 on fullgraph Q/K RMSNorm plus Triton RoPE source
+  Current best source commit: 19f61c75
+  Source: fullgraph Q/K norm plus RoPE raises the batch176 peak enough that the old batch180 branch deserved one stability recheck on materially changed source.
+  Expected mechanism: Extra batch size may amortize FSDP collectives and GEMM launch overhead if the helper removes enough per-token overhead.
+  Supporting evidence: Short run529 reached 14,069 tps at step 10.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active qk_norm_rope command with `--training.local_batch_size=180`.
+  Success criteria and expected risk: Success is sustained steps 11-20 average above 14,003 without allocator retries. Risk is the known 96%+ HBM pressure and unstable throughput.
+  Result: discarded at source state `19f61c75`; run530 averaged 13,963 tps over steps 11-20 at 172.47 GiB (96.70%). Keep batch176 and do not retest larger batches without a memory-reducing source change.

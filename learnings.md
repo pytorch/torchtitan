@@ -13315,3 +13315,52 @@ Interpretation:
 
 - Fullgraph capture is valid for this narrow helper even though broader attention/layer fullgraph capture failed.
 - Keep `fullgraph=True` for the active Q/K norm plus RoPE helper.
+
+## Experiment 529: Batch180 On Fullgraph Q/K RMSNorm Plus RoPE Source
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=180 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run529-qk-norm-rope-batch180-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run529-qk-norm-rope-batch180-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the kept fullgraph `qk_norm_rope` helper.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 14,069.
+- Step 10 peak memory: 172.47 GiB, 96.70%.
+- Loss moved from 12.45897 at step 1 to 4.87571 at step 10.
+
+Interpretation:
+
+- The short sample beats the active batch176 step-10 peak but remains above the memory risk line.
+- Treat it as a validation candidate only; the longer run below decides whether the batch-size branch stays open.
+
+## Experiment 530: Batch180 20-Step Stability On Fullgraph Q/K RMSNorm Plus RoPE Source
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=20 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=180 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run530-qk-norm-rope-batch180-20step-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run530-qk-norm-rope-batch180-20step-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the kept fullgraph `qk_norm_rope` helper.
+
+Result:
+
+- Status: discard.
+- Sustained steps 11-20 average `tps`: 13,963.
+- Step 10 `tps`: 14,084.
+- Peak memory: 172.47 GiB, 96.70%.
+- Loss moved from 12.56486 at step 1 to 3.40239 at step 20.
+
+Interpretation:
+
+- Batch180 is numerically clean on this source, but sustained throughput is below the active batch176 step-10 peak while using substantially more HBM.
+- Keep the active batch176 command and close larger-batch retesting until a source change materially lowers memory or per-token work.
