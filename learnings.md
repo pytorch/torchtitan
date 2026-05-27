@@ -10561,3 +10561,56 @@ Interpretation:
 
 - The installed TorchAO MXFP8 linear path does not implement MSLK for this route.
 - Keep the default `KernelPreference.AUTO`; the only non-auto path advertised by the assertion is emulated, which is not a plausible performance candidate for the current GEMM-dominated profile.
+
+## Experiment 426: Profile Explicit-NVLS Active Recipe
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run426-profile-nvls-active > run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the committed shared MXFP8 gate/up input-cast source.
+
+Result:
+
+- Status: keep as profile data; profiled tps is diagnostic only.
+- Step 10 `tps`: 12,093.
+- Step 10 peak memory: 166.95 GiB, 93.61%.
+- Traces written under `outputs/autoresearch/may19-qwen3-14b/run426-profile-nvls-active/profiling/traces/iteration_10/`.
+
+Trace summary:
+
+- The profiled step remains dominated by rank-skewed FSDP collectives plus MXFP8 GEMM/cast work.
+- Average parsed GPU kernel buckets across ranks: reduce-scatter about 888 ms, GEMM/matmul about 829 ms, all-gather about 525 ms, MXFP8 cast/MX kernels about 416 ms, copy/mem kernels about 352 ms, elementwise about 176 ms.
+- Worst rank remains rank6 with about 1.71 s reduce-scatter and 0.67 s all-gather.
+- Top rank0 kernel is still `nvjet_sm100_qqtst_...` at about 738 ms total. The visible NCCL kernels are still `RING_LL`, so explicit `NCCL_NVLS_ENABLE=1` did not make the main profiled FSDP collectives visibly use NVLS kernels.
+
+Interpretation:
+
+- The NVLS command win is not explained by an obvious switch from ring kernels to NVLS kernels in the trace.
+- The next viable work remains reducing MXFP8 GEMM/cast/copy cost or changing FSDP collective exposure; simple compile-boundary and saved-MX-weight variants have not helped.
+
+## Experiment 427: Force NCCL_ALGO=NVLS
+
+Command:
+
+```bash
+NCCL_ALGO=NVLS NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run427-nccl-algo-nvls > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: crash during distributed initialization.
+- Failure: `Error : no algorithm/protocol available for function Broadcast with datatype ncclInt8. NCCL_ALGO was set to NVLS.`
+
+Interpretation:
+
+- Forcing all collectives to NVLS is not viable because the initialization broadcast path cannot use NVLS.
+- Keep `NCCL_NVLS_ENABLE=1` as an enablement hint only, not `NCCL_ALGO=NVLS`.
