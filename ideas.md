@@ -4311,3 +4311,13 @@
   Planned command or config overrides: Active event-cache-disabled command with `/home/avenkataraman/github/pytorch/third_party/flash-attention/hopper` and `/home/avenkataraman/github/pytorch/third_party/flash-attention` prepended to `PYTHONPATH`.
   Success criteria and expected risk: Success is a valid 10-step run above 12,454. Risk is that FA3's supported device matrix does not include this host.
   Result: crashed at source state `6ab75081`; the import blocker is gone, but PyTorch FA3 rejects the B200/SM100 host with `FA3 requires compute capability 9.0`. Restore SDPA; varlen remains blocked unless FA3 gains an SM100 path or the capability gate is intentionally bypassed and validated.
+
+- Idea: BF16 fused optimizer states on the event-cache-disabled recipe
+  Current best source commit: 4816c3fd
+  Source: the active recipe is still close to the memory limit, and optimizer-state dtype had not been isolated after compiled Q/K/V plus event-cache disable.
+  Expected mechanism: `fused_opt_states_bf16` may reduce optimizer-state footprint and either speed the fused optimizer or permit a larger local batch.
+  Supporting evidence: `OptimizersContainer.Config` exposes the implementation and uses fused Adam/AdamW with BF16 momentum/variance states.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active event-cache-disabled command plus `--optimizer.implementation=fused_opt_states_bf16`.
+  Success criteria and expected risk: Success is step-10 tps above 12,454 or clearly lower peak memory that enables a higher batch. Risk is weaker short-run loss behavior from BF16 optimizer states.
+  Result: discarded at source state `4816c3fd`; 12,442 tps and 163.95 GiB. It is close to the active peak but does not beat it and does not lower printed peak memory, so keep the default fused optimizer.

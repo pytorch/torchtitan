@@ -12258,3 +12258,29 @@ Interpretation:
 - Varlen attention is not currently viable on this B200/SM100 host through PyTorch FA3, even with the vendored FA3 extension installed.
 - The attention alternatives now have backend-specific SM100 blockers: Flex FLASH reaches a CUTE SM100 block-sparse correction crash, while varlen reaches FA3 and is rejected by the FA3 compute-capability gate.
 - SDPA remains the active attention backend.
+
+## Experiment 490: BF16 Fused Optimizer States
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --optimizer.implementation=fused_opt_states_bf16 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run490-event-cache0-fused-opt-states-bf16 > outputs/autoresearch/may19-qwen3-14b/run490-event-cache0-fused-opt-states-bf16.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,442.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Loss moved from 12.34171 at step 1 to 7.05333 at step 10.
+
+Interpretation:
+
+- BF16 fused optimizer states are a near miss but do not beat the active peak of 12,454 tps.
+- Peak memory is unchanged at the printed resolution, so this does not open a higher local-batch follow-up.
+- Keep the default fused optimizer implementation for the active recipe.
