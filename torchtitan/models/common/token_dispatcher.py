@@ -355,6 +355,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         Collapses token count matrix ``t_mat`` from ``(EP, e)`` to
         ``num_global_tokens_per_local_expert_e`` ``(e,)`` by summing across ranks.
         """
+        # pyrefly: ignore [missing-attribute]
         ep_size = self.ep_mesh.size()
         e = num_global_tokens_per_local_expert_eEP.shape[0] // ep_size
         device = num_global_tokens_per_local_expert_eEP.device
@@ -514,6 +515,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         # implementation of GroupedExperts, as it does not need padding.
         from torchao.prototype.moe_training.ep.permute import permute_and_pad
 
+        # pyrefly: ignore [missing-attribute]
         ep_size = self.ep_mesh.size()
         e = num_global_tokens_per_local_expert_eEP.shape[0] // ep_size
 
