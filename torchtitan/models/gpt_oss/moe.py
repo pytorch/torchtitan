@@ -168,38 +168,29 @@ class GptOssGroupedExperts(Module):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-        combine_base: torch.Tensor | None = None,
-        shared_experts: nn.Module | None = None,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add."""
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices
         )
-        sparse_mesh = getattr(self.token_dispatcher, "sparse_mesh", None)
-        with set_current_mesh(sparse_mesh):
+        with set_current_mesh(self.token_dispatcher.sparse_mesh):
             routed_output = self._experts_forward(routed_input, num_tokens_local)
         return self.token_dispatcher.combine(
             routed_output,
             metadata,
             x,
-            combine_base=combine_base,
-            shared_experts=shared_experts,
         )
 
     def parallelize(self, parallel_dims) -> None:
-        """Parallelize experts and wire dispatcher meshes.
+        """Parallelize experts and install the sparse runtime mesh.
 
         Mirrors ``GroupedExperts.parallelize``: after the base
         ``Module.parallelize`` distributes the expert weight params, install
-        the EP / TP meshes on the non-Module ``token_dispatcher`` child via
-        ``wire_meshes``. ``GptOssGroupedExperts`` inherits ``Module``
-        directly (not ``GroupedExperts``) so it needs its own override.
+        the sparse mesh on the non-Module ``token_dispatcher`` child.
+        ``GptOssGroupedExperts`` inherits ``Module`` directly (not
+        ``GroupedExperts``) so it needs its own override.
         """
         super().parallelize(parallel_dims)
-        self.token_dispatcher.wire_meshes(
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-        )
         if parallel_dims.ep_enabled:
             self.token_dispatcher.sparse_mesh = parallel_dims.get_activated_mesh(
                 ["dp_replicate", "efsdp", "ep"]

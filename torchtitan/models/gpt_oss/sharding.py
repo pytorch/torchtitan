@@ -25,6 +25,17 @@ if TYPE_CHECKING:
     from torchtitan.models.gpt_oss.model import GptOssModel, GptOssTransformerBlock
 
 
+# Routed-expert layout for ``GptOssGroupedExperts`` (mlp1/mlp2 fused
+# weights + biases): mlp1_weight/bias colwise, mlp2_weight rowwise,
+# mlp2_bias replicated.
+_GPT_OSS_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
+    "mlp1_weight": spmd.S(1),
+    "mlp1_bias": spmd.S(1),
+    "mlp2_weight": spmd.S(2),
+    "mlp2_bias": spmd.I,
+}
+
+
 def set_gpt_oss_sharding_config(
     config: "GptOssModel.Config",
     *,
@@ -34,7 +45,14 @@ def set_gpt_oss_sharding_config(
     enable_ep: bool,
     chunked_loss: bool,
 ) -> None:
-    """Fill ``sharding_config`` on all GPT-OSS sub-configs."""
+    """Fill ``sharding_config`` on all GPT-OSS sub-configs.
+
+    Dense sub-configs (attention, norms) are populated unconditionally —
+    ``Module.parallelize`` filters disabled axes at runtime.
+
+    MoE sub-configs (router, routed experts) are populated when TP or
+    EP is enabled.
+    """
 
     set_decoder_sharding_config(
         config,
@@ -60,7 +78,8 @@ def _set_gpt_oss_layer_sharding(
 ) -> None:
     """Set sharding on one GPT-OSS transformer layer.
 
-    All GPT-OSS blocks are MoE, so this sets both attention/norms and MoE.
+    Attention and norms are sharded on all blocks. MoE FFN is routed
+    through ``set_moe_sharding_config``.
     """
     attention = layer_cfg.attention
     assert isinstance(attention, Attention.Config)
@@ -91,16 +110,13 @@ def _set_gpt_oss_layer_sharding(
     # GPT-OSS flash attention always returns (output, lse).
     set_gqa_inner_attention_local_map(attention.inner_attention, return_lse=True)
 
-    set_moe_sharding_config(
-        layer_cfg.moe,
-        enable_tp=enable_tp,
-        enable_ep=enable_ep,
-        enable_sp=enable_sp,
-        expert_param_layout={
-            "mlp1_weight": spmd.S(1),
-            "mlp1_bias": spmd.S(1),
-            "mlp2_weight": spmd.S(2),
-            "mlp2_bias": spmd.I,
-        },
-        router_has_bias=True,
-    )
+    # MoE FFN (all GPT-OSS blocks are MoE).
+    if layer_cfg.moe is not None:
+        set_moe_sharding_config(
+            layer_cfg.moe,
+            enable_tp=enable_tp,
+            enable_ep=enable_ep,
+            enable_sp=enable_sp,
+            expert_param_layout=_GPT_OSS_EXPERTS_PARAM_LAYOUT,
+            router_has_bias=True,
+        )
