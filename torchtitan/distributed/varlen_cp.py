@@ -8,7 +8,7 @@
 
 Houses :class:`CPVarlenMetadata`, the CP-specific extension of
 :class:`~torchtitan.models.common.attention.VarlenMetadata` that adds
-``k_local_indices`` and the per-rank metadata builder.
+``k_global_gather_indices`` and the per-rank metadata builder.
 """
 
 from __future__ import annotations
@@ -30,19 +30,19 @@ from torchtitan.models.common.attention import VarlenMetadata
 class CPVarlenMetadata(VarlenMetadata):
     """Per-rank :class:`VarlenMetadata` for context-parallel varlen attention.
 
-    Extends the base with a required 1-D ``k_local_indices`` gather index of length
+    Extends the base with a required 1-D ``k_global_gather_indices`` gather index of length
     ``cu_seq_k[-1]``. :meth:`VarlenAttention.forward` detects this subclass via
-    ``isinstance`` and applies ``index_select(0, k_local_indices)`` to K (and V) before
+    ``isinstance`` and applies ``index_select(0, k_global_gather_indices)`` to K (and V) before
     the kernel call; the base type and non-CP callers are unaffected.
 
     Because CP shards the sequence dim, after K and V are allgathered the rank-local
     packed K can have unused gaps between per-segment visible regions when ``B > 1``;
-    ``k_local_indices`` picks out just those regions. When a load balancer is active
+    ``k_global_gather_indices`` picks out just those regions. When a load balancer is active
     the indices also compose with the per-batch inverse permutation so the gather hits
     the correct entries in the rearranged K/V.
     """
 
-    k_local_indices: torch.Tensor
+    k_global_gather_indices: torch.Tensor
 
     @classmethod
     def from_global(
@@ -80,13 +80,13 @@ class CPVarlenMetadata(VarlenMetadata):
               cu_seq_q        = [0, 3, 5]         (segment lengths 3, 2)
               cu_seq_k        = [0, 6, 8]         (visible K per segment 6, 2)
               max_q, max_k    = 3, 6
-              k_local_indices = [7, 8, 9, 10, 11, 12, 13, 14]
+              k_global_gather_indices = [7, 8, 9, 10, 11, 12, 13, 14]
 
         Example (non-contiguous K under ``B > 1``):
             ``B=2, S=20, CP=4, rank 2``, same docs per batch as above. ``K_packed``
             (length ``B*S = 40``) places batch 1 after batch 0, so a rank's visible
             K per segment lives inside one batch's range; consecutive segments
-            may belong to different batches. ``k_local_indices`` (length 16) concatenates
+            may belong to different batches. ``k_global_gather_indices`` (length 16) concatenates
             the visible slices [7..13), [13..15), [27..33), [33..35).
         """
         if isinstance(global_metadata, CPVarlenMetadata):
@@ -190,8 +190,8 @@ class CPVarlenMetadata(VarlenMetadata):
         )
 
         # Segment break wherever doc id changes or packed-global positions are
-        # non-consecutive. Batch boundaries are covered by diff_doc since adjacent
-        # batches' docs always have different ids globally.
+        # non-consecutive. Batch boundaries are always caught by diff_global
+        # (packed positions jump between batch ranges).
         diff_doc = doc_id[1:] != doc_id[:-1]
         diff_global = packed_local_to_global[1:] != packed_local_to_global[:-1] + 1
         is_break = diff_doc | diff_global
@@ -231,22 +231,22 @@ class CPVarlenMetadata(VarlenMetadata):
         within_seg = (
             torch.arange(total_k, device=device, dtype=dtype) - seg_starts_repeated
         )
-        k_local_indices = bases + within_seg
+        k_global_gather_indices = bases + within_seg
 
         # K is all-gathered in the balancer's shuffling order, so compose the gather
         # index with the per-batch inverse permutation.
         if restore_per_batch is not None:
-            b_ids = k_local_indices // seq_length
-            p_orig = k_local_indices % seq_length
-            p_rearr = restore_per_batch[b_ids, p_orig]
-            k_local_indices = b_ids * seq_length + p_rearr
+            batch_id = k_global_gather_indices // seq_length
+            pos_in_batch = k_global_gather_indices % seq_length
+            restored_pos = restore_per_batch[batch_id, pos_in_batch]
+            k_global_gather_indices = batch_id * seq_length + restored_pos
 
         return cls(
             cu_seq_q=cu_seq_q,
             cu_seq_k=cu_seq_k,
             max_q=max_q,
             max_k=max_k,
-            k_local_indices=k_local_indices.to(torch.long),
+            k_global_gather_indices=k_global_gather_indices.to(torch.long),
         )
 
 
