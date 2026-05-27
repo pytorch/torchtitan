@@ -10614,3 +10614,29 @@ Interpretation:
 
 - Forcing all collectives to NVLS is not viable because the initialization broadcast path cannot use NVLS.
 - Keep `NCCL_NVLS_ENABLE=1` as an enablement hint only, not `NCCL_ALGO=NVLS`.
+
+## Experiment 428: Explicit-NVLS Active Recipe With NCCL_PROTO=LL128
+
+Command:
+
+```bash
+NCCL_PROTO=LL128 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run428-nccl-proto-ll128-nvls-active > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,822.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.95 GiB, 93.61%.
+- No allocator retries were logged.
+- Loss moved from 12.44951 at step 1 to 4.67088 at step 10.
+
+Interpretation:
+
+- Forcing LL128 is slower than the default protocol on the final explicit-NVLS recipe.
+- Keep default NCCL protocol selection with `NCCL_CTA_POLICY=2` and `NCCL_NVLS_ENABLE=1`.
