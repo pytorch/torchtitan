@@ -8,7 +8,6 @@ import spmd_types as spmd
 
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
 from torchtitan.protocols.sharding import (
-    LocalSpmdConfig,
     NamedPlacement,
     PlacementLike,
     PlacementSpec,
@@ -197,7 +196,7 @@ def set_gqa_inner_attention_local_map(
         in_src_shardings={"k": kv_src, "v": kv_src},
         in_dst_shardings={"q": q, "k": kv_dst, "v": kv_dst},
         out_src_shardings=out_src,
-        local_spmd=LocalSpmdConfig(),
+        local_spmd=True,
     )
 
 
@@ -253,7 +252,7 @@ def set_decoder_sharding_config(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
         in_dst_shardings={"input": embed_in},
         out_src_shardings=embed_out,
-        local_spmd=LocalSpmdConfig(),
+        local_spmd=True,
     )
     config.tok_embeddings.enable_sp = enable_sp
     config.norm.sharding_config = norm_config(enable_sp=enable_sp)

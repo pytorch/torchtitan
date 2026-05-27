@@ -17,7 +17,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import distribute_tensor, DTensor
-from torch.utils._pytree import tree_map
 
 import spmd_types as spmd
 from spmd_types.types import shard_types_to_partition_spec
@@ -29,7 +28,6 @@ from torchtitan.distributed.spmd_state import (
     set_current_mesh,
 )
 from torchtitan.protocols.sharding import (
-    LocalSpmdConfig,
     NamedPlacement,
     NamedPartitionSpec,
     PlacementLike,
@@ -451,21 +449,10 @@ class Module(nn.Module, Configurable):
             self._cache_pos_arg_names()
 
             fn = self.forward
-            if sharding_config.local_spmd is not None:
-                fn = self.local_spmd(fn, sharding_config.local_spmd)
-
-        _mesh_reinterpret = sharding_config.mesh_reinterpret
-
-        def _apply_mesh_reinterpret(t: torch.Tensor) -> torch.Tensor:
-            if not isinstance(t, torch.Tensor) or not spmd.has_local_type(t):
-                return t
-            assert _mesh_reinterpret is not None
-            resolved_reinterpret = placement_to_spmd(_mesh_reinterpret, t.ndim)
-            return spmd.reinterpret_mesh(t, resolved_reinterpret, inplace=True)
+            if sharding_config.local_spmd:
+                fn = self.local_spmd(fn)
 
         def with_redistribution(*args: Any, **kwargs: Any) -> Any:
-            if _mesh_reinterpret and spmd.is_type_checking():
-                args, kwargs = tree_map(_apply_mesh_reinterpret, (args, kwargs))
             args, kwargs = self._shard_inputs(args, kwargs)
             outputs = fn(*args, **kwargs)
             return self._shard_outputs(outputs)
@@ -614,7 +601,6 @@ class Module(nn.Module, Configurable):
     def local_spmd(
         self,
         fn: Callable[..., Any],
-        lm: LocalSpmdConfig,
     ) -> Callable[..., Any]:
         sharding_config = self._sharding_config
         assert sharding_config is not None
