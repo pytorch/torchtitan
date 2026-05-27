@@ -12204,3 +12204,26 @@ Interpretation:
 
 - Flex FLASH is no longer just a missing dependency problem; using the vendored flash-attention source exposes a CUTE/SM100 block-sparse kernel incompatibility for the block-causal mask path used by packed-document training.
 - SDPA remains the active attention backend.
+
+## Experiment 488: Varlen Attention On Event-Cache-Disabled Recipe
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run488-varlen-attention-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run488-varlen-attention-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily set Qwen3 14B `attn_backend="varlen"`.
+- Restored `attn_backend="sdpa"` after the crash.
+
+Result:
+
+- Status: crash before step 1.
+- Failure: `ModuleNotFoundError: No module named 'flash_attn_interface'`, caused by missing `flash_attn_3`.
+
+Interpretation:
+
+- Varlen attention remains blocked by the compiled FlashAttention 3 extension, separate from the CUTE Python API issue found in run487.
+- SDPA remains the only working attention backend for the current local environment and packed-document training command.

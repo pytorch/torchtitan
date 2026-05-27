@@ -4291,3 +4291,13 @@
   Planned command or config overrides: Active event-cache-disabled command with vendored flash-attention prepended to `PYTHONPATH`.
   Success criteria and expected risk: Success is a valid 10-step run above 12,454. Risk is a newer CUTE kernel/runtime incompatibility.
   Result: crashed at source state `c28e46ba`; vendored flash-attention gets past the missing module/API blocker, but CUTE compilation fails in `flash_fwd_sm100.py` block-sparse correction with `TypeError: 'NoneType' object is not subscriptable` from `block_sparse_utils.py`. Restore SDPA; Flex FLASH remains blocked for block-causal masks on this local SM100 CUTE path.
+
+- Idea: varlen attention on current event-cache-disabled recipe
+  Current best source commit: 41883410
+  Source: Flex FLASH is blocked in the CUTE block-sparse path; varlen attention supports packed-document masks through cumulative sequence metadata and may avoid that CUTE path.
+  Expected mechanism: Replace SDPA with varlen FlashAttention to reduce attention overhead while preserving document boundaries.
+  Supporting evidence: `torch.nn.attention.varlen` is importable, and the environment changed since the earlier missing-dependency attempt.
+  Planned source/config changes: Temporarily set Qwen3 14B `attn_backend="varlen"`.
+  Planned command or config overrides: Active event-cache-disabled command.
+  Success criteria and expected risk: Success is a valid 10-step run above 12,454. Risk is that the compiled FlashAttention extension is still absent.
+  Result: crashed at source state `41883410`; varlen still imports `flash_attn_interface`, which fails because `flash_attn_3` is missing. Restore SDPA.
