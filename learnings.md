@@ -10538,3 +10538,26 @@ Interpretation:
 
 - The layout-adjusted saved MX weight path is valid, but it is slower than recasting `w1`/`w3` to dim1 during backward.
 - The extra MX transpose/contiguous layout work is not a useful replacement for the current dim1 weight casts.
+
+## Experiment 425: Force MXFP8 KernelPreference.MSLK
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run425-mxfp8-mslk-kernel-pref-nvls > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily forced `mxfp8_op_config.kernel_preference = KernelPreference.MSLK` in `MXFP8Linear`.
+- The source was restored after the result.
+
+Result:
+
+- Status: crash before step 1.
+- Failure: TorchAO asserted `gemm_choice == KernelPreference.EMULATED, "unimplemented"` when the forced MSLK path was selected.
+
+Interpretation:
+
+- The installed TorchAO MXFP8 linear path does not implement MSLK for this route.
+- Keep the default `KernelPreference.AUTO`; the only non-auto path advertised by the assertion is emulated, which is not a plausible performance candidate for the current GEMM-dominated profile.
