@@ -11206,3 +11206,38 @@ Interpretation:
 - This is the first additional model-portion compile boundary after FFN compile that improves the active stack.
 - The memory drop versus run446 suggests the compiled wrapper removes some transient eager/autograd overhead around the Q/K/V projection path, not just Python dispatch.
 - New active recipe is shared FFN gate/up MXFP8 casts, shared attention Q/K/V MXFP8 casts, compiled FFN modules, compiled Q/K/V projection wrappers, explicit NVLS, batch168, seq128, loss chunks4, and weight decay 0.
+
+## Experiment 450: Profile Compiled-QKV Active Recipe
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run450-profile-compile-qkv-linear-active > outputs/autoresearch/may19-qwen3-14b/run450-profile-compile-qkv-linear-active.run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the committed compiled-Q/K/V active recipe from run449.
+
+Result:
+
+- Status: keep as profile data; profiled tps is diagnostic.
+- Step 10 `tps`: 12,176.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Traces were written under `outputs/autoresearch/may19-qwen3-14b/run450-profile-compile-qkv-linear-active/profiling/traces/iteration_10`.
+
+Parsed trace notes versus run448:
+
+- Average `aten::copy_` time dropped from about 291 ms/rank to 148 ms/rank, with event count dropping from 2,641 to 1,201.
+- Average `PythonSubclass` time dropped from about 581 ms/rank to 366 ms/rank, with event count dropping from 915 to 275.
+- Average MXFP8 cast time dropped from about 450 ms/rank to 409 ms/rank with the same coarse event count in the trace parser.
+- NVJET MXFP8 GEMM kernel time stayed essentially flat at about 759 ms/rank versus 761 ms/rank.
+- Average reduce-scatter improved from about 575 ms/rank to 543 ms/rank, but rank skew remains large; rank6 still spends about 1,859 ms in reduce-scatter and 771 ms in all-gather.
+
+Interpretation:
+
+- The Q/K/V compile boundary primarily removes eager/autograd wrapper overhead and copies around the projection path; it does not materially improve the GEMM kernels themselves.
+- The lower memory and lower copy/subclass overhead explain why run449 can improve throughput without changing GEMM counts.
+- Remaining opportunities are now either converting the memory savings into more batch, reducing GEMM/cast work further, or addressing rank-skewed FSDP collective exposure.

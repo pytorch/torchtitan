@@ -3921,3 +3921,13 @@
   Planned command or config overrides: Active shared-QKV command with `--compile.components=loss,feed_forward,qkv_linear`.
   Success criteria and expected risk: Success is step-10 tps above 12,265 with finite loss and memory below the risk line. Risk is reproducing the broader compile recursion or adding compile overhead with no kernel win.
   Result: kept at source state `2c394b5f` plus dirty source; 12,387 tps and 163.95 GiB. This is a new measured peak and becomes the active recipe.
+
+- Idea: profile compiled-Q/K/V active recipe
+  Current best source commit: 08becbe2
+  Source: run449 changed both throughput and memory, so the previous run448 trace no longer represents the active hot path.
+  Expected mechanism: Compare traces to identify whether the win came from GEMM, MXFP8 casts, eager wrapper overhead, or FSDP overlap.
+  Supporting evidence: Run449 improved from 12,265 to 12,387 tps and reduced peak memory from 166.97 GiB to 163.95 GiB.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active compiled-Q/K/V command with profiler active on step 10.
+  Success criteria and expected risk: Success is complete rank traces; profiled tps is diagnostic only.
+  Result: kept as profile data at source state `08becbe2`; profiled step 10 reached 12,176 tps and 163.95 GiB. Trace comparison shows large drops in `aten::copy_` and `PythonSubclass` overhead, modest MXFP8 cast-time reduction, flat NVJET GEMM time, and persistent rank-skewed FSDP collectives.
