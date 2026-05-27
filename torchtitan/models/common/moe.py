@@ -13,7 +13,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
 
 from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher

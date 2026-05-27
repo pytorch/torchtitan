@@ -11,7 +11,7 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.nn_modules import Embedding
 
 
 class TestEmbedding(unittest.TestCase):
