@@ -314,14 +314,14 @@ class VarlenPTRRLoadBalancer(_LoadBalancer):
         num_blocks = S // block_size
 
         device = self.cu_seq_q.device
-        cu = self.cu_seq_q.to(torch.long)
+        cu_seq_q = self.cu_seq_q.to(torch.long)
 
         # Per-token work = number of visible K positions for this token.
         # Causal (-1, 0): offset_in_doc + 1.
         # Sliding window (W, 0): min(W, offset + 1).
         positions = torch.arange(B * S, device=device, dtype=torch.long)
-        doc_id = torch.searchsorted(cu, positions, right=True) - 1
-        work_per_token = positions - cu[doc_id] + 1  # (B*S,)
+        doc_id = torch.searchsorted(cu_seq_q, positions, right=True) - 1
+        work_per_token = positions - cu_seq_q[doc_id] + 1  # (B*S,)
         left = self.window_size[0]
         if left >= 0:
             work_per_token = work_per_token.clamp(max=left)
@@ -343,7 +343,7 @@ class VarlenPTRRLoadBalancer(_LoadBalancer):
         indices = block_indices[ptrr_blocks].view(B, -1)  # (B, S)
 
         if restore:
-            # pyrefly: ignore[missing-argument]  # vmap supplies the first arg
+            # pyrefly: ignore[missing-argument]
             indices = torch.vmap(torch.argsort)(indices)
 
         return indices
