@@ -1016,21 +1016,31 @@ def _wrap_as_custom_op(
 
     full_name = f"graph_trainer::{op_name}"
 
-    def _match_stride(t: torch.Tensor, meta) -> torch.Tensor:
-        if t.stride() == tuple(meta.stride()):
-            return t
-        dst = torch.empty_strided(
-            meta.shape, meta.stride(), dtype=meta.dtype, device=meta.device
-        )
-        dst.copy_(t)
-        return dst
-
     def _cuda_impl(*args):
         out = kernel_fn(*args)
+        # Most kernels already produce the correct stride (either
+        # contiguous or via a trailing .t()/.transpose()). Only copy
+        # when the runtime stride truly differs from what the meta
+        # declared — this check is a cheap tuple comparison.
         if isinstance(out, (tuple, list)):
-            matched = [_match_stride(o, m) for o, m in zip(out, output_metas)]
-            return tuple(matched) if isinstance(out, tuple) else matched
-        return _match_stride(out, output_metas[0])
+            fixed = []
+            for o, m in zip(out, output_metas):
+                if o.stride() != tuple(m.stride()):
+                    dst = torch.empty_strided(
+                        m.shape, m.stride(), dtype=m.dtype, device=m.device
+                    )
+                    dst.copy_(o)
+                    o = dst
+                fixed.append(o)
+            return tuple(fixed)
+        if out.stride() != tuple(output_metas[0].stride()):
+            dst = torch.empty_strided(
+                output_metas[0].shape, output_metas[0].stride(),
+                dtype=output_metas[0].dtype, device=output_metas[0].device,
+            )
+            dst.copy_(out)
+            out = dst
+        return out
 
     _FUSED_KERNEL_LIB.impl(op_name, _cuda_impl, "CUDA")
 
