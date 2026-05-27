@@ -12574,3 +12574,29 @@ Interpretation:
 - The final event-cache-disabled MXFP8 compiled-Q/K/V stack still prefers the seq128 shape.
 - This shape preserves the same per-rank token count as seq128/local-batch168 and preserves the same 5,376-row loss chunks, so the slowdown is not from obvious MXFP8 tile misalignment.
 - Shorter sequence length with more batch rows likely worsens model-side launch/scheduling balance enough to offset the lower attention work.
+
+## Experiment 502: Seq112 Local Batch192 On Event-Cache-Disabled Stack
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=112 --training.local_batch_size=192 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run502-event-cache0-seq112-lbs192-same-tokens > outputs/autoresearch/may19-qwen3-14b/run502-event-cache0-seq112-lbs192-same-tokens.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,313.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Loss moved from 12.44220 at step 1 to 4.69727 at step 10.
+
+Interpretation:
+
+- Seq112/local-batch192 improves over seq96/local-batch224 but still does not beat the active seq128/local-batch168 shape.
+- Because both shorter-sequence probes preserve the same total tokens and 5,376-row loss chunks, the final stack's seq128 preference appears to be a broader compute/communication scheduling effect rather than loss tiling.
+- Close the shorter-sequence shape branch unless a later trace specifically points back to attention cost.

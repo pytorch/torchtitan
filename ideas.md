@@ -4421,3 +4421,13 @@
   Planned command or config overrides: Active event-cache-disabled command with `--training.seq_len=96 --training.local_batch_size=224`.
   Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is lower GEMM/communication scheduling efficiency from more batch rows and shorter sequence length.
   Result: discarded at source state `4784cdb3`; 12,222 tps and 163.95 GiB. Keep seq128/local batch168.
+
+- Idea: seq112 local batch192 on final compiled-Q/K/V stack
+  Current best source commit: 84f86ec8
+  Source: closer shape follow-up after seq96/local-batch224 lost but preserved useful MXFP8 tiling.
+  Expected mechanism: `seq_len=112` with local batch 192 keeps the same 21,504 tokens per rank and the same 5,376 flattened rows per loss chunk as the active recipe, while being closer to seq128 than the losing seq96 probe.
+  Supporting evidence: If seq96 lost because it was too short rather than because seq128 is genuinely optimal, seq112 should recover most scheduling efficiency while modestly reducing attention work.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active event-cache-disabled command with `--training.seq_len=112 --training.local_batch_size=192`.
+  Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is another lower-throughput shape and no memory benefit.
+  Result: discarded at source state `84f86ec8`; 12,313 tps and 163.95 GiB. Seq128/local batch168 remains the best final-stack shape.
