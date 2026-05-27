@@ -13735,3 +13735,30 @@ Interpretation:
 
 - Static specialization does not help the norm-module helper.
 - Restore the default compiled helper.
+
+## Experiment 549: Compile Only SDPA Inner Attention Modules
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,norm_modules,inner_attention --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run549-compile-inner-attention-norm-modules-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run549-compile-inner-attention-norm-modules-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily added an `inner_attention` compile component.
+- The hook compiled each layer's `attention.inner_attention` module with `fullgraph=True`.
+- The run log confirmed 40 inner-attention modules were compiled, so this was the real version of the earlier malformed-CLI probe.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 13,942.
+- Peak memory: 168.91 GiB, 94.71%.
+- Loss moved from 12.42775 at step 1 to 5.51303 at step 10.
+
+Interpretation:
+
+- The narrow SDPA module compile is valid and memory-neutral, but it is slower than the kept `norm_modules` branch.
+- The SDPA transpose/call/transpose boundary is not a useful remaining compile target on the current stack.
+- Remove the temporary hook and keep attention/backend work closed unless it also changes the MXFP8/GEMM or FSDP overlap picture.

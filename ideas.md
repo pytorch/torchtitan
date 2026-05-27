@@ -4791,3 +4791,13 @@
   Planned command or config overrides: Active batch176 `norm_modules` command.
   Success criteria and expected risk: Success is step-10 throughput above the kept norm_modules short sample or same throughput with lower memory. Risk is no effect because the helper was already effectively static.
   Result: discarded at source state `322ae189+dirty`; run548 reached 14,014 tps at 168.91 GiB. Restore the dynamic default.
+
+- Idea: compile only SDPA inner attention modules
+  Current best source commit: 4e6834c6
+  Source: an earlier `inner_attention` compile probe did not actually execute because the CLI component list was malformed, and the current stack still has visible flash-attention backward work.
+  Expected mechanism: Compile just `attention.inner_attention` to capture the SDPA transpose/call/transpose boundary while excluding QKV MXFP8 linears, output projection, block forward, and FSDP wrappers.
+  Supporting evidence: This is narrower than the failed whole-attention/layer/model compile attempts and independent of the `norm_modules` block-forward memory issue.
+  Planned source/config changes: Temporarily add an `inner_attention` compile component that calls `.compile(backend=..., fullgraph=True)` on each layer's `attention.inner_attention`.
+  Planned command or config overrides: Active batch176 `norm_modules` command with `inner_attention` added to `--compile.components`.
+  Success criteria and expected risk: Success is step-10 throughput above the kept norm_modules short sample without memory growth. Risk is compile overhead around an already efficient SDPA kernel.
+  Result: discarded at source state `4e6834c6+dirty`; run549 executed the hook for 40 inner-attention modules and completed with falling loss, but reached only 13,942 tps at 168.91 GiB. Restore the source and keep inner-attention compile closed.
