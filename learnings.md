@@ -13600,3 +13600,29 @@ Interpretation:
 - Splitting the two outer block norm calls does not recover memory.
 - The memory increase appears tied to the patched block-forward/compiled-helper boundary itself, not simply to compiling both norms.
 - Neither split beats the combined `block_norms` short-run peak, so remove the split-only source change.
+
+## Experiment 542: Custom Residual Add Plus FFN RMSNorm
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,residual_rms_norm --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run542-residual-rms-norm-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run542-residual-rms-norm-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily added a Triton forward kernel that computes `x + attention_output`, RMSNorm, and `rstd` in one pass.
+- The custom autograd backward used native `aten._fused_rms_norm_backward` and returned the summed residual gradient to both inputs.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 14,013.
+- Peak memory: 172.88 GiB, 96.93%.
+- Loss moved from 12.41754 at step 1 to 7.10479 at step 10, with noisy mid-run values.
+
+Interpretation:
+
+- The fused residual/RMSNorm forward is correct enough for a smoke test, but it does not beat native/compiled scheduling in the full run.
+- The wide hidden-dim Triton row kernel likely loses enough efficiency that the saved add/read traffic does not matter.
+- Remove the custom op and keep the existing `block_norms` throughput branch.

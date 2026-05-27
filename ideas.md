@@ -4751,3 +4751,13 @@
   Planned command or config overrides: Active batch176 command with either `attention_norm` or `ffn_norm` replacing `block_norms`.
   Success criteria and expected risk: Success is tps above 14,003 with memory below 172.88 GiB, or a short sample exceeding the combined `block_norms` peak. Risk is the block-forward monkeypatch itself, not the number of compiled norms, causing the memory increase.
   Result: discarded at source state `dc962bb9+dirty`; attention-only reached 14,083 tps and FFN-only reached 14,075 tps, both at 172.88 GiB. The memory cliff follows the block-forward compiled helper shape, not just compiling both norm calls.
+
+- Idea: custom residual add plus FFN RMSNorm operator
+  Current best source commit: 40f511e0
+  Source: run535 still has many bf16 residual add kernels and block RMSNorm work; the user allowed replacing operators with custom kernels.
+  Expected mechanism: A custom autograd function can fuse `x + attention_output` with the FFN RMSNorm forward, saving one large residual-add kernel and one read of the summed activation while preserving native RMSNorm backward.
+  Supporting evidence: A CUDA smoke test matched `x + residual` plus `F.rms_norm` within bf16 tolerances and produced matching gradients.
+  Planned source/config changes: Add a Triton forward kernel returning both the residual sum and RMSNorm output, and use native `aten._fused_rms_norm_backward` in backward.
+  Planned command or config overrides: Active batch176 command with `residual_rms_norm` replacing `block_norms`.
+  Success criteria and expected risk: Success is tps above the sustained 14,070 branch or memory below 172.88 GiB with safe-branch throughput. Risk is the wide 5120-dim Triton row kernel being slower than native RMSNorm despite less memory traffic.
+  Result: discarded at source state `40f511e0+dirty`; run542 reached 14,013 tps at 172.88 GiB and had a noisy loss trend. Remove the custom source.
