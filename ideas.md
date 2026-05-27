@@ -3981,3 +3981,13 @@
   Planned command or config overrides: Active command with `--compile.components=loss,feed_forward,qkv_linear,attention_wo`.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is extra compiled activation residency or no compiled benefit for a single linear.
   Result: discarded at source state `efab4475` plus dirty source; 12,290 tps and 169.22 GiB. Keep only FFN and Q/K/V compile boundaries.
+
+- Idea: reduce metric logging frequency on active recipe
+  Current best source commit: ab4a53c3
+  Source: run449 structured logs show `collect_dist_metrics` around 302 ms on logged steps.
+  Expected mechanism: `--metrics.log_freq=10` still logs step 10 but should avoid metric collection on steps 2-9, reducing runtime overhead from distributed metric reductions.
+  Supporting evidence: Optimizer time is only about 23 ms, while metric collection is much larger in structured logs.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active command with `--metrics.log_freq=10`.
+  Success criteria and expected risk: Success is reported step-10 tps above 12,387. Risk is throughput accounting becoming less favorable or less comparable.
+  Result: discarded at source state `ab4a53c3`; only steps 1 and 10 were logged, and step-10 reported tps dropped to 10,956. Keep `metrics.log_freq=1`.
