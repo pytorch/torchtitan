@@ -10488,3 +10488,53 @@ Interpretation:
 
 - Explicit NVLS does not make the larger batch172 shape worthwhile; it remains slower and crosses the preferred 95% memory line.
 - Keep local batch168 for the active recipe.
+
+## Experiment 423: Saved Forward MX Weights For Gate/Up Grad-Input
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run423-mxfp8-shared-gate-up-save-forward-weight-mx-for-grad-input-weight-decay0-nccl-nvls-enable-feed-forward-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily saved forward `w1`/`w3` MXFP8 dim0 weight tensors and reused them directly for the gate/up backward `grad_input` GEMMs instead of casting `w1`/`w3` to dim1 in backward.
+- The source was restored after the follow-up run424 result.
+
+Result:
+
+- Status: crash before step 1.
+- Failure: TorchAO MX matmul asserted `b.qdata.t().is_contiguous()` for the saved forward MX weight when used as the backward GEMM B operand.
+
+Interpretation:
+
+- The forward MX weight layout cannot be reused directly as the `grad_input` GEMM operand.
+- A layout-adjusted variant is needed to test the cast-vs-copy tradeoff.
+
+## Experiment 424: Saved Transposed-Contiguous Forward MX Weights For Gate/Up Grad-Input
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run424-mxfp8-save-mx-contig > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily saved `w1_mx_dim0.t().contiguous().t()` and `w3_mx_dim0.t().contiguous().t()` from forward, then used those layout-adjusted MX tensors for the gate/up backward `grad_input` GEMMs.
+- The source was restored after the result.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,959.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.89 GiB, 93.58%.
+- No allocator retries were logged.
+- Loss moved from 12.39265 at step 1 to 5.23155 at step 10.
+
+Interpretation:
+
+- The layout-adjusted saved MX weight path is valid, but it is slower than recasting `w1`/`w3` to dim1 during backward.
+- The extra MX transpose/contiguous layout work is not a useful replacement for the current dim1 weight casts.
