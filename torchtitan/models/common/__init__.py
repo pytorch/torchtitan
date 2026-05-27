@@ -21,11 +21,19 @@ from .attention import (
     VarlenMetadata,
 )
 from .decoder import Decoder, TransformerBlock
-from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
-from .linear import Linear
 from .moe import MoE
-from .rmsnorm import RMSNorm
+from .nn_modules import (
+    Conv2d,
+    Embedding,
+    GELU,
+    GroupNorm,
+    Identity,
+    LayerNorm,
+    Linear,
+    RMSNorm,
+    SiLU,
+)
 from .rope import (
     apply_rotary_emb_complex,
     apply_rotary_emb_cos_sin,
@@ -34,6 +42,7 @@ from .rope import (
 )
 
 __all__ = [
+    "Conv2d",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
     "Decoder",
@@ -42,17 +51,22 @@ __all__ = [
     "FlexAttention",
     "BaseQKVLinear",
     "FusedQKVLinear",
+    "GELU",
     "get_causal_mask_mod",
     "get_document_mask_mod",
     "get_fixed_block_mask_mod",
     "get_sliding_window_mask_mod",
     "GQAttention",
+    "GroupNorm",
+    "Identity",
+    "LayerNorm",
     "Linear",
     "MoE",
     "QKVLinear",
     "RMSNorm",
     "RoPE",
     "ScaledDotProductAttention",
+    "SiLU",
     "TransformerBlock",
     "VarlenAttention",
     "VarlenMetadata",

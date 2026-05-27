@@ -31,9 +31,7 @@ def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
     n_layers = 4
     moe_hidden_dim = compute_moe_hidden_dim(dim)
 
-    from torchtitan.models.common.embedding import Embedding
-    from torchtitan.models.common.linear import Linear
-    from torchtitan.models.common.rmsnorm import RMSNorm
+    from torchtitan.models.common.nn_modules import Embedding, Linear, RMSNorm
     from torchtitan.models.common.rope import RoPE
 
     config = Llama4Model.Config(
