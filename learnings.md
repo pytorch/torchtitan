@@ -12548,3 +12548,29 @@ Interpretation:
 - The fused-backward shape is valid, but it is slower than the active separate-Q/K/V backward path.
 - The likely reason is that concatenating the large Q/K/V weight and grad-output tensors adds enough bandwidth and allocation overhead to erase the reduced number of MXFP8 casts and GEMM launches.
 - Do not pursue larger gate/up concatenated backward GEMMs without new evidence; that variant would copy much larger FFN tensors and is likely to amplify the same overhead.
+
+## Experiment 501: Seq96 Local Batch224 On Event-Cache-Disabled Stack
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=96 --training.local_batch_size=224 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run501-event-cache0-seq96-lbs224-same-tokens > outputs/autoresearch/may19-qwen3-14b/run501-event-cache0-seq96-lbs224-same-tokens.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,222.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Loss moved from 12.32691 at step 1 to 7.21497 at step 10.
+
+Interpretation:
+
+- The final event-cache-disabled MXFP8 compiled-Q/K/V stack still prefers the seq128 shape.
+- This shape preserves the same per-rank token count as seq128/local-batch168 and preserves the same 5,376-row loss chunks, so the slowdown is not from obvious MXFP8 tile misalignment.
+- Shorter sequence length with more batch rows likely worsens model-side launch/scheduling balance enough to offset the lower attention work.

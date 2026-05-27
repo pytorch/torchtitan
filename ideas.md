@@ -4411,3 +4411,13 @@
   Planned command or config overrides: Active event-cache-disabled command.
   Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is extra allocation/copy overhead and higher peak memory from the concatenated tensors.
   Result: discarded at source state `16f4dddf+dirty`; 12,379 tps and 163.98 GiB. The fused backward is valid but slower, so restore the prior three-GEMM Q/K/V backward path.
+
+- Idea: seq96 local batch224 on final compiled-Q/K/V stack
+  Current best source commit: 4784cdb3
+  Source: shape retest after the final MXFP8 shared-cast, compiled-Q/K/V, and event-cache-disabled stack changed the bottleneck mix.
+  Expected mechanism: `seq_len=96` with local batch 224 keeps the same 21,504 tokens per rank as seq128/local batch168, and with four loss chunks it keeps the same 5,376 flattened rows per loss chunk. This isolates whether lower attention work can help without changing MXFP8 tile divisibility.
+  Supporting evidence: Earlier seq96 tests were on older BF16/SDPA stacks; the final stack is MXFP8 and compiled around FFN/Q/K/V, so the old shape conclusion needed one tile-aligned final-stack check.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active event-cache-disabled command with `--training.seq_len=96 --training.local_batch_size=224`.
+  Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is lower GEMM/communication scheduling efficiency from more batch rows and shorter sequence length.
+  Result: discarded at source state `4784cdb3`; 12,222 tps and 163.95 GiB. Keep seq128/local batch168.
