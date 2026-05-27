@@ -10927,3 +10927,30 @@ Interpretation:
 
 - The cached `lm_head` weight path is valid, but the extra cached MX tensor raises memory by about 0.8 GiB and does not beat the active recipe.
 - Repeated `lm_head` forward weight casts are not the dominant remaining limiter for this command.
+
+## Experiment 440: Feed-Forward Compile With dynamic=False
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run440-feed-forward-compile-dynamic-false-nvls-active > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily changed Qwen3 feed-forward compilation to call `feed_forward.compile(..., fullgraph=True, dynamic=False)`.
+- Restored the default feed-forward compile call after the result.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,117.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.95 GiB, 93.61%.
+- No allocator retries were logged.
+- Loss moved from 12.38640 at step 1 to 6.30712 at step 10.
+
+Interpretation:
+
+- Static specialization with `dynamic=False` is valid but does not improve throughput or memory.
+- Keep the default `torch.compile` dynamic setting for the feed-forward modules.
