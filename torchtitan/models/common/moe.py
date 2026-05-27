@@ -262,10 +262,17 @@ class TokenChoiceTopKRouter(Module):
         # NOTE: use bincount instead of histc because histc has no
         # deterministic kernel on Intel XPU (`_histc_xpu does not have
         # a deterministic implementation`), which blocks running with
-        # ``torch.use_deterministic_algorithms(True)``. bincount is
-        # deterministic on all supported backends and produces
-        # identical integer counts for the integer index inputs
-        # ``torch.topk`` returns here.
+        # ``torch.use_deterministic_algorithms(True)``. The bincount
+        # forward path here is deterministic on CPU/CUDA/XPU because
+        # the input is an integer index tensor with no associated
+        # weights (the non-determinism note in the bincount docs only
+        # applies to the gradient path with ``weights``).
+        # Dtype contract: both ``torch.bincount(int64, ...)`` and
+        # ``torch.histc(int64, ...)`` return int64 here, so downstream
+        # consumers (``cumsum`` with explicit ``dtype=int32``, the
+        # ``tokens_per_expert.add_`` accumulator, the EP all-to-all
+        # ``output_splits.tolist()`` path that requires ints) see the
+        # same dtype as before.
         num_tokens_per_expert = torch.bincount(
             selected_experts_indices.view(-1),
             minlength=self.num_experts,

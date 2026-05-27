@@ -91,7 +91,11 @@ class LocalTokenDispatcher(Configurable):
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         # NOTE: use bincount instead of histc; see the same swap in
         # ``torchtitan/models/common/moe.py`` for rationale (histc has
-        # no deterministic kernel on Intel XPU).
+        # no deterministic kernel on Intel XPU). bincount and histc
+        # both return int64 here for the int64 input, so the EP
+        # all-to-all path (which feeds the result through
+        # ``output_splits.tolist()`` and requires int splits) sees
+        # the same dtype as before.
         num_tokens_per_expert = torch.bincount(
             selected_experts_indices.view(-1),
             minlength=self.num_experts,

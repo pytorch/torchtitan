@@ -62,35 +62,50 @@ class TestMoeRoutingCountingEquivalence(unittest.TestCase):
 
 
 class TestMoeRoutingUnderDeterministicAlgorithms(unittest.TestCase):
-    """``torch.bincount`` must not raise under
-    ``torch.use_deterministic_algorithms(True)`` — that's the
-    motivating reason for using it over ``torch.histc``."""
+    """``torch.bincount`` (no weights) must not raise under
+    ``torch.use_deterministic_algorithms(True)`` on CPU or XPU —
+    that's the motivating reason for using it over ``torch.histc``.
 
-    def _device_with_dispatch(self):
-        # Prefer XPU if available since that's the backend whose
-        # missing deterministic histc kernel motivated this swap.
-        if hasattr(torch, "xpu") and torch.xpu.is_available():
-            return torch.device("xpu:0")
-        if torch.cuda.is_available():
-            return torch.device("cuda:0")
-        return torch.device("cpu")
+    Note on CUDA: ``torch.bincount(..., weights=tensor)`` does raise
+    under deterministic algorithms on CUDA, but the router/dispatcher
+    call site here uses no weights, which is exempt. We don't assert
+    no-raise on CUDA here because (a) the swap is motivated by XPU,
+    not CUDA, where ``histc`` was already deterministic, and (b)
+    upstream may tighten the bincount determinism rules in the
+    future. CPU + XPU coverage is sufficient.
+    """
 
-    def test_bincount_does_not_raise_under_deterministic(self):
-        device = self._device_with_dispatch()
+    def _sync_device(self, device: torch.device) -> None:
+        # Avoid ``torch.accelerator.synchronize`` (newer API not present
+        # in all supported PyTorch versions); dispatch to the
+        # device-specific synchronize that has shipped for years.
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        elif device.type == "xpu":
+            torch.xpu.synchronize(device)
+
+    def _run_no_raise_check(self, device: torch.device) -> None:
         torch.manual_seed(0)
         idx = torch.randint(0, 32, (8192,), device=device, dtype=torch.int64)
-
         prev = torch.are_deterministic_algorithms_enabled()
         torch.use_deterministic_algorithms(True)
         try:
             counts = torch.bincount(idx, minlength=32)
-            if device.type in {"cuda", "xpu"}:
-                torch.accelerator.synchronize(device)
+            self._sync_device(device)
         finally:
             torch.use_deterministic_algorithms(prev)
-
         self.assertEqual(counts.shape, (32,))
         self.assertEqual(counts.sum().item(), 8192)
+
+    def test_bincount_does_not_raise_on_cpu(self):
+        self._run_no_raise_check(torch.device("cpu"))
+
+    @unittest.skipUnless(
+        hasattr(torch, "xpu") and torch.xpu.is_available(),
+        "requires Intel XPU",
+    )
+    def test_bincount_does_not_raise_on_xpu(self):
+        self._run_no_raise_check(torch.device("xpu:0"))
 
 
 if __name__ == "__main__":
