@@ -10666,3 +10666,30 @@ Interpretation:
 
 - The correct CUTE DSL flag is `CUTEDSL_ENABLE_AUTOTUNING=1`; Inductor only considers CUTE DSL for GEMM autotune when `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS` includes `CUTEDSL`.
 - This flag stack is valid but below the current explicit-NVLS peak. The compiled feed-forward boundary is not benefiting from CUTE DSL autotune enough to offset overhead or different kernel choices.
+
+## Experiment 430: Explicit-NVLS Active Recipe With Backward-Only FSDP Prefetch
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run430-backward-only-prefetch-nvls-active > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily removed all forward FSDP prefetch calls while keeping the one-module backward prefetch chain.
+- The source was restored after the result.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,188.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.95 GiB, 93.61%.
+- No allocator retries were logged.
+- Loss moved from 12.40664 at step 1 to 5.87664 at step 10.
+
+Interpretation:
+
+- Backward-only prefetch is valid and better than the earlier forward-only variant, but still below the bidirectional one-module prefetch schedule.
+- Keep both forward layer-to-next/lm_head prefetch and backward lm_head/layer-to-previous prefetch.
