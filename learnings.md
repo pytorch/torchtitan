@@ -11267,3 +11267,30 @@ Interpretation:
 
 - The memory recovered by compiling the Q/K/V projection wrapper is enough to run batch172 safely, but the shape is slower than batch168.
 - This argues against immediately testing batch176 on the same recipe; the prior batch sweep was already nonmonotonic, and the first higher neighbor under the new source regressed.
+
+## Experiment 452: Q/K/V Projection Compile With dynamic=False
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run452-qkv-linear-compile-dynamic-false > outputs/autoresearch/may19-qwen3-14b/run452-qkv-linear-compile-dynamic-false.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily changed only the Q/K/V projection wrapper compile call to pass `dynamic=False`.
+- Restored the default compile call after the run.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,250.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Loss moved from 12.48412 at step 1 to 5.68138 at step 10.
+
+Interpretation:
+
+- Shape-specializing the Q/K/V projection wrapper compile is valid, but it does not beat the default `fullgraph=True` compile path.
+- This mirrors the earlier FFN `dynamic=False` result enough to avoid further dynamic-shape specialization unless a new compile boundary is introduced.

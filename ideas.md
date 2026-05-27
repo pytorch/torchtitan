@@ -3941,3 +3941,13 @@
   Planned command or config overrides: Active compiled-Q/K/V command with `--training.local_batch_size=172`.
   Success criteria and expected risk: Success is step-10 tps above 12,387 with memory below the risk line. Risk is a worse shape/schedule point despite fitting.
   Result: discarded at source state `6abf05c5`; 12,187 tps and 166.98 GiB. Keep batch168 and do not prioritize batch176 without a new reason.
+
+- Idea: qkv_linear compile dynamic=False
+  Current best source commit: 25da7c08
+  Source: run449 showed that compiling the narrow Q/K/V projection wrapper helps, and the target command uses fixed seq/batch shapes.
+  Expected mechanism: Static-shape specialization might reduce Dynamo/Inductor guards or choose a better compiled schedule for the small Q/K/V wrapper graph.
+  Supporting evidence: This is a narrower graph than FFN, so the earlier bad FFN `dynamic=False` result does not fully answer the question.
+  Planned source/config changes: Temporarily pass `dynamic=False` only to `qkv_linear.compile(...)`.
+  Planned command or config overrides: Active compiled-Q/K/V batch168 command.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is the same specialization penalty observed for FFN compile.
+  Result: discarded at source state `25da7c08` plus dirty source; 12,250 tps and 163.95 GiB. Restore the default Q/K/V compile call.
