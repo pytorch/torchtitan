@@ -259,11 +259,16 @@ class TokenChoiceTopKRouter(Module):
         top_scores = top_scores * self.route_scale
 
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
+        # NOTE: use bincount instead of histc because histc has no
+        # deterministic kernel on Intel XPU (`_histc_xpu does not have
+        # a deterministic implementation`), which blocks running with
+        # ``torch.use_deterministic_algorithms(True)``. bincount is
+        # deterministic on all supported backends and produces
+        # identical integer counts for the integer index inputs
+        # ``torch.topk`` returns here.
+        num_tokens_per_expert = torch.bincount(
             selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
+            minlength=self.num_experts,
         )
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
