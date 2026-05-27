@@ -12380,3 +12380,28 @@ Interpretation:
 
 - Explicit `NCCL_NVLS_ENABLE=1` still matters after adding `TORCH_NCCL_CUDA_EVENT_CACHE=0`.
 - The active communication recipe remains event-cache disabled plus explicit NVLS plus `NCCL_CTA_POLICY=2`.
+
+## Experiment 495: Foreach Optimizer
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --optimizer.implementation=foreach --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run495-event-cache0-optimizer-foreach > outputs/autoresearch/may19-qwen3-14b/run495-event-cache0-optimizer-foreach.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,202.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Loss moved from 12.32758 at step 1 to 6.03628 at step 10.
+
+Interpretation:
+
+- The default fused optimizer remains better than `foreach` on the final event-cache-disabled compiled-Q/K/V recipe.
+- The optimizer implementation axis is now closed for this stack: `fused_opt_states_bf16` is a near miss without memory benefit, and `foreach` is plainly slower.

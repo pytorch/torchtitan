@@ -4351,3 +4351,13 @@
   Planned command or config overrides: Active command with `NCCL_NVLS_ENABLE=0` instead of `NCCL_NVLS_ENABLE=1`.
   Success criteria and expected risk: Success is step-10 tps above 12,454 or a lower-memory tie. Risk is slower collectives if NVLS remains beneficial.
   Result: discarded at source state `9bf1d113`; 12,217 tps and 163.95 GiB. Keep explicit `NCCL_NVLS_ENABLE=1` in the active command.
+
+- Idea: foreach optimizer on the event-cache-disabled recipe
+  Current best source commit: 7c9127fc
+  Source: close the optimizer implementation axis after `fused_opt_states_bf16` landed close but did not improve memory.
+  Expected mechanism: `foreach` changes optimizer kernel grouping and may reduce or increase host/kernel overhead versus fused AdamW.
+  Supporting evidence: `OptimizersContainer.Config` exposes the implementation directly, and optimizer work is small but still part of the per-step tail.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active command plus `--optimizer.implementation=foreach`.
+  Success criteria and expected risk: Success is step-10 tps above 12,454 or a lower-memory tie. Risk is slower optimizer kernels or weaker startup behavior.
+  Result: discarded at source state `7c9127fc`; 12,202 tps and 163.95 GiB. Keep the default fused optimizer.
