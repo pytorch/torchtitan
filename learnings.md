@@ -13518,3 +13518,27 @@ Interpretation:
 
 - Direct `aten._fused_rms_norm` does not remove the memory increase and is slower than the compiled outer RMSNorm helper.
 - Restore the committed compiled outer RMSNorm source.
+
+## Experiment 537: Batch172 On Compiled Outer Block RMSNorm Source
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,block_norms --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=172 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run537-block-norms-batch172-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run537-block-norms-batch172-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the kept compiled outer `block_norms` source.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 13,791.
+- Step 10 peak memory: 169.71 GiB, 95.16%.
+- Loss moved from 12.46536 at step 1 to 5.77623 at step 10.
+
+Interpretation:
+
+- Reducing the batch size does not turn the `block_norms` source into a better safe-memory point.
+- Keep batch176 for the throughput branch and the pre-`block_norms` batch176 source as the safer memory branch.

@@ -4721,3 +4721,13 @@
   Planned command or config overrides: Active block_norms command.
   Success criteria and expected risk: Success is memory back near 168.91 GiB with tps near or above 14,070. Risk is no benefit because the native RMSNorm path is already used under autograd.
   Result: discarded at source state `bf4f67bc+dirty`; 13,955 tps at the same 172.88 GiB peak. Restore compiled outer RMSNorm helpers.
+
+- Idea: batch172 on compiled outer block RMSNorm source
+  Current best source commit: bf4f67bc
+  Source: compiled outer block RMSNorm helpers raise memory at batch176; the next lower MXFP8-tile-valid batch could preserve enough throughput while reducing allocator pressure.
+  Expected mechanism: Reduce activation memory and collective payload slightly while keeping the compiled outer norm launch-overhead benefit.
+  Supporting evidence: Batch172 is valid for loss chunks4 because `172 * 32` rows is divisible by the 128-row MXFP8 dim1 tile.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active block_norms command with `--training.local_batch_size=172`.
+  Success criteria and expected risk: Success is tps above 14,003 with memory at or below the pre-block_norms 168.91 GiB point. Risk is losing too much batch amortization.
+  Result: discarded at source state `bf4f67bc`; 13,791 tps at 169.71 GiB (95.16%). Do not keep tuning batch size around `block_norms`.
