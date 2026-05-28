@@ -86,7 +86,7 @@ _TT_SPECIFIC_ATTRIBUTES = [
 # implementation, mixing that remote config with the newer local model code can
 # drop compatibility attrs the local model expects. Prefer the local
 # ``transformers`` config/model pair for denylisted model types.
-_REMOTE_CONFIG_DENYLIST = frozenset({"deepseek_v3"})
+_REMOTE_CONFIG_DENYLIST = frozenset({"deepseek_v2", "deepseek_v3"})
 
 
 def _get_moe_attr_name(layer: nn.Module) -> str | None:
@@ -376,6 +376,10 @@ class HFTransformerModel(BaseModel):
             # num_attention_heads heads.
             if hasattr(self, "qk_rope_head_dim"):
                 self.num_key_value_heads = self.num_attention_heads
+                # Ensure head_dim is set for MLA models; remote configs
+                # may not compute it in __post_init__.
+                if not getattr(self, "head_dim", None):
+                    self.head_dim = self.qk_rope_head_dim
             else:
                 self.head_dim = self.dim // self.num_attention_heads
 
