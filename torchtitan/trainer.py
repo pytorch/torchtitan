@@ -44,7 +44,7 @@ from torchtitan.config.configs import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.distributed.spmd_state import is_spmd_active, set_current_mesh
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
@@ -52,7 +52,11 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
-from torchtitan.protocols.module import placement_to_assert_type, preserve_buffer_spmd
+from torchtitan.protocols.module import (
+    named_placement_to_spmd,
+    placement_to_assert_type,
+    preserve_buffer_spmd,
+)
 from torchtitan.protocols.sharding import is_placement_like
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -647,11 +651,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # unique tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += labels.numel()
 
-        if self.config.parallelism.full_dtensor:
-            inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
-                self.parallel_dims, inputs, labels, extra_kwargs
-            )
-
         if is_spmd_active():
             self._annotate_inputs_spmd(inputs, labels, extra_inputs, extra_kwargs)
 
@@ -882,7 +881,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             global_valid_tokens = local_valid_tokens.float()
 
         if is_spmd_active() and isinstance(global_valid_tokens, torch.Tensor):
-            spmd.assert_type(global_valid_tokens, spmd.I)
+            spmd.assert_type(
+                global_valid_tokens,
+                named_placement_to_spmd(
+                    {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I}
+                ),
+            )
 
         # Process each microbatch: move to GPU, forward/backward, then free
         accumulated_losses = []

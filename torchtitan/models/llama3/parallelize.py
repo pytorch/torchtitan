@@ -83,17 +83,9 @@ def parallelize_llama(
 
     # Always run apply_fsdp -- with shard_degree=1 it is a no-op for the
     # all-gather but still installs the MixedPrecisionPolicy.
-    mesh_names = []
-    if parallel_dims.dp_replicate_enabled:
-        mesh_names.append("dp_replicate")
-    mesh_names.append("fsdp")
-    if parallel_dims.tp_enabled:
-        mesh_names.append("tp")
-    dp_mesh = parallel_dims.get_mesh(mesh_names)
-    dp_mesh_dims = DataParallelMeshDims(
-        shard="fsdp",
-        replicate="dp_replicate" if parallel_dims.dp_replicate_enabled else None,
-    )
+    dp_mesh, dp_mesh_dims = parallel_dims.resolve_fsdp_mesh()
+    if dp_mesh.size() == 1:
+        dp_mesh_dims = None
 
     apply_fsdp(
         model,
@@ -142,9 +134,6 @@ def apply_fsdp(
             - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
             - "always" will enable `reshard_after_forward` for all forward passes.
             - "never" will disable `reshard_after_forward` for all forward passes.
-        dp_mesh_dims: For SPMD meshes, ``fully_shard`` must flatten
-            ``fsdp`` away from non-data-parallel mesh axes. We pass this
-            explicitly rather than relying on FSDP mesh-name inference.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
@@ -152,7 +141,7 @@ def apply_fsdp(
         cast_forward_inputs=False,
     )
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
-    if dp_mesh_dims is not None and dp_mesh.size() > 1:
+    if dp_mesh_dims is not None:
         # pyrefly: ignore[bad-typed-dict-key]
         fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:

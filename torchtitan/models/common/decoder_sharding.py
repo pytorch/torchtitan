@@ -279,14 +279,17 @@ def set_decoder_sharding_config(
     config.tok_embeddings.enable_sp = enable_sp
     config.norm.sharding_config = norm_config(enable_sp=enable_sp)
 
-    # ChunkedCELoss gathers SP hidden states before chunking; normal model
-    # forward enters lm_head directly from the SP residual stream.
-    in_src = (
-        dense_sp_placement()
-        if enable_sp and not chunked_loss
-        else dense_activation_placement(tp=spmd.I)
-    )
-    in_dst = dense_activation_placement(tp=spmd.R)
+    # ChunkedCELoss manually writes the S(1)->R allgather before chunking;
+    # normal model forward calls lm_head directly so needs the allgather here.
+    if enable_sp:
+        if chunked_loss:
+            in_src = dense_activation_placement(tp=spmd.R)
+        else:
+            in_src = dense_sp_placement()
+        in_dst = dense_activation_placement(tp=spmd.R)
+    else:
+        in_src = dense_activation_placement(tp=spmd.I)
+        in_dst = dense_activation_placement(tp=spmd.I)
 
     # When loss_parallel is enabled, lm_head output stays vocab-sharded.
     # ChunkedCELoss handles distributed CE directly.

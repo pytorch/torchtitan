@@ -41,13 +41,14 @@ class Embedding(nn.Embedding, Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         weight = self.weight
         tp_pg = None
-        if is_spmd_active():
-            mesh = current_mesh()
-            assert mesh is not None
+        mesh = current_mesh() if is_spmd_active() else None
+        if mesh is not None:
             assert mesh.mesh_dim_names is not None
             if "tp" in mesh.mesh_dim_names:
                 tp_pg = mesh.get_group("tp")
-        if tp_pg is None or dist.get_world_size(tp_pg) == 1:
+
+        # standard F.embedding
+        if mesh is None or tp_pg is None or dist.get_world_size(tp_pg) == 1:
             return F.embedding(
                 input,
                 weight,
@@ -58,6 +59,7 @@ class Embedding(nn.Embedding, Module):
                 self.sparse,
             )
 
+        # vocab-parallel embedding w/ sharded vocab dim; allreduce over masked embeddings.
         assert self.enable_sp is not None
         chunk_size = weight.shape[0]
         offset = dist.get_rank(tp_pg) * chunk_size
