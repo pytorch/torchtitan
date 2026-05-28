@@ -490,6 +490,77 @@ def fuse_mm_reduce_scatter_pass(
     return gm
 
 
+def annotate_swiglu_chains_for_regional_inductor_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs=None,
+) -> torch.fx.GraphModule:
+    """Tag bf16 pointwise chains around silu/silu_backward for Inductor fusion.
+
+    Seed with ``aten.silu``/``aten.silu_backward``, then iteratively expand to
+    adjacent ``aten.mul.Tensor`` neighbors whose tensor inputs are all bf16.
+    The connected component becomes a single Inductor region. Bitwise-safe
+    because pure bf16 pointwise mul is elementwise — same FP order as the
+    separate eager kernels.
+
+    The backward SwiGLU template is a chain ``silu_backward -> mul -> mul``
+    (and analogous forward ``silu -> mul``); 32 Llama3 layers gives ~3-4 ops
+    per layer that benefit from a single fused Triton kernel.
+    """
+    from torch._subclasses.fake_tensor import FakeTensor
+
+    seed_targets = {aten.silu.default, aten.silu_backward.default}
+    expand_targets = {aten.mul.Tensor}
+
+    def _is_bf16_node(n: torch.fx.Node) -> bool:
+        v = n.meta.get("val")
+        if not isinstance(v, FakeTensor):
+            return False
+        return v.dtype == torch.bfloat16
+
+    def _all_bf16_inputs(n: torch.fx.Node) -> bool:
+        for a in n.args:
+            if isinstance(a, torch.fx.Node):
+                v = a.meta.get("val")
+                if isinstance(v, FakeTensor) and v.dtype != torch.bfloat16:
+                    return False
+        return True
+
+    tagged: set[torch.fx.Node] = set()
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+        if node.target in seed_targets and _is_bf16_node(node):
+            tagged.add(node)
+
+    # Iteratively expand to bf16 muls adjacent to tagged ops until fixed point.
+    changed = True
+    while changed:
+        changed = False
+        for node in gm.graph.nodes:
+            if node in tagged:
+                continue
+            if node.op != "call_function":
+                continue
+            if node.target not in expand_targets:
+                continue
+            if not _is_bf16_node(node) or not _all_bf16_inputs(node):
+                continue
+            neighbors_tagged = any(
+                isinstance(a, torch.fx.Node) and a in tagged for a in node.args
+            ) or any(u in tagged for u in node.users)
+            if neighbors_tagged:
+                tagged.add(node)
+                changed = True
+
+    for node in tagged:
+        node.meta.setdefault("custom", {})["compile_with_inductor"] = {}
+    if tagged:
+        logger.info(
+            f"Tagged {len(tagged)} SwiGLU-chain pointwise nodes for regional Inductor compilation"
+        )
+    return gm
+
+
 def annotate_residual_add_for_regional_inductor_pass(
     gm: torch.fx.GraphModule,
     example_inputs=None,
@@ -635,6 +706,10 @@ def compile_time_passes(
                 flex_compile_config=FlexAttention.inductor_configs,
             )
         )
+        # Tag bf16 SwiGLU chains (silu/silu_backward + adjacent bf16 muls)
+        # before residual-add tagging so adds that are NOT part of the
+        # SwiGLU chain still get picked up by the residual-add pass.
+        passes.append(annotate_swiglu_chains_for_regional_inductor_pass)
         # Tag bf16 residual adds for regional Inductor (numerics-preserving:
         # pure pointwise bf16 fusion). Must run after the flex annotation
         # pass and before ``regional_inductor_pass`` so the tagger sees

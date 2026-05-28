@@ -532,3 +532,36 @@ learn from past experiments and avoid repeating failed approaches.
   overlap.
 
 ---
+
+## Extended SwiGLU chain regional Inductor — keep (PENDING)
+
+- **Idea**: The original `annotate_swiglu_for_regional_inductor_pass`
+  tagged only silu + immediate-mul user (128 nodes, +0.14% noise). But
+  the backward SwiGLU is `silu_backward → mul → mul → ...` (3+ ops).
+  Iterate from silu/silu_backward seeds, expanding to adjacent bf16
+  `mul.Tensor` neighbors until fixed point. This grows each Inductor
+  region to include the full forward AND backward SwiGLU computation,
+  yielding bigger fused Triton kernels.
+- **Changes**: New `annotate_swiglu_chains_for_regional_inductor_pass`
+  with seed+expand algorithm. Seeds: silu/silu_backward (bf16). Expand:
+  bf16 mul.Tensor whose all-Tensor inputs are bf16 AND which is adjacent
+  to a tagged node. Registered between FlexAttention annotation and
+  residual-add annotation.
+- **Result**: **160 nodes tagged (5 per layer × 32 = 32×(silu+mul) +
+  32×(silu_backward+mul+mul))**. Bitwise numerics PASS. 3-run tps
+  **7,524 / 7,529 / 7,523** → avg **7,525 (+1.36% over 7,424,
+  +5.07% over Run 3 production baseline 7,162)**, mfu 44.07% avg,
+  memory unchanged 49.10 GiB, wall ~166 s.
+- **Analysis**: The expanded fusion captures the FULL 5-op SwiGLU
+  forward+backward computation per layer in one Inductor kernel.
+  Eliminates 5 HBM round-trips per SwiGLU site vs the previous
+  2-op-only SwiGLU experiment. The +1.36% gain finally crosses the
+  noise threshold convincingly — three runs all above 7,498.
+- **Lessons**: (1) Connected-component pointwise tagging (vs op-by-op
+  tagging) is the right granularity for Inductor fusion — bigger
+  regions amortize per-region overhead better. (2) Backward SwiGLU
+  has a 3-op chain (silu_backward + 2 muls) that the original SwiGLU
+  pass missed. (3) Bf16-only filter on inputs ensures bitwise safety
+  while keeping the fusion broad.
+
+---
