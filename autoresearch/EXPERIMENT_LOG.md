@@ -155,3 +155,37 @@ learn from past experiments and avoid repeating failed approaches.
   earliest moved consumer. Try (a) next — it's a one-line reorder.
 
 ---
+
+## bucket_all_reduce before FSDP bucketing — crash (xxxxxxx)
+
+- **Idea**: Move `bucket_tp_all_reduce_pass` to run BEFORE
+  `joint_transformer_block_bucketing_reordering_pass` so the FSDP pass
+  sees one merged AR instead of 67 (avoiding the consumer-reorder
+  conflict that crashed the previous attempt).
+- **Changes**: Added `bucket_tp_all_reduce_pass` between
+  `normalize_view_ops_as_reshape` and the FSDP bucketing partial.
+- **Result**: Numerics PASS. Benchmark CRASHED with the same
+  `RuntimeError: Argument 'view_X' of Node '_to_copy_Y' was used before
+  it has been defined!` from `gm.graph.lint()` inside our pass.
+- **Analysis**: This rules out FSDP-overlap as the cause. The upstream
+  `merge_all_reduce_bucket` always inserts the merged collective at
+  `bucket_nodes[-1].next` (after the last bucketed AR). The split
+  outputs are created at that position. But many consumers of the
+  ORIGINAL waits live BETWEEN bucket_nodes[0] and bucket_nodes[-1].next,
+  so after redirection they reference split outputs that are defined
+  later → topologically invalid. This is a fundamental issue with
+  `merge_all_reduce_bucket` when bucketed ARs are spread out across the
+  graph: there's no single insertion point where (a) all inputs are
+  defined and (b) the position precedes every consumer.
+- **Lessons**: Upstream `bucket_all_reduce` is unusable as-is for
+  scattered ARs. Fixing it requires either: (i) hoisting all bucket
+  inputs to a single earliest position (expensive — disturbs FSDP grad
+  accumulation chain), or (ii) moving every consumer of every bucket
+  wait to a single latest position (also expensive). Both are
+  reimplementations of the upstream pass. Park this direction. The 67×
+  TP-AR launch overhead remains an open opportunity but needs a custom
+  bucketer that respects topology — or a completely different approach
+  (e.g. fold the AR into the downstream `reduce_scatter`'s
+  collective-chunk math).
+
+---
