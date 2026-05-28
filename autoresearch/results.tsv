@@ -39,3 +39,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-28T11:30:00	xxxxxxx	7530	49.3	discard	44.10	150	max_compute_pre_fetch=20: +0.07% noise (prefetch distance not the limit)
 2026-05-28T11:45:00	xxxxxxx	0	0.0	crash	0.0	0	bucket_mode=coalesced: upstream AssertionError in OverlapScheduler._handle_wait
 2026-05-28T12:30:00	xxxxxxx	7516	49.1	discard	44.00	150	Custom topology-aware AR coalescer: 64/68 ARs into 8 chunks bitwise-safe, 0% perf (ARs already overlapped or off critical path)
+2026-05-28T12:45:00	xxxxxxx	7522	49.1	discard	44.02	150	enable_fusion_regions=True alone: 0% noise
