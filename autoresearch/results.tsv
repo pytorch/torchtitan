@@ -42,3 +42,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-28T12:45:00	xxxxxxx	7522	49.1	discard	44.02	150	enable_fusion_regions=True alone: 0% noise
 2026-05-28T13:00:00	xxxxxxx	7510	49.1	discard	43.98	150	prioritize_bucketing_during_scheduling=False: -0.2% noise
 2026-05-28T13:20:00	xxxxxxx	7544	49.1	discard	44.18	150	tag_bridging_layout_ops: 0 hits (tagged regions are pointwise-connected, no layout ops between)
+2026-05-28T13:35:00	xxxxxxx	7542	49.1	discard	44.16	150	tag_extra_pointwise (mul.Scalar/where/clamp_min): 0 hits
