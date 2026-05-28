@@ -36,3 +36,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-28T10:40:00	xxxxxxx	7500	49.0	discard	44.00	152	max_memory_increase_gb=16, max_in_flight_gb=32: -0.33% (bucketer not memory-limited, cost model mismatch is the limit)
 2026-05-28T10:55:00	xxxxxxx	7510	49.1	discard	44.06	141	8 MB pre-bucket cap: too small, 32/291 AG fused, -0.20% noise
 2026-05-28T11:15:00	xxxxxxx	7525	49.1	discard	44.07	149	Reorder: auto_overlap_bucketing after regional_inductor: identical (bucketer treats invoke_subgraph as opaque)
+2026-05-28T11:30:00	xxxxxxx	7530	49.3	discard	44.10	150	max_compute_pre_fetch=20: +0.07% noise (prefetch distance not the limit)
