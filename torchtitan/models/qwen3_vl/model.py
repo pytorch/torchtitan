@@ -13,6 +13,7 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.rope import _maybe_check_max_pos
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 
@@ -289,6 +290,7 @@ class Qwen3VLModel(Qwen3Model):
         freqs_cis = self.freqs_cis
         if isinstance(freqs_cis, DTensor):
             freqs_cis = freqs_cis.to_local()
+        _maybe_check_max_pos(position_ids, max_valid_pos=freqs_cis.shape[0] - 1)
         head_dim = freqs_cis.shape[-1] // 2
         cos_cache = freqs_cis[:, :head_dim]
         sin_cache = freqs_cis[:, head_dim:]

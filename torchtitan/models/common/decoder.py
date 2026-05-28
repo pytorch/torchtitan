@@ -109,8 +109,9 @@ class Decoder(BaseModel):
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
-                n_heads = self.layers[0].attention.n_heads
-                n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
+                attention = self.layers[0].attention
+                n_heads = attention.n_heads
+                n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
                 if n_heads % tp != 0:
                     raise ValueError(
                         f"tensor_parallel_degree ({tp}) must divide "
