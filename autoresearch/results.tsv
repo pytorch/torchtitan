@@ -29,3 +29,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-28T08:00:00	xxxxxxx	7525	49.1	discard	44.07	151	remove_noop_to_copy_pass: 0 matches (no _to_copy is a kwargs-no-op in this graph)
 2026-05-28T08:20:00	xxxxxxx	7526	49.1	discard	44.07	163	Extend SwiGLU chain to absorb _to_copy: 0 new nodes (no adjacent _to_copy to chain)
 2026-05-28T08:50:00	xxxxxxx	0	0.0	crash	0.0	0	RoPE complex->real rewrite: 128 sites uniform, bitwise FAIL (FMA promotion changes last bit) - hard floor under strict bitwise
+2026-05-28T09:20:00	xxxxxxx	7540	49.1	discard	44.15	151	Unified pointwise chain v2 (replace SwiGLU+residual): 384 nodes (same as disjoint), +0.20% noise
