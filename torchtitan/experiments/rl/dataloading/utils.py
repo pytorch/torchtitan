@@ -12,14 +12,6 @@ import torch
 logger = logging.getLogger(__name__)
 
 
-def _packed_field_dtype(pad_value: int | float | bool) -> torch.dtype:
-    if isinstance(pad_value, bool):
-        return torch.bool
-    if isinstance(pad_value, int):
-        return torch.long
-    return torch.float32
-
-
 def pack(
     samples: Iterable[dict[str, list]],
     max_seq_length: int,
@@ -43,9 +35,10 @@ def pack(
         Dict with:
         - Token field tensors [1, max_seq_length] for each key in pad_values
         - "positions" tensor [1, max_seq_length] with per-document resets
-        - "seq_lens" list[int] -- length of each sample in this row
+        - "seq_lens" list[int] - length of each sample in this row
     """
     keys = list(pad_values.keys())
+    dtypes: dict[str, torch.dtype] | None = None
     buffer: dict[str, list] = {key: [] for key in keys}
     position_buffer: list[int] = []
     seq_lens_buffer: list[int] = []
@@ -53,6 +46,7 @@ def pack(
 
     def _flush() -> dict:
         nonlocal buffer, position_buffer, seq_lens_buffer, buffer_length
+        assert dtypes is not None
         pad_length = max_seq_length - buffer_length
         if pad_length > 0:
             for key in keys:
@@ -62,7 +56,7 @@ def pack(
         result: dict = {
             key: torch.tensor(
                 buffer[key],
-                dtype=_packed_field_dtype(pad_values[key]),
+                dtype=dtypes[key],
             ).unsqueeze(0)
             for key in keys
         }
@@ -87,6 +81,9 @@ def pack(
                 max_seq_length,
             )
             continue
+
+        if dtypes is None:
+            dtypes = {key: torch.tensor(sample[key]).dtype for key in keys}
 
         if buffer_length > 0 and buffer_length + sample_length > max_seq_length:
             yield _flush()
