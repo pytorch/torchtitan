@@ -19,9 +19,9 @@ _ERROR = frozenset({"error_parse", "error_timeout", "error_abort"})
 class RolloutStatus(StrEnum):
     """Per-rollout terminal status.
 
-    Absorbs vLLM ``finish_reason`` and renderer/wrapper failure modes
-    into one categorical axis. Trainer-facing code reads
-    ``is_error()`` to filter, ``is_truncated()`` for truncation metrics.
+    Absorbs vLLM `finish_reason` and renderer/wrapper failure modes
+    into one categorical axis. Trainer-facing code reads `is_error()`
+    to filter, `is_truncated()` for truncation metrics.
     """
 
     COMPLETED = "completed"
@@ -40,59 +40,57 @@ class RolloutStatus(StrEnum):
 
 @dataclass(kw_only=True, slots=True)
 class RolloutTurn:
-    """One generator call + the env response to that call."""
+    """One generator call + the env response to that call.
+
+    Args:
+        prompt_token_ids: Tokens the generator saw as prompt for this turn.
+        response_token_ids: Tokens the generator produced (response only).
+        response_logprobs: Per-token logprobs from the sampling policy.
+        policy_version: Trainer policy version when this response was sampled.
+        response_messages: Parsed assistant + env-appended messages
+            (assistant first).
+    """
 
     prompt_token_ids: list[int]  # [L_prompt]
-    """Token ids the generator saw as prompt for this turn."""
-
     response_token_ids: list[int]  # [L_response]
-    """Token ids the generator produced (response only)."""
-
     response_logprobs: list[float]  # [L_response]
-    """Per-token logprobs from the sampling policy."""
-
     policy_version: int
-    """Trainer policy version when this response was sampled."""
-
     response_messages: list[Message] = field(default_factory=list)  # [M_response]
-    """Parsed assistant + env-appended messages (assistant first)."""
 
 
 @dataclass(kw_only=True, slots=True)
 class Rollout:
-    """A complete rollout: ordered turns + terminal state + reward + identity."""
+    """A complete rollout: ordered turns + terminal state + reward + identity.
+
+    Args:
+        group_id: Stable ID for the prompt group used for advantage centering.
+        sample_idx: Sibling index within the group (0..group_size-1).
+        turns: Ordered rollout turns.
+        status: Rollout-level terminal status.
+        reward: Final scalar reward, filled by the rubric.
+        reward_components: Decomposed reward metrics, filled by the rubric.
+        advantage: GRPO advantage (reward - group_mean), filled by the controller.
+    """
 
     group_id: str
-    """Stable ID for the prompt group used for advantage centering."""
-
     sample_idx: int
-    """Sibling index within the group (0..group_size-1)."""
-
-    turns: list[RolloutTurn] = field(default_factory=list)  # [K]
-    """Ordered rollout turns."""
-
+    turns: list[RolloutTurn] = field(default_factory=list)  # [K_turns]
     status: RolloutStatus = RolloutStatus.COMPLETED
-    """Rollout-level terminal status."""
-
     reward: float | None = None
-    """Final scalar reward, filled by the rubric."""
-
     reward_components: dict[str, float] = field(default_factory=dict)
-    """Decomposed reward metrics, filled by the rubric."""
-
     advantage: float | None = None
-    """GRPO advantage (reward - group_mean), filled by the controller."""
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class DatasetOutput:
-    """One row from a task's dataset, ready for env construction."""
+    """One row from a dataset, ready for env construction.
 
-    env_name: str
-    """Task identifier used for multi-task dispatch.
-    For single-task tasks this is a constant."""
+    Args:
+        task: Task identifier the controller uses to dispatch this row to the
+            right `Task` in `RLTrainer`. Single-task datasets use a constant.
+        env_input: Task-specific payload consumed by `Task.make_envs`. Each
+            task defines its own typed payload.
+    """
 
+    task: str
     env_input: object
-    """Task-specific payload consumed by ``Task.make_envs``.
-    Each task defines its own typed payload; multi-task tasks
-    downcast by ``env_name``."""

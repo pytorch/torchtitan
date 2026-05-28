@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from renderers import Message, Renderer, ToolSpec
@@ -19,58 +19,60 @@ if TYPE_CHECKING:
     from torchtitan.experiments.rl.actors.generator import Completion
 
 
-# TODO: the name "EnvLimits" is not settled — fields are framework-level
-# wrapper policy (timeouts, context overflow). Reconsider once we have
-# more envs (tool, browser) and a clearer sense of what knobs cluster.
+# TODO: revisit the `EnvLimits` name once tool/browser envs share this policy.
 @dataclass(kw_only=True, slots=True)
 class EnvLimits:
-    """Operational policy applied at the ``RendererEnv`` boundary."""
+    """Operational policy applied at the `RendererEnv` boundary.
+
+    Args:
+        max_trajectory_tokens: Hard cap on `prompt_tokens + generation_tokens`
+            per turn; `None` disables overflow checks.
+        max_generation_tokens: Reserved tokens for the upcoming generation
+            when checking overflow.
+        step_timeout_s: Wall-clock timeout for one `MessageEnv.step_message`
+            call.
+    """
 
     max_trajectory_tokens: int | None = None
-    """Hard cap on ``prompt_tokens + generation_tokens`` per turn; ``None`` disables."""
-
     max_generation_tokens: int | None = None
-    """Reserved tokens for the upcoming generation when checking overflow."""
-
     step_timeout_s: float | None = 1800.0
-    """Wall-clock timeout for one ``MessageEnv.step_message`` call."""
 
 
 @dataclass(kw_only=True, slots=True)
 class TokenizedTurn:
     """One turn boundary in the rollout.
 
-    Returned by both ``RendererEnv.initial_prompt()`` and
-    ``RendererEnv.step_completion(completion)``.
+    Returned by both `RendererEnv.initial_prompt` and
+    `RendererEnv.step_completion`.
+
+    Args:
+        next_token_ids: Prompt for the NEXT generator call. `None` on
+            terminal step. On initial: the prompt the model sees on turn 0.
+            After non-terminal `step_completion`: prompt for turn N+1.
+        next_messages: Full conversation snapshot at the next-prompt point.
+        last_env_step: The env's response to the previous turn. `None` on
+            initial.
+        last_response_messages: Messages appended this turn (parsed assistant
+            message + env's tool / user replies). Empty on initial.
     """
 
     next_token_ids: list[int] | None  # [L_prompt] or None
-    """Prompt for the NEXT generator call. ``None`` on terminal step.
-    On initial: the initial prompt the model sees on turn 0.
-    After non-terminal step_completion: prompt for turn N+1."""
-
     next_messages: list[Message]
-    """Full conversation snapshot at the next-prompt point."""
-
     last_env_step: MsgResponseStep | None = None
-    """The env's response to the previous turn. ``None`` on initial."""
-
     last_response_messages: list[Message] = field(default_factory=list)
-    """Messages appended this turn (parsed assistant message + env's
-    tool / user replies). Empty on initial."""
 
 
 class RendererEnv:
-    """Framework wrapper around one ``MessageEnv`` + ``Renderer``.
+    """Framework wrapper around one `MessageEnv` + `Renderer`.
 
-    IS an env from the driver's view but does NOT inherit ``MessageEnv``.
-    Owns the renderer plumbing, length-stop / parse-error / timeout
-    classification, and context-overflow checks. Rewards live on the
-    rubric; ``MsgResponseStep.reward`` is always ``None`` here.
+    From the rollout driver's view this IS the env; it does NOT inherit
+    `MessageEnv`. Owns the renderer plumbing, length-stop / parse-error /
+    timeout classification, and context-overflow checks. Rewards are
+    assigned by the task rubric after the rollout is built.
 
     Args:
-        message_env: The user's ``MessageEnv`` subclass instance.
-        renderer: Renderer from ``RendererConfig.build``.
+        message_env: The user's `MessageEnv` subclass instance.
+        renderer: Renderer from `RendererConfig.build`.
         limits: Framework-level wrapper policy (timeouts, overflow caps).
 
     Example:
@@ -100,6 +102,13 @@ class RendererEnv:
         self._last_prompt_ids: list[int] = []
 
     async def initial_prompt(self) -> TokenizedTurn:
+        """Render the initial conversation into the first generator prompt.
+
+        Returns:
+            `TokenizedTurn` with `next_token_ids` set for runnable prompts,
+            or a terminal `TRUNCATED_OVERFLOW` turn when the initial prompt
+            exceeds `EnvLimits.max_trajectory_tokens`.
+        """
         init = await self._message_env.reset()
         self._messages = list(init.messages)
         # Renderer chat templates often emit a different tools-section
@@ -125,6 +134,15 @@ class RendererEnv:
         )
 
     async def step_completion(self, completion: Completion) -> TokenizedTurn:
+        """Advance the env by one sampled completion.
+
+        Args:
+            completion: Generator output for the current prompt.
+
+        Returns:
+            `TokenizedTurn` for the next generator call, or a terminal turn
+            when the rollout completes, truncates, or errors.
+        """
         # Reject terminal-state completions
         if completion.finish_reason == "length":
             return _terminal(
@@ -177,8 +195,9 @@ class RendererEnv:
         self._messages.extend(new_messages)
 
         if env_step.done:
+            # Default unset status to COMPLETED without mutating the user-returned object.
             if env_step.status is None:
-                env_step.status = RolloutStatus.COMPLETED
+                env_step = replace(env_step, status=RolloutStatus.COMPLETED)
             return TokenizedTurn(
                 next_token_ids=None,
                 next_messages=list(self._messages),
@@ -206,12 +225,11 @@ class RendererEnv:
 
         # Context-overflow check before returning
         if self._is_overflow(prompt_len=len(next_token_ids)):
-            terminal = _terminal(
+            return _terminal(
                 next_messages=list(self._messages),
                 status=RolloutStatus.TRUNCATED_OVERFLOW,
+                last_response_messages=new_messages,
             )
-            terminal.last_response_messages = new_messages
-            return terminal
 
         self._last_prompt_ids = list(next_token_ids)
         return TokenizedTurn(
@@ -236,15 +254,12 @@ def _terminal(
     *,
     next_messages: list[Message],
     status: RolloutStatus,
+    last_response_messages: list[Message] | None = None,
 ) -> TokenizedTurn:
-    """Build a terminal TokenizedTurn carrying a status-only MsgResponseStep.
-
-    Reward stays ``None``; the rubric assigns reward off-env per doc 37
-    Option B (rubric owns all reward semantics).
-    """
+    """Build a terminal `TokenizedTurn` carrying a status-only env step."""
     return TokenizedTurn(
         next_token_ids=None,
         next_messages=next_messages,
         last_env_step=MsgResponseStep(done=True, status=status),
-        last_response_messages=[],
+        last_response_messages=last_response_messages or [],
     )

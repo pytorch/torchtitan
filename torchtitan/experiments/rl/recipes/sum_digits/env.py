@@ -34,6 +34,7 @@ class SumDigitsEnv(MessageEnv):
         self._numbers = env_input.numbers
 
     async def reset(self) -> MsgResponseReset:
+        """Return the system prompt and one SumDigits user question."""
         question = f"What is the total digit sum of {self._numbers}?"
         return MsgResponseReset(
             messages=[
@@ -43,7 +44,8 @@ class SumDigitsEnv(MessageEnv):
         )
 
     async def step_message(self, msg: Message) -> MsgResponseStep:
-        """Single-turn env: terminate immediately. The rubric scores the
-        rollout off-env from ``msg`` content; nothing here depends on the
-        assistant's message."""
+        """Terminate after the first assistant message.
+
+        The rubric scores the rollout off-env from `msg.content`.
+        """
         return MsgResponseStep(messages=[], done=True, status=RolloutStatus.COMPLETED)

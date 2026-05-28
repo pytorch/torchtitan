@@ -16,28 +16,31 @@ from torchtitan.experiments.rl.rollouts.types import RolloutStatus
 
 @dataclass(kw_only=True, slots=True)
 class MsgResponseReset:
-    """Initial messages + tool specs from ``MessageEnv.reset``."""
+    """Initial messages + tool specs from `MessageEnv.reset`.
 
-    messages: list[Message]
-    """Initial conversation (system + user + few-shot, typically)."""
+    Args:
+        messages: Initial conversation (system + user + few-shot, typically).
+        tools: Tool schemas exposed to the model. Empty for tool-less envs.
+    """
 
-    tools: list[ToolSpec] = field(default_factory=list)
-    """Tool schemas exposed to the model. Empty for tool-less envs."""
+    messages: list[Message]  # [M_initial]
+    tools: list[ToolSpec] = field(default_factory=list)  # [K_tools]
 
 
 @dataclass(kw_only=True, slots=True)
 class MsgResponseStep:
-    """Env response to one parsed assistant message."""
+    """Env response to one parsed assistant message.
 
-    messages: list[Message] = field(default_factory=list)
-    """Env-appended messages (tool / user replies). Empty when the
-    rollout terminates with no follow-up."""
+    Args:
+        messages: Env-appended messages (tool / user replies). Empty when
+            the rollout terminates with no follow-up.
+        done: `True` ends the rollout.
+        status: Terminal status; `None` on non-terminal steps.
+    """
 
+    messages: list[Message] = field(default_factory=list)  # [M_env]
     done: bool = False
-    """``True`` ends the rollout."""
-
     status: RolloutStatus | None = None
-    """Terminal status; ``None`` on non-terminal steps."""
 
     def __post_init__(self) -> None:
         for msg in self.messages:
@@ -49,11 +52,11 @@ class MsgResponseStep:
 
 
 class MessageEnv(abc.ABC):
-    """User's message-level env. Subclass + implement 3 methods.
+    """User's message-level env. Subclass + implement `reset` / `step_message`.
 
-    User envs are renderer-free: ``reset`` / ``step_message`` deal only
-    in messages. The framework's ``RendererEnv`` composes one of these
-    with a ``Renderer`` to expose a token-level interface to the driver.
+    User envs are renderer-free: `reset` and `step_message` deal only in
+    messages. `RendererEnv` composes one of these with a `Renderer` to expose
+    a token-level interface to the rollout driver.
     """
 
     @abc.abstractmethod
@@ -64,18 +67,18 @@ class MessageEnv(abc.ABC):
     async def step_message(self, msg: Message) -> MsgResponseStep:
         """Apply one parsed assistant message; return env-side response.
 
-        Subclasses MUST NOT inspect ``finish_reason`` / token counts /
-        parse failures; ``RendererEnv`` handles those.
+        Subclasses MUST NOT inspect `finish_reason` / token counts / parse
+        failures; `RendererEnv` handles those before calling this method.
 
         Args:
-            msg: Parsed assistant message from ``Renderer.parse_response``.
-                Fields include ``content``, optional ``reasoning_content``,
-                and optional ``tool_calls``.
+            msg: Parsed assistant message from `Renderer.parse_response`.
+                Fields include `content`, optional `reasoning_content`, and
+                optional `tool_calls`.
 
         Returns:
-            ``MsgResponseStep`` carrying env-appended messages, terminal flag,
-            and terminal status. Reward assignment lives entirely on the
-            rubric (doc 37 Option B).
+            `MsgResponseStep` carrying env-appended messages, terminal flag,
+            and terminal status. Reward assignment happens in the rubric;
+            envs never set reward.
         """
 
     async def close(self) -> None:

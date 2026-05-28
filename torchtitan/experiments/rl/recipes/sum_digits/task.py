@@ -12,25 +12,31 @@ from renderers import Renderer
 
 from torchtitan.experiments.rl.envs import EnvLimits, RendererEnv
 from torchtitan.experiments.rl.recipes import Task
-from torchtitan.experiments.rl.recipes.sum_digits.data import SumDigitsDataset
 from torchtitan.experiments.rl.recipes.sum_digits.env import SumDigitsEnv
 from torchtitan.experiments.rl.recipes.sum_digits.grader import SumDigitsRubric
 from torchtitan.experiments.rl.rollouts.types import DatasetOutput
 
 
 class SumDigitsTask(Task):
-    """SumDigits task: seeded dataset + 2-component rubric + env builder."""
+    """SumDigits task: 2-component rubric + env builder.
+
+    Dataset lives on `RLTrainer.Config` (not here); rows are routed to
+    this task by `DatasetOutput.task == "sum_digits"`.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Task.Config):
-        dataset: SumDigitsDataset.Config = field(
-            default_factory=SumDigitsDataset.Config
-        )
+        """Config for `SumDigitsTask`.
+
+        Args:
+            rubric: SumDigits rubric config.
+            env_limits: Renderer-env operational limits.
+        """
+
         rubric: SumDigitsRubric.Config = field(default_factory=SumDigitsRubric.Config)
         env_limits: EnvLimits = field(default_factory=EnvLimits)
 
     def __init__(self, config: Config) -> None:
-        self.dataset = config.dataset.build()
         self.rubric = config.rubric.build()
         self.env_limits = config.env_limits
 
@@ -41,6 +47,7 @@ class SumDigitsTask(Task):
         group_size: int,
         renderer: Renderer,
     ) -> list[RendererEnv]:
+        """Construct SumDigits renderer envs for one prompt group."""
         return [
             RendererEnv(
                 message_env=SumDigitsEnv(env_input=example.env_input),
