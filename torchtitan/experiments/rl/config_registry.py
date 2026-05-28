@@ -43,7 +43,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         validation_env=SumDigitsEnv.Config(
             seed=99, correctness_reward=1.0, format_reward=0.3
         ),
-        metrics=MetricsProcessor.Config(),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
         ),
@@ -100,7 +100,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         validation_env=SumDigitsEnv.Config(
             seed=99, correctness_reward=1.0, format_reward=0.3
         ),
-        metrics=MetricsProcessor.Config(),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
         ),
@@ -158,7 +158,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
         validation_env=SumDigitsEnv.Config(
             seed=99, correctness_reward=1.0, format_reward=0.3
         ),
-        metrics=MetricsProcessor.Config(),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
         ),
@@ -219,7 +219,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
         validation_env=SumDigitsEnv.Config(
             seed=99, correctness_reward=1.0, format_reward=0.3
         ),
-        metrics=MetricsProcessor.Config(),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
         ),
