@@ -361,3 +361,32 @@ learn from past experiments and avoid repeating failed approaches.
   upstream topology bug.
 
 ---
+
+## async TP between normalize+bucket — discard (xxxxxxx)
+
+- **Idea**: Final untried position for `async_tensor_parallel_pass` —
+  between `normalize_view_ops_as_reshape` and `auto_overlap_bucketing_pass`.
+  After view normalization the matcher should see `aten.reshape.default`
+  instead of `view`/`_unsafe_view`, and before bucketing the mm→RS
+  adjacency should be intact.
+- **Changes**: Insert async_tensor_parallel_pass at position #5 (between
+  view normalization and bucketing), dropping the original conditional.
+- **Result**: tps **7,141 (-2.1%)**, numerics PASS, but **356 "no
+  producer matmul found" skips and 0 fusions**. AG-side also produced
+  zero fusions silently.
+- **Analysis**: Position is not the issue. The upstream
+  `_find_producer_matmul` whitelist (`reshape`, `_to_copy`, outer
+  `view`) doesn't match what sits between mm and RS in our graph —
+  presumably a `permute`/`transpose`/DTensor metadata op or a
+  non-whitelisted `_to_copy` variant. Without an explicit dump-and-rewrite
+  to fold those into the matched chain, async TP cannot engage on this
+  configuration from `passes.py` alone.
+- **Lessons**: Async TP is **fully blocked** at the upstream-matcher
+  level on Llama3 8B FSDP=4×TP=2 with DTensor lowering. Three pass
+  positions tried (start, middle, end) — all yield 0 fusions. Park
+  this direction until either (a) upstream loosens the matcher whitelist
+  or (b) we write a custom mm→RS fusion replacement that handles the
+  actual op pattern. TP RS (61.5 ms exposed, 5.9% of step) remains the
+  largest unattacked bottleneck.
+
+---

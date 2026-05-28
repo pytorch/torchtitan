@@ -13,3 +13,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-28T02:25:00	xxxxxxx	7274	49.1	discard	42.60	130	overlap_fsdp_ag_rs_pass unconditional: -0.27% (auto-bucketer already hides most AG)
 2026-05-28T02:35:00	xxxxxxx	7240	49.4	discard	42.40	129	schedule_overlap_bucketing tuned (memory 8GB, in_flight 16GB, compute_mul 1.5, fusion_regions): -0.74%, bucket count capped by pre-bucket FSDP
 2026-05-28T02:50:00	xxxxxxx	7287	49.1	discard	42.66	117	schedule_overlap_bucketing pre_bucketing=False: -0.10%, no schedule change
+2026-05-28T03:10:00	xxxxxxx	7141	49.1	discard	41.81	125	async TP between normalize+bucket: 356 'no producer matmul' skips, 0 fusions, -2.1%
