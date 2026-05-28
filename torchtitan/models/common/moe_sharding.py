@@ -227,9 +227,13 @@ def set_moe_sharding_config(
 
     # Routed experts: local_map converts DTensor inputs to local for
     # dispatch/compute/combine, then wraps local output as DTensor(Partial).
+    # The forward body flattens 3D (bs, slen, dim) input into 2D
+    # (bs*slen, dim) before dispatch, so the OUTPUT placement uses
+    # cp=Shard(0) (seq folded into dim 0) rather than the default
+    # cp=Shard(1) (seq on dim 1 of a 3D tensor).
     # Routed experts: the three things that differ between EP and TP-only
     # are state_shardings, input layout, and input grad layout.
-    experts_out_layout = dense_activation_placement(tp=Partial())
+    experts_out_layout = dense_activation_placement(tp=Partial(), cp=Shard(0))
     if enable_ep:
         state_shardings: dict[str, NamedPlacement] = {
             name: expert_param_placement_sparse() for name in expert_param_layout
