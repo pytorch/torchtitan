@@ -2,3 +2,5 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-27T15:50:43	2ffbabc5	7162	47.5	baseline	41.94	84	Run 3 baseline: production passes (cleanup + FSDP bucketing/reorder + regional Inductor + cudagraph), no SAC, no extra custom passes
 2026-05-28T00:15:00	xxxxxxx	7170	47.5	discard	41.98	81	joint_graph_passes after normalize_view_ops_as_reshape: +0.11% in noise
 2026-05-28T00:23:00	xxxxxxx	7023	47.6	discard	41.13	80	async_tensor_parallel_pass after bucketing: 99 'no producer matmul' skips, -1.9% throughput
+2026-05-28T00:30:00	xxxxxxx	7164	47.5	discard	41.95	79	async_TP first in compile_time_passes: 0 fusions (DTensor redistribute inserts view/permute breaking matcher)
+2026-05-28T00:40:00	xxxxxxx	0	0.0	crash	0.0	0	bucket_all_reduce after FSDP bucketing: lint fail (FSDP overlap moves AR-wait consumers earlier, breaking topology)

@@ -99,3 +99,59 @@ learn from past experiments and avoid repeating failed approaches.
   the very start of `compile_time_passes` (or just after `remove_detach_pass`).
 
 ---
+
+## async_TP first in compile_time_passes — discard (xxxxxxx)
+
+- **Idea**: Move `async_tensor_parallel_pass` to position #1 so upstream
+  `micro_pipeline_tp_pass` matcher sees `mm→RS` / `AG→mm` adjacency in
+  the joint graph before view normalization / FSDP bucketing perturb it.
+- **Changes**: Made `async_tensor_parallel_pass` the first appended pass,
+  unconditionally (dropped the config gate).
+- **Result**: tps = 7,164, mfu = 41.95%, memory = 47.52 GiB, wall_time = 79 s.
+  Bitwise numerics PASS. 0 fusions: 421 "no producer matmul found for
+  reduce scatter" skips. tps in ±1% of baseline.
+- **Analysis**: Position didn't help. `DTensor.redistribute` (which
+  produces the TP collectives during `make_fx`) decomposes via aten
+  `view`/`_unsafe_view`/`reshape`/`_to_copy`/`permute` between `mm` and
+  the collective. Upstream `find_producer_matmul` only traverses through
+  a narrow whitelist (`aten.reshape.default`, `aten._to_copy`,
+  `aten.view.default`); `_unsafe_view` and `permute` (which sit in the
+  Q/K/V reshape path and row-parallel output path) break the chain.
+- **Lessons**: `async_tensor_parallel_pass` at the joint-graph stage is
+  not engageable from `passes.py` alone — the breakers are intrinsic to
+  DTensor lowering, not artifacts of subsequent passes. Either upstream
+  needs a looser matcher, or we'd need to rewrite `mm→{view|reshape|
+  permute|_to_copy}*→RS` chains into direct adjacency ourselves
+  (reimplementing a chunk of `micro_pipeline_tp_pass`). Out of scope.
+
+---
+
+## bucket_all_reduce after FSDP bucketing — crash (xxxxxxx)
+
+- **Idea**: Coalesce 67 small TP `all_reduce` calls (RMSNorm weight grads,
+  8 KB bf16 each on TP-2 group) into one merged bucket via upstream
+  `torch._inductor.fx_passes.bucketing.bucket_all_reduce`. Bitwise-safe
+  in bf16 because per-position rank-axis reduction is unchanged.
+- **Changes**: Added `bucket_tp_all_reduce_pass` wrapping
+  `bucket_all_reduce(gm)`, registered after
+  `joint_transformer_block_bucketing_reordering_pass`.
+- **Result**: Bitwise numerics test PASSED. Benchmark CRASHED with
+  `RuntimeError: Argument 'view_4062' of Node '_to_copy_432' was used
+  before it has been defined!` from `gm.graph.lint()`.
+- **Analysis**: Bucketing logically engaged — the post-merge graph has
+  one big `all_reduce(cat([67 grads]))` instead of 67 separate AR calls,
+  bitwise correct. But the upstream FSDP `enable_fsdp_ag_rs_overlap=True`
+  reorder had already moved consumers of those AR-wait outputs EARLIER
+  in the graph (so the FSDP RS overlap can start sooner). After AR
+  bucketing inserts the merged collective at `bucket_nodes[-1].next`,
+  those moved-earlier consumers now reference an output defined LATER.
+  Topologically invalid. Numerics test happens to pass because that test
+  uses `enable_fsdp_ag_rs_overlap=False`, where the consumer reorder
+  doesn't happen.
+- **Lessons**: AR bucketing IS bitwise-safe (test passes). The crash is
+  pure graph-topology, fixable by either (a) running AR bucketing BEFORE
+  FSDP bucketing/overlap so FSDP sees 1 merged AR not 67, or
+  (b) inserting the merged AR at an `insertion_point` that precedes the
+  earliest moved consumer. Try (a) next — it's a one-line reorder.
+
+---
