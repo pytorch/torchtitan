@@ -84,6 +84,61 @@ def normalize_view_ops_as_reshape(
     return gm
 
 
+def remove_redundant_contiguous_clone_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs=None,
+) -> torch.fx.GraphModule:
+    """Remove aten.clone(..., memory_format=contiguous_format) calls whose
+    input is already contiguous (per FakeTensor stride metadata).
+
+    FSDP weight-unpack patterns (split_with_sizes -> view.dtype -> clone) often
+    produce a clone whose input already has contiguous strides into the bucket
+    buffer; the clone(contiguous_format) is then a redundant memcpy. Running
+    this before ``auto_overlap_bucketing_pass`` lets the bucketer see fewer ops.
+    """
+    from torch._subclasses.fake_tensor import FakeTensor
+
+    def _is_contig(t: FakeTensor) -> bool:
+        shape = list(t.size())
+        strides = list(t.stride())
+        expected: list = []
+        s = 1
+        for d in reversed(shape):
+            expected.append(s)
+            s *= d
+        return strides == list(reversed(expected))
+
+    removed = 0
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function":
+            continue
+        if node.target is not aten.clone.default:
+            continue
+        # Default ``memory_format`` for ``aten.clone`` is contiguous_format;
+        # treat both the explicit and the implicit case as redundant when the
+        # input already has contiguous strides.
+        mem_fmt = node.kwargs.get("memory_format", torch.contiguous_format)
+        if mem_fmt is not torch.contiguous_format:
+            continue
+        if not node.args or not isinstance(node.args[0], torch.fx.Node):
+            continue
+        in_node = node.args[0]
+        in_val = in_node.meta.get("val")
+        if not isinstance(in_val, FakeTensor):
+            continue
+        if not _is_contig(in_val):
+            continue
+        # Clone is redundant; route users to the input directly.
+        node.replace_all_uses_with(in_node)
+        gm.graph.erase_node(node)
+        removed += 1
+    if removed > 0:
+        logger.info(f"Removed {removed} redundant clone(contiguous_format) calls")
+    gm.graph.lint()
+    gm.recompile()
+    return gm
+
+
 def auto_overlap_bucketing_pass(
     gm: torch.fx.GraphModule,
     example_inputs=None,
@@ -175,6 +230,7 @@ def compile_time_passes(
         remove_identity_view_pass,
         remove_identity_slice_pass,
         normalize_view_ops_as_reshape,
+        remove_redundant_contiguous_clone_pass,
     ]
     # Preserve AG/RS overlap (separate streams for AG vs RS) before auto-bucketing.
     if config.compile.enable_fsdp_ag_rs_overlap:

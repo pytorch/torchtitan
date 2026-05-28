@@ -390,3 +390,28 @@ learn from past experiments and avoid repeating failed approaches.
   largest unattacked bottleneck.
 
 ---
+
+## Remove redundant contiguous clones — keep (PENDING)
+
+- **Idea**: Profile showed 358 `aten.clone(memory_format=contiguous_format)`
+  calls, ~290 from FSDP weight unpack. Many should be no-ops if the input
+  is already contiguous (per FakeTensor stride metadata).
+- **Changes**: Added `remove_redundant_contiguous_clone_pass` — walks the
+  graph, finds `aten.clone.default` nodes (default kwargs → contig
+  format), checks FakeTensor stride against contiguous strides; if
+  already-contiguous, replaces uses with input. Registered before
+  `auto_overlap_bucketing_pass`.
+- **Result**: 68 clones eliminated per step (deterministic across 3
+  runs). 3-run tps **7,321 / 7,323 / 7,312** (avg **7,319**, +0.34% vs
+  7,294). Bitwise numerics PASS. wall 129 s.
+- **Analysis**: 68 of 358 clones (~19%) were visible at this FX layer
+  and ALL 68 were redundant. The other ~290 FSDP-unpack clones live
+  inside HOPs/subgraphs the pass doesn't reach. Consistent small
+  improvement across 3 runs suggests the gain is real but partially
+  masked by auto-bucketing already overlapping these clones with
+  compute. Memory unchanged (49.06 GiB).
+- **Lessons**: Stride-aware clone elimination is a small but safe win.
+  Bigger gains likely require reaching INTO the FSDP HOPs/subgraphs or
+  rewriting the unpack path to avoid issuing clones in the first place.
+
+---
