@@ -4851,3 +4851,53 @@
   Planned command or config overrides: Active batch176 command with `aten_norm_modules` replacing `norm_modules`.
   Success criteria and expected risk: Success is step-10 throughput above the kept norm_modules short sample with similar memory. Risk is losing the compiled helper's scheduling benefit or exposing native RMSNorm backward overhead.
   Result: discarded at source state `0deafe33+dirty`; run555 completed with the same logged 168.91 GiB peak but reached only 14,145 tps. Restore source; keep the compiled `norm_modules` helper as the best module-level RMSNorm path.
+
+- Idea: fuse Q and K pairwise RoPE into one custom Triton launch
+  Current best source commit: bfc8d098
+  Source: the model-compile winner still shows RoPE kernels after replacing sequential RoPE with pairwise RoPE.
+  Expected mechanism: A fused Q/K autograd Function can launch one forward kernel and one backward kernel for both Q and K, reducing launch overhead and duplicate rope-cache loads.
+  Supporting evidence: run581 profile still attributes measurable time to `_pairwise_rope_*` kernels.
+  Planned source/config changes: Add a `fused_qk_rope` component in `torchtitan/models/qwen3/parallelize.py`.
+  Planned command or config overrides: Compare the lean model-compile recipe with and without `fused_qk_rope`, both with and without the separately compiled `qk_norm_rope` helper.
+  Success criteria and expected risk: Success is step-10 throughput above the lean model-compile short signal at unchanged memory. Risk is extra masked work inside the fused kernel due Q/K having different head counts.
+  Result: discarded at source state `bfc8d098+dirty`; run588 reached 14,333 tps and run589 reached 14,313 tps, both at 168.89 GiB and below the non-fused recipe.
+
+- Idea: revisit model compile granularity after QKV grad-input concat and pairwise RoPE
+  Current best source commit: bfc8d098
+  Source: whole-block model compile previously crashed or regressed, but the source stack changed materially after MXFP8 QKV and RoPE customizations.
+  Expected mechanism: Block-level model compile can reduce Python/Autograd overhead and fuse pointwise/transpose regions that nested component compiles leave behind.
+  Supporting evidence: run581 profile showed large reductions in `mx_mmBackward` wrapper time and `copy_` after lean block-level compile.
+  Planned source/config changes: None beyond existing `model` component.
+  Planned command or config overrides: Test lean `model,loss,qk_norm_rope,qkv_grad_input_concat,pairwise_rope`, no-helper variants, and nested component interactions.
+  Success criteria and expected risk: Success is sustained throughput above run573 while keeping memory below the 95% line. Risk is graph-boundary noise that looks good in 10-step samples but does not sustain.
+  Result: kept. run580 sustained 14,340 tps over steps 11-20 at 168.89 GiB, the current best. No-helper, nested norm/qkv/feed, and block_norms variants all lost sustained validation.
+
+- Idea: FlexAttention FLASH / CUTE backend for Qwen3 14B
+  Current best source commit: bfc8d098
+  Source: dependencies were reinstalled and FlexAttention FLASH was previously blocked before reaching the CUTE path.
+  Expected mechanism: Flex FLASH/CUTE may improve the attention kernel bucket relative to SDPA/FA3.
+  Supporting evidence: run581 still shows flash attention time, and the user explicitly asked to revisit FLASH/CUTE backends after installing dependencies.
+  Planned source/config changes: Temporarily add Qwen3 14B flex-flash configs and a local compatibility shim for flash-attn 2.8.3 CUTE API mismatches.
+  Planned command or config overrides: Test flex-flash with and without block-level model compile; if needed, isolate a causal-only mask path.
+  Success criteria and expected risk: Success is a finite batch176 run with memory near 168.89 GiB and short throughput above the SDPA winner. Risk is PyTorch/flash-attn CUTE API mismatch or extra memory.
+  Result: discarded and source cleanup performed. run592 hit an Inductor fake-tensor recursion under block compile; run593 hit missing `cutlass.utils.ampere_helpers`; compatibility shims progressed to CUTE execution but runs 597-598 OOMed at batch176 and batch164. Flex FLASH is blocked/non-competitive in this environment.
+
+- Idea: spend memory headroom via batch or FSDP policy
+  Current best source commit: bfc8d098
+  Source: lean model compile lowers peak memory to 168.89 GiB, close to but under the 95% envelope.
+  Expected mechanism: A slightly larger batch or more aggressive last-layer resharding could increase tokens/sec if memory permits.
+  Supporting evidence: earlier memory-risky batch180 runs had high short throughput but exceeded the envelope.
+  Planned source/config changes: Add a `reshard_last_layer` component to keep the last FSDP layer resharded after forward.
+  Planned command or config overrides: Probe batch177, batch180 plus `reshard_last_layer`, and batch180 with loss chunks8.
+  Success criteria and expected risk: Success is a higher batch that stays under the envelope and sustains above run580. Risk is MXFP8 tile-shape assertions or higher communication overhead.
+  Result: discarded. batch177 and batch180/loss-chunks8 fail the torchao MXFP8 dim1 tiling assertion; batch180 with `reshard_last_layer` runs but peaks at 172.03 GiB and only reaches 14,437 tps short.
+
+- Idea: compiler backend and tuning knobs on the lean winner
+  Current best source commit: bfc8d098
+  Source: current winner uses default Inductor with no explicit tuning knobs.
+  Expected mechanism: Max autotune, coordinate-descent tuning, or the cudagraphs backend could select faster kernels or reduce launch overhead.
+  Supporting evidence: run581 still has generated kernels and launch/copy overhead after model compile.
+  Planned source/config changes: None.
+  Planned command or config overrides: Test `TORCHINDUCTOR_MAX_AUTOTUNE=1`, `TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1`, and `--compile.backend=cudagraphs`.
+  Success criteria and expected risk: Success is higher short throughput without exceeding memory. Risk is compile time, CUDA graph private-pool memory, or worse selected kernels.
+  Result: discarded. max-autotune and coordinate descent both raised memory to 171.09 GiB without beating the winner; cudagraphs OOMed at 177.67 GiB.

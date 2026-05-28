@@ -13888,3 +13888,31 @@ Interpretation:
 - Direct ATen RMSNorm at the module boundary is valid and avoids the block-forward memory cliff.
 - It is still slower than the compiled `norm_modules` helper, so the kept module-level compiled helper remains the best outer-RMSNorm implementation.
 - Restore the source and keep direct ATen RMSNorm closed for this stack.
+
+## Experiments 556-606: QKV Grad-Input, Pairwise RoPE, Model Compile, And Backend Probes
+
+Current sustained winner:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=20 --compile.enable --compile.components=model,loss,qk_norm_rope,qkv_grad_input_concat,pairwise_rope --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0
+```
+
+Result:
+
+- Best sustained: run580, 14,340 tps over steps 11-20, 168.89 GiB.
+- Best short spike after that: run604, 14,565 tps with pairwise RoPE block512, but run605 sustained only 14,309 tps, so block256 remains active.
+- Current winning source features: QKV MXFP8 grad-input concat, pairwise RoPE block256, and lean block-level model compile without nested qkv/feed/norm compiles.
+
+Closed branches:
+
+- QKV grad-input-only concat beats full backward concat sustained; grad-weight concat and FFN gate/up concat lost.
+- Fused Q/K pairwise RoPE custom Triton kernels are valid but slower than separate pairwise kernels.
+- No-helper `model,loss,qkv_grad_input_concat,pairwise_rope` and nested `norm_modules`, `qkv_linear`, `feed_forward`, `block_norms` model-compile variants do not sustain.
+- FlexAttention FLASH/CUTE is not viable here: the installed flash-attn 2.8.3 CUTE API mismatches PyTorch Inductor expectations, and compatibility shims reach execution only to OOM well above the target envelope.
+- Inductor max-autotune and coordinate-descent tuning raise memory to 171.09 GiB and do not beat the winner; `cudagraphs` backend OOMs.
+- Batch177 and batch180 with loss chunks8 hit torchao MXFP8 dim1 tiling assertions; batch180 with last-layer resharding runs but peaks at 172.03 GiB.
+
+Interpretation:
+
+- The useful wins came from reducing MXFP8 backward/copy overhead and then changing compile granularity. Most later short wins were scheduling noise that failed sustained validation.
+- The remaining roofline-limited work is GEMM/MXFP8 plus FSDP collectives; small graph-boundary and backend knobs now mostly trade memory or compile time for no sustained gain.

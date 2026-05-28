@@ -220,6 +220,42 @@ def qwen3_14b() -> Trainer.Config:
     )
 
 
+def qwen3_14b_flex_flash() -> Trainer.Config:
+    return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
+        hf_assets_path="./tests/assets/tokenizer",
+        model_spec=model_registry(
+            "14B",
+            attn_backend="flex_flash",
+            converters=[
+                MXFP8LinearConverter.Config(model_compile_enabled=True),
+            ],
+        ),
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        optimizer=OptimizersContainer.Config(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
+        training=TrainingConfig(
+            local_batch_size=4,
+            seq_len=4096,
+            steps=3000,
+        ),
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=-1,
+            tensor_parallel_degree=1,
+            context_parallel_degree=1,
+            pipeline_parallel_degree=1,
+        ),
+        checkpoint=CheckpointManager.Config(
+            interval=500,
+            last_save_model_only=False,
+            export_dtype="float16",
+        ),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="full",
+        ),
+    )
+
+
 def qwen3_32b() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
