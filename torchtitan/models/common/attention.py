@@ -29,8 +29,7 @@ from torch.nn.attention.varlen import varlen_attn
 
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
-from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.rmsnorm import RMSNorm
+from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.rope import (
     apply_rotary_emb_complex,
     apply_rotary_emb_cos_sin,

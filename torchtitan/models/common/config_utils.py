@@ -22,9 +22,8 @@ from torchtitan.models.common.attention import (
     VarlenAttention,
 )
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
-from torchtitan.models.common.rmsnorm import RMSNorm
+from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
