@@ -482,11 +482,11 @@ class Qwen3VLVisionEncoder(Module):
 
         dim: int
         n_heads: int
-        spatial_merge_size: int = 2
-        num_position_embeddings: int = 4096
+        spatial_merge_size: int
+        num_position_embeddings: int
 
         # DeepStack: layer indices for extracting intermediate visual features
-        deepstack_visual_indices: list[int] = field(default_factory=lambda: [7, 15, 23])
+        deepstack_visual_indices: list[int]
 
         patch_embed: PatchEmbed.Config
         rotary_pos_emb: VisionRotaryEmbedding.Config
