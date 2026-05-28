@@ -8,6 +8,7 @@
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
 import os
+import contextlib
 
 import torch
 import torch._functorch.config
@@ -22,6 +23,7 @@ from torch.utils.checkpoint import (
 )
 
 from torchtitan.config import ActivationCheckpointConfig as ACConfig
+from torchtitan.distributed.spmd_state import current_mesh, set_current_mesh
 from torchtitan.tools.logging import logger
 
 
@@ -44,6 +46,9 @@ def _get_save_ops() -> set:
         # FlexAttention (torch.ops.higher_order.flex_attention is the same object)
         torch._higher_order_ops.flex_attention,
         torch.ops.aten.linear.default,
+        # topk can be non-deterministic; save to keep MoE expert assignments
+        # stable between forward and recompute.
+        torch.ops.aten.topk.default,
         # Inductor compiled code (available when torch.compile is used)
         (torch._higher_order_ops, "inductor_compiled_code"),
         # torch_attn custom backend
@@ -85,6 +90,23 @@ def _get_save_ops() -> set:
     save_ops.update(_resolve_ops(compute_ops))
     save_ops.update(_resolve_ops(comm_ops))
     return save_ops
+
+
+def _with_spmd_recompute_context(context_fn):
+    """Preserve TorchTitan's active SPMD mesh across checkpoint recompute."""
+
+    def wrapped_context_fn():
+        mesh = current_mesh()
+        forward_context, recompute_context = context_fn()
+
+        @contextlib.contextmanager
+        def recompute_with_mesh():
+            with set_current_mesh(mesh), recompute_context:
+                yield
+
+        return forward_context, recompute_with_mesh()
+
+    return wrapped_context_fn
 
 
 def _apply_op_sac(
@@ -156,7 +178,9 @@ def _apply_op_sac(
 
     return ptd_checkpoint_wrapper(
         module,
-        context_fn=lambda: create_selective_checkpoint_contexts(_get_custom_policy()),
+        context_fn=_with_spmd_recompute_context(
+            lambda: create_selective_checkpoint_contexts(_get_custom_policy())
+        ),
         preserve_rng_state=ac_config.preserve_rng_state,
         determinism_check=ac_config.determinism_check,
         early_stop=ac_config.early_stop,
@@ -176,6 +200,9 @@ def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
     """
     return ptd_checkpoint_wrapper(
         module,
+        context_fn=_with_spmd_recompute_context(
+            lambda: (contextlib.nullcontext(), contextlib.nullcontext())
+        ),
         preserve_rng_state=ac_config.preserve_rng_state,
         determinism_check=ac_config.determinism_check,
         early_stop=ac_config.early_stop,
