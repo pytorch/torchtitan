@@ -408,6 +408,9 @@ def apply_rotary_emb_cos_sin(
     positions = _maybe_wrap_positions(positions, xq)
     head_dim = xq.shape[-1]
     if rope_cache.ndim != 4:
+        # Qwen3-VL MRoPE passes a pre-broadcast 4D RoPE cache where shape[0]
+        # is batch size, not max sequence length, so only validate positions
+        # for non-4D indexed caches.
         if positions is not None:
             _maybe_check_max_pos(positions, max_valid_pos=rope_cache.shape[0] - 1)
         rope_cache = _reshape_for_broadcast_cos_sin(rope_cache, xq, positions)
