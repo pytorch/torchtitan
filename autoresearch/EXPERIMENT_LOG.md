@@ -616,3 +616,30 @@ learn from past experiments and avoid repeating failed approaches.
   bug isn't worth fixing in this codebase for these AR sizes.
 
 ---
+
+## RMSNorm Inductor with strict-bitwise Inductor flags — crash (xxxxxxx)
+
+- **Idea**: The performance_passes.py annotation for RMSNorm is gated
+  behind `numerics_changing_optim`. Inductor has commented-out
+  bitwise-alignment flags (`emulate_precision_casts`, `disable_ftz`,
+  `use_pytorch_libdevice`). Enable them, then tag RMSNorm forward+backward
+  for regional_inductor — maybe the strict flags make it bitwise-safe.
+- **Changes**: New pass that sets `ic.emulate_precision_casts = True`,
+  `ic.eager_numerics.disable_ftz = True`,
+  `ic.eager_numerics.use_pytorch_libdevice = True` (in addition to the
+  already-set `division_rounding=True`), then tags `_fused_rms_norm`
+  /  `_fused_rms_norm_backward` + getitem users.
+- **Result**: CRASH on bitwise test. Both `model_hash` and `grad_hash`
+  diverge from eager. Loss matches at printed precision (5 digits) but
+  byte-level fails.
+- **Analysis**: All four known Inductor bitwise-alignment flags TOGETHER
+  are insufficient to make Inductor's RMSNorm match aten's fused
+  `_fused_rms_norm` kernel bit-for-bit. The aten kernel does fused
+  fp32 reduction + scaling internally in a way Inductor's Triton
+  decomposition doesn't replicate exactly.
+- **Lessons**: RMSNorm Inductor compile is a **HARD floor** under
+  strict bitwise — gating it behind `numerics_changing_optim` (as
+  performance_passes.py already does) is correct. ~10-15 ms of unfused
+  RMSNorm time is unrecoverable without relaxing bitwise.
+
+---
