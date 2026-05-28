@@ -30,3 +30,7 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-28T08:20:00	xxxxxxx	7526	49.1	discard	44.07	163	Extend SwiGLU chain to absorb _to_copy: 0 new nodes (no adjacent _to_copy to chain)
 2026-05-28T08:50:00	xxxxxxx	0	0.0	crash	0.0	0	RoPE complex->real rewrite: 128 sites uniform, bitwise FAIL (FMA promotion changes last bit) - hard floor under strict bitwise
 2026-05-28T09:20:00	xxxxxxx	7540	49.1	discard	44.15	151	Unified pointwise chain v2 (replace SwiGLU+residual): 384 nodes (same as disjoint), +0.20% noise
+2026-05-28T09:40:00	xxxxxxx	7541	49.1	discard	44.16	157	compute_overlap_multipler=0.7: +0.21% noise, no schedule shift
+2026-05-28T10:00:00	xxxxxxx	7557	49.1	discard	44.27	153	bucket_mode=custom_ops: +0.43% noise
+2026-05-28T10:20:00	xxxxxxx	7541	49.1	discard	44.16	149	compute_mul=0.7 + custom_ops bucket_mode combo: +0.21% noise (same scheduler decision)
+2026-05-28T10:40:00	xxxxxxx	7500	49.0	discard	44.00	152	max_memory_increase_gb=16, max_in_flight_gb=32: -0.33% (bucketer not memory-limited, cost model mismatch is the limit)
