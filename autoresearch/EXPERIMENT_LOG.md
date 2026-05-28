@@ -415,3 +415,21 @@ learn from past experiments and avoid repeating failed approaches.
   rewriting the unpack path to avoid issuing clones in the first place.
 
 ---
+
+## Subgraph descent + second run for clone removal — discard (xxxxxxx, xxxxxxx)
+
+- **Idea**: Investigate if the missing ~290 FSDP weight-unpack clones live
+  in subgraphs (HOPs / get_attr submodules) or are introduced by the
+  auto-bucketer's pre-bucketing rewrite.
+- **Changes**: (a) Extended clone pass to recurse via `named_children()`
+  into nested GraphModules; (b) added a second invocation of the clone
+  pass after `auto_overlap_bucketing_pass`.
+- **Result**: Both experiments found **0 additional clones**. Numerics
+  PASS, perf within noise. No subgraphs exist at this pipeline position;
+  bucketing doesn't introduce new clones.
+- **Lessons**: The missing 290 clones in the original profile are
+  apparently *consumed/eliminated* by `auto_overlap_bucketing_pass`
+  itself (it reorders/fuses the unpack chain), not present as
+  subgraph hidden ops. 68 root-level clones is the actual ceiling here.
+
+---
