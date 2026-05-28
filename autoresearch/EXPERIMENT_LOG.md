@@ -217,3 +217,54 @@ learn from past experiments and avoid repeating failed approaches.
   bucket size — try 4-layer next.
 
 ---
+
+## 4-layer FSDP bucket plan — discard (xxxxxxx)
+
+- **Idea**: Continue the bucket-size sweep. Profiling at 2-layer left
+  ~50 ms of AG still exposed; 4-layer should hide more.
+- **Changes**: Replace 2-layer bucket plan with 4-layer (8 layer
+  buckets + tok_embeddings + [norm, lm_head] = 10 total buckets).
+- **Result**: 3-run avg tps **7,253** (+0.33% vs 2-layer), mfu 42.47%,
+  memory 47.62 GiB, wall ~80 s. Numerics PASS.
+- **Analysis**: Diminishing returns: 1→2 layer = +0.94%, 2→4 layer
+  = +0.33% (within noise). Likely hit a saturation: either the
+  remaining exposed AG is already mostly hidden by 2-layer prefetch,
+  or the bottleneck has shifted (TP RS bf16 dominates exposed comm
+  next). Memory cost was actually negligible (47.62 vs 47.71 GiB).
+- **Lessons**: Don't waste more experiments on bigger bucket sizes —
+  the curve is flat past 2-layer. Pivot to TP RS or compute-side.
+
+---
+
+## SwiGLU regional Inductor — discard (xxxxxxx)
+
+- **Idea**: 32× forward `silu→mul` and 32× backward `silu_backward→mul`
+  are unfused pointwise pairs (~40 ms / 14.8% of kernel time goes to
+  small elementwise kernels). Tag both with `compile_with_inductor`
+  so `regional_inductor_pass` produces a single fused Triton kernel
+  per site. Pure pointwise math with no add-after-mul → no FMA
+  promotion → should be bitwise-safe.
+- **Changes**: Added `annotate_swiglu_for_regional_inductor_pass`
+  in `passes.py` (mirrors `annotate_rmsnorm_for_regional_inductor_pass`
+  template). Tags `aten.silu.default` / `aten.silu_backward.default`
+  and their immediate `aten.mul.Tensor` consumers. Registered after
+  `annotate_flex_attention_for_regional_inductor_pass` and before
+  `regional_inductor_pass`.
+- **Result**: 128 SwiGLU nodes tagged across 32 layers; Inductor
+  compiled them. tps **7,239** (+0.14% vs 2-layer keep, noise).
+  Memory 47.71 GiB, wall 112 s (compile overhead). Bitwise numerics
+  PASS — confirms pure pointwise Inductor fusion preserves bitwise
+  identity.
+- **Analysis**: Fusion engaged but didn't move the needle. The
+  silu+mul pair output is consumed by the `w2` matmul whose memory
+  traffic dominates the savings from collapsing two pointwise
+  kernels into one. Alternatively the bf16 silu+mul eager kernels
+  are already well-coalesced, so kernel-launch savings are small.
+- **Lessons**: **Important meta-finding — pointwise Inductor fusion
+  IS bitwise-safe in this Run-3 setup.** That removes a barrier to
+  more aggressive pointwise-tagging experiments (RoPE complex mul,
+  residual chain, _to_copy chains). Where SwiGLU didn't pay, broader
+  tagging of the 818-count `direct_copy` and 423-count residual `add`
+  may still help. Compile time grew 79→112 s, so be mindful.
+
+---
