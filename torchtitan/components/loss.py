@@ -39,16 +39,17 @@ def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
 
 @spmd.register_autograd_function
 class _LossParallelCrossEntropy(torch.autograd.Function):
-    """Vocab-parallel cross entropy with a fused sharded-logits backward."""
+    """
+    Vocab-parallel cross entropy for logits sharded over TP axis.
+    Explicit implementation of loss_parallel() context from torch/distributed/tensor/parallel.
+    """
 
     @staticmethod
     def typecheck_forward(
         logits: torch.Tensor,
         labels: torch.Tensor,
     ) -> torch.Tensor:
-        current_mesh().get_group("tp")
         result = _LossParallelCrossEntropy.apply(logits, labels)
-
         out_type = dict(spmd.get_local_type(logits))
         out_type["tp"] = spmd.I
         spmd.assert_type(result, out_type)
@@ -61,6 +62,7 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         logits: torch.Tensor,
         labels: torch.Tensor,
     ) -> torch.Tensor:
+        """Compute exact CE loss from local vocab shards via TP all-reduces."""
         tp_pg = current_mesh().get_group("tp")
         tp_rank = dist.get_rank(tp_pg)
 
@@ -69,15 +71,18 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         logits_2d = logits.flatten(0, -2).float()
         labels_1d = labels.flatten()
 
+        # allreduce max for max logit value
         local_max = logits_2d.max(dim=-1).values
         global_max = local_max.clone()
         dist.all_reduce(global_max, op=dist.ReduceOp.MAX, group=tp_pg)
 
+        # allreduce sum over offset logits for global denominator
         shifted = logits_2d - global_max.unsqueeze(-1)
         exp_shifted = shifted.exp()
         global_exp_sum = exp_shifted.sum(dim=-1)
         dist.all_reduce(global_exp_sum, op=dist.ReduceOp.SUM, group=tp_pg)
 
+        #  Mask labels outside this vocab shard; the TP all-reduce selects the owner rank's logit.
         vocab_start = tp_rank * vocab_chunk_size
         valid = labels_1d != IGNORE_INDEX
         in_range = (
@@ -93,10 +98,12 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         target_logit = local_target_logit.clone()
         dist.all_reduce(target_logit, op=dist.ReduceOp.SUM, group=tp_pg)
 
+        # compute loss
         log_global_exp_sum = global_exp_sum.log()
         per_token_loss = -target_logit + log_global_exp_sum + global_max
         loss = (per_token_loss * valid.to(per_token_loss.dtype)).sum()
 
+        # Save local-shard logprobs.
         log_probs = shifted - log_global_exp_sum.unsqueeze(-1)
         ctx.save_for_backward(log_probs, labels_1d)
         ctx.logits_shape = logits_shape
@@ -110,9 +117,11 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         ctx,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, None]:
+        """Return the local vocab shard of the softmax-minus-target gradient."""
         log_probs, labels_1d = ctx.saved_tensors
         grad_logits = torch.exp(log_probs)
 
+        # Apply the -1 target-gradient update only where labels fall in this vocab shard.
         valid = labels_1d != IGNORE_INDEX
         in_range = (
             valid
@@ -126,6 +135,7 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
             local_idx = labels_1d[in_range] - ctx.vocab_start
             grad_logits[row_idx, local_idx] -= 1.0
 
+        # Drop ignored labels, apply upstream scaling, and restore logits shape/dtype.
         grad_logits = grad_logits * valid.to(grad_logits.dtype).unsqueeze(-1)
         grad_logits = grad_logits * grad_output.to(grad_logits.dtype)
         grad_logits = grad_logits.reshape(ctx.logits_shape).to(ctx.logits_dtype)
@@ -349,6 +359,26 @@ class ChunkedCELoss(BaseLoss):
         """Set the lm_head module. Must be called before the first __call__."""
         self.lm_head = lm_head
 
+    def allocate_total_loss(self, reference: torch.Tensor) -> torch.Tensor:
+        """Loss is P@DP, P@CP, I@TP"""
+        total_loss = reference.new_zeros((), dtype=torch.float32)
+        if not spmd.is_type_checking():
+            return total_loss
+
+        mesh_axis_names = spmd.current_mesh_names() or {}
+        loss_types = {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}
+        for axis_name, dst in loss_types.items():
+            if axis_name not in mesh_axis_names:
+                continue
+            total_loss = spmd.reinterpret(
+                total_loss,
+                current_mesh().get_group(axis_name),
+                src=spmd.R,
+                dst=dst,
+                expert_mode=True,
+            )
+        return total_loss
+
     def chunked_loss_and_grad(
         self,
         h_detached: torch.Tensor,
@@ -356,6 +386,12 @@ class ChunkedCELoss(BaseLoss):
         *,
         global_valid_tokens: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute chunked loss and accumulate hidden-state gradients.
+
+        Splits the detached hidden states along sequence, runs ``lm_head`` and
+        CE per chunk, immediately backpropagates each chunk loss, and returns
+        the summed loss contribution with the full hidden-state gradient buffer.
+        """
         from torch.distributed._composable.fsdp import FSDPModule
 
         num_chunks = self.num_chunks
@@ -375,28 +411,7 @@ class ChunkedCELoss(BaseLoss):
             num_chunks=num_chunks,
             dtype=torch.float32,
         )
-
-        total_loss = h_detached.new_zeros((), dtype=torch.float32)
-        if spmd.is_type_checking():
-            mesh_axis_names = spmd.current_mesh_names() or {}
-            for axis_name in ("dp", "cp"):
-                if axis_name not in mesh_axis_names:
-                    continue
-                total_loss = spmd.reinterpret(
-                    total_loss,
-                    current_mesh().get_group(axis_name),
-                    src=spmd.R,
-                    dst=spmd.P,
-                    expert_mode=True,
-                )
-            if "tp" in mesh_axis_names:
-                total_loss = spmd.convert(
-                    total_loss,
-                    current_mesh().get_group("tp"),
-                    src=spmd.R,
-                    dst=spmd.I,
-                    expert_mode=True,
-                )
+        total_loss = self.allocate_total_loss(h_detached)
 
         # Disable FSDP reshard on lm_head to keep weight unsharded across
         # all chunks, avoiding repeated all-gathers. Coalesce per-chunk
@@ -420,19 +435,9 @@ class ChunkedCELoss(BaseLoss):
             else:
                 chunk_loss = self.fn(logits, label_chunk)
             if global_valid_tokens is not None:
-                loss_scale = global_valid_tokens
-                if spmd.is_type_checking() and isinstance(loss_scale, torch.Tensor):
-                    mesh_axis_names = spmd.current_mesh_names() or {}
-                    if "cp" in mesh_axis_names:
-                        loss_scale = spmd.convert(
-                            loss_scale,
-                            current_mesh().get_group("cp"),
-                            src=spmd.I,
-                            dst=spmd.R,
-                            expert_mode=True,
-                        )
-                chunk_loss = chunk_loss / loss_scale
+                chunk_loss = chunk_loss / global_valid_tokens
 
+            # reinterpret V->P on data axes; local typechecking means we're unable to infer partials.
             if spmd.is_type_checking():
                 mesh_axis_names = spmd.current_mesh_names() or {}
                 for axis_name in ("dp", "cp"):
@@ -461,9 +466,21 @@ class ChunkedCELoss(BaseLoss):
             lm_head.set_requires_gradient_sync(True, recurse=False)
             lm_head.reshard()
 
-        return total_loss, grad_accumulator.result()
+        grad_buffer = grad_accumulator.result().to(h_detached.dtype)
 
-    def _spmd_out_types(self, h_detached: torch.Tensor) -> tuple:
+        # allreduce gradients across lm_head shards for loss parallel + no SP
+        if is_spmd_active() and self.loss_parallel and not self.enable_sp:
+            grad_buffer = spmd.redistribute(
+                grad_buffer,
+                current_mesh().get_group("tp"),
+                src=spmd.P,
+                dst=spmd.I,
+            )
+        return total_loss, grad_buffer
+
+    def _spmd_out_types(
+        self, h_detached: torch.Tensor
+    ) -> tuple[dict, tuple[dict, spmd.PartitionSpec | None]]:
         loss_type: dict = {}
         mesh_axis_names = spmd.current_mesh_names() or {}
         for axis_name in ("dp", "cp"):
@@ -474,9 +491,7 @@ class ChunkedCELoss(BaseLoss):
 
         grad_types = dict(spmd.get_local_type(h_detached))
         grad_spec = spmd.get_partition_spec(h_detached)
-        grad_leaf = (grad_types, grad_spec) if grad_spec else grad_types
-
-        return (loss_type, grad_leaf)
+        return loss_type, (grad_types, grad_spec)
 
     def __call__(
         self,
@@ -500,7 +515,7 @@ class ChunkedCELoss(BaseLoss):
         lm_head = self.lm_head
         assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
 
-        # SPMD path: all-gather S(1)@tp -> I@tp before chunking; loss compute
+        # SPMD path: all-gather S(1)@tp -> R@tp before chunking; loss compute
         # is duplicated on TP after the sequence gather.
         if is_spmd_active() and self.enable_sp:
             bwd = {"op_dtype": hidden_states.dtype}
@@ -508,7 +523,7 @@ class ChunkedCELoss(BaseLoss):
                 hidden_states,
                 current_mesh().get_group("tp"),
                 src=spmd.S(1),
-                dst=spmd.I,
+                dst=spmd.R,
                 backward_options=bwd,
             )
 
@@ -517,7 +532,7 @@ class ChunkedCELoss(BaseLoss):
 
         typechecking = is_spmd_active() and spmd.is_type_checking()
         if typechecking:
-            loss_out_type, grad_out_leaf = self._spmd_out_types(h_detached)
+            loss_out_type, (grad_type, grad_spec) = self._spmd_out_types(h_detached)
 
         with spmd.typecheck(local=True) if typechecking else contextlib.nullcontext():
             total_loss, grad_buffer = self.chunked_loss_and_grad(
@@ -526,19 +541,20 @@ class ChunkedCELoss(BaseLoss):
                 global_valid_tokens=global_valid_tokens,
             )
 
-        if typechecking:
-            spmd.assert_type(total_loss, loss_out_type)
-            if isinstance(grad_out_leaf, tuple):
-                spmd.assert_type(
-                    grad_buffer, grad_out_leaf[0], partition_spec=grad_out_leaf[1]
-                )
-            else:
-                spmd.assert_type(grad_buffer, grad_out_leaf)
-
         if not requires_grad:
+            if typechecking:
+                spmd.assert_type(total_loss, loss_out_type)
             return total_loss
 
-        accumulated_grad = grad_buffer.to(hidden_states.dtype)
+        accumulated_grad = grad_buffer
+
+        if typechecking:
+            spmd.assert_type(total_loss, loss_out_type)
+            spmd.assert_type(
+                accumulated_grad,
+                grad_type,
+                partition_spec=grad_spec,
+            )
 
         return _DecoderOutputGradientBackProp.apply(
             hidden_states, accumulated_grad, total_loss
