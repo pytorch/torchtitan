@@ -6,7 +6,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import ClassVar, NamedTuple
+from typing import ClassVar
 
 import torch
 import torch.nn.functional as F
@@ -55,7 +55,8 @@ __all__ = [
 ]
 
 
-class VarlenMetadata(NamedTuple):
+@dataclass(kw_only=True, slots=True)
+class VarlenMetadata:
     """
     Cumulative sequence positions for queries and keys/values.
 
@@ -117,10 +118,12 @@ class VarlenAttention(Module):
 
         batch_size, seq_len, _, head_dim = q.shape
 
-        # varlen attention expects (bs*seqlen, n_heads, head_dim)
+        # varlen attention expects (bs*seqlen, n_heads, head_dim).
+        # K/V may have a different sequence length than Q (e.g. after CP
+        # allgather+slice), so pack them independently.
         xq_packed = q.reshape(batch_size * seq_len, -1, head_dim)
-        xk_packed = k.reshape(batch_size * seq_len, -1, head_dim)
-        xv_packed = v.reshape(batch_size * seq_len, -1, head_dim)
+        xk_packed = k.reshape(k.shape[0] * k.shape[1], -1, head_dim)
+        xv_packed = v.reshape(v.shape[0] * v.shape[1], -1, head_dim)
 
         # Some operators can upcast under AMP, but varlen attention currently only
         # supports bf16/fp16 inputs. If this changes, or fp16 training support

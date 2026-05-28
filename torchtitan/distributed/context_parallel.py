@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from collections.abc import Sequence
 from typing import Any, cast
 
@@ -28,8 +29,67 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     ScaledDotProductAttention,
     VarlenAttention,
+    VarlenMetadata,
 )
 from torchtitan.tools.logging import logger
+
+
+@dataclasses.dataclass(kw_only=True, slots=True)
+class CPVarlenMetadata(VarlenMetadata):
+    """Pre-computed VarlenMetadata for the CP forward pass.
+
+    Slice bounds are plain Python ints computed once per batch in
+    ``_shard_varlen_metadata`` (outside the model loop) to avoid GPU→CPU
+    synchronizations inside ``cp_forward``.
+    """
+
+    k_slice_start: int  # start index into allgathered global K
+    k_slice_end: int  # end index into allgathered global K
+
+
+def _shard_varlen_metadata(
+    metadata: VarlenMetadata,
+    cp_mesh: DeviceMesh,
+    seq_len: int,
+    cp_world_size: int,
+) -> CPVarlenMetadata:
+    """Shard VarlenMetadata for this rank's contiguous token range.
+
+    All expensive Python-int extraction (.item() calls) happens here, once per
+    batch, outside the compiled model loop.  The returned ``CPVarlenMetadata``
+    carries plain Python ints so ``cp_forward`` can slice K/V without any
+    GPU→CPU synchronization.
+
+    NOTE: assumes contiguous token assignment (``load_balancer_type=None``).
+    Interleaved sharding (headtail / ptrr) is not compatible with the
+    ``cu_seq`` document-boundary structure.
+    """
+    cp_rank = dist.get_rank(group=cp_mesh.get_group())
+    local_start = cp_rank * seq_len // cp_world_size
+    local_end = (cp_rank + 1) * seq_len // cp_world_size
+
+    local_cu_seq_q, count_cu_seq_q = metadata.cu_seq_q.clamp(
+        local_start, local_end
+    ).unique_consecutive(return_counts=True)
+    local_cu_seq_k = metadata.cu_seq_k[
+        count_cu_seq_q[0] - 1 : (-count_cu_seq_q[-1] + 1) or None
+    ].clamp(max=local_end)
+    local_max_q = int(local_cu_seq_q.diff().max().item())
+    local_max_k = int(local_cu_seq_k.diff().max().item())
+
+    local_cu_seq_k_start = int(local_cu_seq_k[0].item())
+    local_cu_seq_k_end = int(local_cu_seq_k[-1].item())
+    shifted_local_cu_seq_q = local_cu_seq_q - local_start
+    shifted_local_cu_seq_k = local_cu_seq_k - local_cu_seq_k_start
+
+    return CPVarlenMetadata(
+        cu_seq_q=shifted_local_cu_seq_q,
+        cu_seq_k=shifted_local_cu_seq_k,
+        max_q=local_max_q,
+        max_k=local_max_k,
+        k_slice_start=local_cu_seq_k_start,
+        k_slice_end=local_cu_seq_k_end,
+    )
 
 
 def apply_cp_to_forward(
@@ -95,7 +155,33 @@ def apply_cp_to_forward(
             mod.forward = _make_cp_forward(original_forward, cp_mesh)
 
     elif isinstance(first, VarlenAttention):
-        raise NotImplementedError("Variable-length attention CP is not yet supported")
+        for mod in attention_modules:
+            original_forward = mod.forward
+
+            def _make_cp_forward(orig_fn, mesh):
+                pg_name = dist._get_process_group_name(mesh.get_group())
+
+                def cp_forward(q, k, v, **kwargs):
+                    attn_masks = kwargs.get("attention_masks")
+                    assert isinstance(
+                        attn_masks, CPVarlenMetadata
+                    ), "Expected CPVarlenMetadata in attention_masks"
+                    k = k.contiguous()
+                    v = v.contiguous()
+                    global_k, global_v = flex_cp_allgather(k, v, 1, pg_name)
+                    # k_slice_start / k_slice_end are plain Python ints
+                    # pre-computed in _shard_varlen_metadata — no GPU→CPU sync.
+                    global_k = global_k[
+                        :, attn_masks.k_slice_start : attn_masks.k_slice_end
+                    ]
+                    global_v = global_v[
+                        :, attn_masks.k_slice_start : attn_masks.k_slice_end
+                    ]
+                    return orig_fn(q, global_k, global_v, **kwargs)
+
+                return cp_forward
+
+            mod.forward = _make_cp_forward(original_forward, cp_mesh)
     else:
         raise NotImplementedError(
             f"Context Parallel forward wrapping is not supported for "
@@ -227,39 +313,89 @@ def cp_shard(
                     f"Must be one of: 'headtail', 'ptrr', or None"
                 )
 
-    inputs = cast(
-        tuple[torch.Tensor, ...],
-        _context_parallel_shard(
-            mesh=cp_mesh,
-            buffers=inputs,
-            seq_dims=tuple(input_seq_dim for _ in inputs),
-            load_balancer=load_balancer,
-        ),
-    )
+    batch_size = inputs[0].size(0)
+    match attention_masks:
+        case None | BlockMask() | dict():
+            inputs = cast(
+                tuple[torch.Tensor, ...],
+                _context_parallel_shard(
+                    mesh=cp_mesh,
+                    buffers=inputs,
+                    seq_dims=tuple(input_seq_dim for _ in inputs),
+                    load_balancer=load_balancer,
+                ),
+            )
+        case VarlenMetadata():
+            # Reshape [batch_size, seq_len] → [1, batch_size * seq_len] before
+            # sharding so the entire batch is treated as a single packed sequence.
+            # This preserves document boundaries that span sample boundaries, which
+            # is required for correct varlen sharding.
+            # NOTE: after this reshape the model operates with effective batch_size=1
+            # and a longer sequence. This is safe because the model is batch-invariant,
+            # but requires (batch_size * seq_len) to be divisible by cp_world_size.
+            total_tokens = batch_size * seq_len
+            if total_tokens % cp_world_size != 0:
+                raise ValueError(
+                    f"For VarlenAttention CP, batch_size * seq_len ({total_tokens}) "
+                    f"must be divisible by context_parallel_degree ({cp_world_size})."
+                )
+            inputs = cast(
+                tuple[torch.Tensor, ...],
+                _context_parallel_shard(
+                    mesh=cp_mesh,
+                    buffers=tuple(buf.reshape(1, -1) for buf in inputs),
+                    seq_dims=tuple(input_seq_dim for _ in inputs),
+                    load_balancer=None,
+                ),
+            )
+        case _:
+            raise ValueError(
+                f"Unsupported attention_masks type for CP sharding: "
+                f"{type(attention_masks)}. Must be None, VarlenMetadata, "
+                f"BlockMask, or dict[str, BlockMask]."
+            )
 
     # BlockMask, has shape, [B, H, Q, KV], and we can only shard
     # on the Q seq dimension, not KV.
     MASK_Q_SEQ_DIM = 2
-    if attention_masks is not None:
-        assert isinstance(attention_masks, (BlockMask, dict))
-        masks = (
-            [attention_masks]
-            if isinstance(attention_masks, BlockMask)
-            else list(attention_masks.values())
-        )
-        masks = _context_parallel_shard(
-            mesh=cp_mesh,
-            buffers=masks,
-            seq_dims=(MASK_Q_SEQ_DIM,) * len(masks),
-            load_balancer=load_balancer,
-        )
-        attention_masks = cast(
-            (BlockMask | dict[str, BlockMask]),
-            (
-                masks[0]
+
+    match attention_masks:
+        case VarlenMetadata():
+            if load_balancer is not None:
+                raise ValueError(
+                    "Load balancer must be disabled for VarlenAttention CP. "
+                    "Set --parallelism.context_parallel_load_balancer=none in your config."
+                )
+            attention_masks = _shard_varlen_metadata(
+                attention_masks, cp_mesh, seq_len * batch_size, cp_world_size
+            )
+        case BlockMask() | dict():
+            assert isinstance(attention_masks, (BlockMask, dict))
+            masks = (
+                [attention_masks]
                 if isinstance(attention_masks, BlockMask)
-                else {k: v for k, v in zip(attention_masks.keys(), masks)}
-            ),
-        )
+                else list(attention_masks.values())
+            )
+            masks = _context_parallel_shard(
+                mesh=cp_mesh,
+                buffers=masks,
+                seq_dims=(MASK_Q_SEQ_DIM,) * len(masks),
+                load_balancer=load_balancer,
+            )
+            attention_masks = cast(
+                (BlockMask | dict[str, BlockMask]),
+                (
+                    masks[0]
+                    if isinstance(attention_masks, BlockMask)
+                    else {k: v for k, v in zip(attention_masks.keys(), masks)}
+                ),
+            )
+        case None:
+            pass
+        case _:
+            raise ValueError(
+                f"Unsupported attention_masks type for CP sharding: "
+                f"{type(attention_masks)}. Must be None, BlockMask, or dict[str, BlockMask]."
+            )
 
     return inputs, attention_masks
