@@ -45,3 +45,29 @@ learn from past experiments and avoid repeating failed approaches.
   (4) idle GPU gaps post-AG/RS-overlap.
 
 ---
+
+## joint_graph_passes after no-op cleanup — discard (xxxxxxx)
+
+- **Idea**: Run upstream Inductor `joint_graph_passes` (CSE, noop removal,
+  fold_concat_then_split, constant folding of uniform values, etc.) on the
+  joint forward+backward graph right after `normalize_view_ops_as_reshape`
+  and before `joint_transformer_block_bucketing_reordering_pass`. Hope was
+  that a leaner graph would help bucketing/Inductor downstream.
+- **Changes**: Added `apply_joint_graph_passes` wrapping
+  `torch._inductor.fx_passes.joint_graph.joint_graph_passes`, registered
+  in `compile_time_passes`.
+- **Result**: tps = 7,170, mfu = 41.98%, memory = 47.52 GiB, wall_time = 81 s.
+  Bitwise numerics PASS. Delta +0.11% — well within ±1% noise.
+- **Analysis**: After `make_fx` tracing + existing no-op cleanup the joint
+  graph already has little algebraic redundancy. Llama3 8B is dominated
+  by large matmul/RMSNorm/SDPA/collective kernels; small op-count
+  reductions don't move steady-state. The wall_time drop is plausibly
+  startup variation.
+- **Lessons**: Upstream Inductor's joint_graph_passes is bitwise-safe on
+  this graph but a no-op for steady-state perf. Future cleanup wins
+  probably need to target the *post-bucketing* / *post-regional-Inductor*
+  graph (where new patterns appear) or fuse kernels that Inductor never
+  touches (RMSNorm, residual add, embedding+norm). Don't retry generic
+  pattern cleanup at the joint-graph stage.
+
+---
