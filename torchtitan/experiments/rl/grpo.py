@@ -543,7 +543,7 @@ class RLTrainer(Configurable):
         self,
         num_groups: int,
         step: int,
-        group_offset: int,
+        group_offset: int = 0,
     ) -> tuple[list[Trajectory], list[m.Metric]]:
         """Collect group rollouts and emit completion-shape rollout metrics.
 
@@ -574,7 +574,7 @@ class RLTrainer(Configurable):
                 step_result = envs[c.prompt_idx].step(c.text)
                 trajectories.append(
                     Trajectory(
-                        sample_idx=c.prompt_idx,
+                        sample_idx=group_offset + c.prompt_idx,
                         prompt_token_ids=tokenized_prompts[c.prompt_idx],
                         transitions=[(c, step_result)],
                     )
@@ -781,8 +781,11 @@ class RLTrainer(Configurable):
                 )
                 trajectories.extend(new_trajectories)
                 rollout_metrics.extend(new_metrics)
+                # Both prompt length and completion length are counted.
                 collected_tokens += sum(
-                    len(c.token_ids) for t in new_trajectories for c, _ in t.transitions
+                    len(t.prompt_token_ids) + len(c.token_ids) - 1
+                    for t in new_trajectories
+                    for c, _ in t.transitions
                 )
                 group_offset += num_groups
 
