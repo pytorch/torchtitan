@@ -22,4 +22,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-28T05:30:00	xxxxxxx	7395	53.0	discard	43.32	131	fuse_all_gather_mm_pass (65 AG->mm fusions): bitwise-safe but -0.13% perf, +3.87 GiB memory (forced return_A=True)
 2026-05-28T05:50:00	xxxxxxx	7350	49.1	discard	43.05	130	Extended mm-RS to bwd add-tree chains: 64 RS->160 smaller fused ops, -0.74% (auto-bucketer was already optimal)
 2026-05-28T06:15:00	xxxxxxx	0	0.0	crash	0.0	0	annotate_residual_add for Inductor: 224 adds tagged, runtime shape mismatch in fused mm-RS output (3D meta vs 2D runtime)
-2026-05-28T06:30:00	PENDING	7424	49.1	keep	43.48	143	Shape fix in fuse_mm_reduce_scatter_pass + annotate_residual_add for Inductor: 224 adds tagged, +0.26% (7429/7422/7423)
+2026-05-28T06:30:00	805058b5	7424	49.1	keep	43.48	143	Shape fix in fuse_mm_reduce_scatter_pass + annotate_residual_add for Inductor: 224 adds tagged, +0.26% (7429/7422/7423)
