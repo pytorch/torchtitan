@@ -189,3 +189,31 @@ learn from past experiments and avoid repeating failed approaches.
   collective-chunk math).
 
 ---
+
+## 2-layer FSDP bucket plan — keep (PENDING)
+
+- **Idea**: Profiling showed FSDP AllGather only 28% overlapped, 61.6 ms
+  (5.8% of step) exposed. Default `get_default_transformer_block_buckets`
+  emits 32 single-layer buckets → only 1 layer of compute behind each AG.
+  Override `module_bucket_plans` with **2-layer buckets** (16 layer
+  buckets + tok_embeddings + [norm, lm_head] = 18 total) so each AG
+  covers 2 layers' params and can prefetch deeper.
+- **Changes**: Construct `two_layer_bucket_plan` locally in
+  `compile_time_passes` and pass it as `module_bucket_plans` to
+  `joint_transformer_block_bucketing_reordering_pass`. Drop unused
+  `get_default_transformer_block_buckets` import.
+- **Result**: 3 runs at tps 7,239 / 7,214 / 7,236 (avg **7,229,
+  +0.94%**), mfu 42.34% avg, memory 47.71 GiB (+0.19 GiB), wall_time
+  79–82 s. Bitwise numerics PASS.
+- **Analysis**: Small but consistent win — halves AG launch count
+  (34→18) and gives 2 layers of compute behind each prefetched AG.
+  Memory cost is tiny (2 layers of params live, not 1). The 0.94%
+  recovers ~1/6 of the exposed AG; deeper buckets (4-layer, 8-layer)
+  may keep paying with diminishing returns, traded against the
+  monotonic memory cost.
+- **Lessons**: (a) Bucket plan IS a tunable lever for FSDP comm overlap,
+  not fixed at default. (b) Profile-driven targeting (find the biggest
+  exposed comm bucket, scope an attack at it) works. (c) Worth sweeping
+  bucket size — try 4-layer next.
+
+---

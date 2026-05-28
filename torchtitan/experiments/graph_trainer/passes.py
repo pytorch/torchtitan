@@ -143,12 +143,23 @@ def compile_time_passes(
     all-gathers end up on a separate CUDA stream from reduce-scatters
     (enabling AG/RS overlap in backward).
     """
-    from torchtitan.experiments.graph_trainer.common_utils import (
-        get_default_transformer_block_buckets,
-    )
     from torchtitan.models.common.attention import FlexAttention
 
     n_layers = len(config.model_spec.model.layers)
+    # Group transformer layers into 2-layer buckets to deepen FSDP AG prefetch.
+    # Default is one layer per bucket (34 buckets). With 2-layer buckets we get
+    # 16 layer-buckets + tok_embeddings + [norm, lm_head] = 18 buckets.
+    layer_buckets_2 = [
+        [f"layers.{i}", f"layers.{i+1}"]
+        for i in range(0, n_layers - (n_layers % 2), 2)
+    ]
+    if n_layers % 2:
+        layer_buckets_2.append([f"layers.{n_layers - 1}"])
+    two_layer_bucket_plan = [
+        "tok_embeddings",
+        *layer_buckets_2,
+        ["norm", "lm_head"],
+    ]
     passes: list[Callable] = [
         remove_detach_pass,
         remove_identity_view_pass,
@@ -156,7 +167,7 @@ def compile_time_passes(
         normalize_view_ops_as_reshape,
         functools.partial(
             joint_transformer_block_bucketing_reordering_pass,
-            module_bucket_plans=get_default_transformer_block_buckets(n_layers),
+            module_bucket_plans=two_layer_bucket_plan,
             enable_fsdp_ag_rs_overlap=config.compile.enable_fsdp_ag_rs_overlap,
         ),
     ]
