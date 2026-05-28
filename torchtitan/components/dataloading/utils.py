@@ -12,10 +12,18 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+def _packed_field_dtype(key: str) -> torch.dtype:
+    if key.endswith("_mask"):
+        return torch.bool
+    if key.endswith("_ids") or key == "labels":
+        return torch.long
+    return torch.float32
+
+
 def pack(
     samples: Iterable[dict[str, list]],
     max_seq_length: int,
-    pad_values: dict[str, int | float],
+    pad_values: dict[str, int | float | bool],
 ) -> Iterator[dict[str, torch.Tensor]]:
     """Greedy-pack variable-length samples into [1, max_seq_length] sequences.
 
@@ -54,7 +62,7 @@ def pack(
         result: dict = {
             key: torch.tensor(
                 buffer[key],
-                dtype=torch.long if key.endswith("_ids") else torch.float32,
+                dtype=_packed_field_dtype(key),
             ).unsqueeze(0)
             for key in keys
         }
