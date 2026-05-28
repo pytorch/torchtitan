@@ -26,13 +26,12 @@ if TYPE_CHECKING:
 
 
 # Routed-expert layout for ``GptOssGroupedExperts`` (mlp1/mlp2 fused
-# weights + biases): mlp1_weight/bias colwise, mlp2_weight rowwise,
-# mlp2_bias replicated.
+# weights + biases): mlp1 colwise, mlp2 rowwise, mlp2_bias replicated.
 _GPT_OSS_EXPERTS_PARAM_LAYOUT: dict[str, Placement] = {
-    "mlp1_weight": Shard(1),
-    "mlp1_bias": Shard(1),
-    "mlp2_weight": Shard(2),
-    "mlp2_bias": Replicate(),
+    "mlp1_weight_EGD": Shard(1),
+    "mlp1_bias_EG": Shard(1),
+    "mlp2_weight_EDF": Shard(2),
+    "mlp2_bias_ED": Replicate(),
 }
 
 
