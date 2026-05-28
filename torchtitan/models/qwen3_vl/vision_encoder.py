@@ -488,7 +488,6 @@ class Qwen3VLVisionEncoder(Module):
         # DeepStack: layer indices for extracting intermediate visual features
         deepstack_visual_indices: list[int] = field(default_factory=lambda: [7, 15, 23])
 
-        # Sub-module configs (built in the registry).
         patch_embed: PatchEmbed.Config
         rotary_pos_emb: VisionRotaryEmbedding.Config
         layers: list[VisionTransformerBlock.Config]
