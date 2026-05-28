@@ -12,10 +12,10 @@ import torch
 logger = logging.getLogger(__name__)
 
 
-def _packed_field_dtype(key: str) -> torch.dtype:
-    if key.endswith("_mask"):
+def _packed_field_dtype(pad_value: int | float | bool) -> torch.dtype:
+    if isinstance(pad_value, bool):
         return torch.bool
-    if key.endswith("_ids") or key == "labels":
+    if isinstance(pad_value, int):
         return torch.long
     return torch.float32
 
@@ -43,7 +43,7 @@ def pack(
         Dict with:
         - Token field tensors [1, max_seq_length] for each key in pad_values
         - "positions" tensor [1, max_seq_length] with per-document resets
-        - "seq_lens" list[int] — length of each sample in this row
+        - "seq_lens" list[int] -- length of each sample in this row
     """
     keys = list(pad_values.keys())
     buffer: dict[str, list] = {key: [] for key in keys}
@@ -62,7 +62,7 @@ def pack(
         result: dict = {
             key: torch.tensor(
                 buffer[key],
-                dtype=_packed_field_dtype(key),
+                dtype=_packed_field_dtype(pad_values[key]),
             ).unsqueeze(0)
             for key in keys
         }

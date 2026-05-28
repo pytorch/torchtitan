@@ -12,10 +12,29 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-from torchtitan.components.dataloading.utils import pack
-from torchtitan.config import BatchConfig, Configurable
+from torchtitan.config import Configurable
+from torchtitan.experiments.rl.dataloading.utils import pack
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import Episode, TrainingBatch
+
+
+@dataclass(kw_only=True, slots=True)
+class BatchConfig:
+    """Batch shape parameters for the RL batcher.
+
+    TODO: Refactor the pre-training trainer to use an owned batch config
+    instead of keeping batch shape fields directly on TrainingConfig.
+    """
+
+    local_batch_size: int = 8
+    """Per-DP-rank batch size (rows per forward pass)."""
+
+    global_batch_size: int = -1
+    """Target number of rows per optimizer step. Defaults to
+    ``local_batch_size * data-parallel degree`` when set to -1."""
+
+    seq_len: int = 2048
+    """Tokens per row (packed sequence length)."""
 
 
 class Batcher(Configurable):
@@ -137,9 +156,9 @@ class Batcher(Configurable):
                 yield {
                     "input_ids": raw_ids[:-1],
                     "labels": raw_ids[1:],
-                    "generator_logprobs": gen_lp[:-1],
-                    "loss_mask": loss_mask[:-1],
-                    "advantages": advantages[:-1],
+                    "generator_logprobs": gen_lp[1:],
+                    "loss_mask": loss_mask[1:],
+                    "advantages": advantages[1:],
                 }
 
         yield from pack(
