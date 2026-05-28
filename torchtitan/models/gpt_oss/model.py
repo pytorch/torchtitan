@@ -23,7 +23,7 @@ from torchtitan.models.common.attention import (
     get_sliding_window_mask_mod,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module

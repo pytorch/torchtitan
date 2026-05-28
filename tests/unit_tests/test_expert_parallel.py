@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+import unittest.mock
 
 import torch
 
@@ -18,20 +19,25 @@ class TestPermute(unittest.TestCase):
     Output layout: (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
     """
 
-    def _make_dispatcher(self) -> AllToAllTokenDispatcher:
+    def _make_dispatcher(self, num_ranks: int) -> AllToAllTokenDispatcher:
         """Create a minimal AllToAllTokenDispatcher for testing _permute."""
         cfg = AllToAllTokenDispatcher.Config(
             num_experts=1, top_k=1, score_before_experts=True
         )
-        return AllToAllTokenDispatcher(cfg)
+        dispatcher = AllToAllTokenDispatcher(cfg)
+        # Mock ep_mesh with a simple object that has .size() returning num_ranks
+        mock_mesh = unittest.mock.MagicMock()
+        mock_mesh.size.return_value = num_ranks
+        dispatcher.ep_mesh = mock_mesh
+        return dispatcher
 
     def _permute(self, tokens_per_expert_group, experts_per_rank, num_ranks):
         """Helper that calls _permute and returns (permuted_indices, num_tokens_per_expert)."""
-        dispatcher = self._make_dispatcher()
+        dispatcher = self._make_dispatcher(num_ranks)
         total = tokens_per_expert_group.sum().item()
         dummy_input = torch.zeros(total, 1)
         _, _, permuted_indices, num_tokens_per_expert = dispatcher._permute(
-            dummy_input, tokens_per_expert_group, num_ranks, experts_per_rank
+            dummy_input, tokens_per_expert_group
         )
         return permuted_indices, num_tokens_per_expert
 

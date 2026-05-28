@@ -30,10 +30,10 @@ if TYPE_CHECKING:
 # weights + biases): mlp1_weight/bias colwise, mlp2_weight rowwise,
 # mlp2_bias replicated.
 _GPT_OSS_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "mlp1_weight": spmd.S(1),
-    "mlp1_bias": spmd.S(1),
-    "mlp2_weight": spmd.S(2),
-    "mlp2_bias": spmd.I,
+    "mlp1_weight_EGD": spmd.S(1),
+    "mlp1_bias_EG": spmd.S(1),
+    "mlp2_weight_EDF": spmd.S(2),
+    "mlp2_bias_ED": spmd.I,
 }
 
 

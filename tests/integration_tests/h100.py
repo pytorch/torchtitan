@@ -41,6 +41,17 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             "Float8 test",
             "float8",
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.full_dtensor",
+                    "--parallelism.enable-fsdp-symm-mem",
+                ],
+            ],
+            "FSDP symmetric memory",
+            "fsdp_symm_mem",
+            ngpu=2,
+        ),
         # TODO: re-enable this test once the async TP issue is fixed
         OverrideDefinitions(
             [
