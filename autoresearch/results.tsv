@@ -27,3 +27,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-28T07:10:00	xxxxxxx	7530	49.1	discard	44.10	145	Unified bf16 pointwise chain pass (replacing SwiGLU+residual): 352 nodes (-32), +0.07% noise
 2026-05-28T07:40:00	xxxxxxx	7339	49.1	discard	42.97	201	Second auto_overlap_bucketing after regional_inductor: -2.5% (re-shuffle disrupted schedule)
 2026-05-28T08:00:00	xxxxxxx	7525	49.1	discard	44.07	151	remove_noop_to_copy_pass: 0 matches (no _to_copy is a kwargs-no-op in this graph)
+2026-05-28T08:20:00	xxxxxxx	7526	49.1	discard	44.07	163	Extend SwiGLU chain to absorb _to_copy: 0 new nodes (no adjacent _to_copy to chain)
