@@ -250,11 +250,13 @@ def set_moe_sharding_config(
             "x_BLD": experts_in_layout,
             "topk_scores_BLK": experts_in_layout,
             "topk_expert_ids_BLK": experts_in_layout,
+            "routing_map_BLE": experts_in_layout,
         },
         out_src_shardings=experts_out_layout,
         out_dst_shardings=experts_out_layout,
         local_map=LocalMapConfig(
             in_grad_placements=(
+                experts_in_grad_layout,
                 experts_in_grad_layout,
                 experts_in_grad_layout,
                 experts_in_grad_layout,
