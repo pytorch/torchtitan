@@ -42,7 +42,7 @@ from torchtitan.config.configs import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.distributed.spmd_state import is_spmd_active, set_current_mesh
 
@@ -639,11 +639,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # Accumulate after CP sharding so labels.numel() reflects the actual
         # unique tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += labels.numel()
-
-        if self.config.parallelism.full_dtensor:
-            inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
-                self.parallel_dims, inputs, labels, extra_kwargs
-            )
 
         if is_spmd_active():
             self._annotate_inputs_spmd(inputs, labels, extra_inputs, extra_kwargs)
