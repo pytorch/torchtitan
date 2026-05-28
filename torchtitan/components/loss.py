@@ -452,7 +452,6 @@ class ChunkedCELoss(BaseLoss):
                     )
 
             total_loss = total_loss + chunk_loss.detach()
-
             if requires_grad:
                 with spmd.no_typecheck():
                     chunk_loss.backward()
@@ -467,15 +466,6 @@ class ChunkedCELoss(BaseLoss):
             lm_head.reshard()
 
         grad_buffer = grad_accumulator.result().to(h_detached.dtype)
-
-        # allreduce gradients across lm_head shards for loss parallel + no SP
-        if is_spmd_active() and self.loss_parallel and not self.enable_sp:
-            grad_buffer = spmd.redistribute(
-                grad_buffer,
-                current_mesh().get_group("tp"),
-                src=spmd.P,
-                dst=spmd.I,
-            )
         return total_loss, grad_buffer
 
     def out_typecheck(
@@ -523,14 +513,14 @@ class ChunkedCELoss(BaseLoss):
         lm_head = self.lm_head
         assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
 
-        # SPMD path: all-gather S(1)@tp -> R@tp before chunking; loss compute
-        # is duplicated on TP after the sequence gather.
-        if is_spmd_active() and self.enable_sp:
+        # lm_head is vocab-sharded under TP, so it expects R@TP input.
+        # With SP, we all-gather S(1)->R. without SP, we allreduce gradients across vocab shards.
+        if is_spmd_active():
             bwd = {"op_dtype": hidden_states.dtype}
             hidden_states = spmd.redistribute(
                 hidden_states,
                 current_mesh().get_group("tp"),
-                src=spmd.S(1),
+                src=spmd.S(1) if self.enable_sp else spmd.I,
                 dst=spmd.R,
                 backward_options=bwd,
             )
