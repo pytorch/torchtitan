@@ -27,9 +27,10 @@ from torchtitan.models.common.config_utils import (
     make_ffn_config,
     make_moe_config,
     make_router_config,
+    make_token_dispatcher_config,
 )
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
@@ -103,11 +104,12 @@ def build_and_swap_native_moe(
             gated_shared = moe_config.shared_experts
             moe_config.shared_experts = gated_shared.ffn
 
+        _, expert_layout = _get_expert_param_info()
         set_moe_sharding_config(
             moe_config,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout={"w1": Shard(1), "w2": Shard(2), "w3": Shard(1)},
+            expert_param_layout=expert_layout,
         )
 
         # Restore GatedSharedExpert config with sharding from inner FFN
@@ -523,16 +525,53 @@ class GatedSharedExpert(Module):
 # Config building
 # ---------------------------------------------------------------------------
 
-_EXPERT_INIT = {
-    "w1": partial(nn.init.trunc_normal_, std=0.02),
-    "w2": partial(nn.init.trunc_normal_, std=0.02),
-    "w3": partial(nn.init.trunc_normal_, std=0.02),
-}
-
 _LINEAR_INIT = {
     "weight": partial(nn.init.trunc_normal_, std=0.02),
     "bias": nn.init.zeros_,
 }
+
+_expert_param_info_cache: tuple[dict, dict] | None = None
+
+
+def _get_expert_param_info() -> tuple[dict, dict[str, Shard]]:
+    """Discover GroupedExperts parameter names and their TP shard placements.
+
+    Builds a tiny throwaway instance on meta device to introspect actual
+    parameter names (which may carry dimension suffixes like ``_EFD``).
+    Returns ``(param_init, param_layout)`` where ``param_init`` maps each
+    name to ``trunc_normal_`` and ``param_layout`` maps each name to the
+    correct ``Shard`` placement for TP.
+    """
+    global _expert_param_info_cache
+    if _expert_param_info_cache is not None:
+        return _expert_param_info_cache
+
+    with torch.device("meta"):
+        temp = GroupedExperts.Config(
+            dim=2,
+            hidden_dim=4,
+            num_experts=2,
+            token_dispatcher=make_token_dispatcher_config(
+                num_experts=2, top_k=1, comm_backend="standard"
+            ),
+        ).build()
+
+    init_fn = partial(nn.init.trunc_normal_, std=0.02)
+    param_init: dict = {}
+    param_layout: dict[str, Shard] = {}
+
+    for name, param in temp.named_parameters(recurse=False):
+        param_init[name] = init_fn
+        # (E, hidden_dim, dim) → colwise Shard(1)  [w1/w3 pattern]
+        # (E, dim, hidden_dim) → rowwise Shard(2)  [w2 pattern]
+        if param.shape[1] >= param.shape[2]:
+            param_layout[name] = Shard(1)
+        else:
+            param_layout[name] = Shard(2)
+
+    _expert_param_info_cache = (param_init, param_layout)
+    del temp
+    return _expert_param_info_cache
 
 
 def _build_moe_config(params: dict, config) -> MoE.Config:
@@ -549,12 +588,13 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         num_limited_groups=params["num_limited_groups"],
     )
 
+    expert_init, _ = _get_expert_param_info()
     experts = make_experts_config(
         dim=params["dim"],
         hidden_dim=params["moe_intermediate_size"],
         num_experts=params["num_experts"],
         top_k=params["top_k"],
-        param_init=_EXPERT_INIT,
+        param_init=expert_init,
         score_before_experts=params.get("score_before_experts", False),
         comm_backend=params["comm_backend"],
     )
