@@ -5,20 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-RL training loop using Monarch Actors.
-
-This demonstrates:
-1. Distributed actor architecture with VLLMGenerator (vLLM) and PolicyTrainer (TorchTitan)
-   running on separate GPU meshes
-2. Weight synchronization across meshes: trainer gathers full (unsharded) weights,
-   generator reshards to match its own parallelism layout via distribute_tensor
-3. Envs driven rollouts; reward and advantage computation live inline
-   in the controller.
-
-Command to run:
-python3 torchtitan/experiments/rl/grpo.py \
-    --module rl --config rl_grpo_qwen3_0_6b \
-    --hf_assets_path=<path_to_model_checkpoint>
+RL trainer used for synchronous grpo training.
 """
 
 import asyncio
@@ -27,7 +14,6 @@ import math
 import os
 import statistics
 import time
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 
@@ -36,15 +22,9 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 import torchstore as ts
-from monarch.actor import this_host
+from monarch.actor import ProcMesh
 from monarch.spmd import setup_torch_elastic_env_async
-
-from torchtitan.config import (
-    CompileConfig,
-    ConfigManager,
-    Configurable,
-    ParallelismConfig,
-)
+from torchtitan.config import CompileConfig, Configurable
 from torchtitan.experiments.rl.actors.generator import (
     Completion,
     SamplingConfig,
@@ -144,42 +124,6 @@ class GRPOLoss(Configurable):
             }
 
         return loss, metrics
-
-
-class Provisioner:
-    """Allocates non-overlapping GPU ranges for Monarch proc meshes.
-
-    In non-colocated mode, the trainer and generator run on separate GPU
-    meshes (e.g. GPUs 0-3 for training, GPUs 4-7 for generation). Each
-    call to `allocate(n)` reserves the next *n* GPUs and returns a
-    bootstrap callable that sets `CUDA_VISIBLE_DEVICES` before CUDA
-    initializes in the spawned process, ensuring each mesh only sees its
-    own devices.
-    """
-
-    def __init__(self, total_gpus: int = 8):
-        self.total_gpus = total_gpus
-        self.next_gpu = 0
-
-    @property
-    def available(self) -> int:
-        return self.total_gpus - self.next_gpu
-
-    def allocate(self, num_gpus: int) -> Callable[[], None]:
-        if num_gpus > self.available:
-            raise RuntimeError(
-                f"Requested {num_gpus} GPUs but only {self.available} "
-                f"available (total={self.total_gpus}, allocated={self.next_gpu})"
-            )
-        gpu_ids = list(range(self.next_gpu, self.next_gpu + num_gpus))
-        self.next_gpu += num_gpus
-
-        def _bootstrap():
-            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
-            # TODO: Remove once Monarch/PyTorch fixes concurrent import during unpickling.
-            import torch  # noqa: F401
-
-        return _bootstrap
 
 
 def _log_samples(rollout_groups: list[RolloutGroup]) -> None:
@@ -369,32 +313,14 @@ class RLTrainer(Configurable):
                 logger.exception("mesh.stop[%d] failed", i)
         self._proc_meshes = []
 
-    def _get_rank_0_value(self, result, has_gpus: bool = True):
-        """Extract rank 0 result, handling both single and multi-node meshes.
+    def _get_rank_0_value(self, result):
+        """Extract rank 0 result from a Monarch ValueMesh.
 
         Monarch actor endpoints return results from all ranks in the mesh.
-        This picks out rank 0's result by indexing into the host and GPU
-        dimensions as needed (multi-node meshes have an extra host dimension).
-        This should be used in cases where all ranks return the same result.
+        This method picks out rank 0's result. This should be used in cases
+        where all ranks return the same result.
         """
-        kwargs = {}
-        if self._multi_node:
-            kwargs["hosts"] = 0
-        if has_gpus:
-            kwargs["gpus"] = 0
-        return result.item(**kwargs)
-
-    @staticmethod
-    def _compute_world_size(p: ParallelismConfig) -> int:
-        """Compute world size from all parallel dimensions."""
-        dp_shard = max(p.data_parallel_shard_degree, 1)
-        return (
-            p.data_parallel_replicate_degree
-            * dp_shard
-            * p.tensor_parallel_degree
-            * p.pipeline_parallel_degree
-            * p.context_parallel_degree
-        )
+        return result.get(0)
 
     def _shard_episodes(self, episodes: list[Episode]) -> list[list[Episode]]:
         """Round-robin partition episodes across DP ranks."""
@@ -407,10 +333,8 @@ class RLTrainer(Configurable):
     async def setup_async(
         self,
         *,
-        host_mesh=None,
-        trainer_nodes: int | None = None,
-        generator_nodes: int | None = None,
-        gpus_per_node: int | None = None,
+        trainer_mesh: ProcMesh,
+        generator_mesh: ProcMesh,
     ):
         """Spawn Monarch actors on separate meshes and initialize weights.
 
@@ -419,21 +343,14 @@ class RLTrainer(Configurable):
         weight push/pull are all ``await``-based runtime side effects
         that cannot run in a synchronous constructor.
 
-        Creates separate GPU meshes for trainer and generator and
-        synchronizes initial weights from trainer to generator. Must be
-        called before :meth:`train`.
+        The trainer and generator meshes are provisioned by the caller
+        (see ``create_proc_mesh``) on disjoint GPUs; this method only
+        spawns the actors on them and synchronizes initial weights from
+        trainer to generator. Must be called before :meth:`train`.
 
         Args:
-            host_mesh: Optional multi-node HostMesh. When provided,
-                whole nodes are dedicated to trainer vs generator
-                roles instead of partitioning GPUs on a single host.
-            trainer_nodes: Number of nodes for the trainer (required when
-                host_mesh is provided).
-            generator_nodes: Number of nodes for the generator (required when
-                host_mesh is provided).
-            gpus_per_node: GPUs per node, assumed to be the same across all
-                nodes (no heterogeneous node configurations). Required when
-                host_mesh is provided.
+            trainer_mesh: ProcMesh the trainer actor is spawned on.
+            generator_mesh: ProcMesh the generator actor is spawned on.
         """
         # Thread pool for TokenEnv's asyncio.to_thread renderer calls — one worker per
         # concurrent rollout, capped by CPUs.
@@ -448,86 +365,16 @@ class RLTrainer(Configurable):
 
         config = self.config
 
-        self.trainer_world_size = self._compute_world_size(config.trainer.parallelism)
-        self.generator_world_size = self._compute_world_size(
-            config.generator.parallelism
-        )
         trainer_parallelism = config.trainer.parallelism
         dp_shard = max(trainer_parallelism.data_parallel_shard_degree, 1)
         self.trainer_dp_degree = (
             trainer_parallelism.data_parallel_replicate_degree * dp_shard
         )
 
-        total_gpus = self.trainer_world_size + self.generator_world_size
-        logger.info(
-            f"{self.generator_world_size} generator GPUs + "
-            f"{self.trainer_world_size} trainer GPUs = {total_gpus} total"
-        )
-
-        self._multi_node = host_mesh is not None
-
         # TODO(observability): the mesh_spawn span wraps ~80 LoC of branching
-        # provisioner logic. Pull a Provisioner.spawn_meshes(...) helper and
+        # provisioner logic. Pull a PerHostProvisioner.spawn_meshes(...) helper and
         # shrink this span to a single call.
         with sl.log_trace_span("mesh_spawn"):
-            if host_mesh is not None:
-                # Multi-node mode: dedicate whole nodes to trainer vs generator
-                if (
-                    trainer_nodes is None
-                    or generator_nodes is None
-                    or gpus_per_node is None
-                ):
-                    raise ValueError(
-                        "trainer_nodes, generator_nodes, and gpus_per_node are "
-                        "required when host_mesh is provided"
-                    )
-                # Validate that world sizes are evenly divisible by node counts
-                assert self.trainer_world_size % trainer_nodes == 0, (
-                    f"trainer_world_size ({self.trainer_world_size}) must be "
-                    f"evenly divisible by trainer_nodes ({trainer_nodes})"
-                )
-                assert self.generator_world_size % generator_nodes == 0, (
-                    f"generator_world_size ({self.generator_world_size}) must be "
-                    f"evenly divisible by generator_nodes ({generator_nodes})"
-                )
-
-                # Compute GPUs per node for each role based on the config's
-                # world size and number of nodes allocated to that role
-                trainer_gpus_per_node = self.trainer_world_size // trainer_nodes
-                generator_gpus_per_node = self.generator_world_size // generator_nodes
-
-                trainer_host_mesh = host_mesh.slice(hosts=slice(0, trainer_nodes))
-                generator_host_mesh = host_mesh.slice(
-                    hosts=slice(trainer_nodes, trainer_nodes + generator_nodes)
-                )
-
-                # Use Provisioner to set CUDA_VISIBLE_DEVICES so each role
-                # only sees its own GPUs and doesn't conflict with other
-                # processes on the node
-                trainer_provisioner = Provisioner(total_gpus=gpus_per_node)
-                generator_provisioner = Provisioner(total_gpus=gpus_per_node)
-
-                trainer_mesh = trainer_host_mesh.spawn_procs(
-                    per_host={"gpus": trainer_gpus_per_node},
-                    bootstrap=trainer_provisioner.allocate(trainer_gpus_per_node),
-                )
-                generator_mesh = generator_host_mesh.spawn_procs(
-                    per_host={"gpus": generator_gpus_per_node},
-                    bootstrap=generator_provisioner.allocate(generator_gpus_per_node),
-                )
-            else:
-                # Single-node mode: partition GPUs on this_host() via
-                # CUDA_VISIBLE_DEVICES
-                provisioner = Provisioner(total_gpus=total_gpus)
-                trainer_mesh = this_host().spawn_procs(
-                    per_host={"gpus": self.trainer_world_size},
-                    bootstrap=provisioner.allocate(self.trainer_world_size),
-                )
-                generator_mesh = this_host().spawn_procs(
-                    per_host={"gpus": self.generator_world_size},
-                    bootstrap=provisioner.allocate(self.generator_world_size),
-                )
-
             # Store proc meshes for cleanup
             self._proc_meshes = [trainer_mesh, generator_mesh]
 
@@ -1159,28 +1006,3 @@ class RLTrainer(Configurable):
             post = post_validation_agg.get(key, float("nan"))
             logger.info(f"  {key}:  {pre:+.3f}  /  {post:+.3f}")
         logger.info("=" * 60)
-
-
-async def main():
-    config = ConfigManager().parse_args()
-    sl.init_structured_logger(
-        source="rl_controller",
-        output_dir=config.dump_folder,
-        rank=0,
-        # pyrefly: ignore [missing-attribute]
-        enable=config.trainer.debug.enable_structured_logging,
-    )
-    sl.log_trace_instant("structured_logger_started")
-
-    rl_trainer = config.build()
-    try:
-        await rl_trainer.setup_async()
-        await rl_trainer.train()
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        logger.info("Interrupted; attempting graceful shutdown...")
-    finally:
-        await rl_trainer.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
