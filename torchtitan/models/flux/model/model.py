@@ -10,6 +10,7 @@ import torch
 from torch import nn, Tensor
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
+from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.models.flux.model.layers import (
     DoubleStreamBlock,
     EmbedND,
@@ -44,6 +45,11 @@ class FluxModel(BaseModel):
         theta: int = 10_000
         qkv_bias: bool = True
         autoencoder: AutoEncoder.Config = field(default_factory=AutoEncoder.Config)
+
+        # Text encoder configs, set by the model registry. The trainer can
+        # override version and random_init when it builds the encoders.
+        clip_encoder: FluxEmbedder.Config
+        t5_encoder: FluxEmbedder.Config
 
         # Sub-component configs (all required — set by the model registry)
         pe_config: EmbedND.Config
