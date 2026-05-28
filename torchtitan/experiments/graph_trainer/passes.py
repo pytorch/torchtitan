@@ -391,6 +391,25 @@ def fuse_mm_reduce_scatter_pass(
             skipped_shape += 1
             continue
 
+        # Compute the actual 2D shape of the fused op's runtime output.
+        # The op returns ``A @ B`` reduce-scattered along ``scatter_dim``
+        # in the (2D) mm-output space; runtime shape is
+        # ``out_shape = [*A.shape[:-1], B.shape[1]]`` with
+        # ``out_shape[scatter_dim] //= group.size()`` (see
+        # ``_fused_matmul_reduce_scatter_impl`` in torch.distributed._symmetric_memory).
+        # We stamp this 2D shape on the fused-op node and insert an
+        # explicit reshape back to the original (3D) wait_tensor shape
+        # so downstream consumers (and any regional-Inductor scoop) see
+        # the correct shape on every node.
+        group_size = int(rs_node.args[2])
+        if scatter_dim == 0:
+            fused_2d_shape = (mm_shape[0] // group_size, mm_shape[1])
+        else:
+            fused_2d_shape = (mm_shape[0], mm_shape[1] // group_size)
+        # Create a FakeTensor for the fused op output by viewing wait_val
+        # (same element count and dtype/device) into the actual 2D shape.
+        fused_val = wait_val.view(*fused_2d_shape)
+
         with gm.graph.inserting_before(rs_node):
             fused_out = gm.graph.call_function(
                 symm_mem.fused_matmul_reduce_scatter.default,
@@ -402,13 +421,23 @@ def fuse_mm_reduce_scatter_pass(
                     group_name,
                 ),
             )
-            # Copy fake-tensor metadata from the wait so downstream
-            # passes/lint see the correct output shape on the new node.
-            fused_out.meta["val"] = wait_val
+            # Fused-op node sees the *actual* 2D runtime shape.
+            fused_out.meta["val"] = fused_val
+            # Reshape back to the original (possibly 3D) wait_tensor
+            # shape so downstream users see the same shape as before
+            # fusion. Without this, downstream regional-Inductor scoops
+            # that codegen ``assert_size_stride`` from meta crash with
+            # a shape mismatch (e.g. ``wrong number of dimensions``).
+            reshape_out = gm.graph.call_function(
+                aten.reshape.default,
+                args=(fused_out, list(wait_val.shape)),
+            )
+            reshape_out.meta["val"] = wait_val
 
-        # Redirect users of the wait to the fused op output. The fused
-        # op already returns the reduce-scattered result (waits internally).
-        wait_user.replace_all_uses_with(fused_out)
+        # Redirect users of the wait to the reshape (3D) view. The
+        # fused op already returns the reduce-scattered result (waits
+        # internally); the reshape just restores the original rank.
+        wait_user.replace_all_uses_with(reshape_out)
         gm.graph.erase_node(wait_user)
 
         # If this was a split->cat path, erase the cat + getitems + split
@@ -458,6 +487,50 @@ def fuse_mm_reduce_scatter_pass(
         )
     gm.graph.lint()
     gm.recompile()
+    return gm
+
+
+def annotate_residual_add_for_regional_inductor_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs=None,
+) -> torch.fx.GraphModule:
+    """Tag bf16 ``aten.add.Tensor`` (residual adds) for regional_inductor.
+
+    The Llama3 graph has many residual-add ops (post-attention and post-MLP)
+    on bf16 activations.  These are pure pointwise bf16 kernels; tagging them
+    for regional Inductor compilation lets Inductor fuse them into adjacent
+    elementwise ops, recovering a few ms of kernel time at no numerical cost
+    (bf16 add is commutative and associative-equivalent for the small chains
+    that result).
+
+    Only tags ``aten.add.Tensor`` nodes where both inputs are bf16 FakeTensors
+    so we never touch fp32 master-grad accumulation or scalar adds.
+    """
+    from torch._subclasses.fake_tensor import FakeTensor
+
+    num_tagged = 0
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+        if node.target is not aten.add.Tensor:
+            continue
+        if len(node.args) < 2:
+            continue
+        a, b = node.args[0], node.args[1]
+        if not (isinstance(a, torch.fx.Node) and isinstance(b, torch.fx.Node)):
+            continue
+        a_val = a.meta.get("val")
+        b_val = b.meta.get("val")
+        if not (isinstance(a_val, FakeTensor) and isinstance(b_val, FakeTensor)):
+            continue
+        if a_val.dtype != torch.bfloat16 or b_val.dtype != torch.bfloat16:
+            continue
+        node.meta.setdefault("custom", {})["compile_with_inductor"] = {}
+        num_tagged += 1
+    if num_tagged > 0:
+        logger.info(
+            f"Tagged {num_tagged} bf16 add.Tensor nodes for regional Inductor compilation"
+        )
     return gm
 
 
@@ -562,6 +635,11 @@ def compile_time_passes(
                 flex_compile_config=FlexAttention.inductor_configs,
             )
         )
+        # Tag bf16 residual adds for regional Inductor (numerics-preserving:
+        # pure pointwise bf16 fusion). Must run after the flex annotation
+        # pass and before ``regional_inductor_pass`` so the tagger sees
+        # the final graph but the compiler picks up the new tags.
+        passes.append(annotate_residual_add_for_regional_inductor_pass)
         # Performance passes that may change numerics.
         if config.compile.numerics_changing_optim:
             from torchtitan.experiments.graph_trainer.performance_passes import (

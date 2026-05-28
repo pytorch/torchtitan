@@ -498,3 +498,37 @@ learn from past experiments and avoid repeating failed approaches.
   fusion isn't always a win — measure first.
 
 ---
+
+## fuse_mm_reduce_scatter shape fix + residual-add Inductor — keep (PENDING)
+
+- **Idea**: (1) Fix the shape-meta bug in `fuse_mm_reduce_scatter_pass`
+  (was stamping 3D wait_tensor shape on a 2D runtime output, OK for
+  non-Inductor downstream but crashes any Inductor scoop with
+  `assert_size_stride`). (2) With the fix in place, tag bf16 residual
+  `aten.add.Tensor` nodes for `regional_inductor_pass` so the 224
+  residual adds (~14ms / 2.5% of step) get Inductor-compiled.
+- **Changes**: (1) After inserting `symm_mem.fused_matmul_reduce_scatter`,
+  stamp the actual 2D fake on the fused-op `meta["val"]` and insert an
+  `aten.reshape.default` back to original 3D shape with correct meta.
+  Route wait users to the reshape. (2) New
+  `annotate_residual_add_for_regional_inductor_pass` (similar template
+  to SwiGLU annotation), registered after the FlexAttention annotation.
+- **Result**: 224 bf16 adds tagged; 65 mm->RS pairs still fused. Bitwise
+  numerics PASS. 3-run tps **7,429 / 7,422 / 7,423** → avg **7,424
+  (+0.26% over 7,405, +3.66% over Run 3 production baseline)**, mfu
+  43.48% avg, memory unchanged (49.10 GiB), wall ~143 s.
+- **Analysis**: Two effects combine: the shape fix is perf-neutral (just
+  correctness) but UNBLOCKS Inductor scoops downstream of fused mm-RS;
+  residual-add Inductor compilation collapses 224 small add kernels but
+  most are already overlapped by `auto_overlap_bucketing_pass`, so the
+  gain is modest. All 3 confirmation runs above baseline → small but
+  consistent improvement. The shape fix is essential infra for any
+  future Inductor scoop work.
+- **Lessons**: (1) `fuse_mm_reduce_scatter_pass` shape meta needed
+  fixing — the bug was latent until residual-add tagging exposed it.
+  (2) Residual-add Inductor fusion: bitwise-safe but small payoff
+  at this scale. (3) The pointwise-fusion-Inductor direction is hitting
+  diminishing returns — most pointwise time is already hidden by comm
+  overlap.
+
+---
