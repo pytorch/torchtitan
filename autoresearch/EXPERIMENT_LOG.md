@@ -268,3 +268,38 @@ learn from past experiments and avoid repeating failed approaches.
   may still help. Compile time grew 79→112 s, so be mindful.
 
 ---
+
+## Broad pointwise regional Inductor — discard (xxxxxxx)
+
+- **Idea**: Building on SwiGLU bitwise-safety result, tag a broader
+  set of pointwise targets (silu, mul, add, sub, neg, _to_copy,
+  view_as_complex/real) for regional Inductor — primarily to fuse the
+  RoPE chain `_to_copy→reshape→view_as_complex→mul→view_as_real→
+  reshape→_to_copy` (6 kernels per layer per Q/K, ~128 sites) into
+  one Triton kernel.
+- **Changes**: Added `annotate_pointwise_chains_for_regional_inductor_pass`
+  that tags all of {silu, silu_backward, mul.Tensor, mul.Scalar,
+  add.Tensor, add.Scalar, sub.Tensor, neg, _to_copy, view_as_complex,
+  view_as_real}. Inserted between flex-attention annotation and
+  `regional_inductor_pass`.
+- **Result**: 1328 pointwise nodes tagged (~10× SwiGLU's 128). tps
+  **7,192 (-0.51%)** vs 2-layer keep, mfu 42.11%, memory 47.71 GiB,
+  wall **246 s** (vs 79 s baseline — graph passes alone took 172 s).
+  Bitwise numerics PASS.
+- **Analysis**: The fusion target — RoPE complex multiplication —
+  triggers Inductor's `"does not support code generation for complex
+  operators"` warning. `view_as_complex` / complex `mul.Tensor` /
+  `view_as_real` fall back to non-fused codegen, so the intended
+  6-kernels-to-1 RoPE win never materializes. Meanwhile the rest of
+  the broad tagging fragments regions across half the graph, growing
+  compile time hugely with no steady-state benefit.
+- **Lessons**: **Inductor cannot codegen complex ops.** To fuse RoPE
+  we'd need a graph rewrite that converts
+  `view_as_complex→mul(complex)→view_as_real` into the equivalent
+  4-mul-2-add real-valued form **before** tagging. Risk: FMA promotion
+  may break bitwise (Inductor may emit `fma(a,c,-b*d)` whereas eager
+  complex_mul does separate mul/sub). Also: broad pointwise tagging
+  is high compile-time cost / low steady-state payoff because most
+  pointwise time sits next to matmul/comm that dominates anyway.
+
+---
