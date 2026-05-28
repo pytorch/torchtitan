@@ -515,14 +515,14 @@ class ChunkedCELoss(BaseLoss):
 
         # lm_head is vocab-sharded under TP, so it expects R@TP input.
         # With SP, we all-gather S(1)->R. without SP, we allreduce gradients across vocab shards.
-        if is_spmd_active():
-            bwd = {"op_dtype": hidden_states.dtype}
+        mesh = current_mesh() if is_spmd_active() else None
+        if mesh is not None and "tp" in (mesh.mesh_dim_names or ()):
             hidden_states = spmd.redistribute(
                 hidden_states,
-                current_mesh().get_group("tp"),
+                mesh.get_group("tp"),
                 src=spmd.S(1) if self.enable_sp else spmd.I,
                 dst=spmd.R,
-                backward_options=bwd,
+                backward_options={"op_dtype": hidden_states.dtype},
             )
 
         requires_grad = hidden_states.requires_grad
