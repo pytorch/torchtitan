@@ -131,10 +131,10 @@ def _make_gptoss_experts_config(
     """Build a fully-specified GptOssGroupedExperts.Config for a single layer."""
     std = depth_scaled_std(0.02, layer_id)
     experts_init = {
-        "mlp1_weight": partial(nn.init.trunc_normal_, std=std),
-        "mlp1_bias": partial(nn.init.trunc_normal_, std=std),
-        "mlp2_weight": partial(nn.init.trunc_normal_, std=std),
-        "mlp2_bias": partial(nn.init.trunc_normal_, std=std),
+        "mlp1_weight_EGD": partial(nn.init.trunc_normal_, std=std),
+        "mlp1_bias_EG": partial(nn.init.trunc_normal_, std=std),
+        "mlp2_weight_EDF": partial(nn.init.trunc_normal_, std=std),
+        "mlp2_bias_ED": partial(nn.init.trunc_normal_, std=std),
     }
     return GptOssGroupedExperts.Config(
         dim=dim,

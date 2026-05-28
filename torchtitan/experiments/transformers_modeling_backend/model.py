@@ -289,14 +289,14 @@ class HFTransformerModel(BaseModel):
         def update_from_config(
             self,
             *,
-            trainer_config=None,
+            config=None,
             **kwargs,
         ):
-            training = trainer_config.training
-            parallelism = trainer_config.parallelism
-            debug = trainer_config.debug
-            # Extract HF model ID from the extended trainer_config
-            hf_model_id = getattr(trainer_config, "hf_model", "")
+            training = config.training
+            parallelism = config.parallelism
+            debug = config.debug
+            # Extract HF model ID from the extended config
+            hf_model_id = getattr(config, "hf_model", "")
             config_dict, _ = PretrainedConfig.get_config_dict(hf_model_id)
             trust_remote_code = (
                 config_dict.get("model_type", "") not in _REMOTE_CONFIG_DENYLIST

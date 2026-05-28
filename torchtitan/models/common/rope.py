@@ -21,6 +21,22 @@ __all__ = [
 ]
 
 
+def _maybe_check_max_pos(positions: torch.Tensor, *, max_valid_pos: int) -> None:
+    """Async bounds check: verify all position values <= max_valid_pos.
+
+    Uses ``torch._assert_async`` to avoid a device-host sync while still
+    catching out-of-bounds positions (the assertion failure surfaces at a
+    later kernel launch).  Skipped entirely under ``torch.compile``.
+    """
+    if torch.compiler.is_compiling():
+        return
+    pos_local = positions.to_local() if isinstance(positions, DTensor) else positions
+    torch._assert_async(
+        torch.all(pos_local <= max_valid_pos),
+        f"position_ids exceed {max_valid_pos=}",
+    )
+
+
 class RoPE(Module):
     """Shared Rotary Position Embedding module.
 
@@ -342,6 +358,8 @@ def apply_rotary_emb_complex(
         positions: optional position indices
     """
     positions = _maybe_wrap_positions(positions, xq)
+    if positions is not None:
+        _maybe_check_max_pos(positions, max_valid_pos=freqs_cis.shape[0] - 1)
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
     freqs_cis = _reshape_for_broadcast_complex(freqs_cis, xq_, positions)
@@ -363,6 +381,8 @@ def apply_rotary_emb_single_complex(
         positions: optional position indices
     """
     positions = _maybe_wrap_positions(positions, x)
+    if positions is not None:
+        _maybe_check_max_pos(positions, max_valid_pos=freqs_cis.shape[0] - 1)
     dtype = x.dtype
     x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
     freqs_cis = _reshape_for_broadcast_complex(freqs_cis, x, positions)
@@ -388,6 +408,10 @@ def apply_rotary_emb_cos_sin(
     positions = _maybe_wrap_positions(positions, xq)
     head_dim = xq.shape[-1]
     if rope_cache.ndim != 4:
+        # Qwen3-VL MRoPE validates position IDs before building its 4D cache.
+        # Here shape[0] is max sequence length only for non-4D indexed caches.
+        if positions is not None:
+            _maybe_check_max_pos(positions, max_valid_pos=rope_cache.shape[0] - 1)
         rope_cache = _reshape_for_broadcast_cos_sin(rope_cache, xq, positions)
     cos = rope_cache[..., :head_dim].to(device=xq.device)
     sin = rope_cache[..., head_dim:].to(device=xq.device)
