@@ -5,4 +5,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-28T00:30:00	xxxxxxx	7164	47.5	discard	41.95	79	async_TP first in compile_time_passes: 0 fusions (DTensor redistribute inserts view/permute breaking matcher)
 2026-05-28T00:40:00	xxxxxxx	0	0.0	crash	0.0	0	bucket_all_reduce after FSDP bucketing: lint fail (FSDP overlap moves AR-wait consumers earlier, breaking topology)
 2026-05-28T00:50:00	xxxxxxx	0	0.0	crash	0.0	0	bucket_all_reduce before FSDP bucketing: same lint fail, upstream topology bug not position-dependent
-2026-05-28T00:55:00	PENDING	7229	47.7	keep	42.34	79	2-layer FSDP bucket plan: +0.94% avg over 3 runs (7239/7214/7236), bitwise PASS
+2026-05-28T00:55:00	08d24de9	7229	47.7	keep	42.34	79	2-layer FSDP bucket plan: +0.94% avg over 3 runs (7239/7214/7236), bitwise PASS
