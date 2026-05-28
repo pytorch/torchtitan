@@ -71,3 +71,31 @@ learn from past experiments and avoid repeating failed approaches.
   pattern cleanup at the joint-graph stage.
 
 ---
+
+## async_tensor_parallel_pass after bucketing — discard (xxxxxxx)
+
+- **Idea**: 130 unbucketed TP all_gathers + 130 reduce_scatters on group `'22'`
+  are launched separately every step. `async_tensor_parallel_pass` (already
+  in `passes.py`, gated by config) calls upstream
+  `micro_pipeline_tp_pass` to fuse `all_gather+mm → fused_all_gather_matmul`
+  and `mm+reduce_scatter → fused_matmul_reduce_scatter` via NVLink symm_mem.
+  Hard-enable it.
+- **Changes**: Removed the `if config.parallelism.enable_async_tensor_parallel:`
+  guard so `async_tensor_parallel_pass` always appends.
+- **Result**: tps = 7,023 (-1.9%), mfu = 41.13%, memory = 47.56 GiB, wall_time = 80 s.
+  Bitwise numerics PASS. Net regression.
+- **Analysis**: The pass emitted **99 "no producer matmul found for reduce
+  scatter, skipping fuse_matmul_reduce_scatter fusion"** warnings and **zero
+  fusions** of either `fused_all_gather_matmul` or
+  `fused_matmul_reduce_scatter`. By position #6 (after
+  `normalize_view_ops_as_reshape` and
+  `joint_transformer_block_bucketing_reordering_pass`) there are
+  reshape/view ops between `mm` and the adjacent collective that break the
+  upstream matcher's expected adjacency. The pass still walked the graph
+  and registered symm_mem groups, adding overhead with no benefit.
+- **Lessons**: Pass *position* is critical — `async_tensor_parallel_pass`
+  must run **BEFORE** view normalization and bucketing reorder for the
+  upstream matcher to find `mm→RS` / `AG→mm` adjacency. Next: move it to
+  the very start of `compile_time_passes` (or just after `remove_detach_pass`).
+
+---

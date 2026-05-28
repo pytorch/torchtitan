@@ -19,6 +19,28 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
 - Numerics gate FIRST, perf SECOND: a perf win that fails
   `aot_fx_trace_vs_eager` is `crash`, not `keep`.
 
+## Key structural findings (graph after production passes)
+
+- **Regional Inductor compiles nothing in this config.** Llama3 uses
+  `_scaled_dot_product_cudnn_attention` (cuDNN SDPA), not FlexAttention
+  HOPs, so `annotate_flex_attention_for_regional_inductor_pass` finds no
+  HOPs to tag and `regional_inductor_pass` is a no-op. The whole
+  regional-Inductor chain is dormant — `compile_with_inductor`
+  annotations are absent in the dumped graph.
+- **TP collectives are unbucketed**: 130 `all_gather_into_tensor` + 130
+  `reduce_scatter_tensor` on group `'22'` (TP-2). Each is a separate
+  small NCCL launch.
+- **TP weight-grad all_reduces are unbucketed**: 67 small `all_reduce('sum')`
+  on group `'22'` for RMSNorm-weight gradients (8 KB bf16 each), launched
+  serially in backward.
+- **FSDP collectives ARE bucketed**: 34 bucketed AGs (forward) + 34
+  bucketed RSs (backward) via `bucketing._pre_bucket_*` wrappers. Healthy.
+- **Hot unfused pointwise patterns** outside any Inductor region: 32×
+  RoPE blocks (mul/view_as_complex/view_as_real), 32× SwiGLU
+  (`silu→mul`), 32× residual `add` immediately preceding RMSNorm.
+- **290 FSDP weight `clone(contiguous_format)` calls** — one per param,
+  caused by bf16 bucket-buffer slice being non-contiguous. Large memcpy.
+
 ## Patterns that worked
 
 (none yet)
@@ -27,11 +49,14 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
 
 - Adding upstream Inductor `joint_graph_passes` at the joint-graph stage
   (after `normalize_view_ops_as_reshape`, before bucketing): bitwise-safe
-  but no perf win on this graph. The cleanup it performs (CSE, noop
-  removal, constant folding) finds nothing material because existing
-  no-op passes have already cleaned the graph and Llama3 8B compute is
-  dominated by large matmul/RMSNorm/SDPA/collective kernels with little
-  algebraic redundancy.
+  but +0.11% (noise). Llama3 8B has little algebraic redundancy at this
+  stage; existing no-op cleanup already covers what it would remove.
+- Hard-enabling `async_tensor_parallel_pass` **after** bucketing/view
+  normalization: 0 fusions engaged because reshape/view ops between
+  `mm` and the adjacent collective break upstream `micro_pipeline_tp_pass`'s
+  adjacency matcher. Net -1.9% from pass overhead alone. The pass MUST
+  run before view normalization and bucketing for the matcher to find
+  `mm→RS` / `AG→mm` adjacency.
 
 ## Tooling tips
 
