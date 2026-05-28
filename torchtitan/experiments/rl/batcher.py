@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 
 import torch
@@ -13,9 +13,75 @@ import torch
 logger = logging.getLogger(__name__)
 
 from torchtitan.config import Configurable
-from torchtitan.experiments.rl.dataloading.utils import pack
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import Episode, TrainingBatch
+
+
+def pack(
+    samples: Iterable[dict[str, list]],
+    max_seq_length: int,
+    pad_values: dict[str, int | float | bool],
+) -> Iterator[dict[str, torch.Tensor]]:
+    """Greedy-pack variable-length samples into [1, max_seq_length] sequences."""
+    keys = list(pad_values.keys())
+    dtypes: dict[str, torch.dtype] | None = None
+    buffer: dict[str, list] = {key: [] for key in keys}
+    position_buffer: list[int] = []
+    seq_lens_buffer: list[int] = []
+    buffer_length = 0
+
+    def _flush() -> dict:
+        nonlocal buffer, position_buffer, seq_lens_buffer, buffer_length
+        assert dtypes is not None
+        pad_length = max_seq_length - buffer_length
+        if pad_length > 0:
+            for key in keys:
+                buffer[key].extend([pad_values[key]] * pad_length)
+            position_buffer.extend(range(pad_length))
+
+        result: dict = {
+            key: torch.tensor(
+                buffer[key],
+                dtype=dtypes[key],
+            ).unsqueeze(0)
+            for key in keys
+        }
+        result["positions"] = torch.tensor(position_buffer, dtype=torch.long).unsqueeze(
+            0
+        )
+        result["seq_lens"] = list(seq_lens_buffer)
+
+        buffer = {key: [] for key in keys}
+        position_buffer = []
+        seq_lens_buffer = []
+        buffer_length = 0
+        return result
+
+    for sample in samples:
+        sample_length = len(sample[keys[0]])
+
+        if sample_length > max_seq_length:
+            logger.warning(
+                "Dropping sample with length %d exceeding max_seq_length %d",
+                sample_length,
+                max_seq_length,
+            )
+            continue
+
+        if dtypes is None:
+            dtypes = {key: torch.tensor(sample[key]).dtype for key in keys}
+
+        if buffer_length > 0 and buffer_length + sample_length > max_seq_length:
+            yield _flush()
+
+        for key in keys:
+            buffer[key].extend(sample[key])
+        position_buffer.extend(range(sample_length))
+        seq_lens_buffer.append(sample_length)
+        buffer_length += sample_length
+
+    if buffer_length > 0:
+        yield _flush()
 
 
 @dataclass(kw_only=True, slots=True)
