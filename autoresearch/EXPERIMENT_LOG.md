@@ -335,3 +335,29 @@ learn from past experiments and avoid repeating failed approaches.
   experiments should layer on top of this rather than swap it out.
 
 ---
+
+## Re-profile post auto_overlap_bucketing — discovery (no commit)
+
+- **Idea**: Profile current keep state (auto_overlap_bucketing) to find
+  the new dominant bottleneck.
+- **Result**: GPU 98.2% busy, total comm 325 ms / step (63% overlapped).
+  Exposed comm: 119 ms (11.5% of 1037 ms step).
+  - TP RS bf16: **61.5 ms exposed (2.6% overlap)** — biggest remaining
+    target, untouched by auto-bucketing (which only processes FSDP
+    group '41', not TP group '22').
+  - FSDP AG: 53.8 ms (30.9% overlap, improved from 28% in baseline)
+  - FSDP RS f32: 34.7 ms (83% overlap, +5 ms worse than baseline)
+  - TP AR bf16: 2.6 ms exposed (RMSNorm wg)
+- **Analysis**: The +1.84% from auto_overlap_bucketing came mostly from
+  hiding the ~177 ms of copy/cat overhead behind compute (now <5 ms
+  exposed) — total comm exposed actually grew slightly (146 → 153 ms).
+  Auto-bucketer optimizes FSDP only; TP collectives remain scattered and
+  unbucketed. TP RS (61.5 ms exposed, 130 calls) is the single largest
+  remaining target.
+- **Lessons**: To make further progress: (a) **TP-side bucketing /
+  async TP** is the highest-impact direction; (b) async TP matcher
+  has been failing due to op adjacency — needs custom fusion or
+  graph rewrite; (c) the 67 TP AR coalescing is also stalled by
+  upstream topology bug.
+
+---
