@@ -39,6 +39,7 @@ class Embedding(nn.Embedding, Module):
         self.enable_sp = config.enable_sp
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """Runs vocab-parallel embedding if TP enabled, otherwise standard F.embedding."""
         weight = self.weight
         tp_pg = None
         mesh = current_mesh() if is_spmd_active() else None
@@ -47,7 +48,6 @@ class Embedding(nn.Embedding, Module):
             if "tp" in mesh.mesh_dim_names:
                 tp_pg = mesh.get_group("tp")
 
-        # standard F.embedding
         if mesh is None or tp_pg is None or dist.get_world_size(tp_pg) == 1:
             return F.embedding(
                 input,
@@ -59,7 +59,7 @@ class Embedding(nn.Embedding, Module):
                 self.sparse,
             )
 
-        # vocab-parallel embedding w/ sharded vocab dim; allreduce over masked embeddings.
+        # offset indices to local vocab range, embed, mask out-of-bound values to 0, and allreduce.
         assert self.enable_sp is not None
         chunk_size = weight.shape[0]
         offset = dist.get_rank(tp_pg) * chunk_size

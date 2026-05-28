@@ -478,9 +478,15 @@ class ChunkedCELoss(BaseLoss):
             )
         return total_loss, grad_buffer
 
-    def _spmd_out_types(
-        self, h_detached: torch.Tensor
-    ) -> tuple[dict, tuple[dict, spmd.PartitionSpec | None]]:
+    def out_typecheck(
+        self,
+        h_detached: torch.Tensor,
+        total_loss: torch.Tensor,
+        grad_buffer: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not spmd.is_type_checking():
+            return total_loss, grad_buffer
+
         loss_type: dict = {}
         mesh_axis_names = spmd.current_mesh_names() or {}
         for axis_name in ("dp", "cp"):
@@ -491,7 +497,9 @@ class ChunkedCELoss(BaseLoss):
 
         grad_types = dict(spmd.get_local_type(h_detached))
         grad_spec = spmd.get_partition_spec(h_detached)
-        return loss_type, (grad_types, grad_spec)
+        spmd.assert_type(total_loss, loss_type)
+        spmd.assert_type(grad_buffer, grad_types, partition_spec=grad_spec)
+        return total_loss, grad_buffer
 
     def __call__(
         self,
@@ -531,30 +539,19 @@ class ChunkedCELoss(BaseLoss):
         h_detached = hidden_states.detach().requires_grad_(requires_grad)
 
         typechecking = is_spmd_active() and spmd.is_type_checking()
-        if typechecking:
-            loss_out_type, (grad_type, grad_spec) = self._spmd_out_types(h_detached)
-
         with spmd.typecheck(local=True) if typechecking else contextlib.nullcontext():
             total_loss, grad_buffer = self.chunked_loss_and_grad(
                 h_detached,
                 labels,
                 global_valid_tokens=global_valid_tokens,
             )
-
+        total_loss, accumulated_grad = self.out_typecheck(
+            h_detached,
+            total_loss,
+            grad_buffer,
+        )
         if not requires_grad:
-            if typechecking:
-                spmd.assert_type(total_loss, loss_out_type)
             return total_loss
-
-        accumulated_grad = grad_buffer
-
-        if typechecking:
-            spmd.assert_type(total_loss, loss_out_type)
-            spmd.assert_type(
-                accumulated_grad,
-                grad_type,
-                partition_spec=grad_spec,
-            )
 
         return _DecoderOutputGradientBackProp.apply(
             hidden_states, accumulated_grad, total_loss
