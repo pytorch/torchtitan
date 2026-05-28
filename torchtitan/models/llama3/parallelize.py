@@ -12,6 +12,7 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
+    DataParallelMeshDims,
     fully_shard,
     MixedPrecisionPolicy,
 )
@@ -89,8 +90,9 @@ def parallelize_llama(
 
     # Always run apply_fsdp -- with shard_degree=1 it is a no-op for the
     # all-gather but still installs the MixedPrecisionPolicy.
-    names = ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-    dp_mesh = parallel_dims.get_mesh(names)
+    dp_mesh, dp_mesh_dims = parallel_dims.resolve_fsdp_mesh()
+    if dp_mesh.size() == 1:
+        dp_mesh_dims = None
 
     apply_fsdp(
         model,
@@ -100,6 +102,7 @@ def parallelize_llama(
         pp_enabled=parallel_dims.pp_enabled,
         cpu_offload=training.enable_cpu_offload,
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+        dp_mesh_dims=dp_mesh_dims,
     )
 
     if parallel_dims.dp_replicate_enabled:
@@ -121,6 +124,7 @@ def apply_fsdp(
     pp_enabled: bool,
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
+    dp_mesh_dims: "DataParallelMeshDims | None" = None,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -144,6 +148,9 @@ def apply_fsdp(
         cast_forward_inputs=False,
     )
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if dp_mesh_dims is not None:
+        # pyrefly: ignore[bad-typed-dict-key]
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         # pyrefly: ignore[bad-typed-dict-key]
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
