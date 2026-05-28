@@ -42,7 +42,7 @@ from torchtitan.experiments.graph_trainer.debug_utils import (
     snapshot_graph,
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
-    joint_transformer_block_bucketing_reordering_pass,
+    overlap_fsdp_ag_rs_pass,
 )
 from torchtitan.experiments.graph_trainer.inductor_passes import (
     annotate_flex_attention_for_regional_inductor_pass,
@@ -80,6 +80,31 @@ def normalize_view_ops_as_reshape(
         if node.op == "call_function" and node.target in view_targets:
             node.target = aten.reshape.default
     gm.graph.lint()
+    gm.recompile()
+    return gm
+
+
+def auto_overlap_bucketing_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs=None,
+) -> torch.fx.GraphModule:
+    """Auto-schedule FSDP collectives for overlap (replaces manual bucketing).
+
+    Uses upstream ``schedule_overlap_bucketing`` which estimates collective
+    and compute runtimes from a roofline model and picks bucket sizes
+    that saturate NCCL bandwidth, then reorders to maximize overlap.
+    Respects a memory budget so peak memory doesn't blow up.
+    """
+    from torch._inductor.fx_passes.overlap_scheduling import (
+        schedule_overlap_bucketing,
+    )
+
+    schedule_overlap_bucketing(
+        gm,
+        collective_bucketing=True,
+        max_memory_increase_gb=2.0,
+        max_memory_increase_ratio=0.05,
+    )
     gm.recompile()
     return gm
 
@@ -137,40 +162,24 @@ def compile_time_passes(
     cudagraph is excluded because it needs to re-capture the graph into
     an in-memory CUDA graph at runtime.
 
-    ``joint_transformer_block_bucketing_reordering_pass`` optionally runs
-    ``overlap_fsdp_ag_rs_pass`` first (gated by
-    ``compile.enable_fsdp_ag_rs_overlap``) so that forward+backward
+    ``auto_overlap_bucketing_pass`` is preceded by ``overlap_fsdp_ag_rs_pass``
+    (gated by ``compile.enable_fsdp_ag_rs_overlap``) so that forward+backward
     all-gathers end up on a separate CUDA stream from reduce-scatters
-    (enabling AG/RS overlap in backward).
+    (enabling AG/RS overlap in backward) before the auto-bucketer reorders
+    the schedule.
     """
     from torchtitan.models.common.attention import FlexAttention
 
-    n_layers = len(config.model_spec.model.layers)
-    # Group transformer layers into 2-layer buckets to deepen FSDP AG prefetch.
-    # Default is one layer per bucket (34 buckets). With 2-layer buckets we get
-    # 16 layer-buckets + tok_embeddings + [norm, lm_head] = 18 buckets.
-    layer_buckets_2 = [
-        [f"layers.{i}", f"layers.{i+1}"]
-        for i in range(0, n_layers - (n_layers % 2), 2)
-    ]
-    if n_layers % 2:
-        layer_buckets_2.append([f"layers.{n_layers - 1}"])
-    two_layer_bucket_plan = [
-        "tok_embeddings",
-        *layer_buckets_2,
-        ["norm", "lm_head"],
-    ]
     passes: list[Callable] = [
         remove_detach_pass,
         remove_identity_view_pass,
         remove_identity_slice_pass,
         normalize_view_ops_as_reshape,
-        functools.partial(
-            joint_transformer_block_bucketing_reordering_pass,
-            module_bucket_plans=two_layer_bucket_plan,
-            enable_fsdp_ag_rs_overlap=config.compile.enable_fsdp_ag_rs_overlap,
-        ),
     ]
+    # Preserve AG/RS overlap (separate streams for AG vs RS) before auto-bucketing.
+    if config.compile.enable_fsdp_ag_rs_overlap:
+        passes.append(overlap_fsdp_ag_rs_pass)
+    passes.append(auto_overlap_bucketing_pass)
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 

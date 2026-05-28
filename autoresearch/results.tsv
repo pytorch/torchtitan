@@ -9,3 +9,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-28T01:10:00	xxxxxxx	7253	47.6	discard	42.47	80	4-layer FSDP bucket plan: +0.33% vs 2-layer (in noise)
 2026-05-28T01:30:00	xxxxxxx	7239	47.7	discard	42.39	112	SwiGLU regional Inductor (128 nodes tagged): +0.14% in noise, bitwise PASS - confirms pointwise fusion is bitwise-safe
 2026-05-28T01:50:00	xxxxxxx	7192	47.7	discard	42.11	246	Broad pointwise tag (1328 nodes, silu/mul/add/sub/_to_copy/view_as_complex): -0.51%, Inductor can't codegen complex ops
+2026-05-28T02:15:00	PENDING	7294	49.1	keep	42.72	128	auto_overlap_bucketing (schedule_overlap_bucketing): +0.90% over 2-layer manual (7291/7305/7287), +1.84% over Run3 baseline

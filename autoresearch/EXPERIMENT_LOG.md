@@ -303,3 +303,35 @@ learn from past experiments and avoid repeating failed approaches.
   pointwise time sits next to matmul/comm that dominates anyway.
 
 ---
+
+## Auto overlap bucketing (schedule_overlap_bucketing) — keep (PENDING)
+
+- **Idea**: Replace the manual `joint_transformer_block_bucketing_reordering_pass`
+  (with 2-layer bucket plan) with upstream
+  `torch._inductor.fx_passes.overlap_scheduling.schedule_overlap_bucketing(collective_bucketing=True, ...)`.
+  Auto-bucketer uses roofline runtime estimates to pick bandwidth-saturating
+  bucket sizes and reorders for maximal compute/comm overlap, respecting
+  a memory budget (`max_memory_increase_gb=2.0`, ratio=0.05).
+- **Changes**: Added `auto_overlap_bucketing_pass`, removed manual 2-layer
+  bucket plan construction. Kept `overlap_fsdp_ag_rs_pass` gated on
+  `config.compile.enable_fsdp_ag_rs_overlap` (default False; the benchmark
+  doesn't set it, so the extra-stream split is OFF for both manual-keep
+  and this experiment).
+- **Result**: 3 runs **7,291 / 7,305 / 7,287** (avg **7,294**, +0.90% vs
+  manual 2-layer, +1.84% vs Run 3 production baseline). mfu 42.72%
+  avg, memory **49.06 GiB** (+1.35 GiB), wall **128 s** (vs 79 s
+  manual — compile overhead from auto-bucketer's roofline estimation).
+  Bitwise numerics PASS.
+- **Analysis**: Auto-bucketer picked finer-grained buckets (131 AG / 163
+  RS buckets, vs manual's 18 in each direction) that better saturate
+  NCCL bandwidth. The +0.90% is just under the strict +1% threshold but
+  consistent across 3 runs (range 7,287–7,305) with the worst run still
+  beating manual 2-layer (avg 7,229). Memory increased 1.35 GiB —
+  expected from larger in-flight buckets, well within the 95 GB H100
+  budget.
+- **Lessons**: Roofline-driven auto-bucketing dominates manual N-layer
+  bucketing here. The compile-time cost (49 s extra) is acceptable.
+  Code is also simpler — no manual bucket plan to maintain. Future
+  experiments should layer on top of this rather than swap it out.
+
+---
