@@ -25,10 +25,6 @@ if TYPE_CHECKING:
 __all__ = ["ParallelDims"]
 
 
-_DENSE_FSDP_AXES = ["dp_replicate", "fsdp", "tp"]
-_DENSE_SPMD_AXES = ["dp", "cp", "tp"]
-
-
 @dataclass
 class ParallelDims:
     dp_replicate: int
@@ -224,7 +220,7 @@ class ParallelDims:
         self._validate_meshes()
 
         candidate_spmd_sparse_axes = ["dp_replicate", "efsdp", "ep"]
-        activated_spmd_dense_mesh = self.get_activated_mesh(_DENSE_SPMD_AXES)
+        activated_spmd_dense_mesh = self.get_activated_mesh(["dp", "cp", "tp"])
         activated_spmd_sparse_mesh = self.get_activated_mesh(candidate_spmd_sparse_axes)
         self._spmd_meshes = [
             m
@@ -360,7 +356,7 @@ class ParallelDims:
 
     def resolve_fsdp_mesh(self) -> tuple[DeviceMesh, DataParallelMeshDims]:
         """Select the dense FSDP mesh and its data-parallel axes."""
-        fsdp_mesh = self.get_activated_mesh(_DENSE_FSDP_AXES)
+        fsdp_mesh = self.get_activated_mesh(["dp_replicate", "fsdp", "tp"])
         assert fsdp_mesh is not None
         return fsdp_mesh, self._get_dp_mesh_axes()
 

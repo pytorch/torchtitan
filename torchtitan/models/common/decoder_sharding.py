@@ -7,17 +7,35 @@
 import spmd_types as spmd
 
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
-from torchtitan.models.common.decoder import decoder_spmd_input_config
 from torchtitan.protocols.sharding import (
     NamedPlacement,
     PlacementSpec,
     ShardingConfig,
+    SpmdInputConfig,
 )
 from torchtitan.protocols.types import MeshAxisName
 
 DP = MeshAxisName.DP
 CP = MeshAxisName.CP
 TP = MeshAxisName.TP
+
+
+def decoder_token_placement(*, tp_type: spmd.PerMeshAxisSpmdType) -> NamedPlacement:
+    return {
+        DP: spmd.S(0),
+        CP: spmd.S(1),
+        TP: tp_type,
+    }
+
+
+def decoder_spmd_input_config() -> SpmdInputConfig:
+    inputs = decoder_token_placement(tp_type=spmd.R)
+    labels = decoder_token_placement(tp_type=spmd.I)
+    return SpmdInputConfig(
+        inputs=inputs,
+        labels=labels,
+        extra_kwargs={"positions": inputs},
+    )
 
 
 def dense_param_placement(*, tp: spmd.PerMeshAxisSpmdType) -> NamedPlacement:
