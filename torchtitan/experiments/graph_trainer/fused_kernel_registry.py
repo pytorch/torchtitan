@@ -837,37 +837,17 @@ class InductorRegionExtractor(RegionExtractor):
     ) -> tuple[torch.fx.GraphModule, list[Region]]:
         import time as _time
 
-        try:
-            from torch.fx.passes.infra.partitioner import CapabilityBasedPartitioner
-            from torch.fx.passes.operator_support import create_op_support
-        except ImportError:
-            logger.warning(
-                "InductorRegionExtractor: partitioner not available, "
-                "falling back to FqnRegionExtractor"
-            )
-            return FqnRegionExtractor().extract(gm)
+        from torchtitan.experiments.graph_trainer.contiguous_partitioner import (
+            partition_contiguous,
+        )
 
         _t0 = _time.time()
 
-        # Partition the original graph using our classifier
-        def _is_supported(_subm, node):
-            return is_fusible_node(node)
+        components = partition_contiguous(gm, is_fusible_node)
 
-        support = create_op_support(_is_supported)
-        partitioner = CapabilityBasedPartitioner(
-            gm,
-            support,
-            allows_single_node_partition=True,
-        )
-        partitions = partitioner.propose_partitions()
-        components: list[list[torch.fx.Node]] = [
-            list(p.nodes.keys()) for p in partitions
-        ]
-
-        # Tag every node with its partition ID so downstream code
-        # (region extraction, problem.py, tlparse) can trace provenance.
-        for pid, p in enumerate(partitions):
-            for node in p.nodes:
+        # Tag every node with its partition ID
+        for pid, comp in enumerate(components):
+            for node in comp:
                 node.meta.setdefault("custom", {})["partition_id"] = pid
 
         n_before = len(components)
@@ -1624,11 +1604,8 @@ def _replace_region_with_kernel(
     nodes = region.nodes
     output_nodes = region.output_nodes
 
-    # Derive external inputs from CURRENT graph edges, not the stale
-    # Region.external_inputs list. Prior replacements may have rewired
-    # edges so that inputs now flow through kernel call nodes at
-    # different topological positions.
-    node_order = {n: i for i, n in enumerate(graph.nodes)}
+    # Derive external inputs from CURRENT graph edges (not stale
+    # Region.external_inputs — prior replacements may have rewired).
     region_set = set(nodes)
     external_inputs: list[torch.fx.Node] = []
     seen_inputs: set[str] = set()
@@ -1638,11 +1615,16 @@ def _replace_region_with_kernel(
                 seen_inputs.add(arg.name)
                 external_inputs.append(arg)
 
+    # Insert after the LAST external input and before the EARLIEST
+    # external user. The partitioner guarantees this range is valid in
+    # the original graph; prior replacements may shift positions but
+    # the check still holds for most instances.
+    node_order = {n: i for i, n in enumerate(graph.nodes)}
+
     latest_input_pos = max(
         (node_order.get(inp, -1) for inp in external_inputs),
         default=-1,
     )
-    # Earliest external user position across all output_nodes
     earliest_user_pos = float("inf")
     for out_node in output_nodes:
         for u in out_node.users:
@@ -1659,7 +1641,9 @@ def _replace_region_with_kernel(
         )
 
     if external_inputs and latest_input_pos >= 0:
-        latest_input_node = max(external_inputs, key=lambda n: node_order.get(n, -1))
+        latest_input_node = max(
+            external_inputs, key=lambda n: node_order.get(n, -1)
+        )
         with graph.inserting_after(latest_input_node):
             call_node = graph.call_function(kernel_fn, args=tuple(external_inputs))
     else:
