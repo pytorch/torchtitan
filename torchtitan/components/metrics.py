@@ -525,8 +525,10 @@ class MetricsProcessor(Configurable):
         mfu_str = f"{mfu:.2f}%" if mfu is not None else "N/A"
         logger.info(
             f"{color.red}step: {step:2}  "
-            f"{color.green}loss: {global_avg_loss:8.5f}  "
-            f"{color.orange}grad_norm: {grad_norm:7.4f}  "
+            f"{color.green}loss: {global_avg_loss:.20e}"
+            f"({float(global_avg_loss).hex()})  "
+            f"{color.orange}grad_norm: {grad_norm:.20e}"
+            f"({float(grad_norm).hex()})  "
             f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
             f"{color.blue}tps: {round(tps):,}  "
