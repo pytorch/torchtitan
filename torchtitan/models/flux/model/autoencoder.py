@@ -12,10 +12,8 @@ from einops import rearrange
 from safetensors.torch import load_file as load_sft
 from torch import nn, Tensor
 
+from torchtitan.models.common.nn_modules import Conv2d, GroupNorm
 from torchtitan.protocols.module import Module, ModuleList
-
-Conv2d = Module.from_nn_module(nn.Conv2d)
-GroupNorm = Module.from_nn_module(nn.GroupNorm)
 
 
 @dataclass
@@ -40,14 +38,21 @@ class AttnBlock(Module):
         super().__init__()
         self.in_channels = in_channels
 
-        self.norm = GroupNorm(
-            num_groups=32, num_channels=in_channels, eps=1e-6, affine=True
-        )
+        self.norm = GroupNorm.Config(
+            num_groups=32,
+            num_channels=in_channels,
+            eps=1e-6,
+        ).build()
 
-        self.q = Conv2d(in_channels, in_channels, kernel_size=1)
-        self.k = Conv2d(in_channels, in_channels, kernel_size=1)
-        self.v = Conv2d(in_channels, in_channels, kernel_size=1)
-        self.proj_out = Conv2d(in_channels, in_channels, kernel_size=1)
+        conv1x1 = Conv2d.Config(
+            in_channels=in_channels,
+            out_channels=in_channels,
+            kernel_size=1,
+        )
+        self.q = conv1x1.build()
+        self.k = conv1x1.build()
+        self.v = conv1x1.build()
+        self.proj_out = conv1x1.build()
 
     def attention(self, h_: Tensor) -> Tensor:
         h_ = self.norm(h_)
@@ -74,22 +79,34 @@ class ResnetBlock(Module):
         out_channels = in_channels if out_channels is None else out_channels
         self.out_channels = out_channels
 
-        self.norm1 = GroupNorm(
-            num_groups=32, num_channels=in_channels, eps=1e-6, affine=True
-        )
-        self.conv1 = Conv2d(
-            in_channels, out_channels, kernel_size=3, stride=1, padding=1
-        )
-        self.norm2 = GroupNorm(
-            num_groups=32, num_channels=out_channels, eps=1e-6, affine=True
-        )
-        self.conv2 = Conv2d(
-            out_channels, out_channels, kernel_size=3, stride=1, padding=1
-        )
+        self.norm1 = GroupNorm.Config(
+            num_groups=32,
+            num_channels=in_channels,
+            eps=1e-6,
+        ).build()
+        self.conv1 = Conv2d.Config(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=3,
+            padding=1,
+        ).build()
+        self.norm2 = GroupNorm.Config(
+            num_groups=32,
+            num_channels=out_channels,
+            eps=1e-6,
+        ).build()
+        self.conv2 = Conv2d.Config(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel_size=3,
+            padding=1,
+        ).build()
         if self.in_channels != self.out_channels:
-            self.nin_shortcut = Conv2d(
-                in_channels, out_channels, kernel_size=1, stride=1, padding=0
-            )
+            self.nin_shortcut = Conv2d.Config(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=1,
+            ).build()
 
     def forward(self, x):
         h = x
@@ -111,7 +128,12 @@ class Downsample(Module):
     def __init__(self, in_channels: int):
         super().__init__()
         # no asymmetric padding in torch conv, must do it ourselves
-        self.conv = Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=0)
+        self.conv = Conv2d.Config(
+            in_channels=in_channels,
+            out_channels=in_channels,
+            kernel_size=3,
+            stride=2,
+        ).build()
 
     def forward(self, x: Tensor):
         pad = (0, 1, 0, 1)
@@ -123,7 +145,12 @@ class Downsample(Module):
 class Upsample(Module):
     def __init__(self, in_channels: int):
         super().__init__()
-        self.conv = Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
+        self.conv = Conv2d.Config(
+            in_channels=in_channels,
+            out_channels=in_channels,
+            kernel_size=3,
+            padding=1,
+        ).build()
 
     def forward(self, x: Tensor):
         x = nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
@@ -148,7 +175,12 @@ class Encoder(Module):
         self.resolution = resolution
         self.in_channels = in_channels
         # downsampling
-        self.conv_in = Conv2d(in_channels, self.ch, kernel_size=3, stride=1, padding=1)
+        self.conv_in = Conv2d.Config(
+            in_channels=in_channels,
+            out_channels=self.ch,
+            kernel_size=3,
+            padding=1,
+        ).build()
 
         curr_res = resolution
         in_ch_mult = (1,) + tuple(ch_mult)
@@ -178,12 +210,17 @@ class Encoder(Module):
         self.mid.block_2 = ResnetBlock(in_channels=block_in, out_channels=block_in)
 
         # end
-        self.norm_out = GroupNorm(
-            num_groups=32, num_channels=block_in, eps=1e-6, affine=True
-        )
-        self.conv_out = Conv2d(
-            block_in, 2 * z_channels, kernel_size=3, stride=1, padding=1
-        )
+        self.norm_out = GroupNorm.Config(
+            num_groups=32,
+            num_channels=block_in,
+            eps=1e-6,
+        ).build()
+        self.conv_out = Conv2d.Config(
+            in_channels=block_in,
+            out_channels=2 * z_channels,
+            kernel_size=3,
+            padding=1,
+        ).build()
 
     def forward(self, x: Tensor) -> Tensor:
         # downsampling
@@ -241,7 +278,12 @@ class Decoder(Module):
         self.z_shape = (1, z_channels, curr_res, curr_res)
 
         # z to block_in
-        self.conv_in = Conv2d(z_channels, block_in, kernel_size=3, stride=1, padding=1)
+        self.conv_in = Conv2d.Config(
+            in_channels=z_channels,
+            out_channels=block_in,
+            kernel_size=3,
+            padding=1,
+        ).build()
 
         # middle
         self.mid = Module()
@@ -267,10 +309,17 @@ class Decoder(Module):
             self.up.insert(0, up)  # prepend to get consistent order
 
         # end
-        self.norm_out = GroupNorm(
-            num_groups=32, num_channels=block_in, eps=1e-6, affine=True
-        )
-        self.conv_out = Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1)
+        self.norm_out = GroupNorm.Config(
+            num_groups=32,
+            num_channels=block_in,
+            eps=1e-6,
+        ).build()
+        self.conv_out = Conv2d.Config(
+            in_channels=block_in,
+            out_channels=out_ch,
+            kernel_size=3,
+            padding=1,
+        ).build()
 
     def forward(self, z: Tensor) -> Tensor:
         # get dtype for proper tracing
