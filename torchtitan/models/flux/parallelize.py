@@ -28,7 +28,10 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.fsdp import disable_fsdp_gradient_division
+from torchtitan.distributed.fsdp import (
+    disable_fsdp_gradient_division,
+    enable_fsdp_symm_mem,
+)
 from torchtitan.models.common.decoder_sharding import (
     inner_attention_spmd_sharding_config,
 )
@@ -73,6 +76,7 @@ def parallelize_flux(
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         cpu_offload=training.enable_cpu_offload,
+        enable_symm_mem=parallelism.enable_fsdp_symm_mem,
         dp_mesh_dims=dp_mesh_dims,
     )
 
@@ -87,6 +91,7 @@ def apply_fsdp(
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
     cpu_offload: bool = False,
+    enable_symm_mem: bool = False,
     dp_mesh_dims: DataParallelMeshDims | None = None,
 ):
     """
@@ -98,6 +103,7 @@ def apply_fsdp(
         param_dtype (torch.dtype): The data type to use for model parameters.
         reduce_dtype (torch.dtype): The data type to use for reduction operations.
         cpu_offload (bool): Whether to offload model parameters to CPU. Defaults to False.
+        enable_symm_mem (bool): Whether to enable symmetric-memory FSDP communication.
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
@@ -138,6 +144,9 @@ def apply_fsdp(
 
     # Wrap all the rest of model
     fully_shard(model, **fsdp_config)
+
+    if enable_symm_mem:
+        enable_fsdp_symm_mem(model)
 
     # Disable FSDP's automatic gradient division for all FSDP modules
     disable_fsdp_gradient_division(model)
@@ -225,6 +234,7 @@ def parallelize_encoders(
     parallel_dims: ParallelDims,
     *,
     training: TrainingConfig,
+    enable_symm_mem: bool = False,
 ):
     mp_policy = MixedPrecisionPolicy(
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
@@ -247,6 +257,10 @@ def parallelize_encoders(
         fully_shard(block, **fsdp_config)
     # pyrefly: ignore [no-matching-overload]
     fully_shard(t5_model.hf_module, **fsdp_config)
+
+    if enable_symm_mem:
+        # pyrefly: ignore [bad-argument-type]
+        enable_fsdp_symm_mem(t5_model.hf_module)
 
     # Disable FSDP's automatic gradient division for all FSDP modules
     # pyrefly: ignore [bad-argument-type]

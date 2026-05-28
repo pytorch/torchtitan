@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 import torch
 from torch import nn, Tensor
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.flux.model.autoencoder import AutoEncoderParams
 from torchtitan.models.flux.model.layers import (
     DoubleStreamBlock,

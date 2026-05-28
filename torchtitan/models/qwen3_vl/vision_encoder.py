@@ -14,12 +14,10 @@ from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 import spmd_types as spmd
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.nn_modules import GELU, LayerNorm
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList
 from torchtitan.protocols.sharding import ShardingConfig
-
-LayerNorm = Module.from_nn_module(nn.LayerNorm)
-GELU = Module.from_nn_module(nn.GELU)
 
 _compiled_create_block_mask = spmd.no_typecheck()(torch.compile(create_block_mask))
 
@@ -348,10 +346,13 @@ class PatchMerger(Module):
             if config.use_postshuffle_norm
             else config.hidden_size
         )
-        self.norm = LayerNorm(norm_dim, eps=1e-6)
+        self.norm = LayerNorm.Config(
+            normalized_shape=norm_dim,
+            eps=1e-6,
+        ).build()
         self.norm._sharding_config = config.norm_sharding_config
         self.linear_fc1 = config.fc1.build()
-        self.act_fn = GELU(approximate="tanh")
+        self.act_fn = GELU.Config(approximate="tanh").build()
         self.linear_fc2 = config.fc2.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -447,7 +448,7 @@ class VisionMLP(Module):
         super().__init__()
         self.linear_fc1 = config.fc1.build()
         self.linear_fc2 = config.fc2.build()
-        self.act_fn = GELU(approximate="tanh")
+        self.act_fn = GELU.Config(approximate="tanh").build()
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         return self.linear_fc2(self.act_fn(self.linear_fc1(hidden_state)))
@@ -467,8 +468,14 @@ class VisionTransformerBlock(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.norm1 = LayerNorm(config.dim, eps=config.layer_norm_eps)
-        self.norm2 = LayerNorm(config.dim, eps=config.layer_norm_eps)
+        self.norm1 = LayerNorm.Config(
+            normalized_shape=config.dim,
+            eps=config.layer_norm_eps,
+        ).build()
+        self.norm2 = LayerNorm.Config(
+            normalized_shape=config.dim,
+            eps=config.layer_norm_eps,
+        ).build()
         self.norm1._sharding_config = config.norm_sharding_config
         self.norm2._sharding_config = config.norm_sharding_config
         self.attn = config.attn.build()
