@@ -366,10 +366,11 @@ class Module(nn.Module, Configurable):
                 # Look through non-Module wrappers, e.g., CheckpointWrapper.
                 queue.extend(child.children())
 
-        sharding_config = self._sharding_config
-        if sharding_config is None:
+        if (
+            (sharding_config := self._sharding_config) is None
+            or (mesh := parallel_dims.resolve_mesh(sharding_config.axes())) is None
+        ):
             return
-        mesh = parallel_dims.resolve_mesh(sharding_config.axes())
 
         with set_current_mesh(mesh):
             for name, param in self.named_parameters(recurse=False):
@@ -447,10 +448,8 @@ class Module(nn.Module, Configurable):
         Installs hooks to convert parameters/buffers to compute-time placements.
         Currently only used for convert(I->R) on TP axis, for dense params + SP.
         """
-        if not is_spmd_active():
+        if not is_spmd_active() or (mesh := current_mesh()) is None:
             return
-        mesh = current_mesh()
-        assert mesh is not None
 
         sharding_config = self._sharding_config
         assert sharding_config is not None
