@@ -44,3 +44,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-28T13:20:00	xxxxxxx	7544	49.1	discard	44.18	150	tag_bridging_layout_ops: 0 hits (tagged regions are pointwise-connected, no layout ops between)
 2026-05-28T13:35:00	xxxxxxx	7542	49.1	discard	44.16	150	tag_extra_pointwise (mul.Scalar/where/clamp_min): 0 hits
 2026-05-28T13:50:00	xxxxxxx	0	0.0	crash	0.0	0	RMSNorm Inductor w/ strict-bitwise flags (emulate_precision_casts/disable_ftz/use_pytorch_libdevice): numerics CRASH (model_hash mismatch). RMSNorm bitwise truly unfeasible.
+2026-05-28T14:05:00	xxxxxxx	7547	49.1	discard	44.20	150	Inductor strict-bitwise flags on keeps: +0.29% noise (no codegen improvement, no bitwise issue to mitigate)
