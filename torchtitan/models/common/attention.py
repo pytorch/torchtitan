@@ -220,6 +220,7 @@ class FlexAttention(Module):
         return_lse: bool,
         enable_gqa: bool,
     ):
+        """Runs compiled FlexAttention under no-typecheck, re-annotates following q."""
         with spmd.no_typecheck():
             out, aux = FlexAttention._compiled_flex_attn(
                 q,
