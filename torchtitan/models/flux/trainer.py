@@ -82,23 +82,30 @@ class FluxTrainer(Trainer):
         self.autoencoder = load_ae(
             config.encoder.autoencoder_path,
             # pyrefly: ignore [missing-attribute]
-            model_args.autoencoder_params,
+            model_args.autoencoder,
             device=self.device,
             dtype=self._dtype,
             random_init=config.encoder.random_init,
         )
 
-        self.clip_encoder = FluxEmbedder(
-            version=config.encoder.clip_encoder,
-            random_init=config.encoder.random_init,
-        ).to(device=self.device, dtype=self._dtype)
-        self.t5_encoder = FluxEmbedder(
-            version=config.encoder.t5_encoder,
-            random_init=config.encoder.random_init,
-        ).to(device=self.device, dtype=self._dtype)
+        self.clip_encoder = (
+            FluxEmbedder.Config(
+                version=config.encoder.clip_encoder,
+                random_init=config.encoder.random_init,
+            )
+            .build()
+            .to(device=self.device, dtype=self._dtype)
+        )
+        self.t5_encoder = (
+            FluxEmbedder.Config(
+                version=config.encoder.t5_encoder,
+                random_init=config.encoder.random_init,
+            )
+            .build()
+            .to(device=self.device, dtype=self._dtype)
+        )
 
         # Apply FSDP to the T5 model / CLIP model
-        # pyrefly: ignore [bad-assignment]
         self.t5_encoder, self.clip_encoder = parallelize_encoders(
             t5_model=self.t5_encoder,
             clip_model=self.clip_encoder,

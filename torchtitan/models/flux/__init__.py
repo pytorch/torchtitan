@@ -16,7 +16,7 @@ from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .flux_datasets import FluxDataLoader
-from .model.autoencoder import AutoEncoderParams
+from .model.autoencoder import AutoEncoder
 from .model.layers import (
     DoubleStreamBlock,
     EmbedND,
@@ -247,7 +247,7 @@ def _flux_dev() -> FluxModel.Config:
             bias=True,
             param_init=_XAVIER_LINEAR,
         ),
-        autoencoder_params=AutoEncoderParams(
+        autoencoder=AutoEncoder.Config(
             resolution=256,
             in_channels=3,
             ch=128,
@@ -359,7 +359,7 @@ def _flux_schnell() -> FluxModel.Config:
             bias=True,
             param_init=_XAVIER_LINEAR,
         ),
-        autoencoder_params=AutoEncoderParams(
+        autoencoder=AutoEncoder.Config(
             resolution=256,
             in_channels=3,
             ch=128,
@@ -471,7 +471,7 @@ def _flux_debug() -> FluxModel.Config:
             bias=True,
             param_init=_XAVIER_LINEAR,
         ),
-        autoencoder_params=AutoEncoderParams(
+        autoencoder=AutoEncoder.Config(
             resolution=256,
             in_channels=3,
             ch=128,
