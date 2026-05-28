@@ -471,3 +471,30 @@ learn from past experiments and avoid repeating failed approaches.
   experiment win in Run 3 so far.
 
 ---
+
+## Custom AG→mm fusion — discard (xxxxxxx)
+
+- **Idea**: Mirror the successful `fuse_mm_reduce_scatter_pass` for the
+  forward column-parallel TP `all_gather → mm` chain. Use
+  `symm_mem.fused_all_gather_matmul` (signature
+  `(A_shard, [B_i], gather_dim, group_name) -> Tensors`).
+- **Changes**: New `fuse_all_gather_mm_pass` with multi-B fusion (so 1
+  AG feeding multiple mm consumers like Q/K/V is one fused op). Handles
+  the `t(gathered)` backward-path reuse via `return_A=True`.
+- **Result**: 65 AG→mm fusions (32 QKV+32 W1/W3+1 extra). Bitwise PASS.
+  6-run tps avg **7,395** (-0.13% vs 7,405 baseline). Memory **+3.87
+  GiB** (49.10 → 52.97) due to `return_A=True` keeping gathered
+  activations live for backward weight-grad mm.
+- **Analysis**: Auto-bucketer already overlaps standalone AGs well, the
+  AG shard size is small, and `fused_all_gather_matmul`'s chunked-AG
+  kernel adds enough sync overhead to offset the overlap win. The
+  +3.87 GiB memory cost is paid because every forward AG's gathered
+  output is reused by the backward grad-weight mm (via `t(gathered)`).
+- **Lessons**: AG→mm fusion is **bitwise-safe but net negative** at
+  this scale — opposite outcome from mm→RS fusion. The mm→RS win came
+  because TP RS was poorly overlapped (2.6%) and the fused chunked RS
+  hides better; AG was already 30.9% overlapped and the fused-op
+  overhead + memory cost exceeds the benefit. Lesson: aggressive
+  fusion isn't always a win — measure first.
+
+---
