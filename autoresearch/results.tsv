@@ -47,3 +47,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-28T14:05:00	xxxxxxx	7547	49.1	discard	44.20	150	Inductor strict-bitwise flags on keeps: +0.29% noise (no codegen improvement, no bitwise issue to mitigate)
 2026-05-28T14:25:00	xxxxxxx	7538	49.1	discard	44.15	150	AR coalescer + tighter bucket combo: 0 ARs to coalesce (mm-RS fusion already absorbed them)
 2026-05-28T14:35:00	b41863ab	7535	49.1	verify	44.12	151	Final 3-run verification of keep state: 7534/7530/7541 = +5.21% over Run 3 baseline
+2026-05-28T14:50:00	xxxxxxx	7544	49.1	discard	44.18	150	max_compute_pre_fetch=400/800: noise (prefetch horizon non-binding at 200)
