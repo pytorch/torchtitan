@@ -565,3 +565,27 @@ learn from past experiments and avoid repeating failed approaches.
   while keeping the fusion broad.
 
 ---
+
+## RoPE complex→real rewrite — crash (xxxxxxx)
+
+- **Idea**: Inductor can't codegen complex ops, so RoPE chain (9 ms / 128
+  sites) stays unfused. Rewrite `view_as_real(mul.Tensor(view_as_complex(x),
+  freqs))` to explicit real-valued math `(ac-bd, ad+bc)` then tag for
+  regional Inductor.
+- **Changes**: Discovery showed 128 uniform sites (64 fwd + 64 bwd, same
+  complex64 buffer). Wrote a rewrite pass that splits into real/imag,
+  computes real-valued mul/sub/add, restacks. Handled backward's `_conj`
+  via `aten.conj_physical`.
+- **Result**: Bitwise numerics FAILED (loss diff ~5e-7, grad hash
+  mismatch). Reverted.
+- **Analysis**: Aten complex `mul.Tensor` uses a single hardware-FMA
+  per output component (`fma(a, c, -b*d)`) — one rounding. Our
+  4-mul-1-sub-1-add real decomposition does two roundings → different
+  last bit in bf16. There's no clean way to force aten to skip FMA, or
+  make our rewrite emit identical FMA, without a custom CUDA kernel.
+- **Lessons**: RoPE complex multiplication is a **hard floor** under
+  strict bitwise constraints (~9 ms / step). The rewrite WOULD work as
+  a `numerics_changing_optim` (loss-curve verified instead of bitwise);
+  not in scope for Run 3's bitwise-mandatory regime. Park.
+
+---
