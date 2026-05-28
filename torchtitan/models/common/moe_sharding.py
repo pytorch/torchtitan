@@ -90,7 +90,7 @@ def _router_gate_config(*, enable_ep: bool, has_bias: bool = False) -> ShardingC
 
 
 def _tokens_per_expert_placement(*, enable_ep: bool) -> NamedPlacement:
-    """Placement for the ``tokens_per_expert`` buffer."""
+    """Placement for the ``tokens_per_expert_E`` buffer."""
     del enable_ep
     return {
         DP: spmd.V,
@@ -103,15 +103,15 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
     """``ShardingConfig`` at the MoE boundary."""
     return ShardingConfig(
         state_shardings={
-            "expert_bias": dense_param_placement(tp=spmd.R),
-            "tokens_per_expert": _tokens_per_expert_placement(enable_ep=enable_ep),
+            "expert_bias_E": dense_param_placement(tp=spmd.R),
+            "tokens_per_expert_E": _tokens_per_expert_placement(enable_ep=enable_ep),
         },
         in_src_shardings={
-            "x": dense_sp_placement()
+            "x_BLD": dense_sp_placement()
             if enable_sp
             else dense_activation_placement(tp=spmd.I)
         },
-        in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
+        in_dst_shardings={"x_BLD": dense_activation_placement(tp=spmd.R)},
         out_src_shardings=dense_activation_placement(tp=spmd.P),
         out_dst_shardings=(
             dense_sp_placement()
@@ -135,7 +135,11 @@ def set_moe_sharding_config(
     """Populate ``sharding_config`` on every MoE submodule."""
     del enable_cp
     if expert_param_layout is None:
-        expert_param_layout = {"w1": spmd.S(1), "w2": spmd.S(2), "w3": spmd.S(1)}
+        expert_param_layout = {
+            "w1_EFD": spmd.S(1),
+            "w2_EDF": spmd.S(2),
+            "w3_EFD": spmd.S(1),
+        }
 
     # Always set sharding configs regardless of whether TP is enabled.
     # ``resolve_mesh`` filters out disabled axes at runtime.

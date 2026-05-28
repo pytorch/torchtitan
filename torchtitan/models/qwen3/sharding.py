@@ -27,9 +27,9 @@ if TYPE_CHECKING:
 
 
 _GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "w1": spmd.S(1),
-    "w2": spmd.S(2),
-    "w3": spmd.S(1),
+    "w1_EFD": spmd.S(1),
+    "w2_EDF": spmd.S(2),
+    "w3_EFD": spmd.S(1),
 }
 
 
