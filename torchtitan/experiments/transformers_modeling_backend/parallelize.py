@@ -63,6 +63,28 @@ def parallelize_hf_transformers(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
+    # 0. Un-tie embedding/lm_head weights for FSDP compatibility.
+    # Some models (Gemma4) share the embedding and lm_head weight
+    # (tie_word_embeddings=True). FSDP2 cannot handle parameters shared
+    # across FSDP groups. Un-tying here creates an independent copy for
+    # the lm_head so both can be sharded separately. Since we train from
+    # scratch, the un-tied weights will diverge during training (which is
+    # expected — the model learns independent embedding and output layers).
+    if (
+        model.tok_embeddings is not None
+        and model.lm_head is not None
+        and any(
+            p1 is p2
+            for p1 in model.tok_embeddings.parameters()
+            for p2 in model.lm_head.parameters()
+        )
+    ):
+        model.lm_head.weight = nn.Parameter(
+            model.lm_head.weight.clone(),
+            requires_grad=model.lm_head.weight.requires_grad,
+        )
+        logger.info("Un-tied embedding/lm_head weights for FSDP compatibility")
+
     # 1. Build and swap native MoE (sets _sharding_config, does NOT parallelize)
     if any(getattr(b, "moe_enabled", False) for b in model.layers):
         from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (

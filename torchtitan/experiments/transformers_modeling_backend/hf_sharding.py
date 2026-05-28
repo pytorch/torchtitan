@@ -181,6 +181,20 @@ def _apply_layer_tp(layer: nn.Module, tp_mesh, *, enable_sp: bool) -> None:
     if not hasattr(layer, "post_attention_layernorm"):
         plan.pop("post_attention_layernorm")
 
+    # Models with extra norms around the MLP/MoE (e.g. Gemma4 has
+    # ``pre_feedforward_layernorm`` and ``post_feedforward_layernorm``)
+    # need these in SP mode for the DTensor placement chain to work.
+    if hasattr(layer, "pre_feedforward_layernorm"):
+        plan["pre_feedforward_layernorm"] = SequenceParallel()
+    if hasattr(layer, "post_feedforward_layernorm"):
+        plan["post_feedforward_layernorm"] = SequenceParallel()
+
+    # V-norm (Gemma4) — parameter-free RMSNorm applied per-head.
+    # Operates on local tensors after the V projection (already column-
+    # parallel). Mark as NoParallel to avoid placement mismatches.
+    if hasattr(attn, "v_norm"):
+        plan["self_attn.v_norm"] = NoParallel(use_local_output=True)
+
     parallelize_module(
         module=layer,
         device_mesh=tp_mesh,

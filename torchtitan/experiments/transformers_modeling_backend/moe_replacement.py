@@ -51,8 +51,15 @@ def prepare_native_moe_configs(model: nn.Module, config) -> None:
         if not getattr(layer, "moe_enabled", False):
             continue
 
-        moe_block = _get_moe_block(layer)
-        moe_params = _probe_hf_moe_block(moe_block, config)
+        is_layer_level = getattr(layer, "_layer_level_moe", False)
+        if is_layer_level:
+            # Layer-level MoE (Gemma4): router/experts are siblings of dense
+            # MLP. Probe from the layer itself, treating the dense MLP as
+            # the shared expert.
+            moe_params = _probe_layer_level_moe(layer, config)
+        else:
+            moe_block = _get_moe_block(layer)
+            moe_params = _probe_hf_moe_block(moe_block, config)
         moe_config = _build_moe_config(moe_params, config)
         layer._native_moe_config = moe_config
 
@@ -121,6 +128,29 @@ def build_and_swap_native_moe(
         setattr(layer, moe_attr, native_moe)
         object.__setattr__(layer, "moe", native_moe)
 
+        # For layer-level MoE (Gemma4), the original router and experts
+        # are layer-level siblings of the dense MLP. After swapping in
+        # the native MoE at ``layer.mlp``, disable the HF forward's
+        # separate MoE path (which references ``self.router`` and
+        # ``self.experts``) and delete the original modules to prevent
+        # duplicate parameter registration.
+        if getattr(layer, "_layer_level_moe", False):
+            if hasattr(layer, "enable_moe_block"):
+                layer.enable_moe_block = False
+            if hasattr(layer, "router"):
+                delattr(layer, "router")
+            if hasattr(layer, "experts"):
+                delattr(layer, "experts")
+            # Remove unused norms from the separate MoE path to keep
+            # the parameter count clean.
+            for norm_name in (
+                "pre_feedforward_layernorm_2",
+                "post_feedforward_layernorm_1",
+                "post_feedforward_layernorm_2",
+            ):
+                if hasattr(layer, norm_name):
+                    delattr(layer, norm_name)
+
         # Llama4 decoder forward unpacks ``(output, router_logits)`` when
         # ``is_moe_layer`` is True.  The native MoE returns a plain tensor,
         # so disable the unpacking.
@@ -141,6 +171,7 @@ def _get_moe_attr_name(layer: nn.Module) -> str:
     """Return the attribute name holding the MoE block on a decoder layer.
 
     Most models use ``mlp``; Llama4 uses ``feed_forward``.
+    For layer-level MoE (Gemma4), the native MoE replaces ``mlp``.
     """
     for name in ("mlp", "feed_forward"):
         if hasattr(layer, name):
@@ -283,13 +314,14 @@ def _resolve_top_k(moe_block: nn.Module, gate: nn.Module | None, config) -> int:
     for owner in (moe_block, gate):
         if owner is None:
             continue
-        for attr in ("top_k", "num_experts_per_tok"):
+        for attr in ("top_k", "num_experts_per_tok", "top_k_experts"):
             val = getattr(owner, attr, None)
             if val is not None:
                 return int(val)
-    val = getattr(config, "num_experts_per_tok", None)
-    if val is not None:
-        return int(val)
+    for attr in ("num_experts_per_tok", "top_k_experts"):
+        val = getattr(config, attr, None)
+        if val is not None:
+            return int(val)
     raise ValueError("Could not determine top_k from HF MoE block")
 
 
@@ -382,6 +414,82 @@ def _probe_shared_experts(moe_block: nn.Module, config) -> dict | None:
         "hidden_dim": shared_hidden_dim,
         "dim": config.hidden_size,
         "has_sigmoid_gate": has_sigmoid_gate,
+    }
+
+
+def _probe_layer_level_moe(layer: nn.Module, config) -> dict:
+    """Probe layer-level MoE (Gemma4) where router/experts are layer siblings.
+
+    The dense MLP is treated as a shared expert: its output is summed with
+    the routed expert output in the original HF forward. The native MoE
+    replaces ``layer.mlp`` and contains all three components (router,
+    experts, shared_experts=dense MLP).
+    """
+    gate = getattr(layer, "gate", None) or getattr(layer, "router", None)
+    experts = layer.experts
+
+    num_experts = _resolve_num_experts(experts, gate, layer, config)
+    dim = config.hidden_size
+    top_k = _resolve_top_k(layer, gate, config)
+    score_func = _resolve_score_func(gate, config)
+
+    # Expert intermediate size from fused gate_up_proj
+    if hasattr(experts, "gate_up_proj"):
+        shape = experts.gate_up_proj.shape
+        if shape[2] == dim and shape[1] != dim:
+            moe_intermediate_size = shape[1] // 2
+        elif shape[1] == dim and shape[2] != dim:
+            moe_intermediate_size = shape[2] // 2
+        else:
+            moe_intermediate_size = getattr(
+                config, "moe_intermediate_size", shape[1] // 2
+            )
+    else:
+        moe_intermediate_size = getattr(config, "moe_intermediate_size", dim * 4)
+
+    # Route normalization
+    if hasattr(config, "norm_topk_prob"):
+        route_norm = config.norm_topk_prob
+    elif hasattr(gate, "norm_topk_prob") if gate else False:
+        route_norm = gate.norm_topk_prob
+    else:
+        route_norm = score_func != "sigmoid"
+
+    route_scale = getattr(config, "routed_scaling_factor", 1.0)
+    num_expert_groups = getattr(config, "n_group", None)
+    num_limited_groups = getattr(config, "topk_group", None)
+    load_balance_coeff = getattr(config, "load_balance_coeff", 1e-3)
+    comm_backend = getattr(config, "comm_backend", "standard")
+
+    # Dense MLP is the shared expert
+    mlp = getattr(layer, "mlp", None)
+    shared_expert_info = None
+    if mlp is not None:
+        gate_proj = getattr(mlp, "gate_proj", None)
+        if gate_proj is not None and hasattr(gate_proj, "weight"):
+            shared_hidden_dim = gate_proj.weight.shape[0]
+        else:
+            shared_hidden_dim = getattr(config, "intermediate_size", dim * 4)
+        shared_expert_info = {
+            "hidden_dim": shared_hidden_dim,
+            "dim": dim,
+            "has_sigmoid_gate": False,
+        }
+
+    return {
+        "num_experts": num_experts,
+        "dim": dim,
+        "moe_intermediate_size": moe_intermediate_size,
+        "top_k": top_k,
+        "score_func": score_func,
+        "route_norm": route_norm,
+        "route_scale": route_scale,
+        "num_expert_groups": num_expert_groups,
+        "num_limited_groups": num_limited_groups,
+        "load_balance_coeff": load_balance_coeff,
+        "comm_backend": comm_backend,
+        "shared_expert_info": shared_expert_info,
+        "score_before_experts": False,
     }
 
 

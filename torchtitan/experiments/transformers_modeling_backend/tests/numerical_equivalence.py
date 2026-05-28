@@ -204,6 +204,22 @@ _MODEL_CONFIGS = {
         attn_implementation="sdpa",
         use_cache=False,
     ),
+    "gemma4_text": dict(
+        model_type="gemma4_text",
+        hidden_size=2816,
+        intermediate_size=2112,
+        moe_intermediate_size=704,
+        num_experts=8,
+        top_k_experts=2,
+        num_hidden_layers=1,
+        num_attention_heads=16,
+        num_key_value_heads=8,
+        vocab_size=256,
+        max_position_embeddings=64,
+        enable_moe_block=True,
+        attn_implementation="sdpa",
+        use_cache=False,
+    ),
 }
 
 # Models that require AutoConfig.from_pretrained (remote config).
@@ -255,8 +271,14 @@ def _transfer_weights_via_adapter(hf_moe_block, titan_moe):
     and values, then loads into the titan module.
     """
     from torchtitan.experiments.transformers_modeling_backend.state_dict_adapter import (
+        _TITAN_TO_ORIGINAL_HF_KEY,
+        _TRANSPOSED_GATE_UP_PROJ_KEYS,
         hf_to_titan_moe_state_dict,
     )
+
+    # Clear global adapter state from any previous model's conversion
+    _TRANSPOSED_GATE_UP_PROJ_KEYS.clear()
+    _TITAN_TO_ORIGINAL_HF_KEY.clear()
 
     hf_sd = hf_moe_block.state_dict()
 
@@ -265,6 +287,44 @@ def _transfer_weights_via_adapter(hf_moe_block, titan_moe):
     titan_sd = hf_to_titan_moe_state_dict(hf_sd_prefixed)
 
     # Strip the "mlp." prefix to match titan_moe's own state dict
+    titan_sd_stripped = {k.removeprefix("mlp."): v for k, v in titan_sd.items()}
+
+    titan_moe.load_state_dict(titan_sd_stripped, strict=False)
+
+
+def _transfer_weights_layer_level(hf_layer, titan_moe):
+    """Transfer weights for layer-level MoE (Gemma4).
+
+    Router and experts are at the layer level in HF.  The titan native MoE
+    has ``router.gate``, ``experts.{w1,w2,w3}``.  We collect the relevant
+    HF state dict entries, apply the adapter, and load into titan.
+    """
+    from torchtitan.experiments.transformers_modeling_backend.state_dict_adapter import (
+        _TITAN_TO_ORIGINAL_HF_KEY,
+        _TRANSPOSED_GATE_UP_PROJ_KEYS,
+        hf_to_titan_moe_state_dict,
+    )
+
+    # Clear global adapter state from any previous model's conversion
+    # to prevent cross-model contamination (e.g. Llama4's transposed
+    # layout leaking into Gemma4's standard layout).
+    _TRANSPOSED_GATE_UP_PROJ_KEYS.clear()
+    _TITAN_TO_ORIGINAL_HF_KEY.clear()
+
+    # Collect router + experts state dicts
+    hf_sd = {}
+    router = getattr(hf_layer, "router", None) or getattr(hf_layer, "gate", None)
+    if router is not None:
+        for k, v in router.state_dict().items():
+            hf_sd[f"router.{k}"] = v
+    for k, v in hf_layer.experts.state_dict().items():
+        hf_sd[f"experts.{k}"] = v
+
+    # Prefix with "mlp." to match adapter namespace
+    hf_sd_prefixed = {f"mlp.{k}": v for k, v in hf_sd.items()}
+    titan_sd = hf_to_titan_moe_state_dict(hf_sd_prefixed)
+
+    # Strip the "mlp." prefix
     titan_sd_stripped = {k.removeprefix("mlp."): v for k, v in titan_sd.items()}
 
     titan_moe.load_state_dict(titan_sd_stripped, strict=False)
@@ -318,6 +378,7 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
     from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
         _build_moe_config,
         _probe_hf_moe_block,
+        _probe_layer_level_moe,
     )
 
     torch.manual_seed(seed)
@@ -326,8 +387,13 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
     model, config = _create_hf_model(model_type)
     model = model.to(device=device, dtype=torch.bfloat16).eval()
 
-    # Find first MoE layer (most models use ``mlp``, Llama4 uses ``feed_forward``)
+    # Find first MoE layer.
+    # Standard: gate/router + experts inside ``mlp`` or ``feed_forward``.
+    # Layer-level (Gemma4): router + experts are siblings of the dense MLP
+    # at the decoder layer level.
     hf_moe_block = None
+    hf_moe_layer = None
+    is_layer_level = False
     for layer in model.model.layers:
         for attr_name in ("mlp", "feed_forward"):
             moe_module = getattr(layer, attr_name, None)
@@ -339,29 +405,33 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
                 break
         if hf_moe_block is not None:
             break
+        # Check for layer-level MoE
+        has_layer_router = hasattr(layer, "router") or hasattr(layer, "gate")
+        has_layer_experts = hasattr(layer, "experts")
+        if has_layer_router and has_layer_experts:
+            hf_moe_layer = layer
+            is_layer_level = True
+            break
 
-    if hf_moe_block is None:
+    if hf_moe_block is None and hf_moe_layer is None:
         return {"model": model_type, "error": "No MoE layer found"}
 
-    # Cast the HF router gate module to float32, matching titan's
-    # torch.autocast(dtype=float32) on the gate linear. HF models compute
-    # the gate linear in the model dtype (bf16) while titan uses float32.
-    # Casting the full gate module (weights + inputs via pre-hook) removes
-    # that precision difference so the test isolates routing/dispatch logic.
-    #
-    # Skip for score_before_experts models (Llama4): the router output is
-    # multiplied into the expert input before the expert forward. Casting
-    # the router to float32 would make the expert input float32, causing a
-    # dtype mismatch with expert weights (bf16).
-    from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
-        _resolve_score_before_experts,
-    )
+    # 2. Forward through HF MoE block
+    torch.manual_seed(seed)
+    x = torch.randn(2, 16, config.hidden_size, device=device, dtype=torch.bfloat16)
 
-    score_before = _resolve_score_before_experts(hf_moe_block)
-    gate = getattr(hf_moe_block, "gate", None) or getattr(hf_moe_block, "router", None)
-    if gate is not None and not score_before:
-        gate.float()
-        gate.register_forward_pre_hook(
+    if is_layer_level:
+        # Layer-level MoE (Gemma4): run just the routed experts path.
+        # The test compares the routed-expert-only forward (no shared expert
+        # / dense MLP) to isolate the MoE weight transfer and routing.
+        hf_router = getattr(hf_moe_layer, "router", None) or getattr(
+            hf_moe_layer, "gate", None
+        )
+        hf_experts = hf_moe_layer.experts
+
+        # Cast router to float32 to match titan's autocast
+        hf_router.float()
+        hf_router.register_forward_pre_hook(
             lambda mod, args: tuple(
                 a.float()
                 if isinstance(a, torch.Tensor) and a.is_floating_point()
@@ -370,29 +440,77 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
             )
         )
 
-    # 2. Forward through HF MoE block
-    torch.manual_seed(seed)
-    x = torch.randn(2, 16, config.hidden_size, device=device, dtype=torch.bfloat16)
-    hf_out = hf_moe_block(x)
-    if isinstance(hf_out, tuple):
-        hf_out = hf_out[0]
+        x_flat = x.reshape(-1, x.shape[-1])
+        _, top_k_weights, top_k_index = hf_router(x_flat)
+        hf_out = hf_experts(x_flat, top_k_index, top_k_weights)
+        hf_out = hf_out.reshape(x.shape)
 
-    # 3. Build titan MoE with same config
-    config.load_balance_coeff = None  # disable load balancing for comparison
-    config.comm_backend = "standard"
-    params = _probe_hf_moe_block(hf_moe_block, config)
-    params["load_balance_coeff"] = None
-    moe_config = _build_moe_config(params, config)
+        # 3. Build titan MoE (experts only, no shared expert for this test)
+        config.load_balance_coeff = None
+        config.comm_backend = "standard"
+        params = _probe_layer_level_moe(hf_moe_layer, config)
+        params["load_balance_coeff"] = None
+        # Remove shared expert for this comparison — we only test routed experts
+        params["shared_expert_info"] = None
+        moe_config = _build_moe_config(params, config)
 
-    with torch.device("meta"):
-        titan_moe = moe_config.build()
-    titan_moe.to_empty(device=device)
-    buffer_device = device if isinstance(device, torch.device) else torch.device(device)
-    titan_moe.init_states(buffer_device=buffer_device)
+        with torch.device("meta"):
+            titan_moe = moe_config.build()
+        titan_moe.to_empty(device=device)
+        buffer_device = (
+            device if isinstance(device, torch.device) else torch.device(device)
+        )
+        titan_moe.init_states(buffer_device=buffer_device)
 
-    # 4. Transfer weights from HF to titan via state dict adapter
-    _transfer_weights_via_adapter(hf_moe_block, titan_moe)
-    titan_moe = titan_moe.to(dtype=torch.bfloat16).eval()
+        # 4. Transfer weights — layer-level MoE keys need manual prefix
+        _transfer_weights_layer_level(hf_moe_layer, titan_moe)
+        titan_moe = titan_moe.to(dtype=torch.bfloat16).eval()
+
+    else:
+        # Standard MoE block
+        # Cast the HF router gate module to float32, matching titan's
+        # torch.autocast(dtype=float32) on the gate linear.
+        from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
+            _resolve_score_before_experts,
+        )
+
+        score_before = _resolve_score_before_experts(hf_moe_block)
+        gate = getattr(hf_moe_block, "gate", None) or getattr(
+            hf_moe_block, "router", None
+        )
+        if gate is not None and not score_before:
+            gate.float()
+            gate.register_forward_pre_hook(
+                lambda mod, args: tuple(
+                    a.float()
+                    if isinstance(a, torch.Tensor) and a.is_floating_point()
+                    else a
+                    for a in args
+                )
+            )
+
+        hf_out = hf_moe_block(x)
+        if isinstance(hf_out, tuple):
+            hf_out = hf_out[0]
+
+        # 3. Build titan MoE with same config
+        config.load_balance_coeff = None
+        config.comm_backend = "standard"
+        params = _probe_hf_moe_block(hf_moe_block, config)
+        params["load_balance_coeff"] = None
+        moe_config = _build_moe_config(params, config)
+
+        with torch.device("meta"):
+            titan_moe = moe_config.build()
+        titan_moe.to_empty(device=device)
+        buffer_device = (
+            device if isinstance(device, torch.device) else torch.device(device)
+        )
+        titan_moe.init_states(buffer_device=buffer_device)
+
+        # 4. Transfer weights from HF to titan via state dict adapter
+        _transfer_weights_via_adapter(hf_moe_block, titan_moe)
+        titan_moe = titan_moe.to(dtype=torch.bfloat16).eval()
 
     # 5. Forward through titan MoE
     tt_out = titan_moe(x)

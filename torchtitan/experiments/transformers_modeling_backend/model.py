@@ -513,6 +513,8 @@ class HFTransformerModel(BaseModel):
         for layer in self.model.model.layers.values():
             # Detect MoE layers by checking for gate/router and experts sub-modules.
             # Some models (Llama4) use ``feed_forward`` instead of ``mlp``.
+            # Gemma4 has router/experts as siblings of the dense MLP at the
+            # layer level (not inside ``mlp``).
             moe_attr = _get_moe_attr_name(layer)
             moe_module = getattr(layer, moe_attr, None) if moe_attr else None
             if moe_module is not None:
@@ -520,6 +522,15 @@ class HFTransformerModel(BaseModel):
                 layer.moe_enabled = has_gate and hasattr(moe_module, "experts")
             else:
                 layer.moe_enabled = False
+
+            # Layer-level MoE: router and experts are direct children of the
+            # decoder layer, not nested inside the MLP block (e.g. Gemma4).
+            if not layer.moe_enabled:
+                has_layer_router = hasattr(layer, "router") or hasattr(layer, "gate")
+                has_layer_experts = hasattr(layer, "experts")
+                if has_layer_router and has_layer_experts:
+                    layer.moe_enabled = True
+                    layer._layer_level_moe = True
 
         if config.is_moe:
             from .moe_replacement import prepare_native_moe_configs

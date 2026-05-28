@@ -38,6 +38,8 @@ _HF_TO_TITAN_PATTERNS = [
     (r"^(.*\.)gate\.weight$", r"\1router.gate.weight", False),
     # Llama4 router: nn.Linear directly, key is router.weight → router.gate.weight
     (r"^(.*\.)router\.weight$", r"\1router.gate.weight", False),
+    # Gemma4 router: router.proj.weight → router.gate.weight
+    (r"^(.*\.)router\.proj\.weight$", r"\1router.gate.weight", False),
     # Expert bias
     (r"^(.*\.)gate\.e_score_correction_bias$", r"\1expert_bias", False),
     # Expert down_proj → w2 (transpose handled in conversion function)
@@ -55,7 +57,9 @@ _HF_TO_TITAN_PATTERNS = [
 ]
 
 _TITAN_TO_HF_PATTERNS = [
-    # Router
+    # Router — note: the _TITAN_TO_ORIGINAL_HF_KEY dict handles model-specific
+    # reverse mappings (e.g. Llama4 router.weight, Gemma4 router.proj.weight)
+    # recorded during hf_to_titan conversion. This regex is the fallback.
     (r"^(.*\.)router\.gate\.weight$", r"\1gate.weight", False),
     # Expert bias
     (r"^(.*\.)expert_bias$", r"\1gate.e_score_correction_bias", False),
