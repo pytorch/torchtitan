@@ -433,3 +433,41 @@ learn from past experiments and avoid repeating failed approaches.
   subgraph hidden ops. 68 root-level clones is the actual ceiling here.
 
 ---
+
+## Custom mm→reduce_scatter fusion — keep (PENDING)
+
+- **Idea**: Upstream `micro_pipeline_tp_pass` cannot find mm→RS adjacency
+  in our graph (3 positional attempts all gave 0 fusions, 421 skips).
+  Write a *custom* fusion pass with a looser matcher that walks back from
+  each `_c10d_functional.reduce_scatter_tensor` through
+  `view/reshape/_to_copy/permute/transpose/t/_unsafe_view` AND through
+  `cat(split(input, dim=k))` (scatter_dim>0 pattern) to find a producer
+  `aten.mm.default`, then replace the chain with
+  `torch.ops.symm_mem.fused_matmul_reduce_scatter`.
+- **Changes**: New `fuse_mm_reduce_scatter_pass` (+ supporting helpers)
+  registered between `remove_redundant_contiguous_clone_pass` and
+  `auto_overlap_bucketing_pass`. Includes a dtype filter that skips
+  chains where downstream dtype != mm A dtype (i.e. backward weight-grad
+  RS with fp32 upcast — fusing would crash with bf16 vs fp32 grad mismatch).
+  Inferred scatter_dim by comparing mm output shape to RS input shape.
+- **Result**: **65 forward TP mm→RS fusions** per step (32 attn output +
+  32 mlp w2 + 1 extra). 290 candidates found, 225 correctly skipped on
+  dtype filter. Numerics PASS (bitwise) — chunked matmul + chunked RS
+  produces same bf16 result as unchunked because per-position rank-axis
+  reduction order is unchanged. **4-run tps: 7,408 / 7,396 / 7,406 /
+  7,408 → avg 7,405 (+1.17% over 7,319, +3.39% over Run 3 production
+  baseline 7,162)**. mfu 43.36% avg, memory 49.10 GiB (essentially
+  unchanged), wall 129 s.
+- **Analysis**: Targets the 61.5 ms exposed TP RS (the biggest remaining
+  bottleneck). NVLink symm_mem chunked-matmul-RS recovers a meaningful
+  fraction. The 225 backward weight-grad RS sites (fp32) remain
+  unattacked because `fused_matmul_reduce_scatter` only reduces in
+  `A.dtype` (bf16); fusing them would change reduction precision.
+- **Lessons**: (1) Upstream `micro_pipeline_tp_pass`'s matcher is too
+  strict for our DTensor lowering — a looser custom matcher unlocks
+  the win. (2) Bitwise identity holds when (a) the chunked op's
+  reduction order matches the unchunked, AND (b) the dtype filter
+  keeps fp32 grad reductions out. (3) This is the largest single
+  experiment win in Run 3 so far.
+
+---
