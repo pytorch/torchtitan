@@ -105,11 +105,9 @@ def parallelize_hf_transformers(
         convert_hf_to_module(model)
 
         # 3. Set sharding configs on all non-MoE modules
-        enable_sp = parallel_dims.tp_enabled
         set_hf_sharding_configs(
             model,
-            parallel_dims=parallel_dims,
-            enable_sp=enable_sp,
+            enable_sp=parallel_dims.tp_enabled,
             enable_loss_parallel=not parallelism.disable_loss_parallel,
         )
 

@@ -11,7 +11,8 @@ Two-phase replacement:
       and builds a ``MoE.Config``, stored on each layer as ``_native_moe_config``.
   Phase 2 (parallelize time): ``build_and_swap_native_moe`` calls
       ``set_moe_sharding_config`` on each stored config, builds the native MoE,
-      initializes it, swaps it into the layer, and calls ``parallelize()``.
+      initializes it, and swaps it into the layer. Actual parallelization
+      happens later via ``model.parallelize(parallel_dims)``.
 """
 
 from dataclasses import dataclass
@@ -68,7 +69,7 @@ def prepare_native_moe_configs(model: nn.Module, config) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — build, init, swap, parallelize (called from parallelize_hf_transformers)
+# Phase 2 — build, init, swap (called from parallelize_hf_transformers)
 # ---------------------------------------------------------------------------
 
 

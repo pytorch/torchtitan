@@ -22,8 +22,8 @@ extended for new models. Expected changes include:
 - `moe_replacement.py` — add detection logic for new scoring functions, router
   types, expert layouts, or shared expert patterns in `_probe_hf_moe_block`
   and its helper functions
-- `hf_sharding.py` — add TP plan entries for new attention projection names
-  or norm patterns in `_apply_layer_tp`
+- `hf_sharding.py` — add ShardingConfig entries for new attention projection
+  names or norm patterns in `_set_layer_sharding_configs`
 - `model.py` — handle alternative layer attribute names (e.g. `feed_forward`
   instead of `mlp`)
 - `tests/numerical_equivalence.py` — add the model's synthetic test config
@@ -134,24 +134,28 @@ Call `_probe_hf_moe_block(moe_block, config)` from
   dense MLP as its shared expert. Wire the router and expert weights
   from the layer-level attributes into the native MoE.
 
-### 1e. Probe attention for TP plan
+### 1e. Probe attention for ShardingConfig
 
-Check which TP plan `_apply_layer_tp` (in `hf_sharding.py`) needs:
+Check which sharding configs `_set_layer_sharding_configs` (in
+`hf_sharding.py`) needs:
 
 | Pattern | Projections | Already supported? |
 |---------|-------------|--------------------|
-| Standard GQA | `q_proj`, `k_proj`, `v_proj`, `o_proj` | Yes |
-| MLA (DeepSeek) | `q_a_proj`, `q_b_proj`, `kv_a_proj_with_mqa`, `kv_b_proj` | Yes |
-| Q/K norms | `q_norm`, `k_norm` | Yes |
-| DSA indexer | `indexer` | Yes |
+| Standard GQA | `q_proj`, `k_proj`, `v_proj`, `o_proj` | Yes (`colwise_config`/`rowwise_config`) |
+| MLA (DeepSeek) | `q_a_proj`, `q_b_proj`, `kv_a_proj_with_mqa`, `kv_b_proj` | Yes (`_replicate_config`/`colwise_config`) |
+| Q/K norms | `q_norm`, `k_norm` | Yes (`_replicate_config`) |
+| DSA indexer | `indexer` | Yes (`_replicate_config`) |
 | Alt output | `dense` instead of `o_proj` | Yes |
+| V-norm | `v_norm` | Yes (`_replicate_config`) |
 
 Check for any projection names NOT in the above list. If found, report:
-"attention has unsupported projection `<name>`, needs `_apply_layer_tp`
-update in `hf_sharding.py`."
+"attention has unsupported projection `<name>`, needs
+`_set_layer_sharding_configs` update in `hf_sharding.py`."
 
 Also check: does the layer have `post_attention_layernorm`? (Some models
-omit it — already handled.)
+omit it — already handled.) Does the embedding have extra buffers (e.g.
+Gemma4's `embed_scale`)? (Already handled — buffers are enumerated
+dynamically.)
 
 ### 1f. State dict adapter round-trip
 
@@ -497,32 +501,34 @@ If a config fails:
 a module is to run the full computation redundantly on every TP rank
 (e.g. all-gather input, run full forward, slice output), that is NOT
 an acceptable fix — it defeats the purpose of TP. If a model component
-(e.g. a custom attention mechanism) cannot be properly sharded with
-`ColwiseParallel`/`RowwiseParallel`/`PrepareModuleInput`, report it as
-a FAIL with the reason "no proper TP sharding available, would require
-redundant compute". Do NOT implement redundant-compute workarounds
-with pre/post hooks that all-gather and re-shard.
+(e.g. a custom attention mechanism) cannot be properly sharded, report
+it as a FAIL with the reason "no proper TP sharding available, would
+require redundant compute". Do NOT implement redundant-compute
+workarounds with pre/post hooks that all-gather and re-shard.
 
-**Prefer declarative TP plans over hooks.** When a module needs input or
-output placement conversion for TP, use `parallelize_module` plan entries
-from `torch.distributed.tensor.parallel` and any `ParallelStyle`
-subclasses available in the installed PyTorch version. As of writing:
-- `ColwiseParallel` / `RowwiseParallel` — for linear projections
-- `PrepareModuleInput` — to convert input placements before a module
-- `PrepareModuleOutput` — to convert output placements after a module
-- `PrepareModuleInputOutput` — combined input + output conversion
-- `SequenceParallel` — for norms
-- `NoParallel(use_local_output=True)` — to opt out of TP for a module
-  (titan-specific, in `torchtitan.distributed.tensor_parallel`)
+**Use ShardingConfig, not hooks.** The HF backend sets
+``_sharding_config`` on every sub-module so ``model.parallelize()``
+handles all DTensor distribution and forward wrapping. Available
+helpers from ``torchtitan/models/common/decoder_sharding.py`` and
+``torchtitan/experiments/transformers_modeling_backend/hf_sharding.py``:
 
-Check `torch.distributed.tensor.parallel` for any newer `ParallelStyle`
-subclasses that may have been added since this list was written — prefer
-those over custom solutions.
+- ``colwise_config()`` — for linear projections (weight Shard(0),
+  output Shard(-1))
+- ``rowwise_config(output_sp=True)`` — for output projections (weight
+  Shard(1), output Shard(1) for SP)
+- ``_hf_norm_config(enable_sp=True)`` — for norms (weight Replicate,
+  activations Shard(1) when SP enabled)
+- ``_replicate_config(module)`` — for modules that should have
+  Replicate params/buffers without TP sharding (dynamically enumerates
+  params and buffers to avoid ``_shard_states`` errors)
+- ``ShardingConfig(in_src_shardings=..., in_dst_shardings=...)`` —
+  for input redistribution at module boundaries (e.g. attention,
+  MLP gather from Shard(1) to Replicate)
 
-Do NOT use `register_forward_pre_hook` / `register_forward_hook` to
-manually convert DTensor ↔ local tensors. These hooks are fragile,
-hard to maintain, and bypass the TP plan system. Use them only in test
-code (e.g. `numerical_equivalence.py`), never in production sharding.
+Do NOT use ``register_forward_pre_hook`` / ``register_forward_hook``
+to manually convert DTensor ↔ local tensors. Do NOT use
+``parallelize_module`` from ``torch.distributed.tensor.parallel``.
+Use ``_sharding_config`` exclusively.
 
 The `--hf_model <model_id>` flag overrides the default model in the
 base config. If the base config has incompatible defaults for the new
@@ -531,14 +537,17 @@ model (e.g. wrong tokenizer path), override those too with additional
 the incompatibility with overrides.
 
 Common failure modes and fixes:
-- TP failures from unsupported attention projections — fix in `hf_sharding.py`
-  using `ColwiseParallel`/`RowwiseParallel`/`PrepareModuleInput`/`PrepareModuleOutput`
+- TP failures from unsupported attention projections — fix in
+  `hf_sharding.py` by adding ShardingConfig in `_set_layer_sharding_configs`
 - EP failures from expert weight sharding — check FSDP `shard_placement_fn`
 - Shape mismatches from model-specific layer structure — fix in experiment code
 - Config incompatibility — add more `--override.flags` to the command
 - Tokenizer mismatch — override `--hf_assets_path` to point to the model
 - Custom attention with no standard Q/K/V/O projections — FAIL, not fixable
   without redundant compute
+- Mixed DTensor / plain Tensor — a module has buffers not declared in its
+  ShardingConfig's ``state_shardings``. Fix by using ``_replicate_config(module)``
+  which dynamically enumerates all params and buffers
 
 **Note:** If no GPUs are available, skip this phase and note it in the
 report. But if GPUs are available, all configs must be run and reported.
@@ -596,16 +605,17 @@ experts is a true blocker requiring upstream changes.
 | Expert weights transposed `(E, H, 2*I)` | `state_dict_adapter.py` | Add transpose in conversion; fix shape detection in `moe_replacement.py` |
 | `experts` is `nn.ModuleList` | **Cannot fix** — needs HF upstream | Report to user, stop |
 | Sigmoid scoring not auto-detected | `moe_replacement.py` | Add detection path in `_resolve_score_func()` (e.g. check router source for `sigmoid`) |
-| Router key `router.weight` not converted | `state_dict_adapter.py` | Add regex pattern to `_HF_TO_TITAN_PATTERNS` |
-| Shared expert round-trip broken | `state_dict_adapter.py` | Fix reverse patterns in `_TITAN_TO_HF_PATTERNS` |
+| Router key `router.weight` not converted | `state_dict_adapter.py` | Add regex pattern in `_build_hf_to_titan_patterns()` |
+| Shared expert round-trip broken | `state_dict_adapter.py` | Fix reverse patterns in `_build_titan_to_hf_patterns()` |
 | MoE layer attr is `feed_forward` not `mlp` | `model.py`, `moe_replacement.py` | Handle alternative attribute name |
-| Attention projection not in TP plan | `hf_sharding.py` | Add case to `_apply_layer_tp` |
+| Attention projection not in ShardingConfig | `hf_sharding.py` | Add case to `_set_layer_sharding_configs` using `colwise_config()`/`_replicate_config()` |
 | Model rejects `grouped_mm` | `tests/numerical_equivalence.py` | Skip `_experts_implementation` for this model |
 | `trust_remote_code` import error | Config loading | Try without `trust_remote_code` first |
 | `num_hidden_layers=1` has no MoE layer | Test config | Set `first_k_dense_replace=0` or increase layers |
-| State dict keys missing after round-trip | `state_dict_adapter.py` | Add patterns to `_HF_TO_TITAN_PATTERNS` / `_TITAN_TO_HF_PATTERNS` |
+| State dict keys missing after round-trip | `state_dict_adapter.py` | Add patterns in `_build_hf_to_titan_patterns()` / `_build_titan_to_hf_patterns()` |
 | Layer-level MoE (router/experts are siblings of dense MLP) | `moe_replacement.py` | Treat dense MLP as shared expert inside native MoE; replace `layer.mlp` with full MoE block containing router + experts + shared_experts(=dense MLP) |
-| TP fails with mixed DTensor/Tensor at residual add | `moe_replacement.py` | Usually caused by layer-level MoE — fix by mapping dense MLP as shared expert (see above) so the entire MoE block has one ShardingConfig |
+| TP fails with mixed DTensor/Tensor | `hf_sharding.py` | Module has undeclared buffers — use `_replicate_config(module)` which dynamically enumerates all params and buffers |
+| Embedding has extra buffers (e.g. `embed_scale`) | `hf_sharding.py` | Already handled — `set_hf_sharding_configs` enumerates embedding buffers dynamically |
 
 ## Files touched (experiment folder only)
 
@@ -613,5 +623,5 @@ experts is a true blocker requiring upstream changes.
 |------|--------|
 | `tests/numerical_equivalence.py` | Add entry to `_MODEL_CONFIGS` |
 | `state_dict_adapter.py` | Add key patterns (only if round-trip fails) |
-| `hf_sharding.py` | Add attention TP plan (only if new projection names) |
+| `hf_sharding.py` | Add ShardingConfig entries (only if new projection/norm names) |
 | `moe_replacement.py` | Add probing logic (only if new MoE pattern) |
