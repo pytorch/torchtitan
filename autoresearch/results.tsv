@@ -24,3 +24,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-28T06:15:00	xxxxxxx	0	0.0	crash	0.0	0	annotate_residual_add for Inductor: 224 adds tagged, runtime shape mismatch in fused mm-RS output (3D meta vs 2D runtime)
 2026-05-28T06:30:00	805058b5	7424	49.1	keep	43.48	143	Shape fix in fuse_mm_reduce_scatter_pass + annotate_residual_add for Inductor: 224 adds tagged, +0.26% (7429/7422/7423)
 2026-05-28T06:50:00	6734e2e0	7525	49.1	keep	44.07	166	Extended SwiGLU chain (silu+silu_backward+adjacent bf16 muls iteratively): 160 nodes tagged for regional Inductor, +1.36% (7524/7529/7523)
+2026-05-28T07:10:00	xxxxxxx	7530	49.1	discard	44.10	145	Unified bf16 pointwise chain pass (replacing SwiGLU+residual): 352 nodes (-32), +0.07% noise
