@@ -589,3 +589,30 @@ learn from past experiments and avoid repeating failed approaches.
   not in scope for Run 3's bitwise-mandatory regime. Park.
 
 ---
+
+## Custom topology-aware AR coalescer — discard (xxxxxxx)
+
+- **Idea**: Upstream `bucket_all_reduce` had topology bug. Write a custom
+  pass that chunks 67 TP weight-grad ARs into 8 groups, picks insertion
+  point between latest-input and earliest-consumer, relocates consumer
+  chains as needed to maintain topology.
+- **Changes**: New `coalesce_tp_all_reduce_pass`. Required physically
+  relocating the post-AR `_to_copy → reduce_scatter → wait → output`
+  chain (which terminates at the graph output) so consumers don't see
+  unwait outputs. Bitwise-safe by construction.
+- **Result**: 64/68 ARs absorbed into 8 chunks (chunk_size=8) or 1
+  chunk (chunk_size=64). Numerics PASS in all cases. tps **7,516**
+  (-0.12% noise). Same in chunk_size variants (8/16/64) all within
+  ±0.3%.
+- **Analysis**: Topology-aware coalescing WORKED — 8 chunks merged
+  bitwise-safely. But the 5 ms of total AR launch overhead is apparently
+  ALREADY overlapped by surrounding backward compute, so reducing the
+  collective count doesn't free critical-path time. Confirms the AR
+  bottleneck was theoretical, not measurable on this scale.
+- **Lessons**: (1) Topology-aware coalescing IS possible with explicit
+  consumer-chain relocation. (2) For tiny (8 KB) collectives whose total
+  is <1% of step, NCCL launch overhead is invisible behind compute —
+  coalescing yields ~0%. (3) Upstream `bucket_all_reduce`'s topology
+  bug isn't worth fixing in this codebase for these AR sizes.
+
+---
