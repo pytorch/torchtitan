@@ -6,7 +6,7 @@
 
 import time
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import torch
 
@@ -15,7 +15,7 @@ from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference
 from torchtitan.models.flux.model.autoencoder import load_ae
-from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
+from torchtitan.models.flux.model.model import FluxModel
 from torchtitan.models.flux.parallelize import parallelize_encoders
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.utils import (
@@ -78,27 +78,40 @@ class FluxTrainer(Trainer):
         # load components
         assert config.model_spec is not None
         model_args = config.model_spec.model
+        assert isinstance(model_args, FluxModel.Config)
 
         self.autoencoder = load_ae(
             config.encoder.autoencoder_path,
-            # pyrefly: ignore [missing-attribute]
-            model_args.autoencoder_params,
+            model_args.autoencoder,
             device=self.device,
             dtype=self._dtype,
             random_init=config.encoder.random_init,
         )
 
-        self.clip_encoder = FluxEmbedder(
-            version=config.encoder.clip_encoder,
-            random_init=config.encoder.random_init,
-        ).to(device=self.device, dtype=self._dtype)
-        self.t5_encoder = FluxEmbedder(
-            version=config.encoder.t5_encoder,
-            random_init=config.encoder.random_init,
-        ).to(device=self.device, dtype=self._dtype)
+        # Use the encoder configs from the model registry, overriding version
+        # and random_init from the trainer encoder config if set.
+        clip_encoder_config = model_args.clip_encoder
+        t5_encoder_config = model_args.t5_encoder
+        self.clip_encoder = (
+            replace(
+                clip_encoder_config,
+                version=config.encoder.clip_encoder or clip_encoder_config.version,
+                random_init=config.encoder.random_init,
+            )
+            .build()
+            .to(device=self.device, dtype=self._dtype)
+        )
+        self.t5_encoder = (
+            replace(
+                t5_encoder_config,
+                version=config.encoder.t5_encoder or t5_encoder_config.version,
+                random_init=config.encoder.random_init,
+            )
+            .build()
+            .to(device=self.device, dtype=self._dtype)
+        )
 
         # Apply FSDP to the T5 model / CLIP model
-        # pyrefly: ignore [bad-assignment]
         self.t5_encoder, self.clip_encoder = parallelize_encoders(
             t5_model=self.t5_encoder,
             clip_model=self.clip_encoder,
