@@ -27,7 +27,6 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
@@ -61,16 +60,10 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    if parallel_dims.cp_enabled:
-        apply_cp_to_forward(
-            # pyrefly: ignore [missing-attribute, not-callable]
-            [block.attention.inner_attention for block in model.layers.values()],
-            parallel_dims.get_mesh("cp"),
-        )
+    model.parallelize(parallel_dims)
     if parallel_dims.tp_enabled:
-        model.parallelize(parallel_dims)
-    if parallel_dims.tp_enabled:
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
+        tp_mesh = parallel_dims.get_mesh("tp")
+        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
