@@ -88,7 +88,6 @@ def _set_gpt_oss_layer_sharding(
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.attention_norm.sharding_config = norm
     layer_cfg.ffn_norm.sharding_config = norm
-    attn_x_placement = spmd.S(1) if enable_sp else spmd.I
 
     # Attention: input x gathered to Replicate, freqs_cis always Replicate.
     # sinks parameter is sharded across heads via state_shardings.
@@ -117,7 +116,6 @@ def _set_gpt_oss_layer_sharding(
     if layer_cfg.moe is not None:
         set_moe_sharding_config(
             layer_cfg.moe,
-            enable_tp=enable_tp,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
             expert_param_layout=_GPT_OSS_EXPERTS_PARAM_LAYOUT,

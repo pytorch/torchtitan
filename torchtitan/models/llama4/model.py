@@ -177,7 +177,6 @@ class Llama4Model(Decoder):
                 self,
                 loss_parallel=chunked_loss and not parallelism.disable_loss_parallel,
                 enable_tp=parallelism.tensor_parallel_degree > 1,
-                enable_cp=parallelism.context_parallel_degree > 1,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
                 chunked_loss=chunked_loss,

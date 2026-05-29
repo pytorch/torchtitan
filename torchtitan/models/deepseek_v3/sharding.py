@@ -157,7 +157,6 @@ def _set_deepseek_v3_layer_sharding(
     if layer_cfg.moe is not None:
         set_moe_sharding_config(
             layer_cfg.moe,
-            enable_tp=enable_tp,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
