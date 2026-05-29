@@ -762,7 +762,7 @@ class RLTrainer(Configurable):
 
         gen_metrics = list(gen_metrics)
         gen_metrics.append(
-            m.Metric("rollout/group_failures", m.NoReduce(float(num_failed_groups)))
+            m.Metric("rollout/group_failures", m.Sum(float(num_failed_groups)))
         )
         return rollouts, gen_metrics
 
