@@ -1,4 +1,4 @@
-# Constitution — Qwen3-14B pretraining efficiency search (8x B200)
+# Constitution — Qwen3-14B pretraining efficiency search
 
 Binding rules for this experiment. The Harness reads, enforces, and exposes this
 as `observe().rules`; the Human amends it via `amend_constitution()`. Where this
@@ -25,8 +25,12 @@ disagrees with `ARCHITECTURE.md`, this file wins. Format is defined in
   rewards shorter sequences (attention is O(seq^2)); seq_len defines the workload.
   A `WorkloadViolation` is raised for any candidate that changes it, before any
   run. (Training-seq curricula are a future, eval-judged extension; not enabled.)
-- **Hardware / world:** single node, `NGPU=8` NVIDIA B200, FSDP over the 8-way
-  `fsdp` mesh by default, launched through `./run_train.sh`.
+- **Hardware / world:** hardware is **not** hardcoded. The harness detects the
+  available single-node GPU count at run start, fixes it as the world size for
+  the whole run (so throughput stays comparable across candidates), records the
+  detected GPU model/count in state, and launches through `./run_train.sh` with
+  FSDP over that `fsdp` mesh. Roofline anchors come from the run's printed peak
+  FLOPS, not a hardcoded device.
 
 ## Quality (LOCKED)
 
@@ -118,8 +122,8 @@ prose above is the human explanation of the same rules. Keep them in sync.
     "model_registry_flavor": "14B",
     "dataset": "c4",
     "seq_len": 4096,
-    "ngpu": 8,
-    "gpu": "B200",
+    "ngpu": "auto",
+    "gpu": "auto",
     "launcher": "run_train.sh"
   },
   "quality": {

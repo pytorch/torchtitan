@@ -38,12 +38,13 @@ math must clear the eval — it is no longer a free throughput knob.
     profile showed reduce-scatter and all-gather close to the GEMM cost. Keep
     per-layer FSDP; prefetch just enough to overlap nearby all-gathers.
 
-- id: mxfp8-b200
+- id: mxfp8-precision
   kind: prior
   target: precision
   weight: 1.0
-  text: MXFP8 on B200 is the single largest lever, but it is messy and
-    quality-affecting. Expect: TorchAO dim1 cast requires per-chunk row counts
+  text: On Blackwell/B200-class hardware MXFP8 was the single largest lever, but
+    it is messy and quality-affecting (skip on hardware without MXFP8 support).
+    Expect: TorchAO dim1 cast requires per-chunk row counts
     divisible by 128 (tie loss chunking to seq x batch); force problematic
     dim0/dim1 conversions onto Triton if the CUDA path crashes; keep the chunked
     loss compiled or backward memory blows up; watch for allocator-retry cliffs
@@ -146,12 +147,13 @@ math must clear the eval — it is no longer a free throughput knob.
 
 ## References (grounding facts)
 
-- id: ref-b200
+- id: ref-roofline
   kind: reference
   target: roofline
-  text: 8x NVIDIA B200, ~179 GiB HBM each, NVSwitch (NV18) all-to-all. Native
-    FP8/MXFP8 tensor cores and ~8 TB/s HBM. Use TorchTitan's printed "Peak FLOPS
-    used for computing MFU" for the exact roofline.
+  text: Hardware is detected at run start, not assumed. Use TorchTitan's printed
+    "Peak FLOPS used for computing MFU" and "CUDA capacity" lines for the exact
+    per-device roofline. MXFP8/FP8 levers apply only on hardware with native
+    support (Blackwell/B200-class); on other GPUs they will not help or run.
 
 - id: ref-mxfp8-tiling
   kind: reference

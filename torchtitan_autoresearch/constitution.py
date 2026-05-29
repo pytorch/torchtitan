@@ -42,8 +42,23 @@ class Rules:
         return int(self.raw["workload"]["seq_len"])
 
     @property
-    def ngpu(self) -> int:
-        return int(self.raw["workload"]["ngpu"])
+    def ngpu(self) -> int | str:
+        """Raw world-size setting; ``"auto"`` means detect at run start."""
+        return self.raw["workload"]["ngpu"]
+
+    def resolve_ngpu(self) -> int:
+        """Resolve the world size, detecting the GPU count when set to ``auto``.
+
+        Hardware is not hardcoded: ``auto`` uses the visible single-node GPU
+        count, which the harness then fixes for the whole run so throughput stays
+        comparable across candidates.
+        """
+        val = self.raw["workload"]["ngpu"]
+        if val != "auto":
+            return int(val)
+        import torch
+
+        return torch.cuda.device_count()
 
     # --- quality (locked) ---
     @property
