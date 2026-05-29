@@ -352,7 +352,6 @@ class CheckpointManager(Configurable):
         """
 
         def __post_init__(self):
-            # 1. Sanity & Range Checks
             if not self.folder.strip():
                 raise ValueError("The 'folder' field cannot be empty.")
             if self.interval < 1:
@@ -367,15 +366,12 @@ class CheckpointManager(Configurable):
             if MODEL in self.exclude_from_loading:
                 raise ValueError(f"{MODEL} key shouldn't be in exclude_from_loading.")
 
-            # 2. Path Normalization & Warning
             if self.initial_load_path:
                 self.initial_load_path = self.initial_load_path.strip()
                 if not self.initial_load_path.startswith("/"):
                     raise ValueError(
                         f"initial_load_path must be absolute: {self.initial_load_path}"
                     )
-
-            # 3. Dependency Assertions (Field B requires Field A)
             if self.initial_load_in_hf and not (
                 self.initial_load_path and self.initial_load_model_only
             ):
@@ -383,7 +379,6 @@ class CheckpointManager(Configurable):
                     "initial_load_in_hf requires both initial_load_path "
                     "and initial_load_model_only."
                 )
-
             if self.initial_load_in_hf_quantized and not (
                 self.initial_load_in_hf and self.initial_load_path
             ):
@@ -391,24 +386,20 @@ class CheckpointManager(Configurable):
                     "initial_load_in_hf_quantized requires initial_load_in_hf "
                     "and initial_load_path."
                 )
-
             if self.last_save_in_hf and not self.last_save_model_only:
                 raise ValueError("last_save_in_hf requires last_save_model_only=True.")
 
-            # 4. Mode Normalization
             async_lowered = self.async_mode.lower()
             if async_lowered in ("disabled", "async", "async_with_pinned_mem"):
                 self.async_mode = async_lowered
             else:
                 raise ValueError(f"Invalid async_mode: {async_lowered}")
 
-            # 5. Redundancy Warnings
             if self.load_only and self.enable_first_step_checkpoint:
                 logger.warning(
                     "checkpoint.load_only is True; enable_first_step_checkpoint "
                     "will be ignored."
                 )
-
             if self.initial_load_model_only and not self.initial_load_path:
                 logger.warning(
                     "initial_load_model_only=True has no effect without "
@@ -698,7 +689,7 @@ class CheckpointManager(Configurable):
         # Ensure the background thread/process of saving to disk is finished
         self.maybe_wait_for_saving()
 
-        begin_t = time.monotonic()
+        begin = time.monotonic()
         checkpoint_phase = (
             "saving" if self.async_mode == AsyncMode.DISABLED else "staging"
         )
@@ -710,7 +701,7 @@ class CheckpointManager(Configurable):
         if last_step:
             self._save_last_step(curr_step)
             logger.info(
-                f"Last step checkpoint completed in {time.monotonic() - begin_t:.2f}s"
+                f"Last step checkpoint completed in {time.monotonic() - begin:.2f}s"
             )
             return True
 
@@ -772,12 +763,11 @@ class CheckpointManager(Configurable):
                 enable_garbage_collection=True,
             )
 
-        # Cleanup & Logging
         self._purge_stale_checkpoints()
 
         logger.info(
             f"Finished {checkpoint_phase} the checkpoint in "
-            f"{time.monotonic() - begin_t:.2f} seconds."
+            f"{time.monotonic() - begin:.2f} seconds."
         )
         return True
 
@@ -816,7 +806,6 @@ class CheckpointManager(Configurable):
             from_hf = self.initial_load_in_hf
             from_quantized = self.initial_load_in_hf_quantized
 
-            # Safety checks for HF/Quantization
             if from_hf:
                 assert model_only, (
                     "Only model can be loaded when loading from "
@@ -883,9 +872,8 @@ class CheckpointManager(Configurable):
                     f"--checkpoint.load_step={step} not found at {checkpoint_id}"
                 )
 
-        # Checkpoint Loading
         logger.info(f"Loading the checkpoint from {checkpoint_id}.")
-        begin_t = time.monotonic()
+        begin = time.monotonic()
 
         states = self._states_to_load(model_only)
         self.dcp_load(
@@ -898,7 +886,7 @@ class CheckpointManager(Configurable):
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
             "Finished loading the checkpoint in "
-            f"{time.monotonic() - begin_t:.2f} seconds."
+            f"{time.monotonic() - begin:.2f} seconds."
         )
 
         return True
@@ -971,7 +959,7 @@ class CheckpointManager(Configurable):
         index.
 
         Args:
-            folder (str, optional): The directory to scan.
+            folder (str, optional): The directory to scan. Defaults to `self.folder`.
 
         Returns:
             int: The maximum step number found among valid checkpoints,
