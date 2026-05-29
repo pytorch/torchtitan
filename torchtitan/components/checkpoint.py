@@ -322,8 +322,8 @@ class CheckpointManager(Configurable):
 
         exclude_from_loading: list[str] = field(default_factory=list)
         """
-        Exclude specific keys from being loaded from the checkpoint.
-        Keys shouldn't include "model" key.
+        Exclude specific keys from being loaded from the checkpoint (e.g. 'optimizer',
+        `lr_scheduler`, `dataloader'). Keys shouldn't include 'model' key.
         """
 
         enable_first_step_checkpoint: bool = False
