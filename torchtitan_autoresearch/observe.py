@@ -10,8 +10,12 @@ never proposes candidates and never touches the gate, the ledger, or the branch.
     python -m torchtitan_autoresearch.observe start --tag may30-qwen3 --eval-dataset c4_validation
     python -m torchtitan_autoresearch.observe watch  --tag may30-qwen3
     python -m torchtitan_autoresearch.observe status --tag may30-qwen3
-    python -m torchtitan_autoresearch.observe ask    --tag may30-qwen3 "best so far?"
+    python -m torchtitan_autoresearch.observe ask    --tag may30-qwen3 "any free-form question"
     python -m torchtitan_autoresearch.observe stop   --tag may30-qwen3
+
+Free-form questions are answered by an LLM (the local `claude` CLI / AI gateway,
+no API key) grounded in the run's read-only state; offline it falls back to a
+keyword matcher. The LLM only reads state -- it still cannot touch the gate.
 
 `start` launches the creating loop and OWNS its lifetime: exiting the start
 observer for any reason (Ctrl-C, normal end, SIGTERM/SIGHUP, terminal close)
@@ -24,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -156,6 +161,8 @@ class Observer:
         ql = q.lower()
         rows = self.ledger.read()
         st = self._state()
+        if any(w in ql for w in ("status", "current", "how is", "how's", "going", "overall", "summary")):
+            return self.status()
         if any(w in ql for w in ("best", "champion", "fastest")):
             tps = st.get("champion_tps") or []
             return (f"Champion is {int(tps[-1])} tps (commit {st.get('champion_commit')}), "
@@ -175,7 +182,50 @@ class Observer:
                 f"  {r['label']}: verify={r['verify']} margin={r['quality_margin']}" for r in kept)) if kept else "none kept yet"
         if "recent" in ql or "last" in ql or "latest" in ql:
             return "\n".join(f"{r['label']}: {r['status']} ({r['tps_mean']} tps)" for r in rows[-5:]) or "nothing yet"
-        return ("Ask about: best/champion, progress/count, rejected/why, deferred, quality/eval, recent/latest.")
+        # Unrecognized phrasing: this is a keyword router, not an LLM, so fall back
+        # to the live status (grounded) rather than a help string.
+        return (self.status() +
+                "\n(note: free-form Q&A needs an LLM backend; I matched on keywords. "
+                "Try: best, progress, rejected/why, deferred, quality, recent.)")
+
+    # --- full free-form Q&A via an LLM (falls back to keyword answer offline) ---
+    def context(self) -> str:
+        """A grounded, read-only snapshot the LLM answers from (never invents)."""
+        parts = [self.status()]
+        rows = self.ledger.read()
+        if rows:
+            parts.append("\nFull ledger:")
+            for r in rows:
+                parts.append(
+                    f"  {r['label']}: status={r['status']} verdict={r['verdict']} "
+                    f"tps={r['tps_mean']} cv={r['tps_cv']} verify={r['verify']} "
+                    f"quality_margin={r['quality_margin']} crash={r['crash_class']} "
+                    f"rationale={r.get('rationale','')}")
+        rep = self._report()
+        if rep:
+            parts.append("\nAgent report (its own learnings): " + json.dumps(rep))
+        return "\n".join(parts)
+
+    def ask_llm(self, question: str, timeout: float = 180) -> str:
+        """Answer any free-form question, grounded in the run state, via `claude -p`.
+
+        Uses the local Claude Code CLI (the AI gateway / existing auth, no API key).
+        Falls back to the offline keyword answer when the CLI isn't available.
+        """
+        if not shutil.which("claude"):
+            return self.answer(question)
+        prompt = (
+            "You are a read-only observer of a TorchTitan autoresearch experiment. "
+            "Answer the user's question concisely and ONLY from the state below; if "
+            "the state does not contain the answer, say so plainly.\n\n"
+            f"STATE:\n{self.context()}\n\nQUESTION: {question}"
+        )
+        try:
+            out = subprocess.run(["claude", "-p", prompt], capture_output=True,
+                                 text=True, timeout=timeout)
+            return out.stdout.strip() or self.answer(question)
+        except (subprocess.TimeoutExpired, OSError):
+            return self.answer(question)
 
     def console(self, interval: float = 8.0) -> None:
         """Interactive follow-along: broadcast updates in the background while you
@@ -214,19 +264,26 @@ class Observer:
 
         t = threading.Thread(target=broadcaster, daemon=True)
         t.start()
-        print("Interactive observer. Type a question, 'status', or 'quit' "
+        llm = "(LLM-backed)" if shutil.which("claude") else "(offline keyword mode)"
+        print(f"Interactive observer {llm}. Ask anything, 'status', or 'quit' "
               "('quit'/Ctrl-C stops the experiment).")
         print("> ", end="", flush=True)
         try:
             for line in sys.stdin:
                 q = line.strip()
+                if q.lower() in ("quit", "exit", "q", "stop"):
+                    break
+                if q.lower() == "status":
+                    resp = self.status()
+                elif q:
+                    with lock:
+                        print("[thinking...]", flush=True)
+                    resp = self.ask_llm(q)  # slow LLM call OUTSIDE the lock
+                else:
+                    resp = None
                 with lock:
-                    if q.lower() in ("quit", "exit", "q", "stop"):
-                        break
-                    if q.lower() == "status":
-                        print(self.status())
-                    elif q:
-                        print(self.answer(q))
+                    if resp is not None:
+                        print(resp)
                     print("> ", end="", flush=True)
         except KeyboardInterrupt:
             pass
@@ -300,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "status":
         print(obs.status())
     elif args.cmd == "ask":
-        print(obs.answer(args.question))
+        print(obs.ask_llm(args.question))
     elif args.cmd == "stop":
         obs.stop()
     return 0
