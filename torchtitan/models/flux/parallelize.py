@@ -13,7 +13,12 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+from torch.distributed.fsdp import (
+    CPUOffloadPolicy,
+    DataParallelMeshDims,
+    fully_shard,
+    MixedPrecisionPolicy,
+)
 
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -23,10 +28,12 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     enable_fsdp_symm_mem,
+)
+from torchtitan.models.common.decoder_sharding import (
+    inner_attention_spmd_sharding_config,
 )
 from torchtitan.tools.logging import logger
 
@@ -45,13 +52,24 @@ def parallelize_flux(
         apply_ac(model, ac_config)
 
     if parallel_dims.cp_enabled:
-        apply_cp(model, parallel_dims.get_mesh("cp"))
+        apply_cp(model)
+
+    model.parallelize(parallel_dims)
 
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
 
     dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
     assert dp_mesh is not None
+    dense_spmd_mesh = parallel_dims.get_activated_mesh(["dp", "cp"])
+    dp_mesh_dims = (
+        DataParallelMeshDims(
+            shard="fsdp",
+            replicate="dp_replicate" if parallel_dims.dp_replicate_enabled else None,
+        )
+        if dense_spmd_mesh is not None
+        else None
+    )
     apply_fsdp(
         model,
         dp_mesh,
@@ -59,6 +77,7 @@ def parallelize_flux(
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         cpu_offload=training.enable_cpu_offload,
         enable_symm_mem=parallelism.enable_fsdp_symm_mem,
+        dp_mesh_dims=dp_mesh_dims,
     )
 
     logger.info("Applied fully_shard to the model")
@@ -73,6 +92,7 @@ def apply_fsdp(
     reduce_dtype: torch.dtype,
     cpu_offload: bool = False,
     enable_symm_mem: bool = False,
+    dp_mesh_dims: DataParallelMeshDims | None = None,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -87,6 +107,8 @@ def apply_fsdp(
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if dp_mesh_dims is not None and dp_mesh.size() > 1:
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
@@ -168,38 +190,40 @@ def apply_ac(model: nn.Module, ac_config):
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
 
 
-def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
+def apply_cp(model: nn.Module) -> None:
     """
     Apply context parallelism to the Flux model.
 
     Args:
         model: The Flux model with double_blocks and single_blocks containing
             inner attention modules.
-        cp_mesh: Device mesh for context parallel dimension
 
     Note:
-        - Uses SDPA attention type
-        - Applies to all inner_attention modules in double_blocks and single_blocks
+        Applies to all inner_attention modules in double_blocks and single_blocks.
+        The Flux trainer physically shards the sequence tensors; these configs
+        all-gather K/V at the inner-attention local SPMD boundary.
     """
-    # Collect all inner_attention modules from the Flux model
-    attention_modules = []
-
     # pyrefly: ignore [not-iterable]
     for double_block in model.double_blocks:
         # pyrefly: ignore [missing-attribute]
-        attention_modules.append(double_block.img_attn.inner_attention)
+        double_block.img_attn.inner_attention._sharding_config = (
+            inner_attention_spmd_sharding_config()
+        )
         # pyrefly: ignore [missing-attribute]
-        attention_modules.append(double_block.txt_attn.inner_attention)
+        double_block.txt_attn.inner_attention._sharding_config = (
+            inner_attention_spmd_sharding_config()
+        )
         # pyrefly: ignore [missing-attribute]
-        attention_modules.append(double_block.inner_attention)
+        double_block.inner_attention._sharding_config = (
+            inner_attention_spmd_sharding_config()
+        )
 
     # pyrefly: ignore [not-iterable]
     for single_block in model.single_blocks:
         # pyrefly: ignore [missing-attribute]
-        attention_modules.append(single_block.inner_attention)
-
-    # Apply CP using direct forward wrapping (always uses SDPA for Flux)
-    apply_cp_to_forward(attention_modules, cp_mesh)
+        single_block.inner_attention._sharding_config = (
+            inner_attention_spmd_sharding_config()
+        )
 
     logger.info("Applied Context Parallel to the Flux model")
 

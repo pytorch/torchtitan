@@ -195,10 +195,8 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     attention_cfg.wo.sharding_config = rowwise_config(output_sp=enable_sp)
 
 
-def set_gqa_inner_attention_local_map(
-    inner_attention_cfg, *, return_lse: bool = False
-) -> None:
-    """Install a ``LocalMapConfig`` on an inner-attention config.
+def inner_attention_spmd_sharding_config(*, return_lse: bool = False) -> ShardingConfig:
+    """Build the ``LocalMapConfig`` sharding for inner attention.
 
     q/k/v arrive as ``(bs, seq, heads, head_dim)`` DTensors with heads
     TP-sharded (``Shard(2)``), regardless of SP. ``local_map`` converts them
@@ -218,14 +216,21 @@ def set_gqa_inner_attention_local_map(
     q: NamedPlacement = dense_activation_placement(tp=spmd.S(2))
     kv_src: NamedPlacement = dense_activation_placement(tp=spmd.S(2))
     kv_dst: NamedPlacement = dense_activation_placement(tp=spmd.S(2), cp=spmd.R)
-    out_src: NamedPlacement | tuple[NamedPlacement, ...] = (
-        (q, q) if return_lse else q
-    )
-    inner_attention_cfg.sharding_config = ShardingConfig(
+    out_src: NamedPlacement | tuple[NamedPlacement, ...] = (q, q) if return_lse else q
+    return ShardingConfig(
         in_src_shardings={"k": kv_src, "v": kv_src},
         in_dst_shardings={"q": q, "k": kv_dst, "v": kv_dst},
         out_src_shardings=out_src,
         local_spmd=True,
+    )
+
+
+def set_gqa_inner_attention_local_map(
+    inner_attention_cfg, *, return_lse: bool = False
+) -> None:
+    """Install a ``LocalMapConfig`` on an inner-attention config."""
+    inner_attention_cfg.sharding_config = inner_attention_spmd_sharding_config(
+        return_lse=return_lse,
     )
 
 

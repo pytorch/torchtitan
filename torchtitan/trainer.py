@@ -476,7 +476,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         self.train_context = dist_utils.get_train_context(
-            False,
             spmd_typechecking=config.debug.spmd_typechecking,
         )
 

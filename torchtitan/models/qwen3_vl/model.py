@@ -6,8 +6,10 @@
 
 
 import dataclasses
+import contextlib
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
@@ -15,6 +17,8 @@ from torch.distributed.tensor import DTensor
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.protocols.module import placement_to_assert_type
+from torchtitan.protocols.types import MeshAxisName
 from torchtitan.tools.logging import logger
 
 from .vision_encoder import Qwen3VLVisionEncoder
@@ -85,6 +89,12 @@ class Qwen3VLModel(Qwen3Model):
             from torchtitan.models.qwen3_vl.sharding import set_qwen3_vl_sharding_config
             from torchtitan.components.loss import ChunkedCELoss
 
+            if parallelism.enable_sequence_parallel:
+                raise ValueError(
+                    "Qwen3-VL does not support sequence parallelism. Set "
+                    "--parallelism.enable_sequence_parallel=False."
+                )
+
             chunked_loss = isinstance(trainer_config.loss, ChunkedCELoss.Config)
             set_qwen3_vl_sharding_config(
                 self,
@@ -130,6 +140,7 @@ class Qwen3VLModel(Qwen3Model):
         # Number of early LLM layers that receive DeepStack visual features
         self.num_deepstack_layers = len(config.vision_encoder.deepstack_visual_indices)
 
+    @spmd.no_typecheck()  # freqs_cis: S(0)@DP, R@TP
     def _compute_mrope_freqs(
         self,
         tokens: torch.Tensor,
@@ -292,9 +303,7 @@ class Qwen3VLModel(Qwen3Model):
                         grid_cache[grid_key] = torch.stack([t_index, h_index, w_index])
                     doc_pos_ids_list.append(
                         # pyrefly: ignore [bad-index]
-                        grid_cache[grid_key]
-                        + text_len
-                        + pos_id_offset
+                        grid_cache[grid_key] + text_len + pos_id_offset
                     )
                     pair_cursor = vision_start + llm_grid_t * llm_grid_h * llm_grid_w
 
@@ -428,9 +437,9 @@ class Qwen3VLModel(Qwen3Model):
             Updated embeddings
         """
         for item_idx, sample_idx, vision_start, n_tokens in vision_positions:
-            inputs_embeds[
-                sample_idx, vision_start : vision_start + n_tokens, :
-            ] = merged_embeds[item_idx, :n_tokens, :]
+            inputs_embeds[sample_idx, vision_start : vision_start + n_tokens, :] = (
+                merged_embeds[item_idx, :n_tokens, :]
+            )
         return inputs_embeds
 
     def _deepstack_process(
@@ -451,9 +460,9 @@ class Qwen3VLModel(Qwen3Model):
             Updated hidden states
         """
         for item_idx, sample_idx, vision_start, n_tokens in vision_positions:
-            hidden_states[
-                sample_idx, vision_start : vision_start + n_tokens, :
-            ] += deepstack_embeds[item_idx, :n_tokens, :]
+            hidden_states[sample_idx, vision_start : vision_start + n_tokens, :] += (
+                deepstack_embeds[item_idx, :n_tokens, :]
+            )
         return hidden_states
 
     def _prepare_multimodal_embeds(
@@ -568,20 +577,28 @@ class Qwen3VLModel(Qwen3Model):
         Returns:
             Output logits (batch_size, seq_len, vocab_size)
         """
-        (
-            inputs_embeds,
-            image_positions,
-            video_positions,
-            deepstack_image_features,
-            deepstack_video_features,
-        ) = self._prepare_multimodal_embeds(
-            tokens,
-            pixel_values=pixel_values,
-            pixel_values_videos=pixel_values_videos,
-            grid_thw=grid_thw,
-            grid_thw_videos=grid_thw_videos,
-            special_tokens=special_tokens,
-        )
+        def local_spmd_context():
+            return (
+                spmd.typecheck(local=True)
+                if spmd.is_type_checking()
+                else contextlib.nullcontext()
+            )
+
+        with local_spmd_context():
+            (
+                inputs_embeds,
+                image_positions,
+                video_positions,
+                deepstack_image_features,
+                deepstack_video_features,
+            ) = self._prepare_multimodal_embeds(
+                tokens,
+                pixel_values=pixel_values,
+                pixel_values_videos=pixel_values_videos,
+                grid_thw=grid_thw,
+                grid_thw_videos=grid_thw_videos,
+                special_tokens=special_tokens,
+            )
 
         # Compute MRoPE freqs when vision inputs are present
         if grid_thw is not None or grid_thw_videos is not None:
@@ -593,6 +610,15 @@ class Qwen3VLModel(Qwen3Model):
                 special_tokens=special_tokens,
                 positions=positions,
             )
+            if spmd.is_type_checking():
+                mrope_types, mrope_partition_spec = placement_to_assert_type(
+                    {MeshAxisName.DP: spmd.S(0), MeshAxisName.TP: spmd.R}
+                )
+                spmd.assert_type(
+                    freqs_cis,
+                    mrope_types,
+                    partition_spec=mrope_partition_spec,
+                )
         else:
             # Standard freqs_cis indexed by positions in each layer
             freqs_cis = self.freqs_cis
@@ -605,26 +631,28 @@ class Qwen3VLModel(Qwen3Model):
             # Apply DeepStack: add visual features to early layer hidden states
             layer_idx_int = int(layer_idx)
             if layer_idx_int < self.num_deepstack_layers:
-                if (
-                    deepstack_image_features is not None
-                    and image_positions
-                    and layer_idx_int < len(deepstack_image_features)
-                ):
-                    hidden_states = self._deepstack_process(
-                        hidden_states,
-                        vision_positions=image_positions,
-                        deepstack_embeds=deepstack_image_features[layer_idx_int],
-                    )
-                if (
-                    deepstack_video_features is not None
-                    and video_positions
-                    and layer_idx_int < len(deepstack_video_features)
-                ):
-                    hidden_states = self._deepstack_process(
-                        hidden_states,
-                        vision_positions=video_positions,
-                        deepstack_embeds=deepstack_video_features[layer_idx_int],
-                    )
+                with local_spmd_context():
+                    if (
+                        deepstack_image_features is not None
+                        and image_positions
+                        and layer_idx_int < len(deepstack_image_features)
+                    ):
+                        hidden_states = self._deepstack_process(
+                            hidden_states,
+                            vision_positions=image_positions,
+                            deepstack_embeds=deepstack_image_features[layer_idx_int],
+                        )
+                    if (
+                        deepstack_video_features is not None
+                        and video_positions
+                        and layer_idx_int < len(deepstack_video_features)
+                    ):
+                        hidden_states = self._deepstack_process(
+                            hidden_states,
+                            vision_positions=video_positions,
+                            deepstack_embeds=deepstack_video_features[layer_idx_int],
+                        )
+                spmd.assert_type_like(hidden_states, inputs_embeds)
 
         hidden_states = (
             self.norm(hidden_states) if self.norm is not None else hidden_states
