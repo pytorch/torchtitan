@@ -53,12 +53,7 @@ class SumDigitsRubric(Rubric):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Rubric.Config):
-        """Config for `SumDigitsRubric`.
-
-        Args:
-            correctness_weight: Weight on the answer-matches-target reward.
-            format_weight: Weight on the `[ANSWER] <n>` tag-presence reward.
-        """
+        """Config for `SumDigitsRubric`."""
 
         correctness_weight: float = 1.0
         format_weight: float = 0.3

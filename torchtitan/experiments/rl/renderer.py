@@ -17,13 +17,13 @@ from torchtitan.config import Configurable
 class RendererConfig(Configurable.Config):
     """Selects the renderer used for message <-> token conversion.
 
-    Wraps upstream ``PrimeIntellect-ai/renderers``. ``build`` returns a live
-    ``Renderer`` constructed from a HF ``PreTrainedTokenizer`` loaded from
-    ``model_path``.
+    Wraps upstream `PrimeIntellect-ai/renderers`. `build` returns a live
+    `Renderer` constructed from a HF `PreTrainedTokenizer` loaded from
+    `model_path`.
 
     Args:
-        name: Renderer name passed to ``renderers.create_renderer``
-            (e.g. ``"qwen3"``, ``"auto"``).
+        name: Renderer name passed to `renderers.create_renderer`
+            (e.g. `"qwen3"`, `"auto"`).
         tool_parser: Tool-call parser name used by the default renderer.
         reasoning_parser: Reasoning parser name used by the default renderer.
         preserve_all_thinking: Forward historical assistant reasoning back

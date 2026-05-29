@@ -40,7 +40,6 @@ import torchstore as ts
 from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
 
-from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import (
     CompileConfig,
     ConfigManager,
@@ -227,7 +226,7 @@ async def _do_group_step(
     """Step each env in the group and pack the results into rollouts.
 
     Reward is left unset; the controller calls `task.score_group(...)` after
-    this to fill `reward` and `reward_components`.
+    this and applies `reward` / `reward_components` to each rollout.
 
     Args:
         envs: Sibling envs for one prompt group.
@@ -260,13 +259,11 @@ async def _do_group_step(
             raise RuntimeError(
                 f"env {group_id}/{sample_idx} has no initial prompt tokens"
             )
-        env_step = stepped.last_env_step
-        status = env_step.status if env_step is not None else RolloutStatus.COMPLETED
         rollouts.append(
             Rollout(
                 group_id=group_id,
                 sample_idx=sample_idx,
-                status=status,
+                status=stepped.status,
                 turns=[
                     RolloutTurn(
                         prompt_token_ids=list(initial.next_token_ids),
@@ -302,62 +299,69 @@ class RLTrainer(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        """Top-level config for RL training.
-
-        Args:
-            model_spec: Model specification shared by trainer and generator.
-                Set programmatically via `config_registry` (not from CLI).
-            hf_assets_path: Path to HF assets (model weights, tokenizer,
-                config files).
-            num_steps: Number of RL training steps.
-            dump_folder: Root output folder for RL artifacts.
-            num_prompts_per_step: Number of distinct prompts (= GRPO groups)
-                drawn per training step. Total episodes per step is
-                `num_prompts_per_step * group_size`, where `group_size` is
-                `generator.sampling.n`.
-            num_validation_samples: Number of held-out prompts scored
-                greedily per validation pass.
-            train_dataset: Training dataset; rows route to `tasks` by
-                `DatasetOutput.task`.
-            validation_dataset: Validation dataset; same routing.
-            tasks: Map from task name to `Task.Config`. Single-task runs
-                use a one-key dict.
-            renderer: Message-to-token renderer config.
-            async_executor_max_workers: Worker count for the default
-                `asyncio.to_thread` executor; load-bearing for concurrent
-                renderer calls at `num_prompts_per_step * group_size`
-                rollouts.
-            log_samples: Whether to log the first completion per episode
-                during training and validation.
-            compile: `torch.compile` config shared by trainer and generator.
-            batcher: Batcher config (local_batch_size, seq_len).
-            trainer: `PolicyTrainer` actor config (optimizer, training,
-                parallelism).
-            generator: `VLLMGenerator` actor config (vLLM engine, sampling).
-            metrics: Metrics processor config.
-        """
+        """Top-level config for RL training."""
 
         model_spec: ModelSpec | None = None
+        """Model specification shared by trainer and generator. Set
+        programmatically via `config_registry` (not from CLI)."""
+
         hf_assets_path: str = "./tests/assets/tokenizer"
+        """Path to HF assets (model weights, tokenizer, config files)."""
+
         num_steps: int = 10
+        """Number of RL training steps."""
+
         dump_folder: str = "outputs/rl"
+        """Root output folder for RL artifacts."""
+
         num_prompts_per_step: int = 5
+        """Number of distinct prompts (= GRPO groups) drawn per training step.
+        Total episodes per step is `num_prompts_per_step * group_size`, where
+        `group_size` is `generator.sampling.n`."""
+
         num_validation_samples: int = 20
+        """Number of held-out prompts scored greedily per validation pass."""
+
         train_dataset: Configurable.Config = field(default=None)  # type: ignore[assignment]
+        """Training dataset; rows route to `tasks` by `DatasetOutput.task`."""
+
         validation_dataset: Configurable.Config = field(default=None)  # type: ignore[assignment]
+        """Validation dataset; same routing as `train_dataset`."""
+
         tasks: dict[str, Task.Config] = field(default_factory=dict)
+        """Map from task name to `Task.Config`. Single-task runs use a
+        one-key dict."""
+
         renderer: RendererConfig = field(default_factory=RendererConfig)
+        """Message-to-token renderer config."""
+
         async_executor_max_workers: int = 64
+        """Worker count for the default `asyncio.to_thread` executor;
+        load-bearing for concurrent renderer calls at
+        `num_prompts_per_step * group_size` rollouts."""
+
         log_samples: bool = False
+        """Whether to log the first completion per episode during training and
+        validation."""
+
         compile: CompileConfig = field(default_factory=CompileConfig)
+        """`torch.compile` config shared by trainer and generator."""
+
         batcher: Batcher.Config = field(default_factory=Batcher.Config)
+        """Batcher config (local_batch_size, seq_len)."""
+
         trainer: PolicyTrainer.Config = field(
             default_factory=lambda: PolicyTrainer.Config(loss=GRPOLoss.Config())
         )
+        """`PolicyTrainer` actor config (optimizer, training, parallelism)."""
+
         generator: VLLMGenerator.Config = field(default_factory=VLLMGenerator.Config)
+        """`VLLMGenerator` actor config (vLLM engine, sampling)."""
+
         metrics: m.MetricsProcessor.Config = field(
             default_factory=m.MetricsProcessor.Config
         )
+        """Metrics processor config."""
 
         def __post_init__(self):
             if self.generator.checkpoint.enable:
@@ -404,12 +408,15 @@ class RLTrainer(Configurable):
             log_dir=config.dump_folder,
             job_config=config.to_dict(),
         )
-        # TODO: Replace this single-turn tokenizer with renderer
-        self.tokenizer = HuggingFaceTokenizer(tokenizer_path=config.hf_assets_path)
-        # TODO: Use tokenizer.pad_id when available, falling back to eos_id.
-        self.batcher = Batcher(config.batcher, pad_id=self.tokenizer.eos_id)
         self.renderer = config.renderer.build(model_path=config.hf_assets_path)
         self._stop_token_ids = list(self.renderer.get_stop_token_ids())
+        # TODO: pass our own tokenizer to the renderer and read pad/eos off it
+        # once `renderers` supports bring-your-own-tokenizer
+        # (https://github.com/PrimeIntellect-ai/renderers/pull/70).
+        # Until then, reach into the renderer's tokenizer for the pad id (eos doubles as pad).
+        self.batcher = Batcher(
+            config.batcher, pad_id=self.renderer._tokenizer.eos_token_id
+        )
         self._train_dataset = config.train_dataset.build()
         self._validation_dataset = config.validation_dataset.build()
         self._tasks: dict[str, Task] = {
@@ -647,31 +654,14 @@ class RLTrainer(Configurable):
         group_offset: int,
         metrics_prefix: str,
     ) -> tuple[list[Rollout], list[m.Metric]]:
-        """Build groups, generate completions, delegate step + score to tasks.
+        """Build groups, batch-generate, then per group: step (controller) +
+        score (task rubric). Single-turn; rows route to `self._tasks` by
+        `example.task`. Per-group failures are logged and dropped.
 
-        Single-turn only. Each example is routed to a task in `self._tasks`
-        by `example.task`. Reward assignment lives in the routed task's
-        rubric; envs never set reward.
-
-        TODO(continuous-batching): when VLLMGenerator gains continuous
-        batching, move per-rollout work onto `Task.do_single_rollout(...)`
-        and reduce this controller to one `asyncio.gather` over
-        `num_groups * group_size` rollouts + a per-group rubric pass.
-        See `60_concrete_options.md` §A2.
-
-        Args:
-            dataset: Dataset to sample examples from (train or validation).
-            num_groups: Number of prompt groups to sample.
-            group_size: Number of sibling completions per prompt group.
-            sampling: Generator sampling config.
-            step: Training step (used in generated group IDs).
-            group_offset: Group index offset (used in generated group IDs).
-            metrics_prefix: Prefix passed to generator metrics.
-
-        Returns:
-            Scored rollouts and generator metrics.
+        TODO(continuous-batching): collapse to one `asyncio.gather` over
+        `num_groups * group_size` rollouts once vLLM supports it.
         """
-        # Build groups: one example per group; route to task by example.task
+        # One example per group, routed to its task; build that group's envs.
         examples: list[DatasetOutput] = []
         tasks_per_group: list[Task] = []
         envs_per_group: list[list[RendererEnv]] = []
@@ -702,8 +692,8 @@ class RLTrainer(Configurable):
                 *(env.initial_prompt() for env in all_envs)
             )
 
-            # Filter groups whose initial prompt overflowed; they're emitted as
-            # TRUNCATED_OVERFLOW rollouts below without a generator call.
+            # Siblings share the turn-0 prompt; skip groups that overflow it
+            # (emitted as TRUNCATED_OVERFLOW below, without a generator call).
             runnable_groups = [
                 g_idx
                 for g_idx in range(num_groups)
@@ -733,13 +723,8 @@ class RLTrainer(Configurable):
             for c in completions:
                 completions_by_group[runnable_groups[c.prompt_idx]].append(c)
 
-            # Step each group in the controller; delegate scoring to the
-            # routed task's rubric. Per-group failures are isolated: a
-            # broken group is logged and dropped.
-            # TODO: narrow the per-group except to specific exception types
-            # once tool/sandbox envs land.
-            # TODO: decide whether to drop the whole group when one sample
-            # diverges mid-turn — visible once multi-turn lands.
+            # Per group: step (controller) + score (task rubric). Broken groups
+            # are logged and dropped.
             rollouts: list[Rollout] = []
             num_failed_groups = 0
             for g_idx in range(num_groups):
@@ -756,10 +741,13 @@ class RLTrainer(Configurable):
                         initial_turns=group_initial,
                         completions=completions_by_group[g_idx],
                     )
-                    await tasks_per_group[g_idx].score_group(
-                        rollouts=group_rollouts,
-                        env_input=examples[g_idx].env_input,
+                    rewards = await tasks_per_group[g_idx].score_group(
+                        group_rollouts,
+                        examples[g_idx].env_input,
                     )
+                    for rollout, reward in zip(group_rollouts, rewards, strict=True):
+                        rollout.reward = reward.reward
+                        rollout.reward_components = reward.components
                     rollouts.extend(group_rollouts)
                 except Exception:
                     logger.exception(

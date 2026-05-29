@@ -16,31 +16,28 @@ from torchtitan.experiments.rl.rollouts.types import RolloutStatus
 
 @dataclass(kw_only=True, slots=True)
 class MsgResponseReset:
-    """Initial messages + tool specs from `MessageEnv.reset`.
-
-    Args:
-        messages: Initial conversation (system + user + few-shot, typically).
-        tools: Tool schemas exposed to the model. Empty for tool-less envs.
-    """
+    """Initial messages + tool specs from `MessageEnv.reset`."""
 
     messages: list[Message]  # [M_initial]
+    """The set of messages that form an initial prompt for the model."""
+
     tools: list[ToolSpec] = field(default_factory=list)  # [K_tools]
+    """Tool schemas exposed to the model. Empty for tool-less envs."""
 
 
 @dataclass(kw_only=True, slots=True)
 class MsgResponseStep:
-    """Env response to one parsed assistant message.
-
-    Args:
-        messages: Env-appended messages (tool / user replies). Empty when
-            the rollout terminates with no follow-up.
-        done: `True` ends the rollout.
-        status: Terminal status; `None` on non-terminal steps.
-    """
+    """Env response to one parsed assistant message."""
 
     messages: list[Message] = field(default_factory=list)  # [M_env]
+    """Env-appended messages (tool / user replies). Empty when the rollout
+    terminates with no follow-up."""
+
     done: bool = False
+    """`True` ends the rollout."""
+
     status: RolloutStatus | None = None
+    """Terminal status; `None` on non-terminal steps."""
 
     def __post_init__(self) -> None:
         for msg in self.messages:

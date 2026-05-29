@@ -15,15 +15,13 @@ from torchtitan.experiments.rl.rollouts.types import DatasetOutput
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class SumDigitsInput:
-    """Typed payload for one SumDigits problem.
-
-    Args:
-        numbers: Two to four two-digit numbers the model must digit-sum.
-        target: Ground-truth total digit sum.
-    """
+    """Typed payload for one SumDigits problem."""
 
     numbers: list[int]  # [N_numbers]
+    """Two to four two-digit numbers the model must digit-sum."""
+
     target: int
+    """Ground-truth total digit sum."""
 
 
 class SumDigitsDataset(Configurable):
@@ -41,13 +39,10 @@ class SumDigitsDataset(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        """Config for `SumDigitsDataset`.
-
-        Args:
-            seed: Seed for the per-row RNG.
-        """
+        """Config for `SumDigitsDataset`."""
 
         seed: int = 42
+        """Seed for generating the dataset."""
 
     def __init__(self, config: Config) -> None:
         self._rng = random.Random(config.seed)

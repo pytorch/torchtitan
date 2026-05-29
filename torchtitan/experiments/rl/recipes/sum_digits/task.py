@@ -26,15 +26,13 @@ class SumDigitsTask(Task):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Task.Config):
-        """Config for `SumDigitsTask`.
-
-        Args:
-            rubric: SumDigits rubric config.
-            env_limits: Renderer-env operational limits.
-        """
+        """Config for `SumDigitsTask`."""
 
         rubric: SumDigitsRubric.Config = field(default_factory=SumDigitsRubric.Config)
+        """SumDigits rubric config."""
+
         env_limits: EnvLimits = field(default_factory=EnvLimits)
+        """Renderer-env operational limits, e.g. `max_generation_tokens`."""
 
     def __init__(self, config: Config) -> None:
         self.rubric = config.rubric.build()

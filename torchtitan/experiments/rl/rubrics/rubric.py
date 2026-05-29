@@ -18,32 +18,29 @@ from torchtitan.observability import structured_logger as sl
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class RewardFn:
-    """One reward function + its weight in the rubric's weighted sum.
-
-    Args:
-        fn: Async reward callable with shape `async (rollout, env_input) -> float`.
-        weight: Raw weight. The rubric normalizes weights to sum to 1.0
-            across the registered list, so only the ratio matters. Default 1.0.
-    """
+    """One reward function + its weight in the rubric's weighted sum."""
 
     fn: Callable[[Rollout, object], Awaitable[float]]
+    """Async reward callable with shape `async (rollout, env_input) -> float`."""
+
     weight: float = 1.0
+    """Raw weight. The rubric normalizes weights to sum to 1.0 across the
+    registered list, so only the ratio matters."""
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class Reward:
     """One rollout's reward + per-reward-fn output breakdown.
 
-    Args:
-        reward: Final weighted reward for this rollout.
-        components: Per-reward-fn raw output, keyed by `fn.__name__`.
-
     Example:
         >>> Reward(reward=0.5, components={"reward_fn1": 0.2, "reward_fn2": 0.3})
     """
 
     reward: float
+    """Final weighted reward for this rollout."""
+
     components: dict[str, float] = field(default_factory=dict)
+    """Per-reward-fn raw output, keyed by `fn.__name__`."""
 
 
 class Rubric(Configurable):
@@ -61,18 +58,15 @@ class Rubric(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        """Terminal-status reward overrides.
-
-        Args:
-            truncation_reward: If set, reward fns are skipped on truncated
-                rollouts and this value is returned. `None` → reward fns run
-                normally.
-            error_reward: If set, reward fns are skipped on errored rollouts
-                and this value is returned. `None` → reward fns run normally.
-        """
+        """Terminal-status reward overrides."""
 
         truncation_reward: float | None = None
+        """If set, reward fns are skipped on truncated rollouts and this value
+        is returned. `None` → reward fns run normally."""
+
         error_reward: float | None = None
+        """If set, reward fns are skipped on errored rollouts and this value is
+        returned. `None` → reward fns run normally."""
 
     def __init__(self, config: Config | None = None) -> None:
         self._config = config or Rubric.Config()

@@ -11,28 +11,22 @@ import torch
 
 @dataclass(kw_only=True, slots=True)
 class Completion:
-    """A single generated sequence from the generator.
-
-    Pure generation artifact - no reward, no advantage. ``prompt_idx``
-    is the position of the source prompt in the input ``prompts`` list.
-    """
+    """A single generated sequence from the generator."""
 
     policy_version: int
     prompt_idx: int
-    text: str
     token_ids: list[int]
     token_logprobs: list[float]
     finish_reason: str | None = None
     """vLLM `CompletionOutput.finish_reason` ("stop" | "length" | "abort")"""
 
 
+# TODO: rename `Episode` -> `TrainSample` and `rollout_to_episode` ->
+# `rollout_to_train_sample`, so the meaning is more explicit.
 @dataclass(kw_only=True, slots=True)
 class Episode:
-    """Training sample: flattened trajectory + GRPO advantage.
-
-    Flat shape (rather than composition) because the trainer collate
-    path and logging read these fields directly.
-    """
+    """Training sampleL flattened Rollout turns + GRPO advantage,
+    ready for collation into a batch."""
 
     policy_version: int
     prompt_idx: int
@@ -49,12 +43,12 @@ class TrainingBatch:
     """Packed training batch for the RL trainer.
 
     Per-token fields use "probability of current token" convention:
-    ``logprobs[i] = log p(token_i | context up to i-1)``.
+    `logprobs[i] = log p(token_i | context up to i-1)`.
     Position 0 holds a dummy value (no prior context) and is excluded
-    by ``loss_mask``.
+    by `loss_mask`.
 
     Cross-document logprobs at pack boundaries are incorrect but
-    harmless: ``loss_mask`` is 0 at prompt positions (every episode
+    harmless: `loss_mask` is 0 at prompt positions (every episode
     has a prompt), so they never contribute to the loss.
     """
 
@@ -67,7 +61,7 @@ class TrainingBatch:
 
 @dataclass(frozen=True, slots=True)
 class OptimStepOutput:
-    """Result returned by ``PolicyTrainer.optim_step`` to the controller."""
+    """Result returned by `PolicyTrainer.optim_step` to the controller."""
 
     policy_version: int
     metrics: dict[str, float]

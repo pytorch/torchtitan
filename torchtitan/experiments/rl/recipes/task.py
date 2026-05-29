@@ -13,13 +13,11 @@ from renderers import Renderer
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.envs.renderer_env import EnvLimits, RendererEnv
 from torchtitan.experiments.rl.rollouts.types import DatasetOutput, Rollout
-from torchtitan.experiments.rl.rubrics import Rubric
+from torchtitan.experiments.rl.rubrics import Reward, Rubric
 
 
-# TODO: investigate whether Task should also hold its own dataset (Camp A,
-# verifiers-shape) instead of dataset living on RLTrainer (Camp B,
-# NeMo-RL-shape). Today the dataset lives on RLTrainer.Config and rows
-# are routed to a Task by `DatasetOutput.task`. See `60_concrete_options.md`.
+# TODO: investigate whether Task should also hold its own dataset
+# instead of dataset living on RLTrainer.
 class Task(Configurable):
     """Per-task bundle: rubric + env construction + group scoring.
 
@@ -29,8 +27,7 @@ class Task(Configurable):
 
     Subclass and set `self.rubric` / `self.env_limits` in `__init__`, then
     implement `make_envs`. `score_group` has a default impl that delegates
-    to `self.rubric.score_group` and fills `reward` / `reward_components`
-    on each rollout.
+    to `self.rubric.score_group` and returns one `Reward` per rollout.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -63,11 +60,10 @@ class Task(Configurable):
 
     async def score_group(
         self,
-        *,
         rollouts: list[Rollout],
         env_input: object,
-    ) -> list[Rollout]:
-        """Score one group's rollouts and fill reward + reward_components.
+    ) -> list[Reward]:
+        """Score one group's rollouts; the controller applies the rewards.
 
         Default impl delegates to `self.rubric.score_group`. Override for
         cross-sibling scoring (judge, pairwise, diversity) or partial-credit
@@ -78,18 +74,12 @@ class Task(Configurable):
             env_input: Dataset payload shared by the group.
 
         Returns:
-            The same rollouts with `reward` and `reward_components` filled,
-            in input order.
+            One `Reward` per rollout, in input order.
         """
-        scored = await self.rubric.score_group(rollouts, env_input)
-        for rollout, reward in zip(rollouts, scored, strict=True):
-            rollout.reward = reward.reward
-            rollout.reward_components = reward.components
-        return rollouts
+        return await self.rubric.score_group(rollouts, env_input)
 
     # TODO(continuous-batching): when VLLMGenerator gains continuous batching,
-    # add `do_single_rollout(example, client, renderer, sampling, group_id,
-    # sample_idx) -> Rollout` and migrate `RLTrainer._run_rollouts` from
-    # per-group fan-out (controller _do_group_step + task.score_group) to
+    # add `do_single_rollout(example, client) -> Rollout` and migrate
+    # `RLTrainer._run_rollouts` from per-group fan-out
+    # (controller _do_group_step + task.score_group) to
     # per-rollout fan-out via `asyncio.gather` of `do_single_rollout` calls.
-    # See `60_concrete_options.md` §A2.

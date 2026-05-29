@@ -461,7 +461,6 @@ class VLLMGenerator(Actor, Configurable):
                         Completion(
                             policy_version=self.policy_version,
                             prompt_idx=prompt_idx,
-                            text=sample.text,
                             token_ids=sample.token_ids,
                             token_logprobs=per_token_logprobs,
                             finish_reason=sample.finish_reason,

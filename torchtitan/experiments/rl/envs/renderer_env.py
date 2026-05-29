@@ -7,12 +7,12 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from renderers import Message, Renderer, ToolSpec
 
-from torchtitan.experiments.rl.envs.message_env import MessageEnv, MsgResponseStep
+from torchtitan.experiments.rl.envs.message_env import MessageEnv
 from torchtitan.experiments.rl.rollouts.types import RolloutStatus
 
 if TYPE_CHECKING:
@@ -22,44 +22,41 @@ if TYPE_CHECKING:
 # TODO: revisit the `EnvLimits` name once tool/browser envs share this policy.
 @dataclass(kw_only=True, slots=True)
 class EnvLimits:
-    """Operational policy applied at the `RendererEnv` boundary.
-
-    Args:
-        max_trajectory_tokens: Hard cap on `prompt_tokens + generation_tokens`
-            per turn; `None` disables overflow checks.
-        max_generation_tokens: Reserved tokens for the upcoming generation
-            when checking overflow.
-        step_timeout_s: Wall-clock timeout for one `MessageEnv.step_message`
-            call.
-    """
+    """Operational policy applied at the `RendererEnv` boundary."""
 
     max_trajectory_tokens: int | None = None
+    """Hard cap on `prompt_tokens + generation_tokens` per turn; `None`
+    disables overflow checks."""
+
     max_generation_tokens: int | None = None
+    """Reserved tokens for the upcoming generation when checking overflow."""
+
     step_timeout_s: float | None = 1800.0
+    """Wall-clock timeout for one `MessageEnv.step_message` call."""
 
 
 @dataclass(kw_only=True, slots=True)
 class TokenizedTurn:
     """One turn boundary in the rollout.
 
-    Returned by both `RendererEnv.initial_prompt` and
-    `RendererEnv.step_completion`.
-
-    Args:
-        next_token_ids: Prompt for the NEXT generator call. `None` on
-            terminal step. On initial: the prompt the model sees on turn 0.
-            After non-terminal `step_completion`: prompt for turn N+1.
-        next_messages: Full conversation snapshot at the next-prompt point.
-        last_env_step: The env's response to the previous turn. `None` on
-            initial.
-        last_response_messages: Messages appended this turn (parsed assistant
-            message + env's tool / user replies). Empty on initial.
+    Returned by both `RendererEnv.initial_prompt` and `RendererEnv.step_completion`.
     """
 
     next_token_ids: list[int] | None  # [L_prompt] or None
-    next_messages: list[Message]
-    last_env_step: MsgResponseStep | None = None
-    last_response_messages: list[Message] = field(default_factory=list)
+    """Prompt for the NEXT generator call. `None` on a terminal step. On
+    initial: the prompt the model sees on turn 0. After a non-terminal
+    `step_completion`: prompt for turn N+1."""
+
+    next_messages: list[Message]  # [M_next]
+    """Full conversation, from all turns, at the next-prompt point."""
+
+    status: RolloutStatus | None = None
+    """Terminal status when this turn ends the rollout; `None` while the
+    rollout is still running (initial and non-terminal turns)."""
+
+    last_response_messages: list[Message] = field(default_factory=list)  # [M_response]
+    """Messages appended this turn (parsed assistant message + env's tool /
+    user replies). Empty on the initial prompt."""
 
 
 class RendererEnv:
@@ -129,7 +126,6 @@ class RendererEnv:
         return TokenizedTurn(
             next_token_ids=list(token_ids),
             next_messages=list(self._messages),
-            last_env_step=None,
             last_response_messages=[],
         )
 
@@ -143,19 +139,7 @@ class RendererEnv:
             `TokenizedTurn` for the next generator call, or a terminal turn
             when the rollout completes, truncates, or errors.
         """
-        # Reject terminal-state completions
-        if completion.finish_reason == "length":
-            return _terminal(
-                next_messages=list(self._messages),
-                status=RolloutStatus.TRUNCATED_LENGTH,
-            )
-        if completion.finish_reason == "abort":
-            return _terminal(
-                next_messages=list(self._messages),
-                status=RolloutStatus.ERROR_ABORT,
-            )
-
-        # Parse response tokens into an assistant message
+        # Parse first, so a truncated / aborted response still carries its message.
         try:
             parsed = await asyncio.to_thread(
                 self._renderer.parse_response,
@@ -176,6 +160,22 @@ class RendererEnv:
         if parsed.tool_calls:
             assistant["tool_calls"] = parsed.tool_calls
 
+        # Truncated / aborted: the response is final and partial. Keep it (for
+        # partial-reward grading and debugging); don't step the env on an
+        # incomplete message.
+        if completion.finish_reason == "length":
+            return _terminal(
+                next_messages=list(self._messages),
+                status=RolloutStatus.TRUNCATED_LENGTH,
+                last_response_messages=[assistant],
+            )
+        if completion.finish_reason == "abort":
+            return _terminal(
+                next_messages=list(self._messages),
+                status=RolloutStatus.ERROR_ABORT,
+                last_response_messages=[assistant],
+            )
+
         # Apply the user's env step under a timeout
         timeout = self._limits.step_timeout_s
         try:
@@ -189,19 +189,17 @@ class RendererEnv:
             return _terminal(
                 next_messages=list(self._messages),
                 status=RolloutStatus.ERROR_TIMEOUT,
+                last_response_messages=[assistant],
             )
 
         new_messages: list[Message] = [assistant, *env_step.messages]
         self._messages.extend(new_messages)
 
         if env_step.done:
-            # Default unset status to COMPLETED without mutating the user-returned object.
-            if env_step.status is None:
-                env_step = replace(env_step, status=RolloutStatus.COMPLETED)
             return TokenizedTurn(
                 next_token_ids=None,
                 next_messages=list(self._messages),
-                last_env_step=env_step,
+                status=env_step.status or RolloutStatus.COMPLETED,
                 last_response_messages=new_messages,
             )
 
@@ -235,7 +233,7 @@ class RendererEnv:
         return TokenizedTurn(
             next_token_ids=list(next_token_ids),
             next_messages=list(self._messages),
-            last_env_step=env_step,
+            status=env_step.status,
             last_response_messages=new_messages,
         )
 
@@ -256,10 +254,10 @@ def _terminal(
     status: RolloutStatus,
     last_response_messages: list[Message] | None = None,
 ) -> TokenizedTurn:
-    """Build a terminal `TokenizedTurn` carrying a status-only env step."""
+    """Build a terminal `TokenizedTurn` with the given terminal status."""
     return TokenizedTurn(
         next_token_ids=None,
         next_messages=next_messages,
-        last_env_step=MsgResponseStep(done=True, status=status),
+        status=status,
         last_response_messages=last_response_messages or [],
     )
