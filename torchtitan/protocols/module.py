@@ -34,6 +34,7 @@ from torchtitan.protocols.sharding import (
     NamedPartitionSpec,
     PlacementLike,
     PlacementSpec,
+    placement_axes,
     ShardingConfig,
 )
 from torchtitan.protocols.types import MeshAxisName
@@ -382,43 +383,45 @@ class Module(nn.Module, Configurable):
                 # Look through non-Module wrappers, e.g., CheckpointWrapper.
                 queue.extend(child.children())
 
-        if (
-            (sharding_config := self._sharding_config) is None
-            or (mesh := parallel_dims.resolve_mesh(sharding_config.axes())) is None
-        ):
+        sharding_config = self._sharding_config
+        if sharding_config is None:
             return
 
-        with set_current_mesh(mesh):
-            for name, param in self.named_parameters(recurse=False):
-                if name not in sharding_config.state_shardings:
-                    continue
-                self.distribute_state(
-                    name,
-                    param,
-                    sharding_config.state_shardings[name],
-                    is_param=True,
-                )
+        for name, param in self.named_parameters(recurse=False):
+            if name not in sharding_config.state_shardings:
+                continue
+            state_placement = sharding_config.state_shardings[name]
+            self.distribute_state(
+                parallel_dims,
+                name,
+                param,
+                state_placement,
+                is_param=True,
+            )
 
-            for name, buffer in self.named_buffers(recurse=False):
-                if name not in sharding_config.state_shardings or buffer is None:
-                    continue
-                self.distribute_state(
-                    name,
-                    buffer,
-                    sharding_config.state_shardings[name],
-                    is_param=False,
-                )
+        for name, buffer in self.named_buffers(recurse=False):
+            if name not in sharding_config.state_shardings or buffer is None:
+                continue
+            state_placement = sharding_config.state_shardings[name]
+            self.distribute_state(
+                parallel_dims,
+                name,
+                buffer,
+                state_placement,
+                is_param=False,
+            )
 
-            if sharding_config.state_shardings_compute:
-                self._convert_to_compute_state_with_hook(
-                    sharding_config.state_shardings_compute
-                )
+        if sharding_config.state_shardings_compute:
+            self._convert_to_compute_state_with_hook(
+                parallel_dims,
+                sharding_config.state_shardings_compute,
+            )
 
-            self._cache_pos_arg_names()
+        self._cache_pos_arg_names()
 
-            fn = self.forward
-            if sharding_config.local_spmd:
-                fn = self.local_spmd(fn)
+        fn = self.forward
+        if sharding_config.local_spmd:
+            fn = self.local_spmd(fn)
 
         def with_redistribution(*args: Any, **kwargs: Any) -> Any:
             args, kwargs = self._shard_inputs(args, kwargs)
@@ -458,24 +461,30 @@ class Module(nn.Module, Configurable):
 
     def _convert_to_compute_state_with_hook(
         self,
+        parallel_dims: ParallelDims,
         state_shardings_compute: dict[str, PlacementLike],
     ) -> None:
         """
         Installs hooks to convert parameters/buffers to compute-time placements.
         Currently only used for convert(I->R) on TP axis, for dense params + SP.
         """
-        if not is_spmd_active() or (mesh := current_mesh()) is None:
-            return
-
         sharding_config = self._sharding_config
         assert sharding_config is not None
-        state_types = {
-            name: (
-                placement_to_spmd(sharding_config.state_shardings[name]),
-                placement_to_spmd(compute_named),
-            )
-            for name, compute_named in state_shardings_compute.items()
-        }
+        state_types = {}
+        for name, compute_named in state_shardings_compute.items():
+            state_named = sharding_config.state_shardings[name]
+            mesh = parallel_dims.resolve_shared_mesh([state_named, compute_named])
+            if mesh is None:
+                continue
+            with set_current_mesh(mesh):
+                state_types[name] = (
+                    mesh,
+                    placement_to_spmd(state_named),
+                    placement_to_spmd(compute_named),
+                )
+        if not state_types:
+            return
+
         originals: dict[str, tuple[torch.Tensor, bool]] = {}
 
         def get_state(module: nn.Module, name: str) -> tuple[torch.Tensor, bool]:
@@ -497,7 +506,7 @@ class Module(nn.Module, Configurable):
 
         def pre_hook(module, args):
             originals.clear()
-            for name, (rest_types, compute_types) in state_types.items():
+            for name, (mesh, rest_types, compute_types) in state_types.items():
                 tensor, is_param = get_state(module, name)
                 originals[name] = (tensor, is_param)
                 converted = self._convert_state(tensor, mesh, rest_types, compute_types)
@@ -513,6 +522,7 @@ class Module(nn.Module, Configurable):
 
     def distribute_state(
         self,
+        parallel_dims: ParallelDims,
         name: str,
         tensor: torch.Tensor,
         named_placement: PlacementLike,
@@ -520,49 +530,48 @@ class Module(nn.Module, Configurable):
         is_param: bool,
     ) -> None:
         """Distribute a single parameter or buffer."""
-        mesh = current_mesh()
-        local_type, partition_spec = (
-            placement_to_assert_type(named_placement)
-            if mesh
-            else ({}, None)
-        )
-        named_placement = placement_to_spmd(named_placement) if mesh else {}
-        # Validate and collect shards. Values must be raw per-axis types.
-        shard_dims: dict[int, str] = {}
-        for axis_name, value in named_placement.items():
-            assert isinstance(value, (spmd.Shard, spmd.PerMeshAxisLocalSpmdType)), (
-                f"Expected per-axis spmd type for state {name!r} on axis "
-                f"{axis_name!r}, got {type(value).__name__}: {value!r}"
-            )
-            if isinstance(value, spmd.Shard):
-                assert value.dim not in shard_dims, (
-                    f"State {name!r}: axes {shard_dims[value.dim]!r} and "
-                    f"{axis_name!r} both shard dim {value.dim}. "
-                    f"Multi-axis sharding of a single state dim is not yet supported."
+        mesh = parallel_dims.resolve_mesh(placement_axes(named_placement))
+        if mesh is None:
+            return
+
+        with set_current_mesh(mesh):
+            local_type, partition_spec = placement_to_assert_type(named_placement)
+            named_placement = placement_to_spmd(named_placement)
+            # Validate and collect shards. Values must be raw per-axis types.
+            shard_dims: dict[int, str] = {}
+            for axis_name, value in named_placement.items():
+                assert isinstance(value, (spmd.Shard, spmd.PerMeshAxisLocalSpmdType)), (
+                    f"Expected per-axis spmd type for state {name!r} on axis "
+                    f"{axis_name!r}, got {type(value).__name__}: {value!r}"
                 )
-                shard_dims[value.dim] = str(axis_name)
+                if isinstance(value, spmd.Shard):
+                    assert value.dim not in shard_dims, (
+                        f"State {name!r}: axes {shard_dims[value.dim]!r} and "
+                        f"{axis_name!r} both shard dim {value.dim}. "
+                        f"Multi-axis sharding of a single state dim is not yet supported."
+                    )
+                    shard_dims[value.dim] = str(axis_name)
 
-        for axis_name, value in named_placement.items():
-            if isinstance(value, spmd.Shard):
-                assert mesh is not None
-                pg = mesh.get_group(axis_name)
-                tensor = spmd.shard(tensor, pg, src=spmd.I, dst=value)
+            for axis_name, value in named_placement.items():
+                if isinstance(value, spmd.Shard):
+                    pg = mesh.get_group(axis_name)
+                    tensor = spmd.shard(tensor, pg, src=spmd.I, dst=value)
 
-        # register state
-        if is_param:
-            self.register_parameter(name, nn.Parameter(tensor))
-        else:
-            persistent = name not in self._non_persistent_buffers_set
-            self.register_buffer(name, tensor, persistent=persistent)
+            # register state
+            if is_param:
+                self.register_parameter(name, nn.Parameter(tensor))
+            else:
+                persistent = name not in self._non_persistent_buffers_set
+                self.register_buffer(name, tensor, persistent=persistent)
 
-        # annotate the registered param/buffer (not the input tensor)
-        registered = self._parameters[name] if is_param else self._buffers[name]
-        if local_type:
-            spmd.assert_type(
-                registered,
-                local_type,
-                partition_spec=partition_spec,
-            )
+            # annotate the registered param/buffer (not the input tensor)
+            registered = self._parameters[name] if is_param else self._buffers[name]
+            if local_type:
+                spmd.assert_type(
+                    registered,
+                    local_type,
+                    partition_spec=partition_spec,
+                )
 
     def local_spmd(
         self,

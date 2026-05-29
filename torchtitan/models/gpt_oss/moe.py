@@ -103,21 +103,10 @@ class GptOssGroupedExperts(Module):
         num_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
         """Raw expert computation without dispatch/combine."""
-        if isinstance(self.mlp1_weight_EGD, DTensor):
-            # Convert parameters from DTensors to plain Tensors, to work with
-            # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            mlp1_weight_EGD = self.mlp1_weight_EGD.to_local()
-            # pyrefly: ignore [missing-attribute]
-            mlp1_bias_EG = self.mlp1_bias_EG.to_local()
-            # pyrefly: ignore [missing-attribute]
-            mlp2_weight_EDF = self.mlp2_weight_EDF.to_local()
-            # pyrefly: ignore [missing-attribute]
-            mlp2_bias_ED = self.mlp2_bias_ED.to_local()
-        else:
-            mlp1_weight_EGD = self.mlp1_weight_EGD
-            mlp1_bias_EG = self.mlp1_bias_EG
-            mlp2_weight_EDF = self.mlp2_weight_EDF
-            mlp2_bias_ED = self.mlp2_bias_ED
+        mlp1_weight_EGD = self.mlp1_weight_EGD
+        mlp1_bias_EG = self.mlp1_bias_EG
+        mlp2_weight_EDF = self.mlp2_weight_EDF
+        mlp2_bias_ED = self.mlp2_bias_ED
 
         # Local SPMD typed params are plain tensors, so use the active mesh
         # before falling back to DTensor metadata.
@@ -196,7 +185,8 @@ class GptOssGroupedExperts(Module):
             routed_output_RD = self._experts_forward(
                 routed_input_RD, num_tokens_per_expert_E
             )
-        return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        out_TD = self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        return out_TD.view(B, -1, D)
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize experts and install the sparse runtime mesh.
