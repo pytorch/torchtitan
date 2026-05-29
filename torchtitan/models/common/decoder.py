@@ -17,6 +17,7 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
+    ScaledDotProductAttention,
     VarlenAttention,
 )
 from torchtitan.models.common.feed_forward import FeedForward
@@ -77,6 +78,20 @@ class Decoder(BaseModel):
         # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
         # and fix the typing here
         layers: list  # list[TransformerBlock.Config] or subclass configs
+
+        def validate_context_parallel_attention(
+            self,
+        ) -> None:
+            inner_attention = self.layers[0].attention.inner_attention
+            if isinstance(
+                inner_attention,
+                (ScaledDotProductAttention.Config, VarlenAttention.Config),
+            ):
+                raise NotImplementedError(
+                    "SPMD CP is not supported with ScaledDotProductAttention "
+                    "or VarlenAttention. "
+                    "Use FlexAttention + CP or disable CP."
+                )
 
     # Set by the trainer when ChunkedCELoss is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().

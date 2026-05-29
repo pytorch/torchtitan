@@ -13,10 +13,10 @@ from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any, cast
 
+import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
 import torch.utils._pytree as pytree
-import spmd_types as spmd
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor import DTensor
@@ -45,13 +45,16 @@ from torchtitan.config.configs import (
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.distributed.spmd_state import is_spmd_active, set_current_mesh
-
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
-from torchtitan.protocols.module import placement_to_assert_type
+from torchtitan.protocols.module import (
+    named_placement_to_spmd,
+    placement_to_assert_type,
+    preserve_buffer_spmd,
+)
 from torchtitan.protocols.sharding import is_placement_like
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -392,11 +395,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
-                model.to_empty(device=init_device)
-                with torch.no_grad():
-                    # TODO: Change this back to init_weights once
-                    # autoparallel contains the wrap_init_states
-                    cast(BaseModel, model).init_weights(buffer_device=buffer_device)
+                with preserve_buffer_spmd(model):
+                    model.to_empty(device=init_device)
+                    with torch.no_grad():
+                        # TODO: Change this back to init_weights once
+                        # autoparallel contains the wrap_init_states
+                        cast(BaseModel, model).init_weights(buffer_device=buffer_device)
                 model.train()
 
                 self.model_parts = [model]
@@ -469,13 +473,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             base_folder=config.dump_folder,
         )
 
-        loss_parallel_enabled = (
-            parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
-        )
         self.train_context = dist_utils.get_train_context(
-            loss_parallel_enabled,
+            False,
             spmd_typechecking=config.debug.spmd_typechecking,
         )
+
+        if isinstance(self.loss_fn, ChunkedCELoss):
+            self.loss_fn.enable_sp = (
+                parallel_dims.tp_enabled and config.parallelism.enable_sequence_parallel
+            )
+            self.loss_fn.loss_parallel = (
+                parallel_dims.tp_enabled
+                and not config.parallelism.disable_loss_parallel
+            )
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -784,7 +794,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             global_valid_tokens = local_valid_tokens.float()
 
         if is_spmd_active() and isinstance(global_valid_tokens, torch.Tensor):
-            spmd.assert_type(global_valid_tokens, spmd.I)
+            spmd.assert_type(
+                global_valid_tokens,
+                named_placement_to_spmd(
+                    {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I}
+                ),
+            )
 
         # Process each microbatch: move to GPU, forward/backward, then free
         accumulated_losses = []
