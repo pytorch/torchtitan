@@ -57,12 +57,6 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
     )
 
 
-def deepseek_v3_debugmodel_ep() -> Trainer.Config:
-    config = deepseek_v3_debugmodel()
-    config.model_spec = model_registry("debugmodel")
-    return config
-
-
 def deepseek_v3_debugmodel_hybridep() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
     config.model_spec = model_registry(
