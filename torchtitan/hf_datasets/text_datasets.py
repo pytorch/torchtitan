@@ -256,6 +256,7 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
         tokenizer: BaseTokenizer,
         seq_len: int,
         local_batch_size: int,
+        snapshot_every_n_steps: int | None = 1,
         **kwargs,
     ):
         hf_ds = HuggingFaceTextDataset(
@@ -273,8 +274,8 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
             "persistent_workers": config.persistent_workers,
             "pin_memory": config.pin_memory,
             "prefetch_factor": config.prefetch_factor,
+            "snapshot_every_n_steps": snapshot_every_n_steps,
             "batch_size": local_batch_size,
-            **kwargs,
         }
 
         super().__init__(
@@ -328,6 +329,7 @@ class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
         tokenizer: BaseTokenizer,
         seq_len: int,
         local_batch_size: int,
+        snapshot_every_n_steps: int | None = 1,
         **kwargs,
     ):
         ds = InterleavedDataset(
@@ -353,8 +355,8 @@ class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
             "persistent_workers": config.persistent_workers,
             "pin_memory": config.pin_memory,
             "prefetch_factor": config.prefetch_factor,
+            "snapshot_every_n_steps": snapshot_every_n_steps,
             "batch_size": local_batch_size,
-            **kwargs,
         }
 
         super().__init__(
@@ -661,6 +663,7 @@ class ChatDataLoader(ParallelAwareDataloader):
         tokenizer: BaseTokenizer,
         seq_len: int,
         local_batch_size: int,
+        snapshot_every_n_steps: int | None = 1,
         **kwargs,
     ):
         dataset = load_dataset(config.dataset_path, **config.load_dataset_kwargs)  # type: ignore[arg-type]
@@ -680,8 +683,8 @@ class ChatDataLoader(ParallelAwareDataloader):
             "persistent_workers": config.persistent_workers,
             "pin_memory": config.pin_memory,
             "prefetch_factor": config.prefetch_factor,
+            "snapshot_every_n_steps": snapshot_every_n_steps,
             "batch_size": local_batch_size,
-            **kwargs,
         }
 
         super().__init__(
@@ -735,6 +738,7 @@ class InterleavedChatDataLoader(ParallelAwareDataloader):
         tokenizer: BaseTokenizer,
         seq_len: int,
         local_batch_size: int,
+        snapshot_every_n_steps: int | None = 1,
         **kwargs,
     ):
         ds = InterleavedDataset(
@@ -762,8 +766,8 @@ class InterleavedChatDataLoader(ParallelAwareDataloader):
             "persistent_workers": config.persistent_workers,
             "pin_memory": config.pin_memory,
             "prefetch_factor": config.prefetch_factor,
+            "snapshot_every_n_steps": snapshot_every_n_steps,
             "batch_size": local_batch_size,
-            **kwargs,
         }
 
         super().__init__(

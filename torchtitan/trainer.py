@@ -446,8 +446,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             tokenizer=self.tokenizer,
             seq_len=config.training.seq_len,
             local_batch_size=config.training.local_batch_size,
-            snapshot_every_n_steps=config.checkpoint.interval
-            * self.gradient_accumulation_steps,
+            snapshot_every_n_steps=(
+                config.checkpoint.interval * self.gradient_accumulation_steps
+                if config.checkpoint.enable
+                else None
+            ),
         )
 
         # build checkpointer
