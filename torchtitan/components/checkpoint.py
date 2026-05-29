@@ -219,7 +219,7 @@ class CheckpointManager(Configurable):
         and continue training, saving new checkpoints to the specified folder without
         affecting the existing ones.
 
-        Note that the path should contain the full path to the checkpoint folder,
+        Note that the path should contain the absolute path to the checkpoint folder,
         including the step number, if any; for example,
         "//pre_train/checkpoints/llama3/llama3_8b/step_10000".
         """
@@ -654,7 +654,6 @@ class CheckpointManager(Configurable):
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
             self.states[MODEL].load_state_dict(state_dict)
         else:
-            # Standard DCP load directly into the provided state_dict
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
 
             # TODO: Since we flatten the model states in state_dict, we need to
@@ -688,7 +687,6 @@ class CheckpointManager(Configurable):
 
         sl.add_step_tag("checkpoint_save")
 
-        # Ensure the background thread/process of saving to disk is finished
         self.maybe_wait_for_saving()
 
         begin = time.monotonic()
@@ -699,7 +697,6 @@ class CheckpointManager(Configurable):
 
         checkpoint_id = self._create_checkpoint_id(curr_step)
 
-        # Specialized Last Step
         if last_step:
             self._save_last_step(curr_step)
             logger.info(
@@ -711,8 +708,6 @@ class CheckpointManager(Configurable):
         states = self._flattened_model_states_sd()
 
         if self.async_mode != AsyncMode.DISABLED:
-            # Reclaim memory from the previous step's finished async operations
-            # before allocating new buffers for the current step.
             GarbageCollection.collect("Preparing memory for async checkpoint staging.")
 
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
@@ -730,7 +725,7 @@ class CheckpointManager(Configurable):
                 states,
                 checkpoint_id=checkpoint_id,
                 async_mode=self.async_mode,
-                enable_garbage_collection=False,  # Skipping GC
+                enable_garbage_collection=False,
             )
 
             # NOTE: For ASYNC_WITH_PINNED_MEM, we skip GC here because the staging
@@ -749,15 +744,10 @@ class CheckpointManager(Configurable):
                 enable_garbage_collection=True,
             )
 
-            # NOTE: For standard ASYNC, the GPU-to-CPU copy to the background thread
-            # is already complete. GC now can immediately free the
-            # original tensor references in the main thread.
-
             assert isinstance(result, Future)
             self.save_future = result
 
         else:
-            # Synchronous save
             self.dcp_save(
                 states,
                 checkpoint_id=checkpoint_id,
