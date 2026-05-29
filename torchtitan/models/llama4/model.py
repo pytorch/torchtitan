@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import dataclasses
 from dataclasses import dataclass
 
 import torch
@@ -19,12 +18,7 @@ from torchtitan.models.common.attention import (
     get_fixed_block_mask_mod,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common.token_dispatcher import (
-    DeepEPTokenDispatcher,
-    HybridEPTokenDispatcher,
-)
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
-from torchtitan.tools.logging import logger
 
 
 def compute_moe_hidden_dim(
@@ -123,60 +117,17 @@ class Llama4Model(Decoder):
         def update_from_config(
             self,
             *,
-            trainer_config,
+            config,
             **kwargs,
         ) -> None:
-
-            training = trainer_config.training
-            parallelism = trainer_config.parallelism
-            debug = trainer_config.debug
-            seq_len = training.seq_len
-            if seq_len > self.rope.max_seq_len:
-                logger.warning(
-                    f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
-                )
-            # Sync rope max_seq_len
-            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
-
-            for layer_cfg in self.layers:
-                if layer_cfg.moe is not None:
-                    layer_cfg.moe.router._debug_force_load_balance = (
-                        debug.moe_force_load_balance
-                    )
-                    token_dispatcher_cfg = layer_cfg.moe.experts.token_dispatcher
-                    if (
-                        isinstance(
-                            token_dispatcher_cfg,
-                            (
-                                DeepEPTokenDispatcher.Config,
-                                HybridEPTokenDispatcher.Config,
-                            ),
-                        )
-                        and parallelism.expert_parallel_degree == 1
-                    ):
-                        raise ValueError(
-                            f"{type(token_dispatcher_cfg).__qualname__} requires expert parallelism "
-                            "(expert_parallel_degree > 1)."
-                        )
+            Decoder.Config.update_from_config(self, config=config, **kwargs)
+            parallelism = config.parallelism
 
             if parallelism.context_parallel_degree > 1:
                 raise NotImplementedError(
                     "Context Parallel is not supported for Llama4 "
                     "(Llama4 requires FlexAttention, which is not supported with CP)."
                 )
-
-            tp = parallelism.tensor_parallel_degree
-            if tp > 1:
-                n_heads = self.layers[0].attention.n_heads
-                n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
-                if n_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
-                    )
-                if n_kv_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
-                    )
 
             from torchtitan.models.llama4.sharding import set_llama4_sharding_config
 
