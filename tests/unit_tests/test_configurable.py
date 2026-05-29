@@ -146,6 +146,61 @@ class TestConfigurable(unittest.TestCase):
         self.assertEqual(d2["inner"]["a"], 1)
         self.assertEqual(d2["inner"]["b"], 2)
 
+    def test_traverse_recurse_descends_into_matching_configs(self):
+        """traverse(..., recurse=True) descends after yielding matches."""
+
+        class Leaf(Configurable):
+            @dataclass(kw_only=True, slots=True)
+            class Config(Configurable.Config):
+                value: int = 1
+
+            def __init__(self, config: Config):
+                self.config = config
+
+        class Middle(Configurable):
+            @dataclass(kw_only=True, slots=True)
+            class Config(Configurable.Config):
+                leaf: Leaf.Config = field(default_factory=Leaf.Config)
+
+            def __init__(self, config: Config):
+                self.config = config
+
+        class Outer(Configurable):
+            @dataclass(kw_only=True, slots=True)
+            class Config(Configurable.Config):
+                middle: Middle.Config = field(default_factory=Middle.Config)
+                layers: list[Middle.Config] = field(
+                    default_factory=lambda: [Middle.Config(), Middle.Config()]
+                )
+
+            def __init__(self, config: Config):
+                self.config = config
+
+        cfg = Outer.Config()
+        self.assertEqual(
+            [fqn for fqn, *_ in cfg.traverse(Configurable.Config)],
+            [""],
+        )
+        self.assertEqual(
+            [fqn for fqn, *_ in cfg.traverse(Configurable.Config, recurse=True)],
+            [
+                "",
+                "middle",
+                "middle.leaf",
+                "layers.0",
+                "layers.0.leaf",
+                "layers.1",
+                "layers.1.leaf",
+            ],
+        )
+        recursive = list(cfg.traverse(Configurable.Config, recurse=True))
+        by_fqn = {fqn: (parent, attr) for fqn, _, parent, attr in recursive}
+        self.assertEqual(by_fqn[""], (None, None))
+        self.assertEqual(by_fqn["middle"], (cfg, "middle"))
+        self.assertEqual(by_fqn["middle.leaf"], (cfg.middle, "leaf"))
+        self.assertEqual(by_fqn["layers.0"], (cfg.layers, 0))
+        self.assertEqual(by_fqn["layers.0.leaf"], (cfg.layers[0], "leaf"))
+
     def test_repr(self):
         """repr() works for configs."""
         cfg = self.NoKwargsComponent.Config(x=42)

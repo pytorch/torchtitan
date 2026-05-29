@@ -616,7 +616,7 @@ def model_registry(
     if converters is not None:
         validate_converter_order(converters)
         for c in converters:
-            c.build().convert(config)
+            config = c.build().convert(config)
     return ModelSpec(
         name="qwen3",
         flavor=flavor,

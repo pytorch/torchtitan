@@ -47,8 +47,10 @@ class ModelSpec:
     state_dict_adapter: type[BaseStateDictAdapter] | None
 
     def traverse(
-        self, config_cls: type, *, _prefix: str = ""
-    ) -> Iterator[tuple[str, "Configurable.Config", object, str | int]]:
+        self, config_cls: type, *, recurse: bool = False, _prefix: str = ""
+    ) -> Iterator[
+        tuple[str, "Configurable.Config", object | None, str | int | None]
+    ]:
         """Expose the nested model config to ``Configurable.Config.traverse``.
 
         ``ModelSpec`` is a plain dataclass, not a ``Configurable.Config``, so a
@@ -59,8 +61,18 @@ class ModelSpec:
         """
         model_fqn = f"{_prefix}.model" if _prefix else "model"
         if isinstance(self.model, config_cls):
-            # The model config itself matches — yield it; mirror the generic
-            # traverse, which does not descend into a matched node.
-            yield model_fqn, self.model, self, "model"
+            if not recurse:
+                yield model_fqn, self.model, self, "model"
+                return
+
+            for fqn, cfg, parent, attr in self.model.traverse(
+                config_cls, recurse=recurse, _prefix=model_fqn
+            ):
+                if parent is None:
+                    yield fqn, cfg, self, "model"
+                else:
+                    yield fqn, cfg, parent, attr
         else:
-            yield from self.model.traverse(config_cls, _prefix=model_fqn)
+            yield from self.model.traverse(
+                config_cls, recurse=recurse, _prefix=model_fqn
+            )

@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import dataclass
+
 import pytest
 import torch
 
@@ -12,6 +14,7 @@ from torchtitan.components.quantization import Float8LinearConverter
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.llama3 import model_registry
 from torchtitan.models.utils import validate_converter_order
+from torchtitan.protocols.module import Module
 
 
 def test_lora_model_builds():
@@ -42,6 +45,12 @@ def test_lora_model_builds():
         assert (
             "lora_a" not in name and "lora_b" not in name
         ), f"Frozen param '{name}' looks like a LoRA adapter"
+    non_lora_trainable = {
+        n
+        for n, p in model.named_parameters()
+        if p.requires_grad and "lora_a" not in n and "lora_b" not in n
+    }
+    assert non_lora_trainable == set()
 
 
 def test_lora_forward():
@@ -100,3 +109,53 @@ def test_lora_rank_validation():
         LoRAConverter(LoRAConverter.Config(rank=0))
     with pytest.raises(ValueError, match="rank must be positive"):
         LoRAConverter(LoRAConverter.Config(rank=-1))
+
+
+def test_lora_freezes_direct_params_on_composite_modules():
+    """Composite modules freeze own params while child LoRA adapters train."""
+
+    class CompositeWithDirectParam(Module):
+        @dataclass(kw_only=True, slots=True)
+        class Config(Module.Config):
+            child: Linear.Config
+            dim: int = 4
+
+        def __init__(self, config: Config) -> None:
+            super().__init__()
+            self.direct = torch.nn.Parameter(torch.ones(config.dim))
+            self.child = config.child.build()
+
+    class Root(Module):
+        @dataclass(kw_only=True, slots=True)
+        class Config(Module.Config):
+            block: CompositeWithDirectParam.Config
+
+        def __init__(self, config: Config) -> None:
+            super().__init__()
+            self.direct = torch.nn.Parameter(torch.ones(4))
+            self.block = config.block.build()
+
+    model_config = Root.Config(
+        block=CompositeWithDirectParam.Config(
+            child=Linear.Config(in_features=4, out_features=4),
+            dim=4,
+        )
+    )
+
+    model_config = LoRAConverter(
+        LoRAConverter.Config(rank=2, alpha=4.0, target_modules=["child"])
+    ).convert(model_config)
+    model = model_config.build()
+
+    assert not model.direct.requires_grad
+    assert not model.block.direct.requires_grad
+    assert not model.block.child.weight.requires_grad
+    assert model.block.child.lora_a.weight.requires_grad
+    assert model.block.child.lora_b.weight.requires_grad
+
+    non_lora_trainable = {
+        n
+        for n, p in model.named_parameters()
+        if p.requires_grad and "lora_a" not in n and "lora_b" not in n
+    }
+    assert non_lora_trainable == set()

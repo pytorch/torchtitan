@@ -16,7 +16,8 @@ class ModelConfigConverter(Configurable):
     """Base class for converters that transform the model config tree.
 
     Subclasses implement ``convert()`` to modify configs before model build
-    (e.g. quantization, LoRA).
+    (e.g. quantization, LoRA).  Converters may return a replacement root
+    config when the transform needs to wrap the model config itself.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -24,7 +25,7 @@ class ModelConfigConverter(Configurable):
         pass
 
     @abstractmethod
-    def convert(self, model_config) -> None:
+    def convert(self, model_config: Module.Config) -> Module.Config:
         raise NotImplementedError
 
 
