@@ -9,9 +9,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from torchtitan.experiments.rl.recipes.sum_digits.data import SumDigitsInput
 from torchtitan.experiments.rl.rollouts import last_assistant_text, Rollout
 from torchtitan.experiments.rl.rubrics import RewardFn, Rubric
+
+from torchtitan.experiments.rl.tasks.sum_digits.data import SumDigitsInput
 
 
 _ANSWER_RE = re.compile(r"\[ANSWER\]\s*(-?\d+)")

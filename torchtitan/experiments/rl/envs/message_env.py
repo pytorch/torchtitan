@@ -11,11 +11,9 @@ from dataclasses import dataclass, field
 
 from renderers import Message, ToolSpec
 
-from torchtitan.experiments.rl.rollouts.types import RolloutStatus
-
 
 @dataclass(kw_only=True, slots=True)
-class MsgResponseReset:
+class ResetOutput:
     """Initial messages + tool specs from `MessageEnv.reset`."""
 
     messages: list[Message]  # [M_initial]
@@ -26,8 +24,13 @@ class MsgResponseReset:
 
 
 @dataclass(kw_only=True, slots=True)
-class MsgResponseStep:
-    """Env response to one parsed assistant message."""
+class StepOutput:
+    """Env response to one parsed assistant message.
+
+    `done` ends the conversation; `RendererEnv` maps it to a `RolloutStatus`
+    and detects truncation/errors the env never sees. The env may attach
+    `reward_components` (e.g. tool-call success); the rubric decides how to use them.
+    """
 
     messages: list[Message] = field(default_factory=list)  # [M_env]
     """Env-appended messages (tool / user replies). Empty when the rollout
@@ -36,46 +39,49 @@ class MsgResponseStep:
     done: bool = False
     """`True` ends the rollout."""
 
-    status: RolloutStatus | None = None
-    """Terminal status; `None` on non-terminal steps."""
+    reward_components: dict[str, float] = field(default_factory=dict)
+    """Optional reward signal the env provides for this step; the rubric decides
+    whether and how to use it. Empty if the env scores nothing."""
 
     def __post_init__(self) -> None:
-        for msg in self.messages:
-            if msg.get("role") == "assistant":
-                raise ValueError(
-                    "MsgResponseStep.messages must not contain assistant-role "
-                    "messages; the env cannot forge assistant turns."
-                )
+        # env replies are tool/user turns; the assistant turn comes from the model
+        if any(m.get("role") == "assistant" for m in self.messages):
+            raise ValueError("StepOutput.messages may not contain assistant messages")
 
 
 class MessageEnv(abc.ABC):
-    """User's message-level env. Subclass + implement `reset` / `step_message`.
+    """User-written env in message space. Subclass and implement `reset` +
+    `step_message`; `RendererEnv` wraps it with a `Renderer` for tokens.
 
-    User envs are renderer-free: `reset` and `step_message` deal only in
-    messages. `RendererEnv` composes one of these with a `Renderer` to expose
-    a token-level interface to the rollout driver.
+    Example:
+
+        class SumDigitsEnv(MessageEnv):
+            async def reset(self) -> ResetOutput:
+                return ResetOutput(messages=[{"role": "user", "content": "sum [1, 2]"}])
+
+            async def step_message(self, msg: Message) -> StepOutput:
+                return StepOutput(done=True)        # single-turn; rubric scores later
     """
 
     @abc.abstractmethod
-    async def reset(self) -> MsgResponseReset:
-        """Return the initial conversation + tool specs for this rollout."""
+    async def reset(self) -> ResetOutput:
+        """Return the initial conversation + tools. The wrapper takes ownership
+        of the returned message list (it may mutate it across turns)."""
 
     @abc.abstractmethod
-    async def step_message(self, msg: Message) -> MsgResponseStep:
-        """Apply one parsed assistant message; return env-side response.
+    async def step_message(self, msg: Message) -> StepOutput:
+        """Apply one parsed assistant message; return the env's reply.
 
         Subclasses MUST NOT inspect `finish_reason` / token counts / parse
-        failures; `RendererEnv` handles those before calling this method.
+        failures; `RendererEnv` handles those before calling this.
 
         Args:
-            msg: Parsed assistant message from `Renderer.parse_response`.
-                Fields include `content`, optional `reasoning_content`, and
-                optional `tool_calls`.
+            msg: Parsed assistant message (`content`, optional
+                `reasoning_content`, optional `tool_calls`).
 
         Returns:
-            `MsgResponseStep` carrying env-appended messages, terminal flag,
-            and terminal status. Reward assignment happens in the rubric;
-            envs never set reward.
+            `StepOutput` with env reply messages, `done`, and optional
+            `reward_components`. Final rewards are computed by the rubric.
         """
 
     async def close(self) -> None:

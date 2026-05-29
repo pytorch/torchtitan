@@ -17,10 +17,8 @@ def last_assistant_text(rollout: Rollout) -> str:
     """Return the assistant message text from the last turn, or `""`."""
     if not rollout.turns:
         return ""
-    for msg in rollout.turns[-1].response_messages:
-        if msg.get("role") == "assistant":
-            return msg.get("content") or ""
-    return ""
+    msg = rollout.turns[-1].assistant_message
+    return (msg.get("content") or "") if msg else ""
 
 
 def rollout_to_episode(rollout: Rollout, *, text: str = "") -> Episode:

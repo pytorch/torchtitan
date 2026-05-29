@@ -6,20 +6,20 @@
 
 from torchtitan.experiments.rl.envs.message_env import (
     MessageEnv,
-    MsgResponseReset,
-    MsgResponseStep,
+    ResetOutput,
+    StepOutput,
 )
 from torchtitan.experiments.rl.envs.renderer_env import (
-    EnvLimits,
     RendererEnv,
-    TokenizedResponseStep,
+    RendererEnvConfig,
+    TokenizedStepOutput,
 )
 
 __all__ = [
-    "EnvLimits",
+    "RendererEnvConfig",
     "MessageEnv",
-    "MsgResponseReset",
-    "MsgResponseStep",
+    "ResetOutput",
+    "StepOutput",
     "RendererEnv",
-    "TokenizedResponseStep",
+    "TokenizedStepOutput",
 ]

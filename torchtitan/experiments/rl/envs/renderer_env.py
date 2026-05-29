@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -18,15 +19,17 @@ from torchtitan.experiments.rl.rollouts.types import RolloutStatus
 if TYPE_CHECKING:
     from torchtitan.experiments.rl.actors.generator import Completion
 
+logger = logging.getLogger(__name__)
 
-# TODO: revisit the `EnvLimits` name once tool/browser envs share this policy.
+
+# TODO: revisit the `RendererEnvConfig` name once tool/browser envs share these limits.
 @dataclass(kw_only=True, slots=True)
-class EnvLimits:
-    """Boundaries to be enforced by `RendererEnv`"""
+class RendererEnvConfig:
+    """Limits enforced by `RendererEnv` (prompt cap + step timeout)."""
 
     max_rollout_tokens: int | None = None
-    """Hard cap on number of tokens a Rollout can hold.
-    If the next prompt exceeds it, the rollout turn becomes terminal;
+    """Hard cap on the prompt length (tokens) for any generate call in the
+    rollout. If the next prompt meets/exceeds it, the turn is terminal;
     `None` disables the check."""
 
     step_timeout_s: float | None = 1800.0
@@ -34,52 +37,53 @@ class EnvLimits:
 
 
 @dataclass(kw_only=True, slots=True)
-class TokenizedResponseStep:
-    """One turn boundary in the rollout.
+class TokenizedStepOutput:
+    """One turn boundary in token space.
 
     Returned by both `RendererEnv.initial_prompt` and `RendererEnv.step_completion`.
     """
 
-    next_token_ids: list[int] | None  # [L_prompt] or None
-    """Prompt for the NEXT generator call. `None` on a terminal step. On
-    initial: the prompt the model sees on turn 0. After a non-terminal
-    `step_completion`: prompt for turn N+1."""
+    next_prompt_token_ids: list[int] | None  # [L_prompt] or None
+    """Prompt for the NEXT generator call; `None` on a terminal turn."""
 
-    next_messages: list[Message]  # [M_next]
-    """Full conversation, from all turns, at the next-prompt point."""
-
-    last_response_messages: list[Message] = field(default_factory=list)  # [M_response]
-    """Messages appended this turn (parsed assistant message + env's tool /
-    user replies). Empty on the initial prompt."""
+    next_prompt_messages: list[Message]  # [M_prompt]
+    """Full conversation at the next-prompt point."""
 
     status: RolloutStatus
-    """`ONGOING` while the rollout is still running (initial and non-terminal
-    turns); a terminal `RolloutStatus` when this turn ends the rollout."""
+    """`ONGOING` while the rollout runs; a terminal `RolloutStatus` otherwise."""
+
+    assistant_message: Message | None = None
+    """The model's parsed turn (generator output as a message). `None` on the
+    initial prompt and on parse/overflow failures."""
+
+    env_messages: list[Message] = field(default_factory=list)  # [M_env]
+    """The env's reply messages this turn (tool / user). Empty on the initial
+    prompt and on truncation/abort/timeout."""
+
+    env_reward_components: dict[str, float] = field(default_factory=dict)
+    """Optional per-step reward components the env attached, forwarded to
+    `RolloutTurn.reward_components` for the rubric."""
 
 
 class RendererEnv:
-    """Framework wrapper around one `MessageEnv` + `Renderer`.
+    """Env wrapper doing the messages <-> tokens plumbing between the generator
+    and the user's `MessageEnv`.
 
-    From the rollout driver's view this IS the env; it does NOT inherit
-    `MessageEnv`. Owns the renderer plumbing, length-stop / parse-error /
-    timeout classification, and context-overflow checks. Rewards are
-    assigned by the task rubric after the rollout is built.
+    Owns the renderer, the length-stop / parse-error / timeout classification,
+    and the prompt-overflow check.
 
     Args:
         message_env: The user's `MessageEnv` subclass instance.
         renderer: Renderer from `RendererConfig.build`.
-        limits: Framework-level wrapper policy (timeouts, overflow caps).
+        config: `RendererEnvConfig` (prompt cap, step timeout).
 
     Example:
 
-        env = RendererEnv(
-            message_env=SumDigitsEnv(env_input=example.env_input),
-            renderer=renderer,
-        )
-        turn = await env.initial_prompt()
-        while turn.next_token_ids is not None:
-            completion = await generator.generate([turn.next_token_ids])
-            turn = await env.step_completion(completion[0])
+        env = RendererEnv(message_env=SumDigitsEnv(...), renderer=renderer)
+        step = await env.initial_prompt()
+        while not step.status.is_terminal():
+            completion = (await generator.generate([step.next_prompt_token_ids]))[0]
+            step = await env.step_completion(completion)
     """
 
     def __init__(
@@ -87,96 +91,94 @@ class RendererEnv:
         *,
         message_env: MessageEnv,
         renderer: Renderer,
-        limits: EnvLimits | None = None,
+        config: RendererEnvConfig | None = None,
     ) -> None:
         self._message_env = message_env
         self._renderer = renderer
-        self._limits = limits or EnvLimits()
+        self._config = config or RendererEnvConfig()
         self._tools: list[ToolSpec] | None = None
         self._messages: list[Message] = []
         self._last_prompt_ids: list[int] = []
 
-    async def initial_prompt(self) -> TokenizedResponseStep:
-        """Render the initial conversation into the first generator prompt.
+    async def initial_prompt(self) -> TokenizedStepOutput:
+        """Render the initial conversation into the first generator prompt."""
+        env_reset = await self._message_env.reset()
+        self._messages = env_reset.messages
 
-        Returns:
-            `TokenizedResponseStep` with `next_token_ids` set for runnable prompts,
-            or a terminal `TRUNCATED_PROMPT_OVERFLOW` turn when the initial prompt
-            exceeds `EnvLimits.max_rollout_tokens`.
-        """
-        init = await self._message_env.reset()
-        self._messages = list(init.messages)
-        # Renderer chat templates often emit a different tools-section
-        # depending on None vs empty list; store None when no tools.
-        self._tools = list(init.tools) if init.tools else None
+        # Render messages into tokens
+        self._tools = list(env_reset.tools) if env_reset.tools else None
         token_ids = await asyncio.to_thread(
             self._renderer.render_ids,
             messages=self._messages,
             tools=self._tools,
             add_generation_prompt=True,
         )
+
+        # Terminal if the prompt is already over budget
         if self._is_prompt_overflow(prompt_len=len(token_ids)):
             return _terminal(
-                next_messages=list(self._messages),
+                next_prompt_messages=list(self._messages),
                 status=RolloutStatus.TRUNCATED_PROMPT_OVERFLOW,
             )
+
         self._last_prompt_ids = list(token_ids)
-        return TokenizedResponseStep(
-            next_token_ids=list(token_ids),
-            next_messages=list(self._messages),
-            last_response_messages=[],
+        return TokenizedStepOutput(
+            next_prompt_token_ids=list(token_ids),
+            next_prompt_messages=list(self._messages),
             status=RolloutStatus.ONGOING,
         )
 
-    async def step_completion(self, completion: Completion) -> TokenizedResponseStep:
-        """Advance the env by one sampled completion.
+    async def step_completion(self, completion: Completion) -> TokenizedStepOutput:
+        """Advance the env by one sampled completion from the generator.
 
         Args:
             completion: Generator output for the current prompt.
 
         Returns:
-            `TokenizedResponseStep` for the next generator call, or a terminal turn
+            `TokenizedStepOutput` for the next generator call, or a terminal turn
             when the rollout completes, truncates, or errors.
         """
-        # Parse first, so a truncated / aborted response still carries its message.
+        # Parse first, so a truncated / aborted response still carries its message
         try:
             parsed = await asyncio.to_thread(
                 self._renderer.parse_response,
                 token_ids=list(completion.token_ids),
             )
         except Exception:
+            logger.exception(
+                "parse_response failed (finish_reason=%s, %d tokens); -> ERROR_PARSE",
+                completion.finish_reason,
+                len(completion.token_ids),
+            )
             return _terminal(
-                next_messages=list(self._messages),
+                next_prompt_messages=list(self._messages),
                 status=RolloutStatus.ERROR_PARSE,
             )
 
-        assistant: Message = {
-            "role": "assistant",
-            "content": parsed.content,
-        }
+        assistant: Message = {"role": "assistant", "content": parsed.content}
         if parsed.reasoning_content:
             assistant["reasoning_content"] = parsed.reasoning_content
         if parsed.tool_calls:
             assistant["tool_calls"] = parsed.tool_calls
 
-        # Truncated / aborted: the response is final and partial. Keep it (for
-        # partial-reward grading and debugging); don't step the env on an
-        # incomplete message.
+        # Truncated / aborted: the response is final and partial. Keep it for
+        # partial-reward grading and debugging; don't step the env on it.
+        # TODO: check if we should step the env on an incomplete message
         if completion.finish_reason == "length":
             return _terminal(
-                next_messages=list(self._messages),
+                next_prompt_messages=list(self._messages),
                 status=RolloutStatus.TRUNCATED_LENGTH,
-                last_response_messages=[assistant],
+                assistant_message=assistant,
             )
         if completion.finish_reason == "abort":
             return _terminal(
-                next_messages=list(self._messages),
+                next_prompt_messages=list(self._messages),
                 status=RolloutStatus.ERROR_ABORT,
-                last_response_messages=[assistant],
+                assistant_message=assistant,
             )
 
         # Apply the user's env step under a timeout
-        timeout = self._limits.step_timeout_s
+        timeout = self._config.step_timeout_s
         try:
             if timeout is None:
                 env_step = await self._message_env.step_message(assistant)
@@ -185,21 +187,25 @@ class RendererEnv:
                     self._message_env.step_message(assistant), timeout=timeout
                 )
         except TimeoutError:
+            logger.warning(
+                "step_message timed out after %ss; -> ERROR_TIMEOUT", timeout
+            )
             return _terminal(
-                next_messages=list(self._messages),
+                next_prompt_messages=list(self._messages),
                 status=RolloutStatus.ERROR_TIMEOUT,
-                last_response_messages=[assistant],
+                assistant_message=assistant,
             )
 
-        new_messages: list[Message] = [assistant, *env_step.messages]
-        self._messages.extend(new_messages)
+        self._messages.append(assistant)
+        self._messages.extend(env_step.messages)
 
         if env_step.done:
-            return TokenizedResponseStep(
-                next_token_ids=None,
-                next_messages=list(self._messages),
-                status=env_step.status or RolloutStatus.COMPLETED,
-                last_response_messages=new_messages,
+            return _terminal(
+                next_prompt_messages=list(self._messages),
+                status=RolloutStatus.COMPLETED,
+                assistant_message=assistant,
+                env_messages=env_step.messages,
+                env_reward_components=env_step.reward_components,
             )
 
         # Prepare the next prompt; full re-render if the renderer can't bridge
@@ -211,49 +217,57 @@ class RendererEnv:
             tools=self._tools,
         )
         if bridged is None:
-            next_token_ids = await asyncio.to_thread(
+            next_prompt_token_ids = await asyncio.to_thread(
                 self._renderer.render_ids,
                 messages=self._messages,
                 tools=self._tools,
                 add_generation_prompt=True,
             )
         else:
-            next_token_ids = bridged.token_ids
+            next_prompt_token_ids = bridged.token_ids
 
-        # Context-overflow check before returning
-        if self._is_prompt_overflow(prompt_len=len(next_token_ids)):
+        # Terminal if the next prompt is over budget
+        if self._is_prompt_overflow(prompt_len=len(next_prompt_token_ids)):
             return _terminal(
-                next_messages=list(self._messages),
+                next_prompt_messages=list(self._messages),
                 status=RolloutStatus.TRUNCATED_PROMPT_OVERFLOW,
-                last_response_messages=new_messages,
+                assistant_message=assistant,
+                env_messages=env_step.messages,
+                env_reward_components=env_step.reward_components,
             )
 
-        self._last_prompt_ids = list(next_token_ids)
-        return TokenizedResponseStep(
-            next_token_ids=list(next_token_ids),
-            next_messages=list(self._messages),
-            last_response_messages=new_messages,
+        self._last_prompt_ids = list(next_prompt_token_ids)
+        return TokenizedStepOutput(
+            next_prompt_token_ids=list(next_prompt_token_ids),
+            next_prompt_messages=list(self._messages),
             status=RolloutStatus.ONGOING,
+            assistant_message=assistant,
+            env_messages=env_step.messages,
+            env_reward_components=env_step.reward_components,
         )
 
     async def close(self) -> None:
         await self._message_env.close()
 
     def _is_prompt_overflow(self, *, prompt_len: int) -> bool:
-        cap = self._limits.max_rollout_tokens
+        cap = self._config.max_rollout_tokens
         return cap is not None and prompt_len >= cap
 
 
 def _terminal(
     *,
-    next_messages: list[Message],
+    next_prompt_messages: list[Message],
     status: RolloutStatus,
-    last_response_messages: list[Message] | None = None,
-) -> TokenizedResponseStep:
-    """Build a terminal `TokenizedResponseStep` with the given terminal status."""
-    return TokenizedResponseStep(
-        next_token_ids=None,
-        next_messages=next_messages,
+    assistant_message: Message | None = None,
+    env_messages: list[Message] | None = None,
+    env_reward_components: dict[str, float] | None = None,
+) -> TokenizedStepOutput:
+    """Build a terminal `TokenizedStepOutput` with the given status."""
+    return TokenizedStepOutput(
+        next_prompt_token_ids=None,
+        next_prompt_messages=next_prompt_messages,
         status=status,
-        last_response_messages=last_response_messages or [],
+        assistant_message=assistant_message,
+        env_messages=list(env_messages or []),
+        env_reward_components=dict(env_reward_components or {}),
     )

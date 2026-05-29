@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from renderers import Renderer
 
 from torchtitan.config import Configurable
-from torchtitan.experiments.rl.envs.renderer_env import EnvLimits, RendererEnv
+from torchtitan.experiments.rl.envs.renderer_env import RendererEnv, RendererEnvConfig
 from torchtitan.experiments.rl.rollouts.types import DatasetOutput, Rollout
 from torchtitan.experiments.rl.rubrics import Reward, Rubric
 
@@ -25,8 +25,8 @@ class Task(Configurable):
     per-group step). Task contributes the per-task pieces: how to build
     envs for one example, and how to score one group's rollouts.
 
-    Subclass and set `self.rubric` / `self.env_limits` in `__init__`, then
-    implement `make_envs`. `score_group` has a default impl that delegates
+    Subclass and set `self.rubric` / `self.renderer_env_config` in `__init__`,
+    then implement `make_envs`. `score_group` has a default impl that delegates
     to `self.rubric.score_group` and returns one `Reward` per rollout.
     """
 
@@ -35,7 +35,7 @@ class Task(Configurable):
         """Empty base; concrete tasks add fields."""
 
     rubric: Rubric
-    env_limits: EnvLimits
+    renderer_env_config: RendererEnvConfig
 
     # TODO: revisit the Renderer being injected into `make_envs` once we
     # know whether Task should own a Renderer (per-task chat templates).

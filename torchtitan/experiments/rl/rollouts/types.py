@@ -60,13 +60,18 @@ class RolloutTurn:
     """Trainer policy version when this response was sampled."""
 
     # Logging
-    response_messages: list[Message] = field(default_factory=list)  # [M_response]
-    """Parsed assistant + env-appended messages (assistant first)."""
+    prompt_messages: list[Message] = field(default_factory=list)  # [M_prompt]
+    """Messages rendered into `prompt_token_ids`."""
+
+    assistant_message: Message | None = None
+    """The model's parsed turn (generator output as a message)."""
+
+    env_messages: list[Message] = field(default_factory=list)  # [M_env]
+    """The env's reply messages this turn (tool / user)."""
 
     # For rubrics
     reward_components: dict[str, float] = field(default_factory=dict)
-    """Optional per-turn component reward, provided by the env and used by the rubric.
-    `None` until scored."""
+    """Optional per-turn component reward, provided by the env and used by the rubric."""
 
 
 @dataclass(kw_only=True, slots=True)
@@ -115,9 +120,8 @@ class RolloutGroup:
 class DatasetOutput:
     """One row from a dataset, ready for env construction."""
 
-    task: str
-    """Task identifier the controller uses to dispatch this row to the right
-    `Task` in `RLTrainer`."""
+    task_name: str
+    """Routes the row to a `Task` in `RLTrainer.tasks`."""
 
     env_input: object
     """Task-specific payload consumed by `Task.make_envs`. Each task defines

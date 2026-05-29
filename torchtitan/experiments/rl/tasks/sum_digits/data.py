@@ -31,7 +31,7 @@ class SumDigitsDataset(Configurable):
 
         ds = SumDigitsDataset(SumDigitsDataset.Config(seed=42))
         ex = ds.sample_example()
-        # ex.task == "sum_digits"
+        # ex.task_name == "sum_digits"
         # ex.env_input is a SumDigitsInput
     """
 
@@ -51,6 +51,6 @@ class SumDigitsDataset(Configurable):
         numbers = [self._rng.randint(10, 99) for _ in range(n)]
         target = sum(int(d) for num in numbers for d in str(num))
         return DatasetOutput(
-            task=self.TASK_NAME,
+            task_name=self.TASK_NAME,
             env_input=SumDigitsInput(numbers=numbers, target=target),
         )

@@ -10,11 +10,11 @@ from dataclasses import dataclass, field
 
 from renderers import Renderer
 
-from torchtitan.experiments.rl.envs import EnvLimits, RendererEnv
-from torchtitan.experiments.rl.recipes import Task
-from torchtitan.experiments.rl.recipes.sum_digits.env import SumDigitsEnv
-from torchtitan.experiments.rl.recipes.sum_digits.grader import SumDigitsRubric
+from torchtitan.experiments.rl.envs import RendererEnv, RendererEnvConfig
 from torchtitan.experiments.rl.rollouts.types import DatasetOutput
+from torchtitan.experiments.rl.tasks import Task
+from torchtitan.experiments.rl.tasks.sum_digits.env import SumDigitsEnv
+from torchtitan.experiments.rl.tasks.sum_digits.grader import SumDigitsRubric
 
 
 class SumDigitsTask(Task):
@@ -25,12 +25,14 @@ class SumDigitsTask(Task):
         rubric: SumDigitsRubric.Config = field(default_factory=SumDigitsRubric.Config)
         """SumDigits rubric config."""
 
-        env_limits: EnvLimits = field(default_factory=EnvLimits)
-        """Renderer-env operational limits, e.g. `max_rollout_tokens`."""
+        renderer_env_config: RendererEnvConfig = field(
+            default_factory=RendererEnvConfig
+        )
+        """Renderer-env limits, e.g. `max_rollout_tokens`."""
 
     def __init__(self, config: Config) -> None:
         self.rubric = config.rubric.build()
-        self.env_limits = config.env_limits
+        self.renderer_env_config = config.renderer_env_config
 
     def make_envs(
         self,
@@ -44,7 +46,7 @@ class SumDigitsTask(Task):
             RendererEnv(
                 message_env=SumDigitsEnv(env_input=example.env_input),
                 renderer=renderer,
-                limits=self.env_limits,
+                config=self.renderer_env_config,
             )
             for _ in range(group_size)
         ]

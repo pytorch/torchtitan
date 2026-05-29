@@ -52,9 +52,8 @@ from torchtitan.experiments.rl.actors.generator import (
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import Batcher
-from torchtitan.experiments.rl.envs import RendererEnv, TokenizedResponseStep
+from torchtitan.experiments.rl.envs import RendererEnv, TokenizedStepOutput
 from torchtitan.experiments.rl.observability import metrics as m
-from torchtitan.experiments.rl.recipes import Task
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollouts import (
     DatasetOutput,
@@ -66,6 +65,7 @@ from torchtitan.experiments.rl.rollouts import (
     RolloutStatus,
     RolloutTurn,
 )
+from torchtitan.experiments.rl.tasks import Task
 from torchtitan.experiments.rl.types import Episode
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
@@ -200,7 +200,7 @@ class RLTrainer(Configurable):
     Owns a `PolicyTrainer` actor (gradient updates), a `VLLMGenerator` actor
     (sampling), one or more `Task`s (rubric + env construction), and a
     `Dataset` per phase (train/validation). Each row from the dataset
-    carries `DatasetOutput.task`, which the controller uses to route the
+    carries `DatasetOutput.task_name`, which the controller uses to route the
     row to the matching `Task` in `tasks`. Each training step samples
     groups of rollouts, scores them via per-task rubrics, builds GRPO
     advantages, and syncs trainer weights to the generator.
@@ -218,17 +218,17 @@ class RLTrainer(Configurable):
         """Top-level config for RL training."""
 
         model_spec: ModelSpec | None = None
-        """Model specification shared by trainer and generator. Set
-        programmatically via `config_registry` (not from CLI)."""
+        """Model specification shared by trainer and generator.
+        Set programmatically via config_registry (not from CLI)."""
 
         hf_assets_path: str = "./tests/assets/tokenizer"
-        """Path to HF assets (model weights, tokenizer, config files)."""
+        """Path to HF assets folder (model weights, tokenizer, config files)."""
 
         num_steps: int = 10
         """Number of RL training steps."""
 
         dump_folder: str = "outputs/rl"
-        """Root output folder for RL artifacts."""
+        """Root output folder for RL artifacts (temp weights, logs, etc.)."""
 
         num_prompts_per_step: int = 5
         """Number of distinct prompts (= GRPO groups) drawn per training step.
@@ -236,10 +236,10 @@ class RLTrainer(Configurable):
         `group_size` is `generator.sampling.n`."""
 
         num_validation_samples: int = 20
-        """Number of held-out prompts scored greedily per validation pass."""
+        """Number of held-out prompts scored greedily (temp=0, n=1) per validation pass."""
 
         train_dataset: Configurable.Config = field(default=None)  # type: ignore[assignment]
-        """Training dataset; rows route to `tasks` by `DatasetOutput.task`."""
+        """Training dataset; rows route to `tasks` by `DatasetOutput.task_name`."""
 
         validation_dataset: Configurable.Config = field(default=None)  # type: ignore[assignment]
         """Validation dataset; same routing as `train_dataset`."""
@@ -257,22 +257,21 @@ class RLTrainer(Configurable):
         `num_prompts_per_step * group_size` rollouts."""
 
         log_samples: bool = False
-        """Whether to log the first completion per episode during training and
-        validation."""
+        """Log first completion per episode during training and validation."""
 
         compile: CompileConfig = field(default_factory=CompileConfig)
-        """`torch.compile` config shared by trainer and generator."""
+        """torch.compile config shared by trainer and generator."""
 
         batcher: Batcher.Config = field(default_factory=Batcher.Config)
-        """Batcher config (local_batch_size, seq_len)."""
+        """Batcher config: local_batch_size, seq_len."""
 
         trainer: PolicyTrainer.Config = field(
             default_factory=lambda: PolicyTrainer.Config(loss=GRPOLoss.Config())
         )
-        """`PolicyTrainer` actor config (optimizer, training, parallelism)."""
+        """PolicyTrainer config. Controls optimizer, training, parallelism."""
 
         generator: VLLMGenerator.Config = field(default_factory=VLLMGenerator.Config)
-        """`VLLMGenerator` actor config (vLLM engine, sampling)."""
+        """VLLMGenerator actor configuration (vLLM engine, sampling)."""
 
         metrics: m.MetricsProcessor.Config = field(
             default_factory=m.MetricsProcessor.Config
@@ -659,10 +658,10 @@ class RLTrainer(Configurable):
         for group_idx in range(num_groups):
             # TODO: add dataloader and get a batch
             example: DatasetOutput = dataset.sample_example()
-            task: Task = self._str2task_map[example.task]
+            task: Task = self._str2task_map[example.task_name]
             pending_groups.append(
                 _PendingGroup(
-                    group_id=f"{example.task}/step={step}/group={group_offset + group_idx}",
+                    group_id=f"{example.task_name}/step={step}/group={group_offset + group_idx}",
                     example=example,
                     task=task,
                     envs=task.make_envs(
@@ -675,7 +674,7 @@ class RLTrainer(Configurable):
 
         try:
             # 4. For each env, get initial prompt (n_groups * n_rollouts_per_group)
-            initial_steps: list[list[TokenizedResponseStep]] = await asyncio.gather(
+            initial_steps: list[list[TokenizedStepOutput]] = await asyncio.gather(
                 *(
                     asyncio.gather(*(env.initial_prompt() for env in group.envs))
                     for group in pending_groups
@@ -703,7 +702,7 @@ class RLTrainer(Configurable):
             completions, gen_metrics = self._get_rank_0_value(
                 self.generator.generate.call(
                     [
-                        list(initial_steps[group_idx][sample_idx].next_token_ids)
+                        list(initial_steps[group_idx][sample_idx].next_prompt_token_ids)
                         for group_idx, sample_idx in rollout_index
                     ],
                     sampling_config=replace(sampling_cfg, n=1),
@@ -778,7 +777,7 @@ class RLTrainer(Configurable):
         group_id: str,
         sample_idx: int,
         env: RendererEnv,
-        initial_step: TokenizedResponseStep,
+        initial_step: TokenizedStepOutput,
         completion: Completion,
     ) -> Rollout:
         """Step one env into a Rollout. On unexpected failure,
@@ -802,11 +801,14 @@ class RLTrainer(Configurable):
             step_result = await env.step_completion(completion)
             rollout_turns.append(
                 RolloutTurn(
-                    prompt_token_ids=list(initial_step.next_token_ids),
+                    prompt_token_ids=list(initial_step.next_prompt_token_ids),
                     response_token_ids=list(completion.token_ids),
                     response_logprobs=list(completion.token_logprobs),
                     policy_version=completion.policy_version,
-                    response_messages=list(step_result.last_response_messages),
+                    prompt_messages=list(initial_step.next_prompt_messages),
+                    assistant_message=step_result.assistant_message,
+                    env_messages=list(step_result.env_messages),
+                    reward_components=dict(step_result.env_reward_components),
                 )
             )
             status = step_result.status
