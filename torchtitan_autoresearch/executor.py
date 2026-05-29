@@ -94,68 +94,89 @@ class FakeExecutor:
 # Subprocess executor — the real implementation (needs GPUs + TorchTitan).
 # ---------------------------------------------------------------------------
 class SubprocessExecutor:
-    """Runs candidates through the TorchTitan launcher and torchrun entrypoints.
+    """Runs candidates through the real TorchTitan launcher on GPUs.
+
+    Each candidate is one training run with TorchTitan's validator enabled, so a
+    single run yields both throughput (per-step `tps`, parsed by ``measure``) and
+    the held-out eval loss (`validate step: ... loss:`, the quality signal). The
+    log is cached per candidate so ``run_throughput`` and ``run_eval`` share one
+    GPU run.
 
     Measurement is harness-pinned: ``--metrics.log_freq`` and the step cap come
-    from the constitution, not the candidate. Throughput is parsed by ``measure``;
-    verify/eval entrypoints print one parseable line each.
+    from the constitution, not the candidate. ``base_command`` carries the fixed
+    regime flags (e.g. the bf16 golden dtype) prepended to each candidate command.
+
+    Verify (the faithful/affecting routing optimization) is not yet wired, so
+    ``run_verify`` is conservative: every candidate is treated as quality-affecting
+    and gets a real eval. This is safe (degradation-sensitive) at the cost of
+    eval-ing changes that are actually quality-neutral.
     """
 
-    def __init__(self, repo_root: str, log_freq: int, ngpu: int = 8, run_dir: str = "/tmp"):
+    def __init__(
+        self,
+        repo_root: str,
+        log_freq: int,
+        ngpu: int,
+        *,
+        base_command: list[str] | None = None,
+        val_dataset: str = "c4_test",
+        val_steps: int = 8,
+        run_dir: str = "/tmp/ar_runs",
+    ):
         self.repo_root = repo_root
         self.log_freq = log_freq
         self.ngpu = ngpu
+        self.base_command = base_command or []
+        self.val_dataset = val_dataset
+        self.val_steps = val_steps
         self.run_dir = run_dir
+        os.makedirs(run_dir, exist_ok=True)
+        self._log_cache: dict[str, str] = {}  # candidate key -> log path
 
-    def _run(self, argv: list[str], log_path: str) -> int:
-        env = {**os.environ, "NGPU": str(self.ngpu)}
-        with open(log_path, "w") as f:
-            return subprocess.run(argv, stdout=f, stderr=subprocess.STDOUT, env=env).returncode
+    def _key(self, c: Candidate) -> str:
+        return (c.commit or c.label or "run")[:16].replace("/", "_")
+
+    def _run_once(self, c: Candidate, steps: int) -> str:
+        """Run one validation-enabled training run; return the log path (cached)."""
+        key = self._key(c)
+        if key in self._log_cache:
+            return self._log_cache[key]
+        log = os.path.join(self.run_dir, f"{key}.log")
+        argv = [
+            os.path.join(self.repo_root, "run_train.sh"),
+            *self.base_command, *c.command,
+            f"--training.steps={steps}",
+            f"--metrics.log_freq={self.log_freq}",
+            "--validator.enable",
+            f"--validator.dataloader.dataset={self.val_dataset}",
+            f"--validator.freq={steps}",          # validate once, at the last step
+            f"--validator.steps={self.val_steps}",
+            f"--dump_folder={os.path.join(self.run_dir, key + '_dump')}",
+        ]
+        env = {**os.environ, "NGPU": str(self.ngpu), "MODULE": "qwen3", "CONFIG": "qwen3_14b"}
+        with open(log, "w") as f:
+            subprocess.run(argv, stdout=f, stderr=subprocess.STDOUT, env=env)
+        self._log_cache[key] = log
+        return log
 
     def run_throughput(self, c, steps, window):
-        log = os.path.join(self.run_dir, f"tps_{c.commit[:7]}.log")
-        argv = [
-            os.path.join(self.repo_root, "run_train.sh"), *c.command,
-            f"--training.steps={steps}", f"--metrics.log_freq={self.log_freq}",
-        ]
-        self._run(argv, log)
-        text = open(log).read() if os.path.exists(log) else ""
+        text = open(self._run_once(c, steps)).read()
         meas = M.measure(text, window)
         if not meas.steps or not meas.loss_finite:
             return ThroughputResult(ok=False, crash_text=text[-4000:])
-        return ThroughputResult(
-            ok=True, tps_mean=meas.tps_mean, tps_cv=meas.tps_cv,
-            peak_mem_gb=meas.peak_memory_gb,
-        )
+        return ThroughputResult(ok=True, tps_mean=meas.tps_mean, tps_cv=meas.tps_cv,
+                                peak_mem_gb=meas.peak_memory_gb)
 
     def run_verify(self, c):
-        import re
-        log = os.path.join(self.run_dir, f"verify_{c.commit[:7]}.log")
-        argv = [
-            os.path.join(os.path.dirname(__file__), "run_verify.sh"), *c.command,
-            "--debug.seed=42", "--debug.deterministic",
-        ]
-        self._run(argv, log)
-        text = open(log).read() if os.path.exists(log) else ""
-        m = re.search(r"VERIFY:\s*status=(\w+)", text)
-        # The verify entrypoint reports faithfulness vs the golden; "pass" is
-        # accepted as a synonym for "faithful" for older entrypoint builds.
-        faithful = bool(m) and m.group(1) in ("faithful", "pass")
-        return VerifyResult(faithful=faithful, detail=text[-2000:])
+        # Conservative: route every candidate to the real eval (verify-routing TODO).
+        return VerifyResult(faithful=False, detail="verify-routing not wired; eval all")
 
-    def run_eval(self, c):
-        import re
-        log = os.path.join(self.run_dir, f"eval_{c.commit[:7]}.log")
-        argv = [
-            os.path.join(self.repo_root, "run_train.sh"), *c.command,
-            f"--metrics.log_freq={self.log_freq}", "--eval.enable",
-        ]
-        self._run(argv, log)
-        text = open(log).read() if os.path.exists(log) else ""
-        m = re.search(r"EVAL:\s*eval_loss=([-\d.eE+]+)", text)
-        if not m:
+    def run_eval(self, c, steps=10):
+        text = open(self._run_once(c, steps)).read()
+        loss = M.parse_validation_loss(text)
+        if loss is None:
             return EvalResult(ok=False, crash_text=text[-4000:])
-        return EvalResult(ok=True, eval_loss=float(m.group(1)))
+        return EvalResult(ok=True, eval_loss=loss)
 
 
 def classify_crash(text: str) -> cc.CrashVerdict:

@@ -31,6 +31,17 @@ _STEP = re.compile(
 )
 _PEAK_FLOPS = re.compile(r"Peak FLOPS used for computing MFU:\s*([\d.eE+]+)")
 _CAPACITY = re.compile(r"CUDA capacity:\s*(.+?)\s+with\s+([\d.]+)GiB")
+_VAL_LOSS = re.compile(r"validate step:\s*\d+\s+loss:\s*([-\d.eE+]+)")
+
+
+def parse_validation_loss(text: str) -> float | None:
+    """The held-out eval loss from TorchTitan's validator (the quality signal).
+
+    Returns the last reported `validate step: N  loss: X` value, or None if the
+    run did not run validation.
+    """
+    vals = _VAL_LOSS.findall(_ANSI.sub("", text))
+    return float(vals[-1]) if vals else None
 
 
 @dataclass
