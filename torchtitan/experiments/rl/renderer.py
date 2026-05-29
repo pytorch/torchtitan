@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
+import typing
 from dataclasses import dataclass
 
-from renderers import create_renderer, Renderer
+from renderers import create_renderer, Renderer, RendererConfig as _RendererConfig
 
 from torchtitan.config import Configurable
 
@@ -46,6 +47,7 @@ class RendererConfig(Configurable.Config):
     name: str = "auto"
     tool_parser: str | None = None
     reasoning_parser: str | None = None
+    enable_thinking: bool = True
     preserve_all_thinking: bool = False
     preserve_thinking_between_tool_calls: bool = False
 
@@ -53,11 +55,22 @@ class RendererConfig(Configurable.Config):
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(model_path)
-        return create_renderer(
-            tokenizer,
-            self.name,
-            tool_parser=self.tool_parser,
-            reasoning_parser=self.reasoning_parser,
-            preserve_all_thinking=self.preserve_all_thinking,
-            preserve_thinking_between_tool_calls=self.preserve_thinking_between_tool_calls,
-        )
+
+        # `renderers` takes a typed config from a discriminated union keyed on
+        # `name`. Pick the variant for our `name` and pass only the knobs it
+        # supports (e.g. `enable_thinking` exists on Qwen3 but not Auto).
+        variants = typing.get_args(typing.get_args(_RendererConfig)[0])
+        config_cls = {v.model_fields["name"].default: v for v in variants}[self.name]
+        knobs = {
+            "enable_thinking": self.enable_thinking,
+            "preserve_all_thinking": self.preserve_all_thinking,
+            "preserve_thinking_between_tool_calls": self.preserve_thinking_between_tool_calls,
+            "tool_parser": self.tool_parser,
+            "reasoning_parser": self.reasoning_parser,
+        }
+        kwargs = {
+            k: v
+            for k, v in knobs.items()
+            if k in config_cls.model_fields and v is not None
+        }
+        return create_renderer(tokenizer, config_cls(**kwargs))
