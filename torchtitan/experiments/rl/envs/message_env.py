@@ -28,8 +28,8 @@ class StepOutput:
     """Env response to one parsed assistant message.
 
     `done` ends the conversation; `RendererEnv` maps it to a `RolloutStatus`
-    and detects truncation/errors the env never sees. The env may attach
-    `reward_components` (e.g. tool-call success); the rubric decides how to use them.
+    and detects truncation/errors. The env may attach `reward_components`
+    (e.g. tool-call success); the rubric decides how to use them.
     """
 
     messages: list[Message] = field(default_factory=list)  # [M_env]
@@ -65,14 +65,13 @@ class MessageEnv(abc.ABC):
 
     @abc.abstractmethod
     async def reset(self) -> ResetOutput:
-        """Return the initial conversation + tools. The wrapper takes ownership
-        of the returned message list (it may mutate it across turns)."""
+        """Return the initial conversation + tools for prompt rendering."""
 
     @abc.abstractmethod
     async def step_message(self, msg: Message) -> StepOutput:
-        """Apply one parsed assistant message; return the env's reply.
+        """Return the env's reply to assistant message.
 
-        Subclasses MUST NOT inspect `finish_reason` / token counts / parse
+        Does not need to inspect `finish_reason` / token counts / parse
         failures; `RendererEnv` handles those before calling this.
 
         Args:
@@ -80,8 +79,7 @@ class MessageEnv(abc.ABC):
                 `reasoning_content`, optional `tool_calls`).
 
         Returns:
-            `StepOutput` with env reply messages, `done`, and optional
-            `reward_components`. Final rewards are computed by the rubric.
+            `StepOutput` with env reply messages.
         """
 
     async def close(self) -> None:

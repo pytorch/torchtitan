@@ -21,17 +21,8 @@ def last_assistant_text(rollout: Rollout) -> str:
     return (msg.get("content") or "") if msg else ""
 
 
-def rollout_to_episode(rollout: Rollout, *, text: str = "") -> Episode:
-    """Flatten a single-turn `Rollout` into the batcher's `Episode`.
-
-    Args:
-        rollout: A finished `Rollout`. Must have exactly one turn.
-        text: Decoded assistant text (typically `last_assistant_text(rollout)`).
-
-    Returns:
-        `Episode` containing prompt tokens, response tokens, sampling
-        logprobs, reward, and advantage for training.
-    """
+def rollout_to_episode(rollout: Rollout) -> Episode:
+    """Flatten a single-turn `Rollout` into the batcher's `Episode`."""
     # TODO: support multi-turn rollout flattening.
     if len(rollout.turns) != 1:
         raise ValueError(
@@ -42,7 +33,7 @@ def rollout_to_episode(rollout: Rollout, *, text: str = "") -> Episode:
         policy_version=turn.policy_version,
         prompt_idx=rollout.sample_idx,
         prompt_token_ids=turn.prompt_token_ids,
-        text=text,
+        text=last_assistant_text(rollout),
         token_ids=turn.response_token_ids,
         token_logprobs=turn.response_logprobs,
         reward=rollout.reward,

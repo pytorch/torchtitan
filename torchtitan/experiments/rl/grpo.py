@@ -57,7 +57,6 @@ from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollouts import (
     DatasetOutput,
-    last_assistant_text,
     prepare_rollout_metrics,
     Rollout,
     rollout_to_episode,
@@ -850,22 +849,22 @@ class RLTrainer(Configurable):
         episodes: list[Episode] = []
         group_stds: list[float] = []
         for group_idx, group in enumerate(rollout_groups):
-            rewards = [
-                float(rollout.reward)
-                for rollout in group.rollouts
-                if rollout.reward is not None
-            ]
-            if not rewards:
+            # Drop the whole group if any sibling has no trainable tokens (e.g. an
+            # ERROR rollout with no turns); rollout_to_episode requires one turn.
+            if any(not rollout.turns for rollout in group.rollouts):
+                logger.warning(
+                    "group %s has a turn-less rollout; dropping the group",
+                    group.group_id,
+                )
                 continue
+
+            rewards = [rollout.reward for rollout in group.rollouts]
             group_mean = sum(rewards) / len(rewards)
             group_stds.append(statistics.pstdev(rewards))
+
             for rollout in group.rollouts:
-                # Skip rollouts with no usable training data (e.g. prompt
-                # overflow → empty turns).
-                if rollout.reward is None or not rollout.turns:
-                    continue
                 rollout.advantage = rollout.reward - group_mean
-                episode = rollout_to_episode(rollout, text=last_assistant_text(rollout))
+                episode = rollout_to_episode(rollout)
                 episodes.append(replace(episode, prompt_idx=group_idx))
 
         num_groups = len(rollout_groups)
@@ -933,11 +932,7 @@ class RLTrainer(Configurable):
         rollouts = [rollout for group in rollout_groups for rollout in group.rollouts]
 
         if self.config.log_samples:
-            preview = [
-                rollout_to_episode(r, text=last_assistant_text(r))
-                for r in rollouts
-                if r.reward is not None
-            ]
+            preview = [rollout_to_episode(r) for r in rollouts if r.reward is not None]
             _log_samples(preview)
 
         validation_metrics = prepare_rollout_metrics("validation", rollouts)
