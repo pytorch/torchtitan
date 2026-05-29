@@ -23,11 +23,10 @@ from torchtitan.models.common.attention import (
     get_sliding_window_mask_mod,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
-from torchtitan.tools.logging import logger
 
 
 class Attention(BaseAttention):
@@ -186,32 +185,11 @@ class GptOssModel(Decoder):
         def update_from_config(
             self,
             *,
-            trainer_config,
+            config,
             **kwargs,
         ) -> None:
-            training = trainer_config.training
-            parallelism = trainer_config.parallelism
-            seq_len = training.seq_len
-            if seq_len > self.rope.max_seq_len:
-                logger.warning(
-                    f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
-                )
-
-            # Sync rope max_seq_len
-            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
-
-            tp = parallelism.tensor_parallel_degree
-            if tp > 1:
-                n_heads = self.layers[0].attention.n_heads
-                n_kv_heads = self.layers[0].attention.n_kv_heads
-                if n_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
-                    )
-                if n_kv_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
-                    )
+            Decoder.Config.update_from_config(self, config=config, **kwargs)
+            parallelism = config.parallelism
 
             from torchtitan.models.gpt_oss.sharding import set_gpt_oss_sharding_config
 

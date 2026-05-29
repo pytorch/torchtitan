@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 import torch
 from torch import nn, Tensor
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.flux.model.autoencoder import AutoEncoderParams
 from torchtitan.models.flux.model.layers import (
     DoubleStreamBlock,
@@ -53,7 +53,7 @@ class FluxModel(BaseModel):
         double_blocks: list[DoubleStreamBlock.Config]
         single_blocks: list[SingleStreamBlock.Config]
 
-        def update_from_config(self, *, trainer_config, **kwargs) -> None:
+        def update_from_config(self, *, config, **kwargs) -> None:
             pass
 
         def get_nparams_and_flops(

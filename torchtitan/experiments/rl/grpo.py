@@ -111,7 +111,7 @@ class GRPOLoss(Configurable):
         Args:
             policy_logprobs: [B, L] log π_θ(a_t | s_t) from the current policy.
             generator_logprobs: [B, L] log π_old(a_t | s_t) from the sampling policy.
-            loss_mask: [B, L] 1.0 for response tokens, 0.0 for prompt/padding.
+            loss_mask: [B, L] bool mask; True for response tokens.
             advantages: [B, L] per-token advantages (0.0 for prompt/padding).
             num_global_valid_tokens: total response tokens across all microbatches
                 and DP ranks; used as the loss denominator so gradient

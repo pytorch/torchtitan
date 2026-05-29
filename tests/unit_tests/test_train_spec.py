@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.llama3 import model_registry, parallelize_llama
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
@@ -22,7 +22,7 @@ class FakeModel(BaseModel):
     class Config(BaseModel.Config):
         hidden: int = 8
 
-        def update_from_config(self, *, trainer_config, **kwargs):
+        def update_from_config(self, *, config, **kwargs):
             pass
 
         def get_nparams_and_flops(self, model, seq_len):

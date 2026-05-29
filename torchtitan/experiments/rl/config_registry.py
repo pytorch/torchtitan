@@ -15,7 +15,6 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
-    BatchConfig,
     CompileConfig,
     DebugConfig,
     ParallelismConfig,
@@ -23,7 +22,7 @@ from torchtitan.config import (
 )
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.batcher import Batcher
+from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.grpo import GRPOLoss, RLTrainer
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.recipes.sum_digits import SumDigitsDataset, SumDigitsTask
@@ -45,7 +44,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         validation_dataset=SumDigitsDataset.Config(seed=99),
         tasks={"sum_digits": SumDigitsTask.Config()},
         renderer=RendererConfig(name="qwen3"),
-        metrics=MetricsProcessor.Config(),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
         ),
@@ -102,7 +101,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         validation_dataset=SumDigitsDataset.Config(seed=99),
         tasks={"sum_digits": SumDigitsTask.Config()},
         renderer=RendererConfig(name="qwen3"),
-        metrics=MetricsProcessor.Config(),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
         ),
@@ -160,7 +159,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
         validation_dataset=SumDigitsDataset.Config(seed=99),
         tasks={"sum_digits": SumDigitsTask.Config()},
         renderer=RendererConfig(name="qwen3"),
-        metrics=MetricsProcessor.Config(),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
         ),
@@ -221,7 +220,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
         validation_dataset=SumDigitsDataset.Config(seed=99),
         tasks={"sum_digits": SumDigitsTask.Config()},
         renderer=RendererConfig(name="qwen3"),
-        metrics=MetricsProcessor.Config(),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
         ),

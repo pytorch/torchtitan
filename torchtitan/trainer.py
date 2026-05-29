@@ -246,7 +246,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         model_config = model_spec.model
         # set the model args from training job configs
         model_config.update_from_config(
-            trainer_config=config,
+            config=config,
         )
         self.model_config = model_config
 

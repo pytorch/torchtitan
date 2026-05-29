@@ -5,27 +5,110 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 
 import torch
 
 logger = logging.getLogger(__name__)
 
-from torchtitan.components.dataloading.utils import pack
-from torchtitan.config import BatchConfig, Configurable
+from torchtitan.config import Configurable
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import Episode, TrainingBatch
 
 
-class Batcher(Configurable):
-    """Packs episodes into ``[B, seq_len]`` batches for the trainer.
+def pack(
+    samples: Iterable[dict[str, list]],
+    max_seq_length: int,
+    pad_values: dict[str, int | float | bool],
+) -> Iterator[dict[str, torch.Tensor]]:
+    """Greedy-pack variable-length samples into [1, max_seq_length] sequences."""
+    keys = list(pad_values.keys())
+    dtypes: dict[str, torch.dtype] | None = None
+    buffer: dict[str, list] = {key: [] for key in keys}
+    position_buffer: list[int] = []
+    seq_lens_buffer: list[int] = []
+    buffer_length = 0
 
-    The controller collects rollouts until the total response tokens reach
-    ``num_tokens_target`` (= ``global_batch_size * seq_len``), then
-    packs all collected episodes into fixed-length rows, truncates to
-    ``global_batch_size``, and splits into
-    ``[grad_accum_steps][dp_degree]`` microbatches.
+    def _flush() -> dict:
+        nonlocal buffer, position_buffer, seq_lens_buffer, buffer_length
+        assert dtypes is not None
+        pad_length = max_seq_length - buffer_length
+        if pad_length > 0:
+            for key in keys:
+                buffer[key].extend([pad_values[key]] * pad_length)
+            position_buffer.extend(range(pad_length))
+
+        result: dict = {
+            key: torch.tensor(
+                buffer[key],
+                dtype=dtypes[key],
+            ).unsqueeze(0)
+            for key in keys
+        }
+        result["positions"] = torch.tensor(position_buffer, dtype=torch.long).unsqueeze(
+            0
+        )
+        result["seq_lens"] = list(seq_lens_buffer)
+
+        buffer = {key: [] for key in keys}
+        position_buffer = []
+        seq_lens_buffer = []
+        buffer_length = 0
+        return result
+
+    for sample in samples:
+        sample_length = len(sample[keys[0]])
+
+        if sample_length > max_seq_length:
+            logger.warning(
+                "Dropping sample with length %d exceeding max_seq_length %d",
+                sample_length,
+                max_seq_length,
+            )
+            continue
+
+        if dtypes is None:
+            dtypes = {key: torch.tensor(sample[key]).dtype for key in keys}
+
+        if buffer_length > 0 and buffer_length + sample_length > max_seq_length:
+            yield _flush()
+
+        for key in keys:
+            buffer[key].extend(sample[key])
+        position_buffer.extend(range(sample_length))
+        seq_lens_buffer.append(sample_length)
+        buffer_length += sample_length
+
+    if buffer_length > 0:
+        yield _flush()
+
+
+@dataclass(kw_only=True, slots=True)
+class BatchConfig:
+    """Batch shape parameters for the RL batcher.
+
+    TODO: Refactor the pre-training trainer to use an owned batch config
+    instead of keeping batch shape fields directly on TrainingConfig.
+    """
+
+    local_batch_size: int = 8
+    """Per-DP-rank batch size (rows per forward pass)."""
+
+    global_batch_size: int = -1
+    """Target number of rows per optimizer step. Defaults to
+    ``local_batch_size * data-parallel degree`` when set to -1."""
+
+    seq_len: int = 2048
+    """Tokens per row (packed sequence length)."""
+
+
+class Batcher(Configurable):
+    """Packs ``list[Episode]`` into ``[grad_accum_steps][dp_degree]``
+    microbatches, where each microbatch is a ``TrainingBatch`` of shape
+    ``[local_batch_size, seq_len]``.
+
+    ``gradient_accumulation_steps = global_batch_size // (local_batch_size * dp_degree)``
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -60,6 +143,8 @@ class Batcher(Configurable):
                 gradient accumulation matches a single large-batch step.
             packing_metrics: list of Metric objects for logging.
         """
+        # TODO: Consider consuming the iterator lazily instead of
+        # materializing all rows upfront.
         packed_rows = list(self._pack_episodes(episodes))
 
         global_batch_size = self.global_batch_size
@@ -119,17 +204,27 @@ class Batcher(Configurable):
         return microbatches, num_global_valid_tokens, packing_metrics
 
     def _pack_episodes(self, episodes: list[Episode]) -> Iterator[dict]:
-        """Pack all episodes into [1, seq_len] rows."""
+        """Pack all episodes into [1, seq_len] rows.
+
+        Each episode's raw tokens (length N) are split per sample into
+        ``input_ids = raw[:-1]`` and ``labels = raw[1:]`` (both length
+        N-1), matching the pre-training dataloader convention.
+        """
 
         def _iterate_samples() -> Iterator[dict]:
             for ep in episodes:
                 prompt_len = len(ep.prompt_token_ids)
                 response_len = len(ep.token_ids)
+                raw_ids = ep.prompt_token_ids + ep.token_ids
+                gen_lp = [0.0] * prompt_len + ep.token_logprobs
+                loss_mask = [False] * prompt_len + [True] * response_len
+                advantages = [0.0] * prompt_len + [ep.advantage] * response_len
                 yield {
-                    "input_ids": ep.prompt_token_ids + ep.token_ids,
-                    "generator_logprobs": [0.0] * prompt_len + ep.token_logprobs,
-                    "loss_mask": [0.0] * prompt_len + [1.0] * response_len,
-                    "advantages": [0.0] * prompt_len + [ep.advantage] * response_len,
+                    "input_ids": raw_ids[:-1],
+                    "labels": raw_ids[1:],
+                    "generator_logprobs": gen_lp[1:],
+                    "loss_mask": loss_mask[1:],
+                    "advantages": advantages[1:],
                 }
 
         yield from pack(
@@ -137,8 +232,9 @@ class Batcher(Configurable):
             max_seq_length=self.seq_len,
             pad_values={
                 "input_ids": self.pad_id,
+                "labels": self.pad_id,
                 "generator_logprobs": 0.0,
-                "loss_mask": 0.0,
+                "loss_mask": False,
                 "advantages": 0.0,
             },
         )
@@ -150,6 +246,7 @@ class Batcher(Configurable):
         """Concatenate packed rows into a single [B, L] TrainingBatch."""
         return TrainingBatch(
             token_ids=torch.cat([r["input_ids"] for r in rows]),
+            labels=torch.cat([r["labels"] for r in rows]),
             positions=torch.cat([r["positions"] for r in rows]),
             generator_logprobs=torch.cat([r["generator_logprobs"] for r in rows]),
             loss_mask=torch.cat([r["loss_mask"] for r in rows]),

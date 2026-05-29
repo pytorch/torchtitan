@@ -42,11 +42,13 @@ logger = logging.getLogger(__name__)
 
 
 @sl.log_trace_span("compute_logprobs")
-def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
-    """Compute per-token logprobs from logits.
+def compute_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Compute per-position logprobs from logits and pre-shifted labels.
 
-    Returns logprobs for positions 1..N (the predicted tokens).
-    Output shape is ``[batch, seq_len - 1]``.
+    ``labels`` is pre-shifted per episode in the batcher
+    (``labels[i] = raw_token_ids[i+1]``), matching the pre-training
+    dataloader convention.  No internal shift is needed.
+    Output shape matches input: ``[batch, seq_len]``.
     """
     from torch.distributed.tensor import DTensor
 
@@ -54,12 +56,10 @@ def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Ten
         # TODO: pass `grad_placements=[Replicate(), ...]` to make the autograd
         # contract explicit (see .claude/rules/distributed.md).
         logits = logits.to_local()
-    shift_logits = logits[:, :-1, :].float()
-    shift_targets = token_ids[:, 1:]
-    B, S = shift_targets.shape
+    B, S, V = logits.shape
     return -F.cross_entropy(
-        shift_logits.reshape(B * S, -1),
-        shift_targets.reshape(B * S),
+        logits.float().reshape(B * S, V),
+        labels.reshape(B * S),
         reduction="none",
         ignore_index=IGNORE_INDEX,
     ).reshape(B, S)
@@ -88,15 +88,14 @@ def verify_logprob_identity(
     Args:
         generator_logprobs: [B, L] generator logprobs from TrainingBatch.
         policy_logprobs: [B, L] trainer-computed logprobs.
-        loss_mask: [B, L] binary mask; 1.0 for response tokens.
+        loss_mask: [B, L] bool mask; True for response tokens.
         num_global_valid_tokens: Total response tokens across all DP ranks.
 
     Returns:
         PartialLogprobDrift.
     """
-    mask = loss_mask.bool()
-    ref_flat = generator_logprobs[mask].float()
-    policy_flat = policy_logprobs[mask].float()
+    ref_flat = generator_logprobs[loss_mask].float()
+    policy_flat = policy_logprobs[loss_mask].float()
 
     if ref_flat.numel() == 0:
         zero = torch.zeros((), dtype=torch.float32, device=generator_logprobs.device)
@@ -300,7 +299,7 @@ class PolicyTrainer(Actor, Configurable):
         # Fill sharding configs on the config BEFORE build via the
         # model-agnostic `update_from_config` hook (RL's trainer bypasses
         # `torchtitan.Trainer's` call, so we invoke it directly).
-        model_spec.model.update_from_config(trainer_config=config)
+        model_spec.model.update_from_config(config=config)
 
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
@@ -401,6 +400,7 @@ class PolicyTrainer(Actor, Configurable):
         local_batch = training_data[self.dp_rank]
         device = self.device
         token_ids = local_batch.token_ids.to(device)
+        labels = local_batch.labels.to(device)
         positions = local_batch.positions.to(device)
         loss_mask = local_batch.loss_mask.to(device)
         generator_logprobs = local_batch.generator_logprobs.to(device)
@@ -412,10 +412,7 @@ class PolicyTrainer(Actor, Configurable):
             logits = model(
                 token_ids, attention_masks=attention_masks, positions=positions
             )
-        # compute_logprobs returns [B, L-1]; pad to [B, L] to align with loss_mask
-        policy_logprobs = torch.nn.functional.pad(
-            compute_logprobs(logits, token_ids), (1, 0), value=0.0
-        )
+        policy_logprobs = compute_logprobs(logits, labels)
 
         with sl.log_trace_span("loss_fn"):
             loss, loss_metrics = self.loss_fn(

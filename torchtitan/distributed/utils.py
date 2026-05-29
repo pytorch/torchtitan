@@ -132,6 +132,12 @@ def set_determinism(
         )
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+        # use_deterministic_algorithms(True) enables fill_uninitialized_memory,
+        # which makes torch.empty() run a fill kernel. This kernel races with
+        # DeepEP comm streams, causing errors.
+        # This also prevents HF modeling from initializing ROPE (inv_freq) buffers to NaN.
+        # pyrefly: ignore [missing-attribute]
+        torch.utils.deterministic.fill_uninitialized_memory = False
         # env var for deterministic CuBLAS
         # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
@@ -248,9 +254,8 @@ def set_batch_invariance(enable: bool) -> None:
 
     # Register batch-invariant ATen overrides via upstream package
     # https://github.com/thinking-machines-lab/batch_invariant_ops
-    from batch_invariant_ops import (  # pyrefly: ignore [missing-import]
-        enable_batch_invariant_mode as _upstream_enable,
-    )
+    # pyrefly: ignore[missing-import]
+    from batch_invariant_ops import enable_batch_invariant_mode as _upstream_enable
 
     _upstream_enable()
 
@@ -416,7 +421,8 @@ def init_distributed(
     device_id: torch.device | None = None
     if comm_config.mode == "torchcomms":
         try:
-            import torchcomms  # noqa: F401  # pyrefly: ignore [missing-import]
+            # pyrefly: ignore[missing-import]
+            import torchcomms  # noqa: F401
         except ImportError as err:
             raise ImportError(
                 "torchcomms package is required for --comm.mode=torchcomms."
