@@ -13,8 +13,10 @@ never proposes candidates and never touches the gate, the ledger, or the branch.
     python -m torchtitan_autoresearch.observe ask    --tag may30-qwen3 "best so far?"
     python -m torchtitan_autoresearch.observe stop   --tag may30-qwen3
 
-`start` spawns the creating loop detached (survives the observer exiting) and then
-follows along; Ctrl-C stops the *watch*, not the experiment. `stop` ends it.
+`start` launches the creating loop and OWNS its lifetime: exiting the start
+observer for any reason (Ctrl-C, normal end, SIGTERM/SIGHUP, terminal close)
+tears down the loop and its GPU children. `watch` is a passive re-attach viewer
+that does not own the experiment; `stop` ends it explicitly.
 """
 
 from __future__ import annotations
@@ -89,13 +91,22 @@ class Observer:
         except OSError:
             return False
 
-    def stop(self) -> None:
+    def stop(self, grace: float = 8.0) -> None:
+        """Tear down the loop and its GPU children (SIGTERM, then SIGKILL)."""
         pid = self._pid()
-        if pid and self.is_running():
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
-            print(f"sent SIGTERM to loop process group {pid}")
-        else:
-            print("no running loop found")
+        if not (pid and self.is_running()):
+            return
+        try:
+            pgid = os.getpgid(pid)
+            os.killpg(pgid, signal.SIGTERM)
+            deadline = time.time() + grace
+            while time.time() < deadline and self.is_running():
+                time.sleep(0.3)
+            if self.is_running():
+                os.killpg(pgid, signal.SIGKILL)
+            print(f"[observer] stopped experiment loop (pgid {pgid})")
+        except OSError:
+            pass
 
     # --- read-only state ---
     def _state(self) -> dict:
@@ -193,25 +204,33 @@ def main(argv: list[str] | None = None) -> int:
         if name == "start":
             p.add_argument("--eval-dataset", default="c4_test")
             p.add_argument("--max-iters", type=int, default=8)
-            p.add_argument("--no-follow", action="store_true", help="start detached without watching")
         if name == "ask":
             p.add_argument("question")
     args = ap.parse_args(argv)
     obs = Observer(_run_dir(args.tag, args.run_dir))
 
     if args.cmd == "start":
+        # The start observer OWNS the experiment: when it exits for any reason
+        # (Ctrl-C, normal end, SIGTERM/SIGHUP, terminal close), the loop and its
+        # GPU children are torn down. There is no detached mode.
         obs.start(tag=args.tag, eval_dataset=args.eval_dataset, max_iters=args.max_iters)
-        if not args.no_follow:
-            try:
-                obs.watch()
-            except KeyboardInterrupt:
-                print("\n[observer] stopped watching; the experiment keeps running. "
-                      "Re-attach with `observe watch`, or `observe stop` to end it.")
-    elif args.cmd == "watch":
+        import atexit
+        atexit.register(obs.stop)
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, lambda *_: sys.exit(0))  # -> atexit -> obs.stop()
         try:
             obs.watch()
         except KeyboardInterrupt:
-            pass
+            print("\n[observer] exiting -> stopping the experiment...")
+        finally:
+            obs.stop()
+    elif args.cmd == "watch":
+        # A passive re-attach viewer; it does NOT own the experiment, so exiting
+        # it leaves the experiment running (use `stop` or the owning observer).
+        try:
+            obs.watch()
+        except KeyboardInterrupt:
+            print("\n[observer] detached (experiment still running; use `stop` to end it)")
     elif args.cmd == "status":
         print(obs.status())
     elif args.cmd == "ask":

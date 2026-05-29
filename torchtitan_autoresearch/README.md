@@ -62,26 +62,30 @@ https_proxy=<proxy> http_proxy=<proxy> \
   python -m torchtitan_autoresearch.observe start --tag may30-qwen3 --eval-dataset c4_validation
 ```
 
-`start` launches the creating loop as a **separate background process** (it
-survives the observer exiting) and then follows along, streaming progress. The
-loop detects the GPU count (`ngpu: auto`), creates a fresh `autoresearch/<tag>`
+`start` launches the creating loop and then follows along, streaming progress.
+The loop detects the GPU count (`ngpu: auto`), creates a fresh `autoresearch/<tag>`
 branch, calibrates the golden (throughput, deterministic faithfulness anchor,
 held-out eval bar), and hill-climbs with the quality gate live, driven by the
 built-in `KnobAgent` (config-space candidates: batch size, AC mode, …).
 
+**The start observer owns the experiment's lifetime**: exiting it for any reason
+(Ctrl-C, normal end, SIGTERM/SIGHUP, terminal close) tears down the loop and its
+GPU children. So keep it running (e.g. in tmux) for as long as you want the
+experiment alive.
+
 The observer is read-only over the experiment — it controls (start/stop) and
-broadcasts, but never proposes candidates or touches the gate. Other commands:
+broadcasts, but never proposes candidates or touches the gate. Other commands
+(`watch` is a passive re-attach that does *not* own the experiment):
 
 ```bash
-python -m torchtitan_autoresearch.observe watch  --tag may30-qwen3   # re-attach / follow
+python -m torchtitan_autoresearch.observe watch  --tag may30-qwen3   # re-attach / follow (passive)
 python -m torchtitan_autoresearch.observe status --tag may30-qwen3   # one-shot status
 python -m torchtitan_autoresearch.observe ask    --tag may30-qwen3 "best so far?"
 python -m torchtitan_autoresearch.observe stop   --tag may30-qwen3   # end the experiment
 ```
 
-Ctrl-C during `start`/`watch` stops *watching*, not the experiment. The creating
-loop (`run.py`) is an internal worker spawned by the observer and refuses to run
-directly, so there is exactly one entry point.
+The creating loop (`run.py`) is an internal worker spawned by the observer and
+refuses to run directly, so there is exactly one entry point.
 
 Verify routing is live: each candidate's seed-pinned deterministic loss
 trajectory is compared to the golden's; a faithful match skips the eval
