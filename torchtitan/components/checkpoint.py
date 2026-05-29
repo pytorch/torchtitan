@@ -61,24 +61,28 @@ class AsyncMode(str, enum.Enum):
 
 class ModelWrapper(Stateful):
     """
-    A wrapper for `nn.Module` (or a list of modules) that caches the combined
-    `state_dict` to reduce overhead during distributed checkpointing.
+    A wrapper for `nn.Module` (or a list of modules) that provides a unified
+    `Stateful` interface and aggregates underlying `state_dict`s for distributed
+    checkpointing.
 
-    In FSDP2, generating a state_dict can be computationally expensive because it
-    requires traversing the module hierarchy and computing sharding metadata for
-    distributed parameters (e.g., DTensors).
-
-    By caching the state_dict object, this class:
-        1. Reduces repeated CPU work during checkpoint planning.
-        2. Reuses the same state_dict object across calls, which may help
-           downstream checkpointing utilities (e.g., `dcp.save`) avoid
-           redundant planning work.
+    This class is needed for two main reasons:
+        1. Flattening/Aggregation: It combines the state dicts of multiple
+           different modules (like individual chunks in Pipeline Parallelism)
+           into a single flat view so the rest of the checkpointing manager
+           can easily handle it.
+        2. Object Reference Stability: By caching and returning the exact same
+           dictionary structure and Tensor object references across calls, it
+           enables downstream non-blocking/asynchronous checkpointing pipelines.
+           This stability allows async managers to keep host staging buffers
+           permanently pinned, eliminating expensive runtime memory allocation
+           and registration (`cudaHostRegister`) bottlenecks.
 
     Notes:
         - Calling `load_state_dict` updates the underlying modules and
         refreshes the cached state_dict.
-        - If the wrapped modules are modified outside this wrapper,
-        the cached state_dict may become stale.
+        - The model architecture should not be structurally modified (e.g.,
+        changing keys or replacing tensor references) after wrapping, or the
+        cache will become stale.
     """
 
     def __init__(self, model: nn.Module | list[nn.Module]) -> None:
@@ -571,8 +575,8 @@ class CheckpointManager(Configurable):
             # consolidation internally on a single rank. However, when a mapping
             # exists, the weights are distributed across multiple files (sharded).
             # The internal consolidation is disabled here and instead
-            # `consolidate_safetensors_files_on_every_rank` is used later to manage the
-            # multi-file merging process.
+            # `consolidate_safetensors_files_on_every_rank` is used later to manage
+            # the # multi-file merging process.
 
         # Execution Dispatch
         checkpoint_save_id = (
