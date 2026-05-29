@@ -19,15 +19,7 @@ _FORMAT_RE = re.compile(r"\[ANSWER\]\s*-?\d+")
 
 
 async def reward_correct(rollout: Rollout, env_input: SumDigitsInput) -> float:
-    """Reward exact final answer match.
-
-    Args:
-        rollout: Rollout containing the assistant response to grade.
-        env_input: SumDigits payload with the target digit sum.
-
-    Returns:
-        `1.0` when the last `[ANSWER] <n>` equals the target, else `0.0`.
-    """
+    """returns `1.0` when the last `[ANSWER] <n>` equals the target, else `0.0`."""
     text = last_assistant_text(rollout)
     matches = _ANSWER_RE.findall(text)
     if not matches:
@@ -35,16 +27,8 @@ async def reward_correct(rollout: Rollout, env_input: SumDigitsInput) -> float:
     return 1.0 if int(matches[-1]) == env_input.target else 0.0
 
 
-async def reward_format(rollout: Rollout, _env_input: object) -> float:
-    """Reward presence of an answer tag.
-
-    Args:
-        rollout: Rollout containing the assistant response to grade.
-        _env_input: Unused; accepted to satisfy the reward-fn interface.
-
-    Returns:
-        `1.0` when the response contains `[ANSWER] <n>`, else `0.0`.
-    """
+async def reward_format(rollout: Rollout, *args, **kwargs) -> float:
+    """returns `1.0` when the response contains `[ANSWER] <n>`, else `0.0`."""
     return 1.0 if _FORMAT_RE.search(last_assistant_text(rollout)) else 0.0
 
 
@@ -53,8 +37,6 @@ class SumDigitsRubric(Rubric):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Rubric.Config):
-        """Config for `SumDigitsRubric`."""
-
         correctness_weight: float = 1.0
         format_weight: float = 0.3
 

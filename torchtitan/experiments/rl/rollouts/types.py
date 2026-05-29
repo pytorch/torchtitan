@@ -12,24 +12,27 @@ from enum import StrEnum
 from renderers import Message
 
 
-_TRUNCATED = frozenset({"truncated_length", "truncated_overflow"})
-_ERROR = frozenset({"error_parse", "error_timeout", "error_abort"})
+_TRUNCATED = frozenset({"truncated_length", "truncated_prompt_overflow"})
+_ERROR = frozenset({"error_parse", "error_timeout", "error_abort", "error"})
 
 
 class RolloutStatus(StrEnum):
-    """Per-rollout terminal status.
+    """Per-rollout status; `ONGOING` is the only non-terminal value.
 
     Absorbs vLLM `finish_reason` and renderer/wrapper failure modes
     into one categorical axis. Trainer-facing code reads `is_error()`
-    to filter, `is_truncated()` for truncation metrics.
+    to filter, `is_truncated()` for truncation metrics, `is_terminal()`
+    to tell a finished rollout from one still running.
     """
 
+    ONGOING = "ongoing"
     COMPLETED = "completed"
     TRUNCATED_LENGTH = "truncated_length"
-    TRUNCATED_OVERFLOW = "truncated_overflow"
+    TRUNCATED_PROMPT_OVERFLOW = "truncated_prompt_overflow"
     ERROR_PARSE = "error_parse"
     ERROR_TIMEOUT = "error_timeout"
     ERROR_ABORT = "error_abort"
+    ERROR = "error"
 
     def is_truncated(self) -> bool:
         return self.value in _TRUNCATED
@@ -37,10 +40,16 @@ class RolloutStatus(StrEnum):
     def is_error(self) -> bool:
         return self.value in _ERROR
 
+    def is_terminal(self) -> bool:
+        return self is not RolloutStatus.ONGOING
+
 
 @dataclass(kw_only=True, slots=True)
 class RolloutTurn:
     """One generator completion + the env response to that completion."""
+
+    # TODO: add a `logs` field (raw prompt/response text, finish_reason, timings)
+    # so a turn can be dumped and inspected without re-deriving from tokens.
 
     prompt_token_ids: list[int]  # [L_prompt]
     """Tokens the generator saw as prompt for this turn."""
@@ -66,6 +75,9 @@ class RolloutTurn:
 class Rollout:
     """A complete rollout: ordered turns + terminal state + reward + identifier."""
 
+    # TODO: add a `logs` field (per-turn debug records / event trace) to make a
+    # full rollout reconstructable for debugging.
+
     group_id: str
     """ID for the prompt group used for advantage centering."""
 
@@ -87,6 +99,18 @@ class Rollout:
     # TODO: make it per token
     advantage: float | None = None
     """Advantage for this sample."""
+
+
+@dataclass(kw_only=True, slots=True)
+class RolloutGroup:
+    group_id: str
+    """ID for the prompt group used for advantage centering."""
+
+    env_input: object
+    """`DatasetOutput.env_input` shared by the group; passed to the rubric."""
+
+    rollouts: list[Rollout]  # [group_size]
+    """Sibling rollouts sampled from the group's shared prompt."""
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

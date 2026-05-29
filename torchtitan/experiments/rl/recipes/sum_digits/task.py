@@ -18,21 +18,15 @@ from torchtitan.experiments.rl.rollouts.types import DatasetOutput
 
 
 class SumDigitsTask(Task):
-    """SumDigits task: 2-component rubric + env builder.
-
-    Dataset lives on `RLTrainer.Config` (not here); rows are routed to
-    this task by `DatasetOutput.task == "sum_digits"`.
-    """
+    """SumDigits task: Have the model sum a sequence of digits."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Task.Config):
-        """Config for `SumDigitsTask`."""
-
         rubric: SumDigitsRubric.Config = field(default_factory=SumDigitsRubric.Config)
         """SumDigits rubric config."""
 
         env_limits: EnvLimits = field(default_factory=EnvLimits)
-        """Renderer-env operational limits, e.g. `max_generation_tokens`."""
+        """Renderer-env operational limits, e.g. `max_rollout_tokens`."""
 
     def __init__(self, config: Config) -> None:
         self.rubric = config.rubric.build()

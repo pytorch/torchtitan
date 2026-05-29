@@ -79,7 +79,7 @@ class Task(Configurable):
         return await self.rubric.score_group(rollouts, env_input)
 
     # TODO(continuous-batching): when VLLMGenerator gains continuous batching,
-    # add `do_single_rollout(example, client) -> Rollout` and migrate
-    # `RLTrainer._run_rollouts` from per-group fan-out
-    # (controller _do_group_step + task.score_group) to
-    # per-rollout fan-out via `asyncio.gather` of `do_single_rollout` calls.
+    # move the rollout loop onto Task as `do_single_rollout(example, client)
+    # -> Rollout`, so each rollout drives its own generate calls, instead of
+    # the controller's batched generate + `_do_single_rollout` fan-out in
+    # `RLTrainer._run_rollouts`.

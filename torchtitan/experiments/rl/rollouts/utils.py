@@ -58,23 +58,17 @@ def prepare_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
     Args:
         prefix: Metric namespace (e.g. `"rollout"` or `"validation"`).
         rollouts: Rollouts to summarize.
-
-    Returns:
-        Metrics for response length, prompt length, total length, truncation
-        rate, reward summary, and per-component reward means. Reward-component
-        metrics nest under `{prefix}/reward/component/<name>`.
     """
     # Lengths, truncation, reward
+    # TODO: adapt for multi-turn rollouts
     response_lens = [len(t.response_token_ids) for r in rollouts for t in r.turns]
     prompt_lens = [len(r.turns[0].prompt_token_ids) for r in rollouts if r.turns]
-    # Per-rollout totals (handles multi-turn correctly; single-turn collapses
-    # to the same value as prompt_lens[i] + response_lens[i]).
     total_lens = [
-        len(r.turns[0].prompt_token_ids)
-        + sum(len(t.response_token_ids) for t in r.turns)
+        len(r.turns[-1].prompt_token_ids) + len(r.turns[-1].response_token_ids)
         for r in rollouts
         if r.turns
     ]
+
     truncated = [float(r.status.is_truncated()) for r in rollouts]
     rewards = [r.reward for r in rollouts if r.reward is not None]
 
@@ -83,18 +77,19 @@ def prepare_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
         m.Metric(f"{prefix}/response_length", m.Max.from_list(response_lens)),
         m.Metric(f"{prefix}/prompt_length", m.Mean.from_list(prompt_lens)),
         m.Metric(f"{prefix}/prompt_length", m.Max.from_list(prompt_lens)),
+        m.Metric(f"{prefix}/total_length", m.Mean.from_list(total_lens)),
         m.Metric(f"{prefix}/total_length", m.Max.from_list(total_lens)),
         m.Metric(f"{prefix}/truncation_rate", m.Mean.from_list(truncated)),
-        m.Metric(f"{prefix}/reward", m.SummaryStats.from_list(rewards)),
+        m.Metric(f"{prefix}_reward", m.SummaryStats.from_list(rewards)),
     ]
 
     # Per-component reward breakdown
     values_by_name: dict[str, list[float]] = defaultdict(list)
-    for r in rollouts:
-        for name, value in r.reward_components.items():
+    for rollout in rollouts:
+        for name, value in rollout.reward_components.items():
             values_by_name[name].append(float(value))
     out.extend(
-        m.Metric(f"{prefix}/reward/component/{name}", m.Mean.from_list(values))
+        m.Metric(f"{prefix}_reward/component/{name}", m.Mean.from_list(values))
         for name, values in sorted(values_by_name.items())
     )
     return out

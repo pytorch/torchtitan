@@ -22,21 +22,19 @@ if TYPE_CHECKING:
 # TODO: revisit the `EnvLimits` name once tool/browser envs share this policy.
 @dataclass(kw_only=True, slots=True)
 class EnvLimits:
-    """Operational policy applied at the `RendererEnv` boundary."""
+    """Boundaries to be enforced by `RendererEnv`"""
 
-    max_trajectory_tokens: int | None = None
-    """Hard cap on `prompt_tokens + generation_tokens` per turn; `None`
-    disables overflow checks."""
-
-    max_generation_tokens: int | None = None
-    """Reserved tokens for the upcoming generation when checking overflow."""
+    max_rollout_tokens: int | None = None
+    """Hard cap on number of tokens a Rollout can hold.
+    If the next prompt exceeds it, the rollout turn becomes terminal;
+    `None` disables the check."""
 
     step_timeout_s: float | None = 1800.0
     """Wall-clock timeout for one `MessageEnv.step_message` call."""
 
 
 @dataclass(kw_only=True, slots=True)
-class TokenizedTurn:
+class TokenizedResponseStep:
     """One turn boundary in the rollout.
 
     Returned by both `RendererEnv.initial_prompt` and `RendererEnv.step_completion`.
@@ -50,13 +48,13 @@ class TokenizedTurn:
     next_messages: list[Message]  # [M_next]
     """Full conversation, from all turns, at the next-prompt point."""
 
-    status: RolloutStatus | None = None
-    """Terminal status when this turn ends the rollout; `None` while the
-    rollout is still running (initial and non-terminal turns)."""
-
     last_response_messages: list[Message] = field(default_factory=list)  # [M_response]
     """Messages appended this turn (parsed assistant message + env's tool /
     user replies). Empty on the initial prompt."""
+
+    status: RolloutStatus
+    """`ONGOING` while the rollout is still running (initial and non-terminal
+    turns); a terminal `RolloutStatus` when this turn ends the rollout."""
 
 
 class RendererEnv:
@@ -98,13 +96,13 @@ class RendererEnv:
         self._messages: list[Message] = []
         self._last_prompt_ids: list[int] = []
 
-    async def initial_prompt(self) -> TokenizedTurn:
+    async def initial_prompt(self) -> TokenizedResponseStep:
         """Render the initial conversation into the first generator prompt.
 
         Returns:
-            `TokenizedTurn` with `next_token_ids` set for runnable prompts,
-            or a terminal `TRUNCATED_OVERFLOW` turn when the initial prompt
-            exceeds `EnvLimits.max_trajectory_tokens`.
+            `TokenizedResponseStep` with `next_token_ids` set for runnable prompts,
+            or a terminal `TRUNCATED_PROMPT_OVERFLOW` turn when the initial prompt
+            exceeds `EnvLimits.max_rollout_tokens`.
         """
         init = await self._message_env.reset()
         self._messages = list(init.messages)
@@ -117,26 +115,27 @@ class RendererEnv:
             tools=self._tools,
             add_generation_prompt=True,
         )
-        if self._is_overflow(prompt_len=len(token_ids)):
+        if self._is_prompt_overflow(prompt_len=len(token_ids)):
             return _terminal(
                 next_messages=list(self._messages),
-                status=RolloutStatus.TRUNCATED_OVERFLOW,
+                status=RolloutStatus.TRUNCATED_PROMPT_OVERFLOW,
             )
         self._last_prompt_ids = list(token_ids)
-        return TokenizedTurn(
+        return TokenizedResponseStep(
             next_token_ids=list(token_ids),
             next_messages=list(self._messages),
             last_response_messages=[],
+            status=RolloutStatus.ONGOING,
         )
 
-    async def step_completion(self, completion: Completion) -> TokenizedTurn:
+    async def step_completion(self, completion: Completion) -> TokenizedResponseStep:
         """Advance the env by one sampled completion.
 
         Args:
             completion: Generator output for the current prompt.
 
         Returns:
-            `TokenizedTurn` for the next generator call, or a terminal turn
+            `TokenizedResponseStep` for the next generator call, or a terminal turn
             when the rollout completes, truncates, or errors.
         """
         # Parse first, so a truncated / aborted response still carries its message.
@@ -196,7 +195,7 @@ class RendererEnv:
         self._messages.extend(new_messages)
 
         if env_step.done:
-            return TokenizedTurn(
+            return TokenizedResponseStep(
                 next_token_ids=None,
                 next_messages=list(self._messages),
                 status=env_step.status or RolloutStatus.COMPLETED,
@@ -222,30 +221,27 @@ class RendererEnv:
             next_token_ids = bridged.token_ids
 
         # Context-overflow check before returning
-        if self._is_overflow(prompt_len=len(next_token_ids)):
+        if self._is_prompt_overflow(prompt_len=len(next_token_ids)):
             return _terminal(
                 next_messages=list(self._messages),
-                status=RolloutStatus.TRUNCATED_OVERFLOW,
+                status=RolloutStatus.TRUNCATED_PROMPT_OVERFLOW,
                 last_response_messages=new_messages,
             )
 
         self._last_prompt_ids = list(next_token_ids)
-        return TokenizedTurn(
+        return TokenizedResponseStep(
             next_token_ids=list(next_token_ids),
             next_messages=list(self._messages),
-            status=env_step.status,
             last_response_messages=new_messages,
+            status=RolloutStatus.ONGOING,
         )
 
     async def close(self) -> None:
         await self._message_env.close()
 
-    def _is_overflow(self, *, prompt_len: int) -> bool:
-        cap = self._limits.max_trajectory_tokens
-        if cap is None:
-            return False
-        reserve = self._limits.max_generation_tokens or 0
-        return prompt_len + reserve > cap
+    def _is_prompt_overflow(self, *, prompt_len: int) -> bool:
+        cap = self._limits.max_rollout_tokens
+        return cap is not None and prompt_len >= cap
 
 
 def _terminal(
@@ -253,9 +249,9 @@ def _terminal(
     next_messages: list[Message],
     status: RolloutStatus,
     last_response_messages: list[Message] | None = None,
-) -> TokenizedTurn:
-    """Build a terminal `TokenizedTurn` with the given terminal status."""
-    return TokenizedTurn(
+) -> TokenizedResponseStep:
+    """Build a terminal `TokenizedResponseStep` with the given terminal status."""
+    return TokenizedResponseStep(
         next_token_ids=None,
         next_messages=next_messages,
         status=status,

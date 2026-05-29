@@ -7,6 +7,7 @@
 from torchtitan.experiments.rl.rollouts.types import (
     DatasetOutput,
     Rollout,
+    RolloutGroup,
     RolloutStatus,
     RolloutTurn,
 )
@@ -19,6 +20,7 @@ from torchtitan.experiments.rl.rollouts.utils import (
 __all__ = [
     "DatasetOutput",
     "Rollout",
+    "RolloutGroup",
     "RolloutStatus",
     "RolloutTurn",
     "last_assistant_text",

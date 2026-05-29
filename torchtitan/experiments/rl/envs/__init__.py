@@ -12,7 +12,7 @@ from torchtitan.experiments.rl.envs.message_env import (
 from torchtitan.experiments.rl.envs.renderer_env import (
     EnvLimits,
     RendererEnv,
-    TokenizedTurn,
+    TokenizedResponseStep,
 )
 
 __all__ = [
@@ -21,5 +21,5 @@ __all__ = [
     "MsgResponseReset",
     "MsgResponseStep",
     "RendererEnv",
-    "TokenizedTurn",
+    "TokenizedResponseStep",
 ]

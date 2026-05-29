@@ -28,8 +28,6 @@ Sum all digits: 1 + 2 + 3 + 4 + 5 + 6 + 7 = 28
 
 
 class SumDigitsEnv(MessageEnv):
-    """Single-turn arithmetic env. Rubric scores the rollout off-env."""
-
     def __init__(self, *, env_input: SumDigitsInput) -> None:
         self._numbers = env_input.numbers
 
@@ -44,8 +42,5 @@ class SumDigitsEnv(MessageEnv):
         )
 
     async def step_message(self, msg: Message) -> MsgResponseStep:
-        """Terminate after the first assistant message.
-
-        The rubric scores the rollout off-env from `msg.content`.
-        """
+        # Terminate after the first assistant message, since it is a single-turn env.
         return MsgResponseStep(messages=[], done=True, status=RolloutStatus.COMPLETED)
