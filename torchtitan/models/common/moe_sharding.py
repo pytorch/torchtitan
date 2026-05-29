@@ -107,10 +107,7 @@ def _shared_expert_rowwise_config() -> ShardingConfig:
 def _router_gate_config(
     *, enable_ep: bool, enable_sp: bool, has_bias: bool = False
 ) -> ShardingConfig:
-    """Router gate state.
-
-    Parameters are I->R@TP for SP, I@TP for no SP. No redistribution.
-    """
+    """Router gate parameters are stored I@TP and compute as R@TP under EP/SP."""
     state = {
         "weight": dense_param_placement(tp=spmd.I),
     }
@@ -131,11 +128,7 @@ def _router_gate_config(
 
 
 def _tokens_per_expert_placement(*, enable_ep: bool, enable_sp: bool) -> NamedPlacement:
-    """Placement for the ``tokens_per_expert_E`` buffer.
-
-    if EP on -> P@TP, as activations are sequence-split
-    if EP off -> R@TP if SP on else I@TP (MoE boundary does a sequence-dim allgather; no split)
-    """
+    """Placement for the ``tokens_per_expert_E`` buffer."""
     if enable_ep:
         tp_placement = spmd.P
     elif enable_sp:
@@ -196,37 +189,7 @@ def set_moe_sharding_config(
     expert_param_layout: dict[str, spmd.PerMeshAxisSpmdType],
     router_has_bias: bool = False,
 ) -> None:
-    """Populate ``sharding_config`` on every MoE submodule.
-
-    Branches dense vs sparse family per Module:
-
-    - ``moe`` (wrapper): input/output redistribution on ``{TP}``.
-      Always set when ``tp_enabled``.
-    - ``moe.router.gate``: Replicate weights, output stays DTensor.
-    - ``moe.shared_experts.{w1,w2,w3}``: dense-family TP plan with
-      Partial-flow grad annotations (when ``moe_cfg.shared_experts is not
-      None``).
-    - ``moe.experts`` (``GroupedExperts``): sparse-family ``{EP}``
-      placements when EP is enabled; dense-family ``{TP}`` placements
-      when EP is disabled and TP is enabled; no sharding when both are
-      disabled.
-
-    ``expert_param_layout`` maps each routed-expert parameter name to its
-    dense in/out-dim placement (used on the EP-disabled + TP-enabled path):
-    ``S(1)`` for colwise, ``S(2)`` for rowwise, ``I`` for
-    replicated bias. The shared ``GroupedExperts`` (qwen3, llama4,
-    deepseek_v3) passes ``{"w1_EFD": S(1), "w2_EDF": S(2), "w3_EFD": S(1)}``;
-    ``GptOssGroupedExperts`` passes its mlp1/mlp2 layout.
-
-    Args:
-        moe_cfg: The ``MoE.Config`` instance to populate.
-        enable_ep: Whether expert parallelism is enabled.
-        enable_sp: Whether sequence parallelism is enabled (affects the
-            wrapper's enter/exit TP layout).
-        expert_param_layout: ``{param_name: tp_placement}`` for the
-            routed experts' weight params (used on the EP-disabled +
-            TP-enabled path).
-    """
+    """Populate ``sharding_config`` on every MoE submodule."""
     # Always set sharding configs regardless of whether TP is enabled.
     # ``resolve_mesh`` filters out disabled axes at runtime.
     moe_cfg.sharding_config = _moe_sharding_config(
@@ -253,8 +216,6 @@ def set_moe_sharding_config(
 
     # Routed experts: local_map converts DTensor inputs to local for
     # dispatch/compute/combine, then wraps local output as DTensor(Partial).
-    # Routed experts: the three things that differ between EP and TP-only
-    # are state_shardings, input layout, and input grad layout.
     experts_input_layout = (
         dense_sp_placement()
         if enable_ep

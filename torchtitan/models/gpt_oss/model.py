@@ -64,9 +64,9 @@ class Attention(BaseAttention):
         self.qkv_linear = config.qkv_linear.build()
         self.wo = config.wo.build()
         self.sinks = nn.Parameter(torch.empty(config.n_heads))
-        assert isinstance(config.inner_attention, FlexAttention.Config), (
-            "gpt-oss only supports FlexAttention"
-        )
+        assert isinstance(
+            config.inner_attention, FlexAttention.Config
+        ), "gpt-oss only supports FlexAttention"
         self.inner_attention = config.inner_attention.build()
 
     def forward(
@@ -223,7 +223,6 @@ class GptOssModel(Decoder):
             set_gpt_oss_sharding_config(
                 self,
                 loss_parallel=chunked_loss and not parallelism.disable_loss_parallel,
-                enable_tp=parallelism.tensor_parallel_degree > 1,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
                 chunked_loss=chunked_loss,
