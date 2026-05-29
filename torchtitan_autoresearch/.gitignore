@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+state/
+goldens/*.pt
+report.json
