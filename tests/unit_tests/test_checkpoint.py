@@ -155,13 +155,8 @@ class TestCheckpointManager(unittest.TestCase):
         )
         self.patcher_group.start()
 
-        # Patch process group destruction
-        self.patcher_destroy = mock.patch("torch.distributed.destroy_process_group")
-        self.patcher_destroy.start()
-
     def tearDown(self):
         self.patcher_group.stop()
-        self.patcher_destroy.stop()
         shutil.rmtree(self.base_temp_dir)
         time.sleep(0.1)
 

@@ -511,10 +511,6 @@ class CheckpointManager(Configurable):
             if self.stager is not None:
                 self.stager.close()
 
-            if hasattr(self, "pg") and self.pg is not None:
-                dist.destroy_process_group(self.pg)
-                self.pg = None
-
     @torch.no_grad()
     def dcp_save(
         self,
