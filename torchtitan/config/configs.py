@@ -25,21 +25,6 @@ import torch
 
 
 @dataclass(kw_only=True, slots=True)
-class BatchConfig:
-    """Batch shape parameters shared by SFT dataloaders and RL batchers."""
-
-    local_batch_size: int = 8
-    """Per-DP-rank batch size (rows per forward pass)."""
-
-    global_batch_size: int = -1
-    """Target number of rows per optimizer step. Defaults to
-    ``local_batch_size * data-parallel degree`` when set to -1."""
-
-    seq_len: int = 2048
-    """Tokens per row (packed sequence length)."""
-
-
-@dataclass(kw_only=True, slots=True)
 class TrainingConfig:
     local_batch_size: int = 8
     """Local batch size (i.e., per-device batch size)"""

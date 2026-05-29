@@ -476,6 +476,13 @@ class RLTrainer(Configurable):
             * p.context_parallel_degree
         )
 
+    def _shard_episodes(self, episodes: list[Episode]) -> list[list[Episode]]:
+        """Round-robin partition episodes across DP ranks."""
+        return [
+            [episodes[i] for i in range(rank, len(episodes), self.trainer_dp_degree)]
+            for rank in range(self.trainer_dp_degree)
+        ]
+
     @sl.log_trace_span("setup_async")
     async def setup_async(
         self,
@@ -485,26 +492,28 @@ class RLTrainer(Configurable):
         generator_nodes: int | None = None,
         gpus_per_node: int | None = None,
     ):
-        """Spawn actor meshes and synchronize initial trainer weights.
+        """Spawn Monarch actors on separate meshes and initialize weights.
 
-        Kept separate from `__init__` because actor spawning, torch elastic
-        env setup, TorchStore initialization, and the initial weight
-        push/pull are async runtime side effects.
+        Kept separate from ``__init__`` because actor spawning, torch
+        elastic env setup, TorchStore initialization, and the initial
+        weight push/pull are all ``await``-based runtime side effects
+        that cannot run in a synchronous constructor.
 
         Creates separate GPU meshes for trainer and generator and
         synchronizes initial weights from trainer to generator. Must be
-        called before `train`.
+        called before :meth:`train`.
 
         Args:
-            host_mesh: Optional multi-node `HostMesh`. When provided, whole
-                nodes are dedicated to trainer vs generator roles instead of
-                partitioning GPUs on a single host.
-            trainer_nodes: Number of trainer nodes. Required when
-                `host_mesh` is set.
-            generator_nodes: Number of generator nodes. Required when
-                `host_mesh` is set.
+            host_mesh: Optional multi-node HostMesh. When provided,
+                whole nodes are dedicated to trainer vs generator
+                roles instead of partitioning GPUs on a single host.
+            trainer_nodes: Number of nodes for the trainer (required when
+                host_mesh is provided).
+            generator_nodes: Number of nodes for the generator (required when
+                host_mesh is provided).
             gpus_per_node: GPUs per node, assumed to be the same across all
-                nodes. Required when `host_mesh` is set.
+                nodes (no heterogeneous node configurations). Required when
+                host_mesh is provided.
         """
         # Scale the default thread executor so concurrent renderer calls
         # (asyncio.to_thread inside RendererEnv) don't queue at the
@@ -929,17 +938,12 @@ class RLTrainer(Configurable):
         return validation_metrics
 
     async def train(self):
-        """Run pre-validation, `num_steps` of GRPO, post-validation, and a
-        side-by-side reward summary.
-
-        The loop yields via `asyncio.sleep(0)` between steps so Ctrl-C
-        (KeyboardInterrupt) is honored.
-        """
         num_steps = self.config.num_steps
         num_groups = self.config.num_prompts_per_step
         logger.info(f"Pre-training validation; then {num_steps} steps of RL training")
 
-        # Pre-training validation (for before/after comparison)
+        # collect validation metrics before training
+        # so we can compare before/after
         pre_validation_metrics = await self.validate()
         self.metrics_processor.log(
             step=0,
@@ -957,24 +961,27 @@ class RLTrainer(Configurable):
             # Propagate the step counter to actors for structured logging.
             self.trainer.sync_log_step.call(step)
             self.generator.sync_log_step.call(step)
-            # Yield to the event loop so Ctrl-C is honored; `.get()` calls
-            # don't have a natural cancellation point.
-            # TODO: replace `.get()` with `await` to remove this explicit yield.
+            # Cancellation point for Ctrl-C (KeyboardInterrupt) handling.
+            # This yields to the event loop to check for cancellation, which
+            # doesn't happen with `.get` calls.
+            # TODO: investigate replacing `.get()` with `await
             await asyncio.sleep(0)
 
             t_step_start = time.perf_counter()
 
-            # Collect rollouts up to the token budget
-            # Batcher then packs, truncates to global_batch_size rows, and
-            # splits into microbatches.
+            # --- rollouts ---
+            # Collect rollouts until total response tokens reach the
+            # token budget. The Batcher then packs, truncates to
+            # global_batch_size rows, and splits into microbatches.
             t_rollout_start = time.perf_counter()
             rollouts: list[Rollout] = []
             rollout_metrics: list[m.Metric] = []
             collected_tokens = 0
             group_offset = 0
-            # NOTE: num_tokens_target is a proxy because collected_tokens counts
-            # raw response tokens, while the batcher adds prompt tokens and
-            # padding when packing into fixed-length rows.
+            # num_tokens_target (= global_batch_size * seq_len) is the stop
+            # condition for collected tokens before a train step can proceed.
+            # NOTE: this is a proxy — packing adds padding to fill fixed-length
+            # rows, so actual token consumption may exceed collected_tokens.
             num_tokens_target = self.batcher.num_tokens_target(self.trainer_dp_degree)
             while collected_tokens < num_tokens_target:
                 new_rollouts, new_metrics = await self._collect_rollouts(
@@ -982,8 +989,11 @@ class RLTrainer(Configurable):
                 )
                 rollouts.extend(new_rollouts)
                 rollout_metrics.extend(new_metrics)
+                # Both prompt length and completion length are counted.
                 collected_tokens += sum(
-                    len(t.response_token_ids) for r in new_rollouts for t in r.turns
+                    len(t.prompt_token_ids) + len(t.response_token_ids) - 1
+                    for r in new_rollouts
+                    for t in r.turns
                 )
                 group_offset += num_groups
 
@@ -993,7 +1003,7 @@ class RLTrainer(Configurable):
             if self.config.log_samples:
                 _log_samples(episodes)
 
-            # Train on packed episodes
+            # --- train ---
             t_train_start = time.perf_counter()
             with sl.log_trace_span("batcher_batch"):
                 (
@@ -1002,15 +1012,25 @@ class RLTrainer(Configurable):
                     packing_metrics,
                 ) = self.batcher.batch(episodes, dp_degree=self.trainer_dp_degree)
 
-            all_fwd_bwd_metrics: list[dict[str, float]] = []
+            # Aggregate metrics across gradient-accumulation microbatches.
+            # "/mean" and "/frac" metrics are pre-normalized by
+            # num_global_valid_tokens, so summing reconstructs the global
+            # value.  "/max" metrics take the max across microbatches.
+            fwd_bwd_metrics: dict[str, float] = {}
             for microbatch in microbatches:
                 with sl.log_trace_span("trainer_forward_backward_call"):
-                    metrics = self._get_rank_0_value(
+                    mb_metrics = self._get_rank_0_value(
                         self.trainer.forward_backward.call(
                             microbatch, num_global_valid_tokens
                         ).get()
                     )
-                    all_fwd_bwd_metrics.append(metrics)
+                    for k, v in mb_metrics.items():
+                        if k not in fwd_bwd_metrics:
+                            fwd_bwd_metrics[k] = v
+                        elif k.endswith("/max"):
+                            fwd_bwd_metrics[k] = max(fwd_bwd_metrics[k], v)
+                        elif k.endswith(("/mean", "/frac")):
+                            fwd_bwd_metrics[k] += v
             with sl.log_trace_span("trainer_optim_step_call"):
                 optim_output = self._get_rank_0_value(
                     self.trainer.optim_step.call().get()
@@ -1019,9 +1039,9 @@ class RLTrainer(Configurable):
             optimizer_metrics = optim_output.metrics
             t_train_s = time.perf_counter() - t_train_start
 
-            # Sync trainer weights to generator
-            # TODO: have `push_model_state_dict` return `trainer_policy_version`
-            # instead of returning it from `trainer.optim_step`.
+            # --- weight sync ---
+            # TODO: we should have `push_model_state_dict` return `trainer_policy_version`
+            # instead of having `trainer.optim_step` return it
             t_push_start = time.perf_counter()
             with sl.log_trace_span("trainer_push_model_state_dict"):
                 self.trainer.push_model_state_dict.call().get()
@@ -1030,12 +1050,12 @@ class RLTrainer(Configurable):
                 self.generator.pull_model_state_dict.call(trainer_policy_version).get()
             t_weight_sync_total_s = time.perf_counter() - t_push_start
             t_step_s = time.perf_counter() - t_step_start
-            # Divergence check before any logging
-            if any(not math.isfinite(mb["loss/mean"]) for mb in all_fwd_bwd_metrics):
+            # --- divergence check before any logging ---
+            if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
                 logger.error("Loss is NaN/Inf; training diverged")
                 break
 
-            # Assemble step metrics
+            # --- Prepare metrics ---
             total_tokens = sum(
                 len(ep.prompt_token_ids) + len(ep.token_ids) for ep in episodes
             )
@@ -1045,20 +1065,17 @@ class RLTrainer(Configurable):
             step_metrics += rollout_metrics
             step_metrics += episode_metrics
 
-            # Actor metrics are already globally reduced; NoReduce passes them through.
-            # Log each microbatch's metrics separately.
-            for mb_idx, mb_metrics in enumerate(all_fwd_bwd_metrics):
-                suffix = f"/microbatch_{mb_idx}" if len(all_fwd_bwd_metrics) > 1 else ""
-                step_metrics += [
-                    m.Metric(f"{k}{suffix}", m.NoReduce(v))
-                    for k, v in mb_metrics.items()
-                ]
+            # Actor metrics are already globally reduced and aggregated
+            # across microbatches; NoReduce passes them through.
+            step_metrics += [
+                m.Metric(k, m.NoReduce(v)) for k, v in fwd_bwd_metrics.items()
+            ]
             step_metrics += [
                 m.Metric(k, m.NoReduce(v)) for k, v in optimizer_metrics.items()
             ]
             step_metrics += packing_metrics
 
-            # Timing metrics
+            # timing metrics
             for key, value in [
                 ("timing/step", t_step_s),
                 ("timing/rollout", t_rollout_s),
@@ -1076,7 +1093,6 @@ class RLTrainer(Configurable):
                 step=step, metrics=step_metrics, is_validation=False
             )
 
-        # Post-training validation
         post_validation_metrics = await self.validate()
         self.metrics_processor.log(
             step=num_steps,
@@ -1087,7 +1103,8 @@ class RLTrainer(Configurable):
             post_validation_metrics
         )
 
-        # Validation summary (pre / post side-by-side)
+        # Side-by-side pre/post summary so the before/after improvement is
+        # visible without scrolling back through the train loop.
         reward_keys = sorted(
             k
             for k in set(pre_validation_agg) | set(post_validation_agg)
