@@ -52,14 +52,14 @@ class Observer:
         self.pidfile = os.path.join(run_dir, "loop.pid")
 
     # --- start / stop the creating loop (control, not creation) ---
-    def start(self, *, tag: str, eval_dataset: str, max_iters: int) -> int:
+    def start(self, *, tag: str, train_dataset: str, eval_dataset: str, max_iters: int) -> int:
         os.makedirs(self.run_dir, exist_ok=True)
         if self.is_running():
             print(f"a loop is already running for {self.run_dir} (pid {self._pid()})")
             return 1
         argv = [
             sys.executable, "-m", "torchtitan_autoresearch.run",
-            "--tag", tag, "--eval-dataset", eval_dataset,
+            "--tag", tag, "--train-dataset", train_dataset, "--eval-dataset", eval_dataset,
             "--max-iters", str(max_iters), "--run-dir", self.run_dir,
         ]
         with open(self.loop_log, "w") as f:
@@ -202,6 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--tag", default=None)
         p.add_argument("--run-dir", default=None)
         if name == "start":
+            p.add_argument("--train-dataset", default="c4_test")
             p.add_argument("--eval-dataset", default="c4_test")
             p.add_argument("--max-iters", type=int, default=8)
         if name == "ask":
@@ -217,7 +218,8 @@ def main(argv: list[str] | None = None) -> int:
         # The start observer OWNS the experiment: when it exits for any reason
         # (Ctrl-C, normal end, SIGTERM/SIGHUP, terminal close), the loop and its
         # GPU children are torn down. There is no detached mode.
-        obs.start(tag=args.tag, eval_dataset=args.eval_dataset, max_iters=args.max_iters)
+        obs.start(tag=args.tag, train_dataset=args.train_dataset,
+                  eval_dataset=args.eval_dataset, max_iters=args.max_iters)
         import atexit
         atexit.register(obs.stop)
         for sig in (signal.SIGTERM, signal.SIGHUP):

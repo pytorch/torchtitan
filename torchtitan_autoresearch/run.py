@@ -42,6 +42,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     ap = argparse.ArgumentParser(prog="torchtitan_autoresearch.run")
     ap.add_argument("--tag", required=True, help="experiment tag -> branch autoresearch/<tag>")
+    ap.add_argument("--train-dataset", default="c4_test",
+                    help="training dataset (c4_test offline, c4 real/streamed)")
     ap.add_argument("--eval-dataset", default="c4_test",
                     help="held-out eval dataset (c4_test offline, c4_validation real)")
     ap.add_argument("--max-iters", type=int, default=8)
@@ -64,9 +66,13 @@ def main(argv: list[str] | None = None) -> int:
     if ngpu <= 0:
         print("no GPUs detected; autoresearch needs at least one GPU", file=sys.stderr)
         return 2
-    print(f"[setup] world size (auto) = {ngpu} | eval dataset = {args.eval_dataset} | run dir = {run_dir}")
+    print(f"[setup] world size (auto) = {ngpu} | train = {args.train_dataset} | "
+          f"eval = {args.eval_dataset} | run dir = {run_dir}")
 
+    # The train dataset is a locked workload field set by the human here (not a
+    # candidate knob); it rides in base_command so every run uses it.
     ex = SubprocessExecutor(repo, log_freq=rules.log_freq, ngpu=ngpu,
+                            base_command=[f"--dataloader.dataset={args.train_dataset}"],
                             val_dataset=args.eval_dataset, run_dir=os.path.join(run_dir, "runs"))
 
     sess = start_run(repo, args.tag, rules)
