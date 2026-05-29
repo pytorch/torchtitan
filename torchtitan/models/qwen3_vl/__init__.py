@@ -29,7 +29,15 @@ from torchtitan.protocols.model_spec import ModelSpec
 from .model import Qwen3VLModel
 from .parallelize import parallelize_qwen3_vl
 from .state_dict_adapter import Qwen3VLStateDictAdapter
-from .vision_encoder import Qwen3VLVisionEncoder
+from .vision_encoder import (
+    PatchEmbed,
+    PatchMerger,
+    Qwen3VLVisionEncoder,
+    VisionAttention,
+    VisionMLP,
+    VisionRotaryEmbedding,
+    VisionTransformerBlock,
+)
 
 __all__ = [
     "parallelize_qwen3_vl",
@@ -116,6 +124,8 @@ def _vl_vision_encoder_config(
     """Build a fully-specified Qwen3VLVisionEncoder.Config."""
     patch_dim = in_channels * temporal_patch_size * patch_size * patch_size
     merged_hidden_size = dim * (spatial_merge_size**2)
+    merger_fc1 = _vl_linear(merged_hidden_size, merged_hidden_size)
+    merger_fc2 = _vl_linear(merged_hidden_size, out_hidden_size)
     return Qwen3VLVisionEncoder.Config(
         dim=dim,
         ffn_dim=ffn_dim,
@@ -127,13 +137,47 @@ def _vl_vision_encoder_config(
         out_hidden_size=out_hidden_size,
         num_position_embeddings=num_position_embeddings,
         deepstack_visual_indices=deepstack_visual_indices,
-        patch_embed_proj=_vl_linear(patch_dim, dim),
-        attn_qkv=_vl_linear(dim, dim * 3),
-        attn_proj=_vl_linear(dim, dim),
-        mlp_fc1=_vl_linear(dim, ffn_dim),
-        mlp_fc2=_vl_linear(ffn_dim, dim),
-        merger_fc1=_vl_linear(merged_hidden_size, merged_hidden_size),
-        merger_fc2=_vl_linear(merged_hidden_size, out_hidden_size),
+        patch_embed=PatchEmbed.Config(
+            patch_size=patch_size,
+            temporal_patch_size=temporal_patch_size,
+            in_channels=in_channels,
+            embed_dim=dim,
+            proj=_vl_linear(patch_dim, dim),
+        ),
+        rotary_pos_emb=VisionRotaryEmbedding.Config(
+            dim=(dim // n_heads) // 2,
+            theta=10000.0,
+        ),
+        block=VisionTransformerBlock.Config(
+            dim=dim,
+            n_heads=n_heads,
+            layer_norm_eps=_EPS,
+            attn=VisionAttention.Config(
+                dim=dim,
+                n_heads=n_heads,
+                qkv=_vl_linear(dim, dim * 3),
+                proj=_vl_linear(dim, dim),
+            ),
+            mlp=VisionMLP.Config(
+                fc1=_vl_linear(dim, ffn_dim),
+                fc2=_vl_linear(ffn_dim, dim),
+            ),
+        ),
+        merger=PatchMerger.Config(
+            hidden_size=dim,
+            out_hidden_size=out_hidden_size,
+            spatial_merge_size=spatial_merge_size,
+            fc1=merger_fc1,
+            fc2=merger_fc2,
+        ),
+        deepstack_merger=PatchMerger.Config(
+            hidden_size=dim,
+            out_hidden_size=out_hidden_size,
+            spatial_merge_size=spatial_merge_size,
+            fc1=merger_fc1,
+            fc2=merger_fc2,
+            use_postshuffle_norm=True,
+        ),
         param_init=_POS_EMBED_INIT,
     )
 

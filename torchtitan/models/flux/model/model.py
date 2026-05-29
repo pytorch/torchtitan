@@ -54,7 +54,9 @@ class FluxModel(BaseModel):
         single_blocks: list[SingleStreamBlock.Config]
 
         def update_from_config(self, *, trainer_config, **kwargs) -> None:
-            pass
+            from torchtitan.models.flux.sharding import set_flux_sharding_config
+
+            set_flux_sharding_config(self)
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int

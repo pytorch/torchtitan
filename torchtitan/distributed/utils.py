@@ -316,16 +316,10 @@ class TrainContext(Protocol):
         pass
 
 
-def get_train_context(
-    enable_loss_parallel: bool,
-    *,
-    spmd_typechecking: bool = False,
-) -> TrainContext:
+def get_train_context(*, spmd_typechecking: bool = False) -> TrainContext:
     @contextlib.contextmanager
     def context():
         with contextlib.ExitStack() as stack:
-            if enable_loss_parallel:
-                stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
             if spmd_typechecking:
                 stack.enter_context(spmd.typecheck(local=False))
 
