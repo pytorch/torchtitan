@@ -20,7 +20,7 @@ from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.hf_datasets import DatasetConfig
-from torchtitan.hf_datasets.interleave import InterleavedDataset
+from torchtitan.hf_datasets.interleaved import InterleavedDataset
 from torchtitan.tools.logging import logger
 
 

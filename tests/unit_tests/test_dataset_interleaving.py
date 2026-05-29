@@ -10,7 +10,7 @@ from copy import deepcopy
 
 from torch.utils.data import IterableDataset as TorchIterableDataset
 
-from torchtitan.hf_datasets.interleave import InterleavedDataset
+from torchtitan.hf_datasets.interleaved import InterleavedDataset
 
 
 class _MockDataset(TorchIterableDataset):
