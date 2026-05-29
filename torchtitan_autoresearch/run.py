@@ -1,17 +1,14 @@
-"""Single-command autoresearch entrypoint.
+"""The autoresearch creating loop -- the internal worker the observer launches.
 
-Starts a fresh experiment on whatever machine you run it on: detects the GPU
-count, creates an isolated experiment branch, calibrates the golden (quality bar,
-faithfulness anchor, throughput noise), then runs the hill-climbing loop with the
-quality gate live. Hardware is not assumed -- the constitution's ``ngpu: auto``
-is resolved here.
+This is NOT the human entry point. Autoresearch is started only through the
+observer (``python -m torchtitan_autoresearch.observe start --tag <tag>``), which
+spawns this loop as a separate background process. Running this module directly is
+refused (it checks the observer marker env var) so there is exactly one way to
+start an experiment.
 
-    python -m torchtitan_autoresearch.run --tag may30-qwen3 [--eval-dataset c4_validation]
-
-Run from the repo root (so the package and run_train.sh are found). For real c4
-eval set ``--eval-dataset c4_validation`` and pass your proxy env if needed.
-Follow along read-only from another shell with
-``python -m torchtitan_autoresearch.observe --run-dir <dir>``.
+The loop detects the GPU count (constitution ``ngpu: auto``), creates an isolated
+experiment branch, calibrates the golden (quality bar, faithfulness anchor,
+throughput noise), then runs the hill-climb with the quality gate live.
 """
 
 from __future__ import annotations
@@ -36,6 +33,13 @@ def _repo_root() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if os.environ.get("AR_RUN_FROM_OBSERVER") != "1":
+        print(
+            "autoresearch is started only through the observer:\n"
+            "  python -m torchtitan_autoresearch.observe start --tag <tag>",
+            file=sys.stderr,
+        )
+        return 2
     ap = argparse.ArgumentParser(prog="torchtitan_autoresearch.run")
     ap.add_argument("--tag", required=True, help="experiment tag -> branch autoresearch/<tag>")
     ap.add_argument("--eval-dataset", default="c4_test",

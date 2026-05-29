@@ -52,32 +52,36 @@ The agent never declares a change's class — verify routes by measured faithful
 
 ## Running it (on any machine)
 
-One command, from the repo root, on a checkout of `aditvenk/autoresearch-parallelize`:
+The **observer is the only way to start autoresearch.** From the repo root, on a
+checkout of `aditvenk/autoresearch-parallelize`:
 
 ```bash
-python -m torchtitan_autoresearch.run --tag may30-qwen3
+python -m torchtitan_autoresearch.observe start --tag may30-qwen3
 # real held-out eval (needs internet/proxy for c4 streaming):
 https_proxy=<proxy> http_proxy=<proxy> \
-  python -m torchtitan_autoresearch.run --tag may30-qwen3 --eval-dataset c4_validation
+  python -m torchtitan_autoresearch.observe start --tag may30-qwen3 --eval-dataset c4_validation
 ```
 
-It detects the GPU count (`ngpu: auto`), creates a fresh `autoresearch/<tag>`
+`start` launches the creating loop as a **separate background process** (it
+survives the observer exiting) and then follows along, streaming progress. The
+loop detects the GPU count (`ngpu: auto`), creates a fresh `autoresearch/<tag>`
 branch, calibrates the golden (throughput, deterministic faithfulness anchor,
-held-out eval bar), then runs the hill-climb with the quality gate live, driven
-by the built-in `KnobAgent` (config-space candidates: batch size, AC mode, …).
-Results stream to `<run-dir>/results.tsv`.
+held-out eval bar), and hill-climbs with the quality gate live, driven by the
+built-in `KnobAgent` (config-space candidates: batch size, AC mode, …).
 
-**Follow along, read-only, from another shell** (a separate observer agent that
-never touches the gate):
+The observer is read-only over the experiment — it controls (start/stop) and
+broadcasts, but never proposes candidates or touches the gate. Other commands:
 
 ```bash
-python -m torchtitan_autoresearch.observe --run-dir /tmp/ar_may30-qwen3            # status
-python -m torchtitan_autoresearch.observe --run-dir /tmp/ar_may30-qwen3 --watch    # broadcast changes
-python -m torchtitan_autoresearch.observe --run-dir /tmp/ar_may30-qwen3 --ask "best so far?"
+python -m torchtitan_autoresearch.observe watch  --tag may30-qwen3   # re-attach / follow
+python -m torchtitan_autoresearch.observe status --tag may30-qwen3   # one-shot status
+python -m torchtitan_autoresearch.observe ask    --tag may30-qwen3 "best so far?"
+python -m torchtitan_autoresearch.observe stop   --tag may30-qwen3   # end the experiment
 ```
 
-CPU smoke test of the orchestration (no GPUs) uses `FakeExecutor` + an agent +
-`run_loop` (see the harness tests).
+Ctrl-C during `start`/`watch` stops *watching*, not the experiment. The creating
+loop (`run.py`) is an internal worker spawned by the observer and refuses to run
+directly, so there is exactly one entry point.
 
 Verify routing is live: each candidate's seed-pinned deterministic loss
 trajectory is compared to the golden's; a faithful match skips the eval
