@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
@@ -26,6 +27,22 @@ from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
 #       per-local-expert token counts after EP dispatch /_permute),
 #   K = top-k, T = num tokens (B*L flattened),
 #   N = routed tokens (T*K), R = routed tokens assigned to local experts
+
+
+def _generate_routing_map_ble(
+    scores_BLE: torch.Tensor,
+    topk_expert_ids_BLK: torch.Tensor,
+) -> torch.Tensor:
+    """Build a boolean routing map from expert ids.
+
+    ``scores_BLE`` supplies the ``(B, L, E)`` shape and DTensor placement when
+    this helper is wrapped by ``local_map``.
+    """
+    return torch.zeros_like(scores_BLE, dtype=torch.bool).scatter_(
+        -1,
+        topk_expert_ids_BLK,
+        True,
+    )
 
 
 class GroupedExperts(Module):
@@ -280,17 +297,26 @@ class TokenChoiceTopKRouter(Module):
             topk_scores_BLK = topk_scores_BLK / denominator
         topk_scores_BLK = topk_scores_BLK * self.route_scale
 
-        # Build routing map: (B, L, E) boolean matrix via scatter
-        routing_map_BLE = (
-            torch.zeros(
-                *topk_expert_ids_BLK.shape[:-1],
-                self.num_experts,
-                device=topk_expert_ids_BLK.device,
-                dtype=torch.int32,
+        # Build routing map with scatter. scatter_ does not support mixed
+        # local Tensor / DTensor arguments, so run the scatter on local tensors
+        # under local_map when router outputs are DTensors.
+        if isinstance(topk_expert_ids_BLK, DTensor):
+            assert isinstance(
+                scores_BLE, DTensor
+            ), "scores_BLE and topk_expert_ids_BLK should both be DTensors"
+            generate_routing_map = local_map(
+                _generate_routing_map_ble,
+                in_placements=(
+                    scores_BLE.placements,
+                    topk_expert_ids_BLK.placements,
+                ),
+                out_placements=(scores_BLE.placements,),
+                device_mesh=scores_BLE.device_mesh,
             )
-            .scatter_(-1, topk_expert_ids_BLK, 1)
-            .bool()
-        )
+        else:
+            generate_routing_map = _generate_routing_map_ble
+
+        routing_map_BLE = generate_routing_map(scores_BLE, topk_expert_ids_BLK)
         num_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
 
         return (
