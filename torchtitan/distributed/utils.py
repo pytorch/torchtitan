@@ -126,7 +126,6 @@ def set_determinism(
     """
     if debug_config.deterministic:
         logger.info("Deterministic algorithm enabled (expect perf degradation).")
-        torch.use_deterministic_algorithms(True)
         torch.use_deterministic_algorithms(
             True, warn_only=debug_config.deterministic_warn_only
         )
