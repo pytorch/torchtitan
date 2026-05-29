@@ -90,7 +90,7 @@ dataloader=ChatDataLoader.Config(
 
 ## Multi-source interleaved dataloaders
 
-Both text flavours support interleaving multiple sources with configurable sampling weights. At each step a source is drawn proportionally to its weight. Iteration stops when the first source is exhausted, defining an epoch boundary — re-looping and shuffling are handled per source exactly as in the single-source case.
+Both text flavours support interleaving multiple sources with configurable sampling weights. At each step a source is drawn proportionally to its weight. When a source is drawn, it returns a packed sample, potentially consisting multiple data points from the source. Iteration stops depending on stopping strategy (on_first_exhausted / all_exhausted), defining an epoch boundary — re-looping and shuffling are handled per source exactly as in the single-source case.
 
 All sources must share the same `infinite` setting.
 
