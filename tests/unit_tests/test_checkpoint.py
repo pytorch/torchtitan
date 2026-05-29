@@ -701,6 +701,121 @@ class TestCheckpointManager(unittest.TestCase):
         manager.save(curr_step=2, last_step=True)
         manager.load(step=1)
 
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    @mock.patch(
+        "torchtitan.components.checkpoint.get_model_state_dict",
+        side_effect=lambda m: dict(m.named_parameters()),
+    )
+    def test_hf_save_adapter_receives_all_model_keys(
+        self, mock_get_sd, mock_save, mock_rank
+    ):
+        """to_hf must receive all model keys when saving in HF format."""
+        received_keys = []
+
+        def fake_to_hf(sd):
+            received_keys.extend(sd.keys())
+            return {f"hf_{k}": v for k, v in sd.items()}
+
+        mock_adapter = mock.Mock()
+        mock_adapter.to_hf.side_effect = fake_to_hf
+        mock_adapter.fqn_to_index_mapping = None
+        mock_adapter.hf_assets_path = None
+
+        cfg = self.trainer_config.checkpoint
+        cfg.last_save_model_only = True
+        cfg.last_save_in_hf = True
+        cfg.keep_latest_k = 0
+
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=cfg,
+            sd_adapter=mock_adapter,
+            base_folder=self.trainer_config.dump_folder,
+        )
+        manager.save(curr_step=10, last_step=True)
+
+        mock_adapter.to_hf.assert_called_once()
+        self.assertIn("weight", received_keys)
+        self.assertIn("bias", received_keys)
+
+        mock_save.assert_called_once()
+        saved_sd = mock_save.call_args[0][0]
+        self.assertIn("hf_weight", saved_sd)
+        self.assertIn("hf_bias", saved_sd)
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch(
+        "torchtitan.components.checkpoint.set_model_state_dict",
+    )
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    @mock.patch(
+        "torchtitan.components.checkpoint.get_model_state_dict",
+        side_effect=lambda m: dict(m.named_parameters()),
+    )
+    def test_hf_load_roundtrip_to_hf_then_from_hf(
+        self, mock_get_sd, mock_load, mock_set_sd, mock_rank
+    ):
+        """HF load must: to_hf (container) → dcp.load → from_hf → load_state_dict."""
+        call_order = []
+
+        def fake_to_hf(sd):
+            call_order.append("to_hf")
+            return {f"hf_{k}": v for k, v in sd.items()}
+
+        def fake_from_hf(sd):
+            call_order.append("from_hf")
+            return {k.removeprefix("hf_"): v for k, v in sd.items()}
+
+        def fake_dcp_load(*args, **kwargs):
+            call_order.append("dcp_load")
+
+        mock_adapter = mock.Mock()
+        mock_adapter.to_hf.side_effect = fake_to_hf
+        mock_adapter.from_hf.side_effect = fake_from_hf
+        mock_adapter.get_hf_storage_reader.return_value = mock.Mock()
+        mock_adapter.fqn_to_index_mapping = None
+        mock_adapter.hf_assets_path = self.test_folder
+        mock_load.side_effect = fake_dcp_load
+
+        cfg = self.trainer_config.checkpoint
+        cfg.initial_load_in_hf = True
+        cfg.initial_load_model_only = True
+        cfg.initial_load_path = self.test_folder
+        cfg.folder = os.path.join(self.base_temp_dir, "nonexistent_ckpt")
+
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=cfg,
+            sd_adapter=mock_adapter,
+            base_folder=self.trainer_config.dump_folder,
+        )
+        manager.load(step=-1)
+
+        self.assertEqual(call_order, ["to_hf", "dcp_load", "from_hf"])
+
+        mock_adapter.to_hf.assert_called_once()
+        to_hf_keys = set(mock_adapter.to_hf.call_args[0][0].keys())
+        self.assertEqual(to_hf_keys, {"weight", "bias"})
+
+        mock_adapter.from_hf.assert_called_once()
+        from_hf_keys = set(mock_adapter.from_hf.call_args[0][0].keys())
+        self.assertEqual(from_hf_keys, {"hf_weight", "hf_bias"})
+
+        mock_set_sd.assert_called_once()
+        loaded_sd = mock_set_sd.call_args[1]["model_state_dict"]
+        self.assertEqual(set(loaded_sd.keys()), {"weight", "bias"})
+        manager.close()
+
 
 if __name__ == "__main__":
     unittest.main()
