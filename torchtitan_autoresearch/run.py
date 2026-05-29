@@ -42,15 +42,19 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     ap = argparse.ArgumentParser(prog="torchtitan_autoresearch.run")
     ap.add_argument("--tag", required=True, help="experiment tag -> branch autoresearch/<tag>")
-    ap.add_argument("--train-dataset", default="c4_test",
-                    help="training dataset (c4_test offline, c4 real/streamed)")
-    ap.add_argument("--eval-dataset", default="c4_test",
-                    help="held-out eval dataset (c4_test offline, c4_validation real)")
+    ap.add_argument("--dataset", default="c4",
+                    help="dataset for training AND its held-out eval split "
+                         "(c4 -> train c4 / eval c4_validation; c4_test -> both local/offline)")
     ap.add_argument("--max-iters", type=int, default=8)
     ap.add_argument("--run-dir", default="")
     ap.add_argument("--here", default="",
                     help="repo root (default: cwd)")
     args = ap.parse_args(argv)
+
+    # A single dataset choice decides both the training set and its held-out eval
+    # split. c4's held-out split is c4_validation; toy c4_test has no separate split.
+    eval_split = {"c4": "c4_validation", "c4_test": "c4_test"}.get(args.dataset, args.dataset)
+    train_dataset, eval_dataset = args.dataset, eval_split
 
     repo = args.here or _repo_root()
     const = os.path.join(repo, "torchtitan_autoresearch/Constitution.md")
@@ -66,14 +70,14 @@ def main(argv: list[str] | None = None) -> int:
     if ngpu <= 0:
         print("no GPUs detected; autoresearch needs at least one GPU", file=sys.stderr)
         return 2
-    print(f"[setup] world size (auto) = {ngpu} | train = {args.train_dataset} | "
-          f"eval = {args.eval_dataset} | run dir = {run_dir}")
+    print(f"[setup] world size (auto) = {ngpu} | dataset = {args.dataset} | "
+          f"(train {train_dataset} / eval {eval_dataset}) | run dir = {run_dir}")
 
     # The train dataset is a locked workload field set by the human here (not a
     # candidate knob); it rides in base_command so every run uses it.
     ex = SubprocessExecutor(repo, log_freq=rules.log_freq, ngpu=ngpu,
-                            base_command=[f"--dataloader.dataset={args.train_dataset}"],
-                            val_dataset=args.eval_dataset, run_dir=os.path.join(run_dir, "runs"))
+                            base_command=[f"--dataloader.dataset={train_dataset}"],
+                            val_dataset=eval_dataset, run_dir=os.path.join(run_dir, "runs"))
 
     sess = start_run(repo, args.tag, rules)
     print(f"[setup] experiment branch: {sess.branch} off {sess.base_commit[:7]}")

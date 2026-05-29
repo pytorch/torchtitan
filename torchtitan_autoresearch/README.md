@@ -56,11 +56,15 @@ The **observer is the only way to start autoresearch.** From the repo root, on a
 checkout of `aditvenk/autoresearch-parallelize`:
 
 ```bash
-python -m torchtitan_autoresearch.observe start --tag may30-qwen3
-# real held-out eval (needs internet/proxy for c4 streaming):
-https_proxy=<proxy> http_proxy=<proxy> \
-  python -m torchtitan_autoresearch.observe start --tag may30-qwen3 --eval-dataset c4_validation
+# default: real c4 (train) + c4_validation (held-out eval); needs internet/proxy:
+https_proxy=<proxy> http_proxy=<proxy> python -m torchtitan_autoresearch.observe start
+# offline toy run:
+python -m torchtitan_autoresearch.observe start --dataset c4_test
 ```
+
+`--dataset` (default `c4`) picks both the training set and its held-out eval split
+(`c4` -> train `c4` / eval `c4_validation`; `c4_test` -> both local/offline).
+`--tag` is optional (auto `qwen3-<MMDD-HHMMSS>`).
 
 `start` launches the creating loop and then follows along, streaming progress.
 The loop detects the GPU count (`ngpu: auto`), creates a fresh `autoresearch/<tag>`
