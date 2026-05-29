@@ -138,7 +138,12 @@ class SubprocessExecutor:
         self._log_cache: dict[tuple[str, str], str] = {}
 
     def _key(self, c: Candidate) -> str:
-        return (c.commit or c.label or "run")[:16].replace("/", "_")
+        # Key by commit AND command: command-only candidates share a commit, so
+        # keying on commit alone would make them all reuse the first run's cache.
+        import hashlib
+        h = hashlib.md5(((c.commit or "") + "|" + " ".join(c.command)).encode()).hexdigest()[:8]
+        label = (c.label or "cand").replace("/", "_").replace(" ", "_")[:24]
+        return f"{label}_{h}"
 
     def _run(self, c: Candidate, mode: str, extra: list[str]) -> str:
         key = (self._key(c), mode)

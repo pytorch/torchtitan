@@ -50,6 +50,7 @@ class Observer:
         self.report_path = os.path.join(run_dir, "report.json")
         self.loop_log = os.path.join(run_dir, "loop.out")
         self.pidfile = os.path.join(run_dir, "loop.pid")
+        self._proc: subprocess.Popen | None = None  # set when this observer started it
 
     # --- start / stop the creating loop (control, not creation) ---
     def start(self, *, tag: str, dataset: str, max_iters: int) -> int:
@@ -68,6 +69,7 @@ class Observer:
                 start_new_session=True, cwd=os.getcwd(),
                 env={**os.environ, "PYTHONPATH": os.getcwd(), "AR_RUN_FROM_OBSERVER": "1"},
             )
+        self._proc = p
         with open(self.pidfile, "w") as f:
             f.write(str(p.pid))
         print(f"started autoresearch loop (pid {p.pid}); run dir {self.run_dir}")
@@ -82,13 +84,17 @@ class Observer:
             return None
 
     def is_running(self) -> bool:
+        # If we started it, poll() reaps the child and reports liveness reliably.
+        if self._proc is not None:
+            return self._proc.poll() is None
         pid = self._pid()
         if pid is None:
             return False
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
+        try:  # a finished-but-unreaped child is a zombie -> treat as not running
+            with open(f"/proc/{pid}/stat") as f:
+                state = f.read().rsplit(")", 1)[-1].split()[0]
+            return state != "Z"
+        except (OSError, IndexError):
             return False
 
     def stop(self, grace: float = 8.0) -> None:
@@ -171,6 +177,61 @@ class Observer:
             return "\n".join(f"{r['label']}: {r['status']} ({r['tps_mean']} tps)" for r in rows[-5:]) or "nothing yet"
         return ("Ask about: best/champion, progress/count, rejected/why, deferred, quality/eval, recent/latest.")
 
+    def console(self, interval: float = 8.0) -> None:
+        """Interactive follow-along: broadcast updates in the background while you
+        type questions at a prompt. 'status' for a snapshot, 'quit' to end (quit
+        stops the experiment, since this observer owns it)."""
+        import threading
+
+        stop_flag = threading.Event()
+        lock = threading.Lock()
+
+        def broadcaster() -> None:
+            seen, champ, offset, done = -1, None, 0, False
+            while not stop_flag.is_set():
+                chunk = ""
+                if os.path.exists(self.loop_log):
+                    with open(self.loop_log) as f:
+                        f.seek(offset)
+                        chunk = f.read()
+                        offset = f.tell()
+                rows = self.ledger.read()
+                cur = (self._state().get("champion_tps") or [None])[-1]
+                changed = len(rows) != seen or cur != champ
+                running = self.is_running()
+                if chunk.strip() or changed or (not running and rows and not done):
+                    with lock:
+                        if chunk.strip():
+                            print("\n" + chunk.strip())
+                        if changed:
+                            print("\n" + self.status())
+                        if not running and rows and not done:
+                            print("\n[observer] the loop has finished. Ask questions, or 'quit'.")
+                            done = True
+                        print("> ", end="", flush=True)
+                    seen, champ = len(rows), cur
+                stop_flag.wait(interval)
+
+        t = threading.Thread(target=broadcaster, daemon=True)
+        t.start()
+        print("Interactive observer. Type a question, 'status', or 'quit' "
+              "('quit'/Ctrl-C stops the experiment).")
+        print("> ", end="", flush=True)
+        try:
+            for line in sys.stdin:
+                q = line.strip()
+                with lock:
+                    if q.lower() in ("quit", "exit", "q", "stop"):
+                        break
+                    if q.lower() == "status":
+                        print(self.status())
+                    elif q:
+                        print(self.answer(q))
+                    print("> ", end="", flush=True)
+        except KeyboardInterrupt:
+            pass
+        stop_flag.set()
+
     def watch(self, interval: float = 10.0) -> None:
         """Follow along: stream the loop's stdout and broadcast status on change."""
         seen_rows, last_champ, offset = -1, None, 0
@@ -225,10 +286,9 @@ def main(argv: list[str] | None = None) -> int:
         for sig in (signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, lambda *_: sys.exit(0))  # -> atexit -> obs.stop()
         try:
-            obs.watch()
-        except KeyboardInterrupt:
-            print("\n[observer] exiting -> stopping the experiment...")
+            obs.console()  # interactive: broadcasts updates AND answers questions
         finally:
+            print("\n[observer] exiting -> stopping the experiment...")
             obs.stop()
     elif args.cmd == "watch":
         # A passive re-attach viewer; it does NOT own the experiment, so exiting
