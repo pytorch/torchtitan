@@ -207,6 +207,10 @@ def main(argv: list[str] | None = None) -> int:
         if name == "ask":
             p.add_argument("question")
     args = ap.parse_args(argv)
+    if args.cmd == "start" and not args.tag:
+        import datetime
+        args.tag = "qwen3-" + datetime.datetime.now().strftime("%m%d-%H%M%S")
+        print(f"[observer] no --tag given; using auto tag: {args.tag}")
     obs = Observer(_run_dir(args.tag, args.run_dir))
 
     if args.cmd == "start":
