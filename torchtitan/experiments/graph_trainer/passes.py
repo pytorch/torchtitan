@@ -408,13 +408,13 @@ def construct_default_graph_passes(
     if graph_capture_pass is not None:
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
-            functools.partial(
-                graph_capture_pass,
-                is_forward=True,
-                static_input_indices=static_input_indices,
-                tensor_input_indices=traced_result.tensor_input_indices,
-            )
+        functools.partial(
+            graph_capture_pass,
+            is_forward=True,
+            static_input_indices=static_input_indices,
+            tensor_input_indices=traced_result.tensor_input_indices,
         )
+    )
 
     return passes
 
