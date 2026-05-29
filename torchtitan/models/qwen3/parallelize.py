@@ -23,6 +23,7 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
@@ -64,6 +65,13 @@ def parallelize_qwen3(
         raise NotImplementedError("Qwen3 baseline FSDP does not support HSDP.")
     if training.enable_cpu_offload:
         raise NotImplementedError("Qwen3 baseline FSDP does not support CPU offload.")
+
+    # Apply the configured activation checkpointing before sharding. A 14B model
+    # at this sequence length does not fit without it, and the baseline config
+    # requests it; FSDP then shards the checkpoint-wrapped blocks.
+    if ac_config.mode != "none":
+        apply_ac(model, ac_config)
+        logger.info("Applied %s activation checkpointing", ac_config.mode)
 
     fsdp_mesh = parallel_dims.get_mesh("fsdp")
     mp_policy = MixedPrecisionPolicy(
