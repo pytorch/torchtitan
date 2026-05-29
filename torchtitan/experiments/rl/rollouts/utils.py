@@ -42,7 +42,7 @@ def rollout_to_episode(rollout: Rollout) -> Episode:
 
 
 def prepare_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metric]:
-    """Build rollout-derived metrics for one collection round.
+    """Build rollout-derived metrics (lengths, truncation, reward breakdown).
 
     Args:
         prefix: Metric namespace (e.g. `"rollout"` or `"validation"`).

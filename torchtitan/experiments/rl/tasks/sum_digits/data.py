@@ -18,7 +18,7 @@ class SumDigitsInput:
     """Typed payload for one SumDigits problem."""
 
     numbers: list[int]  # [N_numbers]
-    """List of umbers the model must digit-sum."""
+    """Numbers the model must digit-sum."""
 
     target: int
     """Ground-truth total digit sum."""
@@ -40,7 +40,6 @@ class SumDigitsDataset(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         seed: int = 42
-        """Seed for generating the dataset."""
 
     def __init__(self, config: Config) -> None:
         self._rng = random.Random(config.seed)

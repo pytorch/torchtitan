@@ -20,7 +20,7 @@ _FORMAT_RE = re.compile(r"\[ANSWER\]\s*-?\d+")
 
 
 async def reward_correct(rollout: Rollout, env_input: SumDigitsInput) -> float:
-    """returns `1.0` when the last `[ANSWER] <n>` equals the target, else `0.0`."""
+    """`1.0` if the last `[ANSWER] <n>` equals the target, else `0.0`."""
     text = last_assistant_text(rollout)
     matches = _ANSWER_RE.findall(text)
     if not matches:
@@ -29,7 +29,7 @@ async def reward_correct(rollout: Rollout, env_input: SumDigitsInput) -> float:
 
 
 async def reward_format(rollout: Rollout, *args, **kwargs) -> float:
-    """returns `1.0` when the response contains `[ANSWER] <n>`, else `0.0`."""
+    """`1.0` if the response contains `[ANSWER] <n>`, else `0.0`."""
     return 1.0 if _FORMAT_RE.search(last_assistant_text(rollout)) else 0.0
 
 

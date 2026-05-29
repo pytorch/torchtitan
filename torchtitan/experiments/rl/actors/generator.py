@@ -164,8 +164,7 @@ class SamplingConfig:
     """Maximum number of tokens to generate per completion."""
 
     stop_token_ids: list[int] = field(default_factory=list)
-    """Renderer-supplied role-boundary stop tokens (e.g. Qwen3 ``<|im_end|>``).
-    Filled per call from ``renderer.get_stop_token_ids()`` by the controller."""
+    """Role-boundary stop tokens from the renderer (e.g. Qwen3 `<|im_end|>`)."""
 
 
 class VLLMGenerator(Actor, Configurable):

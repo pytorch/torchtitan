@@ -17,7 +17,7 @@ _ERROR = frozenset({"error_parse", "error_timeout", "error_abort", "error"})
 
 
 class RolloutStatus(StrEnum):
-    """Per-rollout status"""
+    """Per-rollout status."""
 
     ONGOING = "ongoing"
     COMPLETED = "completed"
@@ -71,7 +71,7 @@ class RolloutTurn:
 
     # For rubrics
     reward_components: dict[str, float] = field(default_factory=dict)
-    """Optional per-turn component reward, provided by the env and used by the rubric."""
+    """Optional per-turn reward components attached by the env. User by rubrics."""
 
 
 @dataclass(kw_only=True, slots=True)
@@ -82,7 +82,7 @@ class Rollout:
     # full rollout reconstructable for debugging.
 
     group_id: str
-    """ID for the prompt group used for advantage centering."""
+    """Prompt-group ID; siblings share it for advantage centering."""
 
     sample_idx: int
     """Sample index within the group (0..group_size-1)."""
@@ -107,7 +107,7 @@ class Rollout:
 @dataclass(kw_only=True, slots=True)
 class RolloutGroup:
     group_id: str
-    """ID for the prompt group used for advantage centering."""
+    """Prompt-group ID; siblings share it for advantage centering."""
 
     env_input: object
     """`DatasetOutput.env_input` shared by the group; passed to the rubric."""

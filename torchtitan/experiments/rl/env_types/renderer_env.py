@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from renderers import Message, Renderer, ToolSpec
 
-from torchtitan.experiments.rl.envs.message_env import MessageEnv
+from torchtitan.experiments.rl.env_types.message_env import MessageEnv
 from torchtitan.experiments.rl.rollouts.types import RolloutStatus
 
 if TYPE_CHECKING:
@@ -28,9 +28,8 @@ class RendererEnvConfig:
     """Limits enforced by `RendererEnv` (prompt cap + step timeout)."""
 
     max_rollout_tokens: int | None = None
-    """Hard cap on the prompt length (tokens) for any generate call in the
-    rollout. If the next prompt meets/exceeds it, the turn is terminal;
-    `None` disables the check."""
+    """Hard cap on prompt length (tokens). If the next prompt meets/exceeds
+    it, the turn is terminal; `None` disables the check."""
 
     step_timeout_s: float | None = 1800.0
     """Wall-clock timeout for one `MessageEnv.step_message` call."""
@@ -66,8 +65,7 @@ class TokenizedStepOutput:
 
 
 class RendererEnv:
-    """Env wrapper doing the messages <-> tokens plumbing between the generator
-    and the user's `MessageEnv`.
+    """Wraps a user `MessageEnv` and handles the messages <-> tokens plumbing.
 
     Owns the renderer, the length-stop / parse-error / timeout classification,
     and the prompt-overflow check.

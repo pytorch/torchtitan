@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 from renderers import Renderer
 
-from torchtitan.experiments.rl.envs import RendererEnv, RendererEnvConfig
+from torchtitan.experiments.rl.env_types import RendererEnv, RendererEnvConfig
 from torchtitan.experiments.rl.rollouts.types import DatasetOutput
 from torchtitan.experiments.rl.tasks import Task
 from torchtitan.experiments.rl.tasks.sum_digits.env import SumDigitsEnv

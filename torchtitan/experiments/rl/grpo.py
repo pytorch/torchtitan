@@ -52,7 +52,7 @@ from torchtitan.experiments.rl.actors.generator import (
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import Batcher
-from torchtitan.experiments.rl.envs import RendererEnv, TokenizedStepOutput
+from torchtitan.experiments.rl.env_types import RendererEnv, TokenizedStepOutput
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollouts import (
@@ -198,11 +198,9 @@ class RLTrainer(Configurable):
 
     Owns a `PolicyTrainer` actor (gradient updates), a `VLLMGenerator` actor
     (sampling), one or more `Task`s (rubric + env construction), and a
-    `Dataset` per phase (train/validation). Each row from the dataset
-    carries `DatasetOutput.task_name`, which the controller uses to route the
-    row to the matching `Task` in `tasks`. Each training step samples
-    groups of rollouts, scores them via per-task rubrics, builds GRPO
-    advantages, and syncs trainer weights to the generator.
+    `Dataset` per phase (train/validation). Each training step samples groups
+    of rollouts, scores them via per-task rubrics, builds GRPO advantages, and
+    syncs trainer weights to the generator.
 
     Example:
 
@@ -251,9 +249,8 @@ class RLTrainer(Configurable):
         """Message-to-token renderer config."""
 
         async_executor_max_workers: int = 64
-        """Worker count for the default `asyncio.to_thread` executor;
-        load-bearing for concurrent renderer calls at
-        `num_prompts_per_step * group_size` rollouts."""
+        """Worker count for the default `asyncio.to_thread` executor; sized for
+        concurrent renderer calls across all in-flight rollouts."""
 
         log_samples: bool = False
         """Log first completion per episode during training and validation."""
@@ -275,7 +272,6 @@ class RLTrainer(Configurable):
         metrics: m.MetricsProcessor.Config = field(
             default_factory=m.MetricsProcessor.Config
         )
-        """Metrics processor config."""
 
         def __post_init__(self):
             if self.generator.checkpoint.enable:
@@ -620,11 +616,6 @@ class RLTrainer(Configurable):
         """Build groups, batch-generate, then per group: env.step +
         task.score_group. Per-group failures are logged and dropped.
 
-        Mental model:
-        Level 1: Manage a batch of samples that will be turned into n_groups * n_rollouts_per_group.
-            Level 2: Manage rollouts at the group level.
-                Level 3: Manage individual rollout.
-
         Steps:
         1. Get examples from dataset
         2. For each example, find associated task, e.g. CodingTask, SearchTask, etc
@@ -634,10 +625,8 @@ class RLTrainer(Configurable):
         6. For each rollout, run `env.step`
         7. For each RolloutGroup, run `reward = task.score_group(RolloutGroup)`
         7. Return scored List[RolloutGroup]
-
-        TODO(continuous-batching): when this becomes available, we can modularize this fn properly
-        and run the rollouts independently, instead of having to batch everything at once,
-        due to the current constraint of having to call .generate once with all the prompts.
+        TODO(continuous-batching): once available, run rollouts independently
+        instead of batching one `generate` over all prompts at once.
         """
 
         @dataclass(kw_only=True, slots=True)
@@ -779,11 +768,11 @@ class RLTrainer(Configurable):
         initial_step: TokenizedStepOutput,
         completion: Completion,
     ) -> Rollout:
-        """Step one env into a Rollout. On unexpected failure,
-        return the turns collected so far with an ERROR status
+        """Step one env into a `Rollout`. On failure, return the turns
+        collected so far with an `ERROR` status.
 
-        Reward is left unset; the controller calls `task.score_group(...)` after
-        this and applies `reward` / `reward_components` to each rollout.
+        Reward is left unset; the controller scores via `task.score_group(...)`
+        afterward and fills `reward` / `reward_components`.
 
         Args:
             group_id: Stable prompt-group ID used for advantage centering.

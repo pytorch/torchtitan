@@ -25,7 +25,7 @@ class RewardFn:
     """Async reward callable with shape `async (rollout, env_input) -> float`."""
 
     weight: float = 1.0
-    """Unnormalized weight for reward averaging. The rubric normalizes weights the sum to 1.0."""
+    """Relative weight; the rubric normalizes weights to sum to 1.0."""
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -46,12 +46,10 @@ class Reward:
 class Rubric(Configurable, abc.ABC):
     """Holds and calls reward functions.
 
-    Subclass and implement `register_funcs` returning a list of `RewardFn`.
-    Weights are normalized to sum to 1.0 across the list.
+    Subclass and implement `register_funcs` returning a list of `RewardFn`;
+    weights are normalized to sum to 1.0 across the list.
 
-    `Config.truncation_reward` / `Config.error_reward` override the
-    weighted-sum path on non-COMPLETED rollouts when set. When `None`, reward
-    fns run on the partial response and can inspect `rollout.status`.
+    Setting truncation_reward and error_reward will short-circuit the reward fns.
 
     Example:
         class MyRubric(Rubric):
@@ -84,21 +82,11 @@ class Rubric(Configurable, abc.ABC):
 
     @abc.abstractmethod
     def register_funcs(self) -> list[RewardFn]:
-        """Return the reward fns + weights for this rubric.
-
-        Example:
-            class MyRubric(Rubric):
-                def register_funcs(self) -> list[RewardFn]:
-                    return [
-                        RewardFn(fn=my_reward_fn1, weight=0.5),
-                        RewardFn(fn=my_reward_fn2, weight=0.5),
-                    ]
-        """
+        """Return this rubric's reward fns + weights (see class Example)."""
 
     @functools.cached_property
     def _rwd_fns(self) -> list[RewardFn]:
-        """Builds registered reward fns with weights normalized to sum
-        to 1.0 on first scoring call (lazily)."""
+        """Registered reward fns with weights normalized to sum to 1.0."""
         registered = self.register_funcs()
 
         # Sanity checks
@@ -123,16 +111,15 @@ class Rubric(Configurable, abc.ABC):
 
     @sl.log_trace_span("score_one")
     async def _score_one(self, rollout: Rollout, env_input: object) -> Reward:
-        """Score one rollout. Short-circuits on truncate and error if
-        `Config.truncation_reward` / `error_reward` are set.
+        """Score one rollout. Short-circuits to `truncation_reward` /
+        `error_reward` when those are set and the rollout truncated / errored.
 
         Args:
             rollout: Rollout to score.
-            env_input: Dataset payload originally used to construct the rollout env.
-                It can contain valuable info for the reward, such as the target or metadata.
+            env_input: Dataset payload used to build the env (contains target/metadata).
 
         Returns:
-            Final weighted reward + per-fn raw components. S
+            Final weighted reward + per-fn raw components.
         """
         # Short-circuit on truncate / error
         cfg = self._config

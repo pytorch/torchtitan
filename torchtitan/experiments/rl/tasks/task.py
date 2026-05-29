@@ -11,7 +11,10 @@ from dataclasses import dataclass
 from renderers import Renderer
 
 from torchtitan.config import Configurable
-from torchtitan.experiments.rl.envs.renderer_env import RendererEnv, RendererEnvConfig
+from torchtitan.experiments.rl.env_types.renderer_env import (
+    RendererEnv,
+    RendererEnvConfig,
+)
 from torchtitan.experiments.rl.rollouts.types import DatasetOutput, Rollout
 from torchtitan.experiments.rl.rubrics import Reward, Rubric
 

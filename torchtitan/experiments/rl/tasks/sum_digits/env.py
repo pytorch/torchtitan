@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from renderers import Message
 
-from torchtitan.experiments.rl.envs import MessageEnv, ResetOutput, StepOutput
+from torchtitan.experiments.rl.env_types import MessageEnv, ResetOutput, StepOutput
 from torchtitan.experiments.rl.tasks.sum_digits.data import SumDigitsInput
 
 

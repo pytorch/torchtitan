@@ -50,8 +50,8 @@ class StepOutput:
 
 
 class MessageEnv(abc.ABC):
-    """User-written env in message space. Subclass and implement `reset` +
-    `step_message`; `RendererEnv` wraps it with a `Renderer` for tokens.
+    """User-written env in message space. Implement `reset` + `step_message`;
+    `RendererEnv` wraps it with a `Renderer` for tokens.
 
     Example:
 
@@ -69,10 +69,10 @@ class MessageEnv(abc.ABC):
 
     @abc.abstractmethod
     async def step_message(self, msg: Message) -> StepOutput:
-        """Return the env's reply to assistant message.
+        """Return the env's reply to an assistant message.
 
-        Does not need to inspect `finish_reason` / token counts / parse
-        failures; `RendererEnv` handles those before calling this.
+        `RendererEnv` handles finish_reason / length / parse failures before
+        calling this, so the env only sees a successfully parsed message.
 
         Args:
             msg: Parsed assistant message (`content`, optional
