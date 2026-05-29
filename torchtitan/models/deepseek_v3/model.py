@@ -17,7 +17,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
-from torchtitan.models.common.rope import apply_rotary_emb_single_complex
+from torchtitan.models.common.rope import apply_rotary_emb_single_complex, RoPE
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
@@ -54,6 +54,7 @@ class Attention(BaseAttention):
         rope_factor: float = 1.0
         rope_max_seq_len: int = 4096
         rope_original_seq_len: int = 4096
+        rope: RoPE.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -90,15 +91,20 @@ class Attention(BaseAttention):
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
         self.inner_attention = config.inner_attention.build()
+        self.rope: RoPE | None = (
+            config.rope.build() if config.rope is not None else None
+        )
 
     def forward(
         self,
         x: torch.Tensor,
-        freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
         bsz, seqlen, _ = x.size()
+        if self.rope is None:
+            raise ValueError("RoPE must be configured when RoPE is enabled.")
+        rope_cache = self.rope(seqlen, positions)
 
         # Query projection
         if self.q_lora_rank == 0:
@@ -110,14 +116,14 @@ class Attention(BaseAttention):
         q_nope, q_pe = torch.split(
             q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
         )
-        q_pe = apply_rotary_emb_single_complex(q_pe, freqs_cis, positions)
+        q_pe = apply_rotary_emb_single_complex(q_pe, rope_cache, positions)
         q = torch.cat([q_nope, q_pe], dim=-1)
 
         # Key-value projection
         kv = self.wkv_a(x)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
-        k_pe = apply_rotary_emb_single_complex(k_pe.unsqueeze(2), freqs_cis, positions)
+        k_pe = apply_rotary_emb_single_complex(k_pe.unsqueeze(2), rope_cache, positions)
 
         kv = self.wkv_b(self.kv_norm(kv))
         kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
@@ -157,13 +163,10 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
-        x = x + self.attention(
-            self.attention_norm(x), freqs_cis, attention_masks, positions
-        )
+        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
         if self.moe_enabled:
             x = x + self.moe(self.ffn_norm(x))
         else:

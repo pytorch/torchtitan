@@ -33,6 +33,7 @@ from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.rope import (
     apply_rotary_emb_complex,
     apply_rotary_emb_cos_sin,
+    RoPE,
 )
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import round_up
@@ -679,6 +680,7 @@ class GQAttention(BaseAttention):
         inner_attention: Module.Config
         mask_type: str = "causal"
         rope_backend: str = "complex"  # "complex" or "cos_sin"
+        rope: RoPE.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -694,6 +696,9 @@ class GQAttention(BaseAttention):
         self.enable_gqa = self.n_heads > self.n_kv_heads
         self.use_rope = config.use_rope
         self.rope_backend = config.rope_backend
+        self.rope: RoPE | None = (
+            config.rope.build() if config.rope is not None else None
+        )
 
         # Pluggable QKV projection
         self.qkv_linear = config.qkv_linear.build()
@@ -713,7 +718,6 @@ class GQAttention(BaseAttention):
     def forward(
         self,
         x: torch.Tensor,
-        rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -728,6 +732,9 @@ class GQAttention(BaseAttention):
 
         # Apply rotary embeddings
         if self.use_rope:
+            if self.rope is None:
+                raise ValueError("RoPE must be configured when RoPE is enabled.")
+            rope_cache = self.rope(seqlen, positions)
             if self.rope_backend == "cos_sin":
                 xq, xk = apply_rotary_emb_cos_sin(xq, xk, rope_cache, positions)
             else:

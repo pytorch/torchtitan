@@ -69,11 +69,8 @@ class Decoder(BaseModel):
         lm_head: Linear.Config
         tok_embeddings: Embedding.Config
         norm: RMSNorm.Config
-        # TODO: Right now RoPE config is not in each TransformerBlock / Attention,
-        # so that rope cache, a.k.a. freqs_cis, is shared by all layers. However,
-        # it causes redundantly passing backend (complex / cos_sin) to both RoPE
-        # and Attention. Also RoPE itself as a standalone module requires PP special
-        # handling, see below.
+        # RoPE config is copied into each attention layer so every layer owns
+        # its own local cache.
         rope: RoPE.Config
         # TODO(fegin): revisit
         # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
@@ -169,6 +166,11 @@ class Decoder(BaseModel):
                             debug.moe_force_load_balance
                         )
 
+            for layer_cfg in self.layers:
+                attention_cfg = getattr(layer_cfg, "attention", None)
+                if attention_cfg is not None and hasattr(attention_cfg, "rope"):
+                    attention_cfg.rope = self.rope
+
     # Set by the trainer when ChunkedCELoss is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().
     # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor
@@ -180,11 +182,12 @@ class Decoder(BaseModel):
         self.config = config
 
         self.tok_embeddings = config.tok_embeddings.build()
-        self.rope = config.rope.build()
-        self.register_buffer("freqs_cis", self.rope.cache, persistent=False)
 
         self.layers = ModuleDict()
         for i, layer_config in enumerate(config.layers):
+            attention_config = getattr(layer_config, "attention", None)
+            if attention_config is not None and hasattr(attention_config, "rope"):
+                attention_config.rope = config.rope
             self.layers[str(i)] = layer_config.build()
 
         self.norm = config.norm.build()
@@ -195,10 +198,6 @@ class Decoder(BaseModel):
         *,
         buffer_device: torch.device | None = None,
     ) -> None:
-        # Compute buffer_device before recursion so children (RoPE) get
-        # the correct device when buffer_device is not explicitly provided.
-        if buffer_device is None:
-            buffer_device = self.freqs_cis.device
         super().init_states(buffer_device=buffer_device)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
@@ -206,14 +205,6 @@ class Decoder(BaseModel):
             f"buffer_device must not be meta, got {buffer_device}. "
             f"Buffers should be initialized on a real device after to_empty()."
         )
-        if self.rope is not None:
-            # RoPE's _init_self_buffers was already called by auto-recursion
-            self.freqs_cis = self.rope.cache
-        else:
-            # PP case: rope module was pruned, rebuild to get freqs_cis
-            rope = self.config.rope.build()
-            rope._init_self_buffers(buffer_device=buffer_device)
-            self.freqs_cis = rope.cache
 
     def forward(
         self,
@@ -225,7 +216,7 @@ class Decoder(BaseModel):
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
         for layer in self.layers.values():
-            h = layer(h, self.freqs_cis, attention_masks, positions)
+            h = layer(h, attention_masks, positions)
 
         h = self.norm(h) if self.norm is not None else h
 

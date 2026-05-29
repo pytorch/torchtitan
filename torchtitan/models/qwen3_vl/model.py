@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 import torch
 from torch import nn
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import distribute_tensor, DTensor
 
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.common.decoder import Decoder
@@ -43,11 +43,11 @@ class Qwen3VLModel(Qwen3Model):
           │    ├─ _compute_vision_positions             → locate vision regions in text sequence
           │    └─ _scatter_vision_embeds                → copy vision into text at placeholder positions
           │
-          ├─ _compute_mrope_freqs                      → build 3D position IDs, interleave into freqs_cis
+          ├─ _compute_mrope_freqs                      → build 3D position IDs, interleave RoPE cache
           │
           └─ transformer layers
                └─ for each layer:
-                    ├─ layer(hidden_states, freqs_cis, masks, positions)
+                    ├─ layer(hidden_states, masks, positions)
                     └─ _deepstack_process: add intermediate ViT features at vision positions (early layers only)
     """
 
@@ -99,6 +99,42 @@ class Qwen3VLModel(Qwen3Model):
 
         # Number of early LLM layers that receive DeepStack visual features
         self.num_deepstack_layers = len(config.vision_encoder.deepstack_visual_indices)
+
+    def _first_layer_rope_cache(self) -> torch.Tensor:
+        first_layer = next(iter(self.layers.values()))
+        rope = first_layer.attention.rope
+        if rope is None:
+            raise ValueError("Qwen3-VL requires per-layer RoPE caches.")
+        return rope.cache
+
+    def _set_layer_rope_caches(self, rope_cache: torch.Tensor) -> None:
+        for layer in self.layers.values():
+            rope = layer.attention.rope
+            if rope is None:
+                raise ValueError("Qwen3-VL requires per-layer RoPE caches.")
+            if isinstance(rope.cache, DTensor) and not isinstance(rope_cache, DTensor):
+                rope.cache = distribute_tensor(
+                    rope_cache,
+                    rope.cache.device_mesh,
+                    list(rope.cache.placements),
+                )
+            else:
+                rope.cache = rope_cache
+
+    def _reset_layer_rope_caches(self, *, buffer_device: torch.device) -> None:
+        for layer in self.layers.values():
+            rope = layer.attention.rope
+            if rope is None:
+                raise ValueError("Qwen3-VL requires per-layer RoPE caches.")
+            if rope.cache.ndim == 4:
+                old_cache = rope.cache
+                rope._init_self_buffers(buffer_device=buffer_device)
+                if isinstance(old_cache, DTensor):
+                    rope.cache = distribute_tensor(
+                        rope.cache,
+                        old_cache.device_mesh,
+                        list(old_cache.placements),
+                    )
 
     def _compute_mrope_freqs(
         self,
@@ -287,13 +323,13 @@ class Qwen3VLModel(Qwen3Model):
 
         # --- Compute interleaved MRoPE cos/sin from position IDs ---
 
-        freqs_cis = self.freqs_cis
-        if isinstance(freqs_cis, DTensor):
-            freqs_cis = freqs_cis.to_local()
-        _maybe_check_max_pos(position_ids, max_valid_pos=freqs_cis.shape[0] - 1)
-        head_dim = freqs_cis.shape[-1] // 2
-        cos_cache = freqs_cis[:, :head_dim]
-        sin_cache = freqs_cis[:, head_dim:]
+        rope_cache = self._first_layer_rope_cache()
+        if isinstance(rope_cache, DTensor):
+            rope_cache = rope_cache.to_local()
+        _maybe_check_max_pos(position_ids, max_valid_pos=rope_cache.shape[0] - 1)
+        head_dim = rope_cache.shape[-1] // 2
+        cos_cache = rope_cache[:, :head_dim]
+        sin_cache = rope_cache[:, head_dim:]
 
         # Initialize with temporal positions, then overwrite H/W slices
         t_pos = position_ids[0].long()
@@ -305,7 +341,7 @@ class Qwen3VLModel(Qwen3Model):
         half = head_dim // 2
         for dim, offset in enumerate((1, 2), start=1):  # H, W
             length = self.mrope_section[dim] * 3
-            low = torch.arange(offset, length, 3, device=freqs_cis.device)
+            low = torch.arange(offset, length, 3, device=rope_cache.device)
             col_indices = torch.cat([low, low + half])
             dim_pos = position_ids[dim].long()  # (batch, seq_len)
             mrope_cos[..., col_indices] = cos_cache[:, col_indices][dim_pos]
@@ -399,9 +435,9 @@ class Qwen3VLModel(Qwen3Model):
             Updated embeddings
         """
         for item_idx, sample_idx, vision_start, n_tokens in vision_positions:
-            inputs_embeds[
-                sample_idx, vision_start : vision_start + n_tokens, :
-            ] = merged_embeds[item_idx, :n_tokens, :]
+            inputs_embeds[sample_idx, vision_start : vision_start + n_tokens, :] = (
+                merged_embeds[item_idx, :n_tokens, :]
+            )
         return inputs_embeds
 
     def _deepstack_process(
@@ -554,24 +590,24 @@ class Qwen3VLModel(Qwen3Model):
             special_tokens=special_tokens,
         )
 
-        # Compute MRoPE freqs when vision inputs are present
+        # Compute MRoPE cache when vision inputs are present.
         if grid_thw is not None or grid_thw_videos is not None:
-            # Per-position freqs_cis with 3D (T, H, W) positions baked in
-            freqs_cis = self._compute_mrope_freqs(
-                tokens,
-                grid_thw=grid_thw,
-                grid_thw_videos=grid_thw_videos,
-                special_tokens=special_tokens,
-                positions=positions,
+            self._set_layer_rope_caches(
+                self._compute_mrope_freqs(
+                    tokens,
+                    grid_thw=grid_thw,
+                    grid_thw_videos=grid_thw_videos,
+                    special_tokens=special_tokens,
+                    positions=positions,
+                )
             )
         else:
-            # Standard freqs_cis indexed by positions in each layer
-            freqs_cis = self.freqs_cis
+            self._reset_layer_rope_caches(buffer_device=inputs_embeds.device)
 
         # Apply transformer layers with DeepStack
         hidden_states = inputs_embeds
         for layer_idx, layer in self.layers.items():
-            hidden_states = layer(hidden_states, freqs_cis, attention_masks, positions)
+            hidden_states = layer(hidden_states, attention_masks, positions)
 
             # Apply DeepStack: add visual features to early layer hidden states
             layer_idx_int = int(layer_idx)

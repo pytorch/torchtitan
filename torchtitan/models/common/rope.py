@@ -74,7 +74,7 @@ class RoPE(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
-        self.cache: torch.Tensor = self._precompute()
+        self.register_buffer("cache", self._precompute(), persistent=False)
 
     def _precompute(self) -> torch.Tensor:
         cfg = self.config
@@ -220,9 +220,9 @@ class RoPE(Module):
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is not None:
             with torch.device(buffer_device):
-                self.cache = self._precompute()
+                self.register_buffer("cache", self._precompute(), persistent=False)
         else:
-            self.cache = self._precompute()
+            self.register_buffer("cache", self._precompute(), persistent=False)
 
 
 def _reshape_for_broadcast_complex(

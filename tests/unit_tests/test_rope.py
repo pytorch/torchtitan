@@ -9,6 +9,12 @@ import unittest
 
 import torch
 
+from torchtitan.models.common.attention import (
+    GQAttention,
+    QKVLinear,
+    ScaledDotProductAttention,
+)
+from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.common.rope import (
     _maybe_check_max_pos,
     apply_rotary_emb_complex,
@@ -144,6 +150,44 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
         positions = torch.tensor([[0, 1, self.max_seq_len, self.max_seq_len + 1]])
         with self.assertRaises(RuntimeError):
             apply_rotary_emb_cos_sin(xq, xk, self.rope_cache, positions)
+
+
+class TestPerLayerRoPECache(unittest.TestCase):
+    def test_gqa_attention_uses_layer_rope_cache(self):
+        torch.manual_seed(42)
+        dim = 8
+        head_dim = 4
+        attention = GQAttention.Config(
+            n_heads=2,
+            n_kv_heads=2,
+            head_dim=head_dim,
+            dim=dim,
+            qkv_linear=QKVLinear.Config(
+                head_dim=head_dim,
+                wq=Linear.Config(in_features=dim, out_features=dim),
+                wkv=Linear.Config(in_features=dim, out_features=dim),
+            ),
+            wo=Linear.Config(in_features=dim, out_features=dim),
+            inner_attention=ScaledDotProductAttention.Config(),
+            mask_type="causal",
+            rope_backend="complex",
+            rope=RoPE.Config(dim=head_dim, max_seq_len=16, backend="complex"),
+        ).build()
+
+        x = torch.randn(2, 4, dim)
+        out = attention(x, None)
+
+        self.assertIsNotNone(attention.rope)
+        self.assertEqual(out.shape, x.shape)
+
+    def test_decoder_builds_distinct_rope_modules_per_attention_layer(self):
+        from torchtitan.models.llama3 import llama3_configs
+
+        model = llama3_configs["debugmodel"]("sdpa").build()
+        layer_ropes = [layer.attention.rope for layer in model.layers.values()]
+
+        self.assertTrue(all(rope is not None for rope in layer_ropes))
+        self.assertEqual(len({id(rope) for rope in layer_ropes}), len(layer_ropes))
 
 
 class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
