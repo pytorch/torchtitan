@@ -152,6 +152,45 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
             apply_rotary_emb_cos_sin(xq, xk, self.rope_cache, positions)
 
 
+class TestMRoPECache(unittest.TestCase):
+    def test_three_axis_positions_build_interleaved_cache(self):
+        head_dim = 12
+        rope = RoPE.Config(
+            dim=head_dim,
+            max_seq_len=8,
+            backend="cos_sin",
+            mrope_section=[2, 1, 1],
+        ).build()
+        position_ids = torch.tensor(
+            [
+                [[0, 1, 2], [3, 4, 5]],  # temporal
+                [[1, 2, 3], [4, 5, 6]],  # height
+                [[2, 3, 4], [5, 6, 7]],  # width
+            ]
+        )
+
+        mrope_cache = rope(seq_len=3, positions=position_ids)
+
+        cos_cache = rope.cache[:, :head_dim]
+        sin_cache = rope.cache[:, head_dim:]
+        expected_cos = cos_cache[position_ids[0]]
+        expected_sin = sin_cache[position_ids[0]]
+        half = head_dim // 2
+        for dim, offset in enumerate((1, 2), start=1):
+            low = torch.arange(offset, rope.config.mrope_section[dim] * 3, 3)
+            col_indices = torch.cat([low, low + half])
+            expected_cos[..., col_indices] = cos_cache[:, col_indices][
+                position_ids[dim]
+            ]
+            expected_sin[..., col_indices] = sin_cache[:, col_indices][
+                position_ids[dim]
+            ]
+        expected = torch.cat([expected_cos, expected_sin], dim=-1).unsqueeze(2)
+
+        self.assertEqual(mrope_cache.shape, (2, 3, 1, head_dim * 2))
+        self.assertTrue(torch.equal(mrope_cache, expected))
+
+
 class TestPerLayerRoPECache(unittest.TestCase):
     def test_gqa_attention_uses_layer_rope_cache(self):
         torch.manual_seed(42)

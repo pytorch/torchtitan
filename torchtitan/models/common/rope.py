@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
-from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
 
 from torchtitan.protocols.module import Module
 
@@ -70,6 +70,9 @@ class RoPE(Module):
         beta_slow: float = 1.0
         original_seq_len: int = 4096
         mscale: float = 0.0
+        # Qwen-VL style multimodal RoPE sections for temporal/height/width
+        # position IDs. None means standard 1D RoPE.
+        mrope_section: list[int] | None = None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -215,7 +218,65 @@ class RoPE(Module):
         self, seq_len: int, positions: torch.Tensor | None = None
     ) -> torch.Tensor:
         """Return the precomputed cache tensor (slicing is done by apply_rotary_emb)."""
+        if positions is not None and positions.ndim == 3:
+            return self._compute_mrope_cache(positions)
         return self.cache
+
+    def _compute_mrope_cache(self, position_ids: torch.Tensor) -> torch.Tensor:
+        cfg = self.config
+        if cfg.backend != "cos_sin":
+            raise ValueError("MRoPE is only supported for cos/sin RoPE.")
+        if cfg.mrope_section is None:
+            raise ValueError("mrope_section must be configured for 3D MRoPE positions.")
+        if len(cfg.mrope_section) != 3:
+            raise ValueError(
+                f"mrope_section must have 3 entries, got {cfg.mrope_section}."
+            )
+        if position_ids.shape[0] != 3:
+            raise ValueError(
+                f"MRoPE position IDs must have shape (3, batch, seq), "
+                f"got {tuple(position_ids.shape)}."
+            )
+
+        rope_cache = self.cache
+        cache_was_dtensor = isinstance(rope_cache, DTensor)
+        if cache_was_dtensor:
+            rope_cache = rope_cache.to_local()
+        pos_local = (
+            position_ids.to_local()
+            if isinstance(position_ids, DTensor)
+            else position_ids
+        )
+        pos_local = pos_local.to(device=rope_cache.device)
+
+        _maybe_check_max_pos(pos_local, max_valid_pos=rope_cache.shape[0] - 1)
+        head_dim = rope_cache.shape[-1] // 2
+        cos_cache = rope_cache[:, :head_dim]
+        sin_cache = rope_cache[:, head_dim:]
+
+        # Start from temporal positions for all dimensions, then overwrite the
+        # height/width interleaved sections with their own position IDs.
+        t_pos = pos_local[0].long()
+        mrope_cos = cos_cache[t_pos]
+        mrope_sin = sin_cache[t_pos]
+
+        half = head_dim // 2
+        for dim, offset in enumerate((1, 2), start=1):
+            length = cfg.mrope_section[dim] * 3
+            low = torch.arange(offset, length, 3, device=rope_cache.device)
+            col_indices = torch.cat([low, low + half])
+            dim_pos = pos_local[dim].long()
+            mrope_cos[..., col_indices] = cos_cache[:, col_indices][dim_pos]
+            mrope_sin[..., col_indices] = sin_cache[:, col_indices][dim_pos]
+
+        mrope_cache = torch.cat([mrope_cos, mrope_sin], dim=-1).unsqueeze(2)
+        if cache_was_dtensor:
+            mrope_cache = distribute_tensor(
+                mrope_cache,
+                self.cache.device_mesh,
+                list(self.cache.placements),
+            )
+        return mrope_cache
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is not None:
@@ -405,11 +466,9 @@ def apply_rotary_emb_cos_sin(
             or (bsz, seqlen, 1, head_dim * 2) if already broadcast-shaped (MRoPE)
         positions: optional position indices
     """
-    positions = _maybe_wrap_positions(positions, xq)
     head_dim = xq.shape[-1]
     if rope_cache.ndim != 4:
-        # Qwen3-VL MRoPE validates position IDs before building its 4D cache.
-        # Here shape[0] is max sequence length only for non-4D indexed caches.
+        positions = _maybe_wrap_positions(positions, xq)
         if positions is not None:
             _maybe_check_max_pos(positions, max_valid_pos=rope_cache.shape[0] - 1)
         rope_cache = _reshape_for_broadcast_cos_sin(rope_cache, xq, positions)

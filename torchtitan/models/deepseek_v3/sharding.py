@@ -94,10 +94,10 @@ def _set_deepseek_v3_layer_sharding(
             "x": dense_activation_placement(tp=Replicate()),
         },
     )
-    if attention.rope is not None:
-        attention.rope.sharding_config = ShardingConfig(
-            state_shardings={"cache": dense_param_placement(tp=Replicate())},
-        )
+    assert attention.rope is not None
+    attention.rope.sharding_config = ShardingConfig(
+        state_shardings={"cache": dense_param_placement(tp=Replicate())},
+    )
     # Low-rank projections and norms keep Replicate weights on TP. We still
     # distribute them (Replicate DTensor) so DTensor activations flow through
     # without mixing plain Tensor + DTensor in the matmul.

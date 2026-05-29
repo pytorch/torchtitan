@@ -89,10 +89,10 @@ def _set_gpt_oss_layer_sharding(
             "x": dense_activation_placement(tp=Replicate()),
         },
     )
-    if attention.rope is not None:
-        attention.rope.sharding_config = ShardingConfig(
-            state_shardings={"cache": dense_param_placement(tp=Replicate())},
-        )
+    assert attention.rope is not None
+    attention.rope.sharding_config = ShardingConfig(
+        state_shardings={"cache": dense_param_placement(tp=Replicate())},
+    )
     set_qkv_linear_sharding(attention.qkv_linear)
     attention.wo.sharding_config = rowwise_config(output_sp=enable_sp)
 

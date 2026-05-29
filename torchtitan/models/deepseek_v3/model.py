@@ -90,6 +90,8 @@ class Attention(BaseAttention):
             mscale = 0.1 * config.mscale * math.log(config.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
+        if config.rope is None:
+            raise ValueError("RoPE must be configured for DeepSeek V3 attention.")
         self.inner_attention = config.inner_attention.build()
         self.rope: RoPE | None = (
             config.rope.build() if config.rope is not None else None

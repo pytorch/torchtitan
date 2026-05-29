@@ -696,6 +696,8 @@ class GQAttention(BaseAttention):
         self.enable_gqa = self.n_heads > self.n_kv_heads
         self.use_rope = config.use_rope
         self.rope_backend = config.rope_backend
+        if config.use_rope and config.rope is None:
+            raise ValueError("RoPE must be configured when RoPE is enabled.")
         self.rope: RoPE | None = (
             config.rope.build() if config.rope is not None else None
         )

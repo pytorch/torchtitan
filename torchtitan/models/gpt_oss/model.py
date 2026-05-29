@@ -67,6 +67,8 @@ class Attention(BaseAttention):
         assert isinstance(
             config.inner_attention, FlexAttention.Config
         ), "gpt-oss only supports FlexAttention"
+        if config.rope is None:
+            raise ValueError("RoPE must be configured for GPT-OSS attention.")
         self.inner_attention = config.inner_attention.build()
         self.rope: RoPE | None = (
             config.rope.build() if config.rope is not None else None
