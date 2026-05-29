@@ -189,14 +189,7 @@ class GptOssGroupedExperts(Module):
         return out_TD.view(B, -1, D)
 
     def parallelize(self, parallel_dims) -> None:
-        """Parallelize experts and install the sparse runtime mesh.
-
-        Mirrors ``GroupedExperts.parallelize``: after the base
-        ``Module.parallelize`` distributes the expert weight params, install the
-        sparse mesh on the non-Module ``token_dispatcher`` child.
-        ``GptOssGroupedExperts`` inherits ``Module`` directly (not
-        ``GroupedExperts``) so it needs its own override.
-        """
+        """Parallelize expert weights and install ``sparse_mesh``."""
         super().parallelize(parallel_dims)
         if parallel_dims.ep_enabled:
             self.token_dispatcher.sparse_mesh = parallel_dims.get_activated_mesh(

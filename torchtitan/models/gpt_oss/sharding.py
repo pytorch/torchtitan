@@ -41,7 +41,6 @@ def set_gpt_oss_sharding_config(
     config: "GptOssModel.Config",
     *,
     loss_parallel: bool,
-    enable_tp: bool,
     enable_sp: bool,
     enable_ep: bool,
     chunked_loss: bool,
@@ -64,7 +63,6 @@ def set_gpt_oss_sharding_config(
     for layer_cfg in config.layers:
         _set_gpt_oss_layer_sharding(
             layer_cfg,
-            enable_tp=enable_tp,
             enable_sp=enable_sp,
             enable_ep=enable_ep,
         )
@@ -73,7 +71,6 @@ def set_gpt_oss_sharding_config(
 def _set_gpt_oss_layer_sharding(
     layer_cfg: "GptOssTransformerBlock.Config",
     *,
-    enable_tp: bool,
     enable_sp: bool,
     enable_ep: bool,
 ) -> None:
