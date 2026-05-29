@@ -396,6 +396,14 @@ def xpugraph_pass(
             f"GraphModule, such as full_inductor_compilation."
         )
 
+    if not hasattr(torch, "xpu") or not torch.xpu.is_available():
+        logger.warning("Skipping xpugraph pass because XPU is not available.")
+        return gm
+
+    if not is_xpugraph_compatible(gm):
+        logger.warning("Skipping xpugraph pass because graph is not XPUGraph compatible.")
+        return gm
+
     if static_input_indices is None:
         static_input_indices = get_static_input_indices(gm, is_forward)
 
