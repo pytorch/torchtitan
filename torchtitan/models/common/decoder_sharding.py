@@ -152,7 +152,7 @@ def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
         qkv_linear_cfg.sharding_config = ShardingConfig(
             in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
             out_src_shardings=(qkv_output, qkv_output, qkv_output),
-            local_spmd=LocalSpmdConfig(),
+            local_spmd=True,
         )
         qkv_linear_cfg.wqkv.sharding_config = colwise_config()
     elif isinstance(qkv_linear_cfg, QKVLinear.Config):
