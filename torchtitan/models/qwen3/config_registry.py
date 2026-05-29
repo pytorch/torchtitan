@@ -195,6 +195,9 @@ def qwen3_14b() -> Trainer.Config:
             local_batch_size=4,
             seq_len=4096,
             steps=3000,
+            # bf16 is the runnable, high-precision golden regime; default float32
+            # OOMs a 14B at this sequence length on a single node.
+            dtype="bfloat16",
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,

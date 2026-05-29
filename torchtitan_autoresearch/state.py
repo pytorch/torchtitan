@@ -20,6 +20,7 @@ from torchtitan_autoresearch import significance as sig
 class HarnessState:
     golden_commit: str = ""
     golden_eval_loss: float | None = None  # the quality bar (lower is better)
+    golden_det_losses: list[float] = field(default_factory=list)  # faithfulness anchor
     champion_commit: str = ""
     champion_tps: list[float] = field(default_factory=list)
     tps_cv: float = 0.02

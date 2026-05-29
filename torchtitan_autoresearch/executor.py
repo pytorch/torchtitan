@@ -96,20 +96,19 @@ class FakeExecutor:
 class SubprocessExecutor:
     """Runs candidates through the real TorchTitan launcher on GPUs.
 
-    Each candidate is one training run with TorchTitan's validator enabled, so a
-    single run yields both throughput (per-step `tps`, parsed by ``measure``) and
-    the held-out eval loss (`validate step: ... loss:`, the quality signal). The
-    log is cached per candidate so ``run_throughput`` and ``run_eval`` share one
-    GPU run.
+    Three run modes, each cached per (candidate, mode):
+      - ``tps``    : fast timed run (no validation, non-deterministic) -> throughput.
+      - ``verify`` : short deterministic run (seed-pinned) whose per-step loss
+                     trajectory is compared to the golden's; a faithful match means
+                     the change did not move the math, so quality is preserved and
+                     the eval is skipped (the design's verify-routing).
+      - ``eval``   : validator-enabled run -> held-out eval loss (quality signal),
+                     only run when verify says the change is quality-affecting.
 
-    Measurement is harness-pinned: ``--metrics.log_freq`` and the step cap come
-    from the constitution, not the candidate. ``base_command`` carries the fixed
-    regime flags (e.g. the bf16 golden dtype) prepended to each candidate command.
-
-    Verify (the faithful/affecting routing optimization) is not yet wired, so
-    ``run_verify`` is conservative: every candidate is treated as quality-affecting
-    and gets a real eval. This is safe (degradation-sensitive) at the cost of
-    eval-ing changes that are actually quality-neutral.
+    Measurement is harness-pinned: ``--metrics.log_freq`` and step caps come from
+    the constitution, not the candidate. ``base_command`` carries fixed regime
+    flags prepended to each candidate command. ``golden_det_losses`` is the
+    faithfulness anchor, set by the driver after calibration.
     """
 
     def __init__(
@@ -121,6 +120,8 @@ class SubprocessExecutor:
         base_command: list[str] | None = None,
         val_dataset: str = "c4_test",
         val_steps: int = 8,
+        verify_steps: int = 3,
+        verify_tol: float = 5e-3,
         run_dir: str = "/tmp/ar_runs",
     ):
         self.repo_root = repo_root
@@ -129,29 +130,27 @@ class SubprocessExecutor:
         self.base_command = base_command or []
         self.val_dataset = val_dataset
         self.val_steps = val_steps
+        self.verify_steps = verify_steps
+        self.verify_tol = verify_tol
         self.run_dir = run_dir
         os.makedirs(run_dir, exist_ok=True)
-        self._log_cache: dict[str, str] = {}  # candidate key -> log path
+        self.golden_det_losses: list[float] = []  # set by the driver after calibration
+        self._log_cache: dict[tuple[str, str], str] = {}
 
     def _key(self, c: Candidate) -> str:
         return (c.commit or c.label or "run")[:16].replace("/", "_")
 
-    def _run_once(self, c: Candidate, steps: int) -> str:
-        """Run one validation-enabled training run; return the log path (cached)."""
-        key = self._key(c)
+    def _run(self, c: Candidate, mode: str, extra: list[str]) -> str:
+        key = (self._key(c), mode)
         if key in self._log_cache:
             return self._log_cache[key]
-        log = os.path.join(self.run_dir, f"{key}.log")
+        log = os.path.join(self.run_dir, f"{key[0]}_{mode}.log")
         argv = [
             os.path.join(self.repo_root, "run_train.sh"),
             *self.base_command, *c.command,
-            f"--training.steps={steps}",
             f"--metrics.log_freq={self.log_freq}",
-            "--validator.enable",
-            f"--validator.dataloader.dataset={self.val_dataset}",
-            f"--validator.freq={steps}",          # validate once, at the last step
-            f"--validator.steps={self.val_steps}",
-            f"--dump_folder={os.path.join(self.run_dir, key + '_dump')}",
+            f"--dump_folder={os.path.join(self.run_dir, key[0] + '_' + mode + '_dump')}",
+            *extra,
         ]
         env = {**os.environ, "NGPU": str(self.ngpu), "MODULE": "qwen3", "CONFIG": "qwen3_14b"}
         with open(log, "w") as f:
@@ -160,19 +159,42 @@ class SubprocessExecutor:
         return log
 
     def run_throughput(self, c, steps, window):
-        text = open(self._run_once(c, steps)).read()
+        text = open(self._run(c, "tps", [f"--training.steps={steps}"])).read()
         meas = M.measure(text, window)
         if not meas.steps or not meas.loss_finite:
             return ThroughputResult(ok=False, crash_text=text[-4000:])
         return ThroughputResult(ok=True, tps_mean=meas.tps_mean, tps_cv=meas.tps_cv,
                                 peak_mem_gb=meas.peak_memory_gb)
 
+    def deterministic_losses(self, c: Candidate) -> list[float]:
+        """Per-step loss of a short seed-pinned deterministic run (the faithfulness probe)."""
+        text = open(self._run(c, "verify", [
+            f"--training.steps={self.verify_steps}",
+            "--debug.seed=42", "--debug.deterministic",
+        ])).read()
+        return [s.loss for s in M.parse_steps(text)]
+
     def run_verify(self, c):
-        # Conservative: route every candidate to the real eval (verify-routing TODO).
-        return VerifyResult(faithful=False, detail="verify-routing not wired; eval all")
+        golden = self.golden_det_losses
+        if not golden:
+            return VerifyResult(faithful=False, detail="no golden trajectory; treat as affecting")
+        losses = self.deterministic_losses(c)
+        if len(losses) < len(golden):
+            # deterministic run failed (e.g. compile+deterministic conflict) -> eval to be safe
+            return VerifyResult(faithful=False, detail="deterministic verify run failed; eval")
+        worst = max(abs(a - b) / max(abs(b), 1e-9) for a, b in zip(losses, golden))
+        faithful = worst <= self.verify_tol
+        return VerifyResult(faithful=faithful,
+                            detail=f"max loss rel-dev {worst:.2e} vs tol {self.verify_tol:.0e}")
 
     def run_eval(self, c, steps=10):
-        text = open(self._run_once(c, steps)).read()
+        text = open(self._run(c, "eval", [
+            f"--training.steps={steps}",
+            "--validator.enable",
+            f"--validator.dataloader.dataset={self.val_dataset}",
+            f"--validator.freq={steps}",
+            f"--validator.steps={self.val_steps}",
+        ])).read()
         loss = M.parse_validation_loss(text)
         if loss is None:
             return EvalResult(ok=False, crash_text=text[-4000:])

@@ -50,24 +50,38 @@ GPU entrypoints (torchrun; not runnable on CPU):
 
 The agent never declares a change's class — verify routes by measured faithfulness.
 
-## Running it
+## Running it (on any machine)
 
-CPU smoke test of the whole loop (no GPUs), with a fake executor:
+One command, from the repo root, on a checkout of `aditvenk/autoresearch-parallelize`:
 
-```python
-from torchtitan_autoresearch.api import Harness
-from torchtitan_autoresearch.executor import FakeExecutor
-from torchtitan_autoresearch.agent import ScriptedAgent
-from torchtitan_autoresearch.loop import run_loop
-# build Harness(constitution_path, ideas_path, ledger_path, statefile, FakeExecutor(specs))
-# run_loop(harness, ScriptedAgent([...]))
+```bash
+python -m torchtitan_autoresearch.run --tag may30-qwen3
+# real held-out eval (needs internet/proxy for c4 streaming):
+https_proxy=<proxy> http_proxy=<proxy> \
+  python -m torchtitan_autoresearch.run --tag may30-qwen3 --eval-dataset c4_validation
 ```
 
-Real run (GPUs): construct `SubprocessExecutor(repo_root, log_freq, ngpu)` instead
-of `FakeExecutor`, seed the golden + noise models into the state at setup
-(calibration), and drive a real Agent. The executor shells to `run_train.sh`
-(throughput, parsed by `measure`), `run_verify.sh` (faithfulness), and
-`eval_main.py` (quality).
+It detects the GPU count (`ngpu: auto`), creates a fresh `autoresearch/<tag>`
+branch, calibrates the golden (throughput, deterministic faithfulness anchor,
+held-out eval bar), then runs the hill-climb with the quality gate live, driven
+by the built-in `KnobAgent` (config-space candidates: batch size, AC mode, …).
+Results stream to `<run-dir>/results.tsv`.
+
+**Follow along, read-only, from another shell** (a separate observer agent that
+never touches the gate):
+
+```bash
+python -m torchtitan_autoresearch.observe --run-dir /tmp/ar_may30-qwen3            # status
+python -m torchtitan_autoresearch.observe --run-dir /tmp/ar_may30-qwen3 --watch    # broadcast changes
+python -m torchtitan_autoresearch.observe --run-dir /tmp/ar_may30-qwen3 --ask "best so far?"
+```
+
+CPU smoke test of the orchestration (no GPUs) uses `FakeExecutor` + an agent +
+`run_loop` (see the harness tests).
+
+Verify routing is live: each candidate's seed-pinned deterministic loss
+trajectory is compared to the golden's; a faithful match skips the eval
+(quality-neutral), a deviation routes to the held-out eval (quality-affecting).
 
 ## Status
 

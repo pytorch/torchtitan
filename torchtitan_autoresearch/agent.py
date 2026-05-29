@@ -47,6 +47,52 @@ class ScriptedAgent:
         )
 
 
+class KnobAgent:
+    """Built-in, non-LLM proposing agent over the config/command search space.
+
+    Emits a fixed exploration plan of command-only candidates (no code edits), so
+    the packaged single-command entrypoint runs genuine autoresearch end to end
+    without an LLM. Each candidate is a real recipe knob the baseline respects
+    (batch size, activation-checkpoint mode, FSDP reshard policy). The LLM
+    code-writing agent is a separate, future plug behind the same contract.
+
+    Families let the harness time-box knobs that keep crashing; quality-affecting
+    knobs (batch) get the eval, quality-neutral ones (AC/reshard) route faithful.
+    """
+
+    DEFAULT_KNOBS = [
+        ("local_batch_size=8", "batch", ["--training.local_batch_size=8"]),
+        ("selective_activation_checkpoint", "ac", ["--activation_checkpoint.mode=selective"]),
+        ("local_batch_size=12", "batch", ["--training.local_batch_size=12"]),
+        ("local_batch_size=16", "batch", ["--training.local_batch_size=16"]),
+    ]
+
+    def __init__(self, knobs: list[tuple[str, str, list[str]]] | None = None):
+        self._knobs = list(knobs or self.DEFAULT_KNOBS)
+        self._i = 0
+        self._notes: dict[str, str] = {}
+
+    def propose(self, obs: Observation) -> Candidate | None:
+        while self._i < len(self._knobs):
+            label, family, command = self._knobs[self._i]
+            self._i += 1
+            if family in obs.deferred_families:
+                self._notes[label] = "skipped: family deferred"
+                continue
+            self._notes[label] = "tried"
+            return Candidate(label=label, family=family, command=command,
+                             rationale=f"config-space knob ({family})")
+        return None
+
+    def report(self) -> Report:
+        return Report(
+            beliefs=["exploring config-space throughput knobs (batch, AC, reshard)"],
+            conclusions=[],
+            plan="exhaust the knob plan, skipping deferred families",
+            ideas_usage=dict(self._notes),
+        )
+
+
 class PlaybookAgent:
     """Non-LLM policy: emit one candidate per advisory idea, highest weight first.
 
