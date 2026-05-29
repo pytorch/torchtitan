@@ -227,14 +227,7 @@ def _reshape_for_broadcast_complex(
         assert freqs_cis.shape == (seqlen, x.shape[-1])
         shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
         return freqs_cis.view(*shape)
-    elif positions.size(0) == 1:
-        assert positions.shape == (1, seqlen)
-        freqs_cis = freqs_cis[positions.squeeze(0)]
-        assert freqs_cis.shape == (seqlen, x.shape[-1])
-        shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-        return freqs_cis.view(*shape)
-    else:
-        assert positions.shape == (x.shape[0], seqlen)
+    elif positions.shape == (x.shape[0], seqlen):  # non-broadcasting path
         freqs_cis_expanded = freqs_cis[None, :, None, :].expand(x.shape[0], -1, -1, -1)
         freqs_cis = torch.gather(
             freqs_cis_expanded,
@@ -244,6 +237,12 @@ def _reshape_for_broadcast_complex(
             ),
         )
         return freqs_cis
+    else:
+        assert positions.shape == (1, seqlen)
+        freqs_cis = freqs_cis[positions.squeeze(0)]
+        assert freqs_cis.shape == (seqlen, x.shape[-1])
+        shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+        return freqs_cis.view(*shape)
 
 
 def _reshape_for_broadcast_cos_sin(
@@ -264,14 +263,7 @@ def _reshape_for_broadcast_cos_sin(
         assert rope_cache.shape == (seqlen, head_dim * 2)
         shape = [-1, seqlen, 1, head_dim * 2]
         return rope_cache.view(*shape)
-    elif positions.size(0) == 1:
-        assert positions.shape == (1, seqlen)
-        rope_cache = rope_cache[positions.squeeze(0)]
-        assert rope_cache.shape == (seqlen, head_dim * 2)
-        shape = [-1, seqlen, 1, head_dim * 2]
-        return rope_cache.view(*shape)
-    else:
-        assert positions.shape == (bz, seqlen)
+    elif positions.shape == (bz, seqlen):  # non-broadcasting path
         rope_cache_expanded = rope_cache[None, :, None, :].expand(bz, -1, -1, -1)
         rope_cache = torch.gather(
             rope_cache_expanded,
@@ -280,6 +272,12 @@ def _reshape_for_broadcast_cos_sin(
         )
         assert rope_cache.shape == (bz, seqlen, 1, head_dim * 2)
         return rope_cache
+    else:
+        assert positions.shape == (1, seqlen)
+        rope_cache = rope_cache[positions.squeeze(0)]
+        assert rope_cache.shape == (seqlen, head_dim * 2)
+        shape = [-1, seqlen, 1, head_dim * 2]
+        return rope_cache.view(*shape)
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
