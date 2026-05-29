@@ -332,6 +332,8 @@ class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
         snapshot_every_n_steps: int | None = 1,
         **kwargs,
     ):
+        # output from each source is already packed
+        # making interleaved weights a token mixture ratio
         ds = InterleavedDataset(
             datasets=[
                 HuggingFaceTextDataset(
@@ -741,6 +743,8 @@ class InterleavedChatDataLoader(ParallelAwareDataloader):
         snapshot_every_n_steps: int | None = 1,
         **kwargs,
     ):
+        # output from each source is already packed
+        # making interleaved weights a token mixture ratio
         ds = InterleavedDataset(
             datasets=[
                 ChatDataset(
