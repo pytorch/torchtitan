@@ -17,13 +17,7 @@ _ERROR = frozenset({"error_parse", "error_timeout", "error_abort", "error"})
 
 
 class RolloutStatus(StrEnum):
-    """Per-rollout status; `ONGOING` is the only non-terminal value.
-
-    Absorbs vLLM `finish_reason` and renderer/wrapper failure modes
-    into one categorical axis. Trainer-facing code reads `is_error()`
-    to filter, `is_truncated()` for truncation metrics, `is_terminal()`
-    to tell a finished rollout from one still running.
-    """
+    """Per-rollout status"""
 
     ONGOING = "ongoing"
     COMPLETED = "completed"
@@ -51,6 +45,7 @@ class RolloutTurn:
     # TODO: add a `logs` field (raw prompt/response text, finish_reason, timings)
     # so a turn can be dumped and inspected without re-deriving from tokens.
 
+    # Fields needed for training
     prompt_token_ids: list[int]  # [L_prompt]
     """Tokens the generator saw as prompt for this turn."""
 
@@ -60,12 +55,15 @@ class RolloutTurn:
     response_logprobs: list[float]  # [L_response]
     """Per-token logprobs from the generator policy."""
 
+    # Filtering / debugging
     policy_version: int
     """Trainer policy version when this response was sampled."""
 
+    # Logging
     response_messages: list[Message] = field(default_factory=list)  # [M_response]
     """Parsed assistant + env-appended messages (assistant first)."""
 
+    # For rubrics
     reward_components: dict[str, float] = field(default_factory=dict)
     """Optional per-turn component reward, provided by the env and used by the rubric.
     `None` until scored."""

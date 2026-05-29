@@ -43,7 +43,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         train_dataset=SumDigitsDataset.Config(seed=42),
         validation_dataset=SumDigitsDataset.Config(seed=99),
         tasks={"sum_digits": SumDigitsTask.Config()},
-        renderer=RendererConfig(name="qwen3"),
+        renderer=RendererConfig(name="qwen3", enable_thinking=True),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
@@ -81,7 +81,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 n=group_size,
                 temperature=0.8,
                 top_p=0.95,
-                max_tokens=100,
+                max_tokens=700,
             ),
         ),
     )
@@ -100,7 +100,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         train_dataset=SumDigitsDataset.Config(seed=42),
         validation_dataset=SumDigitsDataset.Config(seed=99),
         tasks={"sum_digits": SumDigitsTask.Config()},
-        renderer=RendererConfig(name="qwen3"),
+        renderer=RendererConfig(name="qwen3", enable_thinking=True),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
@@ -139,7 +139,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 n=group_size,
                 temperature=0.8,
                 top_p=0.95,
-                max_tokens=100,
+                max_tokens=700,
             ),
         ),
     )
@@ -158,7 +158,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
         train_dataset=SumDigitsDataset.Config(seed=42),
         validation_dataset=SumDigitsDataset.Config(seed=99),
         tasks={"sum_digits": SumDigitsTask.Config()},
-        renderer=RendererConfig(name="qwen3"),
+        renderer=RendererConfig(name="qwen3", enable_thinking=True),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
@@ -196,7 +196,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
                 n=group_size,
                 temperature=0.8,
                 top_p=0.95,
-                max_tokens=100,
+                max_tokens=700,
             ),
         ),
     )
@@ -219,7 +219,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
         train_dataset=SumDigitsDataset.Config(seed=42),
         validation_dataset=SumDigitsDataset.Config(seed=99),
         tasks={"sum_digits": SumDigitsTask.Config()},
-        renderer=RendererConfig(name="qwen3"),
+        renderer=RendererConfig(name="qwen3", enable_thinking=True),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
@@ -261,7 +261,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
                 n=group_size,
                 temperature=0.8,
                 top_p=0.95,
-                max_tokens=100,
+                max_tokens=700,
             ),
             debug=batch_invariant_config,
         ),
