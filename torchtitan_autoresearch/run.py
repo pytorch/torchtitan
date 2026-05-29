@@ -73,46 +73,51 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[setup] world size (auto) = {ngpu} | dataset = {args.dataset} | "
           f"(train {train_dataset} / eval {eval_dataset}) | run dir = {run_dir}")
 
-    # The train dataset is a locked workload field set by the human here (not a
-    # candidate knob); it rides in base_command so every run uses it.
-    ex = SubprocessExecutor(repo, log_freq=rules.log_freq, ngpu=ngpu,
+    # Create the experiment in its OWN git worktree so all its commits/resets/runs
+    # are isolated from the primary checkout (which stays free for development).
+    sess = start_run(repo, args.tag, rules, worktree_path=os.path.join(run_dir, "wt"))
+    print(f"[setup] experiment branch: {sess.branch} off {sess.base_commit[:7]} "
+          f"(isolated worktree: {sess.repo_root})")
+
+    # The executor runs in the worktree; the train dataset is a locked workload
+    # field set by the human here (not a candidate knob).
+    ex = SubprocessExecutor(sess.repo_root, log_freq=rules.log_freq, ngpu=ngpu,
                             base_command=[f"--dataloader.dataset={train_dataset}"],
                             val_dataset=eval_dataset, run_dir=os.path.join(run_dir, "runs"))
+    try:
+        # --- Calibrate the golden: throughput, faithfulness anchor, quality bar ---
+        print("[calibrate] running golden baseline (throughput, deterministic, eval)...", flush=True)
+        gold = Candidate(label="golden", command=[])
+        tr = ex.run_throughput(gold, steps, window)
+        if not tr.ok:
+            print("[calibrate] golden baseline failed to run; aborting:\n", tr.crash_text[-1500:])
+            return 1
+        det = ex.deterministic_losses(gold)
+        er = ex.run_eval(gold, steps=steps)
+        ex.golden_det_losses = det
+        print(f"[calibrate] golden: tps={tr.tps_mean:.0f} (cv {tr.tps_cv:.3f})  "
+              f"eval_loss={er.eval_loss if er.ok else 'n/a'}  det_losses={[round(x,2) for x in det]}")
+        HarnessState(
+            golden_commit=sess.base_commit[:7],
+            golden_eval_loss=(er.eval_loss if er.ok else None),
+            golden_det_losses=det,
+            champion_commit=sess.base_commit[:7],
+            champion_tps=[tr.tps_mean],
+            tps_cv=max(tr.tps_cv, 0.01),
+            tps_tail_pct=3.7,  # heavy-tail default; refine with repeated golden runs
+        ).save(statefile)
 
-    sess = start_run(repo, args.tag, rules)
-    print(f"[setup] experiment branch: {sess.branch} off {sess.base_commit[:7]}")
+        H = Harness(constitution_path=const, ideas_path=ideas, ledger_path=ledger,
+                    statefile=statefile, executor=ex, session=sess,
+                    report_path=os.path.join(run_dir, "report.json"))
 
-    # --- Calibrate the golden: throughput, faithfulness anchor, quality bar ---
-    print("[calibrate] running golden baseline (throughput, deterministic, eval)...", flush=True)
-    gold = Candidate(label="golden", command=[])
-    tr = ex.run_throughput(gold, steps, window)
-    if not tr.ok:
-        print("[calibrate] golden baseline failed to run; aborting:\n", tr.crash_text[-1500:])
-        return 1
-    det = ex.deterministic_losses(gold)
-    er = ex.run_eval(gold, steps=steps)
-    ex.golden_det_losses = det
-    print(f"[calibrate] golden: tps={tr.tps_mean:.0f} (cv {tr.tps_cv:.3f})  "
-          f"eval_loss={er.eval_loss if er.ok else 'n/a'}  det_losses={[round(x,2) for x in det]}")
-    HarnessState(
-        golden_commit=sess.base_commit[:7],
-        golden_eval_loss=(er.eval_loss if er.ok else None),
-        golden_det_losses=det,
-        champion_commit=sess.base_commit[:7],
-        champion_tps=[tr.tps_mean],
-        tps_cv=max(tr.tps_cv, 0.01),
-        tps_tail_pct=3.7,  # heavy-tail default; refine with repeated golden runs
-    ).save(statefile)
-
-    H = Harness(constitution_path=const, ideas_path=ideas, ledger_path=ledger,
-                statefile=statefile, executor=ex, session=sess,
-                report_path=os.path.join(run_dir, "report.json"))
-
-    print(f"[loop] starting hill-climb (max {args.max_iters} candidates). "
-          f"Follow along: python -m torchtitan_autoresearch.observe --run-dir {run_dir}", flush=True)
-    summary = run_loop(H, KnobAgent(), max_iters=args.max_iters, report_every=1)
-    print("[done]", summary)
-    print("ledger:\n" + (open(ledger).read() if os.path.exists(ledger) else "(empty)"))
+        print(f"[loop] starting hill-climb (max {args.max_iters} candidates). "
+              f"Follow: python -m torchtitan_autoresearch.observe watch --run-dir {run_dir}", flush=True)
+        summary = run_loop(H, KnobAgent(), max_iters=args.max_iters, report_every=1)
+        print("[done]", summary)
+        print("ledger:\n" + (open(ledger).read() if os.path.exists(ledger) else "(empty)"))
+    finally:
+        sess.remove()  # tear down the worktree; the branch + its commits are kept
     return 0
 
 

@@ -157,9 +157,13 @@ class SubprocessExecutor:
             f"--dump_folder={os.path.join(self.run_dir, key[0] + '_' + mode + '_dump')}",
             *extra,
         ]
-        env = {**os.environ, "NGPU": str(self.ngpu), "MODULE": "qwen3", "CONFIG": "qwen3_14b"}
+        # Run inside repo_root (the experiment's worktree): cwd so relative paths
+        # (tokenizer, dumps) resolve there, and PYTHONPATH so the worktree's
+        # torchtitan (with this candidate's edits) is imported, not the primary.
+        env = {**os.environ, "NGPU": str(self.ngpu), "MODULE": "qwen3", "CONFIG": "qwen3_14b",
+               "PYTHONPATH": self.repo_root + os.pathsep + os.environ.get("PYTHONPATH", "")}
         with open(log, "w") as f:
-            subprocess.run(argv, stdout=f, stderr=subprocess.STDOUT, env=env)
+            subprocess.run(argv, stdout=f, stderr=subprocess.STDOUT, env=env, cwd=self.repo_root)
         self._log_cache[key] = log
         return log
 

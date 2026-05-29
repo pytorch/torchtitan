@@ -35,12 +35,21 @@ def _git(repo: str, *args: str) -> str:
 
 @dataclass
 class Session:
-    repo_root: str
+    repo_root: str  # where experiment git ops + runs happen (an isolated worktree)
     branch: str
     base_commit: str
+    main_repo: str = ""  # the primary checkout (untouched); set when using a worktree
 
     def head(self) -> str:
         return _git(self.repo_root, "rev-parse", "HEAD")
+
+    def remove(self) -> None:
+        """Remove the experiment worktree (the branch + its commits are kept)."""
+        if self.main_repo and os.path.abspath(self.repo_root) != os.path.abspath(self.main_repo):
+            try:
+                _git(self.main_repo, "worktree", "remove", "--force", self.repo_root)
+            except RuntimeError:
+                pass
 
     def _assert_on_branch(self) -> None:
         cur = _git(self.repo_root, "rev-parse", "--abbrev-ref", "HEAD")
@@ -89,20 +98,40 @@ def _tree_clean(repo: str) -> bool:
     return _git(repo, "status", "--porcelain") == ""
 
 
-def start_run(repo_root: str, tag: str, rules: Rules, base_commit: str | None = None) -> Session:
-    """Create a fresh isolated experiment branch. Refuses to resume or contaminate.
+def start_run(
+    repo_root: str,
+    tag: str,
+    rules: Rules,
+    base_commit: str | None = None,
+    worktree_path: str | None = None,
+) -> Session:
+    """Create a fresh isolated experiment branch. Refuses to resume.
 
-    This is the only place a branch is created, and it is harness/human owned —
-    never the agent. A pre-existing branch (unless the constitution allows resume)
-    or a dirty working tree is a hard `ProvenanceViolation`.
+    This is the only place a branch is created, and it is harness/human owned --
+    never the agent. With ``worktree_path`` (the default for real runs), the
+    experiment gets its own git worktree at that path: all its commits, resets,
+    and training runs happen there, so the primary checkout is never touched and a
+    live experiment can never collide with editing/committing the tooling. A
+    pre-existing branch (unless the constitution allows resume) is a hard
+    `ProvenanceViolation`. Without a worktree it falls back to the in-place
+    checkout (used by tests).
     """
     branch = rules.branch_pattern.format(tag=tag)
     if _branch_exists(repo_root, branch) and not rules.allow_resume:
         raise ProvenanceViolation(
             f"branch {branch} already exists and resume is disabled; pick a new tag"
         )
+    base = _git(repo_root, "rev-parse", base_commit or rules.base_commit)
+
+    if worktree_path:
+        if os.path.exists(worktree_path):
+            raise ProvenanceViolation(f"worktree path already exists: {worktree_path}")
+        # An isolated worktree needs no clean primary tree -- the primary is untouched.
+        _git(repo_root, "worktree", "add", worktree_path, "-b", branch, base)
+        return Session(repo_root=worktree_path, branch=branch, base_commit=base,
+                       main_repo=repo_root)
+
     if not _tree_clean(repo_root):
         raise ProvenanceViolation("working tree is dirty; commit or stash before starting a run")
-    base = _git(repo_root, "rev-parse", base_commit or rules.base_commit)
     _git(repo_root, "checkout", "-b", branch, base)
-    return Session(repo_root=repo_root, branch=branch, base_commit=base)
+    return Session(repo_root=repo_root, branch=branch, base_commit=base, main_repo=repo_root)
