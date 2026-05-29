@@ -19,6 +19,7 @@ class _MockDataset(TorchIterableDataset):
     def __init__(self, values: list):
         self._values = list(values)
         self._pos: int = 0
+        self.reloop_count: int = 0
 
     def __iter__(self):
         while self._pos < len(self._values):
@@ -26,6 +27,10 @@ class _MockDataset(TorchIterableDataset):
             self._pos += 1
             yield val
         self._pos = 0
+
+    def reloop(self) -> None:
+        self._pos = 0
+        self.reloop_count += 1
 
     def state_dict(self):
         return {"pos": self._pos}
@@ -48,6 +53,9 @@ class _MockDictDataset(TorchIterableDataset):
             yield {"input": v}, v
         self._pos = 0
 
+    def reloop(self) -> None:
+        self._pos = 0
+
     def state_dict(self):
         return {"pos": self._pos}
 
@@ -60,6 +68,19 @@ class _NoCheckpointDataset:
 
     def __iter__(self):
         yield from range(5)
+
+
+class _NoReloopDataset(TorchIterableDataset):
+    """Checkpointable but missing reloop() — rejected only for 'all_exhausted'."""
+
+    def __iter__(self):
+        yield from range(5)
+
+    def state_dict(self):
+        return {}
+
+    def load_state_dict(self, sd: dict):
+        pass
 
 
 class TestInterleavedDatasetInit(unittest.TestCase):
@@ -254,6 +275,34 @@ class TestAllExhaustedStrategy(unittest.TestCase):
         )
         self.assertGreater(samples.count(99), 1)
         self.assertEqual(sorted(v for v in samples if v != 99), list(range(5)))
+
+    def test_exhausted_source_is_relooped(self):
+        """The interleaver re-loops an exhausted source via reloop(), rather
+        than relying on the source resetting itself on re-iteration."""
+        ds_short = _MockDataset([99])
+        ds_long = _MockDataset(list(range(20)))
+        list(
+            InterleavedDataset(
+                [ds_short, ds_long],
+                [1.0, 1.0],
+                seed=0,
+                stopping_strategy="all_exhausted",
+            )
+        )
+        # Short source must have been re-looped at least once to keep
+        # contributing while the long source drains.
+        self.assertGreater(ds_short.reloop_count, 0)
+
+    def test_requires_reloop(self):
+        """'all_exhausted' rejects sources that don't implement reloop()."""
+        with self.assertRaises(TypeError):
+            InterleavedDataset(
+                [_NoReloopDataset()], [1.0], stopping_strategy="all_exhausted"
+            )
+
+    def test_on_first_exhausted_does_not_require_reloop(self):
+        """Default strategy never re-loops, so reloop() is not required."""
+        InterleavedDataset([_NoReloopDataset()], [1.0])
 
     def test_all_sources_seen_at_least_once(self):
         """Every item from every source appears at least once."""

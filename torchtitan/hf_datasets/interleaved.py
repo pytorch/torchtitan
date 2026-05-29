@@ -32,15 +32,18 @@ class InterleavedDataset(IterableDataset):
 
     Args:
         datasets: Source datasets. Each must implement ``state_dict()``
-            and ``load_state_dict()``.
+            and ``load_state_dict()``. ``"all_exhausted"`` additionally
+            requires ``reloop()``.
         weights: Sampling weights (normalised internally). Controls the
             relative likelihood of drawing from each source at each step.
         seed: Seed for the interleaver RNG.
         stopping_strategy: Controls when iteration ends.
             ``"on_first_exhausted"`` (default) stops as soon as any source
             raises ``StopIteration``, defining a natural epoch boundary.
-            ``"all_exhausted"`` restarts an exhausted source and continues
-            until every source has been exhausted at least once.
+            ``"all_exhausted"`` re-loops an exhausted source via its
+            ``reloop()`` (reset + reshuffle) so its sampling weight is
+            preserved, and continues until every source has been exhausted at
+            least once.
     """
 
     def __init__(
@@ -85,6 +88,19 @@ class InterleavedDataset(IterableDataset):
                 f"Missing on: {missing}"
             )
 
+        if stopping_strategy == "all_exhausted":
+            no_reloop = [
+                type(ds).__name__
+                for ds in datasets
+                if not callable(getattr(ds, "reloop", None))
+            ]
+            if no_reloop:
+                raise TypeError(
+                    "stopping_strategy='all_exhausted' re-loops exhausted sources, "
+                    "so each dataset must implement reloop(). Missing on: "
+                    f"{no_reloop}"
+                )
+
         self._datasets = list(datasets)
         self._probs = [w / total for w in weights]
         self._rng = random.Random(seed)
@@ -120,10 +136,14 @@ class InterleavedDataset(IterableDataset):
                 yield self._add_source_idx(next(iterators[idx]), idx)
             except StopIteration:
                 if self._stopping_strategy == "on_first_exhausted":
-                    return
+                    break
                 exhausted[idx] = True
                 if all(exhausted):
-                    return
+                    break
+                # Re-loop the exhausted source (reset position + reshuffle) so it
+                # keeps contributing at its sampling weight until every source has
+                # been exhausted at least once.
+                self._datasets[idx].reloop()
                 iterators[idx] = iter(self._datasets[idx])
 
     def state_dict(self) -> dict[str, Any]:

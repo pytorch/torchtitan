@@ -167,23 +167,23 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
             if not self.infinite:
                 logger.warning(f"Dataset {self.dataset_name} has run out of data")
                 break
-            else:
-                # Reset offset for the next iteration
-                self._sample_idx = 0
-                self._epoch += 1
-                logger.warning(
-                    f"Dataset {self.dataset_name} is being re-looped "
-                    f"(epoch {self._epoch})"
-                )
-                # Ensures re-looping a dataset loaded from a checkpoint works correctly.
-                # Map-style datasets replay the same order unless we shuffle per epoch;
-                # iterable-style datasets honor set_epoch and re-shuffle internally.
-                if isinstance(self._data, Dataset):
-                    self._data = cast(
-                        Dataset, self._original_data.shuffle(seed=42 + self._epoch)
-                    )
-                elif hasattr(self._data, "set_epoch") and hasattr(self._data, "epoch"):
-                    self._data.set_epoch(self._data.epoch + 1)
+            self.reloop()
+
+    def reloop(self) -> None:
+        """Advance to the next epoch in place: reset the read position and
+        reshuffle.
+        """
+        self._sample_idx = 0
+        self._epoch += 1
+        if isinstance(self._data, Dataset):
+            self._data = cast(
+                Dataset, self._original_data.shuffle(seed=42 + self._epoch)
+            )
+        elif hasattr(self._data, "set_epoch") and hasattr(self._data, "epoch"):
+            self._data.set_epoch(self._data.epoch + 1)
+        logger.warning(
+            f"Dataset {self.dataset_name} is being re-looped (epoch {self._epoch})"
+        )
 
     def load_state_dict(self, state_dict):
         self._inputs_buffer = state_dict["inputs_buffer"]
@@ -566,20 +566,24 @@ class ChatDataset(IterableDataset, Stateful):
             if not self.infinite:
                 logger.warning(f"Chat dataset '{self._dataset_id}' has run out of data")
                 break
-            else:
-                self._sample_idx = 0
-                self._epoch += 1
-                if isinstance(self._data, Dataset):
-                    self._data = cast(
-                        Dataset,
-                        self._original_data.shuffle(seed=42 + self._epoch),
-                    )
-                elif hasattr(self._data, "set_epoch"):
-                    self._data.set_epoch(self._epoch)
-                logger.warning(
-                    f"Chat dataset '{self._dataset_id}' is being re-looped "
-                    f"(epoch {self._epoch})"
-                )
+            self.reloop()
+
+    def reloop(self) -> None:
+        """Advance to the next epoch in place: reset position and reshuffle.
+        """
+        self._sample_idx = 0
+        self._epoch += 1
+        if isinstance(self._data, Dataset):
+            self._data = cast(
+                Dataset,
+                self._original_data.shuffle(seed=42 + self._epoch),
+            )
+        elif hasattr(self._data, "set_epoch"):
+            self._data.set_epoch(self._epoch)
+        logger.warning(
+            f"Chat dataset '{self._dataset_id}' is being re-looped "
+            f"(epoch {self._epoch})"
+        )
 
     def _flush_buffers(self):
         """Convert buffers to tensors, clear them, and return the batch."""
