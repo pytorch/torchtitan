@@ -12,6 +12,8 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+import spmd_types as spmd
+from torchtitan.distributed.spmd_state import current_mesh, set_current_mesh
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
@@ -93,12 +95,7 @@ class GroupedExperts(Module):
         topk_scores_BLK: torch.Tensor,
         topk_expert_ids_BLK: torch.Tensor,
     ) -> torch.Tensor:
-        """Dispatch tokens to experts, compute, combine, and scatter_add.
-
-        When parallelized, ``local_map`` (from ``sharding_config``) handles
-        DTensor→local conversion on entry and local→DTensor(Partial) wrapping
-        on exit. The forward body operates on plain local tensors.
-        """
+        """Dispatch tokens to experts, compute, combine, and scatter_add."""
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
         T = B * L
@@ -110,22 +107,20 @@ class GroupedExperts(Module):
             num_tokens_per_expert_E,
             metadata,
         ) = self.token_dispatcher.dispatch(x_TD, topk_scores_TK, topk_expert_ids_TK)
-        routed_output_RD = self._experts_forward(
-            routed_input_RD, num_tokens_per_expert_E
-        )
-        return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        with set_current_mesh(self.token_dispatcher.sparse_mesh):
+            routed_output_RD = self._experts_forward(
+                routed_input_RD, num_tokens_per_expert_E
+            )
+        out_TD = self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        return out_TD.view(B, -1, D)
 
     def parallelize(self, parallel_dims) -> None:
-        """Parallelize expert weights, then wire EP/TP meshes on the dispatcher
-        so dispatch/combine see the right meshes at runtime."""
+        """Parallelize expert weights and install ``sparse_mesh``."""
         super().parallelize(parallel_dims)
-        # TODO(@pianpwk): With spmd_types and set_current_mesh, replace wire_meshes
-        # with current_mesh calls inside AllToAllTokenDispatcher and
-        # DeepEPTokenDispatcher.
-        self.token_dispatcher.wire_meshes(
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-        )
+        if parallel_dims.ep_enabled:
+            self.token_dispatcher.sparse_mesh = parallel_dims.get_activated_mesh(
+                ["dp_replicate", "efsdp", "ep"]
+            )
 
 
 class TokenChoiceTopKRouter(Module):
@@ -276,7 +271,7 @@ class TokenChoiceTopKRouter(Module):
 
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_tokens_per_expert_E = torch.histc(
-            topk_expert_ids_BLK.view(-1),
+            topk_expert_ids_BLK,
             bins=self.num_experts,
             min=0,
             max=self.num_experts,
@@ -313,6 +308,8 @@ class MoE(Module):
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None
+        enable_ep: bool = False
+        enable_sp: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
@@ -320,6 +317,8 @@ class MoE(Module):
         num_experts = config.num_experts
         self.experts = config.experts.build()
         self.router = config.router.build()
+        self.enable_ep = config.enable_ep
+        self.enable_sp = config.enable_sp
         self.shared_experts = (
             config.shared_experts.build() if config.shared_experts is not None else None
         )
@@ -360,15 +359,28 @@ class MoE(Module):
         operates on DTensors — the DTensor→local conversion happens at
         the GroupedExperts boundary.
         """
-        B, L, D = x_BLD.shape
-
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # num_tokens_per_expert_E shape (E,)
+        routed_x_BLD = x_BLD
+        if self.enable_ep and not self.enable_sp:
+            mesh = current_mesh()
+            assert (
+                mesh is not None
+                and mesh.mesh_dim_names is not None
+                and "tp" in mesh.mesh_dim_names
+            )
+            routed_x_BLD = spmd.shard(
+                routed_x_BLD,
+                mesh.get_group("tp"),
+                src=spmd.I,
+                dst=spmd.S(1),
+            )
+
         (
             topk_scores_BLK,
             topk_expert_ids_BLK,
             num_tokens_per_expert_E,
-        ) = self.router(x_BLD, self.expert_bias_E)
+        ) = self.router(routed_x_BLD, self.expert_bias_E)
 
         # tokens_per_expert_E will be used to update the expert bias for load balancing,
         # and also to count the expert usage.
@@ -378,7 +390,7 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert_E.add_(num_tokens_per_expert_E)
 
-        out_TD = self.experts(x_BLD, topk_scores_BLK, topk_expert_ids_BLK)
+        out_BLD = self.experts(routed_x_BLD, topk_scores_BLK, topk_expert_ids_BLK)
 
         # shared_experts runs in parallel with deepep combine communication.
         shared_out_BLD = (
@@ -391,12 +403,11 @@ class MoE(Module):
         ):
             # Sync the combine operation before using routed_output.
             # This inserts a CUDA stream wait, ensuring combine is complete before
-            # the subsequent addition or view operations read routed output.
+            # the subsequent addition reads routed output.
             from torchtitan.distributed.deepep.deepep import sync_combine
 
             sync_combine()
 
-        out_BLD = out_TD.view(B, L, D)
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD
         return out_BLD

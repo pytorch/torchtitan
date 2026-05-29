@@ -6,7 +6,7 @@
 
 from typing import TYPE_CHECKING
 
-from torch.distributed.tensor import Placement, Replicate, Shard
+import spmd_types as spmd
 
 from torchtitan.models.common.decoder_sharding import (
     norm_config,
@@ -20,10 +20,11 @@ from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 if TYPE_CHECKING:
     from torchtitan.models.llama4.model import Llama4Model, Llama4TransformerBlock
 
-_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, Placement] = {
-    "w1_EFD": Shard(1),
-    "w2_EDF": Shard(2),
-    "w3_EFD": Shard(1),
+
+_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
+    "w1_EFD": spmd.S(1),
+    "w2_EDF": spmd.S(2),
+    "w3_EFD": spmd.S(1),
 }
 
 
@@ -33,6 +34,7 @@ def set_llama4_sharding_config(
     loss_parallel: bool,
     enable_sp: bool,
     enable_ep: bool,
+    chunked_loss: bool,
 ) -> None:
     """Fill ``sharding_config`` on all Llama4 sub-configs.
 
@@ -46,10 +48,17 @@ def set_llama4_sharding_config(
     """
 
     set_decoder_sharding_config(
-        config, loss_parallel=loss_parallel, enable_sp=enable_sp
+        config,
+        loss_parallel=loss_parallel,
+        enable_sp=enable_sp,
+        chunked_loss=chunked_loss,
     )
     for layer_cfg in config.layers:
-        _set_llama4_layer_sharding(layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep)
+        _set_llama4_layer_sharding(
+            layer_cfg,
+            enable_sp=enable_sp,
+            enable_ep=enable_ep,
+        )
 
 
 def _set_llama4_layer_sharding(
@@ -67,7 +76,7 @@ def _set_llama4_layer_sharding(
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.attention_norm.sharding_config = norm
     layer_cfg.ffn_norm.sharding_config = norm
-    attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
+    attn_x_placement = spmd.S(1) if enable_sp else spmd.I
 
     set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
     set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)

@@ -9,7 +9,12 @@ from typing import Any
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+from torch.distributed.fsdp import (
+    CPUOffloadPolicy,
+    DataParallelMeshDims,
+    fully_shard,
+    MixedPrecisionPolicy,
+)
 from torch.distributed.tensor import Shard
 
 from torchtitan.config import (
@@ -22,13 +27,14 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     enable_fsdp_symm_mem,
     get_fsdp_reshard_after_forward_policy,
 )
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.distributed.tensor_parallel import (
+    maybe_enable_async_tp,
+)
 from torchtitan.models.llama4.model import Llama4Model
 from torchtitan.tools.logging import logger
 
@@ -50,31 +56,15 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
+    assert training.seq_len % parallel_dims.seq_len_divisor == 0, f"""
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    if parallelism.full_dtensor:
-        raise NotImplementedError("full_dtensor is not supported yet.")
-
-    # CP: wrap inner attention forward BEFORE parallelize() so CP logic
-    # runs inside the local_map boundary on local tensors.
-    if parallel_dims.cp_enabled:
-        apply_cp_to_forward(
-            # pyrefly: ignore [missing-attribute]
-            [block.attention.inner_attention for block in model.layers.values()],
-            parallel_dims.get_mesh("cp"),
-        )
-
-    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        model.parallelize(parallel_dims)
+    model.parallelize(parallel_dims)
     if parallel_dims.tp_enabled:
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
-    # Set SP size/rank on EP dispatchers for sequence-parallel token splitting.
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
@@ -90,12 +80,27 @@ def parallelize_llama(
     if model_compile_enabled:
         apply_compile(model, compile_config)
 
-    dp_mesh_names = (
-        ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+    # Build the FSDP mesh. When TP is enabled, include it so FSDP
+    # sees the full SPMD mesh and can handle spmd_types-annotated params.
+    mesh_names: list[str] = []
+    if parallel_dims.dp_replicate_enabled:
+        mesh_names.append("dp_replicate")
+    mesh_names.append("fsdp")
+    if parallel_dims.tp_enabled:
+        mesh_names.append("tp")
+    dp_mesh = parallel_dims.get_mesh(mesh_names)
+    dense_spmd_mesh = parallel_dims.get_activated_mesh(["dp", "cp", "tp"])
+    dp_mesh_dims = (
+        DataParallelMeshDims(
+            shard="fsdp",
+            replicate="dp_replicate" if parallel_dims.dp_replicate_enabled else None,
+        )
+        if dense_spmd_mesh is not None
+        else None
     )
-    dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
     edp_mesh = None
+    sparse_spmd_mesh = None
     if parallel_dims.ep_enabled:
         edp_mesh_names = (
             ["dp_replicate", "efsdp"]
@@ -103,6 +108,9 @@ def parallelize_llama(
             else ["efsdp"]
         )
         edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+        sparse_spmd_mesh = parallel_dims.get_activated_mesh(
+            ["dp_replicate", "efsdp", "ep"]
+        )
 
     apply_fsdp(
         model,
@@ -115,6 +123,8 @@ def parallelize_llama(
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
         enable_symm_mem=parallelism.enable_fsdp_symm_mem,
+        sparse_spmd_mesh=sparse_spmd_mesh,
+        dp_mesh_dims=dp_mesh_dims,
     )
 
     logger.info("Applied fully_shard to the model")
@@ -136,6 +146,8 @@ def apply_fsdp(
     ep_degree: int = 1,
     edp_mesh: DeviceMesh | None = None,
     enable_symm_mem: bool = False,
+    sparse_spmd_mesh: DeviceMesh | None = None,
+    dp_mesh_dims: DataParallelMeshDims | None = None,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -160,6 +172,8 @@ def apply_fsdp(
         cast_forward_inputs=False,
     )
     fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if dp_mesh_dims is not None and dp_mesh.size() > 1:
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
@@ -251,22 +265,50 @@ def apply_fsdp(
                     HSDPMeshInfo,
                     ShardPlacementResult,
                 )
+                from torch.distributed.fsdp._fully_shard._fsdp_init import (
+                    _get_mesh_info_from_named_dims,
+                )
 
                 assert edp_mesh is not None
 
-                def _get_fsdp_mesh_info(mesh: DeviceMesh) -> FSDPMeshInfo:
+                def _get_fsdp_mesh_info(
+                    mesh: DeviceMesh,
+                    dp_mesh_dims: DataParallelMeshDims | None = None,
+                    spmd_mesh: DeviceMesh | None = None,
+                ) -> FSDPMeshInfo:
+                    if dp_mesh_dims is not None and mesh.size() > 1:
+                        return _get_mesh_info_from_named_dims(
+                            spmd_mesh if spmd_mesh is not None else mesh,
+                            dp_mesh_dims,
+                        )
                     if mesh.ndim == 1:
-                        return FSDPMeshInfo(mesh=mesh, shard_mesh_dim=0)
+                        return FSDPMeshInfo(
+                            mesh=mesh,
+                            shard_mesh_dim=0,
+                        )
                     if mesh.ndim == 2:
                         return HSDPMeshInfo(
-                            mesh=mesh, replicate_mesh_dim=0, shard_mesh_dim=1
+                            mesh=mesh,
+                            replicate_mesh_dim=0,
+                            shard_mesh_dim=1,
                         )
                     raise ValueError(
                         f"Expected 1D or 2D FSDP mesh, got {mesh.ndim}D mesh."
                     )
 
-                edp_mesh_info = _get_fsdp_mesh_info(edp_mesh)
-                dp_mesh_info = _get_fsdp_mesh_info(dp_mesh)
+                edp_mesh_info = _get_fsdp_mesh_info(
+                    edp_mesh,
+                    dp_mesh_dims=DataParallelMeshDims(
+                        shard="efsdp",
+                        replicate="dp_replicate" if edp_mesh.ndim == 2 else None,
+                    ),
+                    spmd_mesh=sparse_spmd_mesh,
+                )
+                dp_mesh_info = _get_fsdp_mesh_info(
+                    dp_mesh,
+                    dp_mesh_dims=dp_mesh_dims,
+                    spmd_mesh=dp_mesh,
+                )
 
                 def _shard_placement_fn(
                     param: nn.Parameter,

@@ -7,14 +7,14 @@
 from dataclasses import dataclass
 
 import torch
-from torch.distributed._functional_collectives import (
-    all_to_all_single,
-    all_to_all_single_autograd,
-)
 from torch.distributed.tensor import DeviceMesh
 
+import spmd_types as spmd
 from torchtitan.config import Configurable
+from torchtitan.distributed.spmd_state import current_mesh, set_current_mesh
 from torchtitan.ops.scatter_add import deterministic_scatter_add
+from torchtitan.protocols.module import named_placement_to_spmd
+from torchtitan.protocols.types import MeshAxisName
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -55,15 +55,38 @@ class LocalTokenDispatcher(Configurable):
         self.num_experts = config.num_experts
         self.top_k = config.top_k
         self.score_before_experts = config.score_before_experts
+        self.sparse_mesh: DeviceMesh | None = None
 
-    def wire_meshes(
-        self,
-        *,
-        ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
-    ) -> None:
-        """No-op for the EP=1 dispatcher. Subclasses override."""
-        del ep_mesh, tp_mesh
+    @property
+    def sp_size(self) -> int:
+        mesh = current_mesh()
+        if (
+            mesh is None
+            or mesh.mesh_dim_names is None
+            or "tp" not in mesh.mesh_dim_names
+        ):
+            return 1
+        tp_axis = mesh.mesh_dim_names.index("tp")
+        return mesh.size(tp_axis)
+
+    @property
+    def sp_rank(self) -> int | torch.SymInt | spmd.Scalar:
+        mesh = current_mesh()
+        if (
+            mesh is None
+            or mesh.mesh_dim_names is None
+            or "tp" not in mesh.mesh_dim_names
+        ):
+            return 0
+        tp_axis = mesh.mesh_dim_names.index("tp")
+        sp_rank = mesh._sym_get_coordinate(tp_axis)
+        if not spmd.is_type_checking():
+            return sp_rank
+        mesh_axis_names = spmd.current_mesh_names()
+        assert mesh_axis_names is not None
+        local_type = {axis: spmd.R for axis in mesh_axis_names.values()}
+        local_type[mesh_axis_names["tp"]] = spmd.V
+        return spmd.Scalar(sp_rank, local_type)
 
     def _local_reorder(
         self,
@@ -106,8 +129,8 @@ class LocalTokenDispatcher(Configurable):
         token_indices_experts_sorted_N = token_indices_experts_sorted_N // self.top_k
         routed_input_ND = x_TD[token_indices_experts_sorted_N]
 
-        # Apply scores before expert computation if configured
         if self.score_before_experts:
+            # Apply scores before expert computation if configured.
             routed_input_ND = (
                 routed_input_ND.to(torch.float32)
                 * topk_scores_experts_sorted_N.reshape(-1, 1)
@@ -134,12 +157,10 @@ class LocalTokenDispatcher(Configurable):
             topk_expert_ids_TK: ``(T, K)`` expert indices per token
 
         Returns:
-            routed_input_RD: ``[R = sum(num_tokens_per_expert_E), input_dim(D)]``.
-                Tokens sorted by expert index.
+            routed_input_RD: ``(R, D)`` tokens sorted by expert index
             num_tokens_per_expert_E: ``(E,)`` token counts per expert
             metadata: LocalDispatchMetadata for combine()
         """
-        # R = N (no EP all-to-all)
         (
             routed_input_RD,
             num_tokens_per_expert_E,
@@ -152,6 +173,31 @@ class LocalTokenDispatcher(Configurable):
             topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
         )
         return routed_input_RD, num_tokens_per_expert_E, metadata
+
+    def _scatter_expert_outputs(
+        self,
+        out_TD: torch.Tensor,
+        routed_output_RD: torch.Tensor,
+        token_indices_experts_sorted_N: torch.Tensor,
+    ) -> torch.Tensor:
+        index = token_indices_experts_sorted_N.reshape(-1, 1).expand(
+            -1, out_TD.shape[-1]
+        )
+
+        with spmd.no_typecheck():
+            result = deterministic_scatter_add(out_TD, index, routed_output_RD)
+        if spmd.is_type_checking():
+            spmd.assert_type(
+                result,
+                named_placement_to_spmd(
+                    {
+                        MeshAxisName.DP: spmd.V,
+                        MeshAxisName.CP: spmd.V,
+                        MeshAxisName.TP: spmd.P,
+                    }
+                ),
+            )
+        return result
 
     def combine(
         self,
@@ -169,21 +215,17 @@ class LocalTokenDispatcher(Configurable):
         Returns:
             out_TD: ``(T, D)`` combined output.
         """
-        out_TD = torch.zeros_like(x_TD)
-
         if not self.score_before_experts:
             routed_output_RD = (
                 routed_output_RD.to(torch.float32)
                 * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
             ).to(routed_output_RD.dtype)
 
-        dim = x_TD.shape[-1]
-        out_TD = deterministic_scatter_add(
-            out_TD,
-            metadata.token_indices_experts_sorted_N.reshape(-1, 1).expand(-1, dim),
+        return self._scatter_expert_outputs(
+            x_TD.new_zeros(x_TD.shape),
             routed_output_RD,
+            metadata.token_indices_experts_sorted_N,
         )
-        return out_TD
 
 
 class AllToAllTokenDispatcher(LocalTokenDispatcher):
@@ -192,9 +234,8 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
     Handles the full token routing lifecycle:
     dispatch (reorder + EP all-to-all) and combine (reverse).
 
-    ``ep_mesh`` and the ``sp_size`` / ``sp_rank`` SP coordinates are wired
-    by the owning ``GroupedExperts.parallelize`` override via
-    ``wire_meshes``.
+    The owning ``GroupedExperts.parallelize`` installs ``sparse_mesh``. Dense
+    TP sequence-parallel coordinates are derived from the current dense mesh.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -207,30 +248,35 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         # torch.ops._dtensor.mesh_get_process_group to keep the FX graph
         # rank-agnostic. None when EP=1 so dispatch falls back to the
         # LocalTokenDispatcher path.
-        self.ep_mesh: DeviceMesh | None = None
-        # Sequence-parallel split coordinates derived from tp_mesh.
-        # ``sp_rank`` uses ``DeviceMesh._sym_get_coordinate`` so it is a
-        # ``SymInt`` under CooR precompile, keeping the FX graph
-        # rank-agnostic. Defaults are the TP=1 values.
-        self.sp_size: int = 1
-        self.sp_rank: int | torch.SymInt = 0
+        self.sparse_mesh: DeviceMesh | None = None
 
-    def wire_meshes(
+    def _sparse_placement(
         self,
         *,
-        ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
-    ) -> None:
-        """Install the EP mesh and SP coordinates used by dispatch / combine.
+        ep: spmd.PerMeshAxisSpmdType = spmd.V,
+    ) -> dict[str, spmd.PerMeshAxisSpmdType]:
+        mesh_axis_names = spmd.current_mesh_names() or {}
+        placement: dict[str, spmd.PerMeshAxisSpmdType] = {}
+        for axis_name in ("dp_replicate", "efsdp"):
+            if axis_name in mesh_axis_names:
+                placement[axis_name] = spmd.V
+        if "ep" in mesh_axis_names:
+            placement["ep"] = ep
+        return placement
 
-        Both arguments may be ``None`` when the corresponding parallelism
-        dimension is disabled; ``dispatch`` / ``combine`` handle the
-        disabled cases internally.
-        """
-        self.ep_mesh = ep_mesh
-        if tp_mesh is not None:
-            self.sp_size = tp_mesh.size()
-            self.sp_rank = tp_mesh._sym_get_coordinate(0)
+    def _dense_placement(
+        self,
+        *,
+        tp: spmd.PerMeshAxisSpmdType,
+    ) -> dict[str, spmd.PerMeshAxisSpmdType]:
+        mesh_axis_names = spmd.current_mesh_names() or {}
+        placement: dict[str, spmd.PerMeshAxisSpmdType] = {}
+        for axis_name in ("dp", "cp"):
+            if axis_name in mesh_axis_names:
+                placement[axis_name] = spmd.V
+        if "tp" in mesh_axis_names:
+            placement["tp"] = tp
+        return placement
 
     def dispatch(
         self,
@@ -242,11 +288,8 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
     ]:
         """Reorder tokens, then all-to-all dispatch to expert-parallel ranks.
 
-        When ep_mesh is None (EP=1), falls back to local dispatch — no
+        When ``sparse_mesh`` is None (EP=1), falls back to local dispatch — no
         all-to-all communication, just local token reordering with padding.
-
-        With SP, x_TD/topk_scores_TK/topk_expert_ids_TK are already
-        the local SP shard (from DTensor Shard to_local via LocalMapConfig).
 
         Args:
             x_TD: ``(T, D)`` local token shard
@@ -254,83 +297,87 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             topk_expert_ids_TK: ``(T, K)`` expert indices
 
         Returns:
-            routed_input_RD: ``[R = sum(num_tokens_per_local_expert_e), input_dim(D)]``.
-                Tokens in expert-major order for local experts.
-            num_tokens_per_local_expert_e: ``(num_local_experts,)`` token counts
+            routed_input_RD: ``(R, D)`` tokens in expert-major order
+            num_tokens_per_local_expert_e: ``(e,)`` token counts
             metadata: dispatch metadata for combine()
         """
         # EP=1: fall back to local dispatch (no all-to-all needed)
-        if self.ep_mesh is None:
+        if self.sparse_mesh is None:
             return super().dispatch(x_TD, topk_scores_TK, topk_expert_ids_TK)
 
-        ep_size = self.ep_mesh.size()
-
-        # _local_reorder returns (N, D) where N = T*K.
-        # EP all-to-all below produces (R, D) where R != N.
+        ep_size = self.sparse_mesh.get_group("ep").size()
         (
-            routed_input_ND,
-            num_local_tokens_per_expert_E,
+            routed_input_RD,
+            num_tokens_per_expert_E,
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
         ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
 
         # generate the input splits and output splits for all-to-all
         with torch.no_grad():
-            num_global_tokens_per_local_expert_E = all_to_all_single(
-                num_local_tokens_per_expert_E,
-                None,
-                None,
-                group=self.ep_mesh,
-            )
-            # Need to wait explicitly because it is used by a triton kernel later
-            # which doesn't realize that AsyncCollectiveTensor needs unwrapping
-            num_global_tokens_per_local_expert_E = (
-                torch.ops._c10d_functional.wait_tensor(
-                    num_global_tokens_per_local_expert_E
+            with set_current_mesh(self.sparse_mesh):
+                with spmd.no_typecheck():
+                    ep_pg = self.sparse_mesh.get_group("ep")
+                    num_global_tokens_per_local_expert_E = spmd.all_to_all(
+                        num_tokens_per_expert_E,
+                        ep_pg,
+                        src=spmd.S(0),
+                        dst=spmd.S(0),
+                    )
+                if spmd.is_type_checking():
+                    spmd.assert_type(
+                        num_global_tokens_per_local_expert_E,
+                        self._sparse_placement(ep=spmd.S(0)),
+                    )
+                with spmd.no_typecheck():
+                    non_blocking = not torch.compiler.is_compiling()
+                    input_splits = (
+                        num_tokens_per_expert_E.view(ep_size, -1)
+                        .sum(dim=1)
+                        .to(torch.device("cpu"), non_blocking=non_blocking)
+                    )
+                    output_splits = (
+                        num_global_tokens_per_local_expert_E.view(ep_size, -1)
+                        .sum(dim=1)
+                        .to(torch.device("cpu"), non_blocking=False)
+                    )
+                    input_splits_list = input_splits.tolist()
+                    output_splits_list = output_splits.tolist()
+
+        with set_current_mesh(self.sparse_mesh):
+            ep_pg = self.sparse_mesh.get_group("ep")
+            if spmd.is_type_checking():
+                routed_input_RD = spmd.reinterpret_mesh(
+                    routed_input_RD,
+                    self._sparse_placement(),
                 )
+                spmd.assert_type(
+                    routed_input_RD,
+                    self._sparse_placement(ep=spmd.S(0)),
+                )
+            routed_input_RD = spmd.all_to_all(
+                routed_input_RD,
+                ep_pg,
+                src=spmd.S(0),
+                dst=spmd.S(0),
+                output_split_sizes=output_splits_list,
+                input_split_sizes=input_splits_list,
             )
-            # non_blocking=True is safe in eager, but under torch.compile the
-            # async D2H transfer can race with the subsequent .tolist()/.item()
-            # calls, producing stale values and failing unbacked-symint guards.
-            non_blocking = not torch.compiler.is_compiling()
-            input_splits = (
-                num_local_tokens_per_expert_E.view(ep_size, -1)
-                .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=non_blocking)
-            )
-            # NOTE: this would incur a device-to-host sync
-            output_splits = (
-                num_global_tokens_per_local_expert_E.view(ep_size, -1)
-                .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=False)
-            )
-            input_splits_list = input_splits.tolist()
-            output_splits_list = output_splits.tolist()
 
-        # All-to-all dispatch tokens to EP ranks
-        routed_input_RD = all_to_all_single_autograd(
-            routed_input_ND,
-            output_splits_list,
-            input_splits_list,
-            self.ep_mesh,
-        )
-
-        # Reorder from rank-major to expert-major via _permute.
-        #
-        # num_global_tokens_per_local_expert_E layout after all-to-all
-        # (e = local experts, EP = EP ranks):
-        #   (e0,r0), (e1,r0), ..., (e0,r1), (e1,r1), ...  (rank-major)
-        # _permute reshuffles to:
-        #   (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
-        (
-            input_shape,
-            routed_input_RD,
-            permuted_indices,
-            num_global_tokens_per_local_expert_e,
-        ) = self._permute(
-            routed_input_RD,
-            num_global_tokens_per_local_expert_E,
-        )
+            num_local_experts = (
+                num_global_tokens_per_local_expert_E.shape[0] // ep_size
+            )
+            (
+                input_shape,
+                routed_input_RD,
+                permuted_indices,
+                num_global_tokens_per_local_expert_e,
+            ) = self._permute(
+                routed_input_RD,
+                num_global_tokens_per_local_expert_E,
+                ep_size,
+                num_local_experts,
+            )
 
         metadata = AllToAllDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
@@ -346,31 +393,28 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         self,
         routed_input_RD,
         num_global_tokens_per_local_expert_E,
+        ep_size,
+        num_local_experts,
     ):
         """Reorder tokens from rank-major to expert-major layout.
 
         Input layout:  (e0,r0), (e1,r0), ..., (e0,r1), (e1,r1), ...  (rank-major)
         Output layout: (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
-
-        Collapses token count matrix ``t_mat`` from ``(EP, e)`` to
-        ``num_global_tokens_per_local_expert_e`` ``(e,)`` by summing across ranks.
         """
-        # pyrefly: ignore [missing-attribute]
-        ep_size = self.ep_mesh.size()
-        e = num_global_tokens_per_local_expert_E.shape[0] // ep_size
+        input_shape = routed_input_RD.shape
         device = num_global_tokens_per_local_expert_E.device
         total = num_global_tokens_per_local_expert_E.sum()
 
-        # (EP, e) matrix of token counts per (rank, local_expert)
-        t_mat = num_global_tokens_per_local_expert_E.view(ep_size, e)
+        # [R, E] matrix of token counts per (rank, expert)
+        t_mat = num_global_tokens_per_local_expert_E.view(ep_size, num_local_experts)
 
         # Where each (r, e) segment starts in the input (rank-major order)
         input_starts = (
             num_global_tokens_per_local_expert_E.cumsum(0)
             - num_global_tokens_per_local_expert_E
-        ).view(ep_size, e)
+        ).view(ep_size, num_local_experts)
 
-        # Transpose to expert-major (e, EP) and flatten
+        # Transpose to expert-major [E, R] and flatten
         segment_lens = t_mat.t().reshape(-1)
         input_starts = input_starts.t().reshape(-1)
 
@@ -387,9 +431,10 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         )
 
         num_global_tokens_per_local_expert_e = t_mat.sum(0)
+        routed_input_RD = routed_input_RD[permuted_indices, :]
         return (
-            routed_input_RD.shape,
-            routed_input_RD[permuted_indices, :],
+            input_shape,
+            routed_input_RD,
             permuted_indices,
             num_global_tokens_per_local_expert_e,
         )
@@ -398,6 +443,8 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         """Reverse expert-major reordering."""
         out_unpermuted_RD = routed_output_RD.new_empty(input_shape)
         out_unpermuted_RD[permuted_indices, :] = routed_output_RD
+        if spmd.is_type_checking():
+            spmd.assert_type(out_unpermuted_RD, spmd.get_local_type(routed_output_RD))
         return out_unpermuted_RD
 
     # pyrefly: ignore [bad-override]
@@ -409,9 +456,8 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
     ) -> torch.Tensor:
         """Reverse the dispatch: unpermute + all-to-all + score + scatter_add.
 
-        When sp_size > 1, dispatch uses local token indices.
-        Combine offsets them to global positions so scatter_add
-        into full x_TD is correct.
+        With SP, x_TD is the local shard. Combine scatters into a full-size
+        buffer so routed results from all SP ranks occupy global positions.
 
         Args:
             routed_output_RD: ``(R, D)`` expert outputs in expert-major order
@@ -422,26 +468,34 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             out_TD: ``(T, D)`` combined output.
         """
         # EP=1: fall back to local combine (no all-to-all needed)
-        if self.ep_mesh is None:
-            return super().combine(routed_output_RD, metadata, x_TD)
+        if self.sparse_mesh is None:
+            return super().combine(
+                routed_output_RD,
+                metadata,
+                x_TD,
+            )
 
-        # Reverse expert-major reordering
-        routed_output_RD = self._unpermute(
-            routed_output_RD, metadata.input_shape, metadata.permuted_indices
-        )
+        with set_current_mesh(self.sparse_mesh):
+            routed_output_RD = self._unpermute(
+                routed_output_RD, metadata.input_shape, metadata.permuted_indices
+            )
+            ep_pg = self.sparse_mesh.get_group("ep")
+            spmd.assert_type(routed_output_RD, self._sparse_placement(ep=spmd.S(0)))
+            routed_output_RD = spmd.all_to_all(
+                routed_output_RD,
+                ep_pg,
+                src=spmd.S(0),
+                dst=spmd.S(0),
+                output_split_sizes=metadata.input_splits,
+                input_split_sizes=metadata.output_splits,
+            )
 
-        # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
-        # on the NCCL stream and won't block until the tensor is accessed.
-        routed_output_RD = all_to_all_single_autograd(
-            routed_output_RD,
-            metadata.input_splits,
-            metadata.output_splits,
-            self.ep_mesh,
-        )
+        if spmd.is_type_checking():
+            dense_placement = self._dense_placement(tp=spmd.V)
+            routed_output_RD = spmd.reinterpret_mesh(
+                routed_output_RD, dense_placement
+            )
 
-        # With SP, x_TD is the local shard. Create full-size buffer for
-        # scatter_add so routed results from all SP ranks can be placed
-        # at global positions.
         out_TD = torch.zeros(
             x_TD.shape[0] * self.sp_size,
             x_TD.shape[-1],
@@ -455,8 +509,6 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
                 * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
             ).to(routed_output_RD.dtype)
 
-        # With SP, token indices are 0-based within the local shard.
-        # Offset to global positions for the full-size scatter buffer.
         if self.sp_size > 1:
             token_indices_experts_sorted_N = (
                 metadata.token_indices_experts_sorted_N + x_TD.shape[0] * self.sp_rank
@@ -464,13 +516,11 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         else:
             token_indices_experts_sorted_N = metadata.token_indices_experts_sorted_N
 
-        assert isinstance(token_indices_experts_sorted_N, torch.Tensor)
-        out_TD = deterministic_scatter_add(
+        return self._scatter_expert_outputs(
             out_TD,
-            token_indices_experts_sorted_N.reshape(-1, 1).expand(-1, out_TD.shape[-1]),
             routed_output_RD,
+            token_indices_experts_sorted_N,
         )
-        return out_TD
 
 
 class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
@@ -481,8 +531,8 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
     a multiple of ``pad_multiple``. This alignment is required by FP8/MXFP8
     quantized grouped GEMM kernels (e.g. 16 for FP8, 32 for MXFP8).
 
-    Requires EP to be enabled (ep_mesh must be set). Raises ValueError
-    if ep_mesh is None, since quantized grouped GEMMs need padded token
+    Requires EP to be enabled (sparse_mesh must be set). Raises ValueError
+    if sparse_mesh is None, since quantized grouped GEMMs need padded token
     groups which are only produced by the EP permute_and_pad path.
     """
 
@@ -495,9 +545,9 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         self.pad_multiple = config.pad_multiple
 
     def dispatch(self, x_TD, topk_scores_TK, topk_expert_ids_TK):
-        if self.ep_mesh is None:
+        if self.sparse_mesh is None:
             raise ValueError(
-                "TorchAOTokenDispatcher requires expert parallelism (ep_mesh must be set). "
+                "TorchAOTokenDispatcher requires expert parallelism (sparse_mesh must be set). "
                 "Quantized grouped GEMMs need padded token groups, which requires EP>1. "
             )
         return super().dispatch(x_TD, topk_scores_TK, topk_expert_ids_TK)
@@ -506,6 +556,8 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         self,
         routed_input_RD,
         num_global_tokens_per_local_expert_E,
+        ep_size,
+        num_local_experts,
     ):
         # FP8/MXFP8 require groups to be permuted to expert major order AND
         # padded to nearest multiple of 16.
@@ -514,10 +566,6 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         # Note that this will create side effects when wrapping the for-loop
         # implementation of GroupedExperts, as it does not need padding.
         from torchao.prototype.moe_training.ep.permute import permute_and_pad
-
-        # pyrefly: ignore [missing-attribute]
-        ep_size = self.ep_mesh.size()
-        e = num_global_tokens_per_local_expert_E.shape[0] // ep_size
 
         (
             input_shape,
@@ -529,7 +577,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             routed_input_RD,
             num_global_tokens_per_local_expert_E,
             ep_size,
-            e,
+            num_local_experts,
             self.pad_multiple,
         )
         return (
@@ -567,27 +615,10 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.ep_mesh: DeviceMesh | None = None
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
         from torchtitan.distributed.deepep import deepep  # noqa: F401
-
-    def wire_meshes(
-        self,
-        *,
-        ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
-    ) -> None:
-        """Install the EP mesh used by DeepEP dispatch / combine.
-
-        ``tp_mesh`` provides SP coordinates so combine can expand its output
-        to full sequence length (matching AllToAll's convention).
-        """
-        self.ep_mesh = ep_mesh
-        if tp_mesh is not None:
-            self.sp_size = tp_mesh.size()
-            self.sp_rank = tp_mesh._sym_get_coordinate(0)
 
     # pyrefly: ignore [bad-override]
     def dispatch(
@@ -596,11 +627,11 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
-        assert self.ep_mesh is not None, (
-            "ep_mesh must be set before dispatch. "
-            "ExpertParallel._partition_fn() should set it."
+        assert self.sparse_mesh is not None, (
+            "sparse_mesh must be set before dispatch. "
+            "GroupedExperts.parallelize() should set it."
         )
-        ep_group = self.ep_mesh.get_group()
+        ep_group = self.sparse_mesh.get_group("ep")
         num_local_experts = self.num_experts // ep_group.size()
 
         from torchtitan.distributed.deepep.deepep import dispatch_tokens
@@ -635,21 +666,21 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
 
         # pyrefly: ignore [bad-argument-type]
-        combined_TD = combine_tokens(routed_output_RD, metadata.state)
+        routed_output_RD = combine_tokens(routed_output_RD, metadata.state)
 
         if self.sp_size > 1:
             sync_combine()
             out_TD = torch.zeros(
-                combined_TD.shape[0] * self.sp_size,
-                combined_TD.shape[-1],
-                device=combined_TD.device,
-                dtype=combined_TD.dtype,
+                routed_output_RD.shape[0] * self.sp_size,
+                routed_output_RD.shape[-1],
+                device=routed_output_RD.device,
+                dtype=routed_output_RD.dtype,
             )
-            offset = combined_TD.shape[0] * self.sp_rank
-            out_TD[offset : offset + combined_TD.shape[0]] = combined_TD
+            offset = routed_output_RD.shape[0] * self.sp_rank
+            out_TD[offset : offset + routed_output_RD.shape[0]] = routed_output_RD
             return out_TD
 
-        return combined_TD
+        return routed_output_RD
 
 
 class HybridEPTokenDispatcher(LocalTokenDispatcher):
@@ -700,29 +731,10 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
         super().__init__(config)
         self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
         self.pad_multiple = config.pad_multiple
-        self.ep_mesh: DeviceMesh | None = None
-        self.sp_size: int = 1
-        self.sp_rank: int | torch.SymInt = 0
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
         from torchtitan.distributed.deepep import hybridep  # noqa: F401
-
-    def wire_meshes(
-        self,
-        *,
-        ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
-    ) -> None:
-        """Install the EP mesh used by HybridEP dispatch / combine.
-
-        ``tp_mesh`` provides SP coordinates so combine can expand its output
-        to full sequence length (matching AllToAll's convention).
-        """
-        self.ep_mesh = ep_mesh
-        if tp_mesh is not None:
-            self.sp_size = tp_mesh.size()
-            self.sp_rank = tp_mesh._sym_get_coordinate(0)
 
     # pyrefly: ignore [bad-override]
     def dispatch(
@@ -731,11 +743,11 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
-        assert self.ep_mesh is not None, (
-            "ep_mesh must be set before dispatch. "
-            "ExpertParallel._partition_fn() should set it."
+        assert self.sparse_mesh is not None, (
+            "sparse_mesh must be set before dispatch. "
+            "GroupedExperts.parallelize() should set it."
         )
-        ep_group = self.ep_mesh.get_group()
+        ep_group = self.sparse_mesh.get_group("ep")
         num_local_experts = self.num_experts // ep_group.size()
 
         from torchtitan.distributed.deepep.hybridep import dispatch_tokens
@@ -765,7 +777,7 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
         """Combine tokens via HybridEP."""
         from torchtitan.distributed.deepep import hybridep
 
-        combined_TD = hybridep.combine_tokens(
+        routed_output_RD = hybridep.combine_tokens(
             routed_output_RD,
             metadata.state,  # pyrefly: ignore [bad-argument-type]
             pad_multiple=self.pad_multiple,
@@ -773,13 +785,13 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
 
         if self.sp_size > 1:
             out_TD = torch.zeros(
-                combined_TD.shape[0] * self.sp_size,
-                combined_TD.shape[-1],
-                device=combined_TD.device,
-                dtype=combined_TD.dtype,
+                routed_output_RD.shape[0] * self.sp_size,
+                routed_output_RD.shape[-1],
+                device=routed_output_RD.device,
+                dtype=routed_output_RD.dtype,
             )
-            offset = combined_TD.shape[0] * self.sp_rank
-            out_TD[offset : offset + combined_TD.shape[0]] = combined_TD
+            offset = routed_output_RD.shape[0] * self.sp_rank
+            out_TD[offset : offset + routed_output_RD.shape[0]] = routed_output_RD
             return out_TD
 
-        return combined_TD
+        return routed_output_RD

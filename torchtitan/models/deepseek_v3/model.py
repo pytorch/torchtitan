@@ -14,6 +14,7 @@ from torch import nn
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
+    FlexAttention,
     ScaledDotProductAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -128,7 +129,7 @@ class Attention(BaseAttention):
         kv = self.wkv_b(self.kv_norm(kv))
         kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1)
+        k = torch.cat([k_nope, k_pe.expand(-1, -1, k_nope.shape[-2], -1)], dim=-1)
 
         output = self.inner_attention(
             q, k, v, attention_masks=attention_masks, scale=self.softmax_scale
@@ -235,23 +236,26 @@ class DeepSeekV3Model(Decoder):
 
             if parallelism.context_parallel_degree > 1 and not isinstance(
                 self.layers[0].attention.inner_attention,
-                ScaledDotProductAttention.Config,
+                FlexAttention.Config,
             ):
                 raise NotImplementedError(
                     "Context Parallel for DeepSeek V3 only supports "
-                    "ScaledDotProductAttention. Got "
+                    "FlexAttention. Got "
                     f"{type(self.layers[0].attention.inner_attention).__name__}."
                 )
 
             from torchtitan.models.deepseek_v3.sharding import (
                 set_deepseek_v3_sharding_config,
             )
+            from torchtitan.components.loss import ChunkedCELoss
 
+            chunked_loss = isinstance(trainer_config.loss, ChunkedCELoss.Config)
             set_deepseek_v3_sharding_config(
                 self,
-                loss_parallel=not parallelism.disable_loss_parallel,
+                loss_parallel=chunked_loss and not parallelism.disable_loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
+                chunked_loss=chunked_loss,
             )
 
         def get_nparams_and_flops(

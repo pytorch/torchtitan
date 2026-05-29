@@ -146,6 +146,14 @@ def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
     ``FusedQKVLinear`` (single ``wqkv``).
     """
     if isinstance(qkv_linear_cfg, FusedQKVLinear.Config):
+        # FusedQKVLinear Q-K-V head-dim split is local semantics;
+        # [n_heads, 1, 1] concatenated weight is difficult to represent globally.
+        qkv_output = dense_activation_placement(tp=spmd.S(2))
+        qkv_linear_cfg.sharding_config = ShardingConfig(
+            in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
+            out_src_shardings=(qkv_output, qkv_output, qkv_output),
+            local_spmd=True,
+        )
         qkv_linear_cfg.wqkv.sharding_config = colwise_config()
     elif isinstance(qkv_linear_cfg, QKVLinear.Config):
         qkv_linear_cfg.wq.sharding_config = colwise_config()
