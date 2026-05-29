@@ -569,8 +569,7 @@ class ChatDataset(IterableDataset, Stateful):
             self.reloop()
 
     def reloop(self) -> None:
-        """Advance to the next epoch in place: reset position and reshuffle.
-        """
+        """Advance to the next epoch in place: reset position and reshuffle."""
         self._sample_idx = 0
         self._epoch += 1
         if isinstance(self._data, Dataset):

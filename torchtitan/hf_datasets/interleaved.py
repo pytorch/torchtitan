@@ -106,24 +106,6 @@ class InterleavedDataset(IterableDataset):
         self._rng = random.Random(seed)
         self._stopping_strategy = stopping_strategy
 
-    @staticmethod
-    def _add_source_idx(sample: Any, source_idx: int) -> Any:
-        """Attach source_idx (int) to a sample, based on its type:
-
-        * (input_dict, label) → ({**input_dict, "source_idx": i}, label)
-        * plain dict          → {**d, "source_idx": i}
-        * anything else           → returned unchanged (no source_idx injected)
-        """
-        if (
-            isinstance(sample, tuple)
-            and len(sample) == 2
-            and isinstance(sample[0], dict)
-        ):
-            return ({**sample[0], "source_idx": source_idx}, sample[1])
-        if isinstance(sample, dict):
-            return {**sample, "source_idx": source_idx}
-        return sample
-
     def __iter__(self) -> Iterator:
         """Yield weighted-interleaved samples across all sources."""
         indices = list(range(len(self._datasets)))
@@ -132,8 +114,13 @@ class InterleavedDataset(IterableDataset):
 
         while True:
             idx = self._rng.choices(indices, weights=self._probs, k=1)[0]
+            # TODO: `idx` identifies the source drawn here. To observe the
+            # per-source sample mix, accumulate per-source counts and all-reduce
+            # them across DP ranks into a metric (e.g. {"dataset_a": n, ...}) for
+            # MetricsProcessor. Keep this in the dataloader; defer until
+            # distributed metrics land.
             try:
-                yield self._add_source_idx(next(iterators[idx]), idx)
+                yield next(iterators[idx])
             except StopIteration:
                 if self._stopping_strategy == "on_first_exhausted":
                     break

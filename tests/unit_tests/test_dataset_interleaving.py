@@ -39,30 +39,6 @@ class _MockDataset(TorchIterableDataset):
         self._pos = sd["pos"]
 
 
-class _MockDictDataset(TorchIterableDataset):
-    """Yields ({"input": v}, v) tuples — mirrors the real dataset format."""
-
-    def __init__(self, values: list):
-        self._values = list(values)
-        self._pos: int = 0
-
-    def __iter__(self):
-        while self._pos < len(self._values):
-            v = self._values[self._pos]
-            self._pos += 1
-            yield {"input": v}, v
-        self._pos = 0
-
-    def reloop(self) -> None:
-        self._pos = 0
-
-    def state_dict(self):
-        return {"pos": self._pos}
-
-    def load_state_dict(self, sd: dict):
-        self._pos = sd["pos"]
-
-
 class _NoCheckpointDataset:
     """Missing state_dict / load_state_dict — must be rejected by InterleavedDataset."""
 
@@ -216,48 +192,6 @@ class TestInterleavedDatasetCheckpointing(unittest.TestCase):
         interleaved2 = InterleavedDataset([ds_a2, ds_b2], [1.0, 1.0], seed=13)
         interleaved2.load_state_dict(state)
         self.assertEqual(list(interleaved2), original_tail)
-
-
-class TestAddSourceIdx(unittest.TestCase):
-    def test_dict_label_tuple_injects_key(self):
-        sample = ({"input": 1, "positions": 0}, 1)
-        result = InterleavedDataset._add_source_idx(sample, 2)
-        self.assertEqual(result[0]["source_idx"], 2)
-        self.assertEqual(result[0]["input"], 1)
-        self.assertEqual(result[1], 1)
-
-    def test_dict_label_tuple_does_not_mutate_original(self):
-        original = {"input": 1}
-        result = InterleavedDataset._add_source_idx((original, 1), 0)
-        self.assertNotIn("source_idx", original)
-        self.assertIn("source_idx", result[0])
-
-    def test_plain_dict_injects_key(self):
-        sample = {"input": 5}
-        result = InterleavedDataset._add_source_idx(sample, 1)
-        self.assertEqual(result["source_idx"], 1)
-        self.assertEqual(result["input"], 5)
-
-    def test_other_format_returned_unchanged(self):
-        self.assertEqual(InterleavedDataset._add_source_idx(42, 0), 42)
-        self.assertEqual(InterleavedDataset._add_source_idx("text", 1), "text")
-
-    def test_iter_source_idx_matches_dataset_index(self):
-        """source_idx in yielded samples must equal the dataset's position in the list."""
-        ds_a = _MockDictDataset([10, 11, 12])
-        ds_b = _MockDictDataset([20, 21, 22])
-        interleaved = InterleavedDataset([ds_a, ds_b], [1.0, 1.0], seed=0)
-
-        for input_dict, _label in interleaved:
-            value = input_dict["input"]
-            expected_idx = 0 if value < 20 else 1
-            self.assertEqual(input_dict["source_idx"], expected_idx)
-
-    def test_iter_single_source_always_zero(self):
-        ds = _MockDictDataset([1, 2, 3])
-        interleaved = InterleavedDataset([ds], [1.0], seed=0)
-        for input_dict, _label in interleaved:
-            self.assertEqual(input_dict["source_idx"], 0)
 
 
 class TestAllExhaustedStrategy(unittest.TestCase):
