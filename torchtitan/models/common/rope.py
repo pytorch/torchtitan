@@ -387,8 +387,11 @@ def apply_rotary_emb_cos_sin(
     head_dim = xq.shape[-1]
     if rope_cache.ndim != 4:
         rope_cache = _reshape_for_broadcast_cos_sin(rope_cache, xq, positions)
-    cos = rope_cache[..., :head_dim].to(device=xq.device)
-    sin = rope_cache[..., head_dim:].to(device=xq.device)
+    cos = rope_cache[..., :head_dim]
+    sin = rope_cache[..., head_dim:]
+    if cos.device != xq.device:  # unconditional .to() fails SPMD sharding prop
+        cos = cos.to(device=xq.device)
+        sin = sin.to(device=xq.device)
     xq_f = xq.float()
     xk_f = xk.float()
     xq_out = (xq_f * cos) + (_rotate_half(xq_f) * sin)

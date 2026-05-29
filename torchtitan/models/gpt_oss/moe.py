@@ -13,10 +13,13 @@ import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+import spmd_types as spmd
+from torchtitan.distributed.spmd_state import current_mesh, set_current_mesh
 from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.protocols.module import Module
 
 
+@spmd.register_autograd_function
 class ScaleBiasForward(torch.autograd.Function):
     """
     Custom autograd function that scales bias in forward pass but not in backward.
@@ -34,6 +37,17 @@ class ScaleBiasForward(torch.autograd.Function):
         return bias
 
     @staticmethod
+    def typecheck_forward(bias, tp_degree):
+        out = ScaleBiasForward.apply(bias, tp_degree)
+        local_type = dict(spmd.get_local_type(bias)) if spmd.has_local_type(bias) else {}
+        mesh_axis_names = spmd.current_mesh_names() or {}
+        if tp_degree > 1 and "tp" in mesh_axis_names:
+            local_type[mesh_axis_names["tp"]] = spmd.V
+        if local_type:
+            spmd.set_local_type(out, local_type)
+        return out
+
+    @staticmethod
     # pyrefly: ignore [bad-override]
     def backward(ctx, grad_output):
         # Don't scale the gradient - pass it through as-is
@@ -48,6 +62,15 @@ def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
     out_glu = x_glu * torch.sigmoid(alpha * x_glu)
     # Note we add an extra bias of 1 to the linear layer
     return out_glu * (x_linear + 1)
+
+
+def _tp_degree_from_current_mesh() -> int:
+    mesh = current_mesh()
+    mesh_axis_names = spmd.current_mesh_names() or {}
+    if mesh is None or "tp" not in mesh_axis_names:
+        return 1
+    assert mesh.mesh_dim_names is not None
+    return mesh.size(mesh.mesh_dim_names.index("tp"))
 
 
 class GptOssGroupedExperts(Module):
@@ -80,24 +103,14 @@ class GptOssGroupedExperts(Module):
         num_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
         """Raw expert computation without dispatch/combine."""
-        if isinstance(self.mlp1_weight_EGD, DTensor):
-            # Convert parameters from DTensors to plain Tensors, to work with
-            # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            mlp1_weight_EGD = self.mlp1_weight_EGD.to_local()
-            # pyrefly: ignore [missing-attribute]
-            mlp1_bias_EG = self.mlp1_bias_EG.to_local()
-            # pyrefly: ignore [missing-attribute]
-            mlp2_weight_EDF = self.mlp2_weight_EDF.to_local()
-            # pyrefly: ignore [missing-attribute]
-            mlp2_bias_ED = self.mlp2_bias_ED.to_local()
-        else:
-            mlp1_weight_EGD = self.mlp1_weight_EGD
-            mlp1_bias_EG = self.mlp1_bias_EG
-            mlp2_weight_EDF = self.mlp2_weight_EDF
-            mlp2_bias_ED = self.mlp2_bias_ED
+        mlp1_weight_EGD = self.mlp1_weight_EGD
+        mlp1_bias_EG = self.mlp1_bias_EG
+        mlp2_weight_EDF = self.mlp2_weight_EDF
+        mlp2_bias_ED = self.mlp2_bias_ED
 
-        # Determine tp_degree from device mesh if available
-        tp_degree = 1
+        # Local SPMD typed params are plain tensors, so use the active mesh
+        # before falling back to DTensor metadata.
+        tp_degree = _tp_degree_from_current_mesh()
         if isinstance(self.mlp1_weight_EGD, DTensor):
             mesh_dim_names = self.mlp1_weight_EGD.device_mesh.mesh_dim_names
             # pyrefly: ignore[not-iterable]
@@ -168,25 +181,20 @@ class GptOssGroupedExperts(Module):
             num_tokens_per_expert_E,
             metadata,
         ) = self.token_dispatcher.dispatch(x_TD, topk_scores_TK, topk_expert_ids_TK)
-        routed_output_RD = self._experts_forward(
-            routed_input_RD, num_tokens_per_expert_E
-        )
-        return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        with set_current_mesh(self.token_dispatcher.sparse_mesh):
+            routed_output_RD = self._experts_forward(
+                routed_input_RD, num_tokens_per_expert_E
+            )
+        out_TD = self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        return out_TD.view(B, -1, D)
 
     def parallelize(self, parallel_dims) -> None:
-        """Parallelize experts and wire dispatcher meshes.
-
-        Mirrors ``GroupedExperts.parallelize``: after the base
-        ``Module.parallelize`` distributes the expert weight params, install
-        the EP / TP meshes on the non-Module ``token_dispatcher`` child via
-        ``wire_meshes``. ``GptOssGroupedExperts`` inherits ``Module``
-        directly (not ``GroupedExperts``) so it needs its own override.
-        """
+        """Parallelize expert weights and install ``sparse_mesh``."""
         super().parallelize(parallel_dims)
-        self.token_dispatcher.wire_meshes(
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-        )
+        if parallel_dims.ep_enabled:
+            self.token_dispatcher.sparse_mesh = parallel_dims.get_activated_mesh(
+                ["dp_replicate", "efsdp", "ep"]
+            )
 
 
 class GptOssMoE(MoE):

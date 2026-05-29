@@ -19,10 +19,6 @@ from torchtitan.models.common.attention import (
     get_fixed_block_mask_mod,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common.token_dispatcher import (
-    DeepEPTokenDispatcher,
-    HybridEPTokenDispatcher,
-)
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.tools.logging import logger
 
@@ -143,27 +139,22 @@ class Llama4Model(Decoder):
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
-                    token_dispatcher_cfg = layer_cfg.moe.experts.token_dispatcher
+                    comm_backend = getattr(
+                        layer_cfg.moe.experts.token_dispatcher,
+                        "comm_backend",
+                        "standard",
+                    )
                     if (
-                        isinstance(
-                            token_dispatcher_cfg,
-                            (
-                                DeepEPTokenDispatcher.Config,
-                                HybridEPTokenDispatcher.Config,
-                            ),
-                        )
+                        comm_backend in ("deepep", "hybridep")
                         and parallelism.expert_parallel_degree == 1
                     ):
                         raise ValueError(
-                            f"{type(token_dispatcher_cfg).__qualname__} requires expert parallelism "
+                            f"{comm_backend.upper()} requires expert parallelism "
                             "(expert_parallel_degree > 1)."
                         )
 
             if parallelism.context_parallel_degree > 1:
-                raise NotImplementedError(
-                    "Context Parallel is not supported for Llama4 "
-                    "(Llama4 requires FlexAttention, which is not supported with CP)."
-                )
+                self.validate_context_parallel_attention()
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
@@ -178,13 +169,16 @@ class Llama4Model(Decoder):
                         f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
                     )
 
+            from torchtitan.components.loss import ChunkedCELoss
             from torchtitan.models.llama4.sharding import set_llama4_sharding_config
 
+            chunked_loss = isinstance(trainer_config.loss, ChunkedCELoss.Config)
             set_llama4_sharding_config(
                 self,
-                loss_parallel=not parallelism.disable_loss_parallel,
+                loss_parallel=chunked_loss and not parallelism.disable_loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
+                chunked_loss=chunked_loss,
             )
 
         def get_nparams_and_flops(

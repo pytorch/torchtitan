@@ -11,10 +11,9 @@ and read by ``Module.parallelize(parallel_dims)``. Placements are keyed by mesh
 axis name so they are self-documenting and support multi-dimensional meshes.
 """
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 
 import spmd_types as spmd
-from torch.utils._pytree import tree_leaves
 
 from torchtitan.protocols.types import MeshAxisName
 
@@ -28,6 +27,7 @@ __all__ = [
     "ShardingConfig",
     "SpmdInputConfig",
     "is_placement_like",
+    "placement_axes",
 ]
 
 # Per-axis SPMD type, keyed by mesh axis name. ``MeshAxisName`` is a StrEnum,
@@ -59,6 +59,11 @@ def is_placement_like(value: object) -> bool:
         and bool(value)
         and all(MeshAxisName.has_axis(key) for key in value)
     )
+
+
+def placement_axes(placement: PlacementLike) -> tuple[str, ...]:
+    named = placement.placement if isinstance(placement, PlacementSpec) else placement
+    return tuple(MeshAxisName.normalize(axis_name) for axis_name in named)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -102,33 +107,6 @@ class ShardingConfig:
     out_src_shardings: PlacementLike | tuple[PlacementLike, ...] | None = None
     out_dst_shardings: PlacementLike | None = None
     local_spmd: bool = False
-
-    def axes(self) -> tuple[str, ...]:
-        """Return mesh axes from the first placement, preserving order."""
-        placements = tree_leaves(
-            tuple(getattr(self, field.name) for field in fields(self)),
-            is_leaf=is_placement_like,
-        )
-        axes: tuple[str, ...] | None = None
-        for placement in placements:
-            if not is_placement_like(placement):
-                continue
-            named = (
-                placement.placement
-                if isinstance(placement, PlacementSpec)
-                else placement
-            )
-            placement_axes = tuple(
-                MeshAxisName.normalize(axis_name) for axis_name in named
-            )
-            if axes is None:
-                axes = placement_axes
-                continue
-            assert axes == placement_axes, (
-                f"All placements in a ShardingConfig must use the same mesh axes "
-                f"in the same order. Got {axes} and {placement_axes}."
-            )
-        return axes or ()
 
     def to_dict(self) -> dict:
         """Serialize for JSON logging. Placements become repr strings."""

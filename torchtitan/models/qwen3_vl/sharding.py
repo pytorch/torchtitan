@@ -17,6 +17,7 @@ def set_qwen3_vl_sharding_config(
     *,
     loss_parallel: bool,
     enable_ep: bool,
+    chunked_loss: bool,
 ) -> None:
     """Fill ``sharding_config`` on all Qwen3-VL sub-configs.
 
@@ -30,4 +31,5 @@ def set_qwen3_vl_sharding_config(
         loss_parallel=loss_parallel,
         enable_sp=False,
         enable_ep=enable_ep,
+        chunked_loss=chunked_loss,
     )
