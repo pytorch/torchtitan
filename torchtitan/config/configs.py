@@ -260,6 +260,12 @@ class CompileConfig:
 
     backend: str = "inductor"
 
+    enable_cudagraph: bool = True
+    """Whether to apply CUDAGraph capture."""
+
+    enable_xpugraph: bool = False
+    """Whether to apply XPUGraph capture."""
+
 
 @dataclass(kw_only=True, slots=True)
 class CommConfig:
