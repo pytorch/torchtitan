@@ -270,6 +270,11 @@ _XPUGRAPH_UNSUPPORTED_OPS = {
         "aten.index_put_ currently triggers an XPU event wait during "
         "command graph capture"
     ),
+    torch.ops.aten._scaled_dot_product_flash_attention.default: (
+        "aten._scaled_dot_product_flash_attention uses "
+        "sycl_ext_oneapi_work_group_scratch_memory, which is not currently "
+        "supported by the SYCL Graph extension"
+    ),
 }
 
 _FLEX_ATTENTION_OPS = {
