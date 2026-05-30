@@ -1,5 +1,19 @@
 name: docker-builds
 
+# OSDC (ARC) migration of the torchtitan CI image build, mirroring
+# pytorch/pytorch's .github/workflows/docker-builds.yml:
+#   - builds via a *remote* BuildKit running on OSDC
+#   - runs on the release-runners pool (exempt from the cache-enforcer ghcr.io
+#     egress block) so the GHCR mirror step can push
+#   - pushes the image to ECR and mirrors it to GHCR (hash-tagged by .ci/docker)
+#
+# ASSUMPTIONS TO VERIFY for torchtitan's cluster (flagged for review):
+#   1. BuildKit endpoint `tcp://buildkitd-amd64.buildkit:1234` is reachable.
+#   2. The `release-runners` group / `mt-rel-l-x86iavx512-8-64` label exists.
+#   3. A `GHCR_PAT` secret with push access to GHCR_REPOSITORY is configured.
+#   4. ECR/GHCR repo names below are correct for torchtitan.
+#   5. role/arc can push to the torchtitan ECR repo.
+
 on:
   workflow_dispatch:
   pull_request:
@@ -20,48 +34,97 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}-${{ github.event_name == 'workflow_dispatch' }}
   cancel-in-progress: true
 
+env:
+  ECR_REGISTRY: 308535385114.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REPOSITORY: torchtitan
+  GHCR_REPOSITORY: ghcr.io/pytorch/torchtitan-ci-image  # TODO: confirm GHCR repo
+  AWS_DEFAULT_REGION: us-east-1
+
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
   docker-build:
+    if: github.repository_owner == 'pytorch'
+    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.event.ref, 'refs/tags/v')) && 'docker-build' || '' }}
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
         include:
+          # ROCm images also build on the amd64 BuildKit (x86 host).
           - docker-image-name: torchtitan-ubuntu-22.04-clang12
-            runner: [self-hosted, linux.2xlarge]
+            buildkit_addr: "tcp://buildkitd-amd64.buildkit:1234"
           - docker-image-name: torchtitan-rocm-ubuntu-22.04-clang12
-            runner: [linux.2xlarge]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 240
-    env:
-      DOCKER_IMAGE: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.docker-image-name }}
+            buildkit_addr: "tcp://buildkitd-amd64.buildkit:1234"
+    # Use the release runner pool: its nodes are exempt from the cache-enforcer
+    # DaemonSet's iptables block on outbound ghcr.io traffic, so the "Mirror image
+    # to GHCR" step can succeed (the regular mt-l-* pool blocks ghcr.io egress).
+    runs-on:
+      group: release-runners
+      labels: mt-rel-l-x86iavx512-8-64
+    container:
+      image: ghcr.io/actions/actions-runner:latest
     steps:
-      - name: Clean workspace
+      - name: Setup Linux
+        uses: pytorch/pytorch/.github/actions/setup-linux@main
+        with:
+          use-arc: true
+          submodules: false
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to ECR
+        uses: pytorch/pytorch/.github/actions/ecr-login@main
+        with:
+          aws-role-to-assume: arn:aws:iam::308535385114:role/arc
+
+      - name: Login to GHCR
+        if: github.event_name == 'push' && github.ref_type == 'branch'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: pytorch
+          password: ${{ secrets.GHCR_PAT }}
+
+      - name: Set up Docker Buildx (remote)
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: remote
+          endpoint: ${{ matrix.buildkit_addr }}
+
+      - name: Compute image tag
+        id: tag
         shell: bash
         run: |
-          echo "${GITHUB_WORKSPACE}"
-          sudo rm -rf "${GITHUB_WORKSPACE}"
-          mkdir "${GITHUB_WORKSPACE}"
+          set -ex
+          DOCKER_TAG=$(git rev-parse HEAD:.ci/docker)
+          DOCKER_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}/${{ matrix.docker-image-name }}:${DOCKER_TAG}"
+          echo "docker-tag=${DOCKER_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "docker-image=${DOCKER_IMAGE}" >> "${GITHUB_OUTPUT}"
 
-      - name: Setup SSH (Click me for login details)
-        uses: pytorch/test-infra/.github/actions/setup-ssh@main
-        with:
-          github-secret: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push to ECR
+        env:
+          REMOTE_BUILDKIT: "1"
+          CI: "1"
+          DOCKER_IMAGE: ${{ steps.tag.outputs.docker-image }}
+        shell: bash
+        working-directory: .ci/docker
+        run: |
+          set -ex
+          ./build.sh "${{ matrix.docker-image-name }}" -t "${DOCKER_IMAGE}"
 
-      - name: Checkout the repo
-        uses: actions/checkout@v6
-
-      - name: Setup Linux
-        uses: pytorch/test-infra/.github/actions/setup-linux@main
-
-      - name: Build docker image
-        id: build-docker-image
-        uses: pytorch/test-infra/.github/actions/calculate-docker-image@main
-        with:
-          docker-image-name: ${{ matrix.docker-image-name }}
-          always-rebuild: true
-          push: true
-          force-push: true
-
-      - name: Teardown Linux
-        uses: pytorch/test-infra/.github/actions/teardown-linux@main
-        if: always()
+      - name: Mirror image to GHCR
+        if: github.event_name == 'push' && github.ref_type == 'branch'
+        env:
+          ECR_DOCKER_IMAGE: ${{ steps.tag.outputs.docker-image }}
+          DOCKER_TAG: ${{ steps.tag.outputs.docker-tag }}
+        shell: bash
+        run: |
+          set -ex
+          # `buildx imagetools create` does a server-side cross-registry copy,
+          # so we don't need a local pull/push round-trip.
+          docker buildx imagetools create \
+            -t "${GHCR_REPOSITORY}:${{ matrix.docker-image-name }}-${DOCKER_TAG}" \
+            -t "${GHCR_REPOSITORY}:${{ matrix.docker-image-name }}" \
+            "${ECR_DOCKER_IMAGE}"
