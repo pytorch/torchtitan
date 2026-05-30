@@ -24,7 +24,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.nn_modules import Linear
-from torchtitan.models.common.rope import apply_rotary_emb_cos_sin, RoPE
+from torchtitan.models.common.rope import RoPE
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
@@ -94,11 +94,10 @@ class Attention(BaseAttention):
         bsz, seqlen, _ = x.size()
         if self.rope is None:
             raise ValueError("RoPE must be configured when RoPE is enabled.")
-        rope_cache = self.rope(seqlen, positions)
 
         q, k, v = self.qkv_linear(x)
 
-        q, k = apply_rotary_emb_cos_sin(q, k, rope_cache, positions)
+        q, k = self.rope(q, k, positions)
 
         assert isinstance(attention_masks, BlockMask), attention_masks
         # FlexAttention handles transpose internally; returns (bs, seq, heads, dim)

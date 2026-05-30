@@ -17,7 +17,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
-from torchtitan.models.common.rope import apply_rotary_emb_single_complex, RoPE
+from torchtitan.models.common.rope import RoPE
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
@@ -106,7 +106,6 @@ class Attention(BaseAttention):
         bsz, seqlen, _ = x.size()
         if self.rope is None:
             raise ValueError("RoPE must be configured when RoPE is enabled.")
-        rope_cache = self.rope(seqlen, positions)
 
         # Query projection
         if self.q_lora_rank == 0:
@@ -118,14 +117,13 @@ class Attention(BaseAttention):
         q_nope, q_pe = torch.split(
             q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
         )
-        q_pe = apply_rotary_emb_single_complex(q_pe, rope_cache, positions)
-        q = torch.cat([q_nope, q_pe], dim=-1)
 
         # Key-value projection
         kv = self.wkv_a(x)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
-        k_pe = apply_rotary_emb_single_complex(k_pe.unsqueeze(2), rope_cache, positions)
+        q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(2), positions)
+        q = torch.cat([q_nope, q_pe], dim=-1)
 
         kv = self.wkv_b(self.kv_norm(kv))
         kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)

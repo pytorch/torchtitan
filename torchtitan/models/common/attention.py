@@ -30,11 +30,7 @@ from torch.nn.attention.varlen import varlen_attn
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
-from torchtitan.models.common.rope import (
-    apply_rotary_emb_complex,
-    apply_rotary_emb_cos_sin,
-    RoPE,
-)
+from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import round_up
 
@@ -736,13 +732,7 @@ class GQAttention(BaseAttention):
         if self.use_rope:
             if self.rope is None:
                 raise ValueError("RoPE must be configured when RoPE is enabled.")
-            rope_cache = self.rope(seqlen, positions)
-            if self.rope_backend == "cos_sin":
-                xq, xk = apply_rotary_emb_cos_sin(xq, xk, rope_cache, positions)
-            else:
-                xq, xk = apply_rotary_emb_complex(
-                    xq, xk, freqs_cis=rope_cache, positions=positions
-                )
+            xq, xk = self.rope(xq, xk, positions)
 
         # Handle iRoPE dict masks (Llama4)
         if isinstance(attention_masks, dict):

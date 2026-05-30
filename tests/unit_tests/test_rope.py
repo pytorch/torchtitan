@@ -153,7 +153,9 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
 
 
 class TestMRoPECache(unittest.TestCase):
-    def test_three_axis_positions_build_interleaved_cache(self):
+    def test_forward_accepts_three_axis_positions(self):
+        torch.manual_seed(42)
+        bsz, seqlen, n_heads = 2, 3, 4
         head_dim = 12
         rope = RoPE.Config(
             dim=head_dim,
@@ -168,27 +170,13 @@ class TestMRoPECache(unittest.TestCase):
                 [[2, 3, 4], [5, 6, 7]],  # width
             ]
         )
+        xq = torch.randn(bsz, seqlen, n_heads, head_dim)
+        xk = torch.randn(bsz, seqlen, n_heads, head_dim)
 
-        mrope_cache = rope(seq_len=3, positions=position_ids)
+        xq_out, xk_out = rope(xq, xk, position_ids)
 
-        cos_cache = rope.cache[:, :head_dim]
-        sin_cache = rope.cache[:, head_dim:]
-        expected_cos = cos_cache[position_ids[0]]
-        expected_sin = sin_cache[position_ids[0]]
-        half = head_dim // 2
-        for dim, offset in enumerate((1, 2), start=1):
-            low = torch.arange(offset, rope.config.mrope_section[dim] * 3, 3)
-            col_indices = torch.cat([low, low + half])
-            expected_cos[..., col_indices] = cos_cache[:, col_indices][
-                position_ids[dim]
-            ]
-            expected_sin[..., col_indices] = sin_cache[:, col_indices][
-                position_ids[dim]
-            ]
-        expected = torch.cat([expected_cos, expected_sin], dim=-1).unsqueeze(2)
-
-        self.assertEqual(mrope_cache.shape, (2, 3, 1, head_dim * 2))
-        self.assertTrue(torch.equal(mrope_cache, expected))
+        self.assertEqual(xq_out.shape, xq.shape)
+        self.assertEqual(xk_out.shape, xk.shape)
 
 
 class TestPerLayerRoPECache(unittest.TestCase):

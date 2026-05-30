@@ -214,13 +214,24 @@ class RoPE(Module):
         sin = theta.sin() * mscale
         return torch.cat([cos, sin], dim=-1)
 
-    def forward(
-        self, seq_len: int, positions: torch.Tensor | None = None
+    def _cache_for_positions(
+        self, positions: torch.Tensor | None = None
     ) -> torch.Tensor:
-        """Return the precomputed cache tensor (slicing is done by apply_rotary_emb)."""
         if positions is not None and positions.ndim == 3:
             return self._compute_mrope_cache(positions)
         return self.cache
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        positions: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply rotary embeddings to query and key tensors."""
+        rope_cache = self._cache_for_positions(positions)
+        if self.config.backend == "cos_sin":
+            return apply_rotary_emb_cos_sin(query, key, rope_cache, positions)
+        return apply_rotary_emb_complex(query, key, rope_cache, positions)
 
     def _compute_mrope_cache(self, position_ids: torch.Tensor) -> torch.Tensor:
         cfg = self.config
