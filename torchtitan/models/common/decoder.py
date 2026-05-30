@@ -17,7 +17,7 @@ from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     FlexAttention,
     get_causal_mask_mod,
-    get_document_mask_mod,
+    get_efficient_causal_mask_mod_for_packed_document,
     VarlenAttention,
 )
 from torchtitan.models.common.feed_forward import FeedForward
@@ -248,7 +248,9 @@ class Decoder(BaseModel):
                 B = 1
             case "block_causal":
                 B = positions.shape[0]
-                mask_mods.append(get_document_mask_mod(positions))
+                mask_mods.append(
+                    get_efficient_causal_mask_mod_for_packed_document(positions)
+                )
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {attn_config.mask_type}"
@@ -262,6 +264,7 @@ class Decoder(BaseModel):
             None,
             seq_len,
             seq_len,
+            device=positions.device,
             BLOCK_SIZE=attn_config.inner_attention.block_size,
         )
 
