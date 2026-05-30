@@ -6,42 +6,53 @@
 
 from __future__ import annotations
 
+import abc
 from dataclasses import dataclass
 
 from renderers import Renderer
 
 from torchtitan.config import Configurable
-from torchtitan.experiments.rl.env_types.renderer_env import (
-    RendererEnv,
-    RendererEnvConfig,
-)
+from torchtitan.experiments.rl.env_types.renderer_env import RendererEnv
 from torchtitan.experiments.rl.rollouts.types import DatasetOutput, Rollout
 from torchtitan.experiments.rl.rubrics import Reward, Rubric
 
 
 # TODO: investigate whether Task should also hold its own dataset
 # instead of dataset living on RLTrainer.
-class Task(Configurable):
-    """Per-task bundle: rubric + env construction + group scoring.
+class Task(Configurable, abc.ABC):
+    """Per-task bundle: a `Rubric` + env construction + group scoring. The
+    controller owns the dataset and the rollout loop; `score_group` defaults
+    to per-rollout `rubric.score_group` (override for cross-sibling scoring).
 
-    The controller owns the dataset and the rollout loop (including the
-    per-group step). Task contributes the per-task pieces: how to build
-    envs for one example, and how to score one group's rollouts.
+    Example:
+        class MyTask(Task):
+            @dataclass(kw_only=True, slots=True)
+            class Config(Task.Config):
+                rubric: MyRubric.Config = field(
+                    default_factory=MyRubric.Config
+                )
+                renderer_env_config: RendererEnvConfig = field(
+                    default_factory=RendererEnvConfig
+                )
 
-    Subclass and set `self.rubric` / `self.renderer_env_config` in `__init__`,
-    then implement `make_envs`. `score_group` has a default impl that delegates
-    to `self.rubric.score_group` and returns one `Reward` per rollout.
+            def __init__(self, config: Config) -> None:
+                self.rubric = config.rubric.build()
+                self.renderer_env_config = config.renderer_env_config
+
+            def make_envs(self, *, example, group_size, renderer):
+                return [RendererEnv(...) for _ in range(group_size)]
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        """Empty base; concrete tasks add fields."""
+        rubric: Rubric.Config
 
     rubric: Rubric
-    renderer_env_config: RendererEnvConfig
+    """Built by each subclass's `__init__` from `config.rubric`; used by `score_group`."""
 
     # TODO: revisit the Renderer being injected into `make_envs` once we
     # know whether Task should own a Renderer (per-task chat templates).
+    @abc.abstractmethod
     def make_envs(
         self,
         *,
@@ -59,7 +70,6 @@ class Task(Configurable):
         Returns:
             `group_size` `RendererEnv` instances, each ready for one rollout.
         """
-        raise NotImplementedError
 
     async def score_group(
         self,

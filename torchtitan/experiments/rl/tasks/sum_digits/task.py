@@ -23,8 +23,6 @@ class SumDigitsTask(Task):
     @dataclass(kw_only=True, slots=True)
     class Config(Task.Config):
         rubric: SumDigitsRubric.Config = field(default_factory=SumDigitsRubric.Config)
-        """SumDigits rubric config."""
-
         renderer_env_config: RendererEnvConfig = field(
             default_factory=RendererEnvConfig
         )
