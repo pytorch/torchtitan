@@ -36,8 +36,7 @@ jobs:
         USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cpu
         python -m pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 
-        # Write coverage data/report under RUNNER_TEMP: the mounted workspace isn't
-        # writable by the container user (ci-user) when its uid differs from the host's.
-        mkdir -p "${RUNNER_TEMP}"
-        export COVERAGE_FILE="${RUNNER_TEMP}/.coverage"
-        pytest tests/unit_tests --cov=. --cov-report=xml:"${RUNNER_TEMP}/coverage.xml" --durations=20 -vv
+        # Write coverage data/report to /tmp (world-writable): the mounted workspace and
+        # RUNNER_TEMP are owned by the host uid, which the container user (ci-user) can't write.
+        export COVERAGE_FILE=/tmp/.coverage
+        pytest tests/unit_tests --cov=. --cov-report=xml:/tmp/coverage.xml --durations=20 -vv
