@@ -26,6 +26,7 @@ in order, and the pass registries.  Individual passes live in dedicated modules:
 from __future__ import annotations
 
 import functools
+from logging import config
 import time
 import warnings
 from collections.abc import Callable
@@ -38,6 +39,8 @@ from torchtitan.experiments.graph_trainer.configs import (
     validate_ep_overlap_config,
 )
 
+from torch._logging import trace_structured
+from torchtitan.experiments.graph_trainer.xpugraph import xpugraph_pass
 from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_pass
 from torchtitan.experiments.graph_trainer.cudagraph import (
     cudagraph_pass,
@@ -92,13 +95,6 @@ from torchtitan.tools.logging import logger
 
 c10d = torch.ops._c10d_functional
 
-def _get_graph_capture_backend() -> str | None:
-    """Return the active device backend for graph capture."""
-    if hasattr(torch, "xpu") and torch.xpu.is_available() and torch.xpu.is_initialized():
-        return "xpu"
-    if torch.cuda.is_available() and torch.cuda.is_initialized():
-        return "cuda"
-    return None
 
 def async_tensor_parallel_pass(
     gm: torch.fx.GraphModule,
@@ -468,13 +464,13 @@ def construct_default_graph_passes(
     if graph_capture_pass is not None:
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
-        functools.partial(
-            graph_capture_pass,
-            is_forward=True,
-            static_input_indices=static_input_indices,
-            tensor_input_indices=traced_result.tensor_input_indices,
+            functools.partial(
+                graph_capture_pass,
+                is_forward=True,
+                static_input_indices=static_input_indices,
+                tensor_input_indices=traced_result.tensor_input_indices,
+            )
         )
-    )
 
     return passes
 
