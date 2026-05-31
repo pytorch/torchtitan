@@ -61,21 +61,19 @@ class AsyncMode(str, enum.Enum):
 
 class ModelWrapper(Stateful):
     """
-    A wrapper for `nn.Module` (or a list of modules) that provides a unified
-    `Stateful` interface and aggregates underlying `state_dict`s for distributed
-    checkpointing.
+    A wrapper for `nn.Module` (or a list of modules) that provides a unified `Stateful`
+    interface for distributed checkpointing.
 
-    This class is needed for two main reasons:
+    This class serves two purposes:
         1. Flattening/Aggregation: It combines the state dicts of multiple
            different modules (like individual chunks in Pipeline Parallelism)
-           into a single flat view so the rest of the checkpointing manager
-           can easily handle it.
-        2. Object Reference Stability: By caching and returning the exact same
-           dictionary structure and Tensor object references across calls, it
-           enables downstream non-blocking/asynchronous checkpointing pipelines.
-           This stability allows async managers to keep host staging buffers
-           permanently pinned, eliminating expensive runtime memory allocation
-           and registration (`cudaHostRegister`) bottlenecks.
+           into a single flat view so checkpointing code can interact
+           with them through a unified interface.
+        2. State Dict Caching: It caches the flattened state dict and returns
+           the same dictionary object on subsequent `state_dict()` calls.
+           This avoids repeatedly reconstructing the aggregated state dict and
+           allows downstream checkpointing implementations to reuse the cached
+           mapping when stable object references are beneficial.
 
     Notes:
         - Calling `load_state_dict` updates the underlying modules and
