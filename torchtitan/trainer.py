@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import dataclasses
 import json
 import os
@@ -207,6 +208,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
+        dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
 
         # Logging needs to happen after distributed initialized
         config.maybe_log()
@@ -464,7 +466,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         loss_parallel_enabled = (
             parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
         )
-        self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
+        self.train_context = dist_utils.get_train_context(
+            loss_parallel_enabled,
+            spmd_typechecking=(
+                config.parallelism.spmd_backend == "spmd"
+                and config.debug.spmd_typechecking
+            ),
+        )
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -773,7 +781,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             return
 
         with sl.log_trace_span("collect_dist_metrics"):
-
             sl.log_trace_scalar({"global_valid_tokens": int(global_valid_tokens)})
 
             if parallel_dims.dp_cp_enabled:
@@ -842,8 +849,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 with sl.log_trace_span("step"):
                     self.gc_handler.run(self.step)
 
+                    spmd_mesh_context = (
+                        dist_utils.set_current_mesh(
+                            self.parallel_dims.get_activated_mesh(["dp", "cp", "tp"])
+                        )
+                        if config.parallelism.spmd_backend == "spmd"
+                        else contextlib.nullcontext()
+                    )
                     try:
-                        self.train_step(data_iterator)
+                        with spmd_mesh_context:
+                            self.train_step(data_iterator)
                     except DataloaderExhaustedError:
                         logger.warning("Ran out of data; last step was canceled.")
                         break

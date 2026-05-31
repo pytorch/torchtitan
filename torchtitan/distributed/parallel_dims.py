@@ -129,7 +129,9 @@ class ParallelDims:
         This API performs the following unflatten operations from the world mesh:
 
             ["pp", "batch", "cp", "tp"]  # dataloading_mesh
-            ["pp", "dp_replicate", "fsdp", "tp"]  # dense_mesh
+            ["pp", "dp_replicate", "dp_shard", "cp", "tp"]  # full_dtensor dense_mesh
+            ["pp", "dp_replicate", "fsdp", "tp"]  # legacy dense_mesh
+            ["pp", "dp", "cp", "tp"]  # spmd dense_mesh
             ["pp", "dp_replicate", "efsdp", "ep"]  # sparse_mesh
 
         Note: DeviceMesh currently recreates the process group for each dimension.
@@ -181,6 +183,7 @@ class ParallelDims:
             (self.pp, batch, self.cp, self.tp),
         )
         loss_mesh = dataloading_mesh["batch", "cp"]._flatten("loss_mesh")
+        spmd_dense_mesh = None
         if self.spmd_backend == "full_dtensor":
             # Under full_dtensor, ``dp_shard`` and ``cp`` cannot be folded
             # together: activations carry a ``cp`` dimension, so parameters
@@ -191,6 +194,20 @@ class ParallelDims:
                 self._world_mesh,
                 tuple(["pp"] + candidate_spmd_dense_axes),
                 (self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp),
+            )
+        elif self.spmd_backend == "spmd":
+            # Keep storage axes explicit for FSDP, while the local-tensor
+            # SPMD runtime uses one logical data axis for activation types.
+            candidate_spmd_dense_axes = ["dp", "cp", "tp"]
+            full_dense_mesh = unflatten_mesh(
+                self._world_mesh,
+                ("pp", "dp_replicate", "dp_shard", "cp", "tp"),
+                (self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp),
+            )
+            spmd_dense_mesh = unflatten_mesh(
+                self._world_mesh,
+                tuple(["pp"] + candidate_spmd_dense_axes),
+                (self.pp, batch, self.cp, self.tp),
             )
         else:
             # Legacy path folds ``dp_shard`` and ``cp`` into ``fsdp``.
@@ -213,20 +230,28 @@ class ParallelDims:
             "dense": full_dense_mesh,
             "sparse": full_sparse_mesh,
         }
+        if spmd_dense_mesh is not None:
+            self._global_meshes["spmd_dense"] = spmd_dense_mesh
 
         self._single_axis_meshes = {
             "pp": dataloading_mesh["pp"],
             "batch": dataloading_mesh["batch"],
             "loss": loss_mesh,
-            "dp_replicate": full_dense_mesh["dp_replicate"],
             "cp": dataloading_mesh["cp"],
             "tp": dataloading_mesh["tp"],
             "ep": full_sparse_mesh["ep"],
             "efsdp": full_sparse_mesh["efsdp"],
         }
         if self.spmd_backend == "full_dtensor":
+            self._single_axis_meshes["dp_replicate"] = full_dense_mesh["dp_replicate"]
+            self._single_axis_meshes["dp_shard"] = full_dense_mesh["dp_shard"]
+        elif self.spmd_backend == "spmd":
+            assert spmd_dense_mesh is not None
+            self._single_axis_meshes["dp"] = spmd_dense_mesh["dp"]
+            self._single_axis_meshes["dp_replicate"] = full_dense_mesh["dp_replicate"]
             self._single_axis_meshes["dp_shard"] = full_dense_mesh["dp_shard"]
         else:
+            self._single_axis_meshes["dp_replicate"] = full_dense_mesh["dp_replicate"]
             self._single_axis_meshes["fsdp"] = full_dense_mesh["fsdp"]
 
         self._validate_meshes()
@@ -260,6 +285,9 @@ class ParallelDims:
             "efsdp": self.dp_shard * self.cp * self.tp // self.ep,
         }
         if self.spmd_backend == "full_dtensor":
+            expected_sizes["dp_shard"] = self.dp_shard
+        elif self.spmd_backend == "spmd":
+            expected_sizes["dp"] = self.dp_replicate * self.dp_shard
             expected_sizes["dp_shard"] = self.dp_shard
         else:
             expected_sizes["fsdp"] = self.dp_shard * self.cp
