@@ -28,23 +28,6 @@ from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
 #   K = top-k, T = num tokens (B*L flattened),
 #   N = routed tokens (T*K), R = routed tokens assigned to local experts
 
-
-def _generate_routing_map_ble(
-    scores_BLE: torch.Tensor,
-    topk_expert_ids_BLK: torch.Tensor,
-) -> torch.Tensor:
-    """Build a boolean routing map from expert ids.
-
-    ``scores_BLE`` supplies the ``(B, L, E)`` shape and DTensor placement when
-    this helper is wrapped by ``local_map``.
-    """
-    return torch.zeros_like(scores_BLE, dtype=torch.bool).scatter_(
-        -1,
-        topk_expert_ids_BLK,
-        True,
-    )
-
-
 class GroupedExperts(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -109,7 +92,7 @@ class GroupedExperts(Module):
         x_BLD: torch.Tensor,
         topk_scores_BLK: torch.Tensor,
         topk_expert_ids_BLK: torch.Tensor,
-        routing_map_BLE: torch.Tensor,
+        num_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
@@ -119,18 +102,16 @@ class GroupedExperts(Module):
         """
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
-        E = routing_map_BLE.size(-1)
         T = B * L
         x_TD = x_BLD.view(T, D)
         topk_scores_TK = topk_scores_BLK.view(T, K)
         topk_expert_ids_TK = topk_expert_ids_BLK.view(T, K)
-        routing_map_TE = routing_map_BLE.view(T, E)
         (
             routed_input_RD,
             num_tokens_per_expert_E,
             metadata,
         ) = self.token_dispatcher.dispatch(
-            x_TD, topk_scores_TK, topk_expert_ids_TK, routing_map_TE
+            x_TD, topk_scores_TK, topk_expert_ids_TK, num_tokens_per_expert_E
         )
         routed_output_RD = self._experts_forward(
             routed_input_RD, num_tokens_per_expert_E
@@ -244,7 +225,7 @@ class TokenChoiceTopKRouter(Module):
 
     def forward(
         self, x_BLD: torch.Tensor, expert_bias_E: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
             x_BLD: Input ``(B, L, D)``.
@@ -253,8 +234,7 @@ class TokenChoiceTopKRouter(Module):
         Returns:
             topk_scores_BLK: Routing scores ``(B, L, K)``.
             topk_expert_ids_BLK: Expert indices ``(B, L, K)``.
-            routing_map_BLE: Boolean routing map ``(B, L, E)``.
-            num_tokens_per_expert_E: Token counts per expert ``(E,)``.
+            scores_BLE: Full routing scores ``(B, L, E)``.
         """
         # Compute gate in float32 to help stability of expert load balancing.
         with torch.autocast(device_type=x_BLD.device.type, dtype=torch.float32):
@@ -297,35 +277,10 @@ class TokenChoiceTopKRouter(Module):
             topk_scores_BLK = topk_scores_BLK / denominator
         topk_scores_BLK = topk_scores_BLK * self.route_scale
 
-        # Build routing map with scatter. scatter_ does not support mixed
-        # local Tensor / DTensor arguments, so run the scatter on local tensors
-        # under local_map when router outputs are DTensors.
-        if isinstance(topk_expert_ids_BLK, DTensor):
-            assert isinstance(
-                scores_BLE, DTensor
-            ), "scores_BLE and topk_expert_ids_BLK should both be DTensors"
-            generate_routing_map = local_map(
-                _generate_routing_map_ble,
-                in_placements=(
-                    scores_BLE.placements,
-                    topk_expert_ids_BLK.placements,
-                ),
-                out_placements=(scores_BLE.placements,),
-                device_mesh=scores_BLE.device_mesh,
-            )
-        else:
-            generate_routing_map = _generate_routing_map_ble
-
-        routing_map_BLE = generate_routing_map(  # pyrefly: ignore [bad-argument-count]
-            scores_BLE, topk_expert_ids_BLK
-        )
-        num_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
-
         return (
             topk_scores_BLK,
             topk_expert_ids_BLK,
-            routing_map_BLE,
-            num_tokens_per_expert_E,
+            scores_BLE,
         )
 
 
@@ -407,13 +362,48 @@ class MoE(Module):
         B, L, D = x_BLD.shape
 
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
-        # routing_map_BLE shape (B, L, E), num_tokens_per_expert_E shape (E,)
+        # scores_BLE shape (B, L, E)
         (
             topk_scores_BLK,
             topk_expert_ids_BLK,
-            routing_map_BLE,
-            num_tokens_per_expert_E,
+            scores_BLE,
         ) = self.router(x_BLD, self.expert_bias_E)
+
+        # Build routing map with scatter. scatter_ does not support mixed
+        # local Tensor / DTensor arguments, so run the scatter on local tensors
+        # under local_map when router outputs are DTensors.
+        # TODO: Remove this local_map workaround once DTensor sharding
+        # propagation supports scatter with mixed Tensor / DTensor arguments.
+        def generate_routing_map_ble(
+            scores_BLE: torch.Tensor,
+            topk_expert_ids_BLK: torch.Tensor,
+        ) -> torch.Tensor:
+            return torch.zeros_like(scores_BLE, dtype=torch.bool).scatter_(
+                -1,
+                topk_expert_ids_BLK,
+                True,
+            )
+
+        if isinstance(topk_expert_ids_BLK, DTensor):
+            assert isinstance(
+                scores_BLE, DTensor
+            ), "scores_BLE and topk_expert_ids_BLK should both be DTensors"
+            generate_routing_map = local_map(
+                generate_routing_map_ble,
+                in_placements=(
+                    scores_BLE.placements,
+                    topk_expert_ids_BLK.placements,
+                ),
+                out_placements=(scores_BLE.placements,),
+                device_mesh=scores_BLE.device_mesh,
+            )
+        else:
+            generate_routing_map = generate_routing_map_ble
+
+        routing_map_BLE = generate_routing_map(  # pyrefly: ignore [bad-argument-count]
+            scores_BLE, topk_expert_ids_BLK
+        )
+        num_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
 
         # tokens_per_expert_E will be used to update the expert bias for load balancing,
         # and also to count the expert usage.
@@ -424,7 +414,7 @@ class MoE(Module):
             self.tokens_per_expert_E.add_(num_tokens_per_expert_E)
 
         out_TD = self.experts(
-            x_BLD, topk_scores_BLK, topk_expert_ids_BLK, routing_map_BLE
+            x_BLD, topk_scores_BLK, topk_expert_ids_BLK, num_tokens_per_expert_E
         )
 
         # shared_experts runs in parallel with deepep combine communication.
