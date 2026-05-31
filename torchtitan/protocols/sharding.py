@@ -14,24 +14,76 @@ self-documenting and support multi-dimensional meshes.
 
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import Placement, Replicate, Shard
+from torch.distributed.tensor import Partial, Placement, Replicate, Shard
+from torch.utils._pytree import tree_map
 
-from torchtitan.protocols.types import MeshAxisName, NamedPlacement
+from torchtitan.protocols.types import MeshAxisName
 
 
 __all__ = [
     "LocalMapConfig",
+    "NamedPartitionSpec",
+    "NamedPartitionSpecEntry",
     "NamedPlacement",
+    "NamedPlacementSpmd",
+    "PlacementLike",
+    "PlacementSpec",
     "ShardingConfig",
+    "SpmdInputConfig",
+    "active_spmd_placement",
+    "is_placement_like",
+    "is_spmd_placement",
+    "placement_axes",
+    "placement_to_spmd_assert_type",
     "resolve_placements",
 ]
 
-# Shard order: we implicitly assume the trivial outer -> inner order matching
-# the mesh axis order. The only non-trivial case is FSDP + TP both sharding on
-# tensor dim 0, but it doesn't need to be annotated today.
-# TODO: integrate with global spmd types (e.g., ``TP: V`` + ``PartitionSpec``
-# carrying explicit shard-order info) once that lands.
+NamedPlacement = dict[MeshAxisName, Placement]
+NamedPlacementSpmd = dict[MeshAxisName, spmd.PerMeshAxisSpmdType]
+NamedPartitionSpecEntry = MeshAxisName | tuple[MeshAxisName, ...] | None
+NamedPartitionSpec = tuple[NamedPartitionSpecEntry, ...]
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class PlacementSpec:
+    """Placement with explicit global partition spec ordering.
+
+    Use this only when multiple mesh axes shard the same tensor dimension.
+    ``placement`` carries per-axis runtime placement. ``partition_spec`` only
+    disambiguates ordering for type assertions in the local-tensor SPMD path.
+    """
+
+    placement: NamedPlacementSpmd
+    partition_spec: NamedPartitionSpec
+
+
+PlacementLike = NamedPlacement | NamedPlacementSpmd | PlacementSpec
+
+
+def _named_placement(placement: PlacementLike) -> NamedPlacement | NamedPlacementSpmd:
+    return placement.placement if isinstance(placement, PlacementSpec) else placement
+
+
+def is_placement_like(value: object) -> bool:
+    return isinstance(value, PlacementSpec) or (
+        isinstance(value, dict)
+        and bool(value)
+        and all(MeshAxisName.has_axis(key) for key in value)
+    )
+
+
+def is_spmd_placement(placement: PlacementLike) -> bool:
+    if isinstance(placement, PlacementSpec):
+        return True
+    return all(
+        isinstance(value, spmd.PerMeshAxisSpmdType) for value in placement.values()
+    )
+
+
+def placement_axes(placement: PlacementLike) -> tuple[MeshAxisName, ...]:
+    return tuple(_named_placement(placement).keys())
 
 
 @dataclass(kw_only=True, slots=True)
@@ -52,7 +104,7 @@ class LocalMapConfig:
             ordered by ``forward`` args).
     """
 
-    in_grad_placements: tuple[NamedPlacement, ...]
+    in_grad_placements: tuple[PlacementLike | None, ...]
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}
@@ -80,6 +132,10 @@ class ShardingConfig:
         state_shardings: Parameter/buffer placements for ``distribute_tensor``.
             Outer dict keys are param names.
             e.g. ``{"weight": {TP: Shard(0)}}`` for colwise.
+        state_shardings_compute: Parameter/buffer placements used only during
+            forward compute when they differ from ``state_shardings``. This is
+            for local SPMD type changes such as an ``I@TP`` norm weight that
+            must be read as ``R@TP`` while computing.
         in_src_shardings: Source placements of inputs, keyed by ``forward()``
             arg name. Used to annotate plain tensors as DTensors via
             ``DTensor.from_local`` when inputs arrive plain (e.g. from
@@ -107,11 +163,12 @@ class ShardingConfig:
             ``in_grad_placements``.
     """
 
-    state_shardings: dict[str, NamedPlacement] = field(default_factory=dict)
-    in_src_shardings: dict[str, NamedPlacement] | None = None
-    in_dst_shardings: dict[str, NamedPlacement] | None = None
-    out_src_shardings: NamedPlacement | tuple[NamedPlacement, ...] | None = None
-    out_dst_shardings: NamedPlacement | None = None
+    state_shardings: dict[str, PlacementLike] = field(default_factory=dict)
+    state_shardings_compute: dict[str, PlacementLike] = field(default_factory=dict)
+    in_src_shardings: dict[str, PlacementLike] | None = None
+    in_dst_shardings: dict[str, PlacementLike] | None = None
+    out_src_shardings: PlacementLike | tuple[PlacementLike, ...] | None = None
+    out_dst_shardings: PlacementLike | None = None
     local_map: LocalMapConfig | None = None
 
     def to_dict(self) -> dict:
@@ -119,8 +176,21 @@ class ShardingConfig:
         return {"repr": repr(self)}
 
 
+@dataclass(kw_only=True, slots=True)
+class SpmdInputConfig:
+    """Model-owned trainer input annotations for the local SPMD path."""
+
+    inputs: PlacementLike | None = None
+    labels: PlacementLike | None = None
+    extra_inputs: dict[str, PlacementLike] = field(default_factory=dict)
+    extra_kwargs: dict[str, PlacementLike] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {"repr": repr(self)}
+
+
 def resolve_placements(
-    named: NamedPlacement,
+    placement: PlacementLike,
     mesh: DeviceMesh,
 ) -> tuple[Placement, ...]:
     """Resolve NamedPlacement against a mesh in axis order.
@@ -137,6 +207,9 @@ def resolve_placements(
     """
     # TODO(fegin): remove the ``Shard(d)`` on a size-1 mesh to ``Replicate()``
     # conversion once FlexShard replaces ``fully_shard``.
+    named = _named_placement(placement)
+    if is_spmd_placement(placement):
+        named = _spmd_to_dtensor_placement(placement)
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
     result = []
     for i, axis_name in enumerate(mesh.mesh_dim_names):
@@ -151,5 +224,93 @@ def resolve_placements(
         p = named[key]
         if isinstance(p, Shard) and mesh.size(i) == 1:
             p = Replicate()
+        assert isinstance(
+            p, Placement
+        ), f"Expected a DTensor Placement for axis {axis_name!r}, got {p!r}."
         result.append(p)
     return tuple(result)
+
+
+def _spmd_to_dtensor_placement(placement: PlacementLike) -> NamedPlacement:
+    named = _named_placement(placement)
+    if not is_spmd_placement(placement):
+        raise ValueError(f"Expected an SPMD placement, got {named!r}.")
+
+    result: NamedPlacement = {}
+    for axis_name, axis_type in named.items():
+        if axis_type == spmd.I or axis_type == spmd.R:
+            dtensor_placement: Placement = Replicate()
+        elif axis_type == spmd.P:
+            dtensor_placement = Partial()
+        elif isinstance(axis_type, spmd.Shard):
+            dtensor_placement = Shard(axis_type.dim)
+        else:
+            raise ValueError(
+                f"Unsupported SPMD placement for axis {axis_name!r}: {axis_type!r}."
+            )
+        if axis_name == MeshAxisName.DP:
+            # Temporary bridge: local SPMD uses one logical DP axis, while the
+            # current full-DTensor storage mesh still spells it as two axes.
+            result[MeshAxisName.DP_REPLICATE] = dtensor_placement
+            result[MeshAxisName.DP_SHARD] = dtensor_placement
+        else:
+            result[axis_name] = dtensor_placement
+    return result
+
+
+def active_spmd_placement(placement: PlacementLike) -> NamedPlacementSpmd:
+    """Return the SPMD placement restricted to active current-mesh axes."""
+    if not is_spmd_placement(placement):
+        raise ValueError(
+            "SPMD backend requires SPMD placements. "
+            f"Got DTensor placement: {_named_placement(placement)!r}."
+        )
+
+    named = _named_placement(placement)
+    mesh_names = spmd.current_mesh_names()
+    if mesh_names is None:
+        return {}
+
+    resolved: NamedPlacementSpmd = {}
+    for axis_name, value in named.items():
+        if axis_name in mesh_names:
+            resolved[axis_name] = value
+    return resolved
+
+
+def placement_to_spmd_assert_type(
+    placement: PlacementLike,
+) -> tuple[NamedPlacementSpmd, spmd.PartitionSpec | None]:
+    """Resolve a placement to ``assert_type`` args for local SPMD typechecking."""
+    local_type = active_spmd_placement(placement)
+    if not isinstance(placement, PlacementSpec):
+        return local_type, None
+
+    mesh_names = spmd.current_mesh_names()
+    if mesh_names is None:
+        return local_type, None
+
+    def active_partition_entry(entry: NamedPartitionSpecEntry):
+        filtered = tree_map(
+            lambda axis_name: axis_name if axis_name in mesh_names else None,
+            entry,
+        )
+        if filtered is None:
+            return None
+        if not isinstance(filtered, tuple):
+            return filtered
+
+        active_axes = tuple(
+            axis_name for axis_name in filtered if axis_name is not None
+        )
+        if not active_axes:
+            return None
+        return active_axes[0] if len(active_axes) == 1 else active_axes
+
+    partition_spec = spmd.PartitionSpec(
+        *(active_partition_entry(entry) for entry in placement.partition_spec)
+    )
+    return {
+        axis_name: spmd.V if isinstance(value, spmd.Shard) else value
+        for axis_name, value in local_type.items()
+    }, partition_spec
