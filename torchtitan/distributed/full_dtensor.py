@@ -6,7 +6,7 @@
 
 """Full DTensor infrastructure for SPMD-style parallelization.
 
-When ``parallelism.full_dtensor`` is enabled, all model parameters,
+When ``parallelism.spmd_backend == "full_dtensor"`` is enabled, all model parameters,
 buffers, and inputs become DTensors on a multi-dimensional SPMD mesh.
 FSDP uses ``DataParallelMeshDims`` to identify which mesh axes
 are data-parallel.
@@ -44,7 +44,7 @@ def validate_config(
     if parallel_dims.ep_enabled:
         raise NotImplementedError(
             "full_dtensor is not supported with Expert Parallel. "
-            "Disable EP or disable full_dtensor."
+            "Disable EP or use a different spmd_backend."
         )
 
     if parallel_dims.cp_enabled:
@@ -66,9 +66,9 @@ def _get_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
     even at size 1) so FSDP can pick the DP submesh out of the multi-axis
     SPMD mesh inside ``DeviceMesh._concatenate([dp_mesh, tp_mesh])``.
     """
-    assert (
-        parallel_dims.full_dtensor
-    ), "_get_dp_mesh_axes is only meaningful under full_dtensor"
+    assert parallel_dims.spmd_backend == "full_dtensor", (
+        "_get_dp_mesh_axes is only meaningful under full_dtensor"
+    )
     shard_axes: list[str] = ["dp_shard"]
     if parallel_dims.cp_enabled:
         shard_axes.append("cp")
