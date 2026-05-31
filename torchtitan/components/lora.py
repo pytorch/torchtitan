@@ -204,12 +204,8 @@ class LoRAConverter(ModelConfigConverter):
             Module.Config, recurse=True
         ):
             last_segment = fqn.rsplit(".", 1)[-1]
-            is_target = (
-                isinstance(cfg, Linear.Config)
-                and (
-                    self.target_modules is None
-                    or last_segment in self.target_modules
-                )
+            is_target = isinstance(cfg, Linear.Config) and (
+                self.target_modules is None or last_segment in self.target_modules
             )
             if is_target:
                 new_cfg = self._make_lora_config(cfg)
