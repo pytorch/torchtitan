@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import contextlib
 import math
 import os
@@ -11,7 +13,7 @@ from abc import abstractmethod
 from collections.abc import Iterable, Iterator
 from datetime import timedelta
 from threading import local
-from typing import Protocol
+from typing import Protocol, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
@@ -24,9 +26,11 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import CommConfig, DebugConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
+
+if TYPE_CHECKING:
+    from torchtitan.distributed.parallel_dims import ParallelDims
 
 
 _MESH_TLS = local()

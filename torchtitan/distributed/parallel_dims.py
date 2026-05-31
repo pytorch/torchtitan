@@ -13,11 +13,13 @@ from typing import Literal, TYPE_CHECKING
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from torchtitan.config.configs import ParallelismConfig
+from torchtitan.protocols.sharding import placement_axes
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 
 if TYPE_CHECKING:
-    from torchtitan.protocols.types import MeshAxisName, NamedPlacement
+    from torchtitan.protocols.sharding import PlacementLike
+    from torchtitan.protocols.types import MeshAxisName
 
 
 __all__ = ["ParallelDims"]
@@ -425,8 +427,19 @@ class ParallelDims:
         not one of ``parallel_dims.spmd_meshes()``.
         """
         axes_list = list(axes)
-        if self.spmd_backend != "full_dtensor":
+        if self.spmd_backend == "default":
             in_band = ("tp", "ep")
+            axes_list = [axis for axis in axes_list if axis in in_band]
+        elif self.spmd_backend == "full_dtensor":
+            axes_list = [
+                expanded_axis
+                for axis in axes_list
+                for expanded_axis in (
+                    ("dp_replicate", "dp_shard") if axis == "dp" else (axis,)
+                )
+            ]
+        elif self.spmd_backend == "spmd":
+            in_band = ("dp", "cp", "tp", "ep")
             axes_list = [axis for axis in axes_list if axis in in_band]
         mesh = self.get_activated_mesh(axes_list)
         if mesh is None:
@@ -441,7 +454,7 @@ class ParallelDims:
         return mesh
 
     def resolve_shared_mesh(
-        self, placements: Iterable["NamedPlacement | None"]
+        self, placements: Iterable["PlacementLike | None"]
     ) -> DeviceMesh | None:
         """Resolve the mesh shared by a list of NamedPlacements.
 
@@ -458,12 +471,13 @@ class ParallelDims:
         non_none = [p for p in placements if p is not None]
         if not non_none:
             return None
-        axes = non_none[0].keys()
+        axes = placement_axes(non_none[0])
         for p in non_none[1:]:
-            assert p.keys() == axes, (
+            p_axes = placement_axes(p)
+            assert p_axes == axes, (
                 f"Inconsistent mesh axes within a boundary: "
                 f"{sorted(k.value for k in axes)} vs "
-                f"{sorted(k.value for k in p.keys())}"
+                f"{sorted(k.value for k in p_axes)}"
             )
         return self.resolve_mesh(axes)
 
