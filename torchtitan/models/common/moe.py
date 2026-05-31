@@ -400,8 +400,9 @@ class MoE(Module):
         else:
             generate_routing_map = generate_routing_map_ble
 
-        routing_map_BLE = generate_routing_map(  # pyrefly: ignore [bad-argument-count]
-            scores_BLE, topk_expert_ids_BLK
+        routing_map_BLE = generate_routing_map(
+            scores_BLE,
+            topk_expert_ids_BLK,  # pyrefly: ignore [bad-argument-count]
         )
         num_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
 
