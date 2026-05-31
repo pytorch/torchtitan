@@ -209,7 +209,7 @@ class LRSchedulersContainer(Stateful, Configurable):
     def __len__(self) -> int:
         return len(self.schedulers)
 
-    def get_lr_metrics(self) -> dict[str, float]:
+    def get_metrics(self) -> dict[str, float]:
         """Return per-param-group learning rates keyed for logging."""
         lr_metrics = {}
         for scheduler in self.schedulers:
@@ -236,6 +236,11 @@ class LRSchedulersContainer(Stateful, Configurable):
         # own optimizer's base_lrs and the shared lambda. This is correct for
         # mixed optimizers (different base_lrs) and resharding (different number
         # of schedulers between save and load).
+        #
+        # NOTE: torchtitan's LR schedules are stateless functions
+        # of (last_epoch, base_lr) — LambdaLR with a pure lambda. If a stateful
+        # scheduler (e.g. ReduceLROnPlateau) is added, this method must be updated
+        # to restore additional state.
         last_epoch = state_dict["last_epoch"]
         for scheduler in self.schedulers:
             scheduler.last_epoch = last_epoch

@@ -200,7 +200,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         model_spec = config.model_spec
 
         device_module, device_type = utils.device_module, utils.device_type
-        # pyrefly: ignore [read-only]
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
@@ -718,7 +717,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     ):
         self.optimizers.zero_grad()
         # Save per-optimizer-group learning rates for logging
-        lr_metrics = self.lr_schedulers.get_lr_metrics()
+        lr_metrics = self.lr_schedulers.get_metrics()
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.

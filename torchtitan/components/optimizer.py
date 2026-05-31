@@ -31,6 +31,7 @@ __all__ = [
     "OptimizersContainer",
     "OptimizersInBackwardContainer",
     "ParamGroupConfig",
+    "default_adamw",
     "register_moe_load_balancing_hook",
 ]
 
@@ -66,6 +67,28 @@ class ParamGroupConfig:
     Must include all required kwargs (e.g. ``lr``). No implicit defaults."""
 
 
+def default_adamw(lr: float = 8e-4, **kwargs: Any) -> list[ParamGroupConfig]:
+    """Create a catch-all AdamW param group with standard defaults.
+
+    Use as a convenience for the common case::
+
+        OptimizersContainer.Config(param_groups=default_adamw(lr=3e-4))
+    """
+    return [
+        ParamGroupConfig(
+            pattern=r".*",
+            optimizer_name="AdamW",
+            optimizer_kwargs={
+                "lr": lr,
+                "betas": (0.9, 0.95),
+                "eps": 1e-8,
+                "weight_decay": 0.1,
+                **kwargs,
+            },
+        )
+    ]
+
+
 T = TypeVar("T", bound=Optimizer)
 
 
@@ -94,22 +117,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        name: str = "AdamW"
-        """Default optimizer type, used when param_groups is not specified."""
-
-        lr: float = 8e-4
-        """Default learning rate, used when param_groups is not specified."""
-
-        optimizer_kwargs: dict[str, Any] = field(
-            default_factory=lambda: {
-                "betas": (0.9, 0.95),
-                "eps": 1e-8,
-                "weight_decay": 0.1,
-            }
-        )
-        """Default optimizer kwargs, used when param_groups is not specified.
-        Defaults are for AdamW."""
-
         implementation: Literal[
             "for-loop", "foreach", "fused", "fused_opt_states_bf16"
         ] = "fused"
@@ -129,11 +136,11 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         - more info: https://pytorch.org/docs/stable/optim.html
         """
 
-        param_groups: list[ParamGroupConfig] = field(default_factory=list)
+        param_groups: list[ParamGroupConfig] = field(default_factory=default_adamw)
         """Per-parameter-group optimizer configurations. Each entry specifies a
         regex pattern and a self-contained optimizer setup.
         Patterns are checked in order; first match wins.
-        If empty, all parameters use the default optimizer (name, lr, optimizer_kwargs)."""
+        Defaults to ``default_adamw()``."""
 
     optimizers: list[T]
     model_parts: list[nn.Module]
@@ -143,7 +150,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         optimizer_classes = {
             "Adam": torch.optim.Adam,
             "AdamW": torch.optim.AdamW,
-            "SGD": torch.optim.SGD,
         }
         if name not in optimizer_classes:
             raise NotImplementedError(f"Optimizer {name} not added.")
@@ -165,17 +171,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         }
 
     @staticmethod
-    def _default_param_groups(config: Config) -> list[ParamGroupConfig]:
-        """Return a catch-all param group from config's default optimizer fields."""
-        return [
-            ParamGroupConfig(
-                pattern=r".*",
-                optimizer_name=config.name,
-                optimizer_kwargs={"lr": config.lr, **config.optimizer_kwargs},
-            )
-        ]
-
-    @staticmethod
     def _build_param_groups(
         model: nn.Module,
         param_groups: list[ParamGroupConfig],
@@ -186,7 +181,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         Each parameter is assigned to the first matching ParamGroupConfig pattern.
         Returns a dict mapping optimizer name to a list of param group dicts.
 
-        Each param group dict includes a ``_label`` key with a sanitized pattern
+        Each param group dict includes a ``_label`` key with the regex pattern
         string for logging.
         """
         result: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -207,11 +202,10 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                 )
                 continue
 
-            label = re.sub(r"[^a-zA-Z0-9._]", "", pg.pattern.replace("|", "_or_"))
             result[pg.optimizer_name].append(
                 {
                     "params": matched,
-                    "_label": label,
+                    "_label": pg.pattern,
                     **impl_kwargs,
                     **pg.optimizer_kwargs,
                 }
@@ -221,7 +215,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
     def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
         impl_kwargs = self._build_impl_kwargs(config)
-        param_groups = config.param_groups or self._default_param_groups(config)
+        param_groups = config.param_groups
         all_params = []
         self.optimizers = []
         self.model_parts = model_parts
@@ -229,8 +223,10 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         self._model_part_indices: list[int] = []
 
         for part_idx, model in enumerate(self.model_parts):
-            groups_by_opt = self._build_param_groups(model, param_groups, impl_kwargs)
-            for opt_name, opt_param_groups in groups_by_opt.items():
+            groups_by_opt_name = self._build_param_groups(
+                model, param_groups, impl_kwargs
+            )
+            for opt_name, opt_param_groups in groups_by_opt_name.items():
                 opt_cls = self._resolve_optimizer_cls(opt_name)
                 self.optimizers.append(opt_cls(opt_param_groups))
                 self._model_part_indices.append(part_idx)
@@ -241,7 +237,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
         if config.implementation == "fused_opt_states_bf16":
             self._register_bf16_optimizer_state_hook()
-        self._post_init(all_params, impl_kwargs)
+        self._post_init(all_params)
         self._log_summary()
 
     def _log_summary(self) -> None:
@@ -326,12 +322,10 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         for opt, part_idx in zip(self.optimizers, self._model_part_indices):
             func(self.model_parts[part_idx], opt)
 
-    def _post_init(
-        self, all_params: list[nn.Parameter], optimizer_kwargs: dict[str, Any]
-    ) -> None:
+    def _post_init(self, all_params: list[nn.Parameter]) -> None:
         # We need to call Optimizer.__init__() to initialize some necessary optimizer
-        # functionality such as hooks.
-        Optimizer.__init__(self, all_params, optimizer_kwargs)
+        # functionality such as hooks (e.g. register_step_pre_hook for MoE load balancing).
+        Optimizer.__init__(self, all_params, {})
 
     def _register_bf16_optimizer_state_hook(self) -> None:
         """Register a step pre-hook to create Adam optimizer states in bfloat16.
@@ -399,7 +393,7 @@ class OptimizersInBackwardContainer(OptimizersContainer):
 
     def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
         impl_kwargs = self._build_impl_kwargs(config)
-        param_groups = config.param_groups or self._default_param_groups(config)
+        param_groups = config.param_groups
         all_params = []
         self.model_parts = model_parts
         # Maps each optimizer to its model part (for state_dict/load_state_dict)
@@ -407,8 +401,10 @@ class OptimizersInBackwardContainer(OptimizersContainer):
 
         optim_dict: dict[nn.Parameter, Optimizer] = {}
         for part_idx, model in enumerate(self.model_parts):
-            groups_by_opt = self._build_param_groups(model, param_groups, impl_kwargs)
-            for opt_name, opt_param_groups in groups_by_opt.items():
+            groups_by_opt_name = self._build_param_groups(
+                model, param_groups, impl_kwargs
+            )
+            for opt_name, opt_param_groups in groups_by_opt_name.items():
                 opt_cls = self._resolve_optimizer_cls(opt_name)
                 for group in opt_param_groups:
                     label = group["_label"]
@@ -433,7 +429,7 @@ class OptimizersInBackwardContainer(OptimizersContainer):
 
         self.optimizers = list(optim_dict.values())
         self._validate_params(all_params)
-        self._post_init(all_params, impl_kwargs)
+        self._post_init(all_params)
         self._log_summary()
 
     @overload

@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import (
+    default_adamw,
     OptimizersContainer,
     OptimizersInBackwardContainer,
     ParamGroupConfig,
@@ -66,9 +67,7 @@ def _get_param_names_in_group(model, group):
 def _get_default_groups(model, config):
     """Helper: build param groups and return the AdamW optimizer's groups."""
     impl_kwargs = OptimizersContainer._build_impl_kwargs(config)
-    param_groups = config.param_groups or OptimizersContainer._default_param_groups(
-        config
-    )
+    param_groups = config.param_groups
     groups_by_opt = OptimizersContainer._build_param_groups(
         model, param_groups, impl_kwargs
     )
@@ -79,7 +78,7 @@ class TestParamGroupConfig(unittest.TestCase):
     def test_default_no_param_groups(self):
         """Empty param_groups produces a single group with all params."""
         model = SimpleModel()
-        config = OptimizersContainer.Config(lr=1e-3)
+        config = OptimizersContainer.Config(param_groups=default_adamw(lr=1e-3))
 
         groups = _get_default_groups(model, config)
 
@@ -89,21 +88,25 @@ class TestParamGroupConfig(unittest.TestCase):
         self.assertEqual(groups[0]["lr"], 1e-3)
         self.assertEqual(groups[0]["weight_decay"], 0.1)
 
-    def test_default_sgd(self):
-        """Default optimizer can be changed to SGD via Config fields."""
+    def test_default_adam(self):
+        """All params can use Adam via param_groups."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
-            name="SGD",
-            lr=1e-2,
-            optimizer_kwargs={"momentum": 0.9},
             implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="Adam",
+                    optimizer_kwargs={"lr": 1e-2, "betas": (0.9, 0.95), "eps": 1e-8},
+                ),
+            ],
         )
         container = config.build(model_parts=[model])
         self.assertEqual(len(container.optimizers), 1)
-        sgd = container.optimizers[0]
-        self.assertIsInstance(sgd, torch.optim.SGD)
-        self.assertEqual(sgd.param_groups[0]["lr"], 1e-2)
-        self.assertEqual(sgd.param_groups[0]["momentum"], 0.9)
+        adam = container.optimizers[0]
+        self.assertIsInstance(adam, torch.optim.Adam)
+        self.assertEqual(adam.param_groups[0]["lr"], 1e-2)
+        self.assertEqual(adam.param_groups[0]["betas"], (0.9, 0.95))
 
     def test_single_pattern_weight_decay_zero(self):
         """Pattern matching bias params with weight_decay=0."""
@@ -373,7 +376,7 @@ class TestOptimizersContainerWithParamGroups(unittest.TestCase):
         model = SimpleModel()
         config = OptimizersContainer.Config(
             implementation="for-loop",
-            lr=1e-3,
+            param_groups=default_adamw(lr=1e-3),
         )
         container = config.build(model_parts=[model])
         opt = container.optimizers[0]
@@ -476,8 +479,8 @@ class TestMixedOptimizers(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"output\.",
-                    optimizer_name="SGD",
-                    optimizer_kwargs={"lr": 5e-4, "momentum": 0.9},
+                    optimizer_name="Adam",
+                    optimizer_kwargs={"lr": 5e-4, "betas": (0.9, 0.95), "eps": 1e-8},
                 ),
                 ParamGroupConfig(
                     pattern=r".*",
@@ -488,13 +491,13 @@ class TestMixedOptimizers(unittest.TestCase):
         )
         container = config.build(model_parts=[model])
         opt_types = {type(opt).__name__ for opt in container.optimizers}
-        self.assertEqual(opt_types, {"AdamW", "SGD"})
+        self.assertEqual(opt_types, {"AdamW", "Adam"})
 
-        sgd = next(
-            opt for opt in container.optimizers if isinstance(opt, torch.optim.SGD)
+        adam = next(
+            opt for opt in container.optimizers if type(opt) is torch.optim.Adam
         )
-        self.assertEqual(sgd.param_groups[0]["lr"], 5e-4)
-        self.assertEqual(sgd.param_groups[0]["momentum"], 0.9)
+        self.assertEqual(adam.param_groups[0]["lr"], 5e-4)
+        self.assertEqual(adam.param_groups[0]["betas"], (0.9, 0.95))
 
     def test_mixed_optimizers_all_params_covered(self):
         """All parameters should be covered across all optimizers."""
@@ -504,8 +507,8 @@ class TestMixedOptimizers(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"output\.",
-                    optimizer_name="SGD",
-                    optimizer_kwargs={"lr": 5e-4, "momentum": 0.9},
+                    optimizer_name="Adam",
+                    optimizer_kwargs={"lr": 5e-4, "betas": (0.9, 0.95), "eps": 1e-8},
                 ),
                 ParamGroupConfig(
                     pattern=r".*",
@@ -532,8 +535,8 @@ class TestMixedOptimizers(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"output\.",
-                    optimizer_name="SGD",
-                    optimizer_kwargs={"lr": 5e-4, "momentum": 0.9},
+                    optimizer_name="Adam",
+                    optimizer_kwargs={"lr": 5e-4, "betas": (0.9, 0.95), "eps": 1e-8},
                 ),
                 ParamGroupConfig(
                     pattern=r".*",
@@ -569,8 +572,8 @@ class TestMixedOptimizers(unittest.TestCase):
         )
         container = config.build(model_parts=[model])
         adamw = container.optimizers[0]
-        self.assertEqual(adamw.param_groups[0]["_label"], "output.")
-        self.assertEqual(adamw.param_groups[1]["_label"], ".")
+        self.assertEqual(adamw.param_groups[0]["_label"], r"output\.")
+        self.assertEqual(adamw.param_groups[1]["_label"], ".*")
 
     def test_mixed_optimizer_state_dict_round_trip(self):
         """State dict save/load works with mixed optimizer types."""
@@ -580,8 +583,8 @@ class TestMixedOptimizers(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"output\.",
-                    optimizer_name="SGD",
-                    optimizer_kwargs={"lr": 5e-4, "momentum": 0.9},
+                    optimizer_name="Adam",
+                    optimizer_kwargs={"lr": 5e-4, "betas": (0.9, 0.95), "eps": 1e-8},
                 ),
                 ParamGroupConfig(
                     pattern=r".*",
@@ -631,7 +634,7 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
         model = SimpleModel()
         config = OptimizersContainer.Config(
             implementation="for-loop",
-            lr=1e-3,
+            param_groups=default_adamw(lr=1e-3),
         )
         lr_config = LRSchedulersContainer.Config(
             warmup_steps=10,
@@ -652,8 +655,8 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"output\.",
-                    optimizer_name="SGD",
-                    optimizer_kwargs={"lr": 5e-4, "momentum": 0.9},
+                    optimizer_name="Adam",
+                    optimizer_kwargs={"lr": 5e-4, "betas": (0.9, 0.95), "eps": 1e-8},
                 ),
                 ParamGroupConfig(
                     pattern=r".*",
@@ -677,8 +680,8 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"output\.",
-                    optimizer_name="SGD",
-                    optimizer_kwargs={"lr": 5e-4, "momentum": 0.9},
+                    optimizer_name="Adam",
+                    optimizer_kwargs={"lr": 5e-4, "betas": (0.9, 0.95), "eps": 1e-8},
                 ),
                 ParamGroupConfig(
                     pattern=r".*",
@@ -696,7 +699,7 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
             scheduler.step()
         for opt in container.optimizers:
             base_lr = opt.param_groups[0]["lr"]
-            if isinstance(opt, torch.optim.SGD):
+            if type(opt) is torch.optim.Adam:
                 self.assertAlmostEqual(base_lr, 5e-4, places=6)
             else:
                 self.assertAlmostEqual(base_lr, 1e-3, places=6)
