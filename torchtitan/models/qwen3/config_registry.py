@@ -55,17 +55,31 @@ def qwen3_debugmodel() -> Trainer.Config:
 def qwen3_debugmodel_moe_param_groups() -> Trainer.Config:
     config = qwen3_moe_debug()
     config.optimizer = OptimizersContainer.Config(
-        name="AdamW",
-        lr=8e-4,
         param_groups=[
             ParamGroupConfig(
                 pattern=r"(?:tok_embeddings|output)\.",
-                optimizer_kwargs={"weight_decay": 0.0},
+                optimizer_name="AdamW",
+                optimizer_kwargs={
+                    "lr": 8e-4,
+                    "betas": (0.9, 0.95),
+                    "eps": 1e-8,
+                    "weight_decay": 0.0,
+                },
             ),
             ParamGroupConfig(
                 pattern=r"\.router\.gate\.",
                 optimizer_name="SGD",
-                optimizer_kwargs={"lr": 1e-4, "momentum": 0.0},
+                optimizer_kwargs={"lr": 1e-4, "momentum": 0.0, "fused": False},
+            ),
+            ParamGroupConfig(
+                pattern=r".*",
+                optimizer_name="AdamW",
+                optimizer_kwargs={
+                    "lr": 8e-4,
+                    "betas": (0.9, 0.95),
+                    "eps": 1e-8,
+                    "weight_decay": 0.1,
+                },
             ),
         ],
     )

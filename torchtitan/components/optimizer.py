@@ -37,36 +37,33 @@ __all__ = [
 
 @dataclass(kw_only=True, slots=True)
 class ParamGroupConfig:
-    """Configuration for a parameter group with custom optimizer settings.
+    """Configuration for a parameter group with its own optimizer.
 
-    Each entry specifies a regex pattern matching parameter FQNs. Parameters
-    matching the pattern can override optimizer hyperparameters or switch to a
-    different optimizer entirely.
+    Each entry specifies a regex pattern matching parameter FQNs and a
+    self-contained optimizer setup. ``optimizer_name`` and ``optimizer_kwargs``
+    fully define the optimizer for matched parameters — no implicit inheritance.
 
-    There are two override modes:
+    Patterns are checked in order; first match wins. Place specific patterns
+    before broad ones, and use ``r".*"`` as the last entry to catch all
+    remaining parameters. Example::
 
-    1. **Same optimizer, different hyperparams** (``optimizer_name`` is None):
-       ``optimizer_kwargs`` are merged on top of the global optimizer defaults.
-       Unspecified kwargs inherit from the global config.
-
-    2. **Different optimizer** (``optimizer_name`` is set):
-       ``optimizer_kwargs`` must be self-contained — no fallbacks from the global
-       config. If required kwargs (e.g. ``lr``) are missing, PyTorch's optimizer
-       constructor will raise at init time.
+        param_groups=[
+            ParamGroupConfig(pattern=r"\\.bias$", ...),   # specific: biases first
+            ParamGroupConfig(pattern=r"\\.router\\.", ...),  # specific: routers
+            ParamGroupConfig(pattern=r".*", ...),          # catch-all: everything else
+        ]
     """
 
     pattern: str
     """Regex pattern matched against parameter fully qualified names (FQNs).
-    E.g. '.*bias$', '.*norm.*', '.*\\.embed_tokens\\..*'"""
+    E.g. '.*bias$', '.*norm.*', '.*\\.embed_tokens\\..*', '.*' (catch-all)"""
 
-    optimizer_name: str | None = None
-    """Override the optimizer type for this group. None means use the global
-    default. When set, ``optimizer_kwargs`` must provide all required kwargs."""
+    optimizer_name: str = "AdamW"
+    """Optimizer type for this group."""
 
     optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
-    """Optimizer-specific keyword arguments.
-    When ``optimizer_name`` is None: merged on top of global defaults.
-    When ``optimizer_name`` is set: standalone kwargs for the new optimizer."""
+    """Keyword arguments passed to the optimizer constructor.
+    Must include all required kwargs (e.g. ``lr``). No implicit defaults."""
 
 
 T = TypeVar("T", bound=Optimizer)
@@ -76,11 +73,10 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     """A container for multiple optimizers, supporting mixed optimizer types.
 
     This class wraps multiple optimizers into a single object to simplify the
-    training loop. It supports a two-layer configuration:
-
-    - **Global defaults** (``Config``): the default optimizer type and kwargs.
-    - **Per-group overrides** (``ParamGroupConfig``): override kwargs within the
-      same optimizer, or switch to a different optimizer entirely.
+    training loop. Each parameter group is configured via ``ParamGroupConfig``
+    with its own optimizer type and kwargs. Parameters are matched to groups
+    by regex pattern (first match wins), and groups using the same optimizer
+    type are batched into a single optimizer instance for performance.
 
     Each model part (from pipeline parallelism) may have multiple optimizer
     instances if different parameter groups use different optimizer types.
@@ -92,17 +88,17 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     ``load_state_dict()``.
 
     Args:
-        config (Config): Optimizer configuration including param group overrides.
+        config (Config): Optimizer configuration with param group definitions.
         model_parts (List[nn.Module]): List of model parts to be optimized.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         name: str = "AdamW"
-        """Default optimizer to use"""
+        """Default optimizer type, used when param_groups is not specified."""
 
         lr: float = 8e-4
-        """Learning rate to use"""
+        """Default learning rate, used when param_groups is not specified."""
 
         optimizer_kwargs: dict[str, Any] = field(
             default_factory=lambda: {
@@ -111,15 +107,17 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                 "weight_decay": 0.1,
             }
         )
-        """Optimizer-specific keyword arguments passed to the optimizer constructor.
-        Defaults are for AdamW. Override entirely when using a different optimizer,
-        e.g. ``{"momentum": 0.9}`` for SGD."""
+        """Default optimizer kwargs, used when param_groups is not specified.
+        Defaults are for AdamW."""
 
         implementation: Literal[
             "for-loop", "foreach", "fused", "fused_opt_states_bf16"
         ] = "fused"
         """
-        Specify which optimizer implementation to use for the default optimizer:
+        Optimizer implementation mode applied to all optimizer instances.
+        Per-param-group ``optimizer_kwargs`` can override this (e.g.
+        ``"fused": False`` for optimizers that don't support fused with DTensor).
+
         - 'fused': Use fused implementation (CUDA only) for best performance.
         - 'foreach': Use some horizontal fusion of tensors for better performance.
         - 'for-loop': Use the default implementation for the optimizer (slowest).
@@ -132,19 +130,10 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         """
 
         param_groups: list[ParamGroupConfig] = field(default_factory=list)
-        """Optional per-parameter-group overrides. Each entry specifies a regex
-        pattern matching parameter FQNs. Parameters can override optimizer kwargs
-        or switch to a different optimizer entirely.
-        Parameters not matching any pattern use the global defaults.
-        Patterns are checked in order; first match wins."""
-
-        def __post_init__(self):
-            if self.implementation == "fused_opt_states_bf16":
-                if self.name not in ("Adam", "AdamW"):
-                    raise ValueError(
-                        "implementation='fused_opt_states_bf16' is only supported "
-                        f"for Adam/AdamW, got optimizer '{self.name}'"
-                    )
+        """Per-parameter-group optimizer configurations. Each entry specifies a
+        regex pattern and a self-contained optimizer setup.
+        Patterns are checked in order; first match wins.
+        If empty, all parameters use the default optimizer (name, lr, optimizer_kwargs)."""
 
     optimizers: list[T]
     model_parts: list[nn.Module]
@@ -161,7 +150,8 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         return optimizer_classes[name]
 
     @staticmethod
-    def _build_optimizer_kwargs(config: Config) -> dict[str, Any]:
+    def _build_impl_kwargs(config: Config) -> dict[str, Any]:
+        """Build implementation-related kwargs (fused/foreach) from config."""
         assert config.implementation in [
             "fused",
             "foreach",
@@ -170,43 +160,39 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         ]
         fused = config.implementation in ("fused", "fused_opt_states_bf16")
         return {
-            "lr": config.lr,
             "fused": fused,
             "foreach": config.implementation == "foreach",
-            **config.optimizer_kwargs,
         }
+
+    @staticmethod
+    def _default_param_groups(config: Config) -> list[ParamGroupConfig]:
+        """Return a catch-all param group from config's default optimizer fields."""
+        return [
+            ParamGroupConfig(
+                pattern=r".*",
+                optimizer_name=config.name,
+                optimizer_kwargs={"lr": config.lr, **config.optimizer_kwargs},
+            )
+        ]
 
     @staticmethod
     def _build_param_groups(
         model: nn.Module,
-        config: Config,
-        default_kwargs: dict[str, Any],
+        param_groups: list[ParamGroupConfig],
+        impl_kwargs: dict[str, Any],
     ) -> dict[str, list[dict[str, Any]]]:
         """Build PyTorch param groups from model parameters, partitioned by optimizer.
 
-        Each parameter is assigned to the first matching ParamGroupConfig pattern,
-        or to the default group if no pattern matches. Returns a dict mapping
-        optimizer name to a list of param group dicts for that optimizer.
+        Each parameter is assigned to the first matching ParamGroupConfig pattern.
+        Returns a dict mapping optimizer name to a list of param group dicts.
 
         Each param group dict includes a ``_label`` key with a sanitized pattern
-        string (or ``"default"`` for unmatched params) for logging.
-
-        Override modes:
-        - ``optimizer_name`` is None: ``optimizer_kwargs`` merge on top of defaults.
-        - ``optimizer_name`` is set: ``optimizer_kwargs`` are standalone.
+        string for logging.
         """
-        if not config.param_groups:
-            params = [p for p in model.parameters() if p.requires_grad]
-            return {
-                config.name: [{"params": params, "_label": "default", **default_kwargs}]
-            }
-
         result: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        claimed: set[
-            str
-        ] = set()  # first-match-wins: a param is assigned to the first matching pattern
+        claimed: set[str] = set()  # first-match-wins
 
-        for pg in config.param_groups:
+        for pg in param_groups:
             pattern = re.compile(pg.pattern)
             matched = []
             for name, param in model.named_parameters():
@@ -222,33 +208,20 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                 continue
 
             label = re.sub(r"[^a-zA-Z0-9._]", "", pg.pattern.replace("|", "_or_"))
-            opt_name = pg.optimizer_name or config.name
-            base_kwargs = {} if pg.optimizer_name else default_kwargs
-            # optimizer_kwargs comes last so user overrides take precedence
-            result[opt_name].append(
+            result[pg.optimizer_name].append(
                 {
                     "params": matched,
                     "_label": label,
-                    **base_kwargs,
+                    **impl_kwargs,
                     **pg.optimizer_kwargs,
                 }
-            )
-
-        # Default group: unclaimed params
-        default_params = [
-            p
-            for name, p in model.named_parameters()
-            if p.requires_grad and name not in claimed
-        ]
-        if default_params:
-            result[config.name].insert(
-                0, {"params": default_params, "_label": "default", **default_kwargs}
             )
 
         return dict(result)
 
     def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
-        default_kwargs = self._build_optimizer_kwargs(config)
+        impl_kwargs = self._build_impl_kwargs(config)
+        param_groups = config.param_groups or self._default_param_groups(config)
         all_params = []
         self.optimizers = []
         self.model_parts = model_parts
@@ -256,19 +229,19 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         self._model_part_indices: list[int] = []
 
         for part_idx, model in enumerate(self.model_parts):
-            groups_by_opt = self._build_param_groups(model, config, default_kwargs)
-            for opt_name, param_groups in groups_by_opt.items():
+            groups_by_opt = self._build_param_groups(model, param_groups, impl_kwargs)
+            for opt_name, opt_param_groups in groups_by_opt.items():
                 opt_cls = self._resolve_optimizer_cls(opt_name)
-                self.optimizers.append(opt_cls(param_groups))
+                self.optimizers.append(opt_cls(opt_param_groups))
                 self._model_part_indices.append(part_idx)
-                for group in param_groups:
+                for group in opt_param_groups:
                     all_params.extend(group["params"])
 
         self._validate_params(all_params)
 
         if config.implementation == "fused_opt_states_bf16":
             self._register_bf16_optimizer_state_hook()
-        self._post_init(all_params, default_kwargs)
+        self._post_init(all_params, impl_kwargs)
         self._log_summary()
 
     def _log_summary(self) -> None:
@@ -423,10 +396,10 @@ class OptimizersInBackwardContainer(OptimizersContainer):
                     "implementation='fused_opt_states_bf16' is not supported with "
                     "OptimizersInBackwardContainer"
                 )
-            OptimizersContainer.Config.__post_init__(self)
 
     def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
-        default_kwargs = self._build_optimizer_kwargs(config)
+        impl_kwargs = self._build_impl_kwargs(config)
+        param_groups = config.param_groups or self._default_param_groups(config)
         all_params = []
         self.model_parts = model_parts
         # Maps each optimizer to its model part (for state_dict/load_state_dict)
@@ -434,10 +407,10 @@ class OptimizersInBackwardContainer(OptimizersContainer):
 
         optim_dict: dict[nn.Parameter, Optimizer] = {}
         for part_idx, model in enumerate(self.model_parts):
-            groups_by_opt = self._build_param_groups(model, config, default_kwargs)
-            for opt_name, param_groups in groups_by_opt.items():
+            groups_by_opt = self._build_param_groups(model, param_groups, impl_kwargs)
+            for opt_name, opt_param_groups in groups_by_opt.items():
                 opt_cls = self._resolve_optimizer_cls(opt_name)
-                for group in param_groups:
+                for group in opt_param_groups:
                     label = group["_label"]
                     kwargs = {
                         k: v for k, v in group.items() if k not in ("params", "_label")
@@ -460,7 +433,7 @@ class OptimizersInBackwardContainer(OptimizersContainer):
 
         self.optimizers = list(optim_dict.values())
         self._validate_params(all_params)
-        self._post_init(all_params, default_kwargs)
+        self._post_init(all_params, impl_kwargs)
         self._log_summary()
 
     @overload
