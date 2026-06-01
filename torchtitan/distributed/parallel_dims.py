@@ -13,7 +13,7 @@ from typing import Literal, TYPE_CHECKING
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from torchtitan.config.configs import ParallelismConfig
-from torchtitan.protocols.sharding import placement_axes
+from torchtitan.distributed.spmd_types import placement_axes
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 

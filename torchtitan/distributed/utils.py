@@ -12,7 +12,6 @@ import os
 from abc import abstractmethod
 from collections.abc import Iterable, Iterator
 from datetime import timedelta
-from threading import local
 from typing import Protocol, TYPE_CHECKING
 
 import spmd_types as spmd
@@ -31,68 +30,6 @@ from torchtitan.tools.utils import device_module, device_type
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
-
-
-_MESH_TLS = local()
-_spmd_backend = "default"
-
-
-def set_spmd_backend(spmd_backend: str) -> None:
-    """Set the backend that controls whether current-mesh context is active."""
-    global _spmd_backend
-    _spmd_backend = spmd_backend
-
-
-def _mesh_context_enabled() -> bool:
-    return _spmd_backend == "spmd"
-
-
-def _mesh_stack() -> list[DeviceMesh | None]:
-    stack = getattr(_MESH_TLS, "mesh_stack", None)
-    if stack is None:
-        stack = []
-        _MESH_TLS.mesh_stack = stack
-    return stack
-
-
-def is_mesh_context_active() -> bool:
-    """Return whether a runtime mesh context is active."""
-    return _mesh_context_enabled() and bool(_mesh_stack())
-
-
-def current_mesh() -> DeviceMesh | None:
-    """Return the current runtime mesh, or ``None`` if unset."""
-    if not _mesh_context_enabled():
-        return None
-    stack = _mesh_stack()
-    if not stack:
-        return None
-    return stack[-1]
-
-
-@contextlib.contextmanager
-def set_current_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
-    """Set TorchTitan and spmd_types current mesh state for one runtime region."""
-    if not _mesh_context_enabled():
-        yield
-        return
-
-    stack = _mesh_stack()
-    stack.append(mesh)
-    if mesh is None:
-        try:
-            yield
-        finally:
-            popped = stack.pop()
-            assert popped is mesh
-        return
-
-    with spmd.set_current_mesh(mesh):
-        try:
-            yield
-        finally:
-            popped = stack.pop()
-            assert popped is mesh
 
 
 def _dist_reduce(
