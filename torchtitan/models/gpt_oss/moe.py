@@ -113,9 +113,7 @@ class GptOssGroupedExperts(Module):
                 tp_dim_idx = mesh_dim_names.index("tp")
                 tp_degree = self.mlp1_weight_EGD.device_mesh.size(tp_dim_idx)
 
-        offsets_E = torch.cumsum(
-            num_tokens_per_expert_E, dim=0, dtype=torch.int32
-        )
+        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         # Pad num_tokens_per_expert_E with tail slack so that repeat_interleave
         # with output_size=x_RD.shape[0] directly produces a static-shaped output,
         # avoiding the D2H sync that repeat_interleave incurs without output_size.

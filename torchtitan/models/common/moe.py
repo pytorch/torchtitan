@@ -77,9 +77,7 @@ class GroupedExperts(Module):
             w2_EDF = self.w2_EDF
             w3_EFD = self.w3_EFD
 
-        offsets_E = torch.cumsum(
-            num_tokens_per_expert_E, dim=0, dtype=torch.int32
-        )
+        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
 
         h_RF = F.silu(
             torch._grouped_mm(
