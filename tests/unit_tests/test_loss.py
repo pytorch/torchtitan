@@ -326,7 +326,6 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         mask = torch.rand(
                             num_tokens,
                             device=self.device_type,
-                            generator=generator,
                         )
                         global_labels[mask < 0.3] = IGNORE_INDEX
                     # distribute as DTensor; loss_parallel wrapper takes DTensors.

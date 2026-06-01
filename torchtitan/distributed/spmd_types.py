@@ -27,19 +27,18 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 from torch.utils._pytree import tree_map
 
-from torchtitan.protocols.types import MeshAxisName
-
-# Avoid circular import — PlacementLike is defined in sharding.py which
-# imports from here at runtime.  Use TYPE_CHECKING for annotations only.
+# Avoid circular import — MeshAxisName, PlacementLike, and NamedPlacement
+# live in protocols.*, whose __init__ imports module.py which imports us.
+# Use TYPE_CHECKING for annotations; import at use-site for runtime.
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from torchtitan.protocols.sharding import NamedPlacement, PlacementLike
+    from torchtitan.protocols.sharding import PlacementLike
+    from torchtitan.protocols.types import MeshAxisName, NamedPlacement
 
 __all__ = [
     "PlacementSpec",
     "current_mesh",
-    "is_mesh_context_active",
     "parallelize_spmd_inputs",
     "active_placement",
     "is_placement_like",
@@ -66,10 +65,6 @@ def set_spmd_backend(spmd_backend: str) -> None:
     _spmd_backend = spmd_backend
 
 
-def _mesh_context_enabled() -> bool:
-    return _spmd_backend == "spmd"
-
-
 def _mesh_stack() -> list[DeviceMesh | None]:
     stack = getattr(_MESH_TLS, "mesh_stack", None)
     if stack is None:
@@ -78,14 +73,9 @@ def _mesh_stack() -> list[DeviceMesh | None]:
     return stack
 
 
-def is_mesh_context_active() -> bool:
-    """Return whether a runtime mesh context is active."""
-    return _mesh_context_enabled() and bool(_mesh_stack())
-
-
 def current_mesh() -> DeviceMesh | None:
     """Return the current runtime mesh, or ``None`` if unset."""
-    if not _mesh_context_enabled():
+    if _spmd_backend != "spmd":
         return None
     stack = _mesh_stack()
     if not stack:
@@ -96,7 +86,7 @@ def current_mesh() -> DeviceMesh | None:
 @contextlib.contextmanager
 def set_current_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
     """Set TorchTitan and spmd_types current mesh state for one runtime region."""
-    if not _mesh_context_enabled():
+    if _spmd_backend != "spmd":
         yield
         return
 
@@ -139,11 +129,12 @@ def _is_spmd_placement(value: object) -> bool:
     """
     if isinstance(value, PlacementSpec):
         return True
+    from torchtitan.protocols.types import MeshAxisName
     return (
         isinstance(value, dict)
         and bool(value)
         and all(
-            MeshAxisName.has_axis(k) and isinstance(v, spmd.PerMeshAxisSpmdType)
+            isinstance(k, MeshAxisName) and isinstance(v, spmd.PerMeshAxisSpmdType)
             for k, v in value.items()
         )
     )
@@ -158,10 +149,11 @@ def is_placement_like(value: object) -> bool:
     """
     if _is_spmd_placement(value):
         return True
+    from torchtitan.protocols.types import MeshAxisName
     return (
         isinstance(value, dict)
         and bool(value)
-        and all(MeshAxisName.has_axis(k) for k in value)
+        and all(isinstance(k, MeshAxisName) for k in value)
     )
 
 
@@ -191,6 +183,7 @@ def spmd_to_dtensor_placement(placement: PlacementLike) -> NamedPlacement | None
     are written in spmd_types.
     """
     from torchtitan.protocols.sharding import NamedPlacement as _NP
+    from torchtitan.protocols.types import MeshAxisName
 
     if not _is_spmd_placement(placement):
         return None

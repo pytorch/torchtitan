@@ -12,6 +12,8 @@ so individual protocol modules don't grow their own copies.
 
 from enum import Enum
 
+from torch.distributed.tensor import Placement
+
 
 class StrEnum(str, Enum):
     """str + Enum for Python < 3.11 compatibility."""
@@ -42,11 +44,7 @@ class MeshAxisName(StrEnum):
     EP = "ep"
     EFSDP = "efsdp"
 
-    @classmethod
-    def has_axis(cls, axis_name: object) -> bool:
-        """Return ``True`` if *axis_name* is a known mesh axis name."""
-        try:
-            cls(axis_name)
-        except ValueError:
-            return False
-        return True
+
+NamedPlacement = dict[MeshAxisName, Placement]
+
+
