@@ -51,7 +51,19 @@ def _vocab_shard_size_and_offset(
 
 @spmd.register_autograd_function
 class _LossParallelCrossEntropy(torch.autograd.Function):
-    """Local-tensor vocab-parallel cross entropy."""
+    """
+    Vocab-parallel cross-entropy on plain (non-DTensor) local tensors.
+
+    Replaces ``torch.distributed.tensor.parallel.loss_parallel()`` with an
+    explicit autograd Function so that SPMD code can operate on local tensors
+    and process groups directly, without the DTensor-based context manager.
+
+    Supports uneven vocab sharding (last TP rank may hold fewer classes) and
+    ``IGNORE_INDEX`` labels.  Forward uses three TP all-reduces (max, sumexp,
+    gather); backward is fused (NLL + log-softmax) with zero collectives.
+
+    All inputs and outputs are plain ``torch.Tensor`` (not DTensor).
+    """
 
     @staticmethod
     def typecheck_forward(
@@ -60,6 +72,10 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         tp_group: dist.ProcessGroup,
         global_vocab_size: int,
     ) -> torch.Tensor:
+        """
+        SPMD type: logits S(-1)@TP, labels I@TP → loss I@TP.
+        Non-TP axes are passed through from logits to the output.
+        """
         spmd.assert_type(logits, {tp_group: spmd.S(logits.dim() - 1)})
         spmd.assert_type(labels, {tp_group: spmd.I})
         result = _LossParallelCrossEntropy.apply(
@@ -125,11 +141,10 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         local_result = torch.gather(log_probs, -1, local_labels.unsqueeze(-1))
         local_result = local_result.clone()
         local_result[out_of_range.unsqueeze(-1)] = 0
-        result = local_result.clone()
-        dist.all_reduce(result, op=dist.ReduceOp.SUM, group=tp_group)
+        dist.all_reduce(local_result, op=dist.ReduceOp.SUM, group=tp_group)
 
         # Compute summed NLL loss, dropping ignored labels.
-        result = -result.squeeze(-1)
+        result = -local_result.squeeze(-1)
         result = torch.where(labels_1d != IGNORE_INDEX, result, 0)
         loss = result.sum()
 
@@ -576,9 +591,7 @@ class ChunkedCELoss(BaseLoss):
             lm_head.set_requires_gradient_sync(False, recurse=False)
 
         last_idx = len(h_chunks) - 1
-        for i, (h_chunk, label_chunk) in enumerate(
-            zip(h_chunks, label_chunks, strict=True)
-        ):
+        for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
             if fsdp_enabled and i == last_idx:
                 lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
                     True, recurse=False
