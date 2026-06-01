@@ -22,6 +22,7 @@ from torchtitan.config import (
 )
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
+from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.grpo import GRPOLoss, RLTrainer
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.sum_digits import SumDigitsEnv
@@ -43,6 +44,9 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             seed=99, correctness_reward=1.0, format_reward=0.3
         ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
+        batcher=Batcher.Config(
+            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
+        ),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -97,6 +101,9 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             seed=99, correctness_reward=1.0, format_reward=0.3
         ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
+        batcher=Batcher.Config(
+            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
+        ),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -152,6 +159,9 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
             seed=99, correctness_reward=1.0, format_reward=0.3
         ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
+        batcher=Batcher.Config(
+            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
+        ),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=1e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -210,6 +220,9 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
             seed=99, correctness_reward=1.0, format_reward=0.3
         ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
+        batcher=Batcher.Config(
+            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
+        ),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(

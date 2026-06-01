@@ -27,11 +27,13 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
+from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     enable_fsdp_symm_mem,
     get_fsdp_reshard_after_forward_policy,
 )
+from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh, validate_config
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.tools.logging import logger
@@ -61,10 +63,20 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    model.parallelize(parallel_dims)
+    if parallelism.spmd_backend == "full_dtensor":
+        validate_config(parallel_dims, model)
+        model.parallelize(parallel_dims)
+    else:
+        if parallel_dims.cp_enabled:
+            apply_cp_to_forward(
+                # pyrefly: ignore [missing-attribute, not-callable]
+                [block.attention.inner_attention for block in model.layers.values()],
+                parallel_dims.get_mesh("cp"),
+            )
+        if parallel_dims.tp_enabled:
+            model.parallelize(parallel_dims)
     if parallel_dims.tp_enabled:
-        tp_mesh = parallel_dims.get_mesh("tp")
-        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
@@ -84,8 +96,13 @@ def parallelize_llama(
 
     # Always run apply_fsdp -- with shard_degree=1 it is a no-op for the
     # all-gather but still installs the MixedPrecisionPolicy.
-    dp_mesh, dp_mesh_dims = parallel_dims.resolve_fsdp_mesh()
-    if dp_mesh.size() == 1:
+    if parallelism.spmd_backend == "full_dtensor":
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+    else:
+        names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(names)
         dp_mesh_dims = None
 
     apply_fsdp(
