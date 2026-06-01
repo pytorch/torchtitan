@@ -317,6 +317,9 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         #   (e0,r0), (e1,r0), ..., (e0,r1), (e1,r1), ...  (rank-major)
         # _permute reshuffles to:
         #   (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
+        # TODO: Consider using num_global_tokens_per_local_expert_e as the
+        # expert_bias_e update buffer, then all-gather on EP ranks. This
+        # is blocked by clarification on HybridEP token dropping.
         (
             input_shape,
             routed_input_RD,
@@ -607,7 +610,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
 
         from torchtitan.distributed.deepep.deepep import dispatch_tokens
 
-        hidden_states_RD, tokens_per_expert_E, state = dispatch_tokens(
+        hidden_states_RD, num_global_tokens_per_local_expert_e, state = dispatch_tokens(
             x_TD,
             topk_expert_ids_TK,
             topk_scores_TK,
@@ -618,7 +621,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         )
 
         metadata = DeepEPDispatchMetadata(state=state)
-        return hidden_states_RD, tokens_per_expert_E, metadata
+        return hidden_states_RD, num_global_tokens_per_local_expert_e, metadata
 
     # pyrefly: ignore [bad-override]
     def combine(
@@ -745,7 +748,7 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
 
         from torchtitan.distributed.deepep.hybridep import dispatch_tokens
 
-        hidden_states_RD, tokens_per_expert_E, state = dispatch_tokens(
+        hidden_states_RD, num_global_tokens_per_local_expert_e, state = dispatch_tokens(
             x_TD,
             topk_expert_ids_TK,
             topk_scores_TK,
@@ -758,7 +761,7 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
         )
 
         metadata = DeepEPDispatchMetadata(state=state)
-        return hidden_states_RD, tokens_per_expert_E, metadata
+        return hidden_states_RD, num_global_tokens_per_local_expert_e, metadata
 
     # pyrefly: ignore [bad-override]
     def combine(

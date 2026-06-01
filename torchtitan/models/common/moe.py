@@ -54,38 +54,40 @@ class GroupedExperts(Module):
     def _experts_forward(
         self,
         x_RD: torch.Tensor,
-        num_tokens_per_expert_E: torch.Tensor,
+        num_global_tokens_per_local_expert_e: torch.Tensor,
     ) -> torch.Tensor:
         """Raw expert computation without dispatch/combine."""
         if isinstance(self.w1_EFD, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            w1_EFD = self.w1_EFD.to_local()
+            w1_eFD = self.w1_EFD.to_local()
             # pyrefly: ignore [missing-attribute]
-            w2_EDF = self.w2_EDF.to_local()
+            w2_eDF = self.w2_EDF.to_local()
             # pyrefly: ignore [missing-attribute]
-            w3_EFD = self.w3_EFD.to_local()
+            w3_eFD = self.w3_EFD.to_local()
         else:
-            w1_EFD = self.w1_EFD
-            w2_EDF = self.w2_EDF
-            w3_EFD = self.w3_EFD
+            w1_eFD = self.w1_EFD
+            w2_eDF = self.w2_EDF
+            w3_eFD = self.w3_EFD
 
-        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
+        offsets_e = torch.cumsum(
+            num_global_tokens_per_local_expert_e, dim=0, dtype=torch.int32
+        )
 
         h_RF = F.silu(
             torch._grouped_mm(
                 x_RD.bfloat16(),
-                w1_EFD.bfloat16().transpose(-2, -1),
-                offs=offsets_E,
+                w1_eFD.bfloat16().transpose(-2, -1),
+                offs=offsets_e,
             )
         )
         h_RF = h_RF * torch._grouped_mm(
             x_RD.bfloat16(),
-            w3_EFD.bfloat16().transpose(-2, -1),
-            offs=offsets_E,
+            w3_eFD.bfloat16().transpose(-2, -1),
+            offs=offsets_e,
         )
         return torch._grouped_mm(
-            h_RF, w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
+            h_RF, w2_eDF.bfloat16().transpose(-2, -1), offs=offsets_e
         ).type_as(x_RD)
 
     def forward(
@@ -109,13 +111,13 @@ class GroupedExperts(Module):
         topk_expert_ids_TK = topk_expert_ids_BLK.view(T, K)
         (
             routed_input_RD,
-            num_tokens_per_expert_E,
+            num_global_tokens_per_local_expert_e,
             metadata,
         ) = self.token_dispatcher.dispatch(
             x_TD, topk_scores_TK, topk_expert_ids_TK, num_tokens_per_expert_E
         )
         routed_output_RD = self._experts_forward(
-            routed_input_RD, num_tokens_per_expert_E
+            routed_input_RD, num_global_tokens_per_local_expert_e
         )
         return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
 
@@ -375,7 +377,7 @@ class MoE(Module):
         # under local_map when router outputs are DTensors.
         # TODO: Remove this local_map workaround once DTensor sharding
         # propagation supports scatter with mixed Tensor / DTensor arguments.
-        def generate_routing_map_ble(
+        def _generate_routing_map(
             scores_BLE: torch.Tensor,
             topk_expert_ids_BLK: torch.Tensor,
         ) -> torch.Tensor:
@@ -390,7 +392,7 @@ class MoE(Module):
                 scores_BLE, DTensor
             ), "scores_BLE and topk_expert_ids_BLK should both be DTensors"
             generate_routing_map = local_map(
-                generate_routing_map_ble,
+                _generate_routing_map,
                 in_placements=(
                     scores_BLE.placements,
                     topk_expert_ids_BLK.placements,
@@ -399,7 +401,7 @@ class MoE(Module):
                 device_mesh=scores_BLE.device_mesh,
             )
         else:
-            generate_routing_map = generate_routing_map_ble
+            generate_routing_map = _generate_routing_map
 
         routing_map_BLE = generate_routing_map(
             scores_BLE,
