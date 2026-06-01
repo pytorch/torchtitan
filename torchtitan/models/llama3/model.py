@@ -6,16 +6,14 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-import dataclasses
 from dataclasses import dataclass
 
 import torch
 from torch import nn
 
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import AttentionMasksType, VarlenAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
-from torchtitan.tools.logging import logger
 
 
 class Llama3TransformerBlock(TransformerBlock):
@@ -72,48 +70,44 @@ class Llama3Model(Decoder):
         def update_from_config(
             self,
             *,
-            trainer_config,
+            config,
             **kwargs,
         ) -> None:
-            training = trainer_config.training
-            parallelism = trainer_config.parallelism
-            seq_len = training.seq_len
-            if seq_len > self.rope.max_seq_len:
-                logger.warning(
-                    f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
+            Decoder.Config.update_from_config(self, config=config, **kwargs)
+            parallelism = config.parallelism
+
+            if parallelism.context_parallel_degree > 1 and isinstance(
+                self.layers[0].attention.inner_attention, VarlenAttention.Config
+            ):
+                raise NotImplementedError(
+                    "Context Parallel only supports SDPA and FlexAttention. "
+                    "Varlen attention is not supported with CP."
                 )
-            # Sync rope max_seq_len
-            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
-
-            if parallelism.context_parallel_degree > 1:
-                self.validate_context_parallel_attention()
-
-            tp = parallelism.tensor_parallel_degree
-            if tp > 1:
-                n_heads = self.layers[0].attention.n_heads
-                n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
-                if n_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
-                    )
-                if n_kv_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
-                    )
 
             if self.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
                 raise NotImplementedError(
                     "Weight tying is not supported with Pipeline Parallel."
                 )
 
-            from torchtitan.models.llama3.sharding import set_llama3_sharding_config
             from torchtitan.components.loss import ChunkedCELoss
+            from torchtitan.models.llama3.sharding import set_llama3_sharding_config
 
-            chunked_loss = isinstance(trainer_config.loss, ChunkedCELoss.Config)
+            chunked_loss = isinstance(config.loss, ChunkedCELoss.Config)
+            loss_parallel = not parallelism.disable_loss_parallel
+            if (
+                parallelism.spmd_backend == "spmd"
+                and loss_parallel
+                and not chunked_loss
+            ):
+                raise ValueError(
+                    "Llama3 local SPMD loss parallel requires ChunkedCELoss. "
+                    "Use ChunkedCELoss or set parallelism.disable_loss_parallel=True."
+                )
             set_llama3_sharding_config(
                 self,
-                loss_parallel=chunked_loss and not parallelism.disable_loss_parallel,
+                loss_parallel=loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
+                spmd_backend=parallelism.spmd_backend,
                 chunked_loss=chunked_loss,
             )
 

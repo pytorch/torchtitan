@@ -14,11 +14,13 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from spmd_types.checker import typecheck
+from spmd_types.runtime import get_partition_spec, has_local_type
+from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
+from torch.distributed.tensor.experimental import local_map
+
 from torchtitan.config import CompileConfig, Configurable
-from torchtitan.distributed.spmd_state import (
-    current_mesh,
-    is_spmd_active,
-)
+from torchtitan.distributed.spmd_types import current_mesh
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -29,6 +31,9 @@ LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
+    if isinstance(pred, DTensor) and isinstance(labels, DTensor):
+        return _cross_entropy_via_local_map(pred, labels)
+
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
         labels.flatten(0, 1),
@@ -37,22 +42,55 @@ def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     )
 
 
+def _vocab_shard_size_and_offset(
+    global_vocab_size: int,
+    num_chunks: int,
+    rank: int,
+) -> tuple[int, int]:
+    chunk_size = (global_vocab_size + num_chunks - 1) // num_chunks
+    vocab_start = min(global_vocab_size, chunk_size * rank)
+    vocab_end = min(global_vocab_size, vocab_start + chunk_size)
+    return max(0, vocab_end - vocab_start), vocab_start
+
+
 @spmd.register_autograd_function
 class _LossParallelCrossEntropy(torch.autograd.Function):
     """
-    Vocab-parallel cross entropy for logits sharded over TP axis.
-    Explicit implementation of loss_parallel() context from torch/distributed/tensor/parallel.
+    Vocab-parallel cross-entropy on plain (non-DTensor) local tensors.
+
+    Replaces ``torch.distributed.tensor.parallel.loss_parallel()`` with an
+    explicit autograd Function so that SPMD code can operate on local tensors
+    and process groups directly, without the DTensor-based context manager.
+
+    Supports uneven vocab sharding (last TP rank may hold fewer classes) and
+    ``IGNORE_INDEX`` labels.  Forward uses three TP all-reduces (max, sumexp,
+    gather); backward is fused (NLL + log-softmax) with zero collectives.
+
+    All inputs and outputs are plain ``torch.Tensor`` (not DTensor).
     """
 
     @staticmethod
     def typecheck_forward(
         logits: torch.Tensor,
         labels: torch.Tensor,
+        tp_group: dist.ProcessGroup,
+        global_vocab_size: int,
     ) -> torch.Tensor:
-        result = _LossParallelCrossEntropy.apply(logits, labels)
-        out_type = dict(spmd.get_local_type(logits))
-        out_type["tp"] = spmd.I
-        spmd.assert_type(result, out_type)
+        """
+        SPMD type: logits S(-1)@TP, labels I@TP → loss I@TP.
+        Non-TP axes are passed through from logits to the output.
+        """
+        spmd.assert_type(logits, {tp_group: spmd.S(logits.dim() - 1)})
+        spmd.assert_type(labels, {tp_group: spmd.I})
+        result = _LossParallelCrossEntropy.apply(
+            logits,
+            labels,
+            tp_group,
+            global_vocab_size,
+        )
+        output_type = dict(spmd.get_local_type(logits))
+        output_type[tp_group] = spmd.I
+        spmd.assert_type(result, output_type)
         return result
 
     @staticmethod
@@ -61,85 +99,165 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         ctx,
         logits: torch.Tensor,
         labels: torch.Tensor,
+        tp_group: dist.ProcessGroup,
+        global_vocab_size: int,
     ) -> torch.Tensor:
         """Compute exact CE loss from local vocab shards via TP all-reduces."""
-        tp_pg = current_mesh().get_group("tp")
-        tp_rank = dist.get_rank(tp_pg)
-
         logits_shape = logits.shape
-        vocab_chunk_size = logits_shape[-1]
         logits_2d = logits.flatten(0, -2).float()
         labels_1d = labels.flatten()
-
-        # allreduce max for max logit value
-        local_max = logits_2d.max(dim=-1).values
-        global_max = local_max.clone()
-        dist.all_reduce(global_max, op=dist.ReduceOp.MAX, group=tp_pg)
-
-        # allreduce sum over offset logits for global denominator
-        shifted = logits_2d - global_max.unsqueeze(-1)
-        exp_shifted = shifted.exp()
-        global_exp_sum = exp_shifted.sum(dim=-1)
-        dist.all_reduce(global_exp_sum, op=dist.ReduceOp.SUM, group=tp_pg)
-
-        #  Mask labels outside this vocab shard; the TP all-reduce selects the owner rank's logit.
-        vocab_start = tp_rank * vocab_chunk_size
-        valid = labels_1d != IGNORE_INDEX
-        in_range = (
-            valid
-            & (labels_1d >= vocab_start)
-            & (labels_1d < vocab_start + vocab_chunk_size)
+        local_vocab_size, vocab_start = _vocab_shard_size_and_offset(
+            global_vocab_size,
+            dist.get_world_size(tp_group),
+            dist.get_rank(tp_group),
         )
-        local_idx = (labels_1d - vocab_start).clamp(min=0, max=vocab_chunk_size - 1)
-        local_target_logit = logits_2d[
-            torch.arange(labels_1d.shape[0], device=logits.device), local_idx
-        ]
-        local_target_logit = local_target_logit * in_range.to(logits_2d.dtype)
-        target_logit = local_target_logit.clone()
-        dist.all_reduce(target_logit, op=dist.ReduceOp.SUM, group=tp_pg)
+        if logits_2d.shape[-1] != local_vocab_size:
+            raise ValueError(
+                "_LossParallelCrossEntropy expected local vocab size "
+                f"{local_vocab_size} for global vocab size {global_vocab_size}, "
+                f"got {logits_2d.shape[-1]}."
+            )
+        if local_vocab_size == 0:
+            raise ValueError(
+                "_LossParallelCrossEntropy does not support empty vocab shards."
+            )
 
-        # compute loss
-        log_global_exp_sum = global_exp_sum.log()
-        per_token_loss = -target_logit + log_global_exp_sum + global_max
-        loss = (per_token_loss * valid.to(per_token_loss.dtype)).sum()
+        # All-reduce max for numerically stable distributed log-softmax.
+        local_max = torch.amax(logits_2d, dim=-1, keepdim=True)
+        dist.all_reduce(local_max, op=dist.ReduceOp.MAX, group=tp_group)
 
-        # Save local-shard logprobs.
-        log_probs = shifted - log_global_exp_sum.unsqueeze(-1)
+        # All-reduce sum over shifted logits for the global softmax denominator.
+        shifted = logits_2d - local_max
+        shifted_sumexp = torch.sum(torch.exp(shifted), dim=-1, keepdim=True)
+        dist.all_reduce(shifted_sumexp, op=dist.ReduceOp.SUM, group=tp_group)
+        log_probs = shifted - torch.log(shifted_sumexp)
+
+        # Mask labels outside this vocab shard; the TP all-reduce below selects
+        # the owner rank's log probability for each target token.
+        safe_labels = torch.where(labels_1d != IGNORE_INDEX, labels_1d, 0)
+        out_of_range = (safe_labels < vocab_start) | (
+            safe_labels >= vocab_start + local_vocab_size
+        )
+        local_labels = safe_labels - vocab_start
+        local_labels = local_labels.clone()
+        local_labels[out_of_range] = 0
+
+        local_result = torch.gather(log_probs, -1, local_labels.unsqueeze(-1))
+        local_result = local_result.clone()
+        local_result[out_of_range.unsqueeze(-1)] = 0
+        dist.all_reduce(local_result, op=dist.ReduceOp.SUM, group=tp_group)
+
+        # Compute summed NLL loss, dropping ignored labels.
+        result = -local_result.squeeze(-1)
+        result = torch.where(labels_1d != IGNORE_INDEX, result, 0)
+        loss = result.sum()
+
+        # Save local-shard log probabilities for the fused CE backward.
         ctx.save_for_backward(log_probs, labels_1d)
         ctx.logits_shape = logits_shape
         ctx.logits_dtype = logits.dtype
         ctx.vocab_start = vocab_start
-        ctx.vocab_chunk_size = vocab_chunk_size
+        ctx.local_vocab_size = local_vocab_size
         return loss
 
     @staticmethod
     def backward(  # pyrefly: ignore[bad-override]
         ctx,
         grad_output: torch.Tensor,
-    ) -> tuple[torch.Tensor, None]:
-        """Return the local vocab shard of the softmax-minus-target gradient."""
+    ) -> tuple[torch.Tensor, None, None, None]:
         log_probs, labels_1d = ctx.saved_tensors
-        grad_logits = torch.exp(log_probs)
-
-        # Apply the -1 target-gradient update only where labels fall in this vocab shard.
-        valid = labels_1d != IGNORE_INDEX
-        in_range = (
-            valid
-            & (labels_1d >= ctx.vocab_start)
-            & (labels_1d < ctx.vocab_start + ctx.vocab_chunk_size)
+        safe_labels = torch.where(labels_1d != IGNORE_INDEX, labels_1d, 0)
+        out_of_range = (safe_labels < ctx.vocab_start) | (
+            safe_labels >= ctx.vocab_start + ctx.local_vocab_size
         )
-        if in_range.any():
-            row_idx = torch.arange(labels_1d.shape[0], device=labels_1d.device)[
-                in_range
-            ]
-            local_idx = labels_1d[in_range] - ctx.vocab_start
-            grad_logits[row_idx, local_idx] -= 1.0
+        local_labels = safe_labels - ctx.vocab_start
+        local_labels = local_labels.clone()
+        local_labels[out_of_range] = 0
 
-        # Drop ignored labels, apply upstream scaling, and restore logits shape/dtype.
-        grad_logits = grad_logits * valid.to(grad_logits.dtype).unsqueeze(-1)
-        grad_logits = grad_logits * grad_output.to(grad_logits.dtype)
+        grad_input = torch.zeros_like(log_probs)
+        row_idx = torch.arange(local_labels.shape[0], device=local_labels.device)
+        grad_update = out_of_range.to(grad_input.dtype) - 1.0
+        grad_input[row_idx, local_labels] = grad_update
+
+        grad_output = torch.where(
+            (labels_1d != IGNORE_INDEX).unsqueeze(-1), grad_output, 0
+        )
+        grad_logits = (grad_input + torch.exp(log_probs)) * grad_output
         grad_logits = grad_logits.reshape(ctx.logits_shape).to(ctx.logits_dtype)
-        return grad_logits, None
+        return grad_logits, None, None, None
+
+
+def _cross_entropy_via_local_map(pred: DTensor, labels: DTensor) -> torch.Tensor:
+    mesh = pred.device_mesh
+    # Labels don't have a vocab dim.
+    expected_labels_placements = tuple(
+        Replicate() if isinstance(p, Shard) and p.dim == 2 else p
+        for p in pred.placements
+    )
+    if labels.placements != expected_labels_placements:
+        raise ValueError(
+            f"cross_entropy_loss: expected labels placements {expected_labels_placements}, "
+            f"got {labels.placements}"
+        )
+
+    # After local flatten(0, 1), tensor dims are [batch*seq, vocab].
+    # Per-axis placement:
+    #   Shard on batch/seq -> Shard(0) (valid because reduction is sum)
+    #   Shard on vocab -> Shard(1)
+    def _flatten_placement(p):
+        if isinstance(p, Shard):
+            return Shard(0 if p.dim == 0 else p.dim - 1)
+        return p
+
+    vocab_sharded = any(isinstance(p, Shard) and p.dim == 2 for p in pred.placements)
+
+    # Per-axis output placement for sum reduction:
+    #   Shard on non-vocab-dim -> Partial
+    #   Shard on vocab-dim -> Replicate
+    out_placements = [
+        Partial() if isinstance(p, Shard) and p.dim != 2 else Replicate()
+        for p in pred.placements
+    ]
+
+    @local_map(
+        out_placements=out_placements,
+        in_placements=(pred.placements, labels.placements),
+        in_grad_placements=(pred.placements, labels.placements),
+        device_mesh=mesh,
+    )
+    def _local_cross_entropy(
+        pred_local: torch.Tensor, labels_local: torch.Tensor
+    ) -> torch.Tensor:
+        flat_pred = pred_local.flatten(0, 1).float()
+        flat_labels = labels_local.flatten(0, 1)
+        if not vocab_sharded:
+            return torch.nn.functional.cross_entropy(
+                flat_pred,
+                flat_labels,
+                reduction="sum",
+                ignore_index=IGNORE_INDEX,
+            )
+
+        # vocab_sharded == True => loss parallel case
+        # TODO: rewrite the entire loss parallel using megatron style.
+        flat_pred_placements = tuple(_flatten_placement(p) for p in pred.placements)
+        flat_labels_placements = tuple(_flatten_placement(p) for p in labels.placements)
+        pred_dtensor = DTensor.from_local(
+            flat_pred, mesh, flat_pred_placements, run_check=False
+        )
+        labels_dtensor = DTensor.from_local(
+            flat_labels, mesh, flat_labels_placements, run_check=False
+        )
+        loss_dtensor = torch.nn.functional.cross_entropy(
+            pred_dtensor,
+            labels_dtensor,
+            reduction="sum",
+            ignore_index=IGNORE_INDEX,
+        )
+        assert isinstance(loss_dtensor, DTensor)
+        return loss_dtensor.to_local()
+
+    return _local_cross_entropy(pred, labels)
 
 
 def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
@@ -354,10 +472,10 @@ class ChunkedCELoss(BaseLoss):
         fires per-chunk, and FSDP2 accumulates the sharded gradients correctly.
 
     TP / SP composability:
-        Hidden states are redistributed to ``R`` on the TP mesh before
-        chunking, so each chunk enters the lm_head as ``R`` input regardless
-        of whether SP is enabled. With SP, this is an all-gather from
-        ``S(1)``; without SP, it's a no-op.
+        Hidden states are redistributed to ``Replicate()`` on the TP mesh
+        before chunking, so each chunk enters the lm_head as ``Replicate()``
+        input regardless of whether SP is enabled. With SP, this is an
+        all-gather from ``Shard(1)``; without SP, it's a no-op.
 
         When loss parallel is applied, each TP rank
         computes partial CE on its ``V/tp`` slice, with an internal
@@ -390,114 +508,111 @@ class ChunkedCELoss(BaseLoss):
         """Set the lm_head module. Must be called before the first __call__."""
         self.lm_head = lm_head
 
+    def replicate_seq_dim(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Replicate hidden states on the TP axis before applying lm_head."""
+        mesh = current_mesh()
+        if mesh is not None:
+            if "tp" not in (mesh.mesh_dim_names or ()):
+                return hidden_states
+            src = spmd.S(1) if self.enable_sp else spmd.I
+            return spmd.redistribute(
+                hidden_states,
+                mesh.get_group("tp"),
+                src=src,
+                dst=spmd.R,
+                backward_options={"op_dtype": hidden_states.dtype},
+            )
+
+        # If SP is enabled, hidden states are Shard(1) on the TP mesh dim.
+        # Redistribute only the TP dim to Replicate before chunking so that
+        # the lm_head receives Replicate input on TP.
+        if isinstance(hidden_states, DTensor):
+            mesh = hidden_states.device_mesh
+            if mesh.mesh_dim_names is not None and "tp" in mesh.mesh_dim_names:
+                tp_dim = mesh.mesh_dim_names.index("tp")
+                placements = list(hidden_states.placements)
+                if not isinstance(placements[tp_dim], Replicate):
+                    placements[tp_dim] = Replicate()
+                    hidden_states = hidden_states.redistribute(mesh, tuple(placements))
+        return hidden_states
+
+    def chunk_states_and_labels(
+        self,
+        hidden_states: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        """Chunk hidden states and labels along the local sequence dimension."""
+        num_chunks = self.num_chunks
+
+        # Chunking always operates on the *local* view: when ``t`` is a
+        # Shard(1) DTensor, chunking the global view would distribute whole
+        # chunks across ranks (e.g. size=2, num_chunks=8: chunks 0-3 on
+        # rank 0, 4-7 on rank 1), leaving half the per-chunk DTensors with
+        # local seq=0 and breaking GradAccumulator's slice writes.
+        # ``local_map`` runs the chunking body on plain tensors; under the
+        # non-DTensor path we call ``_chunk_local`` directly.
+        def _chunk_local(t):
+            return tuple(c.contiguous() for c in torch.chunk(t, num_chunks, dim=1))
+
+        def _chunk(t):
+            if not isinstance(t, DTensor):
+                return _chunk_local(t)
+            p = t.placements
+            wrapped = local_map(
+                _chunk_local,
+                out_placements=(p,) * num_chunks,
+                in_placements=(p,),
+                device_mesh=t.device_mesh,
+            )
+            return wrapped(t)
+
+        requires_grad = hidden_states.requires_grad
+        h_chunks = [
+            c.detach().requires_grad_(requires_grad) for c in _chunk(hidden_states)
+        ]
+        label_chunks = list(_chunk(labels))
+        return h_chunks, label_chunks
+
     def allocate_total_loss(self, reference: torch.Tensor) -> torch.Tensor:
-        """Loss is P@DP, P@CP, I@TP"""
+        """Allocate the scalar loss and annotate SPMD partial data axes."""
         total_loss = reference.new_zeros((), dtype=torch.float32)
-        if not spmd.is_type_checking():
+        if current_mesh() is None or not spmd.is_type_checking():
             return total_loss
 
-        mesh_axis_names = spmd.current_mesh_names() or {}
-        loss_types = {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}
-        for axis_name, dst in loss_types.items():
+        mesh = current_mesh()
+        assert mesh is not None
+        mesh_axis_names = mesh.mesh_dim_names or ()
+        for axis_name, dst in {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}.items():
             if axis_name not in mesh_axis_names:
                 continue
             total_loss = spmd.reinterpret(
                 total_loss,
-                current_mesh().get_group(axis_name),
+                mesh.get_group(axis_name),
                 src=spmd.R,
                 dst=dst,
                 expert_mode=True,
             )
         return total_loss
 
-    def chunked_loss_and_grad(
-        self,
-        h_detached: torch.Tensor,
-        labels: torch.Tensor,
-        *,
-        global_valid_tokens: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute chunked loss and accumulate hidden-state gradients.
+    def reinterpret_data_axes(self, chunk_loss: torch.Tensor) -> torch.Tensor:
+        """Mark data-axis scalar losses as partial under local SPMD typecheck."""
+        if current_mesh() is None or not spmd.is_type_checking():
+            return chunk_loss
 
-        Splits the detached hidden states along sequence, runs ``lm_head`` and
-        CE per chunk, immediately backpropagates each chunk loss, and returns
-        the summed loss contribution with the full hidden-state gradient buffer.
-        """
-        from torch.distributed._composable.fsdp import FSDPModule
-
-        num_chunks = self.num_chunks
-        lm_head = self.lm_head
-        fsdp_enabled = isinstance(lm_head, FSDPModule)
-        requires_grad = h_detached.requires_grad
-
-        # Use .contiguous() to break shared storage from torch.chunk().
-        h_chunks = [
-            c.contiguous().detach().requires_grad_(requires_grad)
-            for c in torch.chunk(h_detached, num_chunks, dim=1)
-        ]
-        label_chunks = torch.chunk(labels, num_chunks, dim=1)
-
-        grad_accumulator = GradAccumulator(
-            h_detached,
-            num_chunks=num_chunks,
-            dtype=torch.float32,
-        )
-        total_loss = self.allocate_total_loss(h_detached)
-
-        # Disable FSDP reshard on lm_head to keep weight unsharded across
-        # all chunks, avoiding repeated all-gathers. Coalesce per-chunk
-        # grad sync into a single reduce-scatter at the last chunk by
-        # disabling gradient sync for chunks 0..N-2.
-        if fsdp_enabled:
-            lm_head.set_reshard_after_forward(False)
-            lm_head.set_reshard_after_backward(False)
-            lm_head.set_requires_gradient_sync(False, recurse=False)
-
-        last_idx = len(h_chunks) - 1
-        for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
-            if fsdp_enabled and i == last_idx:
-                lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
-                    True, recurse=False
-                )
-
-            logits = lm_head(h_chunk)
-            if self.loss_parallel:
-                chunk_loss = _LossParallelCrossEntropy.apply(logits, label_chunk)
-            else:
-                chunk_loss = self.fn(logits, label_chunk)
-            if global_valid_tokens is not None:
-                chunk_loss = chunk_loss / global_valid_tokens
-
-            # reinterpret V->P on data axes; local typechecking means we're unable to infer partials.
-            if spmd.is_type_checking():
-                mesh_axis_names = spmd.current_mesh_names() or {}
-                for axis_name in ("dp", "cp"):
-                    if axis_name not in mesh_axis_names:
-                        continue
-                    chunk_loss = spmd.reinterpret(
-                        chunk_loss,
-                        current_mesh().get_group(axis_name),
-                        src=spmd.V,
-                        dst=spmd.P,
-                        expert_mode=True,
-                    )
-
-            total_loss = total_loss + chunk_loss.detach()
-            if requires_grad:
-                with spmd.no_typecheck():
-                    chunk_loss.backward()
-                    assert h_chunk.grad is not None
-                    grad_accumulator.add(h_chunk.grad)
-                    h_chunk.grad = None
-
-        if fsdp_enabled:
-            lm_head.set_reshard_after_forward(True)
-            lm_head.set_reshard_after_backward(True)
-            lm_head.set_requires_gradient_sync(True, recurse=False)
-            lm_head.reshard()
-
-        grad_buffer = grad_accumulator.result().to(h_detached.dtype)
-        return total_loss, grad_buffer
+        mesh = current_mesh()
+        assert mesh is not None
+        mesh_axis_names = mesh.mesh_dim_names or ()
+        for axis_name in ("dp", "cp"):
+            if axis_name not in mesh_axis_names:
+                continue
+            chunk_loss = spmd.reinterpret(
+                chunk_loss,
+                mesh.get_group(axis_name),
+                src=spmd.V,
+                dst=spmd.P,
+                expert_mode=True,
+            )
+        return chunk_loss
 
     def out_typecheck(
         self,
@@ -505,21 +620,117 @@ class ChunkedCELoss(BaseLoss):
         total_loss: torch.Tensor,
         grad_buffer: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if not spmd.is_type_checking():
+        """Validate SPMD output types after leaving the local typecheck region."""
+        if current_mesh() is None or not spmd.is_type_checking():
             return total_loss, grad_buffer
 
-        loss_type: dict = {}
-        mesh_axis_names = spmd.current_mesh_names() or {}
-        for axis_name in ("dp", "cp"):
-            if axis_name in mesh_axis_names:
-                loss_type[axis_name] = spmd.P
+        mesh = current_mesh()
+        assert mesh is not None
+        mesh_axis_names = mesh.mesh_dim_names or ()
+        loss_type = {
+            mesh.get_group(axis_name): spmd.P
+            for axis_name in ("dp", "cp")
+            if axis_name in mesh_axis_names
+        }
         if "tp" in mesh_axis_names:
-            loss_type["tp"] = spmd.I
+            loss_type[mesh.get_group("tp")] = spmd.I
 
-        grad_types = dict(spmd.get_local_type(h_detached))
-        grad_spec = spmd.get_partition_spec(h_detached)
         spmd.assert_type(total_loss, loss_type)
-        spmd.assert_type(grad_buffer, grad_types, partition_spec=grad_spec)
+        spmd.assert_type(
+            grad_buffer,
+            dict(spmd.get_local_type(h_detached)),
+            partition_spec=get_partition_spec(h_detached),
+        )
+        return total_loss, grad_buffer
+
+    def chunked_loss_and_grad(
+        self,
+        hidden_states: torch.Tensor,
+        labels: torch.Tensor,
+        *,
+        global_valid_tokens: torch.Tensor | None,
+        fsdp_enabled: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Run the chunk loop and return the detached loss plus hidden grad."""
+        lm_head = self.lm_head
+        assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
+
+        requires_grad = hidden_states.requires_grad
+        typecheck_context = (
+            typecheck(local=True)
+            if current_mesh() is not None and spmd.is_type_checking()
+            else contextlib.nullcontext()
+        )
+
+        with typecheck_context:
+            h_detached = hidden_states.detach().requires_grad_(requires_grad)
+            h_chunks, label_chunks = self.chunk_states_and_labels(h_detached, labels)
+            grad_accumulator = GradAccumulator(
+                h_detached,
+                num_chunks=self.num_chunks,
+                dtype=torch.float32,
+            )
+            total_loss = self.allocate_total_loss(h_detached)
+
+            # Disable FSDP reshard on lm_head to keep weight unsharded across
+            # all chunks, avoiding repeated all-gathers. Coalesce per-chunk
+            # grad sync into a single reduce-scatter at the last chunk by
+            # disabling gradient sync for chunks 0..N-2.
+            if fsdp_enabled:
+                lm_head.set_reshard_after_forward(False)
+                lm_head.set_reshard_after_backward(False)
+                lm_head.set_requires_gradient_sync(False, recurse=False)
+
+            last_idx = len(h_chunks) - 1
+            for i, (h_chunk, label_chunk) in enumerate(
+                zip(h_chunks, label_chunks, strict=True)
+            ):
+                if fsdp_enabled and i == last_idx:
+                    lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
+                        True, recurse=False
+                    )
+
+                logits = lm_head(h_chunk)
+                if current_mesh() is not None and self.loss_parallel:
+                    mesh = current_mesh()
+                    assert mesh is not None
+                    chunk_loss = _LossParallelCrossEntropy.apply(
+                        logits,
+                        label_chunk,
+                        mesh.get_group("tp"),
+                        getattr(lm_head, "out_features"),
+                    )
+                else:
+                    chunk_loss = self.fn(logits, label_chunk)
+                if global_valid_tokens is not None:
+                    chunk_loss = chunk_loss / global_valid_tokens
+                chunk_loss = self.reinterpret_data_axes(chunk_loss)
+                total_loss = total_loss + chunk_loss.detach()
+
+                if requires_grad:
+                    backward_context = (
+                        spmd.no_typecheck()
+                        if current_mesh() is not None
+                        else contextlib.nullcontext()
+                    )
+                    with backward_context:
+                        chunk_loss.backward()
+                        assert h_chunk.grad is not None
+                        grad_accumulator.add(h_chunk.grad)
+                        h_chunk.grad = None
+
+            grad_buffer = (
+                grad_accumulator.result().to(h_detached.dtype)
+                if requires_grad
+                else None
+            )
+
+        if grad_buffer is not None:
+            total_loss, grad_buffer = self.out_typecheck(
+                h_detached,
+                total_loss,
+                grad_buffer,
+            )
         return total_loss, grad_buffer
 
     def __call__(
@@ -540,40 +751,47 @@ class ChunkedCELoss(BaseLoss):
         (either by the trainer or the PP schedule), it triggers backward
         through the decoder via a custom autograd Function.
         """
+        from torch.distributed._composable.fsdp import FSDPModule
+
         hidden_states = pred
         lm_head = self.lm_head
         assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
+        fsdp_enabled = isinstance(lm_head, FSDPModule)
+        hidden_states = self.replicate_seq_dim(hidden_states)
 
-        # lm_head is vocab-sharded under TP, so it expects R@TP input.
-        # With SP, we all-gather S(1)->R. without SP, we allreduce gradients across vocab shards.
-        mesh = current_mesh() if is_spmd_active() else None
-        if mesh is not None and "tp" in (mesh.mesh_dim_names or ()):
-            hidden_states = spmd.redistribute(
-                hidden_states,
-                mesh.get_group("tp"),
-                src=spmd.S(1) if self.enable_sp else spmd.I,
-                dst=spmd.R,
-                backward_options={"op_dtype": hidden_states.dtype},
-            )
-
+        # Check if it's training model or validation mode
         requires_grad = hidden_states.requires_grad
-        h_detached = hidden_states.detach().requires_grad_(requires_grad)
 
-        typechecking = is_spmd_active() and spmd.is_type_checking()
-        with spmd.typecheck(local=True) if typechecking else contextlib.nullcontext():
-            total_loss, grad_buffer = self.chunked_loss_and_grad(
-                h_detached,
-                labels,
-                global_valid_tokens=global_valid_tokens,
-            )
-        total_loss, accumulated_grad = self.out_typecheck(
-            h_detached,
-            total_loss,
-            grad_buffer,
+        total_loss, accumulated_grad = self.chunked_loss_and_grad(
+            hidden_states,
+            labels,
+            global_valid_tokens=global_valid_tokens,
+            fsdp_enabled=fsdp_enabled,
         )
+
         if not requires_grad:
             return total_loss
 
+        assert accumulated_grad is not None
+        return self._gradient_backprop(
+            hidden_states, accumulated_grad, total_loss, lm_head, fsdp_enabled
+        )
+
+    @staticmethod
+    def _gradient_backprop(
+        hidden_states: torch.Tensor,
+        accumulated_grad: torch.Tensor,
+        total_loss: torch.Tensor,
+        lm_head: nn.Module,
+        fsdp_enabled: bool,
+    ) -> torch.Tensor:
+        """Return a differentiable loss via _DecoderOutputGradientBackProp.
+        When ``.backward()`` is called (by the trainer or PP schedule),
+        autograd calls ``_DecoderOutputGradientBackProp.backward`` which
+        returns ``accumulated_grad`` as the gradient for ``hidden_states``,
+        propagating through the decoder. Subclasses override to swap in a
+        different autograd Function.
+        """
         return _DecoderOutputGradientBackProp.apply(
             hidden_states, accumulated_grad, total_loss
         )
@@ -601,7 +819,7 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         result = _DecoderOutputGradientBackProp.apply(
             hidden_states, accumulated_grad, loss
         )
-        if spmd.has_local_type(loss):
+        if has_local_type(loss):
             spmd.assert_type(result, spmd.get_local_type(loss))
         return result
 
@@ -614,7 +832,7 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         loss: torch.Tensor,
     ) -> torch.Tensor:
         ctx.save_for_backward(accumulated_grad)
-        return loss.detach().clone()
+        return loss.detach()
 
     @staticmethod
     def backward(  # pyrefly: ignore[bad-override]

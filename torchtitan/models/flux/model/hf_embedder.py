@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+from dataclasses import dataclass, field
+from typing import Any
 
 from torch import Tensor
 
@@ -13,35 +15,41 @@ from transformers import CLIPTextModel, T5EncoderModel
 
 
 class FluxEmbedder(Module):
-    def __init__(self, version: str, random_init=False, **hf_kwargs):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        version: str
+        random_init: bool = False
+        hf_kwargs: dict[str, Any] = field(default_factory=dict)
+
+    def __init__(self, config: Config):
         super().__init__()
-        self.is_clip = "clip" in version.lower()
+        self.is_clip = "clip" in config.version.lower()
         self.output_key = "pooler_output" if self.is_clip else "last_hidden_state"
         if self.is_clip:
-            if random_init:
+            if config.random_init:
                 # Initialize CLIP model with random weights for test purpose only
                 self.hf_module = CLIPTextModel._from_config(
                     # pyrefly: ignore [missing-attribute]
                     CLIPTextModel.config_class.from_pretrained(
-                        os.path.join(version, "config.json"), **hf_kwargs
+                        os.path.join(config.version, "config.json"), **config.hf_kwargs
                     )
                 )
             else:
                 self.hf_module: CLIPTextModel = CLIPTextModel.from_pretrained(
-                    version, **hf_kwargs
+                    config.version, **config.hf_kwargs
                 )
         else:
-            if random_init:
+            if config.random_init:
                 # Initialize T5 model with random weights for test purpose only
                 self.hf_module = T5EncoderModel._from_config(
                     # pyrefly: ignore [missing-attribute]
                     T5EncoderModel.config_class.from_pretrained(
-                        os.path.join(version, "config.json"), **hf_kwargs
+                        os.path.join(config.version, "config.json"), **config.hf_kwargs
                     )
                 )
             else:
                 self.hf_module: T5EncoderModel = T5EncoderModel.from_pretrained(
-                    version, **hf_kwargs
+                    config.version, **config.hf_kwargs
                 )
 
         self.hf_module = self.hf_module.eval().requires_grad_(False)

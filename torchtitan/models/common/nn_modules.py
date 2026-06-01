@@ -24,7 +24,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torchtitan.distributed.spmd_state import current_mesh, is_spmd_active
+from torchtitan.distributed.spmd_types import current_mesh
 from torchtitan.protocols.module import Module
 
 
@@ -67,16 +67,16 @@ class Embedding(nn.Embedding, Module):
         self.enable_sp = config.enable_sp
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        """Runs vocab-parallel embedding if TP enabled, otherwise standard F.embedding."""
+        """Runs vocab-parallel embedding when the current mesh has a TP axis."""
         weight = self.weight
+        mesh = current_mesh()
         tp_pg = None
-        mesh = current_mesh() if is_spmd_active() else None
         if mesh is not None:
             assert mesh.mesh_dim_names is not None
             if "tp" in mesh.mesh_dim_names:
                 tp_pg = mesh.get_group("tp")
 
-        if mesh is None or tp_pg is None or dist.get_world_size(tp_pg) == 1:
+        if tp_pg is None or dist.get_world_size(tp_pg) == 1:
             return F.embedding(
                 input,
                 weight,
@@ -87,12 +87,13 @@ class Embedding(nn.Embedding, Module):
                 self.sparse,
             )
 
-        # offset indices to local vocab range, embed, mask out-of-bound values to 0, and allreduce.
         assert self.enable_sp is not None
-        chunk_size = weight.shape[0]
+        chunk_size = (
+            self.num_embeddings + dist.get_world_size(tp_pg) - 1
+        ) // dist.get_world_size(tp_pg)
         offset = dist.get_rank(tp_pg) * chunk_size
-        mask = (input >= offset) & (input < offset + chunk_size)
-        local_input = (input - offset).clamp(0, chunk_size - 1)
+        mask = (input >= offset) & (input < offset + weight.shape[0])
+        local_input = (input - offset).clamp(0, weight.shape[0] - 1)
         out = F.embedding(
             local_input,
             weight,

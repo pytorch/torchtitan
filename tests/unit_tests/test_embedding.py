@@ -8,9 +8,20 @@ import unittest
 from dataclasses import dataclass
 from functools import partial
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from spmd_types.checker import typecheck
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import distribute_tensor, Replicate, Shard
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
+from torch.utils._debug_mode import DebugMode
 
+from torchtitan.distributed.spmd_types import set_current_mesh, set_spmd_backend
 from torchtitan.models.common.nn_modules import Embedding
 
 
@@ -87,6 +98,96 @@ class TestEmbedding(unittest.TestCase):
         emb = config.build()
         self.assertIsInstance(emb, Embedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
+
+
+class TestVocabParallelEmbedding(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 4
+
+    @with_comms
+    def test_vocab_parallel_embedding_parity(self):
+        """Validate local vocab-parallel embedding against DTensor and full embedding."""
+        mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
+        tp_group = mesh.get_group("tp")
+
+        for vocab_size in (128, 131):
+            for enable_sp in (False, True):
+                with self.subTest(vocab_size=vocab_size, enable_sp=enable_sp):
+                    torch.manual_seed(42)
+
+                    # Build global inputs, then derive DTensor and local views from them.
+                    global_weight = torch.randn(
+                        vocab_size,
+                        32,
+                        device=self.device_type,
+                    )
+                    global_tokens = torch.randint(
+                        0,
+                        vocab_size,
+                        (3, 16),
+                        device=self.device_type,
+                    )
+                    weight_dtensor = distribute_tensor(global_weight, mesh, (Shard(0),))
+                    tokens_dtensor = distribute_tensor(
+                        global_tokens, mesh, (Replicate(),)
+                    )
+
+                    # DTensor embedding is the bitwise oracle for local MaskPartial.
+                    expected_placement = Shard(1) if enable_sp else Replicate()
+                    dtensor_output = F.embedding(tokens_dtensor, weight_dtensor)
+                    dtensor_output = dtensor_output.redistribute(
+                        placements=(expected_placement,)
+                    )
+
+                    # Run the manual MaskPartial implementation on local tensors.
+                    embedding = Embedding(
+                        Embedding.Config(
+                            num_embeddings=vocab_size,
+                            embedding_dim=32,
+                            enable_sp=enable_sp,
+                        )
+                    ).to(self.device_type)
+                    embedding.weight = nn.Parameter(weight_dtensor.to_local())
+                    local_tokens = tokens_dtensor.to_local()
+
+                    # The embedding boundary converts replicated token ids to
+                    # R@TP before the local masked embedding region.
+                    # If SP: R @ weight -> S(1) if SP else I
+                    out_type = spmd.S(1) if enable_sp else spmd.I
+                    set_spmd_backend("spmd")
+                    try:
+                        with set_current_mesh(mesh):
+                            with typecheck(strict_mode="strict", local=True):
+                                local_tokens = spmd.assert_type(
+                                    local_tokens, {tp_group: spmd.R}
+                                )
+                                spmd.assert_type(local_tokens, {tp_group: spmd.R})
+                                embedding._parameters["weight"] = spmd.assert_type(
+                                    embedding.weight, {tp_group: spmd.S(0)}
+                                )
+                                local_output = embedding(local_tokens)
+                                spmd.assert_type(local_output, {tp_group: out_type})
+
+                            # The manual path should use reduce-scatter under SP and
+                            # all-reduce otherwise.
+                            with DebugMode() as debug_mode:
+                                embedding(local_tokens)
+                    finally:
+                        set_spmd_backend("default")
+                    if enable_sp:
+                        self.assertIn("reduce_scatter", debug_mode.debug_string())
+                    else:
+                        self.assertIn("allreduce", debug_mode.debug_string())
+
+                    # local matches DTensor bitwise and no-parallel embedding
+                    self.assertTrue(
+                        torch.equal(local_output, dtensor_output.to_local())
+                    )
+                    full_output = F.embedding(global_tokens, global_weight)
+                    self.assertTrue(
+                        torch.equal(dtensor_output.full_tensor(), full_output)
+                    )
 
 
 if __name__ == "__main__":

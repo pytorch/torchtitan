@@ -111,7 +111,7 @@ def test_generate(
     )
 
     model_config = config.model_spec.model  # pyrefly: ignore [missing-attribute]
-    model_config.update_from_config(trainer_config=config)
+    model_config.update_from_config(config=config)
 
     init_device = "meta" if world_size > 1 else device
     with torch.device(init_device):

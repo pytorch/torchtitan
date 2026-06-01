@@ -6,17 +6,35 @@
 
 import unittest
 
+import spmd_types as spmd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import DTensor, Partial, Replicate
+from torch.distributed.tensor import (
+    DTensor,
+    distribute_tensor,
+    Partial,
+    Replicate,
+    Shard,
+)
+from torch.distributed.tensor.parallel import loss_parallel
+from spmd_types.checker import typecheck
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 from torchtitan.components.loss import (
     ChunkedCELoss,
+    _LossParallelCrossEntropy,
     cross_entropy_loss,
     GradAccumulator,
     IGNORE_INDEX,
 )
+from torchtitan.distributed.spmd_types import set_current_mesh, set_spmd_backend
+from torchtitan.models.common.decoder_sharding import lm_head_sharding_config
+from torchtitan.protocols.types import MeshAxisName
 
 
 class TestLoss(unittest.TestCase):
@@ -260,6 +278,125 @@ class TestGradAccumulatorDTensor(unittest.TestCase):
             acc.add(self._make_chunk((B, L // num_chunks, D), Replicate()))
 
 
+class TestLossParallelCrossEntropy(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 4
+
+    @with_comms
+    def test_loss_parallel_cross_entropy_parity(self):
+        """
+        Tests loss-parallel cross-entropy loss bitwise parity, with torch.distributed.tensor.parallel.loss_parallel().
+        Tests even/uneven vocab sharding, TP, DP+TP, and IGNORE_INDEX labels.
+
+        Runs _LossParallelCrossEntropy under typing checking: logits S(1)@TP, labels I@TP -> I@TP.
+        """
+        num_tokens = 128
+        mesh_configs = (
+            ((4,), ("tp",), (Shard(1),), (Replicate(),)),
+            ((2, 2), ("dp", "tp"), (Shard(0), Shard(1)), (Shard(0), Replicate())),
+        )
+        cases = ((32000, 109, False), (32003, 211, False), (32000, 307, True))
+
+        for mesh_shape, axis_names, logits_placements, label_placements in mesh_configs:
+            mesh = init_device_mesh(
+                self.device_type, mesh_shape, mesh_dim_names=axis_names
+            )
+            tp_group = mesh.get_group("tp")
+            for vocab_size, seed, ignore in cases:
+                with self.subTest(
+                    mesh_shape=mesh_shape, vocab_size=vocab_size, ignore=ignore
+                ):
+                    # Build global test data once, then let DTensor derive the
+                    # exact local shards for TP-only and DP+TP placements.
+                    torch.manual_seed(seed)
+                    global_logits = torch.randn(
+                        num_tokens,
+                        vocab_size,
+                        device=self.device_type,
+                    )
+                    global_labels = torch.randint(
+                        0,
+                        vocab_size,
+                        (num_tokens,),
+                        device=self.device_type,
+                        dtype=torch.long,
+                    )
+                    if ignore:
+                        mask = torch.rand(
+                            num_tokens,
+                            device=self.device_type,
+                        )
+                        global_labels[mask < 0.3] = IGNORE_INDEX
+                    # distribute as DTensor; loss_parallel wrapper takes DTensors.
+                    logits_dtensor = distribute_tensor(
+                        global_logits,
+                        mesh,
+                        logits_placements,
+                    ).detach()
+                    logits_dtensor.requires_grad_(True)
+                    labels_dtensor = distribute_tensor(
+                        global_labels,
+                        mesh,
+                        label_placements,
+                    )
+                    # pytorch loss_parallel() as ground truth
+                    with loss_parallel():
+                        wrapper_loss = F.cross_entropy(
+                            logits_dtensor.float(),
+                            labels_dtensor,
+                            reduction="sum",
+                            ignore_index=IGNORE_INDEX,
+                        )
+
+                    # typecheck S(1)@TP, I@TP -> I@TP
+                    logits_type = {tp_group: spmd.S(1)}
+                    labels_type = {tp_group: spmd.I}
+                    if "dp" in axis_names:
+                        dp_group = mesh.get_group("dp")
+                        logits_type[dp_group] = spmd.S(0)
+                        labels_type[dp_group] = spmd.S(0)
+
+                    # run custom autograd
+                    local_logits = (
+                        logits_dtensor.to_local().detach().requires_grad_(True)
+                    )
+                    local_labels = labels_dtensor.to_local()
+                    spmd.assert_type(local_logits, logits_type)
+                    spmd.assert_type(local_labels, labels_type)
+                    with typecheck(strict_mode="strict"):
+                        local_loss = _LossParallelCrossEntropy.apply(
+                            local_logits,
+                            local_labels,
+                            tp_group,
+                            vocab_size,
+                        )
+                    self.assertIs(
+                        spmd.get_axis_local_type(local_loss, tp_group), spmd.I
+                    )
+
+                    # Loss and local-shard gradients must be bitwise-equivalent
+                    # to torch.distributed.tensor.parallel.loss_parallel().
+                    self.assertTrue(torch.equal(local_loss, wrapper_loss.to_local()))
+
+                    # compare grad_logits; easier to wrap DTensor -> full_tensor for check.
+                    wrapper_loss.backward()
+                    local_loss.backward()
+                    local_grad_dtensor = DTensor.from_local(
+                        local_logits.grad,
+                        mesh,
+                        logits_placements,
+                        shape=torch.Size((num_tokens, vocab_size)),
+                        stride=(vocab_size, 1),
+                    )
+                    self.assertTrue(
+                        torch.equal(
+                            local_grad_dtensor.full_tensor(),
+                            logits_dtensor.grad.full_tensor(),
+                        )
+                    )
+
+
 class _FakeDecoder(nn.Module):
     """Minimal Decoder-like model for testing ChunkedCELoss."""
 
@@ -275,6 +412,44 @@ class _FakeDecoder(nn.Module):
         if skip_lm_head:
             return tokens  # return hidden states directly
         return self.output(tokens)
+
+
+class _FakeVocabParallelLmHead(nn.Module):
+    """Test lm_head with vocab-sharded weight on the TP axis."""
+
+    def __init__(
+        self,
+        dim: int,
+        global_vocab_size: int,
+        tp_group: dist.ProcessGroup,
+        *,
+        enable_sp: bool,
+        loss_parallel: bool,
+    ):
+        super().__init__()
+        tp_degree = dist.get_world_size(tp_group)
+        self.weight = nn.Parameter(torch.empty(global_vocab_size // tp_degree, dim))
+        self.out_features = global_vocab_size
+        self.tp_group = tp_group
+        self.enable_sp = enable_sp
+        self.loss_parallel = loss_parallel
+        self.sharding_config = lm_head_sharding_config(
+            loss_parallel=loss_parallel,
+            enable_sp=enable_sp,
+            spmd_backend="spmd",
+        )
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        logits = F.linear(input, self.weight)
+        if self.loss_parallel:
+            return logits
+        return spmd.redistribute(
+            logits,
+            self.tp_group,
+            src=spmd.S(logits.dim() - 1),
+            dst=spmd.I,
+            backward_options={"op_dtype": logits.dtype},
+        )
 
 
 class TestChunkedCELoss(unittest.TestCase):
@@ -378,6 +553,213 @@ class TestChunkedCELoss(unittest.TestCase):
                 places=5,
                 msg=f"Loss with {2**i} chunks should match loss with 1 chunk",
             )
+
+
+class TestChunkedCELossSPMD(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 8
+
+    @property
+    def device_type(self):
+        return "cpu"
+
+    def _make_model_and_loss(
+        self,
+        *,
+        dim=32,
+        vocab_size=64,
+        num_chunks=4,
+        enable_sp=False,
+        loss_parallel=False,
+        tp_group=None,
+    ):
+        # The eager reference uses the ordinary full-vocab lm_head. The SPMD
+        # path swaps in a local vocab-parallel lm_head when ``tp_group`` is set.
+        model = _FakeDecoder(dim, vocab_size)
+        if tp_group is not None:
+            model.output = _FakeVocabParallelLmHead(
+                dim,
+                vocab_size,
+                tp_group,
+                enable_sp=enable_sp,
+                loss_parallel=loss_parallel,
+            )
+        chunked_loss = ChunkedCELoss(ChunkedCELoss.Config(num_chunks=num_chunks))
+        chunked_loss.lm_head = model.output
+        chunked_loss.enable_sp = enable_sp
+        chunked_loss.loss_parallel = loss_parallel
+        return model, chunked_loss
+
+    @with_comms
+    def test_spmd_matches_eager_and_types(self):
+        # Build one global batch/vocab problem, then compare each local SPMD
+        # rank against the corresponding eager DP/CP slice.
+        torch.manual_seed(42)
+        B, L, D, V = 4, 8, 32, 64
+        num_chunks = 2
+        mesh = init_device_mesh(
+            self.device_type,
+            (2, 2, 2),
+            mesh_dim_names=("dp", "cp", "tp"),
+        )
+        dp_rank, cp_rank, tp_rank = mesh.get_coordinate()
+        dp_degree, cp_degree, tp_degree = mesh.shape
+
+        hidden_states = torch.randn(B, L, D, device=self.device_type)
+        labels = torch.randint(0, V, (B, L), device=self.device_type)
+        labels[0, 1] = IGNORE_INDEX
+        labels[1, 3] = IGNORE_INDEX
+
+        # DP shards the batch, CP shards the sequence. When SP is enabled, TP
+        # further shards each CP-local sequence segment before the chunked loss.
+        b_start = dp_rank * (B // dp_degree)
+        b_end = b_start + (B // dp_degree)
+        cp_seq = L // cp_degree
+        cp_start = cp_rank * cp_seq
+        cp_end = cp_start + cp_seq
+        tp_seq = cp_seq // tp_degree
+        tp_start = tp_rank * tp_seq
+        tp_end = tp_start + tp_seq
+
+        hidden_cp = hidden_states[b_start:b_end, cp_start:cp_end].detach()
+        labels_cp = labels[b_start:b_end, cp_start:cp_end]
+        hidden_sp = hidden_cp[:, tp_start:tp_end].detach()
+
+        dp_group = mesh.get_group("dp")
+        cp_group = mesh.get_group("cp")
+        tp_group = mesh.get_group("tp")
+
+        for enable_sp in (False, True):
+            for loss_parallel in (False, True):
+                with self.subTest(enable_sp=enable_sp, loss_parallel=loss_parallel):
+                    # Reference loss runs on the full local CP sequence and a
+                    # full-vocab lm_head. This is the numerical oracle for each
+                    # local rank.
+                    model_ref, loss_ref_fn = self._make_model_and_loss(
+                        dim=D,
+                        vocab_size=V,
+                        num_chunks=num_chunks,
+                    )
+                    model_ref.to(self.device_type)
+
+                    # SPMD loss uses the same global lm_head weight, sliced by
+                    # TP as the real vocab-parallel lm_head would store it.
+                    model_spmd, loss_spmd_fn = self._make_model_and_loss(
+                        dim=D,
+                        vocab_size=V,
+                        num_chunks=num_chunks,
+                        enable_sp=enable_sp,
+                        loss_parallel=loss_parallel,
+                        tp_group=tp_group,
+                    )
+                    model_spmd.to(self.device_type)
+                    vocab_start = tp_rank * (V // tp_degree)
+                    vocab_end = vocab_start + (V // tp_degree)
+                    model_spmd.output.weight.data.copy_(
+                        model_ref.output.weight.data[vocab_start:vocab_end]
+                    )
+
+                    h_ref = hidden_cp.clone().detach().requires_grad_(True)
+                    loss_ref = loss_ref_fn(h_ref, labels_cp)
+                    loss_ref.backward()
+                    h_grad_ref = h_ref.grad.clone()
+
+                    # The SPMD input is CP-local for non-SP and CP+TP-local for
+                    # SP. The expected hidden grad mirrors that layout below.
+                    h_spmd = (
+                        (hidden_sp if enable_sp else hidden_cp)
+                        .clone()
+                        .detach()
+                        .requires_grad_(True)
+                    )
+                    set_spmd_backend("spmd")
+                    try:
+                        with set_current_mesh(mesh):
+                            spmd_mesh_names = spmd.current_mesh_names()
+                            assert spmd_mesh_names is not None
+                            dp_axis = spmd_mesh_names["dp"]
+                            cp_axis = spmd_mesh_names["cp"]
+                            tp_axis = spmd_mesh_names["tp"]
+                            hidden_type = (
+                                # SP shards one tensor dimension across both
+                                # CP and TP, so use PartitionSpec below to make
+                                # the combined seq-axis sharding explicit.
+                                {
+                                    dp_axis: spmd.V,
+                                    cp_axis: spmd.V,
+                                    tp_axis: spmd.V,
+                                }
+                                if enable_sp
+                                else {
+                                    # Without SP, TP does not shard the hidden
+                                    # sequence; lm_head handles TP internally.
+                                    dp_group: spmd.S(0),
+                                    cp_group: spmd.S(1),
+                                    tp_group: spmd.I,
+                                }
+                            )
+                            labels_type = {
+                                dp_group: spmd.S(0),
+                                cp_group: spmd.S(1),
+                                tp_group: spmd.I,
+                            }
+                            weight_placement = (
+                                model_spmd.output.sharding_config.state_shardings[
+                                    "weight"
+                                ]
+                            )
+                            weight_type = {
+                                dp_group: weight_placement[MeshAxisName.DP],
+                                cp_group: weight_placement[MeshAxisName.CP],
+                                tp_group: weight_placement[MeshAxisName.TP],
+                            }
+                            # Check the boundary contract before executing the
+                            # loss: inputs/labels are local data shards and the
+                            # lm_head weight is vocab-sharded on TP.
+                            if enable_sp:
+                                spmd.assert_type(
+                                    h_spmd,
+                                    hidden_type,
+                                    partition_spec=spmd.PartitionSpec(
+                                        dp_axis,
+                                        (cp_axis, tp_axis),
+                                        None,
+                                    ),
+                                )
+                            else:
+                                spmd.assert_type(h_spmd, hidden_type)
+                            spmd.assert_type(labels_cp, labels_type)
+                            spmd.assert_type(model_spmd.output.weight, weight_type)
+                            with typecheck(strict_mode="strict"):
+                                loss_spmd = loss_spmd_fn(h_spmd, labels_cp)
+
+                            # Each rank has a partial loss over its DP/CP data
+                            # shard. TP must be invariant after either loss
+                            # parallel CE or full-vocab CE.
+                            self.assertIs(
+                                spmd.get_axis_local_type(loss_spmd, dp_group),
+                                spmd.P,
+                            )
+                            self.assertIs(
+                                spmd.get_axis_local_type(loss_spmd, cp_group),
+                                spmd.P,
+                            )
+                            self.assertIs(
+                                spmd.get_axis_local_type(loss_spmd, tp_group),
+                                spmd.I,
+                            )
+                    finally:
+                        set_spmd_backend("default")
+
+                    # Match both scalar loss and hidden-state gradient against
+                    # the eager local oracle for all LP on/off x SP on/off cases.
+                    loss_spmd.backward()
+                    torch.testing.assert_close(loss_spmd, loss_ref)
+                    expected_h_grad = (
+                        h_grad_ref[:, tp_start:tp_end] if enable_sp else h_grad_ref
+                    )
+                    torch.testing.assert_close(h_spmd.grad, expected_h_grad)
 
 
 if __name__ == "__main__":

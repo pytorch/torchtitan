@@ -25,7 +25,8 @@ def set_llama3_sharding_config(
     *,
     loss_parallel: bool,
     enable_sp: bool,
-    chunked_loss: bool,
+    spmd_backend: str = "default",
+    chunked_loss: bool = True,
 ) -> None:
     """Fill ``sharding_config`` on all Llama3 sub-configs.
 
@@ -41,6 +42,7 @@ def set_llama3_sharding_config(
         config,
         loss_parallel=loss_parallel,
         enable_sp=enable_sp,
+        spmd_backend=spmd_backend,
         chunked_loss=chunked_loss,
     )
     for layer_cfg in config.layers:
@@ -63,7 +65,6 @@ def _set_llama3_layer_sharding(
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.attention_norm.sharding_config = norm
     layer_cfg.ffn_norm.sharding_config = norm
-
     attn_x_placement = spmd.S(1) if enable_sp else spmd.I
 
     set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)

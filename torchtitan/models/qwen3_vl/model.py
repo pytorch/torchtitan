@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 
-import dataclasses
 from dataclasses import dataclass, field
 
 import torch
@@ -13,9 +12,10 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
+from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.rope import _maybe_check_max_pos
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
-from torchtitan.tools.logging import logger
 
 from .vision_encoder import Qwen3VLVisionEncoder
 
@@ -62,25 +62,11 @@ class Qwen3VLModel(Qwen3Model):
         def update_from_config(
             self,
             *,
-            trainer_config,
+            config,
             **kwargs,
         ) -> None:
-            training = trainer_config.training
-            parallelism = trainer_config.parallelism
-            debug = trainer_config.debug
-            seq_len = training.seq_len
-            if seq_len > self.rope.max_seq_len:
-                logger.warning(
-                    f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
-                )
-            # Sync rope max_seq_len
-            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
-
-            for layer_cfg in self.layers:
-                if layer_cfg.moe is not None:
-                    layer_cfg.moe.router._debug_force_load_balance = (
-                        debug.moe_force_load_balance
-                    )
+            Decoder.Config.update_from_config(self, config=config, **kwargs)
+            parallelism = config.parallelism
 
             from torchtitan.models.qwen3_vl.sharding import set_qwen3_vl_sharding_config
 
@@ -89,19 +75,6 @@ class Qwen3VLModel(Qwen3Model):
                 loss_parallel=not parallelism.disable_loss_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
-
-            tp = parallelism.tensor_parallel_degree
-            if tp > 1:
-                n_heads = self.layers[0].attention.n_heads
-                n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
-                if n_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
-                    )
-                if n_kv_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
-                    )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -317,6 +290,7 @@ class Qwen3VLModel(Qwen3Model):
         freqs_cis = self.freqs_cis
         if isinstance(freqs_cis, DTensor):
             freqs_cis = freqs_cis.to_local()
+        _maybe_check_max_pos(position_ids, max_valid_pos=freqs_cis.shape[0] - 1)
         head_dim = freqs_cis.shape[-1] // 2
         cos_cache = freqs_cis[:, :head_dim]
         sin_cache = freqs_cis[:, head_dim:]

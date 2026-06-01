@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from dataclasses import dataclass
 
 import torch
@@ -17,7 +18,6 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
-    ScaledDotProductAttention,
     VarlenAttention,
 )
 from torchtitan.models.common.feed_forward import FeedForward
@@ -79,19 +79,94 @@ class Decoder(BaseModel):
         # and fix the typing here
         layers: list  # list[TransformerBlock.Config] or subclass configs
 
-        def validate_context_parallel_attention(
+        def update_from_config(
             self,
+            *,
+            config,
+            **kwargs,
         ) -> None:
-            inner_attention = self.layers[0].attention.inner_attention
-            if isinstance(
-                inner_attention,
-                (ScaledDotProductAttention.Config, VarlenAttention.Config),
-            ):
-                raise NotImplementedError(
-                    "SPMD CP is not supported with ScaledDotProductAttention "
-                    "or VarlenAttention. "
-                    "Use FlexAttention + CP or disable CP."
-                )
+            """Apply runtime config to model config.
+
+            When *config* is a ``Trainer.Config``, validates
+            ``training.seq_len`` against the model's intrinsic
+            ``rope.max_seq_len``, resizes the RoPE cache, and propagates
+            debug flags. Non-trainer callers may pass any config-like
+            object with a ``ParallelismConfig`` in its ``parallelism``
+            field; in that case the training/debug setup is skipped.
+            """
+            from torchtitan.config import ParallelismConfig
+            from torchtitan.trainer import Trainer
+
+            assert hasattr(config, "parallelism"), (
+                "config passed to update_from_config must provide "
+                "a parallelism field."
+            )
+            parallelism = config.parallelism
+            assert isinstance(parallelism, ParallelismConfig), (
+                "config.parallelism must be a ParallelismConfig, got "
+                f"{type(parallelism).__name__}."
+            )
+
+            tp = parallelism.tensor_parallel_degree
+            if tp > 1:
+                attention = self.layers[0].attention
+                n_heads = attention.n_heads
+                n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
+                if n_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide "
+                        f"n_heads ({n_heads})."
+                    )
+                if n_kv_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide "
+                        f"n_kv_heads ({n_kv_heads})."
+                    )
+
+            for layer_cfg in self.layers:
+                if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
+                    from torchtitan.models.common.token_dispatcher import (
+                        DeepEPTokenDispatcher,
+                        HybridEPTokenDispatcher,
+                    )
+
+                    token_dispatcher_cfg = layer_cfg.moe.experts.token_dispatcher
+                    if (
+                        isinstance(
+                            token_dispatcher_cfg,
+                            (
+                                DeepEPTokenDispatcher.Config,
+                                HybridEPTokenDispatcher.Config,
+                            ),
+                        )
+                        and parallelism.expert_parallel_degree == 1
+                    ):
+                        raise ValueError(
+                            f"{type(token_dispatcher_cfg).__qualname__} "
+                            "requires expert parallelism "
+                            "(expert_parallel_degree > 1)."
+                        )
+
+            # NOTE: Inference-only callers such as the RL generator skip
+            # training.seq_len sync. Generated sequence length is not known
+            # ahead of time, so keep the RoPE cache at the model's max_seq_len.
+            if isinstance(config, Trainer.Config):
+                debug = config.debug
+                seq_len = config.training.seq_len
+
+                if seq_len > self.rope.max_seq_len:
+                    raise ValueError(
+                        f"Training sequence length {seq_len} exceeds "
+                        f"model's maximum supported sequence length "
+                        f"{self.rope.max_seq_len}."
+                    )
+                self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
+
+                for layer_cfg in self.layers:
+                    if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
+                        layer_cfg.moe.router._debug_force_load_balance = (
+                            debug.moe_force_load_balance
+                        )
 
     # Set by the trainer when ChunkedCELoss is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().

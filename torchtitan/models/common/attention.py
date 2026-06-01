@@ -219,7 +219,7 @@ class FlexAttention(Module):
         return_lse: bool,
         enable_gqa: bool,
     ):
-        """Runs compiled FlexAttention under no-typecheck, re-annotates following q."""
+        """Run compiled FlexAttention outside SPMD typechecking."""
         with spmd.no_typecheck():
             out, aux = FlexAttention._compiled_flex_attn(
                 q,
@@ -557,33 +557,11 @@ class QKVLinear(BaseQKVLinear):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-
-        # TODO(pianpwk): this goes away if user can declare even sharding
-        def view_projection(y: torch.Tensor) -> torch.Tensor:
-            out_type = spmd.type_like(y)
-            if spmd.has_local_type(y):
-                local_type = dict(spmd.get_local_type(y))
-                partition_spec = spmd.get_partition_spec(y)
-                if partition_spec is not None and len(partition_spec) == 3:
-                    partition_spec = spmd.PartitionSpec(
-                        partition_spec[0],
-                        partition_spec[1],
-                        partition_spec[2],
-                        None,
-                    )
-                out_type = local_type, partition_spec
-
-            return spmd.local_map(
-                in_types=(spmd.type_like(y), None, None, None, None),
-                out_types=out_type,
-                local_typecheck=True,
-            )(torch.Tensor.view)(y, bs, seqlen, -1, self.head_dim)
-
         # Use -1 instead of n_heads (or n_kv_heads) to infer the
         # actual local heads from sizes as TP may have sharded them.
-        xq = view_projection(xq)
-        xk = view_projection(xk)
-        xv = view_projection(xv)
+        xq = xq.view(bs, seqlen, -1, self.head_dim)
+        xk = xk.view(bs, seqlen, -1, self.head_dim)
+        xv = xv.view(bs, seqlen, -1, self.head_dim)
         return xq, xk, xv
 
 
