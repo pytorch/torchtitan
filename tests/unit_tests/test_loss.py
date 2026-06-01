@@ -306,14 +306,11 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                 ):
                     # Build global test data once, then let DTensor derive the
                     # exact local shards for TP-only and DP+TP placements.
-                    generator = torch.Generator(device=self.device_type).manual_seed(
-                        seed
-                    )
+                    torch.manual_seed(seed)
                     global_logits = torch.randn(
                         num_tokens,
                         vocab_size,
                         device=self.device_type,
-                        generator=generator,
                     )
                     global_labels = torch.randint(
                         0,
@@ -321,7 +318,6 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         (num_tokens,),
                         device=self.device_type,
                         dtype=torch.long,
-                        generator=generator,
                     )
                     if ignore:
                         mask = torch.rand(
