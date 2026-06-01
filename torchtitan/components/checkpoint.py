@@ -705,10 +705,8 @@ class CheckpointManager(Configurable):
         # Execution Dispatch
         states = self._flattened_model_states_sd()
 
-        if self.async_mode != AsyncMode.DISABLED:
-            GarbageCollection.collect("Preparing memory for async checkpoint staging.")
-
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
+            GarbageCollection.collect("GC collection invoked by checkpointer.")
             if self.stager is None:
                 self.stager = DefaultStager(
                     StagingOptions(
@@ -723,7 +721,6 @@ class CheckpointManager(Configurable):
                 states,
                 checkpoint_id=checkpoint_id,
                 async_mode=self.async_mode,
-                enable_garbage_collection=False,
             )
 
             # NOTE: For ASYNC_WITH_PINNED_MEM, we skip GC here because the staging
@@ -735,12 +732,13 @@ class CheckpointManager(Configurable):
             self.save_future = result.upload_completion
 
         elif self.async_mode == AsyncMode.ASYNC:
+            GarbageCollection.collect("GC collection invoked by checkpointer.")
             result = self.dcp_save(
                 states,
                 checkpoint_id=checkpoint_id,
                 async_mode=self.async_mode,
-                enable_garbage_collection=True,
             )
+            GarbageCollection.collect("GC collection invoked by checkpointer.")
 
             assert isinstance(result, Future)
             self.save_future = result
