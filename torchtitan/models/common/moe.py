@@ -107,12 +107,13 @@ class GroupedExperts(Module):
         x_TD = x_BLD.view(T, D)
         topk_scores_TK = topk_scores_BLK.view(T, K)
         topk_expert_ids_TK = topk_expert_ids_BLK.view(T, K)
-        del num_tokens_per_expert_E
         (
             routed_input_RD,
             num_tokens_per_expert_E,
             metadata,
-        ) = self.token_dispatcher.dispatch(x_TD, topk_scores_TK, topk_expert_ids_TK)
+        ) = self.token_dispatcher.dispatch(
+            x_TD, topk_scores_TK, topk_expert_ids_TK, num_tokens_per_expert_E
+        )
         routed_output_RD = self._experts_forward(
             routed_input_RD, num_tokens_per_expert_E
         )
