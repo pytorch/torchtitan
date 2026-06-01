@@ -497,12 +497,13 @@ class ChunkedCELoss(BaseLoss):
         """Replicate hidden states on the TP axis before applying lm_head."""
         mesh = current_mesh()
         if mesh is not None:
-            if not self.enable_sp or "tp" not in (mesh.mesh_dim_names or ()):
+            if "tp" not in (mesh.mesh_dim_names or ()):
                 return hidden_states
+            src = spmd.S(1) if self.enable_sp else spmd.I
             return spmd.redistribute(
                 hidden_states,
                 mesh.get_group("tp"),
-                src=spmd.S(1),
+                src=src,
                 dst=spmd.R,
                 backward_options={"op_dtype": hidden_states.dtype},
             )
