@@ -544,7 +544,6 @@ class CheckpointManager(Configurable):
             state_dict = self.sd_adapter.to_hf(state_dict)
             fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping
 
-            # Storage Writer Configuration
             # If sharded, we save to a subdir then consolidate
             save_path = (
                 os.path.join(checkpoint_id, "sharded")
@@ -563,7 +562,7 @@ class CheckpointManager(Configurable):
             # exists, the weights are distributed across multiple files (sharded).
             # The internal consolidation is disabled here and instead
             # `consolidate_safetensors_files_on_every_rank` is used later to manage
-            # the # multi-file merging process.
+            # the multi-file merging process.
 
         # Execution Dispatch
         checkpoint_save_id = (
@@ -640,7 +639,6 @@ class CheckpointManager(Configurable):
                 "but sd_adapter is not provided."
             )
 
-            # Prepare HF-compatible dictionary and reader
             hf_state_dict = self.sd_adapter.to_hf(state_dict)
             hf_storage_reader = self.sd_adapter.get_hf_storage_reader(
                 checkpoint_id, from_quantized
@@ -648,7 +646,6 @@ class CheckpointManager(Configurable):
 
             dcp.load(hf_state_dict, storage_reader=hf_storage_reader)
 
-            # Map the loaded HF tensors back to the internal model FQNs
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
             self.states[MODEL].load_state_dict(state_dict)
         else:
@@ -767,7 +764,7 @@ class CheckpointManager(Configurable):
         This function orchestrates the states loading process.
         If the local checkpoint folder does not yet exist, it attempts an initial load
         from a specified path (in either native or HF format) or performs loading using
-        provided HF assets path from the state dict adapter.  Otherwise, it retrieves
+        provided HF assets path from the state dict adapter. Otherwise, it retrieves
         the checkpoint corresponding to the specified step, defaulting to the latest
         available if the `step` is -1.
 
@@ -782,14 +779,11 @@ class CheckpointManager(Configurable):
         if not self.enable:
             return False
 
-        # Checkpoint Path Resolution
         model_only = False
         from_hf = False
         from_quantized = False
 
         if not os.path.exists(self.folder):
-            # Case A: Local folder doesn't exist - attempt initial/external load
-            # (i.e. "I am starting by using someone else's (or my own previous) work")
             model_only = self.initial_load_model_only
             from_hf = self.initial_load_in_hf
             from_quantized = self.initial_load_in_hf_quantized
@@ -831,11 +825,9 @@ class CheckpointManager(Configurable):
                 )
 
             else:
-                return False  # No local folder and no initial load path defined
+                return False
 
         else:
-            # Case B: Local folder exists - load local training checkpoints
-            # (i.e. "I am continuing my own work")
             if self.initial_load_path:
                 logger.warning(
                     "checkpoint.initial_load_path is provided but the "
@@ -909,7 +901,7 @@ class CheckpointManager(Configurable):
         if not self.staging_future.done():
             logger.debug("Staging future is not done yet; blocking for result.")
             self.staging_future.result()
-            self.staging_future = None
+        self.staging_future = None
 
     def maybe_wait_for_saving(self) -> None:
         """
@@ -935,7 +927,7 @@ class CheckpointManager(Configurable):
         if not self.save_future.done():
             logger.debug("Saving future is not done yet; blocking for result.")
             self.save_future.result()
-            self.staging_future = None
+        self.save_future = None
 
     def _find_load_step(self, folder: str = "") -> int:
         """
@@ -1072,8 +1064,6 @@ class CheckpointManager(Configurable):
                 f"at last step, step {curr_step}."
             )
         else:
-            # Full state save: keeping master weights as-is to ensure
-            # resume ability remains numerically sound.
             logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
             states = self._flattened_model_states_sd()
 
