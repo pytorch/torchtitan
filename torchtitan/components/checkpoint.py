@@ -288,10 +288,10 @@ class CheckpointManager(Configurable):
         data is successfully saved to the persistence storage device (disk).
 
         - "async": Uses threading and `torch.distributed.checkpoint.async_save`.
-        The training loop is blocked only during the GPU-to-CPU memory transfer
-        (typically on the order of tens of seconds). Once data reaches host RAM,
-        training resumes while a background thread manages the final write to disk.
-        This reduces idle time but remains subject to GIL contention.
+        The training loop is blocked only during the GPU-to-CPU memory transfer. Once
+        data reaches host RAM, training resumes while a background thread manages the
+        final write to disk. This reduces idle time but remains subject to GIL
+        contention.
 
         - "async_with_pinned_mem": Uses a separate process and pre-allocated pinned
         shared memory.
@@ -301,7 +301,7 @@ class CheckpointManager(Configurable):
         This eliminates GIL contention and minimizes the blocking window to near-zero
         (< 1s), at the cost of significantly higher fixed CPU RAM usage (pinned memory).
         If case of insufficient CPU memory, performance may degrade due to memory
-        paging. For most users, "async" should suffice.
+        paging.
 
         "disabled" is the default mode.
         """
@@ -511,8 +511,7 @@ class CheckpointManager(Configurable):
         enable_garbage_collection: bool = False,
         to_hf: bool = False,
     ) -> Future | AsyncSaveResponse | None:
-        """
-        Execute the DCP saving process.
+        """Execute the DCP saving process.
 
         This method orchestrates the state_dict transformation (e.g., to HuggingFace
         format), selects the appropriate storage writer, and dispatches the save
@@ -613,8 +612,7 @@ class CheckpointManager(Configurable):
         from_hf: bool,
         from_quantized: bool,
     ) -> None:
-        """
-        Load a DCP into the provided state dictionary.
+        """Load a DCP into the provided state dictionary.
 
         This method handles both standard DCP sharded checkpoints and HuggingFace
         safetensors. If loading from HF, it utilizes an adapter to map FQNs and
@@ -717,10 +715,7 @@ class CheckpointManager(Configurable):
                 checkpoint_id=checkpoint_id,
                 async_mode=self.async_mode,
             )
-
-            # NOTE: For ASYNC_WITH_PINNED_MEM, we skip GC here because the staging
-            # process (copying from GPU to CPU) is still ongoing. The pinned CPU buffers
-            # are actively in use and cannot be reclaimed until staging finishes.
+            # Calling GC here is not required for this path.
 
             assert isinstance(result, AsyncSaveResponse)
             self.staging_future = result.staging_completion
@@ -870,8 +865,7 @@ class CheckpointManager(Configurable):
         return True
 
     def maybe_wait_for_staging(self) -> None:
-        """
-        Wait for the staging process to complete if it is active.
+        """Wait for the staging process to complete if it is active.
 
         In `ASYNC_WITH_PINNED_MEM` mode, the checkpoint data is first staged from
         device (GPU) memory to pinned host (CPU) memory. This staging process is
@@ -896,14 +890,11 @@ class CheckpointManager(Configurable):
                 "but self.async_mode isn't ASYNC_WITH_PINNED_MEM."
             )
 
-        if not self.staging_future.done():
-            logger.debug("Staging future is not done yet; blocking for result.")
-            self.staging_future.result()
+        self.staging_future.result()
         self.staging_future = None
 
     def maybe_wait_for_saving(self) -> None:
-        """
-        Wait for any async background checkpoint saving operation to complete.
+        """Wait for any async background checkpoint saving operation to complete.
 
         This is a blocking call that ensures all checkpoint data has been fully
         saved to storage. Upon completion, the tracking future is cleared
@@ -922,14 +913,11 @@ class CheckpointManager(Configurable):
                 "self.save_future is not None, but self.async_mode is DISABLED."
             )
 
-        if not self.save_future.done():
-            logger.debug("Saving future is not done yet; blocking for result.")
-            self.save_future.result()
+        self.save_future.result()
         self.save_future = None
 
     def _find_load_step(self, folder: str = "") -> int:
-        """
-        Identify the highest available checkpoint step in the specified directory.
+        """Identify the highest available checkpoint step in the specified directory.
 
         This method scans the target folder for subdirectories matching the
         'step-N' pattern. A folder is only considered a valid checkpoint if
@@ -977,8 +965,7 @@ class CheckpointManager(Configurable):
     def _flattened_model_states_sd(
         self, state_dict: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        """
-        Extract and flatten model parameters into a single state dictionary.
+        """Extract and flatten model parameters into a single state dictionary.
 
         This method merges the internal state of the model object into the top-level
         dictionary while keeping auxiliary states (such as optimizers or lr_schedulers)
@@ -999,8 +986,7 @@ class CheckpointManager(Configurable):
         return sd
 
     def _states_to_load(self, model_only: bool) -> dict[str, Any]:
-        """
-        Determine which state objects should be restored during loading.
+        """Determine which state objects should be restored during loading.
 
         This method filters the checkpointer's state dictionary based on the
         loading context. It supports partial restoration for specific steps
@@ -1030,8 +1016,7 @@ class CheckpointManager(Configurable):
         return self._flattened_model_states_sd(states_to_load)
 
     def _save_last_step(self, curr_step: int) -> None:
-        """
-        Execute the final checkpoint save at the completion of training.
+        """Execute the final checkpoint save at the completion of training.
 
         This method handles the specific requirements for the final training
         artifact. It allows for saving model weights exclusively (stripping
