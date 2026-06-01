@@ -21,7 +21,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torch.utils._debug_mode import DebugMode
 
-from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.spmd_types import set_current_mesh, set_spmd_backend
 from torchtitan.models.common.nn_modules import Embedding
 
 
@@ -155,9 +155,9 @@ class TestVocabParallelEmbedding(DTensorTestBase):
                     # R@TP before the local masked embedding region.
                     # If SP: R @ weight -> S(1) if SP else I
                     out_type = spmd.S(1) if enable_sp else spmd.I
-                    dist_utils.set_spmd_backend("spmd")
+                    set_spmd_backend("spmd")
                     try:
-                        with dist_utils.set_current_mesh(mesh):
+                        with set_current_mesh(mesh):
                             with typecheck(strict_mode="strict", local=True):
                                 local_tokens = spmd.assert_type(
                                     local_tokens, {tp_group: spmd.R}
@@ -174,7 +174,7 @@ class TestVocabParallelEmbedding(DTensorTestBase):
                             with DebugMode() as debug_mode:
                                 embedding(local_tokens)
                     finally:
-                        dist_utils.set_spmd_backend("default")
+                        set_spmd_backend("default")
                     if enable_sp:
                         self.assertIn("reduce_scatter", debug_mode.debug_string())
                     else:

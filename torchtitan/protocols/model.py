@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from torchtitan.config import Configurable
 
 from .module import Module
-from .sharding import SpmdInputConfig
 
 
 class ModelConfigConverter(Configurable):
@@ -77,8 +76,6 @@ class BaseModel(Module):
 
         Subclasses define model-specific hyperparameters.
         """
-
-        spmd_input_config: SpmdInputConfig | None = None
 
         # TODO: This function violates encapsulation;
         # maybe replace it with config passes from outside.

@@ -32,7 +32,7 @@ from torchtitan.components.loss import (
     GradAccumulator,
     IGNORE_INDEX,
 )
-from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.spmd_types import set_current_mesh, set_spmd_backend
 from torchtitan.models.common.decoder_sharding import lm_head_sharding_config
 from torchtitan.protocols.types import MeshAxisName
 
@@ -674,9 +674,9 @@ class TestChunkedCELossSPMD(DTensorTestBase):
                         .detach()
                         .requires_grad_(True)
                     )
-                    dist_utils.set_spmd_backend("spmd")
+                    set_spmd_backend("spmd")
                     try:
-                        with dist_utils.set_current_mesh(mesh):
+                        with set_current_mesh(mesh):
                             spmd_mesh_names = spmd.current_mesh_names()
                             assert spmd_mesh_names is not None
                             dp_axis = spmd_mesh_names["dp"]
@@ -751,7 +751,7 @@ class TestChunkedCELossSPMD(DTensorTestBase):
                                 spmd.I,
                             )
                     finally:
-                        dist_utils.set_spmd_backend("default")
+                        set_spmd_backend("default")
 
                     # Match both scalar loss and hidden-state gradient against
                     # the eager local oracle for all LP on/off x SP on/off cases.

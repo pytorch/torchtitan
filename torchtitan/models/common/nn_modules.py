@@ -24,7 +24,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torchtitan.distributed.utils import current_mesh
+from torchtitan.distributed.spmd_types import current_mesh
 from torchtitan.protocols.module import Module
 
 
