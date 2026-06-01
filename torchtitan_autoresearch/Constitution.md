@@ -129,7 +129,8 @@ prose above is the human explanation of the same rules. Keep them in sync.
   "quality": {
     "eval": {"dataset": "c4_heldout", "seq_len": 4096, "metric": "eval_loss",
              "tokens": 3276800, "fallback_steps": 50, "val_steps": 16,
-             "calibration_repeats": 3, "z": 3.0},
+             "calibration_repeats": 3, "z": 3.0,
+             "warm_steps": 800, "lr_total_steps": 3000},
     "golden": {"dtype": "bfloat16", "quant": "none", "attn": "sdpa", "compile": "minimal"},
     "epsilon_rel": 0.005,
     "one_sided": true,

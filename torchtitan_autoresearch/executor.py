@@ -124,7 +124,11 @@ class SubprocessExecutor:
                      trajectory is compared to the golden's; a faithful match means
                      the change did not move the math, so quality is preserved and
                      the eval is skipped (the design's verify-routing).
+      - ``warm``   : one-time golden pre-train (``warm_steps``) that saves a full
+                     checkpoint; every eval warm-starts from it so the quality
+                     signal is taken past warmup, not in from-scratch chaos.
       - ``eval``   : validator-enabled run -> held-out eval loss (quality signal),
+                     warm-started from the golden checkpoint when available, and
                      only run when verify says the change is quality-affecting.
 
     Measurement is harness-pinned: ``--metrics.log_freq`` and step caps come from
@@ -147,6 +151,8 @@ class SubprocessExecutor:
         seq_len: int = 4096,
         eval_tokens: int = 0,
         eval_fallback_steps: int = 50,
+        warm_steps: int = 0,
+        lr_total_steps: int = 0,
         run_dir: str = "/tmp/ar_runs",
     ):
         self.repo_root = repo_root
@@ -160,9 +166,14 @@ class SubprocessExecutor:
         self.seq_len = seq_len
         self.eval_tokens = eval_tokens
         self.eval_fallback_steps = eval_fallback_steps
+        self.warm_steps = warm_steps  # pre-train the golden this far past warmup
+        self.lr_total_steps = lr_total_steps  # real LR-schedule horizon (decoupled)
         self.run_dir = run_dir
         os.makedirs(run_dir, exist_ok=True)
         self.golden_det_losses: list[float] = []  # set by the driver after calibration
+        self.warm_ckpt_path: str = (
+            ""  # set by prepare_warm_checkpoint; evals warm-start here
+        )
         self._log_cache: dict[tuple[str, str], str] = {}
 
     def _key(self, c: Candidate) -> str:
@@ -176,6 +187,9 @@ class SubprocessExecutor:
         label = (c.label or "cand").replace("/", "_").replace(" ", "_")[:24]
         return f"{label}_{h}"
 
+    def _dump_folder(self, c: Candidate, mode: str) -> str:
+        return os.path.join(self.run_dir, f"{self._key(c)}_{mode}_dump")
+
     def _run(self, c: Candidate, mode: str, extra: list[str]) -> str:
         key = (self._key(c), mode)
         if key in self._log_cache:
@@ -186,7 +200,7 @@ class SubprocessExecutor:
             *self.base_command,
             *c.command,
             f"--metrics.log_freq={self.log_freq}",
-            f"--dump_folder={os.path.join(self.run_dir, key[0] + '_' + mode + '_dump')}",
+            f"--dump_folder={self._dump_folder(c, mode)}",
             *extra,
         ]
         # Run inside repo_root (the experiment's worktree): cwd so relative paths
@@ -272,23 +286,73 @@ class SubprocessExecutor:
             return max(1, math.ceil(self.eval_tokens / (global_batch * self.seq_len)))
         return self.eval_fallback_steps
 
+    def prepare_warm_checkpoint(self, golden: Candidate) -> str:
+        """Pre-train the golden ``warm_steps`` (past warmup) and save a full
+        checkpoint the evals warm-start from. Paid once per experiment.
+
+        Solves substrate soft point #2: a from-scratch held-out eval is dominated
+        by warmup chaos, so a short eval is pure noise. Continuing an already-good
+        model a few *post-warmup* steps is a tight, cheap, honest quality signal --
+        and it matches the operating assumption that the starting model is good and
+        we are sensitive to degradations. ``lr_scheduler.total_steps`` keeps the LR
+        curve on its real horizon so step W lands where it truly would in training.
+
+        Returns the checkpoint folder path (also stored on ``self.warm_ckpt_path``),
+        or "" if warm start is disabled (``warm_steps<=0``) or the run failed.
+        """
+        if self.warm_steps <= 0:
+            return ""
+        extra = [
+            f"--training.steps={self.warm_steps}",
+            "--checkpoint.enable",
+            "--checkpoint.folder=ckpt",
+            f"--checkpoint.interval={self.warm_steps}",  # one full checkpoint, at step W
+            "--checkpoint.no_last_save_model_only",  # full state (model+opt+sched)
+        ]
+        if self.lr_total_steps:
+            extra.append(f"--lr_scheduler.total_steps={self.lr_total_steps}")
+        self._run(golden, "warm", extra)
+        # DCP writes {dump}/ckpt/step-W/{.metadata,*.distcp}; initial_load_path must
+        # point at the STEP dir (where .metadata lives), not the parent folder.
+        step_dir = os.path.join(
+            self._dump_folder(golden, "warm"), "ckpt", f"step-{self.warm_steps}"
+        )
+        if not os.path.isfile(os.path.join(step_dir, ".metadata")):
+            return ""
+        self.warm_ckpt_path = step_dir
+        return step_dir
+
     def run_eval(self, c, *, global_batch: int = 0, run_tag: str = ""):
-        steps = self.eval_steps_for(global_batch)
+        eval_steps = self.eval_steps_for(global_batch)
+        extra = [
+            "--validator.enable",
+            f"--validator.dataloader.dataset={self.val_dataset}",
+            f"--validator.steps={self.val_steps}",
+        ]
+        if self.warm_ckpt_path:
+            # Warm-start from the golden checkpoint: resume at step W (full state),
+            # train eval_steps more *post-warmup* steps, then validate. The fresh
+            # per-run dump keeps checkpoint.folder empty so initial_load_path is honored.
+            total = self.warm_steps + eval_steps
+            extra += [
+                "--checkpoint.enable",
+                f"--checkpoint.initial_load_path={self.warm_ckpt_path}",
+                "--checkpoint.no_initial_load_model_only",  # resume opt+sched, not just weights
+                "--checkpoint.load_only",  # load the warm state; never save (eval is throwaway)
+                f"--training.steps={total}",
+                f"--validator.freq={total}",
+            ]
+            if self.lr_total_steps:
+                extra.append(f"--lr_scheduler.total_steps={self.lr_total_steps}")
+        else:
+            # No warm checkpoint: from-scratch eval (toy/offline mode).
+            extra += [
+                f"--training.steps={eval_steps}",
+                f"--validator.freq={eval_steps}",
+            ]
         # run_tag distinguishes repeated golden evals so noise calibration gets
         # independent (non-cached) runs rather than the same cached log.
-        text = open(
-            self._run(
-                c,
-                "eval" + run_tag,
-                [
-                    f"--training.steps={steps}",
-                    "--validator.enable",
-                    f"--validator.dataloader.dataset={self.val_dataset}",
-                    f"--validator.freq={steps}",
-                    f"--validator.steps={self.val_steps}",
-                ],
-            )
-        ).read()
+        text = open(self._run(c, "eval" + run_tag, extra)).read()
         loss = M.parse_validation_loss(text)
         if loss is None:
             return EvalResult(ok=False, crash_text=text[-4000:])

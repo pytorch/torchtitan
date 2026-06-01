@@ -107,6 +107,8 @@ def main(argv: list[str] | None = None) -> int:
         eval_tokens=rules.eval_tokens,
         eval_fallback_steps=rules.eval_fallback_steps,
         val_steps=rules.eval_val_steps,
+        warm_steps=rules.eval_warm_steps,
+        lr_total_steps=rules.eval_lr_total_steps,
         run_dir=os.path.join(run_dir, "runs"),
     )
     try:
@@ -136,15 +138,31 @@ def main(argv: list[str] | None = None) -> int:
                 f"[calibrate] faithfulness tol = {ex.verify_tol:.2e} "
                 f"(golden rounding jitter {jitter:.2e} x10)"
             )
+        # Warm checkpoint (substrate soft point #2): pre-train the golden past
+        # warmup once so every held-out eval continues an already-good model a few
+        # post-warmup steps instead of measuring from-scratch chaos. Paid once.
+        if rules.eval_warm_steps > 0:
+            print(
+                f"[calibrate] building golden warm checkpoint @ {rules.eval_warm_steps} "
+                f"steps (LR horizon {rules.eval_lr_total_steps or 'run-length'})...",
+                flush=True,
+            )
+            wp = ex.prepare_warm_checkpoint(gold)
+            print(
+                f"[calibrate] warm checkpoint: {wp or 'FAILED -> evals run from scratch'}",
+                flush=True,
+            )
+
         # Quality bar + eval-noise band: repeat the golden's held-out eval at a
         # fixed TOKEN budget (equal-compute, not equal-steps) and measure its
-        # run-to-run spread. The floor uses this measured noise so the gate never
-        # rejects a candidate on a difference the eval itself cannot resolve.
+        # run-to-run spread. With a warm checkpoint these post-warmup evals are a
+        # tight signal; the floor uses the measured noise so the gate never rejects
+        # a candidate on a difference the eval itself cannot resolve.
         gb = tr.global_batch
         eval_steps = ex.eval_steps_for(gb)
         reps = rules.eval_calibration_repeats
         print(
-            f"[calibrate] golden eval x{reps} at ~{eval_steps} steps "
+            f"[calibrate] golden eval x{reps} at ~{eval_steps} post-warmup steps "
             f"({rules.eval_tokens:,} tokens / global batch {gb})...",
             flush=True,
         )

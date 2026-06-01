@@ -104,6 +104,16 @@ class Rules:
         return int(self._eval().get("calibration_repeats", 3))
 
     @property
+    def eval_warm_steps(self) -> int:
+        """Steps to pre-train the golden warm checkpoint (past warmup). 0 = from scratch."""
+        return int(self._eval().get("warm_steps", 0))
+
+    @property
+    def eval_lr_total_steps(self) -> int:
+        """Real LR-schedule horizon for warm evals (decoupled from run length). 0 = run length."""
+        return int(self._eval().get("lr_total_steps", 0))
+
+    @property
     def eval_z(self) -> float:
         """Multiplier on the eval-noise std for the quality floor's noise band."""
         return float(self._eval().get("z", 3.0))
