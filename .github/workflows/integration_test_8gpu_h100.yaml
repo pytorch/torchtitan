@@ -37,7 +37,7 @@ jobs:
   # Step 2: Use the dynamic matrix in the build-test job
   build-test:
     needs: set-matrix
-    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@huydo/linux-job-v3-shell-bash
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
