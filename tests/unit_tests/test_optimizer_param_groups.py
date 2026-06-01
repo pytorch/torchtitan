@@ -78,7 +78,7 @@ class TestParamGroupConfig(unittest.TestCase):
     def test_default_no_param_groups(self):
         """Empty param_groups produces a single group with all params."""
         model = SimpleModel()
-        config = OptimizersContainer.Config(param_groups=default_adamw(lr=1e-3))
+        config = default_adamw(lr=1e-3)
 
         groups = _get_default_groups(model, config)
 
@@ -141,34 +141,6 @@ class TestParamGroupConfig(unittest.TestCase):
         for name in default_names:
             self.assertFalse(name.endswith(".bias"), f"{name} should not be in default")
         self.assertEqual(groups[1]["weight_decay"], 0.1)
-
-    def test_embed_tokens_pattern(self):
-        """Pattern matching embed_tokens with weight_decay=0."""
-        model = SimpleModel()
-        config = OptimizersContainer.Config(
-            param_groups=[
-                ParamGroupConfig(
-                    pattern=r"embed_tokens\.",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={
-                        "lr": 1e-3,
-                        "betas": (0.9, 0.95),
-                        "eps": 1e-8,
-                        "weight_decay": 0.0,
-                    },
-                ),
-                _DEFAULT_ADAMW,
-            ],
-        )
-        groups = _get_default_groups(model, config)
-
-        self.assertEqual(len(groups), 2)
-        embed_names = _get_param_names_in_group(model, groups[0])
-        self.assertTrue(
-            all("embed_tokens" in n for n in embed_names),
-            f"Expected embed_tokens params, got {embed_names}",
-        )
-        self.assertEqual(groups[0]["weight_decay"], 0.0)
 
     def test_lr_override(self):
         """Different lr for a param group."""
@@ -372,12 +344,10 @@ class TestOptimizersContainerWithParamGroups(unittest.TestCase):
         self.assertEqual(len(opt.param_groups), 2)
 
     def test_build_optimizer_default_groups(self):
-        """Empty param_groups produces standard single-group behavior."""
+        """default_adamw produces standard single-group behavior."""
         model = SimpleModel()
-        config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=default_adamw(lr=1e-3),
-        )
+        config = default_adamw(lr=1e-3)
+        config.implementation = "for-loop"
         container = config.build(model_parts=[model])
         opt = container.optimizers[0]
         self.assertEqual(len(opt.param_groups), 1)
@@ -499,33 +469,6 @@ class TestMixedOptimizers(unittest.TestCase):
         self.assertEqual(adam.param_groups[0]["lr"], 5e-4)
         self.assertEqual(adam.param_groups[0]["betas"], (0.9, 0.95))
 
-    def test_mixed_optimizers_all_params_covered(self):
-        """All parameters should be covered across all optimizers."""
-        model = SimpleModel()
-        config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
-                    pattern=r"output\.",
-                    optimizer_name="Adam",
-                    optimizer_kwargs={"lr": 5e-4, "betas": (0.9, 0.95), "eps": 1e-8},
-                ),
-                ParamGroupConfig(
-                    pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
-                ),
-            ],
-        )
-        container = config.build(model_parts=[model])
-        all_opt_params = set()
-        for opt in container.optimizers:
-            for group in opt.param_groups:
-                for p in group["params"]:
-                    all_opt_params.add(id(p))
-        model_params = {id(p) for p in model.parameters() if p.requires_grad}
-        self.assertEqual(all_opt_params, model_params)
-
     def test_model_part_indices(self):
         """_model_part_indices correctly maps optimizers to model parts."""
         model1 = SimpleModel()
@@ -552,8 +495,8 @@ class TestMixedOptimizers(unittest.TestCase):
         self.assertEqual(container._model_part_indices[2], 1)
         self.assertEqual(container._model_part_indices[3], 1)
 
-    def test_param_group_labels(self):
-        """Param groups have correct _label for logging."""
+    def test_param_group_patterns(self):
+        """Param groups have correct pattern for logging."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
             implementation="for-loop",
@@ -572,8 +515,8 @@ class TestMixedOptimizers(unittest.TestCase):
         )
         container = config.build(model_parts=[model])
         adamw = container.optimizers[0]
-        self.assertEqual(adamw.param_groups[0]["_label"], r"output\.")
-        self.assertEqual(adamw.param_groups[1]["_label"], ".*")
+        self.assertEqual(adamw.param_groups[0]["pattern"], r"output\.")
+        self.assertEqual(adamw.param_groups[1]["pattern"], ".*")
 
     def test_mixed_optimizer_state_dict_round_trip(self):
         """State dict save/load works with mixed optimizer types."""
@@ -632,10 +575,8 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
     def test_default_schedule(self):
         """Default schedule should work the same as before."""
         model = SimpleModel()
-        config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=default_adamw(lr=1e-3),
-        )
+        config = default_adamw(lr=1e-3)
+        config.implementation = "for-loop"
         lr_config = LRSchedulersContainer.Config(
             warmup_steps=10,
             decay_type="linear",

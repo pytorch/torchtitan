@@ -8,11 +8,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import (
-    default_adamw,
-    OptimizersContainer,
-    OptimizersInBackwardContainer,
-)
+from torchtitan.components.optimizer import default_adamw, OptimizersInBackwardContainer
 from torchtitan.components.quantization import Float8LinearConverter
 from torchtitan.components.validate import Validator
 from torchtitan.config import (
@@ -36,7 +32,7 @@ def llama3_debugmodel() -> Trainer.Config:
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         model_spec=model_registry("debugmodel"),
-        optimizer=OptimizersContainer.Config(param_groups=default_adamw(lr=8e-4)),
+        optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -88,7 +84,7 @@ def llama3_debugmodel_varlen_attn() -> Trainer.Config:
 def llama3_debugmodel_opt_in_bwd() -> Trainer.Config:
     config = llama3_debugmodel()
     config.optimizer = OptimizersInBackwardContainer.Config(
-        param_groups=default_adamw(lr=8e-4)
+        param_groups=default_adamw(lr=8e-4).param_groups
     )
     return config
 
@@ -147,7 +143,7 @@ def llama3_8b() -> Trainer.Config:
             enable_tensorboard=True,
         ),
         model_spec=model_registry("8B"),
-        optimizer=OptimizersContainer.Config(param_groups=default_adamw(lr=3e-4)),
+        optimizer=default_adamw(lr=3e-4),
         training=TrainingConfig(
             local_batch_size=1,
             seq_len=8192,
@@ -179,7 +175,7 @@ def llama3_70b() -> Trainer.Config:
             enable_tensorboard=True,
         ),
         model_spec=model_registry("70B"),
-        optimizer=OptimizersContainer.Config(param_groups=default_adamw(lr=1.5e-4)),
+        optimizer=default_adamw(lr=1.5e-4),
         training=TrainingConfig(
             local_batch_size=8,
             seq_len=8192,
@@ -223,7 +219,7 @@ def llama3_405b() -> Trainer.Config:
                 ),
             ],
         ),
-        optimizer=OptimizersContainer.Config(param_groups=default_adamw(lr=8e-5)),
+        optimizer=default_adamw(lr=8e-5),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
             local_batch_size=2,
@@ -262,7 +258,7 @@ def sft_debugmodel() -> Trainer.Config:
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         model_spec=model_spec,
-        optimizer=OptimizersContainer.Config(param_groups=default_adamw(lr=8e-4)),
+        optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,

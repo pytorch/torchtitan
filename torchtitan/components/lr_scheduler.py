@@ -38,8 +38,7 @@ class LRSchedulersContainer(Stateful, Configurable):
 
     **Checkpoint behavior**
     All schedulers share the same lambda and step together. On save, only
-    ``last_epoch`` is needed for restore; full per-scheduler state is saved
-    alongside for observability. On load, ``last_epoch`` is restored and each
+    ``last_epoch`` is saved. On load, ``last_epoch`` is restored and each
     scheduler recomputes its lr from its own optimizer's ``base_lrs``. This
     handles mixed optimizers (different base lrs) and resharding (different
     number of schedulers between save and load).
@@ -211,25 +210,24 @@ class LRSchedulersContainer(Stateful, Configurable):
 
     def get_metrics(self) -> dict[str, float]:
         """Return per-param-group learning rates keyed for logging."""
-        lr_metrics = {}
+        metrics = {}
         for scheduler in self.schedulers:
             opt = scheduler.optimizer
             opt_name = type(opt).__name__
             for group, lr_val in zip(opt.param_groups, scheduler.get_last_lr()):
-                lr_metrics[f"lr/{opt_name}_{group['_label']}"] = float(lr_val)
-        return lr_metrics
+                metrics[f"lr/{opt_name}_{group['pattern']}"] = float(lr_val)
+        return metrics
 
     def step(self) -> None:
         for scheduler in self.schedulers:
             scheduler.step()
 
     def state_dict(self) -> dict[str, Any]:
-        # Save last_epoch (the step counter, shared across all schedulers) for
-        # loading, plus full per-scheduler state for observability/debugging.
-        return {
-            "last_epoch": self.schedulers[0].last_epoch,
-            "schedulers": [s.state_dict() for s in self.schedulers],
-        }
+        # Only last_epoch is needed — each scheduler recomputes its lr from
+        # its own optimizer's base_lrs on load. Per-scheduler state (base_lrs,
+        # _last_lr) is not saved because it's reconstructed from the optimizer
+        # config at construction time.
+        return {"last_epoch": self.schedulers[0].last_epoch}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         # Only restore last_epoch. Each scheduler recomputes _last_lr from its

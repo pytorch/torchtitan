@@ -67,28 +67,6 @@ class ParamGroupConfig:
     Must include all required kwargs (e.g. ``lr``). No implicit defaults."""
 
 
-def default_adamw(lr: float = 8e-4, **kwargs: Any) -> list[ParamGroupConfig]:
-    """Create a catch-all AdamW param group with standard defaults.
-
-    Use as a convenience for the common case::
-
-        OptimizersContainer.Config(param_groups=default_adamw(lr=3e-4))
-    """
-    return [
-        ParamGroupConfig(
-            pattern=r".*",
-            optimizer_name="AdamW",
-            optimizer_kwargs={
-                "lr": lr,
-                "betas": (0.9, 0.95),
-                "eps": 1e-8,
-                "weight_decay": 0.1,
-                **kwargs,
-            },
-        )
-    ]
-
-
 T = TypeVar("T", bound=Optimizer)
 
 
@@ -117,13 +95,18 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
+        param_groups: list[ParamGroupConfig] = field(default_factory=list)
+        """Per-parameter-group optimizer configurations. Each entry specifies a
+        regex pattern and a self-contained optimizer setup.
+        Patterns are checked in order; first match wins."""
+
         implementation: Literal[
             "for-loop", "foreach", "fused", "fused_opt_states_bf16"
         ] = "fused"
         """
         Optimizer implementation mode applied to all optimizer instances.
         Per-param-group ``optimizer_kwargs`` can override this (e.g.
-        ``"fused": False`` for optimizers that don't support fused with DTensor).
+        ``"fused": False`` for optimizers that don't support fused).
 
         - 'fused': Use fused implementation (CUDA only) for best performance.
         - 'foreach': Use some horizontal fusion of tensors for better performance.
@@ -135,12 +118,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
           OptimizersInBackwardContainer). See docs/bf16_optimizer_states.md.
         - more info: https://pytorch.org/docs/stable/optim.html
         """
-
-        param_groups: list[ParamGroupConfig] = field(default_factory=default_adamw)
-        """Per-parameter-group optimizer configurations. Each entry specifies a
-        regex pattern and a self-contained optimizer setup.
-        Patterns are checked in order; first match wins.
-        Defaults to ``default_adamw()``."""
 
     optimizers: list[T]
     model_parts: list[nn.Module]
@@ -173,7 +150,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     @staticmethod
     def _build_param_groups(
         model: nn.Module,
-        param_groups: list[ParamGroupConfig],
+        param_group_configs: list[ParamGroupConfig],
         impl_kwargs: dict[str, Any],
     ) -> dict[str, list[dict[str, Any]]]:
         """Build PyTorch param groups from model parameters, partitioned by optimizer.
@@ -181,13 +158,13 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         Each parameter is assigned to the first matching ParamGroupConfig pattern.
         Returns a dict mapping optimizer name to a list of param group dicts.
 
-        Each param group dict includes a ``_label`` key with the regex pattern
+        Each param group dict includes a ``pattern`` key with the regex pattern
         string for logging.
         """
         result: dict[str, list[dict[str, Any]]] = defaultdict(list)
         claimed: set[str] = set()  # first-match-wins
 
-        for pg in param_groups:
+        for pg in param_group_configs:
             pattern = re.compile(pg.pattern)
             matched = []
             for name, param in model.named_parameters():
@@ -205,17 +182,17 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             result[pg.optimizer_name].append(
                 {
                     "params": matched,
-                    "_label": pg.pattern,
+                    "pattern": pg.pattern,
                     **impl_kwargs,
                     **pg.optimizer_kwargs,
                 }
             )
 
-        return dict(result)
+        return result
 
     def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
         impl_kwargs = self._build_impl_kwargs(config)
-        param_groups = config.param_groups
+        param_group_configs = config.param_groups
         all_params = []
         self.optimizers = []
         self.model_parts = model_parts
@@ -224,7 +201,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
         for part_idx, model in enumerate(self.model_parts):
             groups_by_opt_name = self._build_param_groups(
-                model, param_groups, impl_kwargs
+                model, param_group_configs, impl_kwargs
             )
             for opt_name, opt_param_groups in groups_by_opt_name.items():
                 opt_cls = self._resolve_optimizer_cls(opt_name)
@@ -258,10 +235,10 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             for group in opt.param_groups:
                 num_params = len(group["params"])
                 kwargs = {k: v for k, v in group.items() if k in _KEY_KWARGS}
-                label = group["_label"]
+                pattern = group["pattern"]
                 logger.info(
                     f"Optimizer {opt_name} (model_part={part_idx}): "
-                    f"{num_params} params [{label}] {kwargs}"
+                    f"{num_params} params [{pattern}] {kwargs}"
                 )
 
     def _validate_params(self, all_params: list[nn.Parameter]) -> None:
@@ -393,7 +370,7 @@ class OptimizersInBackwardContainer(OptimizersContainer):
 
     def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
         impl_kwargs = self._build_impl_kwargs(config)
-        param_groups = config.param_groups
+        param_group_configs = config.param_groups
         all_params = []
         self.model_parts = model_parts
         # Maps each optimizer to its model part (for state_dict/load_state_dict)
@@ -402,18 +379,18 @@ class OptimizersInBackwardContainer(OptimizersContainer):
         optim_dict: dict[nn.Parameter, Optimizer] = {}
         for part_idx, model in enumerate(self.model_parts):
             groups_by_opt_name = self._build_param_groups(
-                model, param_groups, impl_kwargs
+                model, param_group_configs, impl_kwargs
             )
             for opt_name, opt_param_groups in groups_by_opt_name.items():
                 opt_cls = self._resolve_optimizer_cls(opt_name)
                 for group in opt_param_groups:
-                    label = group["_label"]
+                    pattern = group["pattern"]
                     kwargs = {
-                        k: v for k, v in group.items() if k not in ("params", "_label")
+                        k: v for k, v in group.items() if k not in ("params", "pattern")
                     }
                     for p in group["params"]:
                         optim_dict[p] = opt_cls(
-                            [{"params": [p], "_label": label, **kwargs}]
+                            [{"params": [p], "pattern": pattern, **kwargs}]
                         )
                         self._model_part_indices.append(part_idx)
             all_params.extend(p for p in model.parameters())
@@ -445,6 +422,30 @@ class OptimizersInBackwardContainer(OptimizersContainer):
 
     def zero_grad(self, set_to_none: bool = True) -> None:
         pass
+
+
+def default_adamw(lr: float = 8e-4, **kwargs: Any) -> OptimizersContainer.Config:
+    """Create an OptimizersContainer.Config with a catch-all AdamW param group.
+
+    Use as a convenience for the common case::
+
+        optimizer=default_adamw(lr=3e-4)
+    """
+    return OptimizersContainer.Config(
+        param_groups=[
+            ParamGroupConfig(
+                pattern=r".*",
+                optimizer_name="AdamW",
+                optimizer_kwargs={
+                    "lr": lr,
+                    "betas": (0.9, 0.95),
+                    "eps": 1e-8,
+                    "weight_decay": 0.1,
+                    **kwargs,
+                },
+            )
+        ]
+    )
 
 
 def register_moe_load_balancing_hook(

@@ -13,7 +13,7 @@ Each function returns a complete ``RLTrainer.Config`` and is discoverable by
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.optimizer import default_adamw, OptimizersContainer
+from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import (
     CompileConfig,
     DebugConfig,
@@ -48,7 +48,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
         ),
         trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(param_groups=default_adamw(lr=2e-6)),
+            optimizer=default_adamw(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
@@ -105,7 +105,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
         ),
         trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(param_groups=default_adamw(lr=2e-6)),
+            optimizer=default_adamw(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
@@ -163,7 +163,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
         ),
         trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(param_groups=default_adamw(lr=1e-6)),
+            optimizer=default_adamw(lr=1e-6),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
@@ -201,48 +201,6 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_debug() -> RLTrainer.Config:
-    """Debug config for quick iteration -- small model, few steps (2 GPUs: 1 gen + 1 train)."""
-    group_size = 4
-    return RLTrainer.Config(
-        model_spec=model_registry("debugmodel", attn_backend="varlen"),
-        num_steps=5,
-        num_prompts_per_step=5,
-        num_validation_samples=20,
-        compile=CompileConfig(enable=True, backend="aot_eager"),
-        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
-        validation_env=SumDigitsEnv.Config(
-            seed=99, correctness_reward=1.0, format_reward=0.3
-        ),
-        trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=8e-4),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
-                decay_type="linear",
-            ),
-            training=TrainingConfig(),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=1,
-                data_parallel_replicate_degree=1,
-            ),
-            loss=GRPOLoss.Config(),
-        ),
-        generator=VLLMGenerator.Config(
-            parallelism=ParallelismConfig(
-                tensor_parallel_degree=1,
-                data_parallel_replicate_degree=1,
-            ),
-            sampling=SamplingConfig(
-                n=group_size,
-                temperature=1.0,
-                top_p=0.95,
-                max_tokens=50,
-            ),
-        ),
-    )
-
-
 def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
     """On-policy GRPO config for Qwen3-0.6B under same parallelism (4 GPUs: 2 gen + 2 train).
 
@@ -266,7 +224,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
         ),
         trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(param_groups=default_adamw(lr=2e-6)),
+            optimizer=default_adamw(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
