@@ -51,10 +51,12 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
-from torchtitan.protocols.module import preserve_buffer_spmd
-from torchtitan.protocols.sharding import (
-    is_placement_like,
+from torchtitan.distributed.spmd_types import (
+    parallelize_spmd_inputs,
     placement_to_spmd_assert_type,
+    preserve_buffer_spmd,
+    set_current_mesh,
+    set_spmd_backend,
 )
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -215,7 +217,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
-        dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
+        set_spmd_backend(config.parallelism.spmd_backend)
 
         # Logging needs to happen after distributed initialized
         config.maybe_log()
@@ -665,7 +667,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
         elif self.config.parallelism.spmd_backend == "spmd":
-            self._annotate_inputs_spmd(inputs, labels, extra_inputs, extra_kwargs)
+            parallelize_spmd_inputs(
+                self.parallel_dims, inputs, labels, extra_inputs, extra_kwargs
+            )
 
         return inputs, labels, extra_inputs, extra_kwargs
 
@@ -739,44 +743,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
-
-    def _annotate_inputs_spmd(
-        self,
-        inputs: torch.Tensor,
-        labels: torch.Tensor,
-        extra_inputs: dict[str, torch.Tensor],
-        extra_kwargs: dict[str, Any],
-    ) -> None:
-        """Annotate configured model inputs with local SPMD types."""
-        cfg = self.model_config.spmd_input_config
-        if cfg is None:
-            return
-
-        def annotate_type(value: object, placement: object) -> None:
-            if not isinstance(value, torch.Tensor):
-                return
-            local_type, partition_spec = placement_to_spmd_assert_type(placement)
-            if local_type:
-                spmd.assert_type(value, local_type, partition_spec=partition_spec)
-
-        def annotate_tree(value: object, placement: object) -> None:
-            pytree.tree_map(
-                annotate_type,
-                value,
-                placement,
-                is_leaf=is_placement_like,
-            )
-
-        if cfg.inputs is not None:
-            annotate_tree(inputs, cfg.inputs)
-        if cfg.labels is not None:
-            annotate_tree(labels, cfg.labels)
-        for name, placement in cfg.extra_inputs.items():
-            if name in extra_inputs:
-                annotate_tree(extra_inputs[name], placement)
-        for name, placement in cfg.extra_kwargs.items():
-            if name in extra_kwargs:
-                annotate_tree(extra_kwargs[name], placement)
 
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
@@ -914,7 +880,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     self.gc_handler.run(self.step)
 
                     spmd_mesh_context = (
-                        dist_utils.set_current_mesh(
+                        set_current_mesh(
                             self.parallel_dims.get_activated_mesh(["dp", "cp", "tp"])
                         )
                         if config.parallelism.spmd_backend == "spmd"
