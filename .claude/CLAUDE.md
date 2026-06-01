@@ -17,6 +17,10 @@ pytest tests/ -x
 Integration tests override default config for Llama 3 debug model.
 See tests/integration_tests/ for `OverrideDefinitions`.
 
+### Performance Testing
+When running performance tests, use at least 10 training steps (for example,
+`--training.steps 10`) so startup and warmup effects do not dominate the results.
+
 ### Validating Numerics
 Non-computation changes (e.g. activation checkpointing, refactoring) must produce
 **identical loss** before vs. after with `--debug.seed=42` and `--debug.deterministic`.
