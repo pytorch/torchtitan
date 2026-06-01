@@ -89,6 +89,8 @@ def _build_llama4_layers(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     rope_max_seq_len: int,
+    rope_theta: float,
+    rope_backend: str,
     rope_scaling: str,
     rope_scaling_factor: float = 8.0,
     rope_high_freq_factor: float = 4.0,
@@ -97,6 +99,9 @@ def _build_llama4_layers(
 
     Handles iRoPE (NoPE on every N layers) and MoE interleaving. For each
     layer, depth-scaled inits are computed using the layer index.
+
+    ``rope_scaling_factor`` and ``rope_high_freq_factor`` are optional knobs
+    when rope_backend is ``llama``.
     """
     inner_attention, mask_type = get_attention_config(attn_backend)
     if every_n_layers_nope <= 1:
@@ -123,8 +128,8 @@ def _build_llama4_layers(
             inner_attention=inner_attention,
             mask_type=mask_type,
             rope_max_seq_len=rope_max_seq_len,
-            rope_theta=500000,
-            rope_backend="complex",
+            rope_theta=rope_theta,
+            rope_backend=rope_backend,
             rope_scaling=rope_scaling,
             rope_scaling_factor=rope_scaling_factor,
             rope_high_freq_factor=rope_high_freq_factor,
@@ -214,6 +219,7 @@ def _debugmodel(
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
+            n_kv_heads=None,
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
             moe_hidden_dim=compute_moe_hidden_dim(dim),
             num_experts=8,
@@ -221,8 +227,12 @@ def _debugmodel(
             interleave_moe_layer_step=2,
             fixed_attn_block_size=256,
             attn_backend=attn_backend,
+            shared_experts_hidden_dim=None,
             moe_comm_backend=moe_comm_backend,
+            non_blocking_capacity_factor=None,
             rope_max_seq_len=1048576,
+            rope_theta=500000,
+            rope_backend="complex",
             rope_scaling="llama",
             rope_scaling_factor=16.0,
             rope_high_freq_factor=1.0,
@@ -272,9 +282,14 @@ def _17bx16e(
             num_experts=16,
             every_n_layers_nope=4,
             interleave_moe_layer_step=1,
+            fixed_attn_block_size=8192,
             attn_backend=attn_backend,
+            shared_experts_hidden_dim=None,
             moe_comm_backend=moe_comm_backend,
+            non_blocking_capacity_factor=None,
             rope_max_seq_len=10485760,
+            rope_theta=500000,
+            rope_backend="complex",
             rope_scaling="llama",
             rope_scaling_factor=16.0,
             rope_high_freq_factor=1.0,
@@ -324,9 +339,14 @@ def _17bx128e(
             num_experts=128,
             every_n_layers_nope=4,
             interleave_moe_layer_step=1,
+            fixed_attn_block_size=8192,
             attn_backend=attn_backend,
+            shared_experts_hidden_dim=None,
             moe_comm_backend=moe_comm_backend,
+            non_blocking_capacity_factor=None,
             rope_max_seq_len=1048576,
+            rope_theta=500000,
+            rope_backend="complex",
             rope_scaling="none",
         ),
     )

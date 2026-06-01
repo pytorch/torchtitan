@@ -209,6 +209,7 @@ def _build_qwen3_vl_layers(
     attn_backend: str,
     rope_max_seq_len: int,
     rope_theta: float,
+    rope_backend: str,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for dense Qwen3-VL models with depth-scaled inits."""
     inner_attention, mask_type = get_attention_config(attn_backend)
@@ -229,7 +230,7 @@ def _build_qwen3_vl_layers(
                     mask_type=mask_type,
                     rope_max_seq_len=rope_max_seq_len,
                     rope_theta=rope_theta,
-                    rope_backend="cos_sin",
+                    rope_backend=rope_backend,
                     qk_norm=_qwen3_vl_norm(head_dim),
                 ),
                 feed_forward=make_ffn_config(
@@ -258,6 +259,7 @@ def _build_qwen3_vl_moe_layers(
     non_blocking_capacity_factor: float | None = None,
     rope_max_seq_len: int,
     rope_theta: float,
+    rope_backend: str,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for MoE Qwen3-VL models with depth-scaled inits."""
     inner_attention, mask_type = get_attention_config(attn_backend)
@@ -278,7 +280,7 @@ def _build_qwen3_vl_moe_layers(
                     mask_type=mask_type,
                     rope_max_seq_len=rope_max_seq_len,
                     rope_theta=rope_theta,
-                    rope_backend="cos_sin",
+                    rope_backend=rope_backend,
                     qk_norm=_qwen3_vl_norm(head_dim),
                 ),
                 moe=make_moe_config(
@@ -336,6 +338,7 @@ def _debugmodel(attn_backend: str) -> Qwen3VLModel.Config:
             hidden_dim=512,
             rope_max_seq_len=4096,
             rope_theta=1000000.0,
+            rope_backend="cos_sin",
         ),
         vision_encoder=_vl_vision_encoder_config(
             dim=256,
@@ -388,6 +391,7 @@ def _debugmodel_moe(
             moe_comm_backend=moe_comm_backend,
             rope_max_seq_len=4096,
             rope_theta=1000000.0,
+            rope_backend="cos_sin",
         ),
         vision_encoder=_vl_vision_encoder_config(
             dim=256,
@@ -435,6 +439,7 @@ def _2b(attn_backend: str) -> Qwen3VLModel.Config:
             hidden_dim=6144,
             rope_max_seq_len=32768,
             rope_theta=5000000.0,
+            rope_backend="cos_sin",
         ),
         vision_encoder=_vl_vision_encoder_config(
             dim=1024,
@@ -481,6 +486,7 @@ def _8b(attn_backend: str) -> Qwen3VLModel.Config:
             hidden_dim=12288,
             rope_max_seq_len=32768,
             rope_theta=5000000.0,
+            rope_backend="cos_sin",
         ),
         vision_encoder=_vl_vision_encoder_config(
             dim=1152,
@@ -536,6 +542,7 @@ def _30b_a3b(
             moe_comm_backend=moe_comm_backend,
             rope_max_seq_len=32768,
             rope_theta=5000000.0,
+            rope_backend="cos_sin",
         ),
         vision_encoder=_vl_vision_encoder_config(
             dim=1152,
@@ -588,6 +595,7 @@ def _235b_a22b(
             moe_comm_backend=moe_comm_backend,
             rope_max_seq_len=32768,
             rope_theta=5000000.0,
+            rope_backend="cos_sin",
         ),
         vision_encoder=_vl_vision_encoder_config(
             dim=1152,
