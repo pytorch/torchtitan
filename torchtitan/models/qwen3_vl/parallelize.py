@@ -158,7 +158,7 @@ def parallelize_qwen3_vl(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    if parallelism.full_dtensor:
+    if parallelism.spmd_backend == "full_dtensor":
         raise NotImplementedError("full_dtensor is not supported yet.")
 
     model_compile_enabled = (
