@@ -98,12 +98,14 @@ class Embedding(nn.Embedding, Module):
             self.sparse,
         )
         out = out * mask.unsqueeze(-1).to(out.dtype)
+        bwd = {"op_dtype": torch.float32} if out.dtype != torch.float32 else None
         tp_out_type = spmd.S(1) if self.enable_sp else spmd.I
         return spmd.redistribute(
             out,
             self.tp_pg,
             src=spmd.P,
             dst=tp_out_type,
+            backward_options=bwd,
         )
 
 

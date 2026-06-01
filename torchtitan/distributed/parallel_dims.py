@@ -71,11 +71,6 @@ class ParallelDims:
         )
         for d in (dp_replicate, cp, tp, pp, ep):
             assert d >= 1, "Parallelism degree should be >= 1, except for dp_shard"
-        if self.spmd_backend == "spmd":
-            raise NotImplementedError(
-                "parallelism.spmd_backend='spmd' is not supported yet."
-            )
-
         assert dp_shard == -1 or dp_shard >= 1, "dp_shard must -1 or >=1."
         if dp_shard < 0:
             self.dp_shard = dp_shard = self.world_size // (dp_replicate * cp * tp * pp)
@@ -91,11 +86,11 @@ class ParallelDims:
             # Always keep fsdp mesh with real backend so fully_shard()
             # can apply MixedPrecisionPolicy even at degree 1.
             return True
-        if name == "dp_shard" and self.spmd_backend == "full_dtensor":
-            # Under full_dtensor ``dp_shard`` is the DP storage axis (no
-            # flattened ``fsdp``); keep alive at size 1 so ``fully_shard``
-            # can install MixedPrecisionPolicy and FSDP can discriminate
-            # the DP submesh on TP/DDP/PP-only.
+        if name == "dp_shard" and self.spmd_backend in ("full_dtensor", "spmd"):
+            # Under full_dtensor/local-SPMD, ``dp_shard`` is the DP storage axis
+            # (no flattened ``fsdp``); keep alive at size 1 so ``fully_shard``
+            # can install MixedPrecisionPolicy and FSDP can discriminate the DP
+            # submesh on TP/DDP/PP-only.
             return True
         if name == "efsdp":
             # We always keep the efsdp if EP is larger than 1 because we need
