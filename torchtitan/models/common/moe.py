@@ -54,40 +54,47 @@ class GroupedExperts(Module):
     def _experts_forward(
         self,
         x_RD: torch.Tensor,
-        num_global_tokens_per_local_expert_e: torch.Tensor,
+        num_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
-        """Raw expert computation without dispatch/combine."""
+        """Raw expert computation without dispatch/combine.
+
+        Shape suffixes here describe logical grouped-mm inputs, not physical
+        sharding. Under EP, E may be a local shard of experts; under TP,
+        expert weights shard hidden dimensions instead; under SP, R may be a
+        local token shard. Keep logical capital suffixes here to avoid encoding
+        a specific parallel layout in these local tensor names.
+        """
         if isinstance(self.w1_EFD, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            w1_eFD = self.w1_EFD.to_local()
+            w1_EFD = self.w1_EFD.to_local()
             # pyrefly: ignore [missing-attribute]
-            w2_eDF = self.w2_EDF.to_local()
+            w2_EDF = self.w2_EDF.to_local()
             # pyrefly: ignore [missing-attribute]
-            w3_eFD = self.w3_EFD.to_local()
+            w3_EFD = self.w3_EFD.to_local()
         else:
-            w1_eFD = self.w1_EFD
-            w2_eDF = self.w2_EDF
-            w3_eFD = self.w3_EFD
+            w1_EFD = self.w1_EFD
+            w2_EDF = self.w2_EDF
+            w3_EFD = self.w3_EFD
 
-        offsets_e = torch.cumsum(
-            num_global_tokens_per_local_expert_e, dim=0, dtype=torch.int32
+        offsets_E = torch.cumsum(
+            num_tokens_per_expert_E, dim=0, dtype=torch.int32
         )
 
         h_RF = F.silu(
             torch._grouped_mm(
                 x_RD.bfloat16(),
-                w1_eFD.bfloat16().transpose(-2, -1),
-                offs=offsets_e,
+                w1_EFD.bfloat16().transpose(-2, -1),
+                offs=offsets_E,
             )
         )
         h_RF = h_RF * torch._grouped_mm(
             x_RD.bfloat16(),
-            w3_eFD.bfloat16().transpose(-2, -1),
-            offs=offsets_e,
+            w3_EFD.bfloat16().transpose(-2, -1),
+            offs=offsets_E,
         )
         return torch._grouped_mm(
-            h_RF, w2_eDF.bfloat16().transpose(-2, -1), offs=offsets_e
+            h_RF, w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
         ).type_as(x_RD)
 
     def forward(
