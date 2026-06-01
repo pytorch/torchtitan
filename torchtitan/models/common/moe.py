@@ -95,7 +95,7 @@ class GroupedExperts(Module):
         x_BLD: torch.Tensor,
         topk_scores_BLK: torch.Tensor,
         topk_expert_ids_BLK: torch.Tensor,
-        num_tokens_per_expert_E: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
@@ -114,7 +114,7 @@ class GroupedExperts(Module):
             num_global_tokens_per_local_expert_e,
             metadata,
         ) = self.token_dispatcher.dispatch(
-            x_TD, topk_scores_TK, topk_expert_ids_TK, num_tokens_per_expert_E
+            x_TD, topk_scores_TK, topk_expert_ids_TK, num_local_tokens_per_expert_E
         )
         routed_output_RD = self._experts_forward(
             routed_input_RD, num_global_tokens_per_local_expert_e
@@ -407,7 +407,7 @@ class MoE(Module):
             scores_BLE,
             topk_expert_ids_BLK,  # pyrefly: ignore [bad-argument-count]
         )
-        num_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
+        num_local_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
 
         # tokens_per_expert_E will be used to update the expert bias for load balancing,
         # and also to count the expert usage.
@@ -415,10 +415,13 @@ class MoE(Module):
         #       first in the forward pass, and then in the backward pass. However, this has no
         #       effect on the expert bias update thanks to the torch.sign() operator.
         with torch.no_grad():
-            self.tokens_per_expert_E.add_(num_tokens_per_expert_E)
+            self.tokens_per_expert_E.add_(num_local_tokens_per_expert_E)
 
         out_TD = self.experts(
-            x_BLD, topk_scores_BLK, topk_expert_ids_BLK, num_tokens_per_expert_E
+            x_BLD,
+            topk_scores_BLK,
+            topk_expert_ids_BLK,
+            num_local_tokens_per_expert_E,
         )
 
         # shared_experts runs in parallel with deepep combine communication.

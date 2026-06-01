@@ -77,24 +77,24 @@ class GptOssGroupedExperts(Module):
     def _experts_forward(
         self,
         x_RD: torch.Tensor,
-        num_tokens_per_expert_E: torch.Tensor,
+        num_global_tokens_per_local_expert_e: torch.Tensor,
     ) -> torch.Tensor:
         """Raw expert computation without dispatch/combine."""
         if isinstance(self.mlp1_weight_EGD, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            mlp1_weight_EGD = self.mlp1_weight_EGD.to_local()
+            mlp1_weight_eGD = self.mlp1_weight_EGD.to_local()
             # pyrefly: ignore [missing-attribute]
-            mlp1_bias_EG = self.mlp1_bias_EG.to_local()
+            mlp1_bias_eG = self.mlp1_bias_EG.to_local()
             # pyrefly: ignore [missing-attribute]
-            mlp2_weight_EDF = self.mlp2_weight_EDF.to_local()
+            mlp2_weight_eDF = self.mlp2_weight_EDF.to_local()
             # pyrefly: ignore [missing-attribute]
-            mlp2_bias_ED = self.mlp2_bias_ED.to_local()
+            mlp2_bias_eD = self.mlp2_bias_ED.to_local()
         else:
-            mlp1_weight_EGD = self.mlp1_weight_EGD
-            mlp1_bias_EG = self.mlp1_bias_EG
-            mlp2_weight_EDF = self.mlp2_weight_EDF
-            mlp2_bias_ED = self.mlp2_bias_ED
+            mlp1_weight_eGD = self.mlp1_weight_EGD
+            mlp1_bias_eG = self.mlp1_bias_EG
+            mlp2_weight_eDF = self.mlp2_weight_EDF
+            mlp2_bias_eD = self.mlp2_bias_ED
 
         # Determine tp_degree from device mesh if available
         tp_degree = 1
@@ -106,29 +106,29 @@ class GptOssGroupedExperts(Module):
                 tp_dim_idx = mesh_dim_names.index("tp")
                 tp_degree = self.mlp1_weight_EGD.device_mesh.size(tp_dim_idx)
 
-        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
-        # Pad num_tokens_per_expert_E with tail slack so that repeat_interleave
+        offsets_e = torch.cumsum(num_global_tokens_per_local_expert_e, dim=0, dtype=torch.int32)
+        # Pad num_global_tokens_per_local_expert_e with tail slack so that repeat_interleave
         # with output_size=x_RD.shape[0] directly produces a static-shaped output,
         # avoiding the D2H sync that repeat_interleave incurs without output_size.
         tail_slack = (
-            (x_RD.shape[0] - offsets_E[-1])
+            (x_RD.shape[0] - offsets_e[-1])
             .unsqueeze(0)
-            .to(num_tokens_per_expert_E.dtype)
+            .to(num_global_tokens_per_local_expert_e.dtype)
         )
         # shape (E+1,): E expert counts + 1 tail slack for padding
         num_tokens_per_expert_long = torch.cat(
-            [num_tokens_per_expert_E, tail_slack]
+            [num_global_tokens_per_local_expert_e, tail_slack]
         ).long()
 
         # G = gate+up dimension (2*F)
         h_RG = torch._grouped_mm(
             x_RD.bfloat16(),
-            mlp1_weight_EGD.transpose(-2, -1).bfloat16(),
-            offs=offsets_E,
+            mlp1_weight_eGD.transpose(-2, -1).bfloat16(),
+            offs=offsets_e,
         )
 
         b1 = torch.cat(
-            [mlp1_bias_EG, mlp1_bias_EG.new_zeros(1, mlp1_bias_EG.shape[-1])]
+            [mlp1_bias_eG, mlp1_bias_eG.new_zeros(1, mlp1_bias_eG.shape[-1])]
         )
         b1_RG = b1.repeat_interleave(
             num_tokens_per_expert_long, dim=0, output_size=x_RD.shape[0]
@@ -137,12 +137,12 @@ class GptOssGroupedExperts(Module):
 
         h_RF = swiglu(h_RG, limit=self.swiglu_limit)
         h_RD = torch._grouped_mm(
-            h_RF, mlp2_weight_EDF.transpose(-2, -1).bfloat16(), offs=offsets_E
+            h_RF, mlp2_weight_eDF.transpose(-2, -1).bfloat16(), offs=offsets_e
         )
 
         # Apply custom autograd function to scale bias in forward but not in backward
         b2 = torch.cat(
-            [mlp2_bias_ED, mlp2_bias_ED.new_zeros(1, mlp2_bias_ED.shape[-1])]
+            [mlp2_bias_eD, mlp2_bias_eD.new_zeros(1, mlp2_bias_eD.shape[-1])]
         )
         b2_RD = b2.repeat_interleave(
             num_tokens_per_expert_long, dim=0, output_size=x_RD.shape[0]
@@ -155,7 +155,7 @@ class GptOssGroupedExperts(Module):
         x_BLD: torch.Tensor,
         topk_scores_BLK: torch.Tensor,
         topk_expert_ids_BLK: torch.Tensor,
-        num_tokens_per_expert_E: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add."""
         B, L, D = x_BLD.shape
@@ -166,13 +166,13 @@ class GptOssGroupedExperts(Module):
         topk_expert_ids_TK = topk_expert_ids_BLK.view(T, K)
         (
             routed_input_RD,
-            num_tokens_per_expert_E,
+            num_global_tokens_per_local_expert_e,
             metadata,
         ) = self.token_dispatcher.dispatch(
-            x_TD, topk_scores_TK, topk_expert_ids_TK, num_tokens_per_expert_E
+            x_TD, topk_scores_TK, topk_expert_ids_TK, num_local_tokens_per_expert_E
         )
         routed_output_RD = self._experts_forward(
-            routed_input_RD, num_tokens_per_expert_E
+            routed_input_RD, num_global_tokens_per_local_expert_e
         )
         return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
 

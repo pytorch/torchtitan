@@ -250,7 +250,7 @@ def set_moe_sharding_config(
             "x_BLD": experts_in_layout,
             "topk_scores_BLK": experts_in_layout,
             "topk_expert_ids_BLK": experts_in_layout,
-            "num_tokens_per_expert_E": _tokens_per_expert_placement(
+            "num_local_tokens_per_expert_E": _tokens_per_expert_placement(
                 enable_ep=enable_ep
             ),
         },
