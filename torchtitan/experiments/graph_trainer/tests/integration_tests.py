@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
-import importlib
 import os
 
 from tests.integration_tests import OverrideDefinitions
@@ -16,8 +15,6 @@ from tests.integration_tests.run_tests import run_tests
 # triggered by the full DTensor change (#2149). Re-enable once the
 # partitioner issue is resolved.
 _JIT_DISABLED = True
-
-_DEEPEP_AVAILABLE = importlib.util.find_spec("deep_ep") is not None
 
 
 def _build_llama3_tests() -> list[OverrideDefinitions]:
@@ -364,7 +361,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace deepseek_v3 FSDP+TP+HybridEP",
             "aot_fx_trace_deepseek_v3_hybridep",
             ngpu=4,
-            disabled=not _DEEPEP_AVAILABLE,
         ),
     ]
 
