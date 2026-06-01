@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import functools
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
@@ -36,6 +37,19 @@ from torchtitan.protocols.sharding import (
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
+
+
+@contextmanager
+def preserve_buffer_spmd(model: nn.Module) -> Iterator[None]:
+    """Preserve spmd_types annotations on buffers replaced during initialization."""
+    saved: dict[str, Any] = {}
+    for fqn, buf in model.named_buffers():
+        if spmd.has_local_type(buf):
+            saved[fqn] = dict(spmd.get_local_type(buf))
+    yield
+    for fqn, buf in model.named_buffers():
+        if fqn in saved and not spmd.has_local_type(buf):
+            spmd.assert_type(buf, saved[fqn])
 
 
 def redistribute_spmd_per_axis(
