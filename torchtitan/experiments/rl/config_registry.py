@@ -11,6 +11,8 @@ Each function returns a complete ``RLTrainer.Config`` and is discoverable by
 ``ConfigManager`` via ``--module rl --config <function_name>``.
 """
 
+from dataclasses import dataclass, field
+
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
@@ -21,14 +23,33 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
-
-_BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.grpo import GRPOLoss, RLTrainer
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.sum_digits import SumDigitsEnv
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.qwen3 import model_registry
+from torchtitan.protocols.model import ModelConfigConverter
+
+_BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
+
+
+class FlexKernelOptionsConverter(ModelConfigConverter):
+    """Traverse all FlexAttention layers and set kernel options."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ModelConfigConverter.Config):
+        kernel_options: dict = field(default_factory=dict)
+
+    def __init__(self, config: Config):
+        self.kernel_options = config.kernel_options
+
+    def convert(self, model_config) -> None:
+        for layer_cfg in model_config.layers:
+            inner = layer_cfg.attention.inner_attention
+            if isinstance(inner, FlexAttention.Config):
+                inner.kernel_options.update(self.kernel_options)
 
 
 def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
@@ -70,12 +91,15 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
 
 def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B with flex attention (4 GPUs: 2 gen + 2 train)."""
-    spec = model_registry("0.6B", attn_backend="flex")
-    for layer_cfg in spec.model.layers:
-        layer_cfg.attention.inner_attention.kernel_options["SPLIT_KV"] = 1
-        layer_cfg.attention.inner_attention.kernel_options[
-            "FORCE_USE_FLEX_ATTENTION"
-        ] = True
+    spec = model_registry(
+        "0.6B",
+        attn_backend="flex",
+        converters=[
+            FlexKernelOptionsConverter.Config(
+                kernel_options={"SPLIT_KV": 1, "FORCE_USE_FLEX_ATTENTION": True},
+            ),
+        ],
+    )
     group_size = 8
     return RLTrainer.Config(
         model_spec=spec,
@@ -135,13 +159,19 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B with flex attention and batch invariance
     for bitwise-identical numerics between trainer and generator (4 GPUs: 2 gen + 2 train).
     """
-    spec = model_registry("0.6B", attn_backend="flex")
-    for layer_cfg in spec.model.layers:
-        layer_cfg.attention.inner_attention.kernel_options[
-            "FORCE_USE_FLEX_ATTENTION"
-        ] = True
-        layer_cfg.attention.inner_attention.kernel_options["BLOCK_M"] = 16
-        layer_cfg.attention.inner_attention.kernel_options["BLOCK_N"] = 16
+    spec = model_registry(
+        "0.6B",
+        attn_backend="flex",
+        converters=[
+            FlexKernelOptionsConverter.Config(
+                kernel_options={
+                    "FORCE_USE_FLEX_ATTENTION": True,
+                    "BLOCK_M": 16,
+                    "BLOCK_N": 16,
+                },
+            ),
+        ],
+    )
     return RLTrainer.Config(
         model_spec=spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
@@ -152,6 +182,10 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLTrainer.Config:
         validation_env=SumDigitsEnv.Config(
             seed=99, correctness_reward=1.0, format_reward=0.3
         ),
+        batcher=Batcher.Config(
+            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
+        ),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -160,9 +194,16 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLTrainer.Config:
             ),
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 disable_loss_parallel=True,
                 enable_sequence_parallel=False,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
             ),
             debug=_BATCH_INVARIANT_DEBUG,
             loss=GRPOLoss.Config(),
@@ -175,6 +216,7 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
+            checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 n=8,
                 temperature=0.8,

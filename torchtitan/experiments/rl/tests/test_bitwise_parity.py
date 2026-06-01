@@ -45,32 +45,36 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
-from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.distributed.utils import set_batch_invariance
-from torchtitan.experiments.rl.config_registry import (
-    rl_grpo_qwen3_0_6b_flex_batch_invariant,
-    rl_grpo_qwen3_0_6b_varlen_batch_invariant,
-)
-from torchtitan.experiments.rl.grpo import RLTrainer
-from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
-from torchtitan.experiments.rl.models.vllm_registry import (
-    registry_to_vllm,
-    VLLM_MODEL_NAME,
-)
-from torchtitan.experiments.rl.actors.utils import (
-    create_flex_block_mask,
-    create_positions_from_seq_lens,
-    pad_to_block_aligned,
-    unpad_from_block_aligned,
-)
-from torchtitan.models.common.attention import VarlenMetadata
-from torchtitan.tools import utils
+from torch.distributed.tensor import DTensor
+from torch.nn.attention.flex_attention import and_masks
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+from torchtitan.components.checkpoint import CheckpointManager
+
+from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
+from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed.utils import is_in_batch_invariant_mode, set_batch_invariance
+from torchtitan.experiments.rl.batcher import Batcher
+from torchtitan.experiments.rl.config_registry import (
+    rl_grpo_qwen3_0_6b_batch_invariant,
+    rl_grpo_qwen3_0_6b_flex_batch_invariant,
+)
+from torchtitan.experiments.rl.grpo import RLTrainer
+from torchtitan.experiments.rl.models.vllm_registry import (
+    registry_to_vllm,
+    VLLM_MODEL_NAME,
+)
+from torchtitan.models.common.attention import (
+    create_attention_mask,
+    FlexAttention,
+    get_causal_mask_mod,
+    get_document_mask_mod,
+    VarlenMetadata,
+)
+from torchtitan.tools import utils
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -115,20 +119,27 @@ def build_trainer_model(
         distinct_seed_mesh_dims=["pp"],
     )
 
+    trainer_config = config.trainer
+
     # Mirror PolicyTrainer._build_model: fill sharding configs (and any other
     # parallelism-driven config mutations) on the model config BEFORE build,
     # so each Module is constructed with its ShardingConfig / LocalMapConfig.
     # Without this the trainer side would run un-parallelized while the vLLM
     # generator runs fully TP-parallelized, breaking trainer-vs-vLLM parity.
-    model_spec.model.update_from_config(config=config.trainer)
+    model_spec.model.update_from_config(config=trainer_config)
 
-    # Build on meta device, parallelize, then materialize
     with torch.device("meta"):
-        with utils.set_default_dtype(TORCH_DTYPE_MAP[config.trainer.training.dtype]):
+        with utils.set_default_dtype(TORCH_DTYPE_MAP[trainer_config.training.dtype]):
             model = model_spec.model.build()
 
-    model = parallelize_qwen3(
-        model, parallel_dims=parallel_dims, parallelism=parallelism
+    model = model_spec.parallelize_fn(
+        model,
+        parallel_dims=parallel_dims,
+        training=trainer_config.training,
+        parallelism=parallelism,
+        compile_config=config.compile,
+        ac_config=trainer_config.ac_config,
+        dump_folder=trainer_config.dump_folder,
     )
     model.to_empty(device=device_type)
     with torch.no_grad():
@@ -174,8 +185,6 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     """Create a vLLM LLMEngine with torchtitan model from the RL config."""
     gen_config = config.generator
 
-    from torchtitan.models.common.attention import FlexAttention
-
     inner_attn = config.model_spec.model.layers[0].attention.inner_attention
     use_flex = isinstance(inner_attn, FlexAttention.Config)
 
@@ -206,7 +215,7 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     from torchtitan.tools.utils import has_cuda_capability
 
     if not has_cuda_capability(9, 0) and not use_flex:
-        engine_kwargs["block_size"] = 256
+        engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
     engine_kwargs["max_model_len"] = config.model_spec.model.rope.max_seq_len
     max_num_seqs = config.num_prompts_per_step * gen_config.sampling.n
@@ -243,37 +252,62 @@ def _build_padded_varlen_metadata(batch_size, max_len, device):
 
 
 def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
-    """Compute per-sequence logprobs using flex attention with packed sequences."""
-    flat = torch.cat(input_tensors)
-    attention_masks, maybe_padded_seq_lens = create_flex_block_mask(seq_lens, device)
-    needs_unpad = maybe_padded_seq_lens != seq_lens
-    if needs_unpad:
-        packed_ids, positions = pad_to_block_aligned(
-            flat, seq_lens, maybe_padded_seq_lens, device
-        )
+    """Compute per-sequence logprobs using flex attention with packed sequences.
+
+    Mirrors the trainer's flex attention path: pack documents into a single
+    row, pad each document to block-aligned boundaries in batch-invariant
+    mode, create a BlockMask via ``get_document_mask_mod`` +
+    ``get_causal_mask_mod``, and extract per-document logprobs.
+    """
+    inner_attn = model.config.layers[0].attention.inner_attention
+    assert isinstance(inner_attn, FlexAttention.Config)
+    block_size = inner_attn.block_size
+
+    batch_invariant = is_in_batch_invariant_mode()
+
+    if batch_invariant:
+        padded_seq_lens = [Batcher._align_to(sl, block_size) for sl in seq_lens]
     else:
-        packed_ids = flat.unsqueeze(0)
-        positions = create_positions_from_seq_lens(seq_lens, device)
+        padded_seq_lens = list(seq_lens)
+
+    # Build packed token_ids and positions (positions reset to 0 per doc)
+    parts, pos_parts = [], []
+    for tensor, sl, psl in zip(input_tensors, seq_lens, padded_seq_lens):
+        padded = torch.zeros(psl, dtype=tensor.dtype, device=device)
+        padded[:sl] = tensor
+        parts.append(padded)
+        pos_parts.append(torch.arange(psl, device=device))
+
+    packed_ids = torch.cat(parts).unsqueeze(0)
+    positions = torch.cat(pos_parts).unsqueeze(0)
+
+    mask_mod = and_masks(get_causal_mask_mod(), get_document_mask_mod(positions))
+    attention_masks = create_attention_mask(
+        mask_mod,
+        1,
+        None,
+        positions.shape[1],
+        positions.shape[1],
+        BLOCK_SIZE=block_size,
+        separate_full_blocks=not batch_invariant,
+    )
 
     logits = model(packed_ids, attention_masks=attention_masks, positions=positions)
 
-    if needs_unpad:
-        logits = unpad_from_block_aligned(logits, seq_lens, maybe_padded_seq_lens)
-        packed_ids = unpad_from_block_aligned(
-            packed_ids, seq_lens, maybe_padded_seq_lens
-        )
+    if isinstance(logits, DTensor):
+        logits = logits.to_local()
 
     log_probs = F.log_softmax(logits[:, :-1, :].float(), dim=-1)
     target_ids = packed_ids[:, 1:]
 
     results = []
     offset = 0
-    for sl in seq_lens:
+    for sl, psl in zip(seq_lens, padded_seq_lens):
         seq_lps = log_probs[0, offset : offset + sl - 1]
         seq_tgt = target_ids[0, offset : offset + sl - 1]
         seq_lps = seq_lps.gather(1, seq_tgt.unsqueeze(-1)).squeeze(-1)
         results.append(seq_lps)
-        offset += sl
+        offset += psl
     return results
 
 
@@ -289,12 +323,14 @@ def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
     # Explicit positions avoid dynamic rope_cache[0:seqlen] slice in RoPE,
     # which can break torch.compile with symbolic shapes.
     positions = (
-        torch.arange(max_len, device=device)
-        .unsqueeze(0)
-        .expand(len(input_tensors), -1)
+        torch.arange(max_len, device=device).unsqueeze(0).expand(len(input_tensors), -1)
     )
 
     logits = model(padded, attention_masks=attention_masks, positions=positions)
+
+    if isinstance(logits, DTensor):
+        logits = logits.to_local()
+
     log_probs = F.log_softmax(logits[:, :-1, :].float(), dim=-1)
 
     results = []
@@ -472,7 +508,7 @@ class BitwiseParityTestBase(unittest.TestCase):
     PROMPT_LENGTH = 150
     MAX_GEN_TOKENS = 50
 
-    config_fn = staticmethod(rl_grpo_qwen3_0_6b_varlen_batch_invariant)
+    config_fn = staticmethod(rl_grpo_qwen3_0_6b_batch_invariant)
     attn_backend: str = "varlen"
 
     # Shared across all tests in the class (built once in setUpClass)
@@ -645,7 +681,7 @@ class TestBitwiseParityVarlen(BitwiseParityTestBase):
     """Bitwise parity tests using varlen attention."""
 
     __test__ = True
-    config_fn = staticmethod(rl_grpo_qwen3_0_6b_varlen_batch_invariant)
+    config_fn = staticmethod(rl_grpo_qwen3_0_6b_batch_invariant)
     attn_backend = "varlen"
 
 

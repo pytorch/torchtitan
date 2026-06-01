@@ -15,6 +15,7 @@ import torch.distributed.distributed_c10d as c10d
 import torch.nn.functional as F
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
+from torch.nn.attention.flex_attention import and_masks
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -31,19 +32,13 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
-from torchtitan.experiments.rl.actors.utils import (
-    compute_logprobs,
-    create_flex_block_mask,
-    create_positions_from_seq_lens,
-    extract_response_logprobs,
-    pad_to_block_aligned,
-    unpad_from_block_aligned,
-    verify_logprob_identity,
-)
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingBatch
 from torchtitan.models.common.attention import (
+    create_attention_mask,
     create_varlen_metadata_for_document,
     FlexAttention,
+    get_causal_mask_mod,
+    get_document_mask_mod,
 )
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
@@ -321,11 +316,6 @@ class PolicyTrainer(Actor, Configurable):
         # `torchtitan.Trainer's` call, so we invoke it directly).
         model_spec.model.update_from_config(config=config)
 
-        # Fill sharding configs on the config BEFORE build via the
-        # model-agnostic ``update_from_config`` hook (RL's trainer bypasses
-        # ``torchtitan.Trainer``'s call, so we invoke it directly).
-        model_spec.model.update_from_config(trainer_config=config)
-
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
                 model = model_spec.model.build()
@@ -345,6 +335,20 @@ class PolicyTrainer(Actor, Configurable):
             model.init_weights(buffer_device=None)
 
         return model
+
+    def _create_flex_masks(self, positions: torch.Tensor):
+        """Create a flex attention BlockMask from packed positions."""
+        B, S = positions.shape
+        mask_mod = and_masks(get_causal_mask_mod(), get_document_mask_mod(positions))
+        return create_attention_mask(
+            mask_mod,
+            B,
+            None,
+            S,
+            S,
+            BLOCK_SIZE=self._flex_block_size,
+            separate_full_blocks=not self._batch_invariant,
+        )
 
     @endpoint
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
@@ -431,57 +435,16 @@ class PolicyTrainer(Actor, Configurable):
         generator_logprobs = local_batch.generator_logprobs.to(device)
         advantages = local_batch.advantages.to(device)
 
-        attention_masks = create_varlen_metadata_for_document(positions)
+        if self._use_flex:
+            attention_masks = self._create_flex_masks(positions)
+        else:
+            attention_masks = create_varlen_metadata_for_document(positions)
 
         with sl.log_trace_span("model_forward"):
             logits = model(
                 token_ids, attention_masks=attention_masks, positions=positions
             )
         policy_logprobs = compute_logprobs(logits, labels)
-        # max_seq_len = max(seq_lens)
-        # rope_cache_len = self.model.freqs_cis.shape[0]
-        # if max_seq_len > rope_cache_len:
-        #     raise ValueError(
-        #         f"Episode length {max_seq_len} exceeds rope cache size "
-        #         f"{rope_cache_len}. Increase model max_seq_len or reduce "
-        #         f"generation max_tokens."
-        #     )
-
-        # if self._use_flex and self._batch_invariant:
-        #     attention_masks, maybe_padded_seq_lens = create_flex_block_mask(
-        #         seq_lens, device, self._flex_block_size
-        #     )
-        #     padded_ids, positions = pad_to_block_aligned(
-        #         token_ids.squeeze(0), seq_lens, maybe_padded_seq_lens, device
-        #     )
-        #     logits = self.model(
-        #         padded_ids, attention_masks=attention_masks, positions=positions
-        #     )
-        #     logits = unpad_from_block_aligned(logits, seq_lens, maybe_padded_seq_lens)
-        #     token_ids = unpad_from_block_aligned(
-        #         padded_ids, seq_lens, maybe_padded_seq_lens
-        #     )
-        # elif self._use_flex:
-        #     attention_masks, _ = create_flex_block_mask(
-        #         seq_lens, device, self._flex_block_size
-        #     )
-        #     positions = create_positions_from_seq_lens(seq_lens, device)
-        #     logits = self.model(
-        #         token_ids, attention_masks=attention_masks, positions=positions
-        #     )
-        # else:
-        #     positions = torch.cat(
-        #         [torch.arange(l, device=device) for l in seq_lens]
-        #     ).unsqueeze(0)
-        #     attention_masks = create_varlen_metadata_for_document(positions)
-        #     logits = self.model(
-        #         token_ids, attention_masks=attention_masks, positions=positions
-        #     )
-
-        # all_policy_logprobs = compute_logprobs(logits, token_ids)
-        # policy_logprobs = extract_response_logprobs(
-        #     all_policy_logprobs, seq_lens, prompt_lens, response_lens
-        # )
 
         with sl.log_trace_span("loss_fn"):
             loss, loss_metrics = self.loss_fn(

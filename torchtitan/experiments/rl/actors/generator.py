@@ -26,6 +26,7 @@ from torchtitan.experiments.rl.models.vllm_registry import (
 )
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import Completion
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools.logging import init_logger
@@ -85,9 +86,9 @@ def _prepare_generation_request_metrics(
         if stats.num_generation_tokens > 1:
             first_to_last_token_ms = (stats.last_token_ts - stats.first_token_ts) * 1000
             metric_values[f"{prefix}/decode_time_ms"] = first_to_last_token_ms
-            metric_values[f"{prefix}/inter_token_latency_ms"] = (
-                first_to_last_token_ms / (stats.num_generation_tokens - 1)
-            )
+            metric_values[
+                f"{prefix}/inter_token_latency_ms"
+            ] = first_to_last_token_ms / (stats.num_generation_tokens - 1)
 
     # Emit each value with both Mean and Max aggregators.
     return [
@@ -285,8 +286,7 @@ class VLLMGenerator(Actor, Configurable):
             checkpoint_config=config.checkpoint,
         )
 
-        from torchtitan.models.common.attention import FlexAttention
-
+        # Set vLLM environment variables from config before any vLLM initialization
         inner_attn = model_spec.model.layers[0].attention.inner_attention
         self._use_flex = isinstance(inner_attn, FlexAttention.Config)
 
@@ -333,13 +333,9 @@ class VLLMGenerator(Actor, Configurable):
         )
         engine_kwargs["max_model_len"] = model_spec.model.rope.max_seq_len
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
-
-        if self._use_flex:
-            engine_kwargs["enable_chunked_prefill"] = False
-        elif not has_cuda_capability(9, 0):
-            # FA2 requires block_size to be a multiple of 256
+        # FA2 requires block_size to be a multiple of 256
+        if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
-
         vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
             max_num_seqs=self._max_num_seqs,
         )

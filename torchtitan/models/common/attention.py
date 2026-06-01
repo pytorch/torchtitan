@@ -231,7 +231,12 @@ class FlexAttention(Module):
         # autotuner from picking input-dependent block dimensions.
         kernel_options = self.kernel_options
         if is_in_batch_invariant_mode():
-            kernel_options = {"BLOCK_M": 16, "BLOCK_N": 16, **self.kernel_options}
+            kernel_options = {
+                "BLOCK_M": 16,
+                "BLOCK_N": 16,
+                "IS_DIVISIBLE": False,
+                **self.kernel_options,
+            }
 
         # 1. _compiled_flex_attn has to be a class variable, otherwise there will
         #    be multiple compiled flex_attention instances, which can be slow.

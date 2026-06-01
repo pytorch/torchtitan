@@ -315,7 +315,22 @@ class RLTrainer(Configurable):
         # TODO: Replace this single-turn tokenizer with renderer
         self.tokenizer = HuggingFaceTokenizer(tokenizer_path=config.hf_assets_path)
         # TODO: Use tokenizer.pad_id when available, falling back to eos_id.
-        self.batcher = Batcher(config.batcher, pad_id=self.tokenizer.eos_id)
+        from torchtitan.models.common.attention import FlexAttention
+
+        inner_attn = config.model_spec.model.layers[0].attention.inner_attention
+        use_flex = isinstance(inner_attn, FlexAttention.Config)
+        batch_invariant = config.trainer.debug.batch_invariant
+        batcher_kwargs: dict = {}
+        if use_flex and batch_invariant:
+            batcher_kwargs["batch_invariant"] = True
+            batcher_kwargs["block_size"] = (
+                inner_attn.block_size
+                if isinstance(inner_attn.block_size, int)
+                else inner_attn.block_size[0]
+            )
+        self.batcher = Batcher(
+            config.batcher, pad_id=self.tokenizer.eos_id, **batcher_kwargs
+        )
 
     async def close(self):
         """Best-effort: tear down actors, close metric backends, then stop proc meshes."""

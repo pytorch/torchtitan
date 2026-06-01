@@ -115,11 +115,20 @@ class Batcher(Configurable):
     class Config(Configurable.Config):
         batch: BatchConfig = field(default_factory=BatchConfig)
 
-    def __init__(self, config: Config, *, pad_id: int):
+    def __init__(
+        self,
+        config: Config,
+        *,
+        pad_id: int,
+        batch_invariant: bool = False,
+        block_size: int = 128,
+    ):
         self.local_batch_size = config.batch.local_batch_size
         self.global_batch_size = config.batch.global_batch_size
         self.seq_len = config.batch.seq_len
         self.pad_id = pad_id
+        self._batch_invariant = batch_invariant
+        self._block_size = block_size
 
     def num_tokens_target(self, dp_degree: int) -> int:
         global_batch_size = self.global_batch_size
@@ -203,13 +212,28 @@ class Batcher(Configurable):
 
         return microbatches, num_global_valid_tokens, packing_metrics
 
+    @staticmethod
+    def _align_to(length: int, alignment: int) -> int:
+        return ((length + alignment - 1) // alignment) * alignment
+
     def _pack_episodes(self, episodes: list[Episode]) -> Iterator[dict]:
         """Pack all episodes into [1, seq_len] rows.
 
         Each episode's raw tokens (length N) are split per sample into
         ``input_ids = raw[:-1]`` and ``labels = raw[1:]`` (both length
         N-1), matching the pre-training dataloader convention.
+
+        When ``_batch_invariant`` is True, each sample is padded to a
+        multiple of ``_block_size`` so that flex attention block
+        boundaries align identically regardless of batch composition.
         """
+        pad_values = {
+            "input_ids": self.pad_id,
+            "labels": self.pad_id,
+            "generator_logprobs": 0.0,
+            "loss_mask": False,
+            "advantages": 0.0,
+        }
 
         def _iterate_samples() -> Iterator[dict]:
             for ep in episodes:
@@ -219,24 +243,26 @@ class Batcher(Configurable):
                 gen_lp = [0.0] * prompt_len + ep.token_logprobs
                 loss_mask = [False] * prompt_len + [True] * response_len
                 advantages = [0.0] * prompt_len + [ep.advantage] * response_len
-                yield {
+                sample = {
                     "input_ids": raw_ids[:-1],
                     "labels": raw_ids[1:],
                     "generator_logprobs": gen_lp[1:],
                     "loss_mask": loss_mask[1:],
                     "advantages": advantages[1:],
                 }
+                if self._batch_invariant:
+                    sample_len = len(sample["input_ids"])
+                    padded_len = self._align_to(sample_len, self._block_size)
+                    pad_count = padded_len - sample_len
+                    if pad_count > 0:
+                        for key in sample:
+                            sample[key].extend([pad_values[key]] * pad_count)
+                yield sample
 
         yield from pack(
             _iterate_samples(),
             max_seq_length=self.seq_len,
-            pad_values={
-                "input_ids": self.pad_id,
-                "labels": self.pad_id,
-                "generator_logprobs": 0.0,
-                "loss_mask": False,
-                "advantages": 0.0,
-            },
+            pad_values=pad_values,
         )
 
     # TODO: Make collate configurable (passed as an argument to Batcher),
