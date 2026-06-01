@@ -36,8 +36,6 @@ def flux_debugmodel() -> FluxTrainer.Config:
             max_t5_encoding_len=256,
         ),
         encoder=FluxEncoderConfig(
-            t5_encoder="google/t5-v1_1-xxl",
-            clip_encoder="openai/clip-vit-large-patch14",
             autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
@@ -97,8 +95,6 @@ def flux_dev() -> FluxTrainer.Config:
             max_t5_encoding_len=512,
         ),
         encoder=FluxEncoderConfig(
-            t5_encoder="google/t5-v1_1-xxl",
-            clip_encoder="openai/clip-vit-large-patch14",
             autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
         ),
         metrics=MetricsProcessor.Config(log_freq=100),
@@ -149,8 +145,6 @@ def flux_schnell() -> FluxTrainer.Config:
             max_t5_encoding_len=256,
         ),
         encoder=FluxEncoderConfig(
-            t5_encoder="google/t5-v1_1-xxl",
-            clip_encoder="openai/clip-vit-large-patch14",
             autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
         ),
         metrics=MetricsProcessor.Config(log_freq=100),
