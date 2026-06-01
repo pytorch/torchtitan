@@ -20,7 +20,7 @@ from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
-from torchtitan.distributed.spmd_types import current_mesh
+from torchtitan.distributed.spmd_types import current_mesh, mesh_size
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -510,10 +510,9 @@ class ChunkedCELoss(BaseLoss):
 
     def replicate_seq_dim(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Replicate hidden states on the TP axis before applying lm_head."""
-        mesh = current_mesh()
-        if mesh is not None:
-            if "tp" not in (mesh.mesh_dim_names or ()):
-                return hidden_states
+        if mesh_size("tp") > 1:
+            mesh = current_mesh()
+            assert mesh is not None
             src = spmd.S(1) if self.enable_sp else spmd.I
             return spmd.redistribute(
                 hidden_states,
@@ -576,14 +575,11 @@ class ChunkedCELoss(BaseLoss):
     def allocate_total_loss(self, reference: torch.Tensor) -> torch.Tensor:
         """Allocate the scalar loss and annotate SPMD partial data axes."""
         total_loss = reference.new_zeros((), dtype=torch.float32)
-        if current_mesh() is None or not spmd.is_type_checking():
-            return total_loss
-
         mesh = current_mesh()
-        assert mesh is not None
-        mesh_axis_names = mesh.mesh_dim_names or ()
+        if mesh is None or not spmd.is_type_checking():
+            return total_loss
         for axis_name, dst in {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}.items():
-            if axis_name not in mesh_axis_names:
+            if mesh_size(axis_name) == 1:
                 continue
             total_loss = spmd.reinterpret(
                 total_loss,
@@ -596,14 +592,11 @@ class ChunkedCELoss(BaseLoss):
 
     def reinterpret_data_axes(self, chunk_loss: torch.Tensor) -> torch.Tensor:
         """Mark data-axis scalar losses as partial under local SPMD typecheck."""
-        if current_mesh() is None or not spmd.is_type_checking():
-            return chunk_loss
-
         mesh = current_mesh()
-        assert mesh is not None
-        mesh_axis_names = mesh.mesh_dim_names or ()
+        if mesh is None or not spmd.is_type_checking():
+            return chunk_loss
         for axis_name in ("dp", "cp"):
-            if axis_name not in mesh_axis_names:
+            if mesh_size(axis_name) == 1:
                 continue
             chunk_loss = spmd.reinterpret(
                 chunk_loss,
@@ -621,18 +614,15 @@ class ChunkedCELoss(BaseLoss):
         grad_buffer: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Validate SPMD output types after leaving the local typecheck region."""
-        if current_mesh() is None or not spmd.is_type_checking():
-            return total_loss, grad_buffer
-
         mesh = current_mesh()
-        assert mesh is not None
-        mesh_axis_names = mesh.mesh_dim_names or ()
+        if mesh is None or not spmd.is_type_checking():
+            return total_loss, grad_buffer
         loss_type = {
             mesh.get_group(axis_name): spmd.P
             for axis_name in ("dp", "cp")
-            if axis_name in mesh_axis_names
+            if mesh_size(axis_name) > 1
         }
-        if "tp" in mesh_axis_names:
+        if mesh_size("tp") > 1:
             loss_type[mesh.get_group("tp")] = spmd.I
 
         spmd.assert_type(total_loss, loss_type)
