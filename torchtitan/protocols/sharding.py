@@ -13,6 +13,7 @@ self-documenting and support multi-dimensional meshes.
 """
 
 from dataclasses import dataclass, field
+from typing import Union
 
 import spmd_types as spmd
 from torch.distributed.device_mesh import DeviceMesh
@@ -22,7 +23,7 @@ from torchtitan.distributed.spmd_types import (
     PlacementSpec,
     spmd_to_dtensor_placement,
 )
-from torchtitan.protocols.types import MeshAxisName
+from torchtitan.protocols.types import MeshAxisName, NamedPlacement
 
 
 __all__ = [
@@ -33,9 +34,7 @@ __all__ = [
     "resolve_placements",
 ]
 
-NamedPlacement = dict[MeshAxisName, Placement]
-
-PlacementLike = NamedPlacement | spmd.PerMeshAxisSpmdTypes | PlacementSpec
+PlacementLike = Union[NamedPlacement, spmd.PerMeshAxisSpmdTypes, PlacementSpec]
 
 
 @dataclass(kw_only=True, slots=True)
@@ -148,10 +147,7 @@ def resolve_placements(
     # conversion once FlexShard replaces ``fully_shard``.
     # TODO(pianpwk): remove spmd_to_dtensor_placement after full_dtensor is deleted.
     spmd_translated = spmd_to_dtensor_placement(placement)
-    if spmd_translated is not None:
-        named = spmd_translated
-    else:
-        named = placement.placement if isinstance(placement, PlacementSpec) else placement
+    named = spmd_translated if spmd_translated is not None else placement
 
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
     result = []
