@@ -44,7 +44,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.full_dtensor",
+                    "--parallelism.spmd_backend full_dtensor",
                     "--parallelism.enable-fsdp-symm-mem",
                 ],
             ],

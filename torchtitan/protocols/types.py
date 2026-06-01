@@ -44,6 +44,14 @@ class MeshAxisName(StrEnum):
     EP = "ep"
     EFSDP = "efsdp"
 
+    @classmethod
+    def has_axis(cls, axis_name: object) -> bool:
+        try:
+            cls(axis_name)
+        except ValueError:
+            return False
+        return True
+
 
 # Placement per mesh axis, keyed by MeshAxisName.
 # Every sharding_config must declare a placement for every mesh axis it
