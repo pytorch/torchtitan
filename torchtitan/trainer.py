@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import dataclasses
 import json
 import os
@@ -13,8 +14,10 @@ from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any, cast
 
+import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
+import torch.utils._pytree as pytree
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor import DTensor
@@ -48,6 +51,11 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.module import preserve_buffer_spmd
+from torchtitan.protocols.sharding import (
+    is_placement_like,
+    placement_to_spmd_assert_type,
+)
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
@@ -207,6 +215,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
+        dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
 
         # Logging needs to happen after distributed initialized
         config.maybe_log()
@@ -346,11 +355,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 del model
 
                 for m in self.model_parts:
-                    m.to_empty(device=init_device)
-                    with torch.no_grad():
-                        # TODO: Change this back to init_weights once
-                        # autoparallel contains the wrap_init_states
-                        cast(BaseModel, m).init_weights(buffer_device=buffer_device)
+                    with preserve_buffer_spmd(m):
+                        m.to_empty(device=init_device)
+                        with torch.no_grad():
+                            # TODO: Change this back to init_weights once
+                            # autoparallel contains the wrap_init_states
+                            cast(BaseModel, m).init_weights(
+                                buffer_device=buffer_device
+                            )
                     m.train()
 
                 # confirm that user will be able to view loss metrics on the console
@@ -373,11 +385,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
-                model.to_empty(device=init_device)
-                with torch.no_grad():
-                    # TODO: Change this back to init_weights once
-                    # autoparallel contains the wrap_init_states
-                    cast(BaseModel, model).init_weights(buffer_device=buffer_device)
+                with preserve_buffer_spmd(model):
+                    model.to_empty(device=init_device)
+                    with torch.no_grad():
+                        # TODO: Change this back to init_weights once
+                        # autoparallel contains the wrap_init_states
+                        cast(BaseModel, model).init_weights(buffer_device=buffer_device)
                 model.train()
 
                 self.model_parts = [model]
@@ -471,7 +484,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         loss_parallel_enabled = (
             parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
         )
-        self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
+        self.train_context = dist_utils.get_train_context(
+            loss_parallel_enabled,
+            spmd_typechecking=(
+                config.parallelism.spmd_backend == "spmd"
+                and config.debug.spmd_typechecking
+            ),
+        )
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -636,10 +655,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # unique tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += labels.numel()
 
-        if self.config.parallelism.full_dtensor:
+        if self.config.parallelism.spmd_backend == "full_dtensor":
             inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
+        elif self.config.parallelism.spmd_backend == "spmd":
+            self._annotate_inputs_spmd(inputs, labels, extra_inputs, extra_kwargs)
 
         return inputs, labels, extra_inputs, extra_kwargs
 
@@ -702,7 +723,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # Remove once non-full_dtensor is no longer supported.
                 if (
                     isinstance(pred, DTensor)
-                    and not self.config.parallelism.full_dtensor
+                    and self.config.parallelism.spmd_backend != "full_dtensor"
                     and self.config.parallelism.disable_loss_parallel
                 ):
                     pred = pred.to_local()
@@ -712,6 +733,44 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
+
+    def _annotate_inputs_spmd(
+        self,
+        inputs: torch.Tensor,
+        labels: torch.Tensor,
+        extra_inputs: dict[str, torch.Tensor],
+        extra_kwargs: dict[str, Any],
+    ) -> None:
+        """Annotate configured model inputs with local SPMD types."""
+        cfg = self.model_config.spmd_input_config
+        if cfg is None:
+            return
+
+        def annotate_type(value: object, placement: object) -> None:
+            if not isinstance(value, torch.Tensor):
+                return
+            local_type, partition_spec = placement_to_spmd_assert_type(placement)
+            if local_type:
+                spmd.assert_type(value, local_type, partition_spec=partition_spec)
+
+        def annotate_tree(value: object, placement: object) -> None:
+            pytree.tree_map(
+                annotate_type,
+                value,
+                placement,
+                is_leaf=is_placement_like,
+            )
+
+        if cfg.inputs is not None:
+            annotate_tree(inputs, cfg.inputs)
+        if cfg.labels is not None:
+            annotate_tree(labels, cfg.labels)
+        for name, placement in cfg.extra_inputs.items():
+            if name in extra_inputs:
+                annotate_tree(extra_inputs[name], placement)
+        for name, placement in cfg.extra_kwargs.items():
+            if name in extra_kwargs:
+                annotate_tree(extra_kwargs[name], placement)
 
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
@@ -780,7 +839,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             return
 
         with sl.log_trace_span("collect_dist_metrics"):
-
             sl.log_trace_scalar({"global_valid_tokens": int(global_valid_tokens)})
 
             if parallel_dims.dp_cp_enabled:
@@ -849,8 +907,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 with sl.log_trace_span("step"):
                     self.gc_handler.run(self.step)
 
+                    spmd_mesh_context = (
+                        dist_utils.set_current_mesh(
+                            self.parallel_dims.get_activated_mesh(["dp", "cp", "tp"])
+                        )
+                        if config.parallelism.spmd_backend == "spmd"
+                        else contextlib.nullcontext()
+                    )
                     try:
-                        self.train_step(data_iterator)
+                        with spmd_mesh_context:
+                            self.train_step(data_iterator)
                     except DataloaderExhaustedError:
                         logger.warning("Ran out of data; last step was canceled.")
                         break
