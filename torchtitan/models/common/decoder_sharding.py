@@ -6,14 +6,12 @@
 
 import spmd_types as spmd
 
+from torchtitan.distributed.spmd_types import PlacementSpec
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
 from torchtitan.protocols.sharding import (
     LocalMapConfig,
-    NamedPlacementSpmd,
     PlacementLike,
-    PlacementSpec,
     ShardingConfig,
-    SpmdInputConfig,
 )
 from torchtitan.protocols.types import MeshAxisName
 
@@ -24,7 +22,7 @@ TP = MeshAxisName.TP
 
 def dense_param_placement(
     *, tp: spmd.PerMeshAxisSpmdType
-) -> NamedPlacementSpmd:
+) -> spmd.PerMeshAxisSpmdTypes:
     """Placement for dense-path params/buffers.
 
     The logical SPMD DP axis translates to the current DTensor storage axes
@@ -41,7 +39,7 @@ def dense_activation_placement(
     *,
     tp: spmd.PerMeshAxisSpmdType,
     cp: spmd.PerMeshAxisSpmdType = spmd.S(1),
-) -> NamedPlacementSpmd:
+) -> spmd.PerMeshAxisSpmdTypes:
     """Placement for dense-path activations.
 
     DP is batch-sharded. CP defaults to seq-sharded; override to ``spmd.R``
@@ -65,24 +63,13 @@ def dense_sequence_parallel_placement() -> PlacementSpec:
 
 def decoder_token_placement(
     *, tp: spmd.PerMeshAxisSpmdType
-) -> NamedPlacementSpmd:
+) -> spmd.PerMeshAxisSpmdTypes:
     """Local-SPMD placement for decoder token/label tensors."""
     return {
         DP: spmd.S(0),
         CP: spmd.S(1),
         TP: tp,
     }
-
-
-def decoder_spmd_input_config() -> SpmdInputConfig:
-    """Trainer input annotations for local SPMD decoder batches."""
-    inputs = decoder_token_placement(tp=spmd.R)
-    labels = decoder_token_placement(tp=spmd.I)
-    return SpmdInputConfig(
-        inputs=inputs,
-        labels=labels,
-        extra_kwargs={"positions": inputs},
-    )
 
 
 def _decoder_activation_placement(
@@ -191,7 +178,7 @@ def norm_config(*, enable_sp: bool) -> ShardingConfig:
     sp_placement = dense_sequence_parallel_placement()
     return ShardingConfig(
         state_shardings=state,
-        state_shardings_compute={"weight": dense_param_placement(tp=spmd.R)},
+        state_shardings_for_computation={"weight": dense_param_placement(tp=spmd.R)},
         in_src_shardings={"input": sp_placement},
         in_dst_shardings={"input": sp_placement},
         out_dst_shardings=sp_placement,
@@ -339,9 +326,6 @@ def set_decoder_sharding_config(
     ``enable_sp=False`` -> activations stay ``Replicate``; root norm is left
     unsharded (equivalent to the legacy ``NoParallel`` plan).
     """
-    if spmd_backend == "spmd":
-        config.spmd_input_config = decoder_spmd_input_config()
-
     # freqs_cis buffer on the decoder root: Replicate on all axes.
     config.sharding_config = ShardingConfig(
         state_shardings={"freqs_cis": dense_param_placement(tp=spmd.R)},

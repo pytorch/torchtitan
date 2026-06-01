@@ -126,6 +126,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     raise NotImplementedError(
                         "Optimizers in backward is not supported with Pipeline Parallel."
                     )
+            if (
+                self.parallelism.spmd_backend == "spmd"
+                and self.debug.spmd_typechecking
+                and self.parallelism.pipeline_parallel_degree > 1
+            ):
+                raise ValueError(
+                    "SPMD typechecking is not supported with pipeline parallelism. "
+                    "Validate the same config without PP "
+                    "(--parallelism.pipeline_parallel_degree 1)."
+                )
 
         def to_dict(self) -> dict[str, Any]:
             d = {}
@@ -487,7 +497,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
         )
         self.train_context = dist_utils.get_train_context(
-            loss_parallel_enabled,
+            enable_loss_parallel=loss_parallel_enabled,
             spmd_typechecking=(
                 config.parallelism.spmd_backend == "spmd"
                 and config.debug.spmd_typechecking
