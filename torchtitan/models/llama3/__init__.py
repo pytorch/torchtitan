@@ -15,7 +15,6 @@ from torchtitan.models.common import (
     Embedding,
     Linear,
     RMSNorm,
-    RoPE,
     TransformerBlock,
 )
 from torchtitan.models.common.config_utils import (
@@ -70,6 +69,9 @@ def _build_llama3_layers(
     dim: int,
     n_heads: int,
     hidden_dim: int,
+    rope_max_seq_len: int,
+    rope_theta: float,
+    rope_scaling: str,
     n_kv_heads: int | None = None,
     fuse_qkv: bool = False,
     attn_backend: str,
@@ -93,7 +95,10 @@ def _build_llama3_layers(
                     inner_attention=inner_attention,
                     fuse_qkv=fuse_qkv,
                     mask_type=mask_type,
+                    rope_max_seq_len=rope_max_seq_len,
+                    rope_theta=rope_theta,
                     rope_backend="complex",
+                    rope_scaling=rope_scaling,
                 ),
                 feed_forward=make_ffn_config(
                     dim=dim,
@@ -120,18 +125,14 @@ def _debugmodel(attn_backend: str) -> Llama3Model.Config:
         lm_head=Linear.Config(
             in_features=dim, out_features=2048, param_init=_output_linear_init(dim)
         ),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=131072,
-            theta=500000,
-            backend="complex",
-            scaling="llama",
-        ),
         layers=_build_llama3_layers(
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
+            rope_max_seq_len=131072,
+            rope_theta=500000,
+            rope_scaling="llama",
             attn_backend=attn_backend,
         ),
     )
@@ -151,19 +152,15 @@ def _debugmodel_fused_qkv(attn_backend: str) -> Llama3Model.Config:
         lm_head=Linear.Config(
             in_features=dim, out_features=2048, param_init=_output_linear_init(dim)
         ),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=131072,
-            theta=500000,
-            backend="complex",
-            scaling="llama",
-        ),
         layers=_build_llama3_layers(
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
             fuse_qkv=True,
+            rope_max_seq_len=131072,
+            rope_theta=500000,
+            rope_scaling="llama",
             attn_backend=attn_backend,
         ),
     )
@@ -190,13 +187,6 @@ def _1b(attn_backend: str) -> Llama3Model.Config:
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=131072,
-            theta=500000,
-            backend="complex",
-            scaling="llama",
-        ),
         layers=_build_llama3_layers(
             n_layers=n_layers,
             dim=dim,
@@ -205,6 +195,9 @@ def _1b(attn_backend: str) -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=1024, ffn_dim_multiplier=1.5
             ),
+            rope_max_seq_len=131072,
+            rope_theta=500000,
+            rope_scaling="llama",
             attn_backend=attn_backend,
         ),
     )
@@ -231,13 +224,6 @@ def _3b(attn_backend: str) -> Llama3Model.Config:
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=131072,
-            theta=500000,
-            backend="complex",
-            scaling="llama",
-        ),
         layers=_build_llama3_layers(
             n_layers=n_layers,
             dim=dim,
@@ -246,6 +232,9 @@ def _3b(attn_backend: str) -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=1024, ffn_dim_multiplier=1.0
             ),
+            rope_max_seq_len=131072,
+            rope_theta=500000,
+            rope_scaling="llama",
             attn_backend=attn_backend,
         ),
     )
@@ -269,13 +258,6 @@ def _8b(attn_backend: str) -> Llama3Model.Config:
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=131072,
-            theta=500000,
-            backend="complex",
-            scaling="llama",
-        ),
         layers=_build_llama3_layers(
             n_layers=n_layers,
             dim=dim,
@@ -284,6 +266,9 @@ def _8b(attn_backend: str) -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=1024, ffn_dim_multiplier=1.3
             ),
+            rope_max_seq_len=131072,
+            rope_theta=500000,
+            rope_scaling="llama",
             attn_backend=attn_backend,
         ),
     )
@@ -307,13 +292,6 @@ def _70b(attn_backend: str) -> Llama3Model.Config:
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=131072,
-            theta=500000,
-            backend="complex",
-            scaling="llama",
-        ),
         layers=_build_llama3_layers(
             n_layers=n_layers,
             dim=dim,
@@ -322,6 +300,9 @@ def _70b(attn_backend: str) -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=4096, ffn_dim_multiplier=1.3
             ),
+            rope_max_seq_len=131072,
+            rope_theta=500000,
+            rope_scaling="llama",
             attn_backend=attn_backend,
         ),
     )
@@ -345,13 +326,6 @@ def _405b(attn_backend: str) -> Llama3Model.Config:
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=131072,
-            theta=500000,
-            backend="complex",
-            scaling="llama",
-        ),
         layers=_build_llama3_layers(
             n_layers=n_layers,
             dim=dim,
@@ -360,6 +334,9 @@ def _405b(attn_backend: str) -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=4096, ffn_dim_multiplier=1.2
             ),
+            rope_max_seq_len=131072,
+            rope_theta=500000,
+            rope_scaling="llama",
             attn_backend=attn_backend,
         ),
     )

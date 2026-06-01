@@ -24,6 +24,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
+from torchtitan.models.common.rope import RoPE
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
@@ -67,12 +68,25 @@ def make_gqa_config(
     wqkv_param_init: dict[str, Callable],
     wo_param_init: dict[str, Callable],
     inner_attention: Module.Config,
+    rope_max_seq_len: int,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
     fuse_qkv: bool = False,
     use_rope: bool = True,
     mask_type: str = "causal",
-    rope_backend: str = "complex",
+    rope_dim: int | None = None,
+    rope_theta: float = 10000.0,
+    rope_backend: Literal["complex", "cos_sin"] = "complex",
+    rope_scaling: Literal["none", "llama", "yarn"] = "none",
+    rope_scaling_factor: float = 8.0,
+    rope_low_freq_factor: float = 1.0,
+    rope_high_freq_factor: float = 4.0,
+    rope_original_max_position_embeddings: int = 8192,
+    rope_factor: float = 1.0,
+    rope_beta_fast: float = 32.0,
+    rope_beta_slow: float = 1.0,
+    rope_original_seq_len: int = 4096,
+    rope_mscale: float = 0.0,
     qk_norm: RMSNorm.Config | None = None,
 ) -> GQAttention.Config:
     """Build a fully-specified GQAttention.Config."""
@@ -120,7 +134,22 @@ def make_gqa_config(
         use_rope=use_rope,
         inner_attention=inner_attention,
         mask_type=mask_type,
-        rope_backend=rope_backend,
+        rope=RoPE.Config(
+            dim=per_head_dim if rope_dim is None else rope_dim,
+            max_seq_len=rope_max_seq_len,
+            theta=rope_theta,
+            backend=rope_backend,
+            scaling=rope_scaling,
+            scaling_factor=rope_scaling_factor,
+            low_freq_factor=rope_low_freq_factor,
+            high_freq_factor=rope_high_freq_factor,
+            original_max_position_embeddings=rope_original_max_position_embeddings,
+            rope_factor=rope_factor,
+            beta_fast=rope_beta_fast,
+            beta_slow=rope_beta_slow,
+            original_seq_len=rope_original_seq_len,
+            mscale=rope_mscale,
+        ),
     )
 
 

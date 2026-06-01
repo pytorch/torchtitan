@@ -46,15 +46,12 @@ class Attention(BaseAttention):
         qk_nope_head_dim: int = 128
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
+        rope: RoPE.Config
         inner_attention: Module.Config = field(
             default_factory=ScaledDotProductAttention.Config
         )
         mask_type: str = "causal"
         mscale: float = 1.0
-        rope_factor: float = 1.0
-        rope_max_seq_len: int = 4096
-        rope_original_seq_len: int = 4096
-        rope: RoPE.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -86,16 +83,12 @@ class Attention(BaseAttention):
         self.wo = config.wo.build()
         self.softmax_scale = self.qk_head_dim**-0.5
 
-        if config.rope_max_seq_len > config.rope_original_seq_len:
-            mscale = 0.1 * config.mscale * math.log(config.rope_factor) + 1.0
+        if config.rope.max_seq_len > config.rope.original_seq_len:
+            mscale = 0.1 * config.mscale * math.log(config.rope.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
-        if config.rope is None:
-            raise ValueError("RoPE must be configured for DeepSeek V3 attention.")
         self.inner_attention = config.inner_attention.build()
-        self.rope: RoPE | None = (
-            config.rope.build() if config.rope is not None else None
-        )
+        self.rope = config.rope.build()
 
     def forward(
         self,
@@ -104,8 +97,6 @@ class Attention(BaseAttention):
         positions: torch.Tensor | None = None,
     ):
         bsz, seqlen, _ = x.size()
-        if self.rope is None:
-            raise ValueError("RoPE must be configured when RoPE is enabled.")
 
         # Query projection
         if self.q_lora_rank == 0:
@@ -192,19 +183,6 @@ class DeepSeekV3Model(Decoder):
         ) -> None:
             Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
-
-            from torchtitan.trainer import Trainer
-
-            # Sync rope fields to attention for all layers.
-            if isinstance(config, Trainer.Config):
-                seq_len = config.training.seq_len
-                for layer_cfg in self.layers:
-                    assert isinstance(layer_cfg.attention, Attention.Config)
-                    layer_cfg.attention.rope_max_seq_len = seq_len
-                    layer_cfg.attention.rope_factor = self.rope.rope_factor
-                    layer_cfg.attention.rope_original_seq_len = (
-                        self.rope.original_seq_len
-                    )
 
             if parallelism.context_parallel_degree > 1 and not isinstance(
                 self.layers[0].attention.inner_attention,

@@ -47,7 +47,7 @@ class Attention(BaseAttention):
         )
         mask_type: str = "causal"
         sliding_window_size: int = 128
-        rope: RoPE.Config | None = None
+        rope: RoPE.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -67,12 +67,8 @@ class Attention(BaseAttention):
         assert isinstance(
             config.inner_attention, FlexAttention.Config
         ), "gpt-oss only supports FlexAttention"
-        if config.rope is None:
-            raise ValueError("RoPE must be configured for GPT-OSS attention.")
         self.inner_attention = config.inner_attention.build()
-        self.rope: RoPE | None = (
-            config.rope.build() if config.rope is not None else None
-        )
+        self.rope = config.rope.build()
 
     def forward(
         self,
@@ -92,8 +88,6 @@ class Attention(BaseAttention):
             torch.Tensor: Output tensor with the same shape as the input.
         """
         bsz, seqlen, _ = x.size()
-        if self.rope is None:
-            raise ValueError("RoPE must be configured when RoPE is enabled.")
 
         q, k, v = self.qkv_linear(x)
 

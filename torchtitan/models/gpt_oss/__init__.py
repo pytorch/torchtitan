@@ -60,6 +60,13 @@ def _make_gptoss_attn_config(
     head_dim: int = 64,
     sliding_window_size: int = 128,
     fuse_qkv: bool = False,
+    rope_max_seq_len: int,
+    rope_theta: float,
+    rope_scaling: str,
+    rope_factor: float,
+    rope_beta_slow: float,
+    rope_beta_fast: float,
+    rope_original_seq_len: int,
 ) -> Attention.Config:
     """Build a fully-specified GPT-OSS Attention.Config for a single layer.
 
@@ -114,6 +121,17 @@ def _make_gptoss_attn_config(
         ),
         sliding_window_size=sliding_window_size,
         param_init=sinks_init,
+        rope=RoPE.Config(
+            dim=head_dim,
+            max_seq_len=rope_max_seq_len,
+            theta=rope_theta,
+            backend="cos_sin",
+            scaling=rope_scaling,
+            rope_factor=rope_factor,
+            beta_slow=rope_beta_slow,
+            beta_fast=rope_beta_fast,
+            original_seq_len=rope_original_seq_len,
+        ),
     )
 
 
@@ -163,6 +181,13 @@ def _build_gptoss_layers(
     fuse_qkv: bool = False,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    rope_max_seq_len: int,
+    rope_theta: float,
+    rope_scaling: str,
+    rope_factor: float,
+    rope_beta_slow: float,
+    rope_beta_fast: float,
+    rope_original_seq_len: int,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for GPT-OSS.
 
@@ -172,7 +197,16 @@ def _build_gptoss_layers(
     layers = []
     for layer_id in range(n_layers):
         attn_cfg = _make_gptoss_attn_config(
-            dim=dim, layer_id=layer_id, fuse_qkv=fuse_qkv
+            dim=dim,
+            layer_id=layer_id,
+            fuse_qkv=fuse_qkv,
+            rope_max_seq_len=rope_max_seq_len,
+            rope_theta=rope_theta,
+            rope_scaling=rope_scaling,
+            rope_factor=rope_factor,
+            rope_beta_slow=rope_beta_slow,
+            rope_beta_fast=rope_beta_fast,
+            rope_original_seq_len=rope_original_seq_len,
         )
         experts_cfg = _make_gptoss_experts_config(
             dim=dim,
@@ -239,17 +273,13 @@ def _debugmodel(
             score_before_experts=False,
             load_balance_coeff=1e-3,
             moe_comm_backend=moe_comm_backend,
-        ),
-        rope=RoPE.Config(
-            dim=64,
-            max_seq_len=131072,
-            theta=150000.0,
-            backend="cos_sin",
-            scaling="yarn",
+            rope_max_seq_len=131072,
+            rope_theta=150000.0,
+            rope_scaling="yarn",
             rope_factor=32,
-            beta_slow=32.0,
-            beta_fast=1.0,
-            original_seq_len=4096,
+            rope_beta_slow=32.0,
+            rope_beta_fast=1.0,
+            rope_original_seq_len=4096,
         ),
     )
 
@@ -281,17 +311,13 @@ def _20b(
             score_before_experts=False,
             load_balance_coeff=1e-3,
             moe_comm_backend=moe_comm_backend,
-        ),
-        rope=RoPE.Config(
-            dim=64,
-            max_seq_len=131072,
-            theta=150000.0,
-            backend="cos_sin",
-            scaling="yarn",
+            rope_max_seq_len=131072,
+            rope_theta=150000.0,
+            rope_scaling="yarn",
             rope_factor=32,
-            beta_slow=32.0,
-            beta_fast=1.0,
-            original_seq_len=4096,
+            rope_beta_slow=32.0,
+            rope_beta_fast=1.0,
+            rope_original_seq_len=4096,
         ),
     )
 
@@ -323,17 +349,13 @@ def _120b(
             score_before_experts=False,
             load_balance_coeff=1e-3,
             moe_comm_backend=moe_comm_backend,
-        ),
-        rope=RoPE.Config(
-            dim=64,
-            max_seq_len=131072,
-            theta=150000.0,
-            backend="cos_sin",
-            scaling="yarn",
+            rope_max_seq_len=131072,
+            rope_theta=150000.0,
+            rope_scaling="yarn",
             rope_factor=32,
-            beta_slow=32.0,
-            beta_fast=1.0,
-            original_seq_len=4096,
+            rope_beta_slow=32.0,
+            rope_beta_fast=1.0,
+            rope_original_seq_len=4096,
         ),
     )
 

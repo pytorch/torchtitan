@@ -24,7 +24,6 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import Embedding, Linear, RMSNorm
-from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 
@@ -69,9 +68,6 @@ class Decoder(BaseModel):
         lm_head: Linear.Config
         tok_embeddings: Embedding.Config
         norm: RMSNorm.Config
-        # RoPE config is copied into each attention layer so every layer owns
-        # its own local cache.
-        rope: RoPE.Config
         # TODO(fegin): revisit
         # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
         # and fix the typing here
@@ -86,8 +82,8 @@ class Decoder(BaseModel):
             """Apply runtime config to model config.
 
             When *config* is a ``Trainer.Config``, validates
-            ``training.seq_len`` against the model's intrinsic
-            ``rope.max_seq_len``, resizes the RoPE cache, and propagates
+            ``training.seq_len`` against each attention layer's intrinsic
+            RoPE max sequence length, resizes RoPE caches, and propagates
             debug flags. Non-trainer callers may pass any config-like
             object with a ``ParallelismConfig`` in its ``parallelism``
             field; in that case the training/debug setup is skipped.
@@ -152,24 +148,23 @@ class Decoder(BaseModel):
                 debug = config.debug
                 seq_len = config.training.seq_len
 
-                if seq_len > self.rope.max_seq_len:
-                    raise ValueError(
-                        f"Training sequence length {seq_len} exceeds "
-                        f"model's maximum supported sequence length "
-                        f"{self.rope.max_seq_len}."
-                    )
-                self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
-
                 for layer_cfg in self.layers:
+                    attention_cfg = getattr(layer_cfg, "attention", None)
+                    if attention_cfg is not None and hasattr(attention_cfg, "rope"):
+                        rope_cfg = attention_cfg.rope
+                        if seq_len > rope_cfg.max_seq_len:
+                            raise ValueError(
+                                f"Training sequence length {seq_len} exceeds "
+                                f"attention RoPE maximum supported sequence "
+                                f"length {rope_cfg.max_seq_len}."
+                            )
+                        attention_cfg.rope = dataclasses.replace(
+                            rope_cfg, max_seq_len=seq_len
+                        )
                     if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
                         layer_cfg.moe.router._debug_force_load_balance = (
                             debug.moe_force_load_balance
                         )
-
-            for layer_cfg in self.layers:
-                attention_cfg = getattr(layer_cfg, "attention", None)
-                if attention_cfg is not None and hasattr(attention_cfg, "rope"):
-                    attention_cfg.rope = self.rope
 
     # Set by the trainer when ChunkedCELoss is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().
@@ -185,9 +180,6 @@ class Decoder(BaseModel):
 
         self.layers = ModuleDict()
         for i, layer_config in enumerate(config.layers):
-            attention_config = getattr(layer_config, "attention", None)
-            if attention_config is not None and hasattr(attention_config, "rope"):
-                attention_config.rope = config.rope
             self.layers[str(i)] = layer_config.build()
 
         self.norm = config.norm.build()

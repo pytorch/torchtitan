@@ -32,7 +32,6 @@ def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
     moe_hidden_dim = compute_moe_hidden_dim(dim)
 
     from torchtitan.models.common.nn_modules import Embedding, Linear, RMSNorm
-    from torchtitan.models.common.rope import RoPE
 
     config = Llama4Model.Config(
         dim=dim,
@@ -40,15 +39,6 @@ def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
         tok_embeddings=Embedding.Config(num_embeddings=2048, embedding_dim=dim),
         norm=RMSNorm.Config(normalized_shape=dim),
         lm_head=Linear.Config(in_features=dim, out_features=2048),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=2048,
-            theta=500000,
-            backend="complex",
-            scaling="llama",
-            scaling_factor=16.0,
-            high_freq_factor=1.0,
-        ),
         layers=_build_llama4_layers(
             n_layers=n_layers,
             dim=dim,
@@ -61,6 +51,10 @@ def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
             fixed_attn_block_size=256,
             attn_backend="flex",
             moe_comm_backend="standard",
+            rope_max_seq_len=2048,
+            rope_scaling="llama",
+            rope_scaling_factor=16.0,
+            rope_high_freq_factor=1.0,
         ),
     )
     return Llama4Model(config)

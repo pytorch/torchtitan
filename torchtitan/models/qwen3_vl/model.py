@@ -63,7 +63,6 @@ class Qwen3VLModel(Qwen3Model):
             config,
             **kwargs,
         ) -> None:
-            self.rope.mrope_section = self.mrope_section
             Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
 
@@ -89,12 +88,14 @@ class Qwen3VLModel(Qwen3Model):
             )
 
     def __init__(self, config: Config):
-        config.rope.mrope_section = config.mrope_section
         super().__init__(config)
 
         self.vision_encoder = config.vision_encoder.build()
 
         self.mrope_section = config.mrope_section
+        for layer in self.layers.values():
+            layer.attention.rope.mrope_section = self.mrope_section
+
         self.spatial_merge_size = config.vision_encoder.spatial_merge_size
 
         # Number of early LLM layers that receive DeepStack visual features
@@ -372,9 +373,9 @@ class Qwen3VLModel(Qwen3Model):
             Updated embeddings
         """
         for item_idx, sample_idx, vision_start, n_tokens in vision_positions:
-            inputs_embeds[sample_idx, vision_start : vision_start + n_tokens, :] = (
-                merged_embeds[item_idx, :n_tokens, :]
-            )
+            inputs_embeds[
+                sample_idx, vision_start : vision_start + n_tokens, :
+            ] = merged_embeds[item_idx, :n_tokens, :]
         return inputs_embeds
 
     def _deepstack_process(

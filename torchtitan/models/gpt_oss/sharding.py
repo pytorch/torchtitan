@@ -89,7 +89,6 @@ def _set_gpt_oss_layer_sharding(
             "x": dense_activation_placement(tp=Replicate()),
         },
     )
-    assert attention.rope is not None
     attention.rope.sharding_config = ShardingConfig(
         state_shardings={"cache": dense_param_placement(tp=Replicate())},
     )

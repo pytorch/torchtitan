@@ -70,13 +70,11 @@ class RoPE(Module):
         beta_slow: float = 1.0
         original_seq_len: int = 4096
         mscale: float = 0.0
-        # Qwen-VL style multimodal RoPE sections for temporal/height/width
-        # position IDs. None means standard 1D RoPE.
-        mrope_section: list[int] | None = None
 
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
+        self.mrope_section: list[int] | None = None
         self.register_buffer("cache", self._precompute(), persistent=False)
 
     def _precompute(self) -> torch.Tensor:
@@ -237,11 +235,11 @@ class RoPE(Module):
         cfg = self.config
         if cfg.backend != "cos_sin":
             raise ValueError("MRoPE is only supported for cos/sin RoPE.")
-        if cfg.mrope_section is None:
+        if self.mrope_section is None:
             raise ValueError("mrope_section must be configured for 3D MRoPE positions.")
-        if len(cfg.mrope_section) != 3:
+        if len(self.mrope_section) != 3:
             raise ValueError(
-                f"mrope_section must have 3 entries, got {cfg.mrope_section}."
+                f"mrope_section must have 3 entries, got {self.mrope_section}."
             )
         if position_ids.shape[0] != 3:
             raise ValueError(
@@ -273,7 +271,7 @@ class RoPE(Module):
 
         half = head_dim // 2
         for dim, offset in enumerate((1, 2), start=1):
-            length = cfg.mrope_section[dim] * 3
+            length = self.mrope_section[dim] * 3
             low = torch.arange(offset, length, 3, device=rope_cache.device)
             col_indices = torch.cat([low, low + half])
             dim_pos = pos_local[dim].long()
