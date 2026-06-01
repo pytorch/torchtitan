@@ -16,74 +16,26 @@ from dataclasses import dataclass, field
 
 import spmd_types as spmd
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import Partial, Placement, Replicate, Shard
-from torch.utils._pytree import tree_map
+from torch.distributed.tensor import Placement, Replicate, Shard
 
+from torchtitan.distributed.spmd_types import (
+    PlacementSpec,
+    spmd_to_dtensor_placement,
+)
 from torchtitan.protocols.types import MeshAxisName
 
 
 __all__ = [
     "LocalMapConfig",
-    "NamedPartitionSpec",
-    "NamedPartitionSpecEntry",
     "NamedPlacement",
-    "NamedPlacementSpmd",
     "PlacementLike",
-    "PlacementSpec",
     "ShardingConfig",
-    "SpmdInputConfig",
-    "active_spmd_placement",
-    "is_placement_like",
-    "is_spmd_placement",
-    "placement_axes",
-    "placement_to_spmd_assert_type",
     "resolve_placements",
 ]
 
 NamedPlacement = dict[MeshAxisName, Placement]
-NamedPlacementSpmd = dict[MeshAxisName, spmd.PerMeshAxisSpmdType]
-NamedPartitionSpecEntry = MeshAxisName | tuple[MeshAxisName, ...] | None
-NamedPartitionSpec = tuple[NamedPartitionSpecEntry, ...]
 
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class PlacementSpec:
-    """Placement with explicit global partition spec ordering.
-
-    Use this only when multiple mesh axes shard the same tensor dimension.
-    ``placement`` carries per-axis runtime placement. ``partition_spec`` only
-    disambiguates ordering for type assertions in the local-tensor SPMD path.
-    """
-
-    placement: NamedPlacementSpmd
-    partition_spec: NamedPartitionSpec
-
-
-PlacementLike = NamedPlacement | NamedPlacementSpmd | PlacementSpec
-
-
-def _named_placement(placement: PlacementLike) -> NamedPlacement | NamedPlacementSpmd:
-    return placement.placement if isinstance(placement, PlacementSpec) else placement
-
-
-def is_placement_like(value: object) -> bool:
-    return isinstance(value, PlacementSpec) or (
-        isinstance(value, dict)
-        and bool(value)
-        and all(MeshAxisName.has_axis(key) for key in value)
-    )
-
-
-def is_spmd_placement(placement: PlacementLike) -> bool:
-    if isinstance(placement, PlacementSpec):
-        return True
-    return all(
-        isinstance(value, spmd.PerMeshAxisSpmdType) for value in placement.values()
-    )
-
-
-def placement_axes(placement: PlacementLike) -> tuple[MeshAxisName, ...]:
-    return tuple(_named_placement(placement).keys())
+PlacementLike = NamedPlacement | spmd.PerMeshAxisSpmdTypes | PlacementSpec
 
 
 @dataclass(kw_only=True, slots=True)
@@ -132,7 +84,7 @@ class ShardingConfig:
         state_shardings: Parameter/buffer placements for ``distribute_tensor``.
             Outer dict keys are param names.
             e.g. ``{"weight": {TP: Shard(0)}}`` for colwise.
-        state_shardings_compute: Parameter/buffer placements used only during
+        state_shardings_for_computation: Parameter/buffer placements used only during
             forward compute when they differ from ``state_shardings``. This is
             for local SPMD type changes such as an ``I@TP`` norm weight that
             must be read as ``R@TP`` while computing.
@@ -164,7 +116,7 @@ class ShardingConfig:
     """
 
     state_shardings: dict[str, PlacementLike] = field(default_factory=dict)
-    state_shardings_compute: dict[str, PlacementLike] = field(default_factory=dict)
+    state_shardings_for_computation: dict[str, PlacementLike] = field(default_factory=dict)
     in_src_shardings: dict[str, PlacementLike] | None = None
     in_dst_shardings: dict[str, PlacementLike] | None = None
     out_src_shardings: PlacementLike | tuple[PlacementLike, ...] | None = None
@@ -173,19 +125,6 @@ class ShardingConfig:
 
     def to_dict(self) -> dict:
         """Serialize for JSON logging. Placements become repr strings."""
-        return {"repr": repr(self)}
-
-
-@dataclass(kw_only=True, slots=True)
-class SpmdInputConfig:
-    """Model-owned trainer input annotations for the local SPMD path."""
-
-    inputs: PlacementLike | None = None
-    labels: PlacementLike | None = None
-    extra_inputs: dict[str, PlacementLike] = field(default_factory=dict)
-    extra_kwargs: dict[str, PlacementLike] = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
         return {"repr": repr(self)}
 
 
@@ -207,9 +146,13 @@ def resolve_placements(
     """
     # TODO(fegin): remove the ``Shard(d)`` on a size-1 mesh to ``Replicate()``
     # conversion once FlexShard replaces ``fully_shard``.
-    named = _named_placement(placement)
-    if is_spmd_placement(placement):
-        named = _spmd_to_dtensor_placement(placement)
+    # TODO(pianpwk): remove spmd_to_dtensor_placement after full_dtensor is deleted.
+    spmd_translated = spmd_to_dtensor_placement(placement)
+    if spmd_translated is not None:
+        named = spmd_translated
+    else:
+        named = placement.placement if isinstance(placement, PlacementSpec) else placement
+
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
     result = []
     for i, axis_name in enumerate(mesh.mesh_dim_names):
@@ -229,88 +172,3 @@ def resolve_placements(
         ), f"Expected a DTensor Placement for axis {axis_name!r}, got {p!r}."
         result.append(p)
     return tuple(result)
-
-
-def _spmd_to_dtensor_placement(placement: PlacementLike) -> NamedPlacement:
-    named = _named_placement(placement)
-    if not is_spmd_placement(placement):
-        raise ValueError(f"Expected an SPMD placement, got {named!r}.")
-
-    result: NamedPlacement = {}
-    for axis_name, axis_type in named.items():
-        if axis_type == spmd.I or axis_type == spmd.R:
-            dtensor_placement: Placement = Replicate()
-        elif axis_type == spmd.P:
-            dtensor_placement = Partial()
-        elif isinstance(axis_type, spmd.Shard):
-            dtensor_placement = Shard(axis_type.dim)
-        else:
-            raise ValueError(
-                f"Unsupported SPMD placement for axis {axis_name!r}: {axis_type!r}."
-            )
-        if axis_name == MeshAxisName.DP:
-            # Temporary bridge: local SPMD uses one logical DP axis, while the
-            # current full-DTensor storage mesh still spells it as two axes.
-            result[MeshAxisName.DP_REPLICATE] = dtensor_placement
-            result[MeshAxisName.DP_SHARD] = dtensor_placement
-        else:
-            result[axis_name] = dtensor_placement
-    return result
-
-
-def active_spmd_placement(placement: PlacementLike) -> NamedPlacementSpmd:
-    """Return the SPMD placement restricted to active current-mesh axes."""
-    if not is_spmd_placement(placement):
-        raise ValueError(
-            "SPMD backend requires SPMD placements. "
-            f"Got DTensor placement: {_named_placement(placement)!r}."
-        )
-
-    named = _named_placement(placement)
-    mesh_names = spmd.current_mesh_names()
-    if mesh_names is None:
-        return {}
-
-    resolved: NamedPlacementSpmd = {}
-    for axis_name, value in named.items():
-        if axis_name in mesh_names:
-            resolved[axis_name] = value
-    return resolved
-
-
-def placement_to_spmd_assert_type(
-    placement: PlacementLike,
-) -> tuple[NamedPlacementSpmd, spmd.PartitionSpec | None]:
-    """Resolve a placement to ``assert_type`` args for local SPMD typechecking."""
-    local_type = active_spmd_placement(placement)
-    if not isinstance(placement, PlacementSpec):
-        return local_type, None
-
-    mesh_names = spmd.current_mesh_names()
-    if mesh_names is None:
-        return local_type, None
-
-    def active_partition_entry(entry: NamedPartitionSpecEntry):
-        filtered = tree_map(
-            lambda axis_name: axis_name if axis_name in mesh_names else None,
-            entry,
-        )
-        if filtered is None:
-            return None
-        if not isinstance(filtered, tuple):
-            return filtered
-
-        active_axes = tuple(
-            axis_name for axis_name in filtered if axis_name is not None
-        )
-        if not active_axes:
-            return None
-        return active_axes[0] if len(active_axes) == 1 else active_axes
-
-    partition_spec = spmd.PartitionSpec(
-        *(active_partition_entry(entry) for entry in placement.partition_spec)
-    )
-    return {
-        axis_name: spmd.V if isinstance(value, spmd.Shard) else value
-        for axis_name, value in local_type.items()
-    }, partition_spec

@@ -8,8 +8,7 @@ from __future__ import annotations
 
 import functools
 import inspect
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
@@ -22,14 +21,16 @@ from torch.distributed.tensor.placement_types import Placement
 from torch.utils._pytree import tree_map
 
 from torchtitan.config import Configurable
-from torchtitan.distributed.utils import current_mesh, set_current_mesh
-from torchtitan.protocols.sharding import (
-    active_spmd_placement,
+from torchtitan.distributed.spmd_types import (
+    active_placement,
     is_placement_like,
-    NamedPlacement,
-    NamedPlacementSpmd,
     placement_axes,
     placement_to_spmd_assert_type,
+    redistribute_spmd_per_axis,
+)
+from torchtitan.distributed.spmd_types import current_mesh, set_current_mesh
+from torchtitan.protocols.sharding import (
+    NamedPlacement,
     PlacementLike,
     resolve_placements,
     ShardingConfig,
@@ -37,43 +38,6 @@ from torchtitan.protocols.sharding import (
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
-
-
-@contextmanager
-def preserve_buffer_spmd(model: nn.Module) -> Iterator[None]:
-    """Preserve spmd_types annotations on buffers replaced during initialization."""
-    saved: dict[str, Any] = {}
-    for fqn, buf in model.named_buffers():
-        if spmd.has_local_type(buf):
-            saved[fqn] = dict(spmd.get_local_type(buf))
-    yield
-    for fqn, buf in model.named_buffers():
-        if fqn in saved and not spmd.has_local_type(buf):
-            spmd.assert_type(buf, saved[fqn])
-
-
-def redistribute_spmd_per_axis(
-    x: torch.Tensor,
-    src_types: NamedPlacementSpmd,
-    dst_types: NamedPlacementSpmd,
-) -> torch.Tensor:
-    """Redistribute a local tensor along axes whose SPMD type changes."""
-    mesh = current_mesh()
-    if mesh is None:
-        return x
-
-    for axis_name, dst_t in dst_types.items():
-        src_t = src_types.get(axis_name)
-        if src_t is None or src_t == dst_t:
-            continue
-        x = spmd.redistribute(
-            x,
-            mesh.get_group(axis_name),
-            src=src_t,
-            dst=dst_t,
-            backward_options={"op_dtype": x.dtype},
-        )
-    return x
 
 
 class Module(nn.Module, Configurable):
@@ -281,12 +245,12 @@ class Module(nn.Module, Configurable):
 
         self._shard_states(parallel_dims)
         if (
-            self._sharding_config.state_shardings_compute
+            self._sharding_config.state_shardings_for_computation
             and parallel_dims.spmd_backend == "spmd"
         ):
             self._convert_to_compute_state_with_hook(
                 parallel_dims,
-                self._sharding_config.state_shardings_compute,
+                self._sharding_config.state_shardings_for_computation,
             )
         self._cache_pos_arg_names()
         fn = self._maybe_wrap_with_local_map(self.forward, parallel_dims)
@@ -313,7 +277,7 @@ class Module(nn.Module, Configurable):
 
         with set_current_mesh(mesh):
             local_type, partition_spec = placement_to_spmd_assert_type(placement)
-            for axis_name, axis_type in active_spmd_placement(placement).items():
+            for axis_name, axis_type in active_placement(placement).items():
                 if isinstance(axis_type, spmd.Shard):
                     tensor = spmd.shard(
                         tensor,
@@ -341,8 +305,8 @@ class Module(nn.Module, Configurable):
     def _convert_spmd_state(
         tensor: torch.Tensor,
         mesh,
-        rest_types: NamedPlacementSpmd,
-        compute_types: NamedPlacementSpmd,
+        rest_types: spmd.PerMeshAxisSpmdTypes,
+        compute_types: spmd.PerMeshAxisSpmdTypes,
     ) -> torch.Tensor:
         """Convert a param/buffer from rest placement to compute placement."""
         device_type = tensor.device.type
@@ -370,14 +334,14 @@ class Module(nn.Module, Configurable):
     def _convert_to_compute_state_with_hook(
         self,
         parallel_dims: ParallelDims,
-        state_shardings_compute: dict[str, PlacementLike],
+        state_shardings_for_computation: dict[str, PlacementLike],
     ) -> None:
         """Temporarily retype params/buffers for local SPMD forward compute."""
         sharding_config = self._sharding_config
         assert sharding_config is not None
 
         state_types = {}
-        for name, compute_placement in state_shardings_compute.items():
+        for name, compute_placement in state_shardings_for_computation.items():
             rest_placement = sharding_config.state_shardings.get(name)
             if rest_placement is None:
                 raise ValueError(
@@ -392,8 +356,8 @@ class Module(nn.Module, Configurable):
             with set_current_mesh(mesh):
                 state_types[name] = (
                     mesh,
-                    active_spmd_placement(rest_placement),
-                    active_spmd_placement(compute_placement),
+                    active_placement(rest_placement),
+                    active_placement(compute_placement),
                 )
         if not state_types:
             return
@@ -685,8 +649,8 @@ class Module(nn.Module, Configurable):
                 with set_current_mesh(mesh):
                     value = redistribute_spmd_per_axis(
                         value,
-                        active_spmd_placement(src_named_placements),
-                        active_spmd_placement(dst_named_placements),
+                        active_placement(src_named_placements),
+                        active_placement(dst_named_placements),
                     )
                 new_kwargs[name] = value
                 continue
@@ -744,8 +708,8 @@ class Module(nn.Module, Configurable):
             with set_current_mesh(mesh):
                 return redistribute_spmd_per_axis(
                     outputs,
-                    active_spmd_placement(out_src),
-                    active_spmd_placement(out_dst),
+                    active_placement(out_src),
+                    active_placement(out_dst),
                 )
 
         mesh = parallel_dims.resolve_shared_mesh([out_named_placements])

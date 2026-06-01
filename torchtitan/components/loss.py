@@ -20,7 +20,7 @@ from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
-from torchtitan.distributed.utils import current_mesh
+from torchtitan.distributed.spmd_types import current_mesh
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
