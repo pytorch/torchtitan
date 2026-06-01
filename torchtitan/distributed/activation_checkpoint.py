@@ -8,6 +8,7 @@
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
 import os
+
 import contextlib
 
 import torch
@@ -23,7 +24,7 @@ from torch.utils.checkpoint import (
 )
 
 from torchtitan.config import ActivationCheckpointConfig as ACConfig
-from torchtitan.distributed.spmd_state import current_mesh, set_current_mesh
+from torchtitan.distributed.spmd_types import current_mesh, set_current_mesh
 from torchtitan.tools.logging import logger
 
 
@@ -176,11 +177,12 @@ def _apply_op_sac(
 
         return wrapped_policy
 
+    def sac_context_fn():
+        return create_selective_checkpoint_contexts(_get_custom_policy())
+
     return ptd_checkpoint_wrapper(
         module,
-        context_fn=_with_spmd_recompute_context(
-            lambda: create_selective_checkpoint_contexts(_get_custom_policy())
-        ),
+        context_fn=_with_spmd_recompute_context(sac_context_fn),
         preserve_rng_state=ac_config.preserve_rng_state,
         determinism_check=ac_config.determinism_check,
         early_stop=ac_config.early_stop,
@@ -198,11 +200,11 @@ def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
     Returns:
         nn.Module: The module with full activation checkpointing applied.
     """
+    from torch.utils.checkpoint import noop_context_fn
+
     return ptd_checkpoint_wrapper(
         module,
-        context_fn=_with_spmd_recompute_context(
-            lambda: (contextlib.nullcontext(), contextlib.nullcontext())
-        ),
+        context_fn=_with_spmd_recompute_context(noop_context_fn),
         preserve_rng_state=ac_config.preserve_rng_state,
         determinism_check=ac_config.determinism_check,
         early_stop=ac_config.early_stop,

@@ -4,13 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import contextlib
 import math
 import os
 from abc import abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from datetime import timedelta
-from typing import Protocol
+from typing import Protocol, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
@@ -23,9 +25,11 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import CommConfig, DebugConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
+
+if TYPE_CHECKING:
+    from torchtitan.distributed.parallel_dims import ParallelDims
 
 
 def _dist_reduce(
@@ -127,7 +131,6 @@ def set_determinism(
     """
     if debug_config.deterministic:
         logger.info("Deterministic algorithm enabled (expect perf degradation).")
-        torch.use_deterministic_algorithms(True)
         torch.use_deterministic_algorithms(
             True, warn_only=debug_config.deterministic_warn_only
         )
@@ -255,9 +258,8 @@ def set_batch_invariance(enable: bool) -> None:
 
     # Register batch-invariant ATen overrides via upstream package
     # https://github.com/thinking-machines-lab/batch_invariant_ops
-    from batch_invariant_ops import (  # pyrefly: ignore [missing-import]
-        enable_batch_invariant_mode as _upstream_enable,
-    )
+    # pyrefly: ignore[missing-import]
+    from batch_invariant_ops import enable_batch_invariant_mode as _upstream_enable
 
     _upstream_enable()
 
@@ -317,8 +319,8 @@ class TrainContext(Protocol):
 
 
 def get_train_context(
-    enable_loss_parallel: bool,
     *,
+    enable_loss_parallel: bool,
     spmd_typechecking: bool = False,
 ) -> TrainContext:
     @contextlib.contextmanager
@@ -429,7 +431,8 @@ def init_distributed(
     device_id: torch.device | None = None
     if comm_config.mode == "torchcomms":
         try:
-            import torchcomms  # noqa: F401  # pyrefly: ignore [missing-import]
+            # pyrefly: ignore[missing-import]
+            import torchcomms  # noqa: F401
         except ImportError as err:
             raise ImportError(
                 "torchcomms package is required for --comm.mode=torchcomms."
