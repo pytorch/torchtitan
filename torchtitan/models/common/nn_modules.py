@@ -18,7 +18,12 @@ add more if a new callsite needs them.
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
+import torch
+import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.distributed.tensor import DTensor
 
 from torchtitan.protocols.module import Module
 
@@ -55,9 +60,53 @@ class Embedding(nn.Embedding, Module):
     class Config(Module.Config):
         num_embeddings: int
         embedding_dim: int
+        enable_sp: bool | None = None
 
     def __init__(self, config: Config):
         super().__init__(config.num_embeddings, config.embedding_dim)
+        self.enable_sp = config.enable_sp
+        self.tp_pg: dist.ProcessGroup | None = None
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """Runs vocab-parallel embedding when a local TP process group is set."""
+        weight = self.weight
+        if self.tp_pg is None or isinstance(weight, DTensor):
+            return F.embedding(
+                input,
+                weight,
+                self.padding_idx,
+                self.max_norm,
+                self.norm_type,
+                self.scale_grad_by_freq,
+                self.sparse,
+            )
+
+        assert self.enable_sp is not None
+        chunk_size = (
+            self.num_embeddings + dist.get_world_size(self.tp_pg) - 1
+        ) // dist.get_world_size(self.tp_pg)
+        offset = dist.get_rank(self.tp_pg) * chunk_size
+        mask = (input >= offset) & (input < offset + weight.shape[0])
+        local_input = (input - offset).clamp(0, weight.shape[0] - 1)
+        out = F.embedding(
+            local_input,
+            weight,
+            self.padding_idx,
+            self.max_norm,
+            self.norm_type,
+            self.scale_grad_by_freq,
+            self.sparse,
+        )
+        out = out * mask.unsqueeze(-1).to(out.dtype)
+        bwd = {"op_dtype": torch.float32} if out.dtype != torch.float32 else None
+        tp_out_type = spmd.S(1) if self.enable_sp else spmd.I
+        return spmd.redistribute(
+            out,
+            self.tp_pg,
+            src=spmd.P,
+            dst=tp_out_type,
+            backward_options=bwd,
+        )
 
 
 class GELU(nn.GELU, Module):
