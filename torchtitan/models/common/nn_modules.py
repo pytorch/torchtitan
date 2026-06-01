@@ -88,10 +88,12 @@ class Embedding(nn.Embedding, Module):
             )
 
         assert self.enable_sp is not None
-        chunk_size = weight.shape[0]
+        chunk_size = (
+            self.num_embeddings + dist.get_world_size(tp_pg) - 1
+        ) // dist.get_world_size(tp_pg)
         offset = dist.get_rank(tp_pg) * chunk_size
-        mask = (input >= offset) & (input < offset + chunk_size)
-        local_input = (input - offset).clamp(0, chunk_size - 1)
+        mask = (input >= offset) & (input < offset + weight.shape[0])
+        local_input = (input - offset).clamp(0, weight.shape[0] - 1)
         out = F.embedding(
             local_input,
             weight,
