@@ -375,6 +375,7 @@ def set_decoder_sharding_config(
                 spmd_backend=spmd_backend,
             ),
         )
+    config.tok_embeddings.enable_sp = enable_sp
     config.norm.sharding_config = norm_config(enable_sp=enable_sp)
 
     config.lm_head.sharding_config = lm_head_sharding_config(
