@@ -117,8 +117,8 @@ def lm_head_sharding_config(
             )
             in_dst = dense_activation_placement(tp=spmd.R)
         else:
-            in_src = dense_activation_placement(tp=spmd.I)
-            in_dst = dense_activation_placement(tp=spmd.I)
+            in_src = dense_activation_placement(tp=spmd.R)
+            in_dst = dense_activation_placement(tp=spmd.R)
 
         if loss_parallel:
             out_src = None
@@ -272,12 +272,17 @@ def set_gqa_inner_attention_local_map(
     the same heads-sharded placement.
     """
     q_placements = dense_activation_placement(tp=spmd.S(2))
+    kv_src_placements = dense_activation_placement(tp=spmd.S(2))
     kv_placements = dense_activation_placement(tp=spmd.S(2), cp=spmd.R)
     kv_grad_placements = dense_activation_placement(tp=spmd.S(2), cp=spmd.P)
     out_src: PlacementLike | tuple[PlacementLike, ...] = (
         (q_placements, q_placements) if return_lse else q_placements
     )
     inner_attention_cfg.sharding_config = ShardingConfig(
+        in_src_shardings={
+            "k": kv_src_placements,
+            "v": kv_src_placements,
+        },
         in_dst_shardings={
             "q": q_placements,
             "k": kv_placements,

@@ -31,7 +31,7 @@ def validate_config(
     parallel_dims: ParallelDims,
     model: nn.Module,
 ) -> None:
-    """Validate that the current configuration is compatible with full DTensor.
+    """Validate that the current configuration is compatible with SPMD backends.
 
     Walks ``model`` to discover the actual attention modules in use and
     raises ``NotImplementedError`` with a clear message if incompatible.
@@ -43,7 +43,7 @@ def validate_config(
 
     if parallel_dims.ep_enabled:
         raise NotImplementedError(
-            "full_dtensor is not supported with Expert Parallel. "
+            f"{parallel_dims.spmd_backend} is not supported with Expert Parallel. "
             "Disable EP or use a different spmd_backend."
         )
 
@@ -53,7 +53,7 @@ def validate_config(
             for m in model.modules()
         ):
             raise NotImplementedError(
-                "full_dtensor + CP is not supported with "
+                f"{parallel_dims.spmd_backend} + CP is not supported with "
                 "ScaledDotProductAttention or VarlenAttention. "
                 "Use FlexAttention + CP or disable CP."
             )
@@ -66,8 +66,8 @@ def _get_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
     even at size 1) so FSDP can pick the DP submesh out of the multi-axis
     SPMD mesh inside ``DeviceMesh._concatenate([dp_mesh, tp_mesh])``.
     """
-    assert parallel_dims.spmd_backend == "full_dtensor", (
-        "_get_dp_mesh_axes is only meaningful under full_dtensor"
+    assert parallel_dims.spmd_backend in ("full_dtensor", "spmd"), (
+        "_get_dp_mesh_axes is only meaningful under SPMD-style backends"
     )
     shard_axes: list[str] = ["dp_shard"]
     if parallel_dims.cp_enabled:
@@ -91,7 +91,10 @@ _DENSE_SPMD_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
 def resolve_fsdp_mesh(
     parallel_dims: ParallelDims,
 ) -> tuple[DeviceMesh, DataParallelMeshDims]:
-    """Select the dense SPMD mesh and DataParallelMeshDims for full_dtensor."""
+    """Select the dense storage mesh and DataParallelMeshDims for SPMD backends."""
+    assert parallel_dims.spmd_backend in ("full_dtensor", "spmd"), (
+        "resolve_fsdp_mesh is only meaningful under SPMD-style backends"
+    )
     spmd_mesh = parallel_dims.get_activated_mesh(_DENSE_SPMD_AXES)
     assert spmd_mesh is not None
     return spmd_mesh, _get_dp_mesh_axes(parallel_dims)
