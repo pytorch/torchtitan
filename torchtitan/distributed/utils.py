@@ -319,8 +319,8 @@ class TrainContext(Protocol):
 
 
 def get_train_context(
-    enable_loss_parallel: bool,
     *,
+    enable_loss_parallel: bool,
     spmd_typechecking: bool = False,
 ) -> TrainContext:
     @contextlib.contextmanager

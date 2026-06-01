@@ -9,6 +9,8 @@
 
 import os
 
+import contextlib
+
 import torch
 import torch._functorch.config
 import torch.nn as nn
@@ -22,6 +24,7 @@ from torch.utils.checkpoint import (
 )
 
 from torchtitan.config import ActivationCheckpointConfig as ACConfig
+from torchtitan.distributed.spmd_types import current_mesh, set_current_mesh
 from torchtitan.tools.logging import logger
 
 
@@ -88,6 +91,23 @@ def _get_save_ops() -> set:
     save_ops.update(_resolve_ops(compute_ops))
     save_ops.update(_resolve_ops(comm_ops))
     return save_ops
+
+
+def _with_spmd_recompute_context(context_fn):
+    """Preserve TorchTitan's active SPMD mesh across checkpoint recompute."""
+
+    def wrapped_context_fn():
+        mesh = current_mesh()
+        forward_context, recompute_context = context_fn()
+
+        @contextlib.contextmanager
+        def recompute_with_mesh():
+            with set_current_mesh(mesh), recompute_context:
+                yield
+
+        return forward_context, recompute_with_mesh()
+
+    return wrapped_context_fn
 
 
 def _apply_op_sac(
@@ -157,9 +177,12 @@ def _apply_op_sac(
 
         return wrapped_policy
 
+    def sac_context_fn():
+        return create_selective_checkpoint_contexts(_get_custom_policy())
+
     return ptd_checkpoint_wrapper(
         module,
-        context_fn=lambda: create_selective_checkpoint_contexts(_get_custom_policy()),
+        context_fn=_with_spmd_recompute_context(sac_context_fn),
         preserve_rng_state=ac_config.preserve_rng_state,
         determinism_check=ac_config.determinism_check,
         early_stop=ac_config.early_stop,
@@ -177,8 +200,11 @@ def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
     Returns:
         nn.Module: The module with full activation checkpointing applied.
     """
+    from torch.utils.checkpoint import noop_context_fn
+
     return ptd_checkpoint_wrapper(
         module,
+        context_fn=_with_spmd_recompute_context(noop_context_fn),
         preserve_rng_state=ac_config.preserve_rng_state,
         determinism_check=ac_config.determinism_check,
         early_stop=ac_config.early_stop,
