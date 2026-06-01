@@ -230,17 +230,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.debug,
             distinct_seed_mesh_dims=["pp"],
         )
-        # build tokenizer
-        self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
-
-        # build dataloader
-        self.dataloader = config.dataloader.build(
-            dp_world_size=batch_degree,
-            dp_rank=batch_rank,
-            tokenizer=self.tokenizer,
-            seq_len=config.training.seq_len,
-            local_batch_size=config.training.local_batch_size,
-        )
 
         # build model (using meta init)
         model_config = model_spec.model
@@ -447,6 +436,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.step = 0
         self.ntokens_seen = 0
 
+        # build tokenizer
+        self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+
+        # build dataloader
+        self.dataloader = config.dataloader.build(
+            dp_world_size=batch_degree,
+            dp_rank=batch_rank,
+            tokenizer=self.tokenizer,
+            seq_len=config.training.seq_len,
+            local_batch_size=config.training.local_batch_size,
+            snapshot_every_n_steps=(
+                config.checkpoint.interval * self.gradient_accumulation_steps
+                if config.checkpoint.enable
+                else None
+            ),
+        )
+
+        # build checkpointer
         self.checkpointer = config.checkpoint.build(
             dataloader=self.dataloader,
             model_parts=self.model_parts,
@@ -629,7 +636,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # unique tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += labels.numel()
 
-        if self.config.parallelism.spmd_backend == "full_dtensor":
+        if self.config.parallelism.full_dtensor:
             inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
@@ -695,7 +702,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # Remove once non-full_dtensor is no longer supported.
                 if (
                     isinstance(pred, DTensor)
-                    and self.config.parallelism.spmd_backend != "full_dtensor"
+                    and not self.config.parallelism.full_dtensor
                     and self.config.parallelism.disable_loss_parallel
                 ):
                     pred = pred.to_local()
