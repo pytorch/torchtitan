@@ -14,24 +14,28 @@ self-documenting and support multi-dimensional meshes.
 
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Placement, Replicate, Shard
 
-from torchtitan.protocols.types import MeshAxisName, NamedPlacement
+from torchtitan.distributed.spmd_types import (
+    PlacementSpec,
+    spmd_to_dtensor_placement,
+)
+from torchtitan.protocols.types import MeshAxisName
 
 
 __all__ = [
     "LocalMapConfig",
     "NamedPlacement",
+    "PlacementLike",
     "ShardingConfig",
     "resolve_placements",
 ]
 
-# Shard order: we implicitly assume the trivial outer -> inner order matching
-# the mesh axis order. The only non-trivial case is FSDP + TP both sharding on
-# tensor dim 0, but it doesn't need to be annotated today.
-# TODO: integrate with global spmd types (e.g., ``TP: V`` + ``PartitionSpec``
-# carrying explicit shard-order info) once that lands.
+NamedPlacement = dict[MeshAxisName, Placement]
+
+PlacementLike = NamedPlacement | spmd.PerMeshAxisSpmdTypes | PlacementSpec
 
 
 @dataclass(kw_only=True, slots=True)
@@ -52,7 +56,7 @@ class LocalMapConfig:
             ordered by ``forward`` args).
     """
 
-    in_grad_placements: tuple[NamedPlacement, ...]
+    in_grad_placements: tuple[PlacementLike | None, ...]
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}
@@ -80,6 +84,10 @@ class ShardingConfig:
         state_shardings: Parameter/buffer placements for ``distribute_tensor``.
             Outer dict keys are param names.
             e.g. ``{"weight": {TP: Shard(0)}}`` for colwise.
+        state_shardings_for_computation: Parameter/buffer placements used only during
+            forward compute when they differ from ``state_shardings``. This is
+            for local SPMD type changes such as an ``I@TP`` norm weight that
+            must be read as ``R@TP`` while computing.
         in_src_shardings: Source placements of inputs, keyed by ``forward()``
             arg name. Used to annotate plain tensors as DTensors via
             ``DTensor.from_local`` when inputs arrive plain (e.g. from
@@ -107,11 +115,12 @@ class ShardingConfig:
             ``in_grad_placements``.
     """
 
-    state_shardings: dict[str, NamedPlacement] = field(default_factory=dict)
-    in_src_shardings: dict[str, NamedPlacement] | None = None
-    in_dst_shardings: dict[str, NamedPlacement] | None = None
-    out_src_shardings: NamedPlacement | tuple[NamedPlacement, ...] | None = None
-    out_dst_shardings: NamedPlacement | None = None
+    state_shardings: dict[str, PlacementLike] = field(default_factory=dict)
+    state_shardings_for_computation: dict[str, PlacementLike] = field(default_factory=dict)
+    in_src_shardings: dict[str, PlacementLike] | None = None
+    in_dst_shardings: dict[str, PlacementLike] | None = None
+    out_src_shardings: PlacementLike | tuple[PlacementLike, ...] | None = None
+    out_dst_shardings: PlacementLike | None = None
     local_map: LocalMapConfig | None = None
 
     def to_dict(self) -> dict:
@@ -120,7 +129,7 @@ class ShardingConfig:
 
 
 def resolve_placements(
-    named: NamedPlacement,
+    placement: PlacementLike,
     mesh: DeviceMesh,
 ) -> tuple[Placement, ...]:
     """Resolve NamedPlacement against a mesh in axis order.
@@ -137,6 +146,13 @@ def resolve_placements(
     """
     # TODO(fegin): remove the ``Shard(d)`` on a size-1 mesh to ``Replicate()``
     # conversion once FlexShard replaces ``fully_shard``.
+    # TODO(pianpwk): remove spmd_to_dtensor_placement after full_dtensor is deleted.
+    spmd_translated = spmd_to_dtensor_placement(placement)
+    if spmd_translated is not None:
+        named = spmd_translated
+    else:
+        named = placement.placement if isinstance(placement, PlacementSpec) else placement
+
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
     result = []
     for i, axis_name in enumerate(mesh.mesh_dim_names):
@@ -151,5 +167,8 @@ def resolve_placements(
         p = named[key]
         if isinstance(p, Shard) and mesh.size(i) == 1:
             p = Replicate()
+        assert isinstance(
+            p, Placement
+        ), f"Expected a DTensor Placement for axis {axis_name!r}, got {p!r}."
         result.append(p)
     return tuple(result)

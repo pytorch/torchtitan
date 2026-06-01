@@ -4,14 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import contextlib
 import math
 import os
 from abc import abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from datetime import timedelta
-from typing import Protocol
+from typing import Protocol, TYPE_CHECKING
 
+import spmd_types as spmd
 import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
@@ -22,9 +25,11 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import CommConfig, DebugConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
+
+if TYPE_CHECKING:
+    from torchtitan.distributed.parallel_dims import ParallelDims
 
 
 def _dist_reduce(
@@ -313,12 +318,18 @@ class TrainContext(Protocol):
         pass
 
 
-def get_train_context(enable_loss_parallel: bool) -> TrainContext:
+def get_train_context(
+    enable_loss_parallel: bool,
+    *,
+    spmd_typechecking: bool = False,
+) -> TrainContext:
     @contextlib.contextmanager
     def context():
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
+            if spmd_typechecking:
+                stack.enter_context(spmd.typecheck(local=False))
 
             yield
 
