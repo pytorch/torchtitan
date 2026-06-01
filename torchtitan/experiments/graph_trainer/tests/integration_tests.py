@@ -178,25 +178,27 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
         # === aot_fx_trace mode tests ===
         # Note: aot_fx_trace applies cudagraph by default, so skip_rocm_test=True.
         #
-        # TODO: disabled due to upstream PyTorch cuDNN regression in nightly:
-        # CUDNN_STATUS_BAD_PARAM_STREAM_MISMATCH with CUDA graphs + context
-        # parallelism. Re-enable once fixed upstream.
+        # cudagraph is disabled for this FSDP+TP+CP test: CUDA-graph replay of
+        # the coalesced FSDP collectives currently fails under context
+        # parallelism with "CUDA error: invalid argument". The rest of the
+        # aot_fx_trace path is still exercised. Re-enable cudagraph (drop
+        # --compile.disable_passes) once the cudagraph+CP issue is fixed.
         OverrideDefinitions(
             [
                 [
                     "--module graph_trainer.llama3",
                     "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode aot_fx_trace",
+                    "--compile.disable_passes cudagraph_pass",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.context_parallel_degree 2",
                 ],
             ],
-            "aot_fx_trace llama3 FSDP+TP+CP+cudagraph",
+            "aot_fx_trace llama3 FSDP+TP+CP",
             "aot_fx_trace_llama3_fsdp_tp_cp",
             ngpu=8,
             skip_rocm_test=True,
-            disabled=True,
         ),
         # async_tp test lives in graph_trainer_h100 suite (needs NVLink).
         # TODO: disabled due to upstream PyTorch FlexAttention regression in
