@@ -175,13 +175,23 @@ class SubprocessExecutor:
         return ThroughputResult(ok=True, tps_mean=meas.tps_mean, tps_cv=meas.tps_cv,
                                 peak_mem_gb=meas.peak_memory_gb)
 
+    def _short_losses(self, c: Candidate, mode: str, deterministic: bool) -> list[float]:
+        extra = [f"--training.steps={self.verify_steps}", "--debug.seed=42"]
+        if deterministic:
+            extra.append("--debug.deterministic")
+        text = open(self._run(c, mode, extra)).read()
+        return [s.loss for s in M.parse_steps(text)]
+
     def deterministic_losses(self, c: Candidate) -> list[float]:
         """Per-step loss of a short seed-pinned deterministic run (the faithfulness probe)."""
-        text = open(self._run(c, "verify", [
-            f"--training.steps={self.verify_steps}",
-            "--debug.seed=42", "--debug.deterministic",
-        ])).read()
-        return [s.loss for s in M.parse_steps(text)]
+        return self._short_losses(c, "verify", deterministic=True)
+
+    def jitter_losses(self, c: Candidate) -> list[float]:
+        """Same seed/data but NON-deterministic -- exposes the run-to-run rounding
+        jitter used to calibrate the faithfulness tolerance (the 'harmless noise'
+        scale). This is same-data rounding noise, not seed-to-seed (different-data)
+        variation, which would be far too loose and let precision changes hide."""
+        return self._short_losses(c, "jitter", deterministic=False)
 
     def run_verify(self, c):
         golden = self.golden_det_losses

@@ -93,8 +93,17 @@ def main(argv: list[str] | None = None) -> int:
             print("[calibrate] golden baseline failed to run; aborting:\n", tr.crash_text[-1500:])
             return 1
         det = ex.deterministic_losses(gold)
-        er = ex.run_eval(gold, steps=steps)
         ex.golden_det_losses = det
+        # Calibrate the faithfulness tolerance from the golden's own rounding
+        # jitter (same seed/data, nondeterministic vs deterministic) x headroom,
+        # so rounding-noise changes pass as faithful but real math changes don't.
+        jit = ex.jitter_losses(gold)
+        if jit and len(jit) == len(det):
+            jitter = max(abs(a - b) / max(abs(b), 1e-9) for a, b in zip(jit, det))
+            ex.verify_tol = max(jitter * 10.0, 5e-4)
+            print(f"[calibrate] faithfulness tol = {ex.verify_tol:.2e} "
+                  f"(golden rounding jitter {jitter:.2e} x10)")
+        er = ex.run_eval(gold, steps=steps)
         print(f"[calibrate] golden: tps={tr.tps_mean:.0f} (cv {tr.tps_cv:.3f})  "
               f"eval_loss={er.eval_loss if er.ok else 'n/a'}  det_losses={[round(x,2) for x in det]}")
         HarnessState(

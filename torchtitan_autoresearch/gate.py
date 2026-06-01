@@ -86,10 +86,15 @@ def gate(
     if session is not None:
         c.commit = session.commit_candidate(c, rules)
 
-    # 2. Run + measure throughput (with one optional rerun near the sig boundary).
+    # 2. SPEED TEST FIRST: run + measure throughput, decide significance vs the
+    #    champion (with one optional rerun near the boundary). A candidate that is
+    #    not clearly faster is rejected here -- with NO quality eval -- so the
+    #    expensive eval only ever runs on candidates that actually win on speed.
     steps, window = rules.steps(mode), rules.window(mode)
+    bootstrap = not state.champion_tps
     samples: list[float] = []
     last_cv = 0.0
+    tps_recommend, tps_detail = "promote", "bootstrap champion (no prior best)"
     for attempt in range(max_reruns + 1):
         tr = executor.run_throughput(c, steps, window)
         if not tr.ok:
@@ -100,12 +105,29 @@ def gate(
                                   f"run failed: {cv.crash_class}/{cv.stage}"))
         samples.append(tr.tps_mean)
         last_cv = tr.tps_cv
-        champ = state.champion_tps or [tr.tps_mean]
-        v = sig.decide(samples, champ, state.tps_noise())
-        if v.recommend != "rerun":
+        if bootstrap:
             break
+        sv = sig.decide(samples, state.champion_tps, state.tps_noise())
+        tps_recommend, tps_detail = sv.recommend, sv.detail
+        if sv.recommend != "rerun":
+            break
+    budget.record(family, None)  # it ran fine; reset the family streak
 
-    # 3. Quality - verify routes.
+    if not bootstrap and tps_recommend != "promote":
+        return finish(Verdict(True, samples[-1], last_cv, none_q, tps_recommend, "discard",
+                              "-", f"not faster than champion: {tps_detail}", verify="n/a"))
+
+    # The bootstrap baseline defines the workload; it has no champion to beat and
+    # no golden to check against yet, so it is kept as the first champion.
+    if bootstrap:
+        state.champion_commit = c.commit
+        state.champion_tps = samples
+        return finish(Verdict(True, samples[-1], last_cv, none_q, "promote", "keep", "-",
+                              "bootstrap champion (no prior best)", verify="n/a"))
+
+    # 3. QUALITY (only reached when the candidate is faster): verify routes --
+    #    faithful changes are quality-preserved (no eval); affecting changes must
+    #    clear the held-out eval floor.
     qo = Q.verify_routes_quality(c, executor, state, rules)
     if qo.verify == "fail":
         cv = classify_crash(qo.eval_crash_text or "")
@@ -114,26 +136,13 @@ def gate(
         return finish(Verdict(True, samples[-1], last_cv, qo.quality, "-", st,
                               cv.crash_class, f"eval failed: {cv.crash_class}", verify="fail"))
     if qo.quality.checked and not qo.quality.passed:
-        budget.record(family, None)  # it ran fine; just didn't clear the floor
         return finish(Verdict(True, samples[-1], last_cv, qo.quality, "reject", "discard",
-                              "-", f"quality below floor (margin {qo.quality.margin:+.4f})",
+                              "-", f"faster but quality below floor (margin {qo.quality.margin:+.4f})",
                               verify="affecting"))
 
-    budget.record(family, None)  # success resets the family streak
-
-    # 4. Decide: significance on throughput vs champion, gated by quality.
-    bootstrap = not state.champion_tps
-    if bootstrap:
-        recommend, detail = "promote", "bootstrap champion (no prior best)"
-    else:
-        sv = sig.decide(samples, state.champion_tps, state.tps_noise())
-        recommend, detail = sv.recommend, sv.detail
-    status = "keep" if recommend == "promote" else "discard"
-    if status == "keep":
-        state.champion_commit = c.commit
-        state.champion_tps = samples
-        # The champion is the throughput target; it is never the quality bar.
-        # Only the human re-blesses a new golden via the constitution.
-
-    return finish(Verdict(True, samples[-1], last_cv, qo.quality, recommend, status, "-",
-                          detail, verify=("affecting" if qo.quality.checked else "faithful")))
+    # 4. Faster AND quality preserved -> promote.
+    state.champion_commit = c.commit
+    state.champion_tps = samples
+    return finish(Verdict(True, samples[-1], last_cv, qo.quality, "promote", "keep", "-",
+                          f"faster ({tps_detail}) and quality preserved",
+                          verify=("affecting" if qo.quality.checked else "faithful")))
