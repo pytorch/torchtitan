@@ -772,28 +772,38 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # All-reduce to get global token count across DP ranks
         # Move to GPU for distributed communication
         local_valid_tokens = local_valid_tokens.to(self.device)
-        if parallel_dims.dp_enabled:
-            batch_mesh = parallel_dims.get_mesh("batch")
-            global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
-        else:
-            global_valid_tokens = local_valid_tokens.float()
 
-        # Process each microbatch: move to GPU, forward/backward, then free
-        accumulated_losses = []
-        for input_dict, labels in microbatches:
-            # Move tensors to GPU
-            for k, v in input_dict.items():
-                if isinstance(v, torch.Tensor):
-                    input_dict[k] = v.to(self.device)
-            labels = labels.to(self.device)
-
-            loss = self.forward_backward_step(
-                input_dict=input_dict,
-                labels=labels,
-                # pyrefly: ignore [bad-argument-type]
-                global_valid_tokens=global_valid_tokens,
+        spmd_mesh_context = (
+            set_current_mesh(
+                self.parallel_dims.get_activated_mesh(["dp", "cp", "tp"])
             )
-            accumulated_losses.append(loss.detach())
+            if self.config.parallelism.spmd_backend == "spmd"
+            else contextlib.nullcontext()
+        )
+        accumulated_losses = []
+        with spmd_mesh_context:
+            if parallel_dims.dp_enabled:
+                batch_mesh = parallel_dims.get_mesh("batch")
+                global_valid_tokens = dist_utils.dist_sum(
+                    local_valid_tokens, batch_mesh
+                )
+            else:
+                global_valid_tokens = local_valid_tokens.float()
+
+            for input_dict, labels in microbatches:
+                # Move tensors to GPU
+                for k, v in input_dict.items():
+                    if isinstance(v, torch.Tensor):
+                        input_dict[k] = v.to(self.device)
+                labels = labels.to(self.device)
+
+                loss = self.forward_backward_step(
+                    input_dict=input_dict,
+                    labels=labels,
+                    # pyrefly: ignore [bad-argument-type]
+                    global_valid_tokens=global_valid_tokens,
+                )
+                accumulated_losses.append(loss.detach())
 
         with sl.log_trace_span("optim"):
             grad_norm = dist_utils.clip_grad_norm_(
@@ -883,16 +893,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 with sl.log_trace_span("step"):
                     self.gc_handler.run(self.step)
 
-                    spmd_mesh_context = (
-                        set_current_mesh(
-                            self.parallel_dims.get_activated_mesh(["dp", "cp", "tp"])
-                        )
-                        if config.parallelism.spmd_backend == "spmd"
-                        else contextlib.nullcontext()
-                    )
                     try:
-                        with spmd_mesh_context:
-                            self.train_step(data_iterator)
+                        self.train_step(data_iterator)
                     except DataloaderExhaustedError:
                         logger.warning("Ran out of data; last step was canceled.")
                         break
