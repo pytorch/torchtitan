@@ -10,7 +10,11 @@ from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.hf_datasets.text_datasets import (
+    HFDataSource,
+    HuggingFaceTextDataLoader,
+    InterleavedHuggingFaceTextDataLoader,
+)
 
 
 class DummyDataset(IterableDataset):
@@ -178,6 +182,108 @@ class TestParallelAwareDataloader(unittest.TestCase):
                     if tok == tokenizer.bos_id and i > 0:
                         # BOS token should have position 0
                         self.assertEqual(pos.item(), 0)
+
+
+class TestInterleavedHuggingFaceTextDataLoader(unittest.TestCase):
+    def _make_config(self, **kwargs) -> InterleavedHuggingFaceTextDataLoader.Config:
+        defaults = dict(
+            sources=[
+                HFDataSource(dataset="c4_test", weight=1.0, infinite=False),
+                HFDataSource(dataset="c4_test", weight=1.0, infinite=False),
+            ],
+            seed=42,
+            num_workers=0,
+        )
+        defaults.update(kwargs)
+        return InterleavedHuggingFaceTextDataLoader.Config(**defaults)
+
+    def test_rejects_empty_sources(self):
+        with self.assertRaises(ValueError) as ctx:
+            InterleavedHuggingFaceTextDataLoader.Config(sources=[], seed=42)
+        self.assertIn("At least one source", str(ctx.exception))
+
+    def test_rejects_mixed_infinite(self):
+        with self.assertRaises(ValueError) as ctx:
+            InterleavedHuggingFaceTextDataLoader.Config(
+                sources=[
+                    HFDataSource(dataset="c4_test", weight=1.0, infinite=True),
+                    HFDataSource(dataset="c4_test", weight=1.0, infinite=False),
+                ],
+                seed=42,
+            )
+        self.assertIn("infinite", str(ctx.exception))
+
+    def test_construction_batch_size_and_num_workers(self):
+        """Verify local_batch_size and num_workers are correctly plumbed through."""
+        config = self._make_config(num_workers=2)
+        dataloader = InterleavedHuggingFaceTextDataLoader(
+            config,
+            dp_world_size=1,
+            dp_rank=0,
+            tokenizer=DummyTokenizer(),
+            seq_len=512,
+            local_batch_size=4,
+        )
+        self.assertEqual(dataloader.batch_size, 4)
+        self.assertEqual(dataloader.num_workers, 2)
+
+    def test_yields_input_and_positions_keys(self):
+        """Batches must contain 'input' and 'positions' keys, matching single-source format."""
+        config = self._make_config()
+        dataloader = InterleavedHuggingFaceTextDataLoader(
+            config,
+            dp_world_size=1,
+            dp_rank=0,
+            tokenizer=DummyTokenizer(),
+            seq_len=512,
+            local_batch_size=2,
+        )
+        batch_input, batch_label = next(iter(dataloader))
+        self.assertIn("input", batch_input)
+        self.assertIn("positions", batch_input)
+        self.assertEqual(batch_input["input"].shape[0], 2)  # batch size
+        self.assertEqual(batch_input["input"].shape[1], 512)  # seq_len
+
+    def test_single_source_equivalent_to_huggingfacetextdataloader(self):
+        """A single-source interleaved dataloader must produce the same batch
+        shape as HuggingFaceTextDataLoader with the same config."""
+        tokenizer = DummyTokenizer()
+        seq_len = 512
+        local_batch_size = 4
+
+        single_dl = HuggingFaceTextDataLoader(
+            HuggingFaceTextDataLoader.Config(
+                dataset="c4_test", num_workers=0, infinite=False
+            ),
+            dp_world_size=1,
+            dp_rank=0,
+            tokenizer=tokenizer,
+            seq_len=seq_len,
+            local_batch_size=local_batch_size,
+        )
+
+        interleaved_dl = InterleavedHuggingFaceTextDataLoader(
+            self._make_config(
+                sources=[HFDataSource(dataset="c4_test", weight=1.0, infinite=False)],
+            ),
+            dp_world_size=1,
+            dp_rank=0,
+            tokenizer=tokenizer,
+            seq_len=seq_len,
+            local_batch_size=local_batch_size,
+        )
+
+        single_batch_input, _ = next(iter(single_dl))
+        interleaved_batch_input, _ = next(iter(interleaved_dl))
+
+        self.assertEqual(
+            single_batch_input["input"].shape,
+            interleaved_batch_input["input"].shape,
+        )
+        self.assertEqual(
+            single_batch_input["positions"].shape,
+            interleaved_batch_input["positions"].shape,
+        )
 
 
 if __name__ == "__main__":

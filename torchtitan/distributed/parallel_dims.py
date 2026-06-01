@@ -69,11 +69,6 @@ class ParallelDims:
         )
         for d in (dp_replicate, cp, tp, pp, ep):
             assert d >= 1, "Parallelism degree should be >= 1, except for dp_shard"
-        if self.spmd_backend == "spmd":
-            raise NotImplementedError(
-                "parallelism.spmd_backend='spmd' is not supported yet."
-            )
-
         assert dp_shard == -1 or dp_shard >= 1, "dp_shard must -1 or >=1."
         if dp_shard < 0:
             self.dp_shard = dp_shard = self.world_size // (dp_replicate * cp * tp * pp)
@@ -397,7 +392,7 @@ class ParallelDims:
         not one of ``parallel_dims.spmd_meshes()``.
         """
         axes_list = list(axes)
-        if self.spmd_backend != "full_dtensor":
+        if self.spmd_backend == "default":
             in_band = ("tp", "ep")
             axes_list = [axis for axis in axes_list if axis in in_band]
         mesh = self.get_activated_mesh(axes_list)

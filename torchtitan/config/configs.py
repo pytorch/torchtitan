@@ -377,6 +377,9 @@ class DebugConfig:
     seed: int | None = None
     """Choose the base RNG seed used for training"""
 
+    spmd_typechecking: bool = False
+    """Enable global SPMD type checking for the local-tensor SPMD backend."""
+
     deterministic: bool = False
     """Use deterministic algorithms wherever possible, may be slower"""
 
