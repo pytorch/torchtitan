@@ -28,6 +28,7 @@ from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
 #   K = top-k, T = num tokens (B*L flattened),
 #   N = routed tokens (T*K), R = routed tokens assigned to local experts
 
+
 class GroupedExperts(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -111,9 +112,7 @@ class GroupedExperts(Module):
             routed_input_RD,
             num_tokens_per_expert_E,
             metadata,
-        ) = self.token_dispatcher.dispatch(
-            x_TD, topk_scores_TK, topk_expert_ids_TK
-        )
+        ) = self.token_dispatcher.dispatch(x_TD, topk_scores_TK, topk_expert_ids_TK)
         routed_output_RD = self._experts_forward(
             routed_input_RD, num_tokens_per_expert_E
         )
