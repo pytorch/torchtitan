@@ -284,7 +284,7 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
     def test_loss_parallel_cross_entropy_parity(self):
         """
         Tests loss-parallel cross-entropy loss bitwise parity, with torch.distributed.tensor.parallel.loss_parallel().
-        Tests even/uneven vocab sharding, and TP, DP+TP.
+        Tests even/uneven vocab sharding, TP, DP+TP, and IGNORE_INDEX labels.
 
         Runs _LossParallelCrossEntropy under typing checking: logits S(1)@TP, labels I@TP -> I@TP.
         """
@@ -293,15 +293,17 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
             ((4,), ("tp",), (Shard(1),), (Replicate(),)),
             ((2, 2), ("dp", "tp"), (Shard(0), Shard(1)), (Shard(0), Replicate())),
         )
-        cases = ((32000, 109), (32003, 211))
+        cases = ((32000, 109, False), (32003, 211, False), (32000, 307, True))
 
         for mesh_shape, axis_names, logits_placements, label_placements in mesh_configs:
             mesh = init_device_mesh(
                 self.device_type, mesh_shape, mesh_dim_names=axis_names
             )
             tp_group = mesh.get_group("tp")
-            for vocab_size, seed in cases:
-                with self.subTest(mesh_shape=mesh_shape, vocab_size=vocab_size):
+            for vocab_size, seed, ignore in cases:
+                with self.subTest(
+                    mesh_shape=mesh_shape, vocab_size=vocab_size, ignore=ignore
+                ):
                     # Build global test data once, then let DTensor derive the
                     # exact local shards for TP-only and DP+TP placements.
                     torch.manual_seed(seed)
@@ -317,6 +319,13 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         device=self.device_type,
                         dtype=torch.long,
                     )
+                    if ignore:
+                        mask = torch.rand(
+                            num_tokens,
+                            device=self.device_type,
+                            generator=generator,
+                        )
+                        global_labels[mask < 0.3] = IGNORE_INDEX
                     # distribute as DTensor; loss_parallel wrapper takes DTensors.
                     logits_dtensor = distribute_tensor(
                         global_logits,
