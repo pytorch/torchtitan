@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """The per-candidate gate: the 4-step pipeline (ARCHITECTURE.md section 5.3).
 
     admit -> run+measure -> verify-routes-quality -> decide
@@ -8,11 +14,13 @@ orchestration over the injectable `Executor`, so it is fully testable on CPU.
 
 from __future__ import annotations
 
-from torchtitan_autoresearch import quality as Q
-from torchtitan_autoresearch import significance as sig
-from torchtitan_autoresearch import workload_guard as wg
+from torchtitan_autoresearch import (
+    quality as Q,
+    significance as sig,
+    workload_guard as wg,
+)
 from torchtitan_autoresearch.constitution import Rules
-from torchtitan_autoresearch.executor import Executor, classify_crash
+from torchtitan_autoresearch.executor import classify_crash, Executor
 from torchtitan_autoresearch.ledger import Ledger, Record
 from torchtitan_autoresearch.state import HarnessState
 from torchtitan_autoresearch.types import Candidate, Quality, Verdict
@@ -66,7 +74,9 @@ def gate(
 
     def finish(v: Verdict) -> Verdict:
         if session is not None and v.status != "keep" and prev_tip:
-            session.reset_to(prev_tip)  # discard the candidate commit; tip stays at champion
+            session.reset_to(
+                prev_tip
+            )  # discard the candidate commit; tip stays at champion
         state.absorb_budget(budget)
         state.save(statefile)
         ledger.append(_record(c, v))
@@ -76,8 +86,18 @@ def gate(
 
     # 1. Admissible? (locked invariants + editable scope + not a deferred family)
     if budget.is_deferred(family):
-        return finish(Verdict(False, 0, 0, none_q, "invalid", "invalid", "-",
-                              f"family '{family}' deferred (repeated substrate failures)"))
+        return finish(
+            Verdict(
+                False,
+                0,
+                0,
+                none_q,
+                "invalid",
+                "invalid",
+                "-",
+                f"family '{family}' deferred (repeated substrate failures)",
+            )
+        )
     ok, reason = wg.admissible(c, rules)
     if not ok:
         return finish(Verdict(False, 0, 0, none_q, "invalid", "invalid", "-", reason))
@@ -94,6 +114,7 @@ def gate(
     bootstrap = not state.champion_tps
     samples: list[float] = []
     last_cv = 0.0
+    last_gb = 0  # candidate's global batch -> equal-compute eval horizon
     tps_recommend, tps_detail = "promote", "bootstrap champion (no prior best)"
     for attempt in range(max_reruns + 1):
         tr = executor.run_throughput(c, steps, window)
@@ -101,10 +122,21 @@ def gate(
             cv = classify_crash(tr.crash_text)
             budget.record(family, cv)
             st = "oom" if cv.crash_class == "OOM" else "crash"
-            return finish(Verdict(True, 0, 0, none_q, "-", st, cv.crash_class,
-                                  f"run failed: {cv.crash_class}/{cv.stage}"))
+            return finish(
+                Verdict(
+                    True,
+                    0,
+                    0,
+                    none_q,
+                    "-",
+                    st,
+                    cv.crash_class,
+                    f"run failed: {cv.crash_class}/{cv.stage}",
+                )
+            )
         samples.append(tr.tps_mean)
         last_cv = tr.tps_cv
+        last_gb = tr.global_batch
         if bootstrap:
             break
         sv = sig.decide(samples, state.champion_tps, state.tps_noise())
@@ -114,35 +146,88 @@ def gate(
     budget.record(family, None)  # it ran fine; reset the family streak
 
     if not bootstrap and tps_recommend != "promote":
-        return finish(Verdict(True, samples[-1], last_cv, none_q, tps_recommend, "discard",
-                              "-", f"not faster than champion: {tps_detail}", verify="n/a"))
+        return finish(
+            Verdict(
+                True,
+                samples[-1],
+                last_cv,
+                none_q,
+                tps_recommend,
+                "discard",
+                "-",
+                f"not faster than champion: {tps_detail}",
+                verify="n/a",
+            )
+        )
 
     # The bootstrap baseline defines the workload; it has no champion to beat and
     # no golden to check against yet, so it is kept as the first champion.
     if bootstrap:
         state.champion_commit = c.commit
         state.champion_tps = samples
-        return finish(Verdict(True, samples[-1], last_cv, none_q, "promote", "keep", "-",
-                              "bootstrap champion (no prior best)", verify="n/a"))
+        return finish(
+            Verdict(
+                True,
+                samples[-1],
+                last_cv,
+                none_q,
+                "promote",
+                "keep",
+                "-",
+                "bootstrap champion (no prior best)",
+                verify="n/a",
+            )
+        )
 
     # 3. QUALITY (only reached when the candidate is faster): verify routes --
     #    faithful changes are quality-preserved (no eval); affecting changes must
     #    clear the held-out eval floor.
-    qo = Q.verify_routes_quality(c, executor, state, rules)
+    qo = Q.verify_routes_quality(c, executor, state, rules, global_batch=last_gb)
     if qo.verify == "fail":
         cv = classify_crash(qo.eval_crash_text or "")
         budget.record(family, cv)
         st = "oom" if cv.crash_class == "OOM" else "crash"
-        return finish(Verdict(True, samples[-1], last_cv, qo.quality, "-", st,
-                              cv.crash_class, f"eval failed: {cv.crash_class}", verify="fail"))
+        return finish(
+            Verdict(
+                True,
+                samples[-1],
+                last_cv,
+                qo.quality,
+                "-",
+                st,
+                cv.crash_class,
+                f"eval failed: {cv.crash_class}",
+                verify="fail",
+            )
+        )
     if qo.quality.checked and not qo.quality.passed:
-        return finish(Verdict(True, samples[-1], last_cv, qo.quality, "reject", "discard",
-                              "-", f"faster but quality below floor (margin {qo.quality.margin:+.4f})",
-                              verify="affecting"))
+        return finish(
+            Verdict(
+                True,
+                samples[-1],
+                last_cv,
+                qo.quality,
+                "reject",
+                "discard",
+                "-",
+                f"faster but quality below floor (margin {qo.quality.margin:+.4f})",
+                verify="affecting",
+            )
+        )
 
     # 4. Faster AND quality preserved -> promote.
     state.champion_commit = c.commit
     state.champion_tps = samples
-    return finish(Verdict(True, samples[-1], last_cv, qo.quality, "promote", "keep", "-",
-                          f"faster ({tps_detail}) and quality preserved",
-                          verify=("affecting" if qo.quality.checked else "faithful")))
+    return finish(
+        Verdict(
+            True,
+            samples[-1],
+            last_cv,
+            qo.quality,
+            "promote",
+            "keep",
+            "-",
+            f"faster ({tps_detail}) and quality preserved",
+            verify=("affecting" if qo.quality.checked else "faithful"),
+        )
+    )

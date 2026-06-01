@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Harness reference state: golden, champion, noise models, family budget.
 
 This is harness-owned facts/state (ARCHITECTURE.md section 5.5), persisted as
@@ -12,8 +18,7 @@ import json
 import os
 from dataclasses import asdict, dataclass, field
 
-from torchtitan_autoresearch import crash_classify as cc
-from torchtitan_autoresearch import significance as sig
+from torchtitan_autoresearch import crash_classify as cc, significance as sig
 
 
 @dataclass
@@ -25,7 +30,11 @@ class HarnessState:
     champion_tps: list[float] = field(default_factory=list)
     tps_cv: float = 0.02
     tps_tail_pct: float = 4.5
-    eval_noise_rel: float = 0.0  # relative std of eval loss (sets margin meaningfulness)
+    eval_noise_rel: float = 0.0  # relative std of golden eval loss (informational)
+    eval_noise_abs: float = (
+        0.0  # absolute std of golden eval loss -> the floor's noise band
+    )
+    golden_eval_losses: list[float] = field(default_factory=list)  # calibration samples
     family_streaks: dict[str, int] = field(default_factory=dict)
     family_deferred: list[str] = field(default_factory=list)
 
@@ -56,4 +65,6 @@ class HarnessState:
 
     def absorb_budget(self, b: cc.FamilyBudget) -> None:
         self.family_deferred = sorted(b.deferred)
-        self.family_streaks = {f"{fam}|{cls_}": n for (fam, cls_), n in b._streak.items()}
+        self.family_streaks = {
+            f"{fam}|{cls_}": n for (fam, cls_), n in b._streak.items()
+        }

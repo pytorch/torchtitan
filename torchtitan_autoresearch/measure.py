@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Canonical, tamper-proof throughput measurement.
 
 Post-mortem finding 1b: the search moved reported tps +2.9% by walking
@@ -32,6 +38,17 @@ _STEP = re.compile(
 _PEAK_FLOPS = re.compile(r"Peak FLOPS used for computing MFU:\s*([\d.eE+]+)")
 _CAPACITY = re.compile(r"CUDA capacity:\s*(.+?)\s+with\s+([\d.]+)GiB")
 _VAL_LOSS = re.compile(r"validate step:\s*\d+\s+loss:\s*([-\d.eE+]+)")
+_GLOBAL_BATCH = re.compile(r"global batch size\s+(\d+)")
+
+
+def parse_global_batch(text: str) -> int | None:
+    """The effective global batch size TorchTitan logs at trainer init.
+
+    Used to convert a token budget into a step count so the quality eval can be
+    run at equal *compute* across recipes with different per-rank batch sizes.
+    """
+    m = _GLOBAL_BATCH.search(_ANSI.sub("", text))
+    return int(m.group(1)) if m else None
 
 
 def parse_validation_loss(text: str) -> float | None:
@@ -76,6 +93,7 @@ class Measurement:
     peak_flops: float | None = None
     gpu: str = ""
     n_window: int = 0
+    global_batch: int = 0  # effective global batch size (tokens-per-step / seq_len)
 
 
 def _f(x: str) -> float:
@@ -132,6 +150,7 @@ def measure(text: str, window: tuple[int, int]) -> Measurement:
     cap = _CAPACITY.search(text)
     if cap:
         out.gpu = cap.group(1)
+    out.global_batch = parse_global_batch(text) or 0
 
     out.peak_memory_gb = max(s.memory_gb for s in steps)
     out.peak_memory_pct = max(s.memory_pct for s in steps)

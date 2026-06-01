@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """The GPU-execution boundary, behind an injectable interface.
 
 The harness orchestration (gate, quality, api) only depends on this Protocol, so
@@ -11,13 +17,13 @@ floored axis; verify decides whether a change is faithful enough to skip the eva
 
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 from dataclasses import dataclass
 from typing import Protocol
 
-from torchtitan_autoresearch import crash_classify as cc
-from torchtitan_autoresearch import measure as M
+from torchtitan_autoresearch import crash_classify as cc, measure as M
 from torchtitan_autoresearch.types import Candidate
 
 
@@ -27,6 +33,9 @@ class ThroughputResult:
     tps_mean: float = 0.0
     tps_cv: float = 0.0
     peak_mem_gb: float = 0.0
+    global_batch: int = (
+        0  # effective global batch size; converts a token budget -> steps
+    )
     crash_text: str = ""  # populated when ok is False
 
 
@@ -44,9 +53,18 @@ class EvalResult:
 
 
 class Executor(Protocol):
-    def run_throughput(self, c: Candidate, steps: int, window: tuple[int, int]) -> ThroughputResult: ...
-    def run_verify(self, c: Candidate) -> VerifyResult: ...
-    def run_eval(self, c: Candidate) -> EvalResult: ...
+    def run_throughput(
+        self, c: Candidate, steps: int, window: tuple[int, int]
+    ) -> ThroughputResult:
+        ...
+
+    def run_verify(self, c: Candidate) -> VerifyResult:
+        ...
+
+    def run_eval(
+        self, c: Candidate, *, global_batch: int = 0, run_tag: str = ""
+    ) -> EvalResult:
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -75,15 +93,19 @@ class FakeExecutor:
         if s.get("crash"):
             return ThroughputResult(ok=False, crash_text=s["crash"])
         return ThroughputResult(
-            ok=True, tps_mean=float(s.get("tps", 0.0)),
-            tps_cv=float(s.get("cv", 0.0)), peak_mem_gb=float(s.get("peak_mem", 0.0)),
+            ok=True,
+            tps_mean=float(s.get("tps", 0.0)),
+            tps_cv=float(s.get("cv", 0.0)),
+            peak_mem_gb=float(s.get("peak_mem", 0.0)),
         )
 
     def run_verify(self, c):
         s = self._spec(c)
-        return VerifyResult(faithful=bool(s.get("faithful", True)), detail=s.get("verify_detail", ""))
+        return VerifyResult(
+            faithful=bool(s.get("faithful", True)), detail=s.get("verify_detail", "")
+        )
 
-    def run_eval(self, c):
+    def run_eval(self, c, *, global_batch: int = 0, run_tag: str = ""):
         s = self._spec(c)
         if s.get("eval_crash"):
             return EvalResult(ok=False, crash_text=s["eval_crash"])
@@ -122,6 +144,9 @@ class SubprocessExecutor:
         val_steps: int = 8,
         verify_steps: int = 3,
         verify_tol: float = 5e-3,
+        seq_len: int = 4096,
+        eval_tokens: int = 0,
+        eval_fallback_steps: int = 50,
         run_dir: str = "/tmp/ar_runs",
     ):
         self.repo_root = repo_root
@@ -132,6 +157,9 @@ class SubprocessExecutor:
         self.val_steps = val_steps
         self.verify_steps = verify_steps
         self.verify_tol = verify_tol
+        self.seq_len = seq_len
+        self.eval_tokens = eval_tokens
+        self.eval_fallback_steps = eval_fallback_steps
         self.run_dir = run_dir
         os.makedirs(run_dir, exist_ok=True)
         self.golden_det_losses: list[float] = []  # set by the driver after calibration
@@ -141,7 +169,10 @@ class SubprocessExecutor:
         # Key by commit AND command: command-only candidates share a commit, so
         # keying on commit alone would make them all reuse the first run's cache.
         import hashlib
-        h = hashlib.md5(((c.commit or "") + "|" + " ".join(c.command)).encode()).hexdigest()[:8]
+
+        h = hashlib.md5(
+            ((c.commit or "") + "|" + " ".join(c.command)).encode()
+        ).hexdigest()[:8]
         label = (c.label or "cand").replace("/", "_").replace(" ", "_")[:24]
         return f"{label}_{h}"
 
@@ -152,7 +183,8 @@ class SubprocessExecutor:
         log = os.path.join(self.run_dir, f"{key[0]}_{mode}.log")
         argv = [
             os.path.join(self.repo_root, "run_train.sh"),
-            *self.base_command, *c.command,
+            *self.base_command,
+            *c.command,
             f"--metrics.log_freq={self.log_freq}",
             f"--dump_folder={os.path.join(self.run_dir, key[0] + '_' + mode + '_dump')}",
             *extra,
@@ -160,10 +192,19 @@ class SubprocessExecutor:
         # Run inside repo_root (the experiment's worktree): cwd so relative paths
         # (tokenizer, dumps) resolve there, and PYTHONPATH so the worktree's
         # torchtitan (with this candidate's edits) is imported, not the primary.
-        env = {**os.environ, "NGPU": str(self.ngpu), "MODULE": "qwen3", "CONFIG": "qwen3_14b",
-               "PYTHONPATH": self.repo_root + os.pathsep + os.environ.get("PYTHONPATH", "")}
+        env = {
+            **os.environ,
+            "NGPU": str(self.ngpu),
+            "MODULE": "qwen3",
+            "CONFIG": "qwen3_14b",
+            "PYTHONPATH": self.repo_root
+            + os.pathsep
+            + os.environ.get("PYTHONPATH", ""),
+        }
         with open(log, "w") as f:
-            subprocess.run(argv, stdout=f, stderr=subprocess.STDOUT, env=env, cwd=self.repo_root)
+            subprocess.run(
+                argv, stdout=f, stderr=subprocess.STDOUT, env=env, cwd=self.repo_root
+            )
         self._log_cache[key] = log
         return log
 
@@ -172,10 +213,17 @@ class SubprocessExecutor:
         meas = M.measure(text, window)
         if not meas.steps or not meas.loss_finite:
             return ThroughputResult(ok=False, crash_text=text[-4000:])
-        return ThroughputResult(ok=True, tps_mean=meas.tps_mean, tps_cv=meas.tps_cv,
-                                peak_mem_gb=meas.peak_memory_gb)
+        return ThroughputResult(
+            ok=True,
+            tps_mean=meas.tps_mean,
+            tps_cv=meas.tps_cv,
+            peak_mem_gb=meas.peak_memory_gb,
+            global_batch=meas.global_batch,
+        )
 
-    def _short_losses(self, c: Candidate, mode: str, deterministic: bool) -> list[float]:
+    def _short_losses(
+        self, c: Candidate, mode: str, deterministic: bool
+    ) -> list[float]:
         extra = [f"--training.steps={self.verify_steps}", "--debug.seed=42"]
         if deterministic:
             extra.append("--debug.deterministic")
@@ -196,24 +244,51 @@ class SubprocessExecutor:
     def run_verify(self, c):
         golden = self.golden_det_losses
         if not golden:
-            return VerifyResult(faithful=False, detail="no golden trajectory; treat as affecting")
+            return VerifyResult(
+                faithful=False, detail="no golden trajectory; treat as affecting"
+            )
         losses = self.deterministic_losses(c)
         if len(losses) < len(golden):
             # deterministic run failed (e.g. compile+deterministic conflict) -> eval to be safe
-            return VerifyResult(faithful=False, detail="deterministic verify run failed; eval")
+            return VerifyResult(
+                faithful=False, detail="deterministic verify run failed; eval"
+            )
         worst = max(abs(a - b) / max(abs(b), 1e-9) for a, b in zip(losses, golden))
         faithful = worst <= self.verify_tol
-        return VerifyResult(faithful=faithful,
-                            detail=f"max loss rel-dev {worst:.2e} vs tol {self.verify_tol:.0e}")
+        return VerifyResult(
+            faithful=faithful,
+            detail=f"max loss rel-dev {worst:.2e} vs tol {self.verify_tol:.0e}",
+        )
 
-    def run_eval(self, c, steps=10):
-        text = open(self._run(c, "eval", [
-            f"--training.steps={steps}",
-            "--validator.enable",
-            f"--validator.dataloader.dataset={self.val_dataset}",
-            f"--validator.freq={steps}",
-            f"--validator.steps={self.val_steps}",
-        ])).read()
+    def eval_steps_for(self, global_batch: int) -> int:
+        """Steps to train before the held-out eval, at a fixed *token* budget.
+
+        Equal-compute, not equal-steps: a recipe with a bigger global batch runs
+        proportionally fewer steps to consume the same tokens, so the quality
+        comparison is per-compute (the objective) rather than penalizing/rewarding
+        whoever happens to see more data at a fixed step count.
+        """
+        if self.eval_tokens and global_batch:
+            return max(1, math.ceil(self.eval_tokens / (global_batch * self.seq_len)))
+        return self.eval_fallback_steps
+
+    def run_eval(self, c, *, global_batch: int = 0, run_tag: str = ""):
+        steps = self.eval_steps_for(global_batch)
+        # run_tag distinguishes repeated golden evals so noise calibration gets
+        # independent (non-cached) runs rather than the same cached log.
+        text = open(
+            self._run(
+                c,
+                "eval" + run_tag,
+                [
+                    f"--training.steps={steps}",
+                    "--validator.enable",
+                    f"--validator.dataloader.dataset={self.val_dataset}",
+                    f"--validator.freq={steps}",
+                    f"--validator.steps={self.val_steps}",
+                ],
+            )
+        ).read()
         loss = M.parse_validation_loss(text)
         if loss is None:
             return EvalResult(ok=False, crash_text=text[-4000:])

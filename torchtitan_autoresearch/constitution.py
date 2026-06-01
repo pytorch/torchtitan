@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Load the binding rules from `Constitution.md` (the human's binding channel).
 
 The constitution is the enforced source of truth (ARCHITECTURE.md section 4.1).
@@ -73,6 +79,35 @@ class Rules:
     def coupled(self) -> list[list[str]]:
         return self.raw["quality"].get("coupled", [])
 
+    # --- quality eval horizon + noise calibration ---
+    def _eval(self) -> dict[str, Any]:
+        return self.raw["quality"].get("eval", {})
+
+    @property
+    def eval_tokens(self) -> int:
+        """Token budget for the held-out eval (equal-compute across recipes)."""
+        return int(self._eval().get("tokens", 0))
+
+    @property
+    def eval_fallback_steps(self) -> int:
+        """Step count used only if the token budget can't be converted (no batch)."""
+        return int(self._eval().get("fallback_steps", 50))
+
+    @property
+    def eval_val_steps(self) -> int:
+        """Number of held-out validation batches averaged into the eval loss."""
+        return int(self._eval().get("val_steps", 16))
+
+    @property
+    def eval_calibration_repeats(self) -> int:
+        """Independent golden eval runs used to measure the eval-noise band."""
+        return int(self._eval().get("calibration_repeats", 3))
+
+    @property
+    def eval_z(self) -> float:
+        """Multiplier on the eval-noise std for the quality floor's noise band."""
+        return float(self._eval().get("z", 3.0))
+
     # --- scope ---
     @property
     def editable_files(self) -> list[str]:
@@ -97,7 +132,9 @@ class Rules:
 
     @property
     def branch_pattern(self) -> str:
-        return self.raw.get("provenance", {}).get("branch_pattern", "autoresearch/{tag}")
+        return self.raw.get("provenance", {}).get(
+            "branch_pattern", "autoresearch/{tag}"
+        )
 
     @property
     def allow_resume(self) -> bool:

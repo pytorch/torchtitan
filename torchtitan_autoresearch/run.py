@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """The autoresearch creating loop -- the internal worker the observer launches.
 
 This is NOT the human entry point. Autoresearch is started only through the
@@ -15,7 +21,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
+import statistics
 import sys
 
 from torchtitan_autoresearch.agent import KnobAgent
@@ -41,19 +47,25 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     ap = argparse.ArgumentParser(prog="torchtitan_autoresearch.run")
-    ap.add_argument("--tag", required=True, help="experiment tag -> branch autoresearch/<tag>")
-    ap.add_argument("--dataset", default="c4",
-                    help="dataset for training AND its held-out eval split "
-                         "(c4 -> train c4 / eval c4_validation; c4_test -> both local/offline)")
+    ap.add_argument(
+        "--tag", required=True, help="experiment tag -> branch autoresearch/<tag>"
+    )
+    ap.add_argument(
+        "--dataset",
+        default="c4",
+        help="dataset for training AND its held-out eval split "
+        "(c4 -> train c4 / eval c4_validation; c4_test -> both local/offline)",
+    )
     ap.add_argument("--max-iters", type=int, default=8)
     ap.add_argument("--run-dir", default="")
-    ap.add_argument("--here", default="",
-                    help="repo root (default: cwd)")
+    ap.add_argument("--here", default="", help="repo root (default: cwd)")
     args = ap.parse_args(argv)
 
     # A single dataset choice decides both the training set and its held-out eval
     # split. c4's held-out split is c4_validation; toy c4_test has no separate split.
-    eval_split = {"c4": "c4_validation", "c4_test": "c4_test"}.get(args.dataset, args.dataset)
+    eval_split = {"c4": "c4_validation", "c4_test": "c4_test"}.get(
+        args.dataset, args.dataset
+    )
     train_dataset, eval_dataset = args.dataset, eval_split
 
     repo = args.here or _repo_root()
@@ -70,27 +82,46 @@ def main(argv: list[str] | None = None) -> int:
     if ngpu <= 0:
         print("no GPUs detected; autoresearch needs at least one GPU", file=sys.stderr)
         return 2
-    print(f"[setup] world size (auto) = {ngpu} | dataset = {args.dataset} | "
-          f"(train {train_dataset} / eval {eval_dataset}) | run dir = {run_dir}")
+    print(
+        f"[setup] world size (auto) = {ngpu} | dataset = {args.dataset} | "
+        f"(train {train_dataset} / eval {eval_dataset}) | run dir = {run_dir}"
+    )
 
     # Create the experiment in its OWN git worktree so all its commits/resets/runs
     # are isolated from the primary checkout (which stays free for development).
     sess = start_run(repo, args.tag, rules, worktree_path=os.path.join(run_dir, "wt"))
-    print(f"[setup] experiment branch: {sess.branch} off {sess.base_commit[:7]} "
-          f"(isolated worktree: {sess.repo_root})")
+    print(
+        f"[setup] experiment branch: {sess.branch} off {sess.base_commit[:7]} "
+        f"(isolated worktree: {sess.repo_root})"
+    )
 
     # The executor runs in the worktree; the train dataset is a locked workload
     # field set by the human here (not a candidate knob).
-    ex = SubprocessExecutor(sess.repo_root, log_freq=rules.log_freq, ngpu=ngpu,
-                            base_command=[f"--dataloader.dataset={train_dataset}"],
-                            val_dataset=eval_dataset, run_dir=os.path.join(run_dir, "runs"))
+    ex = SubprocessExecutor(
+        sess.repo_root,
+        log_freq=rules.log_freq,
+        ngpu=ngpu,
+        base_command=[f"--dataloader.dataset={train_dataset}"],
+        val_dataset=eval_dataset,
+        seq_len=rules.seq_len,
+        eval_tokens=rules.eval_tokens,
+        eval_fallback_steps=rules.eval_fallback_steps,
+        val_steps=rules.eval_val_steps,
+        run_dir=os.path.join(run_dir, "runs"),
+    )
     try:
         # --- Calibrate the golden: throughput, faithfulness anchor, quality bar ---
-        print("[calibrate] running golden baseline (throughput, deterministic, eval)...", flush=True)
+        print(
+            "[calibrate] running golden baseline (throughput, deterministic, eval)...",
+            flush=True,
+        )
         gold = Candidate(label="golden", command=[])
         tr = ex.run_throughput(gold, steps, window)
         if not tr.ok:
-            print("[calibrate] golden baseline failed to run; aborting:\n", tr.crash_text[-1500:])
+            print(
+                "[calibrate] golden baseline failed to run; aborting:\n",
+                tr.crash_text[-1500:],
+            )
             return 1
         det = ex.deterministic_losses(gold)
         ex.golden_det_losses = det
@@ -101,14 +132,55 @@ def main(argv: list[str] | None = None) -> int:
         if jit and len(jit) == len(det):
             jitter = max(abs(a - b) / max(abs(b), 1e-9) for a, b in zip(jit, det))
             ex.verify_tol = max(jitter * 10.0, 5e-4)
-            print(f"[calibrate] faithfulness tol = {ex.verify_tol:.2e} "
-                  f"(golden rounding jitter {jitter:.2e} x10)")
-        er = ex.run_eval(gold, steps=steps)
-        print(f"[calibrate] golden: tps={tr.tps_mean:.0f} (cv {tr.tps_cv:.3f})  "
-              f"eval_loss={er.eval_loss if er.ok else 'n/a'}  det_losses={[round(x,2) for x in det]}")
+            print(
+                f"[calibrate] faithfulness tol = {ex.verify_tol:.2e} "
+                f"(golden rounding jitter {jitter:.2e} x10)"
+            )
+        # Quality bar + eval-noise band: repeat the golden's held-out eval at a
+        # fixed TOKEN budget (equal-compute, not equal-steps) and measure its
+        # run-to-run spread. The floor uses this measured noise so the gate never
+        # rejects a candidate on a difference the eval itself cannot resolve.
+        gb = tr.global_batch
+        eval_steps = ex.eval_steps_for(gb)
+        reps = rules.eval_calibration_repeats
+        print(
+            f"[calibrate] golden eval x{reps} at ~{eval_steps} steps "
+            f"({rules.eval_tokens:,} tokens / global batch {gb})...",
+            flush=True,
+        )
+        eval_losses: list[float] = []
+        last_crash = ""
+        for i in range(reps):
+            er = ex.run_eval(gold, global_batch=gb, run_tag=f"_cal{i}")
+            if er.ok:
+                eval_losses.append(er.eval_loss)
+                print(
+                    f"[calibrate]   golden eval[{i}] = {er.eval_loss:.4f}", flush=True
+                )
+            else:
+                last_crash = er.crash_text or ""
+                print(f"[calibrate]   golden eval[{i}] failed", flush=True)
+        if not eval_losses:
+            print(
+                "[calibrate] golden eval failed on every repeat; aborting:\n",
+                last_crash[-1500:],
+            )
+            return 1
+        mean = sum(eval_losses) / len(eval_losses)
+        std = statistics.stdev(eval_losses) if len(eval_losses) > 1 else 0.0
+        band = max(rules.epsilon_rel * mean, rules.eval_z * std)
+        print(
+            f"[calibrate] golden: tps={tr.tps_mean:.0f} (cv {tr.tps_cv:.3f})  "
+            f"eval_loss={mean:.4f} +/- {std:.4f}  "
+            f"floor=golden+{band:.4f} (rejects degradation > {band / mean * 100:.1f}% of golden)  "
+            f"det_losses={[round(x, 2) for x in det]}"
+        )
         HarnessState(
             golden_commit=sess.base_commit[:7],
-            golden_eval_loss=(er.eval_loss if er.ok else None),
+            golden_eval_loss=mean,
+            golden_eval_losses=eval_losses,
+            eval_noise_abs=std,
+            eval_noise_rel=(std / mean if mean else 0.0),
             golden_det_losses=det,
             champion_commit=sess.base_commit[:7],
             champion_tps=[tr.tps_mean],
@@ -116,15 +188,26 @@ def main(argv: list[str] | None = None) -> int:
             tps_tail_pct=3.7,  # heavy-tail default; refine with repeated golden runs
         ).save(statefile)
 
-        H = Harness(constitution_path=const, ideas_path=ideas, ledger_path=ledger,
-                    statefile=statefile, executor=ex, session=sess,
-                    report_path=os.path.join(run_dir, "report.json"))
+        H = Harness(
+            constitution_path=const,
+            ideas_path=ideas,
+            ledger_path=ledger,
+            statefile=statefile,
+            executor=ex,
+            session=sess,
+            report_path=os.path.join(run_dir, "report.json"),
+        )
 
-        print(f"[loop] starting hill-climb (max {args.max_iters} candidates). "
-              f"Follow: python -m torchtitan_autoresearch.observe watch --run-dir {run_dir}", flush=True)
+        print(
+            f"[loop] starting hill-climb (max {args.max_iters} candidates). "
+            f"Follow: python -m torchtitan_autoresearch.observe watch --run-dir {run_dir}",
+            flush=True,
+        )
         summary = run_loop(H, KnobAgent(), max_iters=args.max_iters, report_every=1)
         print("[done]", summary)
-        print("ledger:\n" + (open(ledger).read() if os.path.exists(ledger) else "(empty)"))
+        print(
+            "ledger:\n" + (open(ledger).read() if os.path.exists(ledger) else "(empty)")
+        )
     finally:
         sess.remove()  # tear down the worktree; the branch + its commits are kept
     return 0
