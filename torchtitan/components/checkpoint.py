@@ -569,27 +569,27 @@ class CheckpointManager(Configurable):
             None if to_hf else checkpoint_id
         )  # for HF the storage_writer handles the path
 
-        if async_mode == AsyncMode.DISABLED:
-            ret = dcp.save(
-                state_dict,
-                storage_writer=storage_writer,
-                checkpoint_id=checkpoint_save_id,
-            )
-        else:
-            is_pinned = async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
-            async_checkpointer_type = (
-                AsyncCheckpointerType.PROCESS
-                if is_pinned
-                else AsyncCheckpointerType.THREAD
-            )
-            async_stager = self.stager if is_pinned else None
+        if async_mode == AsyncMode.ASYNC:
             ret = dcp.async_save(
                 state_dict,
                 storage_writer=storage_writer,
                 checkpoint_id=checkpoint_save_id,
                 process_group=self.pg,
-                async_checkpointer_type=async_checkpointer_type,
-                async_stager=async_stager,
+            )
+        elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
+            ret = dcp.async_save(
+                state_dict,
+                storage_writer=storage_writer,
+                checkpoint_id=checkpoint_save_id,
+                process_group=self.pg,
+                async_checkpointer_type=AsyncCheckpointerType.PROCESS,
+                async_stager=self.stager,
+            )
+        else:
+            ret = dcp.save(
+                state_dict,
+                storage_writer=storage_writer,
+                checkpoint_id=checkpoint_save_id,
             )
 
         # Post-Processing
@@ -690,8 +690,6 @@ class CheckpointManager(Configurable):
         )
         logger.info(f"{checkpoint_phase.capitalize()} the checkpoint.")
 
-        checkpoint_id = self._create_checkpoint_id(curr_step)
-
         if last_step:
             self._save_last_step(curr_step)
             logger.info(
@@ -699,7 +697,7 @@ class CheckpointManager(Configurable):
             )
             return True
 
-        # Execution Dispatch
+        checkpoint_id = self._create_checkpoint_id(curr_step)
         states = self._flattened_model_states_sd()
 
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
