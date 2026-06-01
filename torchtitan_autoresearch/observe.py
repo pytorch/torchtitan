@@ -72,7 +72,12 @@ class Observer:
             p = subprocess.Popen(
                 argv, stdout=f, stderr=subprocess.STDOUT,
                 start_new_session=True, cwd=os.getcwd(),
-                env={**os.environ, "PYTHONPATH": os.getcwd(), "AR_RUN_FROM_OBSERVER": "1"},
+                # Pin PYTHONUNBUFFERED so the loop's progress lines flush immediately
+                # to loop.out -- it's a file, not a TTY, so a shell that doesn't
+                # already export this would block-buffer stdout and the observer's
+                # watch/console would only see progress in delayed chunks.
+                env={**os.environ, "PYTHONPATH": os.getcwd(),
+                     "AR_RUN_FROM_OBSERVER": "1", "PYTHONUNBUFFERED": "1"},
             )
         self._proc = p
         with open(self.pidfile, "w") as f:
