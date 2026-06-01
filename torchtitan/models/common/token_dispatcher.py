@@ -598,7 +598,8 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
-        # ignore input num_local_tokens_per_expert_E, DeepEP will return the number of global routed token for every local expert using other inputs 
+        # Ignore input num_local_tokens_per_expert_E. DeepEP returns the number
+        # of global routed tokens for every local expert using other inputs.
         del num_local_tokens_per_expert_E
         assert self.ep_mesh is not None, (
             "ep_mesh must be set before dispatch. "
@@ -736,7 +737,8 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
-        # ignore input num_local_tokens_per_expert_E, HybridEP will return the number of global routed token for every local expert using other inputs 
+        # Ignore input num_local_tokens_per_expert_E. HybridEP returns the
+        # number of global routed tokens for every local expert using other inputs.
         del num_local_tokens_per_expert_E
         assert self.ep_mesh is not None, (
             "ep_mesh must be set before dispatch. "
