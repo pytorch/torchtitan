@@ -27,6 +27,7 @@ from torch.nn.attention.flex_attention import (
 )
 from torch.nn.attention.varlen import varlen_attn
 
+import spmd_types as spmd
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
@@ -207,6 +208,36 @@ class FlexAttention(Module):
         super().__init__()
         self.kernel_options = config.kernel_options
 
+    def compiled_flex_attn(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        attention_masks: BlockMask | None,
+        scale: float | None,
+        return_lse: bool,
+        enable_gqa: bool,
+    ):
+        """Run compiled FlexAttention outside SPMD typechecking."""
+        with spmd.no_typecheck():
+            out, aux = FlexAttention._compiled_flex_attn(
+                q,
+                k,
+                v,
+                block_mask=attention_masks,
+                scale=scale,
+                enable_gqa=enable_gqa,
+                return_aux=AuxRequest(lse=return_lse),
+                kernel_options=self.kernel_options,
+            )
+        if spmd.is_type_checking():
+            out_type = spmd.get_local_type(q)
+            spmd.assert_type(out, out_type)
+            if return_lse:
+                spmd.assert_type(aux.lse, out_type)
+        return out, aux
+
     def forward(
         self,
         q: torch.Tensor,
@@ -232,15 +263,14 @@ class FlexAttention(Module):
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
         #    `FlexAttention._compiled_flex_attn` is correct.
-        out, aux = FlexAttention._compiled_flex_attn(
+        out, aux = self.compiled_flex_attn(
             q,
             k,
             v,
-            block_mask=attention_masks,
+            attention_masks=attention_masks,
             scale=scale,
+            return_lse=return_lse,
             enable_gqa=enable_gqa,
-            return_aux=AuxRequest(lse=return_lse),
-            kernel_options=self.kernel_options,
         )
         # Transpose back to (bs, seq, heads, dim)
         if return_lse:

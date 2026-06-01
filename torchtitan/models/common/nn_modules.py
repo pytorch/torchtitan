@@ -23,8 +23,8 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor
 
+from torchtitan.distributed.utils import current_mesh
 from torchtitan.protocols.module import Module
 
 
@@ -65,12 +65,18 @@ class Embedding(nn.Embedding, Module):
     def __init__(self, config: Config):
         super().__init__(config.num_embeddings, config.embedding_dim)
         self.enable_sp = config.enable_sp
-        self.tp_pg: dist.ProcessGroup | None = None
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        """Runs vocab-parallel embedding when a local TP process group is set."""
+        """Runs vocab-parallel embedding when the current mesh has a TP axis."""
         weight = self.weight
-        if self.tp_pg is None or isinstance(weight, DTensor):
+        mesh = current_mesh()
+        tp_pg = None
+        if mesh is not None:
+            assert mesh.mesh_dim_names is not None
+            if "tp" in mesh.mesh_dim_names:
+                tp_pg = mesh.get_group("tp")
+
+        if tp_pg is None or dist.get_world_size(tp_pg) == 1:
             return F.embedding(
                 input,
                 weight,
@@ -82,12 +88,10 @@ class Embedding(nn.Embedding, Module):
             )
 
         assert self.enable_sp is not None
-        chunk_size = (
-            self.num_embeddings + dist.get_world_size(self.tp_pg) - 1
-        ) // dist.get_world_size(self.tp_pg)
-        offset = dist.get_rank(self.tp_pg) * chunk_size
-        mask = (input >= offset) & (input < offset + weight.shape[0])
-        local_input = (input - offset).clamp(0, weight.shape[0] - 1)
+        chunk_size = weight.shape[0]
+        offset = dist.get_rank(tp_pg) * chunk_size
+        mask = (input >= offset) & (input < offset + chunk_size)
+        local_input = (input - offset).clamp(0, chunk_size - 1)
         out = F.embedding(
             local_input,
             weight,
@@ -102,7 +106,7 @@ class Embedding(nn.Embedding, Module):
         tp_out_type = spmd.S(1) if self.enable_sp else spmd.I
         return spmd.redistribute(
             out,
-            self.tp_pg,
+            tp_pg,
             src=spmd.P,
             dst=tp_out_type,
             backward_options=bwd,
