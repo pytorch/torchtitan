@@ -261,7 +261,9 @@ def set_moe_sharding_config(
                 experts_in_grad_layout,
                 experts_in_grad_layout,
                 experts_in_grad_layout,
-                None,
+                # num_local_tokens_per_expert_E is routing metadata, but it is
+                # still a DTensor input to local_map and must have placements.
+                _tokens_per_expert_placement(enable_ep=enable_ep),
             ),
         ),
     )
