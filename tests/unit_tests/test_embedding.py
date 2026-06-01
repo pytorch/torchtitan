@@ -21,6 +21,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torch.utils._debug_mode import DebugMode
 
+from torchtitan.distributed.spmd_types import set_current_mesh, set_spmd_backend
 from torchtitan.models.common.nn_modules import Embedding
 
 
@@ -148,28 +149,32 @@ class TestVocabParallelEmbedding(DTensorTestBase):
                         )
                     ).to(self.device_type)
                     embedding.weight = nn.Parameter(weight_dtensor.to_local())
-                    embedding.tp_pg = tp_group
                     local_tokens = tokens_dtensor.to_local()
 
                     # The embedding boundary converts replicated token ids to
                     # R@TP before the local masked embedding region.
                     # If SP: R @ weight -> S(1) if SP else I
                     out_type = spmd.S(1) if enable_sp else spmd.I
-                    with typecheck(strict_mode="strict", local=True):
-                        local_tokens = spmd.assert_type(
-                            local_tokens, {tp_group: spmd.R}
-                        )
-                        spmd.assert_type(local_tokens, {tp_group: spmd.R})
-                        embedding._parameters["weight"] = spmd.assert_type(
-                            embedding.weight, {tp_group: spmd.S(0)}
-                        )
-                        local_output = embedding(local_tokens)
-                        spmd.assert_type(local_output, {tp_group: out_type})
+                    set_spmd_backend("spmd")
+                    try:
+                        with set_current_mesh(mesh):
+                            with typecheck(strict_mode="strict", local=True):
+                                local_tokens = spmd.assert_type(
+                                    local_tokens, {tp_group: spmd.R}
+                                )
+                                spmd.assert_type(local_tokens, {tp_group: spmd.R})
+                                embedding._parameters["weight"] = spmd.assert_type(
+                                    embedding.weight, {tp_group: spmd.S(0)}
+                                )
+                                local_output = embedding(local_tokens)
+                                spmd.assert_type(local_output, {tp_group: out_type})
 
-                    # The manual path should use reduce-scatter under SP and
-                    # all-reduce otherwise.
-                    with DebugMode() as debug_mode:
-                        embedding(local_tokens)
+                            # The manual path should use reduce-scatter under SP and
+                            # all-reduce otherwise.
+                            with DebugMode() as debug_mode:
+                                embedding(local_tokens)
+                    finally:
+                        set_spmd_backend("default")
                     if enable_sp:
                         self.assertIn("reduce_scatter", debug_mode.debug_string())
                     else:
