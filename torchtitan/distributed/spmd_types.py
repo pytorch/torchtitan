@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 __all__ = [
     "PlacementSpec",
     "current_mesh",
+    "mesh_size",
     "parallelize_spmd_inputs",
     "active_placement",
     "is_placement_like",
@@ -81,6 +82,17 @@ def current_mesh() -> DeviceMesh | None:
     if not stack:
         return None
     return stack[-1]
+
+
+def mesh_size(axis_name: str) -> int:
+    """Return the size of a mesh axis, or 1 if not active."""
+    mesh = current_mesh()
+    if mesh is None:
+        return 1
+    names = mesh.mesh_dim_names or ()
+    if axis_name not in names:
+        return 1
+    return mesh.size(names.index(axis_name))
 
 
 @contextlib.contextmanager
