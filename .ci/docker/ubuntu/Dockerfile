@@ -39,5 +39,8 @@ COPY ./common/install_conda.sh install_conda.sh
 COPY ./common/utils.sh utils.sh
 RUN bash ./install_conda.sh && rm install_conda.sh utils.sh /opt/conda/requirements-dev.txt /opt/conda/requirements.txt /opt/conda/requirements-flux.txt /opt/conda/requirements-vlm.txt /opt/conda/conda-env-ci.txt
 
+# Add DeepEP install script for MoE expert parallelism tests (CUDA only).
+COPY ./common/install_deepep.sh install_deepep.sh
+
 USER ci-user
 CMD ["bash"]
