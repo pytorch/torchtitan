@@ -49,30 +49,34 @@ def run_loss_compare(
     Returns:
         True if the assertion passed, False otherwise.
     """
-    cmd = [
-        sys.executable,
-        "scripts/loss_compare.py",
-        ".",
-        ".",
-        f"--baseline-module={baseline_module}",
-        f"--baseline-config={baseline_config}",
-        f"--test-module={test_module}",
-        f"--test-config={test_config}",
-        "--assert-equal",
-        f"--steps={STEPS}",
-        f"--baseline-ngpus={baseline_ngpus}",
-        f"--test-ngpus={test_ngpus}",
-    ]
-    if baseline_options:
-        cmd.append(f"--baseline-options={baseline_options}")
-    if test_options:
-        cmd.append(f"--test-options={test_options}")
+    # Use a temp dump folder instead of loss_compare.py's default ("outputs"),
+    # which is created relative to cwd and is not writable in CI containers.
+    with tempfile.TemporaryDirectory() as job_dump_folder:
+        cmd = [
+            sys.executable,
+            "scripts/loss_compare.py",
+            ".",
+            ".",
+            f"--baseline-module={baseline_module}",
+            f"--baseline-config={baseline_config}",
+            f"--test-module={test_module}",
+            f"--test-config={test_config}",
+            "--assert-equal",
+            f"--steps={STEPS}",
+            f"--baseline-ngpus={baseline_ngpus}",
+            f"--test-ngpus={test_ngpus}",
+            f"--job-dump-folder={job_dump_folder}",
+        ]
+        if baseline_options:
+            cmd.append(f"--baseline-options={baseline_options}")
+        if test_options:
+            cmd.append(f"--test-options={test_options}")
 
-    print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, text=True)
-    if result.returncode != 0:
-        print("loss_compare.py failed")
-    return result.returncode == 0
+        print(f"Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, text=True)
+        if result.returncode != 0:
+            print("loss_compare.py failed")
+        return result.returncode == 0
 
 
 def run_loss_compare_close(
