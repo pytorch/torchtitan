@@ -24,7 +24,7 @@ import os
 import shutil
 import sys
 
-from torchtitan_autoresearch.agent import KnobAgent, LLMAgent, summarize_trace
+from torchtitan_autoresearch.agent import KnobAgent, PersistentLLMAgent, summarize_trace
 from torchtitan_autoresearch.api import Harness
 from torchtitan_autoresearch.constitution import load_constitution
 from torchtitan_autoresearch.executor import SubprocessExecutor
@@ -187,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
         # profiled run -> trace path) and the raw run-logs dir; it reads/analyzes
         # both itself -- the harness does no parsing.
         agent = (
-            LLMAgent(
+            PersistentLLMAgent(
                 repo_root=sess.repo_root,
                 log_path=os.path.join(run_dir, "agent_io.log"),
                 profiler=H.profile,

@@ -7,13 +7,14 @@
 """The Agent contract and reference implementations.
 
 The agent is a pluggable search policy (ARCHITECTURE.md section 6). The contract
-is exactly two methods: `propose` (observation -> candidate) and `report`
+is `start`/`stop` (lifecycle) + `propose` (observation -> candidate) + `report`
 (project grounded learnings). Everything else is private. Implementations:
-`LLMAgent` is the real autoresearcher (an LLM via `claude -p`, proposing knobs
-and file edits grounded in the ledger); `KnobAgent` is a deterministic knob-sweep
-fallback for offline/CI; `ScriptedAgent` replays a fixed list (tests); and
-`PlaybookAgent` turns the human's front-loaded ideas into candidates. An ensemble
-or a classical optimizer plug in the same way.
+`SingleTurnLLMAgent` (fresh stateless LLM call per turn, full context re-injected)
+and `PersistentLLMAgent` (one LLM conversation that outlives turns, deltas after
+the first) are the real autoresearchers via `claude -p`; `KnobAgent` is a
+deterministic knob-sweep fallback for offline/CI; `ScriptedAgent` replays a fixed
+list (tests); and `PlaybookAgent` turns the human's front-loaded ideas into
+candidates. An ensemble or a classical optimizer plug in the same way.
 """
 
 from __future__ import annotations
@@ -244,20 +245,21 @@ class KnobAgent:
         )
 
 
-class LLMAgent:
-    """LLM-backed proposing agent -- the real autoresearcher.
+class _BaseLLMAgent:
+    """Shared machinery for the LLM-backed autoresearchers.
 
-    Implements the Agent contract by asking an LLM (the keyless ``claude -p``
-    gateway, same as the observer) for the NEXT candidate, grounded in the live
-    Observation: the constitution rules, the ledger of every past candidate +
-    verdict, the current champion, advisory ideas, and deferred families. It
-    proposes CLI knobs and/or edits to the editable model files, learning from
-    what was faithful / affecting / faster / crashed instead of replaying a fixed
-    list. The harness gate still bounds it -- it can only propose, never promote,
-    and can never edit outside the constitution's editable scope.
+    Asks an LLM (the keyless ``claude -p`` gateway, same as the observer) for the
+    NEXT candidate, grounded in the live Observation: the constitution rules, the
+    ledger of every past candidate + verdict, the current champion, advisory ideas,
+    deferred families, and a profiler summary. Proposes CLI knobs and/or edits to
+    the editable model files, learning from what was faithful / affecting / faster
+    / crashed. The harness gate still bounds it -- propose only, never promote,
+    never edit outside the editable scope.
 
-    ``ask`` is injectable (prompt -> reply text) so the agent is testable on CPU
-    without the real CLI; by default it shells out to ``claude -p``.
+    Subclasses pick the transport (``_make_session``) and the prompt strategy
+    (``_build_prompt``): ``SingleTurnLLMAgent`` re-sends full context each turn;
+    ``PersistentLLMAgent`` keeps one conversation across turns and sends deltas.
+    ``ask`` is injectable (prompt -> reply) so it is CPU-testable without the CLI.
     """
 
     def __init__(
@@ -269,18 +271,13 @@ class LLMAgent:
         log_path=None,
         profiler=None,
         logs_dir: str = "",
-        persistent: bool = False,
         timeout: float = 420,
     ):
         self.repo_root = repo_root
         # ``ask`` (prompt -> reply) is an injectable transport for CPU tests; the
-        # real transport is a session created in start(). ``persistent`` decides
-        # whether that session is one Claude conversation that OUTLIVES turns
-        # (native memory via --resume) or a fresh stateless call per turn. Either
-        # way, whether an "agent" is created per turn is an LLMAgent detail, not
-        # something the loop hardcodes -- the loop only calls start()/stop().
+        # real transport is a session created in start() by ``_make_session`` (the
+        # subclass picks per-turn vs persistent). The loop only calls start()/stop().
         self._ask_override = ask
-        self._persistent = persistent
         self._timeout = timeout
         self._session = None  # set in start(); the LLM transport
         self.max_ledger = max_ledger
@@ -293,19 +290,16 @@ class LLMAgent:
         self._plan = "LLM-driven search over faithful throughput knobs"
         self._n = 0
 
+    def _make_session(self):
+        raise NotImplementedError  # subclass: per-turn or persistent
+
+    def _build_prompt(self, obs: Observation) -> str:
+        return self._full_prompt(obs)  # default; persistent overrides with deltas
+
     def start(self) -> None:
-        """Create the LLM session (persistent or per-turn). Idempotent."""
-        if self._session is not None:
-            return
-        if self._persistent:
-            self._session = _PersistentSession(
-                ask=self._ask_override, timeout=self._timeout
-            )
-            print("[llm] started PERSISTENT session (outlives turns)", flush=True)
-        else:
-            self._session = _PerTurnSession(
-                ask=self._ask_override, timeout=self._timeout
-            )
+        """Create the LLM session (subclass decides per-turn vs persistent)."""
+        if self._session is None:
+            self._session = self._make_session()
 
     def stop(self) -> None:
         """Tear down the LLM session."""
@@ -353,7 +347,7 @@ class LLMAgent:
                 pass
         return out
 
-    def _prompt(self, obs: Observation) -> str:
+    def _full_prompt(self, obs: Observation) -> str:
         rules = obs.rules
 
         def _row(r: dict) -> str:
@@ -444,7 +438,7 @@ class LLMAgent:
             self.start()  # lazy-start so direct propose() calls still work (tests)
         self._n += 1
         self._ensure_profile()  # the agent asks the harness for a baseline trace
-        prompt = self._prompt(obs)
+        prompt = self._build_prompt(obs)
         for _ in range(2):  # one retry on a parse failure or a repeat
             print("[llm] querying claude for the next candidate...", flush=True)
             try:
@@ -513,6 +507,66 @@ class LLMAgent:
             open_questions=[],
             ideas_usage={f"prop{i + 1}": n for i, n in enumerate(self._notes)},
         )
+
+
+class SingleTurnLLMAgent(_BaseLLMAgent):
+    """One fresh, stateless ``claude -p`` call per turn. No memory between turns --
+    full context (rules, ideas, the whole ledger, profiles, editable files) is
+    re-injected into every prompt. Bounded per-turn context; nothing to leak across
+    a crash. The validated default."""
+
+    def _make_session(self):
+        return _PerTurnSession(ask=self._ask_override, timeout=self._timeout)
+
+
+class PersistentLLMAgent(_BaseLLMAgent):
+    """ONE Claude conversation that OUTLIVES turns (``--session-id``/``--resume``),
+    so the agent keeps native memory of the rules, ideas, baseline profile, and its
+    own prior reasoning across propose() calls. To exploit that (and avoid bloating
+    a growing conversation), it sends the FULL context only on the first turn and a
+    small DELTA thereafter -- just the last candidate's verdict+profile, the current
+    champion, and the current editable files."""
+
+    def _make_session(self):
+        print("[llm] started PERSISTENT session (outlives turns)", flush=True)
+        return _PersistentSession(ask=self._ask_override, timeout=self._timeout)
+
+    def _build_prompt(self, obs: Observation) -> str:
+        if self._n <= 1:
+            return self._full_prompt(obs)  # bootstrap the conversation with everything
+        return self._delta_prompt(obs)
+
+    def _delta_prompt(self, obs: Observation) -> str:
+        rows = obs.ledger
+        last = rows[-1] if rows else None
+        sources = "\n\n".join(
+            f"### {p}\n```python\n{c}\n```"
+            for p, c in self._editable_sources(obs).items()
+        )
+        parts = []
+        if last:
+            summ = (last.get("profile_summary") or "").strip()
+            parts.append(
+                f"RESULT of your last proposal '{last.get('label')}': "
+                f"verdict={last.get('verdict')} status={last.get('status')} "
+                f"verify={last.get('verify')} tps={last.get('tps_mean')}."
+                + (f"\nits profile summary:\n{summ}" if summ else "")
+            )
+        parts.append(f"CURRENT CHAMPION: {json.dumps(obs.champion)}")
+        if obs.deferred_families:
+            parts.append(f"DEFERRED FAMILIES (skip these): {obs.deferred_families}")
+        parts.append(
+            "CURRENT EDITABLE FILE CONTENTS (may have changed if a file edit was "
+            f"promoted):\n{sources}"
+        )
+        parts.append(
+            "You remember the objective, constraints, advisory ideas, baseline "
+            "profile, and everything you have already tried. Stay profiler-guided "
+            "and faithful, do NOT repeat a past candidate, and propose the NEXT one "
+            "as ONE JSON object (same schema: label, family, command, file_edits, "
+            "rationale, done)."
+        )
+        return "\n\n".join(parts)
 
 
 class PlaybookAgent:
