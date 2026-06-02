@@ -51,6 +51,9 @@ class Harness:
         self.ideas = load_ideas(ideas_path)
         self.ledger = Ledger(ledger_path)
         self.state = HarnessState.load(statefile)
+        # Roofline/bound summary of the golden, set by the driver after calibration;
+        # surfaced to the agent so it optimizes the measured bottleneck, not a guess.
+        self.profile_summary = ""
 
     # --- Harness -> Agent ---
     def observe(self) -> Observation:
@@ -79,6 +82,7 @@ class Harness:
             golden=golden,
             deferred_families=list(self.state.family_deferred),
             ideas=[asdict(i) for i in self.ideas],
+            profile=self.profile_summary,
         )
 
     def get_traces(self, commit: str) -> dict:

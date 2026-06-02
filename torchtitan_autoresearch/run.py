@@ -158,6 +158,25 @@ def main(argv: list[str] | None = None) -> int:
             f"det_losses={[round(x, 2) for x in det_losses]}",
             flush=True,
         )
+        # Roofline/bound summary from the golden's throughput run -- these MFU/
+        # TFLOPS/memory numbers are printed by every run (no profiler enabled), so
+        # this is free. It tells the agent what the run is bound by, so it targets
+        # the bottleneck instead of blind-sweeping.
+        mfu, mem = tr.mfu, tr.peak_mem_pct
+        if mfu >= 35.0:
+            bound = "COMPUTE-BOUND -> fusion/compile and a faster attention backend can pay."
+        elif mem >= 85.0:
+            bound = "MEMORY-BOUND -> activation-checkpoint mode is the lever (freeing memory may also enable overlap)."
+        else:
+            bound = (
+                "OVERHEAD/COMM-BOUND (low MFU) -> compute optimizations (compile/fusion) will NOT "
+                "help; target FSDP comm overlap (reshard policy, prefetch) and per-step overhead."
+            )
+        profile_summary = (
+            f"golden roofline on {tr.gpu or 'GPU'}: MFU={mfu:.1f}%  TFLOPS={tr.tflops:.0f}  "
+            f"peak_mem={mem:.0f}%  tps={tr.tps_mean:.0f}.  BOUND: {bound}"
+        )
+        print(f"[calibrate] {profile_summary}", flush=True)
         HarnessState(
             golden_commit=sess.base_commit[:7],
             golden_det_losses=det_losses,
@@ -179,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
             session=sess,
             report_path=os.path.join(run_dir, "report.json"),
         )
+        H.profile_summary = profile_summary  # aim the agent at the measured bottleneck
 
         # The LLM agent (claude -p) is the real autoresearcher; fall back to the
         # deterministic KnobAgent offline/CI so the loop still runs without the CLI.

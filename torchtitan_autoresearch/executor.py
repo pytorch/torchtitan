@@ -36,6 +36,10 @@ class ThroughputResult:
     tps_mean: float = 0.0
     tps_cv: float = 0.0
     peak_mem_gb: float = 0.0
+    peak_mem_pct: float = 0.0
+    mfu: float = 0.0  # % of peak FLOPS -> compute-bound vs overhead/comm-bound
+    tflops: float = 0.0
+    gpu: str = ""
     crash_text: str = ""  # populated when ok is False
 
 
@@ -215,6 +219,10 @@ class SubprocessExecutor:
             tps_mean=meas.tps_mean,
             tps_cv=meas.tps_cv,
             peak_mem_gb=meas.peak_memory_gb,
+            peak_mem_pct=meas.peak_memory_pct,
+            mfu=(meas.mfu_mean or 0.0),
+            tflops=meas.tflops_mean,
+            gpu=meas.gpu,
         )
 
     # --- faithfulness probe -------------------------------------------------

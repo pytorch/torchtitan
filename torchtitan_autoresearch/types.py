@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Shared dataclasses for the harness <-> agent contract (ARCHITECTURE.md s. 5.6).
 
 Kept dependency-free so every other module can import these without cycles.
@@ -21,7 +27,9 @@ class Candidate:
     label: str
     command: list[str] = field(default_factory=list)
     file_edits: dict[str, str] = field(default_factory=dict)  # path -> full new content
-    commit: str = ""  # harness-assigned (the sha the harness creates); agent never sets it
+    commit: str = (
+        ""  # harness-assigned (the sha the harness creates); agent never sets it
+    )
     rationale: str = ""
     addresses: list[str] = field(default_factory=list)
     family: str = ""  # idea family for substrate time-boxing; derived if empty
@@ -61,6 +69,9 @@ class Observation:
     golden: dict | None
     deferred_families: list[str]
     ideas: list[dict]
+    profile: str = (
+        ""  # golden roofline/bound summary -> aim the agent at the bottleneck
+    )
 
 
 @dataclass
@@ -68,7 +79,11 @@ class Report:
     """The agent's public, grounded projection of its private learnings."""
 
     beliefs: list[str] = field(default_factory=list)
-    conclusions: list[str] = field(default_factory=list)  # each should cite ledger/trace ids
+    conclusions: list[str] = field(
+        default_factory=list
+    )  # each should cite ledger/trace ids
     plan: str = ""
     open_questions: list[str] = field(default_factory=list)
-    ideas_usage: dict[str, str] = field(default_factory=dict)  # idea id -> used/discarded/why
+    ideas_usage: dict[str, str] = field(
+        default_factory=dict
+    )  # idea id -> used/discarded/why
