@@ -217,6 +217,16 @@ class LLMAgent:
             f"### {p}\n```python\n{c}\n```"
             for p, c in self._editable_sources(obs).items()
         )
+        # Full advisory ideas (human channel; prior-experiment learnings, weighted).
+        # 'soft_constraint' / 'na-*' items are warnings or do-NOT-do bans -- honor them.
+        ideas = (
+            "\n".join(
+                f"- [{i.get('kind')}] {i.get('id')} (w={i.get('weight')}): "
+                f"{i.get('text', '')}"
+                for i in obs.ideas
+            )
+            or "(none)"
+        )
         return (
             "You are the proposing agent in an autonomous TorchTitan autoresearch "
             "loop. Propose the SINGLE next experiment candidate that maximizes "
@@ -239,7 +249,8 @@ class LLMAgent:
             f"{rules.get('editable', {}).get('files')}\n\n"
             f"CURRENT CHAMPION: {json.dumps(obs.champion)}\n"
             f"DEFERRED FAMILIES (skip): {obs.deferred_families}\n"
-            f"ADVISORY IDEAS: {json.dumps(obs.ideas)[:1500]}\n\n"
+            f"ADVISORY IDEAS (human; weighted prior-experiment learnings; "
+            f"soft_constraint/na-* are warnings or bans -- honor them):\n{ideas}\n\n"
             f"LEDGER (past candidates + verdicts -- learn, do NOT repeat):\n{ledger}\n\n"
             f"EDITABLE FILE CONTENTS (for file_edits):\n{sources}\n\n"
             "Reply with ONE JSON object and nothing else:\n"
