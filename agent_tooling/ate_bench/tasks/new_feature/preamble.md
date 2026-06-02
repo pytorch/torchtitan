@@ -4,10 +4,16 @@ training framework. Use your full toolset (Read, Grep, Glob, Bash, Edit, Write).
 You are given the same materials an engineer would consult: the architecture's
 arXiv paper and its reference implementation (see `references.md`). Produce a
 **training script that integrates the new feature into the base MoE model** and
-runs on the C4 dataset under the fixed config: pipeline parallel = 4, expert
+runs on the `{{DATASET}}` dataset under the config: pipeline parallel = 4, expert
 parallel = 2, data-parallel shard = auto (`-1`; EP is carved from the data axis,
 so on {{NGPU}} GPUs the data axis is 2 and EP=2 shards experts across it), sequence
-length 2048, global batch 1024, BF16, with `MODULE={{MODULE}}`, `CONFIG={{CONFIG}}`.
+length 2048, global batch {{GLOBAL_BATCH_SIZE}}, BF16, with `MODULE={{MODULE}}`,
+`CONFIG={{CONFIG}}`.
+
+Launch training with the provided script, e.g.:
+```
+STEPS=64 GLOBAL_BATCH_SIZE={{GLOBAL_BATCH_SIZE}} bash {{TRAIN_SH}} --dataloader.dataset={{DATASET}} 2>&1 | tee {{WORKSPACE}}/{{LABEL}}/{{TASK_ID}}/train.log
+```
 
 Run training for **64 steps**. Your change is correct only if **both** hold:
 1. cross-entropy loss **decreases** across the 64-step run and stays **finite**

@@ -99,6 +99,7 @@ class ReproConfig:
                 f"PP={self.pipeline_parallel_degree}, EP={self.expert_parallel_degree}, "
                 f"DP={self.data_parallel_shard_degree}"
             ),
+            "{{DATASET}}": self.dataset,
             "{{TRAIN_SH}}": train_sh,
             "{{EVALUATE_SH}}": evaluate_sh,
             "{{WORKSPACE}}": ws,

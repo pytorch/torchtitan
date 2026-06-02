@@ -63,6 +63,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--label", default="titan")
     ap.add_argument("--module", default=rc.DEFAULT.module)
     ap.add_argument("--config", default=rc.DEFAULT.config)
+    ap.add_argument("--dataset", default=rc.DEFAULT.dataset, help="training dataset (c4 / c4_test)")
+    ap.add_argument(
+        "--global-batch-size", type=int, default=rc.DEFAULT.global_batch_size,
+        help="paper uses 1024 (for 30B models); use ~64 for the debug model so 64 "
+        "steps show a decreasing loss without grad-accum blowup",
+    )
     ap.add_argument("--model", default=None, help="implementing agent model")
     ap.add_argument("--judge-model", default=None, help="judge model (paper: claude-opus-4-7 @ xhigh)")
     ap.add_argument("--out", type=Path, required=True)
@@ -71,7 +77,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--keep-worktrees", action="store_true", help="don't remove worktrees after")
     args = ap.parse_args(argv)
 
-    cfg = rc.ReproConfig(module=args.module, config=args.config, label=args.label)
+    cfg = rc.ReproConfig(
+        module=args.module, config=args.config, label=args.label,
+        dataset=args.dataset, global_batch_size=args.global_batch_size,
+    )
     all_tasks = discover_tasks()
     selected = list(all_tasks) if args.tasks == "all" else [t.strip() for t in args.tasks.split(",")]
     unknown = [t for t in selected if t not in all_tasks]
@@ -81,6 +90,15 @@ def main(argv: list[str] | None = None) -> int:
     out = args.out.expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
     wt_root = rc.ATE_ROOT / "worktrees"
+
+    # Base worktrees on the CURRENT branch tip (it carries the ate_bench tooling,
+    # which is not on main), and diff the agent's changes against that same point so
+    # the judge sees only the agent's model-code edits, not the tooling.
+    import subprocess as _sp
+    base_ref = _sp.run(
+        ["git", "-C", str(rc.REPO_ROOT), "rev-parse", "HEAD"],
+        capture_output=True, text=True,
+    ).stdout.strip() or "HEAD"
 
     print(f"ATE-Bench New-Feature | module={cfg.module} config={cfg.config} "
           f"label={cfg.label} model={args.model or 'default'} judge={args.judge_model or 'default'}")
@@ -98,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
             wt = wt_root / f"{task_id}-run{run_idx}"
             row: dict = {"run": run_idx}
             try:
-                worktrees.create_worktree(rc.REPO_ROOT, wt, base="main")
+                worktrees.create_worktree(rc.REPO_ROOT, wt, base=base_ref)
             except Exception as exc:  # noqa: BLE001
                 print(f"  run {run_idx}: worktree create failed: {exc}")
                 row.update({"error": True, "detail": str(exc)})
@@ -112,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
                     model=args.model, timeout=args.timeout,
                     monitor_gpu=not args.no_gpu_monitor,
                 )
-                diff = worktrees.diff_vs_base(wt, "main")
+                diff = worktrees.diff_vs_base(wt, base_ref)
                 (tdir / f"run{run_idx}.diff").write_text(diff)
 
                 # Axis 1: loss curve (log saved by the agent under the shared workspace).
