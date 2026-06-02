@@ -201,9 +201,6 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             skip_rocm_test=True,
         ),
         # async_tp test lives in graph_trainer_h100 suite (needs NVLink).
-        # TODO: disabled due to upstream PyTorch FlexAttention regression in
-        # nightly: device-side assert triggered during CUDA graph replay.
-        # Re-enable once fixed upstream.
         OverrideDefinitions(
             [
                 [
@@ -217,13 +214,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace llama3 FSDP+TP+FlexAttn",
             "aot_fx_trace_llama3_fsdp_tp_flexattn",
             ngpu=8,
-            disabled=True,
         ),
-        # TODO: Disabled due to upstream PyTorch cuDNN regression in nightly
-        # dev20260506. _scaled_dot_product_cudnn_attention fails with
-        # "mha_graph.execute ... is_good() to be true, but got false" on A10G
-        # when attention inputs are CPU-offloaded and reloaded. Re-enable once
-        # the upstream fix lands.
         OverrideDefinitions(
             [
                 [
@@ -239,7 +230,6 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_llama3_fsdp_tp_sac_and_offload",
             ngpu=8,
             skip_rocm_test=True,
-            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -312,10 +302,9 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
         # Note: cudagraph is auto-skipped for DSv3 because MoE load-balancing
         # introduces CUDA→CPU transfers incompatible with CUDA graph capture.
         #
-        # TODO: aot_fx_trace MoE tests are disabled due to an upstream PyTorch
-        # regression: histc's meta kernel doesn't support int64 inputs,
-        # breaking tracing for all MoE models. Re-enable once the histc
-        # meta kernel is fixed upstream.
+        # TODO: FSDP+TP+CP+EP is disabled: tracing fails with "aten.add.Tensor
+        # got mixed torch.Tensor and DTensor" — a separate CP+EP issue,
+        # unrelated to the empty_strided shadow-node fix. Re-enable once fixed.
         OverrideDefinitions(
             [
                 [
@@ -347,7 +336,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace deepseek_v3 FSDP+TP+EP+FlexAttn",
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep_flexattn",
             ngpu=8,
-            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -364,8 +352,9 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace deepseek_v3 FSDP+TP+EP+full_inductor",
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep_full_inductor",
             ngpu=8,
-            disabled=True,
         ),
+        # TODO: HybridEP requires the `deep_ep` package, which is not always
+        # available in CI. Re-enable where deep_ep is installed.
         OverrideDefinitions(
             [
                 [
@@ -388,15 +377,18 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
 def _build_qwen3_tests() -> list[OverrideDefinitions]:
     """Qwen3-based integration tests (dense + MoE)."""
     return [
-        # TODO: disabled due to upstream PyTorch cuDNN regression in nightly:
-        # CUDA graphs + context parallelism triggers
-        # CUDNN_STATUS_BAD_PARAM_STREAM_MISMATCH. Re-enable once fixed upstream.
+        # cudagraph is disabled for this FSDP+TP+CP test: CUDA-graph replay of
+        # the coalesced FSDP collectives currently fails under context
+        # parallelism with "CUDA error: invalid argument". The rest of the
+        # aot_fx_trace path is still exercised. Re-enable cudagraph (drop
+        # --compile.disable_passes) once the cudagraph+CP issue is fixed.
         OverrideDefinitions(
             [
                 [
                     "--module graph_trainer.qwen3",
                     "--config graph_trainer_qwen3_debugmodel",
                     "--compile.mode aot_fx_trace",
+                    "--compile.disable_passes cudagraph_pass",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.context_parallel_degree 2",
@@ -405,9 +397,7 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace qwen3 FSDP+TP+CP",
             "aot_fx_trace_qwen3_fsdp_tp_cp",
             ngpu=8,
-            disabled=True,
         ),
-        # TODO: disabled due to upstream histc int64 regression (see DSv3 comment)
         OverrideDefinitions(
             [
                 [
@@ -422,7 +412,6 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace qwen3 MoE FSDP+TP+EP",
             "aot_fx_trace_qwen3_moe_fsdp_tp_ep",
             ngpu=8,
-            disabled=True,
         ),
     ]
 
