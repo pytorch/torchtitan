@@ -216,46 +216,6 @@ class RoPE(Module):
     ) -> torch.Tensor:
         return self.cache
 
-    def apply_rotary_emb_complex(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        positions: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        freqs_cis = self._cache_for_positions(positions)
-        positions = _maybe_wrap_positions(positions, query)
-        if positions is not None:
-            _maybe_check_max_pos(positions, max_valid_pos=freqs_cis.shape[0] - 1)
-        query_ = torch.view_as_complex(
-            query.float().reshape(*query.shape[:-1], -1, 2)
-        )
-        key_ = torch.view_as_complex(key.float().reshape(*key.shape[:-1], -1, 2))
-        freqs_cis = _reshape_for_broadcast_complex(freqs_cis, query_, positions)
-        query_out = torch.view_as_real(query_ * freqs_cis).flatten(3)
-        key_out = torch.view_as_real(key_ * freqs_cis).flatten(3)
-        return query_out.type_as(query), key_out.type_as(key)
-
-    def apply_rotary_emb_cos_sin(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        positions: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        rope_cache = self._cache_for_positions(positions)
-        head_dim = query.shape[-1]
-        if rope_cache.ndim != 4:
-            positions = _maybe_wrap_positions(positions, query)
-            if positions is not None:
-                _maybe_check_max_pos(positions, max_valid_pos=rope_cache.shape[0] - 1)
-            rope_cache = _reshape_for_broadcast_cos_sin(rope_cache, query, positions)
-        cos = rope_cache[..., :head_dim].to(device=query.device)
-        sin = rope_cache[..., head_dim:].to(device=query.device)
-        query_f = query.float()
-        key_f = key.float()
-        query_out = (query_f * cos) + (_rotate_half(query_f) * sin)
-        key_out = (key_f * cos) + (_rotate_half(key_f) * sin)
-        return query_out.type_as(query), key_out.type_as(key)
-
     def forward(
         self,
         query: torch.Tensor,
@@ -263,15 +223,17 @@ class RoPE(Module):
         positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply rotary embeddings to query and key tensors."""
+        rope_cache = self._cache_for_positions(positions)
         if self.config.backend == "cos_sin":
-            return self.apply_rotary_emb_cos_sin(query, key, positions)
-        return self.apply_rotary_emb_complex(query, key, positions)
+            return apply_rotary_emb_cos_sin(query, key, rope_cache, positions)
+        return apply_rotary_emb_complex(query, key, rope_cache, positions)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
-        cache = self.cache.to_local() if isinstance(self.cache, DTensor) else self.cache
-        device = buffer_device or cache.device
-        with torch.device(device):
-            self.register_buffer("cache", self._precompute(), persistent=False)
+        if buffer_device is None:
+            self.cache = self._precompute()
+        else:
+            with torch.device(buffer_device):
+                self.cache = self._precompute()
 
 
 def _reshape_for_broadcast_complex(
