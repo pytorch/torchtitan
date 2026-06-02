@@ -31,6 +31,7 @@ HEADER = [
     "addresses",
     "rationale",
     "profile_trace",
+    "profile_summary",
 ]
 
 
@@ -50,6 +51,7 @@ class Record:
     addresses: list[str] = field(default_factory=list)  # ideas ids acted on
     rationale: str = ""
     profile_trace: str = ""  # path to the candidate's single-step chrome trace
+    profile_summary: str = ""  # LLM-aggregated tiny summary of that trace
 
     def to_row(self) -> list[str]:
         d = asdict(self)

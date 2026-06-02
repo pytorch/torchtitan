@@ -24,7 +24,7 @@ import os
 import shutil
 import sys
 
-from torchtitan_autoresearch.agent import KnobAgent, LLMAgent
+from torchtitan_autoresearch.agent import KnobAgent, LLMAgent, summarize_trace
 from torchtitan_autoresearch.api import Harness
 from torchtitan_autoresearch.constitution import load_constitution
 from torchtitan_autoresearch.executor import SubprocessExecutor
@@ -178,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
             executor=ex,
             session=sess,
             report_path=os.path.join(run_dir, "report.json"),
+            profile_summarizer=summarize_trace,
         )
 
         # The LLM agent (claude -p) is the real autoresearcher; fall back to the

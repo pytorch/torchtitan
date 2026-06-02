@@ -48,6 +48,7 @@ def _record(c: Candidate, v: Verdict) -> Record:
         addresses=c.addresses,
         rationale=c.rationale,
         profile_trace=v.profile_trace,
+        profile_summary=v.profile_summary,
     )
 
 
@@ -62,6 +63,7 @@ def gate(
     session=None,
     mode: str = "screen",
     max_reruns: int = 1,
+    profile_summarizer=None,
 ) -> Verdict:
     """Judge one candidate end to end; append exactly one ledger row.
 
@@ -73,9 +75,11 @@ def gate(
     budget = state.family_budget(rules.family_defer_substrate, rules.family_defer_other)
     prev_tip = state.champion_commit or (session.base_commit if session else "")
     prof_trace = ""  # this candidate's single-step profile; captured after commit
+    prof_summary = ""  # LLM-aggregated tiny summary of that trace
 
     def finish(v: Verdict) -> Verdict:
         v.profile_trace = v.profile_trace or prof_trace
+        v.profile_summary = v.profile_summary or prof_summary
         if session is not None and v.status != "keep" and prev_tip:
             session.reset_to(
                 prev_tip
@@ -109,10 +113,15 @@ def gate(
     if session is not None:
         c.commit = session.commit_candidate(c, rules)
 
-    # Capture a tiny single-step profile of THIS candidate by default and hand the
-    # trace path back (in the verdict + ledger) so the agent can analyze why it
-    # behaved as it did. The harness does not parse it. Best-effort; "" on failure.
+    # Capture a tiny single-step profile of THIS candidate by default and hand it
+    # back to the agent (verdict + ledger) so it can see why the candidate behaved
+    # as it did. The harness does NO programmatic parsing: it runs the profile to a
+    # trace file, then a one-off LLM call (profile_summarizer) aggregates that file
+    # into a tiny comm-vs-compute summary. The agent reads the small summary (fast);
+    # the raw trace path stays as a deep-dive fallback. Best-effort; "" on failure.
     prof_trace = executor.profile(c.command)
+    if profile_summarizer is not None and prof_trace:
+        prof_summary = profile_summarizer(prof_trace)
 
     # 2. SPEED TEST FIRST: run + measure throughput, decide significance vs the
     #    champion (with one optional rerun near the boundary). A candidate that is

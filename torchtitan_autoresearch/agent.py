@@ -35,12 +35,38 @@ class Agent(Protocol):
         ...
 
 
-def _claude_ask(prompt: str, timeout: float = 300) -> str:
+def _claude_ask(prompt: str, timeout: float = 420) -> str:
     """Query the local Claude Code CLI (keyless AI gateway), same as the observer."""
     out = subprocess.run(
         ["claude", "-p", prompt], capture_output=True, text=True, timeout=timeout
     )
     return out.stdout.strip()
+
+
+def summarize_trace(path: str, ask=None, timeout: float = 600) -> str:
+    """One-off LLM aggregation of a chrome trace into a tiny text summary.
+
+    No programmatic parsing in the harness: a ``claude -p`` agent reads/aggregates
+    the large trace with its OWN tools and returns a short comm-vs-compute +
+    top-kernels table. This isolates the slow 30MB read into a single dedicated
+    call (its own timeout) so the proposing agent only ever sees the small summary
+    and never blows its reasoning budget reading the raw trace.
+    """
+    if not path or not os.path.isfile(path):
+        return ""
+    prompt = (
+        f"Read the PyTorch profiler chrome trace at {path} (a large JSON; use your "
+        "tools, e.g. python, to aggregate it -- do not try to read it whole). Output "
+        "a SHORT summary ONLY: total GPU-kernel time; the percent of GPU-kernel time "
+        "in communication (NCCL all-gather / reduce-scatter) vs compute (GEMM / "
+        "matmul / attention) vs other; and the top ~8 kernels by total time (name, "
+        "%, call count). A small table, no prose, no recommendations."
+    )
+    fn = ask or (lambda p: _claude_ask(p, timeout=timeout))
+    try:
+        return fn(prompt)
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
 
 
 def _extract_json(text: str) -> dict | None:
@@ -182,26 +208,30 @@ class LLMAgent:
         self._ask = ask or _claude_ask
         self.max_ledger = max_ledger
         self.log_path = log_path  # full prompt+reply transcript, for deep inspection
-        self._profiler = profiler  # callable(command=None) -> trace path (harness API)
+        self._profiler = profiler  # callable(command=None) -> baseline profile summary
         self.logs_dir = logs_dir  # dir of raw per-run .log files the agent may read
-        self._trace_path = None  # cached baseline profile trace (fetched once)
+        self._baseline_profile = None  # cached baseline profile summary (fetched once)
         self._proposed: set[tuple] = set()  # de-dupe (command, edited-paths)
         self._notes: list[str] = []
         self._plan = "LLM-driven search over faithful throughput knobs"
         self._n = 0
 
     def _ensure_profile(self) -> None:
-        """Ask the harness for a baseline profiler trace once (the agent's call)."""
-        if self._profiler is None or self._trace_path is not None:
+        """Ask the harness for the baseline profile summary once (the agent's call)."""
+        if self._profiler is None or self._baseline_profile is not None:
             return
-        print("[llm] requesting a profiler trace of the baseline...", flush=True)
+        print(
+            "[llm] requesting a profile of the baseline (one-off summary)...",
+            flush=True,
+        )
         try:
-            self._trace_path = self._profiler() or ""
+            self._baseline_profile = self._profiler() or ""
         except Exception as e:  # profiling is best-effort; proceed without it
             print(f"[llm] profile request failed ({e})", flush=True)
-            self._trace_path = ""
+            self._baseline_profile = ""
         print(
-            f"[llm] profiler trace: {self._trace_path or '(unavailable)'}", flush=True
+            f"[llm] baseline profile: {self._baseline_profile[:200] or '(unavailable)'}",
+            flush=True,
         )
 
     def _transcript(self, prompt: str, reply: str) -> None:
@@ -228,14 +258,24 @@ class LLMAgent:
 
     def _prompt(self, obs: Observation) -> str:
         rules = obs.rules
-        ledger = (
-            "\n".join(
+
+        def _row(r: dict) -> str:
+            head = (
                 f"- {r.get('label', '?')} | status={r.get('status')} "
                 f"verdict={r.get('verdict')} verify={r.get('verify')} "
-                f"tps={r.get('tps_mean')} | profile={r.get('profile_trace') or '-'} "
-                f":: {r.get('rationale', '')}"
-                for r in obs.ledger[-self.max_ledger :]
+                f"tps={r.get('tps_mean')} :: {r.get('rationale', '')}"
             )
+            summ = (r.get("profile_summary") or "").strip()
+            if summ:
+                head += "\n    profile-summary: " + summ.replace("\n", "\n    ")
+            elif r.get("profile_trace"):
+                head += (
+                    f"\n    profile-trace (raw, read if needed): {r['profile_trace']}"
+                )
+            return head
+
+        ledger = (
+            "\n".join(_row(r) for r in obs.ledger[-self.max_ledger :])
             or "(no candidates run yet)"
         )
         sources = "\n\n".join(
@@ -266,15 +306,14 @@ class LLMAgent:
             "torch.compile, FSDP reshard policy, tensor-parallel degree, attention "
             "backend, comm/memory layout.\n\n"
             "BE PROFILER-GUIDED: optimize the MEASURED bottleneck, not a guess. A "
-            "profiler trace of the baseline is provided below -- READ and analyze "
-            "it yourself (it is a PyTorch chrome trace; aggregate GPU-kernel "
-            "durations by name and compare NCCL/comm time vs GEMM/compute time) to "
-            "decide what the run is bound by, then target THAT. Do not blind-sweep "
-            "knobs that are off the critical path.\n"
-            f"PROFILER TRACE (chrome json -- read it): {self._trace_path or '(none)'}\n"
+            "profile summary of the baseline is below (comm vs compute vs other). "
+            "Decide what the run is bound by and target THAT; do not blind-sweep "
+            "knobs that are off the critical path. Each ledger candidate also has a "
+            "profile-summary. For a deeper look you MAY read a raw trace path, but "
+            "you do not need to -- the summaries should suffice.\n"
+            f"BASELINE PROFILE (LLM-summarized):\n{self._baseline_profile or '(none)'}\n"
             f"RAW RUN LOGS dir (one .log per past run; read to diagnose crashes or "
-            f"inspect step times -- the ledger only summarizes): "
-            f"{self.logs_dir or '(none)'}\n\n"
+            f"inspect step times if needed): {self.logs_dir or '(none)'}\n\n"
             f"OBJECTIVE: {json.dumps(rules.get('objective', {}))}\n"
             f"QUALITY POLICY: {json.dumps(rules.get('quality', {}))}\n"
             f"WORKLOAD (locked, do NOT change): {json.dumps(rules.get('workload', {}))}\n"
@@ -311,7 +350,10 @@ class LLMAgent:
             print("[llm] querying claude for the next candidate...", flush=True)
             try:
                 reply = self._ask(prompt)
-            except (subprocess.TimeoutExpired, OSError) as e:
+            except subprocess.TimeoutExpired:
+                print("[llm] query timed out; retrying once", flush=True)
+                continue
+            except OSError as e:
                 print(f"[llm] query failed ({e}); no candidate", flush=True)
                 return None
             self._transcript(prompt, reply)

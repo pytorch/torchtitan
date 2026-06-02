@@ -38,11 +38,15 @@ class Harness:
         executor: Executor,
         session=None,
         report_path: str | None = None,
+        profile_summarizer=None,
     ):
         self.constitution_path = constitution_path
         self.ideas_path = ideas_path
         self.executor = executor
         self.session = session
+        # One-off LLM trace summarizer (path -> tiny text); injected by the driver
+        # so api.py needs no LLM dependency. None -> hand back the raw trace path.
+        self.profile_summarizer = profile_summarizer
         self.statefile = statefile
         self.report_path = report_path or os.path.join(
             os.path.dirname(statefile) or ".", "report.json"
@@ -82,10 +86,13 @@ class Harness:
         )
 
     def profile(self, command: list[str] | None = None) -> str:
-        """Agent-requested profile: run a SHORT profiled run, return the trace
-        file path. The harness does no analysis -- the agent reads/analyzes the
-        trace however it wants. ``command`` defaults to the golden baseline."""
-        return self.executor.profile(command)
+        """Agent-requested profile: run a SHORT profiled run; return a tiny
+        LLM-aggregated summary of the trace (or the raw trace path if no summarizer
+        is configured). ``command`` defaults to the golden baseline."""
+        path = self.executor.profile(command)
+        if self.profile_summarizer is not None and path:
+            return self.profile_summarizer(path) or path
+        return path
 
     def get_traces(self, commit: str) -> dict:
         # Real executors persist traces per run; the fake has none.
@@ -103,6 +110,7 @@ class Harness:
             statefile=self.statefile,
             session=self.session,
             mode=mode,
+            profile_summarizer=self.profile_summarizer,
         )
 
     # --- report projection (Harness-pulled, persisted, served) ---

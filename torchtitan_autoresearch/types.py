@@ -58,6 +58,7 @@ class Verdict:
     detail: str
     verify: str = "n/a"  # faithful | affecting | fail | n/a
     profile_trace: str = ""  # path to this candidate's single-step chrome trace
+    profile_summary: str = ""  # LLM-aggregated tiny summary of that trace
 
 
 @dataclass
