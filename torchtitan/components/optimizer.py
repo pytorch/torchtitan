@@ -29,7 +29,6 @@ from torchtitan.tools.logging import logger
 
 __all__ = [
     "OptimizersContainer",
-    "OptimizersInBackwardContainer",
     "ParamGroupConfig",
     "default_adamw",
     "register_moe_load_balancing_hook",
@@ -59,7 +58,7 @@ class ParamGroupConfig:
     """Regex pattern matched against parameter fully qualified names (FQNs).
     E.g. '.*bias$', '.*norm.*', '.*\\.embed_tokens\\..*', '.*' (catch-all)"""
 
-    optimizer_name: str = "AdamW"
+    optimizer_name: str
     """Optimizer type for this group."""
 
     optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
@@ -114,8 +113,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         - 'fused_opt_states_bf16': Like 'fused', but initialize Adam/AdamW
           momentum and variance in bfloat16 via a step pre-hook so the fused
           CUDA kernel uses its mixed-precision path (fp32 params + bf16 states).
-          Only supported for Adam/AdamW with OptimizersContainer (not
-          OptimizersInBackwardContainer). See docs/bf16_optimizer_states.md.
+          Only supported for Adam/AdamW. See docs/bf16_optimizer_states.md.
         - more info: https://pytorch.org/docs/stable/optim.html
         """
 
@@ -173,11 +171,10 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                     claimed.add(name)
 
             if not matched:
-                logger.warning(
+                raise ValueError(
                     f"Optimizer param_groups pattern '{pg.pattern}' "
                     f"matched no parameters"
                 )
-                continue
 
             result[pg.optimizer_name].append(
                 {
@@ -350,80 +347,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         pass
 
 
-class OptimizersInBackwardContainer(OptimizersContainer):
-    """OptimizersContainer for executing ``optim.step()`` in backward pass.
-
-    This class extend ``OptimizersContainer`` to support optimizer step in
-    backward pass. ``step()`` and ``zero_grad()`` are no-op in this class.
-    Instead, ``register_post_accumulate_grad_hook`` is used to register a hook to
-    execute these methods when the gradient is accumulated.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(OptimizersContainer.Config):
-        def __post_init__(self) -> None:
-            if self.implementation == "fused_opt_states_bf16":
-                raise ValueError(
-                    "implementation='fused_opt_states_bf16' is not supported with "
-                    "OptimizersInBackwardContainer"
-                )
-
-    def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
-        impl_kwargs = self._build_impl_kwargs(config)
-        param_group_configs = config.param_groups
-        all_params = []
-        self.model_parts = model_parts
-        # Maps each optimizer to its model part (for state_dict/load_state_dict)
-        self._model_part_indices: list[int] = []
-
-        optim_dict: dict[nn.Parameter, Optimizer] = {}
-        for part_idx, model in enumerate(self.model_parts):
-            groups_by_opt_name = self._build_param_groups(
-                model, param_group_configs, impl_kwargs
-            )
-            for opt_name, opt_param_groups in groups_by_opt_name.items():
-                opt_cls = self._resolve_optimizer_cls(opt_name)
-                for group in opt_param_groups:
-                    pattern = group["pattern"]
-                    kwargs = {
-                        k: v for k, v in group.items() if k not in ("params", "pattern")
-                    }
-                    for p in group["params"]:
-                        optim_dict[p] = opt_cls(
-                            [{"params": [p], "pattern": pattern, **kwargs}]
-                        )
-                        self._model_part_indices.append(part_idx)
-            all_params.extend(p for p in model.parameters())
-
-        def optim_hook(param) -> None:
-            optim_dict[param].step()
-            optim_dict[param].zero_grad()
-
-        for model in self.model_parts:
-            for param in model.parameters():
-                if param.requires_grad:
-                    param.register_post_accumulate_grad_hook(optim_hook)
-
-        self.optimizers = list(optim_dict.values())
-        self._validate_params(all_params)
-        self._post_init(all_params)
-        self._log_summary()
-
-    @overload
-    def step(self, closure: None = None) -> None:
-        ...
-
-    @overload
-    def step(self, closure: Callable[[], float]) -> float:
-        ...
-
-    def step(self, closure: Callable[[], float] | None = None) -> float | None:
-        return None
-
-    def zero_grad(self, set_to_none: bool = True) -> None:
-        pass
-
-
 def default_adamw(lr: float = 8e-4, **kwargs: Any) -> OptimizersContainer.Config:
     """Create an OptimizersContainer.Config with a catch-all AdamW param group.
 
@@ -544,8 +467,7 @@ def register_moe_load_balancing_hook(
                     tokens_per_expert_E_by_layer,
                     # pyrefly: ignore [unbound-name]
                     device_mesh=dtensor_mesh,
-                    placements=[Replicate()]
-                    * dtensor_mesh.ndim,  # pyrefly: ignore [unbound-name]
+                    placements=[Replicate()] * dtensor_mesh.ndim,
                     run_check=False,
                 )
 

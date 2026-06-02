@@ -8,7 +8,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import default_adamw, OptimizersInBackwardContainer
+from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.quantization import Float8LinearConverter
 from torchtitan.components.validate import Validator
 from torchtitan.config import (
@@ -78,14 +78,6 @@ def llama3_debugmodel_flex_attn() -> Trainer.Config:
 def llama3_debugmodel_varlen_attn() -> Trainer.Config:
     config = llama3_debugmodel()
     config.model_spec = model_registry("debugmodel", attn_backend="varlen")
-    return config
-
-
-def llama3_debugmodel_opt_in_bwd() -> Trainer.Config:
-    config = llama3_debugmodel()
-    config.optimizer = OptimizersInBackwardContainer.Config(
-        param_groups=default_adamw(lr=8e-4).param_groups
-    )
     return config
 
 

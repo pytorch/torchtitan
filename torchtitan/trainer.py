@@ -24,10 +24,7 @@ from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhausted
 from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
-from torchtitan.components.optimizer import (
-    OptimizersContainer,
-    OptimizersInBackwardContainer,
-)
+from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
@@ -107,15 +104,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise ValueError(
                     "Batch-invariant mode is not supported in pre-training."
                 )
-            if isinstance(self.optimizer, OptimizersInBackwardContainer.Config):
-                if self.parallelism.expert_parallel_degree > 1:
-                    raise NotImplementedError(
-                        "Optimizers in backward is not supported with Expert Parallel."
-                    )
-                if self.parallelism.pipeline_parallel_degree > 1:
-                    raise NotImplementedError(
-                        "Optimizers in backward is not supported with Pipeline Parallel."
-                    )
 
         def to_dict(self) -> dict[str, Any]:
             d = {}

@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import logging
 import unittest
 
 import torch
@@ -13,7 +12,6 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import (
     default_adamw,
     OptimizersContainer,
-    OptimizersInBackwardContainer,
     ParamGroupConfig,
 )
 
@@ -239,8 +237,8 @@ class TestParamGroupConfig(unittest.TestCase):
         self.assertEqual(groups[1]["betas"], (0.9, 0.999))
         self.assertEqual(groups[2]["betas"], (0.9, 0.95))
 
-    def test_warning_on_zero_matches(self):
-        """Patterns that match no parameters emit a warning."""
+    def test_error_on_zero_matches(self):
+        """Patterns that match no parameters raise ValueError."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
             param_groups=[
@@ -254,17 +252,10 @@ class TestParamGroupConfig(unittest.TestCase):
         )
         impl_kwargs = OptimizersContainer._build_impl_kwargs(config)
 
-        with self.assertLogs(level=logging.WARNING) as cm:
-            groups_by_opt = OptimizersContainer._build_param_groups(
+        with self.assertRaises(ValueError):
+            OptimizersContainer._build_param_groups(
                 model, config.param_groups, impl_kwargs
             )
-
-        self.assertTrue(
-            any("nonexistent_layer" in msg for msg in cm.output),
-            f"Expected warning about unmatched pattern, got: {cm.output}",
-        )
-        groups = groups_by_opt.get("AdamW", [])
-        self.assertEqual(len(groups), 1)
 
     def test_all_params_covered(self):
         """Every requires_grad param appears in exactly one group."""
@@ -351,41 +342,6 @@ class TestOptimizersContainerWithParamGroups(unittest.TestCase):
         container = config.build(model_parts=[model])
         opt = container.optimizers[0]
         self.assertEqual(len(opt.param_groups), 1)
-
-
-class TestOptimizersInBackwardWithParamGroups(unittest.TestCase):
-    def test_build_with_param_groups(self):
-        """OptimizersInBackwardContainer respects param groups."""
-        model = SimpleModel()
-        config = OptimizersInBackwardContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
-                    pattern=r".*\.bias$",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.0},
-                ),
-                ParamGroupConfig(
-                    pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
-                ),
-            ],
-        )
-        container = config.build(model_parts=[model])
-        self.assertIsInstance(container, OptimizersInBackwardContainer)
-
-        param_to_name = {p: n for n, p in model.named_parameters()}
-        for opt in container.optimizers:
-            for pg in opt.param_groups:
-                for p in pg["params"]:
-                    name = param_to_name.get(p, "")
-                    if name.endswith(".bias"):
-                        self.assertEqual(
-                            pg["weight_decay"],
-                            0.0,
-                            f"Bias param {name} should have weight_decay=0",
-                        )
 
 
 class TestDCPWithParamGroups(unittest.TestCase):
