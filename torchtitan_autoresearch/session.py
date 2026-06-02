@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Run bootstrap and git lifecycle — the Harness's branch owner.
 
 Enforces, structurally, that every autoresearch loop runs on a fresh isolated
@@ -25,9 +31,7 @@ class ProvenanceViolation(RuntimeError):
 
 
 def _git(repo: str, *args: str) -> str:
-    out = subprocess.run(
-        ["git", "-C", repo, *args], capture_output=True, text=True
-    )
+    out = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
     if out.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {out.stderr.strip()}")
     return out.stdout.strip()
@@ -45,7 +49,9 @@ class Session:
 
     def remove(self) -> None:
         """Remove the experiment worktree (the branch + its commits are kept)."""
-        if self.main_repo and os.path.abspath(self.repo_root) != os.path.abspath(self.main_repo):
+        if self.main_repo and os.path.abspath(self.repo_root) != os.path.abspath(
+            self.main_repo
+        ):
             try:
                 _git(self.main_repo, "worktree", "remove", "--force", self.repo_root)
             except RuntimeError:
@@ -89,7 +95,8 @@ class Session:
 def _branch_exists(repo: str, name: str) -> bool:
     out = subprocess.run(
         ["git", "-C", repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{name}"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     return out.returncode == 0
 
@@ -128,10 +135,33 @@ def start_run(
             raise ProvenanceViolation(f"worktree path already exists: {worktree_path}")
         # An isolated worktree needs no clean primary tree -- the primary is untouched.
         _git(repo_root, "worktree", "add", worktree_path, "-b", branch, base)
-        return Session(repo_root=worktree_path, branch=branch, base_commit=base,
-                       main_repo=repo_root)
+        # A fresh worktree has tracked assets (assets/images, ...) but NOT the
+        # gitignored ones (assets/hf/* -- tokenizers, downloaded weights). Symlink
+        # each missing child of the primary's assets/ so the config's relative
+        # hf_assets_path (e.g. ./assets/hf/Llama-3.1-8B) resolves inside the
+        # worktree. Assets are read-only data, not code, so this does not break
+        # code isolation; the symlinked subdirs are gitignored so reset --hard
+        # leaves them alone.
+        src_assets = os.path.join(repo_root, "assets")
+        if os.path.isdir(src_assets):
+            dst_assets = os.path.join(worktree_path, "assets")
+            os.makedirs(dst_assets, exist_ok=True)
+            for name in os.listdir(src_assets):
+                dst = os.path.join(dst_assets, name)
+                if not os.path.exists(dst):
+                    os.symlink(os.path.join(src_assets, name), dst)
+        return Session(
+            repo_root=worktree_path,
+            branch=branch,
+            base_commit=base,
+            main_repo=repo_root,
+        )
 
     if not _tree_clean(repo_root):
-        raise ProvenanceViolation("working tree is dirty; commit or stash before starting a run")
+        raise ProvenanceViolation(
+            "working tree is dirty; commit or stash before starting a run"
+        )
     _git(repo_root, "checkout", "-b", branch, base)
-    return Session(repo_root=repo_root, branch=branch, base_commit=base, main_repo=repo_root)
+    return Session(
+        repo_root=repo_root, branch=branch, base_commit=base, main_repo=repo_root
+    )
