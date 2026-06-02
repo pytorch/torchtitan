@@ -3,9 +3,10 @@ Use your full toolset (Read, Grep, Glob, Bash, Edit, Write) as needed to complet
 the task end-to-end.
 
 **Fixed evaluation config (do not change the mesh).** Pipeline parallel = 4,
-expert parallel = 2, data-parallel shard = 1; sequence length 2048; global batch
-size 1024; BF16 precision; on {{NGPU}} GPUs. Model under test: `MODULE={{MODULE}}`,
-`CONFIG={{CONFIG}}` (an MoE model).
+expert parallel = 2, data-parallel shard = auto (`-1`, fills the mesh; EP is carved
+from the data axis, so on {{NGPU}} GPUs the data axis is 2 and EP=2 shards experts
+across it); sequence length 2048; global batch size 1024; BF16 precision. Model
+under test: `MODULE={{MODULE}}`, `CONFIG={{CONFIG}}` (an MoE model).
 
 **Launch training with the provided script (treat it as read-only):**
 ```

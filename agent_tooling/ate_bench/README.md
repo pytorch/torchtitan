@@ -46,7 +46,16 @@ logged; the artifact/loss checks just won't pass.
 
 ### TorchTitan mapping (fixed config, paper Appendix B)
 `PP=4, EP=2, DP=1`, seq_len 2048, global batch 1024, BF16, 8 GPUs → TorchTitan's
-`run_train.sh` with `--parallelism.{pipeline,expert}_parallel_degree` etc. Model:
+`run_train.sh` with `--parallelism.{pipeline,expert}_parallel_degree` etc.
+
+> **Mesh-notation gotcha (a framework-design difference ATE-Bench is about).** The
+> paper's mesh is multiplicative (`PP*EP*DP = 8`). TorchTitan's mesh requires
+> `dp_replicate*dp_shard*cp*tp*pp == world_size` with **EP carved from the data
+> axis**, not multiplied on top. So we set `pp=4`, `dp_shard=-1` (auto → 2 on 8
+> GPUs), `ep=2` (experts sharded across that data axis of 2). Setting `dp_shard=1`
+> fails validation (`1*1*1*1*4 != 8`).
+
+Model:
 an MoE model (`deepseek_v3` default; also `qwen3` `debugmodel_moe`, `llama4`,
 `gpt_oss`). Dataset: **C4** (TorchTitan native; the paper used DCLM). Checkpoint
 export/import: `scripts/checkpoint_conversion/convert_{to,from}_hf.py`. All encoded

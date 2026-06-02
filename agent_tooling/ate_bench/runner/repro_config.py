@@ -37,11 +37,16 @@ class ReproConfig:
     config: str = "deepseek_v3_debugmodel"
     label: str = "titan"  # used for workspace/<label>/... and results/<label>/
 
-    # Fixed mesh (paper Appendix B).
+    # Fixed mesh (paper Appendix B): PP=4, EP=2, DP=1.
+    # NOTE: the paper's notation is multiplicative (PP*EP*DP = 8), but TorchTitan's
+    # mesh is dp_replicate*dp_shard*cp*tp*pp == world_size with EP *carved from* the
+    # data axis (not multiplied on top). So on 8 GPUs we set pp=4 and leave
+    # dp_shard=-1 (auto -> 8/(1*1*1*4)=2); EP=2 then shards experts across that data
+    # axis of 2. dp_shard=1 would fail validation (1*1*1*1*4 != 8).
     ngpu: int = 8
     pipeline_parallel_degree: int = 4
     expert_parallel_degree: int = 2
-    data_parallel_shard_degree: int = 1
+    data_parallel_shard_degree: int = -1  # auto-fill the mesh; EP overlaps this axis
 
     # Fixed training shape.
     seq_len: int = 2048

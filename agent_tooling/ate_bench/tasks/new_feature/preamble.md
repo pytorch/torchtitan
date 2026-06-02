@@ -5,8 +5,9 @@ You are given the same materials an engineer would consult: the architecture's
 arXiv paper and its reference implementation (see `references.md`). Produce a
 **training script that integrates the new feature into the base MoE model** and
 runs on the C4 dataset under the fixed config: pipeline parallel = 4, expert
-parallel = 2, data-parallel shard = 1, sequence length 2048, global batch 1024,
-BF16, on {{NGPU}} GPUs, with `MODULE={{MODULE}}`, `CONFIG={{CONFIG}}`.
+parallel = 2, data-parallel shard = auto (`-1`; EP is carved from the data axis,
+so on {{NGPU}} GPUs the data axis is 2 and EP=2 shards experts across it), sequence
+length 2048, global batch 1024, BF16, with `MODULE={{MODULE}}`, `CONFIG={{CONFIG}}`.
 
 Run training for **64 steps**. Your change is correct only if **both** hold:
 1. cross-entropy loss **decreases** across the 64-step run and stays **finite**

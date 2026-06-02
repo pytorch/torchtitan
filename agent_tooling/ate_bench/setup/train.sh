@@ -22,7 +22,9 @@ CONFIG="${CONFIG:-deepseek_v3_debugmodel}"
 NGPU="${NGPU:-8}"
 PP="${PP:-4}"
 EP="${EP:-2}"
-DP="${DP:-1}"
+# dp_shard: -1 = auto-fill the mesh (world_size/(dp_replicate*cp*tp*pp)). EP is
+# carved from this data axis, not multiplied on top, so PP=4 on 8 GPUs -> dp_shard=2.
+DP="${DP:--1}"
 SEQ_LEN="${SEQ_LEN:-2048}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-1024}"
 
@@ -32,8 +34,11 @@ cd "$REPO_ROOT"
 
 echo "[ate_bench] module=$MODULE config=$CONFIG ngpu=$NGPU mesh(PP=$PP,EP=$EP,DP=$DP) steps=$STEPS"
 
-MODULE="$MODULE" CONFIG="$CONFIG" NGPU="$NGPU" ${COMM_MODE:+COMM_MODE=$COMM_MODE} \
-  ./run_train.sh \
+# run_train.sh reads these from the environment.
+export MODULE CONFIG NGPU
+[ -n "${COMM_MODE:-}" ] && export COMM_MODE
+
+./run_train.sh \
     --parallelism.pipeline_parallel_degree="$PP" \
     --parallelism.expert_parallel_degree="$EP" \
     --parallelism.data_parallel_shard_degree="$DP" \
