@@ -57,6 +57,7 @@ class Verdict:
     crash_class: str
     detail: str
     verify: str = "n/a"  # faithful | affecting | fail | n/a
+    profile_trace: str = ""  # path to this candidate's single-step chrome trace
 
 
 @dataclass

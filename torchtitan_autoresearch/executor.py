@@ -289,29 +289,34 @@ class SubprocessExecutor:
         )
 
     def profile(self, command: list[str] | None = None) -> str:
-        """Run a SHORT profiled run and return the chrome-trace file PATH.
+        """Run a tiny single-step profile and return the chrome-trace file PATH.
 
-        The harness only runs the profile and hands back the file; the agent reads
-        and analyzes the trace however it wants (the harness does no parsing). The
-        run is short (fewer steps than a candidate eval): one trace is captured at
-        step 5 (profiler warmup 3 + active 1).
+        Captures ONE step (#3: warmup 2 + active 1) in a 4-step run -- much shorter
+        than a candidate eval. The harness only runs it and hands back the file;
+        the agent reads/analyzes the trace however it wants (the harness parses
+        nothing). ``command`` defaults to the golden baseline; the gate passes a
+        candidate's command to profile that candidate.
         """
         c = Candidate(label="profile", command=list(command or []))
         self._run(
             c,
             "profile",
             [
-                "--training.steps=6",
+                "--training.steps=4",
                 "--profiler.enable-profiling",
+                "--profiler.profiler-warmup",
+                "2",
+                "--profiler.profiler-active",
+                "1",
                 "--profiler.profile-freq",
-                "5",
+                "3",
             ],
         )
         trace = os.path.join(
             self._dump_folder(c, "profile"),
             "profiling",
             "traces",
-            "iteration_5",
+            "iteration_3",
             "rank0_trace.json",
         )
         return trace if os.path.isfile(trace) else ""

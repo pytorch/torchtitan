@@ -47,6 +47,7 @@ def _record(c: Candidate, v: Verdict) -> Record:
         label=c.label,
         addresses=c.addresses,
         rationale=c.rationale,
+        profile_trace=v.profile_trace,
     )
 
 
@@ -71,8 +72,10 @@ def gate(
     family = _family(c)
     budget = state.family_budget(rules.family_defer_substrate, rules.family_defer_other)
     prev_tip = state.champion_commit or (session.base_commit if session else "")
+    prof_trace = ""  # this candidate's single-step profile; captured after commit
 
     def finish(v: Verdict) -> Verdict:
+        v.profile_trace = v.profile_trace or prof_trace
         if session is not None and v.status != "keep" and prev_tip:
             session.reset_to(
                 prev_tip
@@ -105,6 +108,11 @@ def gate(
     # Harness commits the candidate's edits to the isolated branch (agent has no git).
     if session is not None:
         c.commit = session.commit_candidate(c, rules)
+
+    # Capture a tiny single-step profile of THIS candidate by default and hand the
+    # trace path back (in the verdict + ledger) so the agent can analyze why it
+    # behaved as it did. The harness does not parse it. Best-effort; "" on failure.
+    prof_trace = executor.profile(c.command)
 
     # 2. SPEED TEST FIRST: run + measure throughput, decide significance vs the
     #    champion (with one optional rerun near the boundary). A candidate that is

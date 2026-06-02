@@ -48,7 +48,8 @@ def run_loop(
         v = harness.submit(cand)
         print(
             f"[iter {n}] verdict: {v.verdict}/{v.status}  verify={v.verify}  "
-            f"tps={v.throughput_mean:.0f}  :: {v.detail}",
+            f"tps={v.throughput_mean:.0f}  :: {v.detail}\n"
+            f"          profile: {v.profile_trace or '(none)'}",
             flush=True,
         )
         if v.status == "keep":

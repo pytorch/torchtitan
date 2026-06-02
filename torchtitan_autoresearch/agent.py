@@ -232,7 +232,8 @@ class LLMAgent:
             "\n".join(
                 f"- {r.get('label', '?')} | status={r.get('status')} "
                 f"verdict={r.get('verdict')} verify={r.get('verify')} "
-                f"tps={r.get('tps_mean')} :: {r.get('rationale', '')}"
+                f"tps={r.get('tps_mean')} | profile={r.get('profile_trace') or '-'} "
+                f":: {r.get('rationale', '')}"
                 for r in obs.ledger[-self.max_ledger :]
             )
             or "(no candidates run yet)"
@@ -285,7 +286,9 @@ class LLMAgent:
             f"DEFERRED FAMILIES (skip): {obs.deferred_families}\n"
             f"ADVISORY IDEAS (human; weighted prior-experiment learnings; "
             f"soft_constraint/na-* are warnings or bans -- honor them):\n{ideas}\n\n"
-            f"LEDGER (past candidates + verdicts -- learn, do NOT repeat):\n{ledger}\n\n"
+            f"LEDGER (past candidates + verdicts; each has a single-step profile "
+            f"trace you can READ to see why it was faster/slower/affecting -- learn "
+            f"from these, do NOT repeat):\n{ledger}\n\n"
             f"EDITABLE FILE CONTENTS (for file_edits):\n{sources}\n\n"
             "Reply with ONE JSON object and nothing else:\n"
             '{"label": "<short unique label>", '

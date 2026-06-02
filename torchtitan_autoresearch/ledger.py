@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """The ledger: authoritative, append-only facts authored by the Harness.
 
 The Harness authors the measured columns and *stores* the agent's verbatim
@@ -24,6 +30,7 @@ HEADER = [
     "label",
     "addresses",
     "rationale",
+    "profile_trace",
 ]
 
 
@@ -42,6 +49,7 @@ class Record:
     label: str = ""
     addresses: list[str] = field(default_factory=list)  # ideas ids acted on
     rationale: str = ""
+    profile_trace: str = ""  # path to the candidate's single-step chrome trace
 
     def to_row(self) -> list[str]:
         d = asdict(self)
