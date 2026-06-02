@@ -33,4 +33,11 @@ def diff_vs_base(worktree: Path, base: str = "main") -> str:
 
 
 def remove_worktree(repo: Path, path: Path) -> None:
-    _git(repo, "worktree", "remove", "--force", str(path))
+    # Worktrees can end up "locked" (esp. on network mounts); a single --force won't
+    # remove a locked worktree. Unlock, double-force, then fall back to rm + prune.
+    _git(repo, "worktree", "unlock", str(path))
+    res = _git(repo, "worktree", "remove", "--force", "--force", str(path))
+    if res.returncode != 0:
+        import shutil
+        shutil.rmtree(path, ignore_errors=True)
+        _git(repo, "worktree", "prune")
