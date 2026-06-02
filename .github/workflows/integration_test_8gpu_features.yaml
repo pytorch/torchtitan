@@ -78,10 +78,8 @@ jobs:
           echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
 
                   
-          export HIPBLASLT_LOG_LEVEL=5
-          export HIPBLASLT_LOG_MASK=0xFFFFFFFF
-          export TENSILE_LOG_LEVEL=1
-          echo "Enabled hipBLASLt kernel logging: LOG_LEVEL=5, LOG_MASK=0xFFFFFFFF"
+          export TENSILE_DB=0x8000
+          echo "Enabled kernel logging: TENSILE_DB=0x8000"
         fi
 
         start=$(date +%s)
