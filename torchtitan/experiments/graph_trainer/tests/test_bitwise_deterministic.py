@@ -381,9 +381,9 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
     model_flavor = "debugmodel"
     annotate_model = staticmethod(annotate_deepseekv3)
 
-    # TODO: expected hashes are stale due to upstream PyTorch nightly changes.
-    # Run `EXPECTTEST_ACCEPT=1 pytest <this_file>` on H100 to update.
-    @unittest.skip("DSv3 expected hashes stale after upstream PyTorch changes")
+    @unittest.skipUnless(
+        has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
+    )
     def test_eager_self_deterministic(self):
         """Eager mode: results match hardcoded expected values.
 
@@ -395,11 +395,11 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.4749956130981445""")
         assert_expected_inline(
             model_hash,
-            """89942c2acb1be82c69efe87338ba248dd16b5dab4c5d410877e890c796dec89f""",
+            """edaec1177d073cf99a24433a6381b23282bfbfe306c40cefcea5d4efaf14cd0a""",
         )
         assert_expected_inline(
             grad_hash,
-            """2cc6dbc2a86a68cff84ff4087e73479da2ebec5929528f94f4958ba0f2eca3eb""",
+            """ce80bf7a7186d63eb6231d684ecefe7a7846f1bc63c8fde794fefd462e9c2c5d""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -507,9 +507,9 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     attn_backend = "flex"
     annotate_model = staticmethod(annotate_deepseekv3)
 
-    # TODO: expected hashes are stale due to upstream PyTorch nightly changes.
-    # Run `EXPECTTEST_ACCEPT=1 pytest <this_file>` on H100 to update.
-    @unittest.skip("DSv3 FlexAttn expected hashes stale after upstream PyTorch changes")
+    @unittest.skipUnless(
+        has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
+    )
     def test_eager_self_deterministic(self):
         """Eager results match hardcoded expected values.
 
@@ -521,11 +521,11 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.4749956130981445""")
         assert_expected_inline(
             model_hash,
-            """bb0a4727f4c2120af1c98451a0890eb1220ee1d123bec3ce65818d0669e7c541""",
+            """d2670e9bf949d83c446bcce1ca468a23eda98c83c0cac83eafb15ddebde3c234""",
         )
         assert_expected_inline(
             grad_hash,
-            """16c5442f06bc283431e48c4bcd2498fa3c849351815668b72ce1c76095f22277""",
+            """e90a28b41bdae0de5d1db20de40998b0508866efed561cce4373e595626e8e7a""",
         )
 
     # TODO: FlexAttention compilation exceeds resource limits on pre-Hopper GPUs.
