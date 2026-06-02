@@ -162,9 +162,11 @@ def qwen3_0_6b() -> Trainer.Config:
 def qwen3_1_7b() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
-        hf_assets_path="./tests/assets/tokenizer",
+        hf_assets_path="./assets/hf/Qwen3-1.7B",
         model_spec=model_registry("1.7B"),
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        dataloader=HuggingFaceTextDataLoader.Config(
+            dataset="c4",
+        ),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
@@ -186,17 +188,20 @@ def qwen3_1_7b() -> Trainer.Config:
 def qwen3_14b() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
-        hf_assets_path="./tests/assets/tokenizer",
+        hf_assets_path="./assets/hf/Qwen3-14B",
         model_spec=model_registry("14B"),
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        dataloader=HuggingFaceTextDataLoader.Config(
+            dataset="c4",
+        ),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
             local_batch_size=4,
             seq_len=4096,
             steps=3000,
-            # bf16 is the runnable, high-precision golden regime; default float32
-            # OOMs a 14B at this sequence length on a single node.
+            # Train in bf16 master weights as the deliberate golden baseline: the
+            # float32-master default is heavier and risks OOM for a 14B at seq 4096
+            # on a single node, and bf16 is the regime experiments build on.
             dtype="bfloat16",
         ),
         parallelism=ParallelismConfig(
