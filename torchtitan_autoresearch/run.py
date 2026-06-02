@@ -99,11 +99,10 @@ def main(argv: list[str] | None = None) -> int:
         ngpu=ngpu,
         module=rules.module,
         config=rules.config_fn,
-        base_command=[
-            f"--dataloader.dataset={train_dataset}",
-            # seq_len is a locked workload field; pin it (llama3_8b defaults to 8192).
-            f"--training.seq_len={rules.seq_len}",
-        ],
+        # The workload uses the model config's natural seq_len -- the harness does
+        # NOT pin/override it. seq_len stays banned for candidates (workload_guard),
+        # so it is locked at the config value, just not forced to some other number.
+        base_command=[f"--dataloader.dataset={train_dataset}"],
         verify_steps=rules.verify_steps,
         band_headroom=rules.band_headroom,
         trend_factor=rules.trend_factor,

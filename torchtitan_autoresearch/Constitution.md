@@ -22,10 +22,10 @@ disagrees with `ARCHITECTURE.md`, this file wins. Format is defined in
 - **Model flavor:** Llama 3.1 `8B` via `MODULE=llama3 CONFIG=llama3_8b`. Dense.
   The flavor passed to `model_registry` may not change.
 - **Dataset:** real **`c4`**, Llama-3.1-8B tokenizer at `./assets/hf/Llama-3.1-8B`.
-- **Sequence length:** `training.seq_len = 4096`. **Locked** and pinned by the
-  Harness (note `llama3_8b` defaults to 8192). Raw throughput rewards shorter
-  sequences (attention is O(seq^2)); seq_len defines the workload. A
-  `WorkloadViolation` is raised for any candidate that changes it, before any run.
+- **Sequence length:** the model config's natural value (`llama3_8b` = 8192). The
+  Harness does **not** pin or override it. Raw throughput rewards shorter sequences
+  (attention is O(seq^2)); seq_len defines the workload, so a `WorkloadViolation`
+  is raised for any candidate that changes it, before any run (locked, not pinned).
 - **Hardware / world:** hardware is **not** hardcoded. The harness detects the
   available single-node GPU count at run start, fixes it as the world size for
   the whole run (so throughput stays comparable across candidates), records the
@@ -121,7 +121,7 @@ prose above is the human explanation of the same rules. Keep them in sync.
     "model_registry_flavor": "8B",
     "module": "llama3",
     "dataset": "c4",
-    "seq_len": 4096,
+    "seq_len": 8192,
     "ngpu": "auto",
     "gpu": "auto",
     "launcher": "run_train.sh"
