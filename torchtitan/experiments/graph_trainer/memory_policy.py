@@ -67,21 +67,22 @@ def _make_full_memory_policy() -> Callable:
 
     The layer boundary pass in tag_sac_policy will force MUST_SAVE on nodes
     whose output crosses a layer boundary, so only layer outputs are saved.
-    This mirrors eager's full AC (checkpoint_wrapper with no context_fn).
+    This mirrors eager's full AC (checkpoint_wrapper with no context_fn),
+    which recomputes the entire block — including attention — in backward.
 
-    Two classes of ops are always saved:
-    - RNG ops (dropout etc.): remat pass cannot replay their random state.
-    - Higher-order ops (flex_attention, inductor_compiled_code): they carry
-      GraphModule subgraph arguments that node_copy cannot duplicate.
+    RNG ops (dropout etc.) are the one class that is always saved: the remat
+    pass cannot replay their random state, and ``has_recomputable_rng_ops``
+    would otherwise raise. Eager full AC recomputes them by forking the RNG
+    state (``preserve_rng_state=True``); the graph path lacks that, so it
+    saves them instead.
+
+    Higher-order ops (e.g. flex_attention) ARE recomputed: ``node_copy``
+    duplicates them together with their ``get_attr`` subgraph references, and
+    the subsequent regional_inductor pass compiles the duplicate as well.
     """
-    from torch._ops import HigherOrderOperator
 
     def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
         if torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", set()):
-            return CheckpointPolicy.MUST_SAVE
-        # TODO: node_copy should support HOPs with subgraph arguments,
-        # removing the need for this workaround.
-        if isinstance(node.target, HigherOrderOperator):
             return CheckpointPolicy.MUST_SAVE
         return CheckpointPolicy.MUST_RECOMPUTE
 
@@ -150,10 +151,6 @@ def tag_sac_policy(
     if policy_fn is None:
         policy_fn = _make_default_memory_policy()
 
-    layer_stats: dict[int, dict[str, int]] = defaultdict(
-        lambda: {"save": 0, "recompute": 0}
-    )
-
     # Pass 1: Tag each forward node with a recompute policy.
     for node in gm.graph.nodes:
         if node.op != "call_function":
@@ -183,18 +180,10 @@ def tag_sac_policy(
                 node.meta["recompute"] = parent.meta["recompute"]
             continue
 
-        layer_id = _get_layer_id(node)
-
         # NOTE: The eager SAC policy (activation_checkpoint.py) alternates
         # mm ops between MUST_SAVE and PREFER_RECOMPUTE. We omit that here
         # because the alternating heuristic is arbitrary.
         node.meta["recompute"] = policy_fn(node)
-        key = (
-            "save"
-            if node.meta["recompute"] == CheckpointPolicy.MUST_SAVE
-            else "recompute"
-        )
-        layer_stats[layer_id][key] += 1
 
     # Pass 2: Force MUST_SAVE at layer boundaries. If a recomputable node
     # feeds into a node in a higher layer, saving it is cheaper than
@@ -221,6 +210,27 @@ def tag_sac_policy(
                 break
 
     gm.recompile()
+
+    # Per-layer summary from the FINAL policy (after boundary forcing). Counts
+    # every forward node carrying a recompute decision — primary policy-tagged
+    # ops plus getitem/wait_tensor (which inherit a parent's tag) plus any node
+    # the boundary pass forced to MUST_SAVE — so the per-layer MUST_SAVE counts
+    # account for boundary saves wherever they land (including on getitem /
+    # wait_tensor). The recompute count covers both PREFER_RECOMPUTE and
+    # MUST_RECOMPUTE, so the column is labelled generically as RECOMPUTE.
+    layer_stats: dict[int, dict[str, int]] = defaultdict(
+        lambda: {"save": 0, "recompute": 0}
+    )
+    for node in gm.graph.nodes:
+        if "recompute" not in node.meta:
+            continue
+        key = (
+            "save"
+            if node.meta["recompute"] == CheckpointPolicy.MUST_SAVE
+            else "recompute"
+        )
+        layer_stats[_get_layer_id(node)][key] += 1
+
     logger.info("Applied selective activation checkpointing (SAC) graph pass.")
     if boundary_saves:
         logger.info(f"  Forced {boundary_saves} nodes to MUST_SAVE at layer boundaries")
@@ -230,7 +240,7 @@ def tag_sac_policy(
         logger.info(
             f"  Layer {label}: "
             f"{stats['save']} MUST_SAVE, "
-            f"{stats['recompute']} PREFER_RECOMPUTE"
+            f"{stats['recompute']} RECOMPUTE"
         )
     return gm
 
