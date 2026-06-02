@@ -38,6 +38,13 @@ echo "[ate_bench] module=$MODULE config=$CONFIG ngpu=$NGPU mesh(PP=$PP,EP=$EP,DP
 export MODULE CONFIG NGPU
 [ -n "${COMM_MODE:-}" ] && export COMM_MODE
 
+# With pipeline parallelism the loss is computed on the LAST pipeline stage; rank 0
+# (first stage) only prints a sentinel value. Log the last stage's rank so the
+# captured loss is the real one (and the loss-curve check sees a true curve).
+if [ "${PP}" -gt 1 ] && [ -z "${LOG_RANK:-}" ]; then
+  export LOG_RANK="$(( NGPU - NGPU / PP ))"
+fi
+
 ./run_train.sh \
     --parallelism.pipeline_parallel_degree="$PP" \
     --parallelism.expert_parallel_degree="$EP" \
