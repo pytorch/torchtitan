@@ -37,6 +37,7 @@ from torchtitan.experiments.graph_trainer.graph_utils import export_joint
 from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
 from torchtitan.experiments.graph_trainer.memory_policy import (
     _make_default_memory_policy,
+    _make_full_memory_policy,
     tag_sac_policy,
 )
 from torchtitan.experiments.graph_trainer.passes import (
@@ -565,6 +566,122 @@ class TestApplySACPass(TestCase):
         ]
         self.assertEqual(len(recomputed_nodes), 1)
         self.assertTrue(recomputed_nodes[0].meta["autograd_backward"])
+
+
+class TestFullMemoryPolicy(TestCase):
+    """Unit tests for the full recompute memory policy."""
+
+    def _build_gm(self, op_targets, layer_fqns=None):
+        """Build a GraphModule with call_function nodes and optional layer FQNs."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        y = graph.placeholder("y")
+        last = x
+        nodes = []
+        for target in op_targets:
+            last = graph.call_function(target, args=(last, y))
+            nodes.append(last)
+        graph.output(last)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        if layer_fqns:
+            for node, fqn in zip(nodes, layer_fqns):
+                if fqn is not None:
+                    node.meta["custom"] = {_MODULE_FQN: fqn}
+        return gm
+
+    def _get_call_function_nodes(self, gm):
+        return [n for n in gm.graph.nodes if n.op == "call_function"]
+
+    def test_all_ops_marked_recompute(self):
+        """All ops should be marked MUST_RECOMPUTE with full policy."""
+        gm = self._build_gm(
+            [
+                torch.ops.aten.mm.default,
+                torch.ops.aten.add.Tensor,
+                torch.ops.aten.relu.default,
+            ]
+        )
+        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+        for node in self._get_call_function_nodes(gm):
+            self.assertEqual(
+                node.meta["recompute"],
+                CheckpointPolicy.MUST_RECOMPUTE,
+                f"node {node.name} should be MUST_RECOMPUTE",
+            )
+
+    def test_save_ops_also_recomputed(self):
+        """Compute-intensive ops (linear, max) are recomputed under full."""
+        gm = self._build_gm(
+            [
+                torch.ops.aten.linear.default,
+                torch.ops.aten.max.default,
+            ]
+        )
+        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+        for node in self._get_call_function_nodes(gm):
+            self.assertEqual(
+                node.meta["recompute"],
+                CheckpointPolicy.MUST_RECOMPUTE,
+            )
+
+    def test_rng_ops_saved(self):
+        """RNG ops (nondeterministic_seeded) are saved: the remat pass cannot
+        replay their random state, unlike eager AC's preserve_rng_state."""
+        policy_fn = _make_full_memory_policy()
+        gm = self._build_gm([torch.ops.aten.native_dropout.default])
+        node = self._get_call_function_nodes(gm)[0]
+        self.assertEqual(policy_fn(node), CheckpointPolicy.MUST_SAVE)
+
+    def test_higher_order_ops_recomputed(self):
+        """Higher-order ops (flex_attention) are recomputed, not saved: the
+        remat pass duplicates the HOP together with its subgraph get_attrs."""
+        policy_fn = _make_full_memory_policy()
+        gm = self._build_gm([torch.ops.higher_order.flex_attention])
+        node = self._get_call_function_nodes(gm)[0]
+        self.assertEqual(policy_fn(node), CheckpointPolicy.MUST_RECOMPUTE)
+
+    def test_layer_boundary_forced_to_must_save(self):
+        """Nodes at layer boundaries should still be forced to MUST_SAVE."""
+        gm = self._build_gm(
+            [
+                torch.ops.aten.add.Tensor,
+                torch.ops.aten.relu.default,
+            ],
+            layer_fqns=[
+                "layers.0.feed_forward",
+                "layers.1.attention",
+            ],
+        )
+        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+        nodes = self._get_call_function_nodes(gm)
+        # add crosses from layer 0 to layer 1 — forced to MUST_SAVE
+        self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        # relu has no higher-layer consumer — stays MUST_RECOMPUTE
+        self.assertEqual(nodes[1].meta["recompute"], CheckpointPolicy.MUST_RECOMPUTE)
+
+    def test_same_layer_nodes_all_recomputed(self):
+        """Within a single layer, all ops should be recomputed."""
+        gm = self._build_gm(
+            [
+                torch.ops.aten.mm.default,
+                torch.ops.aten.linear.default,
+                torch.ops.aten.add.Tensor,
+                torch.ops.aten.relu.default,
+            ],
+            layer_fqns=[
+                "layers.0.attention",
+                "layers.0.attention",
+                "layers.0.feed_forward",
+                "layers.0.feed_forward",
+            ],
+        )
+        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+        for node in self._get_call_function_nodes(gm):
+            self.assertEqual(
+                node.meta["recompute"],
+                CheckpointPolicy.MUST_RECOMPUTE,
+                f"node {node.name} in single layer should be MUST_RECOMPUTE",
+            )
 
 
 class TestBucketingPrefetchOrder(FSDPTest):
@@ -1718,6 +1835,69 @@ class TestSelectiveActivationRematPass(TestCase):
         )
         for inp_node in fwd_use_node.all_input_nodes:
             self.assertEqual(inp_node.name, a_name)
+
+    def test_subgraph_get_attr_duplicated_for_recompute(self):
+        """A recomputed node with a subgraph (GraphModule) get_attr input gets
+        a PRIVATE copy of that get_attr, pointing at the same submodule.
+
+        This mirrors how ``flex_attention`` references its score_mod / mask_mod
+        subgraphs via get_attr nodes. Without private copies, the later
+        regional_inductor pass — which partitions each flex node together with
+        its subgraph get_attrs — would place a shared get_attr in only one
+        region, leaving the other flex with the subgraph passed as a raw
+        GraphModule arg (which fails to compile).
+
+            sub = get_attr("subgraph")     # GraphModule attribute
+            a   = some_op(inp, sub)        # must_recompute (HOP-like)
+            bwd = a + a                    # autograd_backward consumer
+
+        Plain-tensor get_attrs are left shared (they are never region-annotated),
+        so this only fires for GraphModule-valued attributes.
+        """
+        from torchtitan.experiments.graph_trainer.selective_activation_remat import (
+            selective_activation_remat_pass,
+        )
+
+        # A trivial GraphModule used as the subgraph attribute, plus a plain
+        # tensor constant attribute that must stay shared (not duplicated).
+        sub_graph = torch.fx.Graph()
+        sub_graph.output(sub_graph.placeholder("x"))
+        root = torch.nn.Module()
+        root.subgraph = torch.fx.GraphModule(torch.nn.Module(), sub_graph)
+        root.const = torch.nn.Buffer(torch.zeros(1))
+
+        graph = torch.fx.Graph()
+        inp = graph.placeholder("inp")
+        sub = graph.get_attr("subgraph")
+        const = graph.get_attr("const")
+        a = graph.call_function(torch.ops.aten.add.Tensor, args=(inp, sub))
+        a.kwargs = {"const": const}
+        bwd = graph.call_function(torch.ops.aten.add.Tensor, args=(a, a))
+        graph.output(bwd)
+        a.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+        bwd.meta["autograd_backward"] = True
+
+        gm = torch.fx.GraphModule(root, graph)
+        result = selective_activation_remat_pass(gm)
+
+        dups = [n for n in result.graph.nodes if n.name.endswith("_recomputed")]
+        self.assertEqual(len(dups), 1)
+        dup = dups[0]
+
+        dup_subgraph_attrs = [
+            n
+            for n in dup.all_input_nodes
+            if n.op == "get_attr" and n.target == "subgraph"
+        ]
+        self.assertEqual(len(dup_subgraph_attrs), 1)
+        # Private copy: a distinct node from the original, same submodule target.
+        self.assertIsNot(dup_subgraph_attrs[0], sub)
+
+        # The plain-tensor const get_attr is shared, not duplicated.
+        const_attrs = [
+            n for n in result.graph.nodes if n.op == "get_attr" and n.target == "const"
+        ]
+        self.assertEqual(len(const_attrs), 1)
 
     def test_offload_reload_chain_hoisted(self):
         """Mirrors the graph the CPU-offload pass produces: a forward
