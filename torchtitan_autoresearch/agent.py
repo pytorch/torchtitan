@@ -8,14 +8,20 @@
 
 The agent is a pluggable search policy (ARCHITECTURE.md section 6). The contract
 is exactly two methods: `propose` (observation -> candidate) and `report`
-(project grounded learnings). Everything else is private. Two reference agents
-are provided: a `ScriptedAgent` (for tests / replay) and a `PlaybookAgent` (a
-trivial non-LLM policy that turns the human's front-loaded ideas into candidates).
-A real LLM agent, an ensemble, or a classical optimizer plug in the same way.
+(project grounded learnings). Everything else is private. Implementations:
+`LLMAgent` is the real autoresearcher (an LLM via `claude -p`, proposing knobs
+and file edits grounded in the ledger); `KnobAgent` is a deterministic knob-sweep
+fallback for offline/CI; `ScriptedAgent` replays a fixed list (tests); and
+`PlaybookAgent` turns the human's front-loaded ideas into candidates. An ensemble
+or a classical optimizer plug in the same way.
 """
 
 from __future__ import annotations
 
+import json
+import os
+import re
+import subprocess
 from typing import Protocol
 
 from torchtitan_autoresearch.types import Candidate, Observation, Report
@@ -27,6 +33,39 @@ class Agent(Protocol):
 
     def report(self) -> Report:
         ...
+
+
+def _claude_ask(prompt: str, timeout: float = 300) -> str:
+    """Query the local Claude Code CLI (keyless AI gateway), same as the observer."""
+    out = subprocess.run(
+        ["claude", "-p", prompt], capture_output=True, text=True, timeout=timeout
+    )
+    return out.stdout.strip()
+
+
+def _extract_json(text: str) -> dict | None:
+    """Pull the first JSON object out of an LLM reply (fenced or bare)."""
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    blob = m.group(1) if m else None
+    if blob is None:  # fall back to the first balanced {...}
+        start = text.find("{")
+        if start == -1:
+            return None
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    blob = text[start : i + 1]
+                    break
+    if not blob:
+        return None
+    try:
+        return json.loads(blob)
+    except json.JSONDecodeError:
+        return None
 
 
 class ScriptedAgent:
@@ -110,6 +149,144 @@ class KnobAgent:
             conclusions=[],
             plan="exhaust the knob plan, skipping deferred families",
             ideas_usage=dict(self._notes),
+        )
+
+
+class LLMAgent:
+    """LLM-backed proposing agent -- the real autoresearcher.
+
+    Implements the Agent contract by asking an LLM (the keyless ``claude -p``
+    gateway, same as the observer) for the NEXT candidate, grounded in the live
+    Observation: the constitution rules, the ledger of every past candidate +
+    verdict, the current champion, advisory ideas, and deferred families. It
+    proposes CLI knobs and/or edits to the editable model files, learning from
+    what was faithful / affecting / faster / crashed instead of replaying a fixed
+    list. The harness gate still bounds it -- it can only propose, never promote,
+    and can never edit outside the constitution's editable scope.
+
+    ``ask`` is injectable (prompt -> reply text) so the agent is testable on CPU
+    without the real CLI; by default it shells out to ``claude -p``.
+    """
+
+    def __init__(self, *, repo_root: str = ".", ask=None, max_ledger: int = 30):
+        self.repo_root = repo_root
+        self._ask = ask or _claude_ask
+        self.max_ledger = max_ledger
+        self._proposed: set[tuple] = set()  # de-dupe (command, edited-paths)
+        self._notes: list[str] = []
+        self._plan = "LLM-driven search over faithful throughput knobs"
+        self._n = 0
+
+    def _editable_sources(self, obs: Observation) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for path in obs.rules.get("editable", {}).get("files", []):
+            try:
+                with open(os.path.join(self.repo_root, path)) as f:
+                    out[path] = f.read()
+            except OSError:
+                pass
+        return out
+
+    def _prompt(self, obs: Observation) -> str:
+        rules = obs.rules
+        ledger = (
+            "\n".join(
+                f"- {r.get('label', '?')} | status={r.get('status')} "
+                f"verdict={r.get('verdict')} verify={r.get('verify')} "
+                f"tps={r.get('tps_mean')} :: {r.get('rationale', '')}"
+                for r in obs.ledger[-self.max_ledger :]
+            )
+            or "(no candidates run yet)"
+        )
+        sources = "\n\n".join(
+            f"### {p}\n```python\n{c}\n```"
+            for p, c in self._editable_sources(obs).items()
+        )
+        return (
+            "You are the proposing agent in an autonomous TorchTitan autoresearch "
+            "loop. Propose the SINGLE next experiment candidate that maximizes "
+            "training throughput (tokens/sec) for the locked workload WITHOUT "
+            "changing the math.\n\n"
+            "POLICY (v1 = faithfulness-only): a candidate is KEPT only if it is "
+            "faster than the champion AND numerically FAITHFUL to the golden (its "
+            "short deterministic loss+grad_norm trajectory stays within the "
+            "golden's own rounding noise). Changes that move the math (fp8/"
+            "precision, batch size, LR, optimizer) are REJECTED. So propose "
+            "math-preserving throughput knobs: activation checkpointing, "
+            "torch.compile, FSDP reshard policy, tensor-parallel degree, attention "
+            "backend, comm/memory layout.\n\n"
+            f"OBJECTIVE: {json.dumps(rules.get('objective', {}))}\n"
+            f"QUALITY POLICY: {json.dumps(rules.get('quality', {}))}\n"
+            f"WORKLOAD (locked, do NOT change): {json.dumps(rules.get('workload', {}))}\n"
+            f"BANNED fields: {rules.get('banned_workload_fields')}; "
+            f"FIXED fields: {rules.get('fixed_fields')}\n"
+            f"EDITABLE files (you MAY rewrite these): "
+            f"{rules.get('editable', {}).get('files')}\n\n"
+            f"CURRENT CHAMPION: {json.dumps(obs.champion)}\n"
+            f"DEFERRED FAMILIES (skip): {obs.deferred_families}\n"
+            f"ADVISORY IDEAS: {json.dumps(obs.ideas)[:1500]}\n\n"
+            f"LEDGER (past candidates + verdicts -- learn, do NOT repeat):\n{ledger}\n\n"
+            f"EDITABLE FILE CONTENTS (for file_edits):\n{sources}\n\n"
+            "Reply with ONE JSON object and nothing else:\n"
+            '{"label": "<short unique label>", '
+            '"family": "<ac|compile|fsdp|tp|attn|...>", '
+            '"command": ["--flag=value", ...], '
+            '"file_edits": {"path": "<full new file content>"}, '
+            '"rationale": "<why it is faster AND faithful>", '
+            '"done": false}\n'
+            "Use command for CLI/config knobs and/or file_edits to rewrite an "
+            "editable file (full content; editable files only). Propose something "
+            "NOT already in the ledger. Set done=true only if no promising "
+            "candidate remains."
+        )
+
+    def propose(self, obs: Observation) -> Candidate | None:
+        self._n += 1
+        prompt = self._prompt(obs)
+        for _ in range(2):  # one retry on a parse failure or a repeat
+            try:
+                reply = self._ask(prompt)
+            except (subprocess.TimeoutExpired, OSError):
+                return None
+            data = _extract_json(reply or "")
+            if data is None:
+                continue
+            if data.get("done"):
+                self._plan = str(data.get("rationale", self._plan))
+                return None
+            command = [str(x) for x in (data.get("command") or [])]
+            file_edits = {
+                str(k): str(v) for k, v in (data.get("file_edits") or {}).items()
+            }
+            if not command and not file_edits:
+                continue
+            key = (tuple(command), tuple(sorted(file_edits)))
+            if key in self._proposed:
+                prompt += (
+                    "\n\nThat candidate was already tried; propose a DIFFERENT one."
+                )
+                continue
+            self._proposed.add(key)
+            family = str(data.get("family") or "misc")
+            label = str(data.get("label") or f"llm-{self._n}")
+            rationale = str(data.get("rationale", ""))
+            self._notes.append(f"{label}: {rationale}")
+            return Candidate(
+                label=label,
+                family=family,
+                command=command,
+                file_edits=file_edits,
+                rationale=rationale,
+            )
+        return None
+
+    def report(self) -> Report:
+        return Report(
+            beliefs=["LLM-driven search over faithful throughput knobs (claude -p)"],
+            conclusions=[],
+            plan=self._plan,
+            open_questions=[],
+            ideas_usage={f"prop{i + 1}": n for i, n in enumerate(self._notes)},
         )
 
 

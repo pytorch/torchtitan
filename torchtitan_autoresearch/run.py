@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 
-from torchtitan_autoresearch.agent import KnobAgent
+from torchtitan_autoresearch.agent import KnobAgent, LLMAgent
 from torchtitan_autoresearch.api import Harness
 from torchtitan_autoresearch.constitution import load_constitution
 from torchtitan_autoresearch.executor import SubprocessExecutor
@@ -180,12 +181,20 @@ def main(argv: list[str] | None = None) -> int:
             report_path=os.path.join(run_dir, "report.json"),
         )
 
+        # The LLM agent (claude -p) is the real autoresearcher; fall back to the
+        # deterministic KnobAgent offline/CI so the loop still runs without the CLI.
+        agent = (
+            LLMAgent(repo_root=sess.repo_root)
+            if shutil.which("claude")
+            else KnobAgent()
+        )
         print(
-            f"[loop] starting hill-climb (max {args.max_iters} candidates). "
+            f"[loop] agent = {type(agent).__name__} | starting hill-climb "
+            f"(max {args.max_iters} candidates). "
             f"Follow: python -m torchtitan_autoresearch.observe watch --run-dir {run_dir}",
             flush=True,
         )
-        summary = run_loop(H, KnobAgent(), max_iters=args.max_iters, report_every=1)
+        summary = run_loop(H, agent, max_iters=args.max_iters, report_every=1)
         print("[done]", summary)
         print(
             "ledger:\n" + (open(ledger).read() if os.path.exists(ledger) else "(empty)")
