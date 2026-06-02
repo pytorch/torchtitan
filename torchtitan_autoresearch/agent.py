@@ -29,10 +29,16 @@ from torchtitan_autoresearch.types import Candidate, Observation, Report
 
 
 class Agent(Protocol):
+    def start(self) -> None:  # lifecycle: create persistent resources (optional)
+        ...
+
     def propose(self, obs: Observation) -> Candidate | None:
         ...
 
     def report(self) -> Report:
+        ...
+
+    def stop(self) -> None:  # lifecycle: destroy them (optional)
         ...
 
 
@@ -95,8 +101,61 @@ def _extract_json(text: str) -> dict | None:
         return None
 
 
+class _PerTurnSession:
+    """A fresh, stateless ``claude -p`` call each turn -- no memory between turns.
+    Continuity comes from re-injecting the ledger/state into every prompt."""
+
+    def __init__(self, ask=None, timeout: float = 420):
+        self._ask = ask or (lambda p: _claude_ask(p, timeout))
+
+    def ask(self, prompt: str) -> str:
+        return self._ask(prompt)
+
+    def close(self) -> None:
+        pass
+
+
+class _PersistentSession:
+    """ONE Claude conversation that OUTLIVES turns: created with an explicit
+    ``--session-id`` and continued with ``--resume``, so the agent keeps native
+    memory across propose() calls. The explicit id isolates it from the
+    summarizer's separate one-off ``claude`` calls. An injected ``ask`` is used
+    instead when provided (tests)."""
+
+    def __init__(self, ask=None, timeout: float = 420):
+        import uuid
+
+        self._sid = str(uuid.uuid4())
+        self._ask = ask
+        self._timeout = timeout
+        self._resuming = False
+
+    def ask(self, prompt: str) -> str:
+        resuming = self._resuming
+        self._resuming = True
+        if self._ask is not None:
+            return self._ask(prompt)
+        flag = ["--resume", self._sid] if resuming else ["--session-id", self._sid]
+        out = subprocess.run(
+            ["claude", "-p", *flag, prompt],
+            capture_output=True,
+            text=True,
+            timeout=self._timeout,
+        )
+        return out.stdout.strip()
+
+    def close(self) -> None:
+        self._resuming = False
+
+
 class ScriptedAgent:
     """Replays a fixed list of candidates; trivial report. For tests and replay."""
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
 
     def __init__(self, candidates: list[Candidate]):
         self._queue = list(candidates)
@@ -154,6 +213,12 @@ class KnobAgent:
         self._i = 0
         self._notes: dict[str, str] = {}
 
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
     def propose(self, obs: Observation) -> Candidate | None:
         while self._i < len(self._knobs):
             label, family, command = self._knobs[self._i]
@@ -204,9 +269,20 @@ class LLMAgent:
         log_path=None,
         profiler=None,
         logs_dir: str = "",
+        persistent: bool = False,
+        timeout: float = 420,
     ):
         self.repo_root = repo_root
-        self._ask = ask or _claude_ask
+        # ``ask`` (prompt -> reply) is an injectable transport for CPU tests; the
+        # real transport is a session created in start(). ``persistent`` decides
+        # whether that session is one Claude conversation that OUTLIVES turns
+        # (native memory via --resume) or a fresh stateless call per turn. Either
+        # way, whether an "agent" is created per turn is an LLMAgent detail, not
+        # something the loop hardcodes -- the loop only calls start()/stop().
+        self._ask_override = ask
+        self._persistent = persistent
+        self._timeout = timeout
+        self._session = None  # set in start(); the LLM transport
         self.max_ledger = max_ledger
         self.log_path = log_path  # full prompt+reply transcript, for deep inspection
         self._profiler = profiler  # callable(command=None) -> baseline profile summary
@@ -216,6 +292,26 @@ class LLMAgent:
         self._notes: list[str] = []
         self._plan = "LLM-driven search over faithful throughput knobs"
         self._n = 0
+
+    def start(self) -> None:
+        """Create the LLM session (persistent or per-turn). Idempotent."""
+        if self._session is not None:
+            return
+        if self._persistent:
+            self._session = _PersistentSession(
+                ask=self._ask_override, timeout=self._timeout
+            )
+            print("[llm] started PERSISTENT session (outlives turns)", flush=True)
+        else:
+            self._session = _PerTurnSession(
+                ask=self._ask_override, timeout=self._timeout
+            )
+
+    def stop(self) -> None:
+        """Tear down the LLM session."""
+        if self._session is not None:
+            self._session.close()
+            self._session = None
 
     def _ensure_profile(self) -> None:
         """Ask the harness for the baseline profile summary once (the agent's call)."""
@@ -344,13 +440,15 @@ class LLMAgent:
         )
 
     def propose(self, obs: Observation) -> Candidate | None:
+        if self._session is None:
+            self.start()  # lazy-start so direct propose() calls still work (tests)
         self._n += 1
         self._ensure_profile()  # the agent asks the harness for a baseline trace
         prompt = self._prompt(obs)
         for _ in range(2):  # one retry on a parse failure or a repeat
             print("[llm] querying claude for the next candidate...", flush=True)
             try:
-                reply = self._ask(prompt)
+                reply = self._session.ask(prompt)
             except subprocess.TimeoutExpired:
                 print("[llm] query timed out; retrying once", flush=True)
                 continue
@@ -432,6 +530,12 @@ class PlaybookAgent:
         self._i = 0
         self._order: list[dict] | None = None
         self._used: dict[str, str] = {}
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
 
     def propose(self, obs: Observation) -> Candidate | None:
         if self._order is None:

@@ -27,6 +27,21 @@ def run_loop(
     visible live: when it is proposing, what it proposed (label / command /
     file-edits / rationale), and the gate's verdict.
     """
+    # Lifecycle: let the agent set up persistent resources (e.g. an LLM session
+    # that outlives turns) before the loop and tear them down after. Whether an
+    # agent is created per turn or persists is the agent's own concern.
+    start = getattr(agent, "start", None)
+    if callable(start):
+        start()
+    try:
+        return _drive(harness, agent, max_iters, report_every)
+    finally:
+        stop = getattr(agent, "stop", None)
+        if callable(stop):
+            stop()
+
+
+def _drive(harness: Harness, agent: Agent, max_iters: int, report_every: int) -> dict:
     submitted = 0
     promotions = 0
     for n in range(1, max_iters + 1):
