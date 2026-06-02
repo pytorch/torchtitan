@@ -424,10 +424,18 @@ def apply_cpu_offload_pass(
                 last_consumer = c
                 last_consumer_pos = c_pos
 
+        # ao::wait_tensor's last_use_of_storage arg expects Optional[Tensor].
+        # If last_consumer produces a non-Tensor value (e.g. sort returns a
+        # tuple), fall back to None to avoid a runtime type error.
+        last_use_arg = last_consumer
+        last_use_val = last_consumer.meta.get("val")
+        if not isinstance(last_use_val, torch.Tensor):
+            last_use_arg = None
+
         with gm.graph.inserting_after(offload_node):
             wait_offload_node = gm.graph.call_function(
                 torch.ops.ao.wait_tensor.default,
-                args=(offload_node, node, last_consumer),
+                args=(offload_node, node, last_use_arg),
             )
             wait_offload_node.meta.update(src_meta)
             wait_offload_node.meta["val"] = offload_node.meta["val"]
