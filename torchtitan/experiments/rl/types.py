@@ -14,18 +14,18 @@ class Completion:
     """A single generated sequence from the generator."""
 
     policy_version: int
-    prompt_idx: int
+    request_idx: int
     token_ids: list[int]
     token_logprobs: list[float]
     finish_reason: str | None = None
     """vLLM `CompletionOutput.finish_reason` ("stop" | "length" | "abort")"""
 
 
-# TODO: rename `Episode` -> `TrainSample` and `rollout_to_episode` ->
-# `rollout_to_train_sample`, so the meaning is more explicit.
+# TODO: rename `Episode` -> `TrainingSample`
+# and `rollout_to_episode` -> `rollout_to_training_sample`
 @dataclass(kw_only=True, slots=True)
 class Episode:
-    """Training sampleL flattened Rollout turns + GRPO advantage,
+    """Training sample: flattened Rollout turns + GRPO advantage,
     ready for collation into a batch."""
 
     policy_version: int

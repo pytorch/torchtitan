@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import abc
 import asyncio
-import functools
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from torchtitan.config import Configurable
@@ -17,111 +15,118 @@ from torchtitan.experiments.rl.rollouts.types import Rollout
 from torchtitan.observability import structured_logger as sl
 
 
-@dataclass(frozen=True, kw_only=True, slots=True)
-class RewardFn:
-    """One reward function + its weight in the rubric's weighted sum."""
+class RewardFn(Configurable, abc.ABC):
+    """A single reward function, as a Configurable callable.
 
-    fn: Callable[[Rollout, object], Awaitable[float]]
-    """Async reward callable with shape `async (rollout, env_input) -> float`."""
-
-    weight: float = 1.0
-    """Relative weight; the rubric normalizes weights to sum to 1.0."""
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class Reward:
-    """One rollout's reward + per-reward-fn output breakdown.
+    Subclass and implement `__call__`. Its `Config` carries the `weight` used in
+    the rubric's weighted sum, plus any args a stateful reward fn needs (a reward
+    model path, an LLM-judge endpoint, a threshold, ...).
 
     Example:
-        >>> Reward(reward=0.5, components={"reward_fn1": 0.2, "reward_fn2": 0.3})
-    """
+        class RewardCorrect(RewardFn):
+            @dataclass(kw_only=True, slots=True)
+            class Config(RewardFn.Config):
+                pass  # only needs `weight`
 
-    reward: float
-    """Final weighted reward for this rollout."""
-
-    components: dict[str, float] = field(default_factory=dict)
-    """Per-reward-fn raw output, keyed by `fn.__name__`."""
-
-
-class Rubric(Configurable, abc.ABC):
-    """Holds and calls reward functions.
-
-    Subclass and implement `register_funcs` returning a list of `RewardFn`;
-    weights are normalized to sum to 1.0 across the list.
-
-    Setting truncation_reward and error_reward will short-circuit the reward fns.
-
-    Example:
-        class MyRubric(Rubric):
-            def register_funcs(self) -> list[RewardFn]:
-                return [
-                    RewardFn(fn=my_reward_fn1, weight=0.5),
-                    RewardFn(fn=my_reward_fn2, weight=0.5),
-                ]
-
-        rubric = MyRubric(config=MyRubric.Config(truncation_reward=0.0))
-        rewards = await rubric.score_group(my_rollouts, env_input)
-        for reward, rollout in zip(rewards, my_rollouts):
-            my_rollout.reward = reward.reward
-            my_rollout.reward_components = reward.components
+            async def __call__(self, rollout, env_input) -> float:
+                ...
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
+        weight: float = 1.0
+        """Relative weight in the rubric's weighted sum (normalized across fns)."""
 
-        truncation_reward: float | None = None
-        """Skip reward fns on truncated rollouts and returns this value instead.
-        If `None`, reward fns run normally."""
-
-        error_reward: float | None = None
-        """Skip reward fns on errored rollouts and returns this value instead.
-        If `None`, reward fns run normally."""
-
-    def __init__(self, config: Config | None = None) -> None:
-        self._config = config or Rubric.Config()
+    def __init__(self, config: Config) -> None:
+        self.weight = config.weight
 
     @abc.abstractmethod
-    def register_funcs(self) -> list[RewardFn]:
-        """Return this rubric's reward fns + weights (see class Example)."""
+    async def __call__(self, rollout: Rollout, env_input: object) -> float:
+        """Return this fn's score for one rollout.
 
-    @functools.cached_property
-    def _rwd_fns(self) -> list[RewardFn]:
-        """Registered reward fns with weights normalized to sum to 1.0."""
-        registered = self.register_funcs()
+        Args:
+            rollout: Rollout to score.
+            env_input: Dataset payload used to build the env (target/metadata).
+        """
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class Reward:
+    """One rollout's reward + per-reward-fn breakdown.
+
+    Example:
+        >>> Reward(reward=0.5, reward_breakdown={"RewardCorrect": 1.0, "RewardFormat": 0.0})
+    """
+
+    reward: float
+    """Final weighted reward for this rollout; the only field the loss uses."""
+
+    reward_breakdown: dict[str, float] = field(default_factory=dict)
+    """Raw per-reward-fn outputs (unweighted), keyed by reward-fn class name,
+    used to compute the scalar `reward`."""
+
+
+class Rubric(Configurable):
+    """Holds reward functions and scores rollouts with their weighted sum.
+
+    Reward fns and their weights live in config (`reward_fns`), so a rubric is
+    just configured for common cases— no subclass needed. Subclass and override `score_group`
+    for cross-sibling scoring (pairwise comparison, diversity, rank normalization).
+
+    Setting `truncation_reward` / `error_reward` short-circuits the reward fns for
+    rollouts whose status is truncated / errored.
+
+    Example:
+        rubric = Rubric.Config(
+            reward_fns=[RewardCorrect.Config(weight=1.0), RewardFormat.Config(weight=0.3)],
+            truncation_reward=0.0,
+        ).build()
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        reward_fns: list[RewardFn.Config] = field(default_factory=list)
+        """The rubric's reward fns + weights; built and weight-normalized at init."""
+
+        truncation_reward: float | None = None
+        """Reward to assign a truncated rollout. If provided, reward fns are skipped.
+        If `None`, reward fns run for partial credit."""
+
+        error_reward: float | None = None
+        """Reward to assign an errored rollout. If provided, reward fns are skipped.
+        If `None`, reward fns run for partial credit."""
+
+    def __init__(self, config: Config) -> None:
+        self._config = config
+        self._reward_fns = [rwd_cfg.build() for rwd_cfg in config.reward_fns]
 
         # Sanity checks
-        if not registered:
-            raise ValueError("register_funcs returned no reward fns")
-
-        names = [_fn_name(rwd_fn.fn) for rwd_fn in registered]
+        if not self._reward_fns:
+            raise ValueError("Rubric.Config.reward_fns must not be empty")
+        names = [type(fn).__name__ for fn in self._reward_fns]
         if len(names) != len(set(names)):
             raise ValueError(f"reward fn names must be unique; got {names}")
-
-        total_weight = sum(rwd_fn.weight for rwd_fn in registered)
-        if total_weight <= 0:
+        self._weight_sum = sum(fn.weight for fn in self._reward_fns)
+        if self._weight_sum <= 0:
             raise ValueError(
-                f"rubric weights must sum to a positive value; got {total_weight}"
+                f"rubric weights must sum to a positive value; got {self._weight_sum}"
             )
 
-        # Normalize weights
-        return [
-            RewardFn(fn=rwd_fn.fn, weight=rwd_fn.weight / total_weight)
-            for rwd_fn in registered
-        ]
-
-    @sl.log_trace_span("score_one")
-    async def _score_one(self, rollout: Rollout, env_input: object) -> Reward:
+    @sl.log_trace_span("score_single_rollout")
+    async def _score_single_rollout(
+        self, rollout: Rollout, env_input: object
+    ) -> Reward:
         """Score one rollout. Short-circuits to `truncation_reward` /
         `error_reward` when those are set and the rollout truncated / errored.
 
         Args:
             rollout: Rollout to score.
-            env_input: Dataset payload used to build the env (contains target/metadata).
+            env_input: Dataset payload used to build the env (target/metadata).
 
         Returns:
-            Final weighted reward + per-fn raw components.
+            Final weighted reward + per-fn raw breakdown.
         """
-        # Short-circuit on truncate / error
+        # Short-circuit on truncate / error and return the configured reward.
         cfg = self._config
         if cfg.truncation_reward is not None and rollout.status.is_truncated():
             return Reward(
@@ -134,19 +139,18 @@ class Rubric(Configurable, abc.ABC):
                 components={"errored": cfg.error_reward},
             )
 
-        # Run all reward fns and weight-sum
+        # Run all reward fns and weight-sum (weights normalized to sum to 1.0).
         per_fn_rewards = await asyncio.gather(
-            *(rwd_fn.fn(rollout, env_input) for rwd_fn in self._rwd_fns)
+            *(fn(rollout, env_input) for fn in self._reward_fns)
         )
 
-        components = {}
+        reward_breakdown = {}
         total_reward = 0.0
-        for rwd_fn, r in zip(self._rwd_fns, per_fn_rewards, strict=True):
-            fn_name = _fn_name(rwd_fn.fn)
-            components[fn_name] = r
-            total_reward += rwd_fn.weight * r
+        for fn, r in zip(self._reward_fns, per_fn_rewards, strict=True):
+            reward_breakdown[type(fn).__name__] = r
+            total_reward += (fn.weight / self._weight_sum) * r
 
-        return Reward(reward=total_reward, components=components)
+        return Reward(reward=total_reward, reward_breakdown=reward_breakdown)
 
     @sl.log_trace_span("score_group")
     async def score_group(
@@ -162,14 +166,10 @@ class Rubric(Configurable, abc.ABC):
         Args:
             rollouts: Sibling rollouts sampled from one prompt group.
             env_input: Dataset payload originally used to construct the rollout env.
-                It can contain valuable info for the reward, such as the target or metadata.
 
         Returns:
             One `Reward` per rollout, in input order.
         """
-        return await asyncio.gather(*(self._score_one(r, env_input) for r in rollouts))
-
-
-def _fn_name(fn: Callable) -> str:
-    """Plain fns have `__name__`; callable instances use the class name."""
-    return getattr(fn, "__name__", None) or type(fn).__name__
+        return await asyncio.gather(
+            *(self._score_single_rollout(r, env_input) for r in rollouts)
+        )

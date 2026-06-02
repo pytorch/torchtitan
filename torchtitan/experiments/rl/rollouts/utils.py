@@ -22,8 +22,12 @@ def last_assistant_text(rollout: Rollout) -> str:
 
 
 def rollout_to_episode(rollout: Rollout) -> Episode:
-    """Flatten a single-turn `Rollout` into the batcher's `Episode`."""
+    """Flatten a scored single-turn `Rollout` into an `Episode`, a class
+    that holds only the information needed for training.
+    """
     # TODO: support multi-turn rollout flattening.
+    # TODO: rename Episode -> TrainingSample / rollout_to_episode ->
+    #       rollout_to_training_sample (consistent with TrainingBatch).
     if len(rollout.turns) != 1:
         raise ValueError(
             f"rollout_to_episode expects exactly one turn; got {len(rollout.turns)}."
@@ -34,8 +38,8 @@ def rollout_to_episode(rollout: Rollout) -> Episode:
         prompt_idx=rollout.sample_idx,
         prompt_token_ids=turn.prompt_token_ids,
         text=last_assistant_text(rollout),
-        token_ids=turn.response_token_ids,
-        token_logprobs=turn.response_logprobs,
+        token_ids=turn.assistant_token_ids,
+        token_logprobs=turn.assistant_logprobs,
         reward=rollout.reward,
         advantage=rollout.advantage if rollout.advantage is not None else 0.0,
     )
@@ -50,10 +54,10 @@ def prepare_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
     """
     # Lengths, truncation, reward
     # TODO: adapt for multi-turn rollouts
-    response_lens = [len(t.response_token_ids) for r in rollouts for t in r.turns]
+    response_lens = [len(t.assistant_token_ids) for r in rollouts for t in r.turns]
     prompt_lens = [len(r.turns[0].prompt_token_ids) for r in rollouts if r.turns]
     total_lens = [
-        len(r.turns[-1].prompt_token_ids) + len(r.turns[-1].response_token_ids)
+        len(r.turns[-1].prompt_token_ids) + len(r.turns[-1].assistant_token_ids)
         for r in rollouts
         if r.turns
     ]
@@ -75,7 +79,7 @@ def prepare_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
     # Per-component reward breakdown
     values_by_name: dict[str, list[float]] = defaultdict(list)
     for rollout in rollouts:
-        for name, value in rollout.reward_components.items():
+        for name, value in rollout.reward_breakdown.items():
             values_by_name[name].append(float(value))
     out.extend(
         m.Metric(f"{prefix}_reward/component/{name}", m.Mean.from_list(values))

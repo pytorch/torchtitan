@@ -414,7 +414,7 @@ class VLLMGenerator(Actor, Configurable):
                 top_p=_sampling_config.top_p,
                 max_tokens=_sampling_config.max_tokens,
                 n=_sampling_config.n,
-                stop_token_ids=list(_sampling_config.stop_token_ids) or None,
+                stop_token_ids=_sampling_config.stop_token_ids or None,
                 seed=self.config.debug.seed,
                 logprobs=1,
                 output_kind=RequestOutputKind.FINAL_ONLY,
@@ -440,14 +440,14 @@ class VLLMGenerator(Actor, Configurable):
                     all_outputs.extend(self._engine.step())
 
             # vLLM may return requests out of order; sort by the integer
-            # request_id we assigned so prompt_idx lines up with the input.
+            # request_id we assigned so request_idx lines up with the input.
             all_outputs.sort(key=lambda o: int(o.request_id))
 
             completions: list[Completion] = []
             generation_metrics: list[m.Metric] = []
             output_token_counts: list[int] = []
             for output in all_outputs:
-                prompt_idx = int(output.request_id)
+                request_idx = int(output.request_id)
                 generation_metrics.extend(
                     _prepare_generation_request_metrics(output, prefix=metrics_prefix)
                 )
@@ -460,7 +460,7 @@ class VLLMGenerator(Actor, Configurable):
                     completions.append(
                         Completion(
                             policy_version=self.policy_version,
-                            prompt_idx=prompt_idx,
+                            request_idx=request_idx,
                             token_ids=sample.token_ids,
                             token_logprobs=per_token_logprobs,
                             finish_reason=sample.finish_reason,

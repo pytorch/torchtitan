@@ -12,7 +12,7 @@ from enum import StrEnum
 from renderers import Message
 
 
-_TRUNCATED = frozenset({"truncated_length", "truncated_prompt_overflow"})
+_TRUNCATED = frozenset({"truncated_length", "truncated_prompt_too_long"})
 _ERROR = frozenset({"error_parse", "error_timeout", "error_abort", "error"})
 
 
@@ -22,7 +22,7 @@ class RolloutStatus(StrEnum):
     ONGOING = "ongoing"
     COMPLETED = "completed"
     TRUNCATED_LENGTH = "truncated_length"
-    TRUNCATED_PROMPT_OVERFLOW = "truncated_prompt_overflow"
+    TRUNCATED_PROMPT_TOO_LONG = "truncated_prompt_too_long"
     ERROR_PARSE = "error_parse"
     ERROR_TIMEOUT = "error_timeout"
     ERROR_ABORT = "error_abort"
@@ -47,13 +47,13 @@ class RolloutTurn:
 
     # Fields needed for training
     prompt_token_ids: list[int]  # [L_prompt]
-    """Tokens the generator saw as prompt for this turn."""
+    """Tokenized conversation up to this turn, used to generate the assistant response."""
 
-    response_token_ids: list[int]  # [L_response]
-    """Tokens the generator produced (response only)."""
+    assistant_token_ids: list[int]  # [L_response]
+    """Tokens the assistant produced this turn."""
 
-    response_logprobs: list[float]  # [L_response]
-    """Per-token logprobs from the generator policy."""
+    assistant_logprobs: list[float]  # [L_response]
+    """Per-token logprobs from the generator policy for the assistant tokens."""
 
     # Filtering / debugging
     policy_version: int
@@ -61,17 +61,17 @@ class RolloutTurn:
 
     # Logging
     prompt_messages: list[Message] = field(default_factory=list)  # [M_prompt]
-    """Messages rendered into `prompt_token_ids`."""
+    """Full conversation up to this turn, used to generate the assistant response."""
 
     assistant_message: Message | None = None
-    """The model's parsed turn (generator output as a message)."""
+    """The assistant's message (generator output, parsed)."""
 
     env_messages: list[Message] = field(default_factory=list)  # [M_env]
     """The env's reply messages this turn (tool / user)."""
 
     # For rubrics
-    reward_components: dict[str, float] = field(default_factory=dict)
-    """Optional per-turn reward components attached by the env. User by rubrics."""
+    env_rewards: dict[str, float] = field(default_factory=dict)
+    """Optional per-turn reward signals the env attached; the rubric decides how to use them."""
 
 
 @dataclass(kw_only=True, slots=True)
@@ -96,8 +96,8 @@ class Rollout:
     reward: float | None = None
     """Final weighted reward, filled by the rubric."""
 
-    reward_components: dict[str, float] = field(default_factory=dict)
-    """Decomposed rewards, filled by the rubric."""
+    reward_breakdown: dict[str, float] = field(default_factory=dict)
+    """Raw per-reward-function values, filled by the rubric."""
 
     # TODO: make it per token
     advantage: float | None = None
@@ -110,19 +110,7 @@ class RolloutGroup:
     """Prompt-group ID; siblings share it for advantage centering."""
 
     env_input: object
-    """`DatasetOutput.env_input` shared by the group; passed to the rubric."""
+    """The env input (dataset payload) shared by the group; passed to the rubric."""
 
     rollouts: list[Rollout]  # [group_size]
     """Sibling rollouts sampled from the group's shared prompt."""
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class DatasetOutput:
-    """One row from a dataset, ready for env construction."""
-
-    task_name: str
-    """Routes the row to a `Task` in `RLTrainer.tasks`."""
-
-    env_input: object
-    """Task-specific payload consumed by `Task.make_envs`. Each task defines
-    its own typed payload."""

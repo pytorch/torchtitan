@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from renderers import Message, Renderer, ToolSpec
 
-from torchtitan.experiments.rl.env_types.message_env import MessageEnv
+from torchtitan.experiments.rl.env_types.message_env import (
+    MessageEnv,
+    MessageStepOutput,
+)
 from torchtitan.experiments.rl.rollouts.types import RolloutStatus
 
 if TYPE_CHECKING:
@@ -22,86 +25,96 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# TODO: revisit the `RendererEnvConfig` name once tool/browser envs share these limits.
 @dataclass(kw_only=True, slots=True)
-class RendererEnvConfig:
-    """Limits enforced by `RendererEnv` (prompt cap + step timeout)."""
+class TurnMessages:
+    """Container for all message data collected during one rollut turn."""
 
-    max_rollout_tokens: int | None = None
-    """Hard cap on prompt length (tokens). If the next prompt meets/exceeds
-    it, the turn is terminal; `None` disables the check."""
+    prompt_messages: list[Message]  # [M_prompt]
+    """Full conversation rendered into the prompt (the assistant's input this turn)."""
 
-    step_timeout_s: float | None = 1800.0
-    """Wall-clock timeout for one `MessageEnv.step_message` call."""
+    assistant_message: Message | None = None
+    """The received assistant's message (generator output, parsed), if any. `None` on reset and on
+    parse/overflow failures."""
+
+    env_step: MessageStepOutput | None = None
+    """The env's reply this turn. `None` on reset, truncation, abort, and timeout (the env was not stepped)."""
 
 
 @dataclass(kw_only=True, slots=True)
 class TokenizedStepOutput:
-    """One turn boundary in token space.
-
-    Returned by both `RendererEnv.initial_prompt` and `RendererEnv.step_completion`.
-    """
+    """Output of `RendererWrapperEnv.reset` and `.step`. Holds the next
+    prompt token ids, if turn is not terminal, and all messages collected so far."""
 
     next_prompt_token_ids: list[int] | None  # [L_prompt] or None
-    """Prompt for the NEXT generator call; `None` on a terminal turn."""
-
-    next_prompt_messages: list[Message]  # [M_prompt]
-    """Full conversation at the next-prompt point."""
+    """Input tokens for the NEXT generator cal; `None` on a terminal turn."""
 
     status: RolloutStatus
     """`ONGOING` while the rollout runs; a terminal `RolloutStatus` otherwise."""
 
-    assistant_message: Message | None = None
-    """The model's parsed turn (generator output as a message). `None` on the
-    initial prompt and on parse/overflow failures."""
-
-    env_messages: list[Message] = field(default_factory=list)  # [M_env]
-    """The env's reply messages this turn (tool / user). Empty on the initial
-    prompt and on truncation/abort/timeout."""
-
-    env_reward_components: dict[str, float] = field(default_factory=dict)
-    """Optional per-step reward components the env attached, forwarded to
-    `RolloutTurn.reward_components` for the rubric."""
+    turn: TurnMessages
+    """Message-space view of this turn (full conversation + assistant message + env reply)."""
 
 
-class RendererEnv:
-    """Wraps a user `MessageEnv` and handles the messages <-> tokens plumbing.
+class RendererWrapperEnv:
+    """Token-space wrapper around a `MessageEnv`.
 
-    Owns the renderer, the length-stop / parse-error / timeout classification,
-    and the prompt-overflow check.
+    In a rollout, the input to a generator is a tokenized prompt, but the input to MessageEnv.step an
+    its output is a message. A step that translates message <-> token is necessary.
+    This wrapper fills this role, using a renderer to convert between the two and facilitating
+    the communication between the generator and the MessageEnv.
+
+    In this process, several checks are necessary, e.g. prompt is too long,
+    total number of tokens is too long, number of turns exceeded the limit, etc. This wrapper
+    also takes care of that, so we can keep the rollout loop clean and simple.
+
+    If users have extra or different logic, they can wrap their MessageEnv with another class instead.
 
     Args:
-        message_env: The user's `MessageEnv` subclass instance.
-        renderer: Renderer from `RendererConfig.build`.
-        config: `RendererEnvConfig` (prompt cap, step timeout).
+        message_env: the user's `MessageEnv` subclass instance.
+        renderer: a `renderers.Renderer` that converts messages <-> token ids.
+        config: `RendererWrapperEnv.Config`.
 
     Example:
 
-        env = RendererEnv(message_env=SumDigitsEnv(...), renderer=renderer)
-        step = await env.initial_prompt()
+        env = RendererWrapperEnv(message_env=SumDigitsEnv(...), renderer=renderer)
+        step = await env.reset()
         while not step.status.is_terminal():
-            completion = (await generator.generate([step.next_prompt_token_ids]))[0]
-            step = await env.step_completion(completion)
+            completion = await generator.generate([step.next_prompt_token_ids])
+            step = await env.step(completion)
     """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config:
+        """Limits enforced by the wrapper"""
+
+        max_rollout_tokens: int | None = None
+        """Hard cap on prompt length for the next turn. If the number of tokens meets/exceeds
+        it, the turn is terminal; `None` disables the check."""
+
+        # TODO: its unclear if timeout should be on this layer or handled by the messageEnv
+        step_timeout_s: float | None = 1800.0
+        """Wall-clock timeout for one `MessageEnv.step` call."""
+
+        # TODO: add max_num_turns
 
     def __init__(
         self,
         *,
         message_env: MessageEnv,
         renderer: Renderer,
-        config: RendererEnvConfig | None = None,
+        config: "RendererWrapperEnv.Config | None" = None,
     ) -> None:
         self._message_env = message_env
         self._renderer = renderer
-        self._config = config or RendererEnvConfig()
+        self._config = config or RendererWrapperEnv.Config()
         self._tools: list[ToolSpec] | None = None
         self._messages: list[Message] = []
         self._last_prompt_ids: list[int] = []
 
-    async def initial_prompt(self) -> TokenizedStepOutput:
+    async def reset(self) -> TokenizedStepOutput:
         """Render the initial conversation into the first generator prompt."""
         env_reset = await self._message_env.reset()
-        self._messages = env_reset.messages
+        self._messages = list(env_reset.prompt_messages)
 
         # Render messages into tokens
         self._tools = list(env_reset.tools) if env_reset.tools else None
@@ -115,18 +128,18 @@ class RendererEnv:
         # Terminal if the prompt is already over budget
         if self._is_prompt_overflow(prompt_len=len(token_ids)):
             return _terminal(
-                next_prompt_messages=list(self._messages),
-                status=RolloutStatus.TRUNCATED_PROMPT_OVERFLOW,
+                prompt_messages=self._messages,
+                status=RolloutStatus.TRUNCATED_PROMPT_TOO_LONG,
             )
 
         self._last_prompt_ids = list(token_ids)
         return TokenizedStepOutput(
             next_prompt_token_ids=list(token_ids),
-            next_prompt_messages=list(self._messages),
             status=RolloutStatus.ONGOING,
+            turn=TurnMessages(prompt_messages=list(self._messages)),
         )
 
-    async def step_completion(self, completion: Completion) -> TokenizedStepOutput:
+    async def step(self, completion: "Completion") -> TokenizedStepOutput:
         """Advance the env by one sampled completion from the generator.
 
         Args:
@@ -149,7 +162,7 @@ class RendererEnv:
                 len(completion.token_ids),
             )
             return _terminal(
-                next_prompt_messages=list(self._messages),
+                prompt_messages=self._messages,
                 status=RolloutStatus.ERROR_PARSE,
             )
 
@@ -164,13 +177,13 @@ class RendererEnv:
         # TODO: check if we should step the env on an incomplete message
         if completion.finish_reason == "length":
             return _terminal(
-                next_prompt_messages=list(self._messages),
+                prompt_messages=self._messages,
                 status=RolloutStatus.TRUNCATED_LENGTH,
                 assistant_message=assistant,
             )
         if completion.finish_reason == "abort":
             return _terminal(
-                next_prompt_messages=list(self._messages),
+                prompt_messages=self._messages,
                 status=RolloutStatus.ERROR_ABORT,
                 assistant_message=assistant,
             )
@@ -179,39 +192,38 @@ class RendererEnv:
         timeout = self._config.step_timeout_s
         try:
             if timeout is None:
-                env_step = await self._message_env.step_message(assistant)
+                env_step = await self._message_env.step(assistant)
             else:
                 env_step = await asyncio.wait_for(
-                    self._message_env.step_message(assistant), timeout=timeout
+                    self._message_env.step(assistant), timeout=timeout
                 )
         except TimeoutError:
-            logger.warning(
-                "step_message timed out after %ss; -> ERROR_TIMEOUT", timeout
-            )
+            logger.warning("step timed out after %ss; -> ERROR_TIMEOUT", timeout)
             return _terminal(
-                next_prompt_messages=list(self._messages),
+                prompt_messages=self._messages,
                 status=RolloutStatus.ERROR_TIMEOUT,
                 assistant_message=assistant,
             )
 
         self._messages.append(assistant)
-        self._messages.extend(env_step.messages)
+        self._messages.extend(env_step.env_messages)
 
         if env_step.done:
             return _terminal(
-                next_prompt_messages=list(self._messages),
+                prompt_messages=self._messages,
                 status=RolloutStatus.COMPLETED,
                 assistant_message=assistant,
-                env_messages=env_step.messages,
-                env_reward_components=env_step.reward_components,
+                env_step=env_step,
             )
 
-        # Prepare the next prompt; full re-render if the renderer can't bridge
+        # Prepare the next prompt; full re-render if the renderer can't bridge.
+        # `tools` is passed because tool schemas are part of the chat template, so
+        # the bridged tokens must match what a full re-render (also tools-aware) produces.
         bridged = await asyncio.to_thread(
             self._renderer.bridge_to_next_turn,
             previous_prompt_ids=self._last_prompt_ids,
             previous_completion_ids=list(completion.token_ids),
-            new_messages=env_step.messages,
+            new_messages=env_step.env_messages,
             tools=self._tools,
         )
         if bridged is None:
@@ -227,21 +239,21 @@ class RendererEnv:
         # Terminal if the next prompt is over budget
         if self._is_prompt_overflow(prompt_len=len(next_prompt_token_ids)):
             return _terminal(
-                next_prompt_messages=list(self._messages),
-                status=RolloutStatus.TRUNCATED_PROMPT_OVERFLOW,
+                prompt_messages=self._messages,
+                status=RolloutStatus.TRUNCATED_PROMPT_TOO_LONG,
                 assistant_message=assistant,
-                env_messages=env_step.messages,
-                env_reward_components=env_step.reward_components,
+                env_step=env_step,
             )
 
         self._last_prompt_ids = list(next_prompt_token_ids)
         return TokenizedStepOutput(
             next_prompt_token_ids=list(next_prompt_token_ids),
-            next_prompt_messages=list(self._messages),
             status=RolloutStatus.ONGOING,
-            assistant_message=assistant,
-            env_messages=env_step.messages,
-            env_reward_components=env_step.reward_components,
+            turn=TurnMessages(
+                prompt_messages=list(self._messages),
+                assistant_message=assistant,
+                env_step=env_step,
+            ),
         )
 
     async def close(self) -> None:
@@ -254,18 +266,18 @@ class RendererEnv:
 
 def _terminal(
     *,
-    next_prompt_messages: list[Message],
+    prompt_messages: list[Message],
     status: RolloutStatus,
     assistant_message: Message | None = None,
-    env_messages: list[Message] | None = None,
-    env_reward_components: dict[str, float] | None = None,
+    env_step: MessageStepOutput | None = None,
 ) -> TokenizedStepOutput:
     """Build a terminal `TokenizedStepOutput` with the given status."""
     return TokenizedStepOutput(
         next_prompt_token_ids=None,
-        next_prompt_messages=next_prompt_messages,
         status=status,
-        assistant_message=assistant_message,
-        env_messages=list(env_messages or []),
-        env_reward_components=dict(env_reward_components or {}),
+        turn=TurnMessages(
+            prompt_messages=list(prompt_messages),
+            assistant_message=assistant_message,
+            env_step=env_step,
+        ),
     )

@@ -9,19 +9,17 @@ from torchtitan.experiments.rl.tasks.sum_digits.data import (
     SumDigitsInput,
 )
 from torchtitan.experiments.rl.tasks.sum_digits.env import SumDigitsEnv
-from torchtitan.experiments.rl.tasks.sum_digits.grader import (
-    reward_correct,
-    reward_format,
-    SumDigitsRubric,
+from torchtitan.experiments.rl.tasks.sum_digits.rubric import (
+    RewardCorrect,
+    RewardFormat,
 )
 from torchtitan.experiments.rl.tasks.sum_digits.task import SumDigitsTask
 
 __all__ = [
+    "RewardCorrect",
+    "RewardFormat",
     "SumDigitsDataset",
     "SumDigitsEnv",
     "SumDigitsInput",
-    "SumDigitsRubric",
     "SumDigitsTask",
-    "reward_correct",
-    "reward_format",
 ]

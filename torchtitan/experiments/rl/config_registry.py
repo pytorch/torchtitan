@@ -40,9 +40,13 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         num_prompts_per_step=5,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        train_dataset=SumDigitsDataset.Config(seed=42),
-        validation_dataset=SumDigitsDataset.Config(seed=99),
-        tasks={"sum_digits": SumDigitsTask.Config()},
+        tasks={
+            "sum_digits": SumDigitsTask.Config(
+                train_dataset=SumDigitsDataset.Config(seed=42),
+                val_dataset=SumDigitsDataset.Config(seed=99),
+            )
+        },
+        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=True),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
@@ -78,7 +82,6 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
-                n=group_size,
                 temperature=0.8,
                 top_p=0.95,
                 max_tokens=700,
@@ -97,9 +100,13 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         num_prompts_per_step=5,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        train_dataset=SumDigitsDataset.Config(seed=42),
-        validation_dataset=SumDigitsDataset.Config(seed=99),
-        tasks={"sum_digits": SumDigitsTask.Config()},
+        tasks={
+            "sum_digits": SumDigitsTask.Config(
+                train_dataset=SumDigitsDataset.Config(seed=42),
+                val_dataset=SumDigitsDataset.Config(seed=99),
+            )
+        },
+        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=True),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
@@ -136,7 +143,6 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
-                n=group_size,
                 temperature=0.8,
                 top_p=0.95,
                 max_tokens=700,
@@ -155,9 +161,13 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
         num_prompts_per_step=5,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        train_dataset=SumDigitsDataset.Config(seed=42),
-        validation_dataset=SumDigitsDataset.Config(seed=99),
-        tasks={"sum_digits": SumDigitsTask.Config()},
+        tasks={
+            "sum_digits": SumDigitsTask.Config(
+                train_dataset=SumDigitsDataset.Config(seed=42),
+                val_dataset=SumDigitsDataset.Config(seed=99),
+            )
+        },
+        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=True),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
@@ -193,7 +203,6 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
-                n=group_size,
                 temperature=0.8,
                 top_p=0.95,
                 max_tokens=700,
@@ -216,9 +225,13 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
         num_prompts_per_step=5,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        train_dataset=SumDigitsDataset.Config(seed=42),
-        validation_dataset=SumDigitsDataset.Config(seed=99),
-        tasks={"sum_digits": SumDigitsTask.Config()},
+        tasks={
+            "sum_digits": SumDigitsTask.Config(
+                train_dataset=SumDigitsDataset.Config(seed=42),
+                val_dataset=SumDigitsDataset.Config(seed=99),
+            )
+        },
+        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=True),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
@@ -258,7 +271,6 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
-                n=group_size,
                 temperature=0.8,
                 top_p=0.95,
                 max_tokens=700,

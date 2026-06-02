@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.experiments.rl.rollouts.types import (
-    DatasetOutput,
     Rollout,
     RolloutGroup,
     RolloutStatus,
@@ -18,7 +17,6 @@ from torchtitan.experiments.rl.rollouts.utils import (
 )
 
 __all__ = [
-    "DatasetOutput",
     "Rollout",
     "RolloutGroup",
     "RolloutStatus",

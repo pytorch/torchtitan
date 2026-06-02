@@ -12,35 +12,54 @@ from dataclasses import dataclass
 from renderers import Renderer
 
 from torchtitan.config import Configurable
-from torchtitan.experiments.rl.env_types.renderer_env import RendererEnv
-from torchtitan.experiments.rl.rollouts.types import DatasetOutput, Rollout
+from torchtitan.experiments.rl.env_types import RendererWrapperEnv
+from torchtitan.experiments.rl.rollouts.types import Rollout
 from torchtitan.experiments.rl.rubrics import Reward, Rubric
 
 
-# TODO: investigate whether Task should also hold its own dataset
-# instead of dataset living on RLTrainer.
+# TODO(continuous-batching): when VLLMGenerator gains continuous batching,
+# move the rollout loop onto Task as `run_rollout(example, client) -> Rollout`,
+# so each rollout drives its own generate calls.
 class Task(Configurable, abc.ABC):
-    """Per-task bundle: a `Rubric` + env construction + group scoring. The
-    controller owns the dataset and the rollout loop; `score_group` defaults
-    to per-rollout `rubric.score_group` (override for cross-sibling scoring).
+    """Bundles everything needed to run and score one rollout: a dataset,
+    how to build its envs, and a `Rubric`.
+
+    The flow for one prompt group:
+
+        sample  = task.sample_train_example()                   # the env input from the task's dataset
+        envs    = task.make_envs(sample, group_size, renderer)  # MessageEnvs wrapped in RendererWrapperEnv
+        run_rollout_fn(sampler, envs)                           # the controller runs the rollout loop
+        rewards = task.score_group(rollouts, sample.env_input)  # the Rubric scores them
+
+    `MessageEnv` works in messages; `RendererWrapperEnv` (what `make_envs` returns)
+    adds the message <-> token plumbing. `score_group` defaults to per-rollout
+    `rubric.score_group`; override it for cross-sibling scoring.
 
     Example:
         class MyTask(Task):
             @dataclass(kw_only=True, slots=True)
             class Config(Task.Config):
-                rubric: MyRubric.Config = field(
-                    default_factory=MyRubric.Config
-                )
-                renderer_env_config: RendererEnvConfig = field(
-                    default_factory=RendererEnvConfig
+                train_dataset: MyDataset.Config = field(default_factory=MyDataset.Config)
+                val_dataset: MyDataset.Config = field(default_factory=MyDataset.Config)
+                rubric: MyRubric.Config = field(default_factory=MyRubric.Config)
+                env_config: RendererWrapperEnv.Config = field(
+                    default_factory=RendererWrapperEnv.Config
                 )
 
             def __init__(self, config: Config) -> None:
-                self.rubric = config.rubric.build()
-                self.renderer_env_config = config.renderer_env_config
+                super().__init__(config)  # builds self.rubric from config.rubric
+                self._train = config.train_dataset.build()
+                self._val = config.val_dataset.build()
+                self._env_config = config.env_config
+
+            def sample_train_example(self) -> MyInput:
+                return self._train.sample_example()
+
+            def sample_val_example(self) -> MyInput:
+                return self._val.sample_example()
 
             def make_envs(self, *, example, group_size, renderer):
-                return [RendererEnv(...) for _ in range(group_size)]
+                return [RendererWrapperEnv(...) for _ in range(group_size)]
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -48,7 +67,18 @@ class Task(Configurable, abc.ABC):
         rubric: Rubric.Config
 
     rubric: Rubric
-    """Built by each subclass's `__init__` from `config.rubric`; used by `score_group`."""
+    """Built from `config.rubric` by the base `__init__`; used by `score_group`."""
+
+    def __init__(self, config: Config) -> None:
+        self.rubric = config.rubric.build()
+
+    @abc.abstractmethod
+    def sample_train_example(self) -> object:
+        """Sample one training example (the env input) from this task's dataset."""
+
+    @abc.abstractmethod
+    def sample_val_example(self) -> object:
+        """Sample one validation example (the env input) from this task's dataset."""
 
     # TODO: revisit the Renderer being injected into `make_envs` once we
     # know whether Task should own a Renderer (per-task chat templates).
@@ -56,19 +86,19 @@ class Task(Configurable, abc.ABC):
     def make_envs(
         self,
         *,
-        example: DatasetOutput,
+        example: object,
         group_size: int,
         renderer: Renderer,
-    ) -> list[RendererEnv]:
+    ) -> list[RendererWrapperEnv]:
         """Construct `group_size` single-use envs from one dataset example.
 
         Args:
-            example: Dataset row sampled from the controller's dataset.
-            group_size: Number of sibling envs for this prompt group.
+            example: the env input from `sample_train_example` / `sample_val_example`.
+            group_size: number of sibling envs for this prompt group.
             renderer: Renderer shared by the rollout controller.
 
         Returns:
-            `group_size` `RendererEnv` instances, each ready for one rollout.
+            `group_size` `RendererWrapperEnv` instances, each ready for one rollout.
         """
 
     async def score_group(
@@ -90,9 +120,3 @@ class Task(Configurable, abc.ABC):
             One `Reward` per rollout, in input order.
         """
         return await self.rubric.score_group(rollouts, env_input)
-
-    # TODO(continuous-batching): when VLLMGenerator gains continuous batching,
-    # move the rollout loop onto Task as `do_single_rollout(example, client)
-    # -> Rollout`, so each rollout drives its own generate calls, instead of
-    # the controller's batched generate + `_do_single_rollout` fan-out in
-    # `RLTrainer._run_rollouts`.

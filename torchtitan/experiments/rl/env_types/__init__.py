@@ -6,20 +6,20 @@
 
 from torchtitan.experiments.rl.env_types.message_env import (
     MessageEnv,
-    ResetOutput,
-    StepOutput,
+    MessageResetOutput,
+    MessageStepOutput,
 )
 from torchtitan.experiments.rl.env_types.renderer_env import (
-    RendererEnv,
-    RendererEnvConfig,
+    RendererWrapperEnv,
     TokenizedStepOutput,
+    TurnMessages,
 )
 
 __all__ = [
-    "RendererEnvConfig",
     "MessageEnv",
-    "ResetOutput",
-    "StepOutput",
-    "RendererEnv",
+    "MessageResetOutput",
+    "MessageStepOutput",
+    "RendererWrapperEnv",
     "TokenizedStepOutput",
+    "TurnMessages",
 ]
