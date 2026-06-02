@@ -68,12 +68,11 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
             test_descr="aot_fx_trace llama3 precompile FSDP+TP",
             test_name="aot_fx_trace_llama3_precompile_fsdp_tp",
             ngpu=8,
-            # TODO: disabled due to upstream CUDA graph device-side assert
-            # regression in PyTorch nightly. Re-enable once fixed.
-            disabled=True,
         ),
-        # TODO: disabled due to upstream histc int64 regression breaking
-        # MoE model tracing. Re-enable once fixed upstream.
+        # TODO: disabled — precompile sharding propagation fails on aten.view
+        # with a data-dependent unbacked symint ("Could not extract specialized
+        # integer from u13") for DSv3 MoE. Separate from the empty_strided
+        # shadow-node fix; re-enable once the precompile symint issue is fixed.
         PrecompileTestDefinition(
             precompile_command=(
                 "python -m torchtitan.experiments.graph_trainer.precompile_main"
