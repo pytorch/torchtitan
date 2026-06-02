@@ -169,16 +169,40 @@ class LLMAgent:
     """
 
     def __init__(
-        self, *, repo_root: str = ".", ask=None, max_ledger: int = 30, log_path=None
+        self,
+        *,
+        repo_root: str = ".",
+        ask=None,
+        max_ledger: int = 30,
+        log_path=None,
+        profiler=None,
+        logs_dir: str = "",
     ):
         self.repo_root = repo_root
         self._ask = ask or _claude_ask
         self.max_ledger = max_ledger
         self.log_path = log_path  # full prompt+reply transcript, for deep inspection
+        self._profiler = profiler  # callable(command=None) -> trace path (harness API)
+        self.logs_dir = logs_dir  # dir of raw per-run .log files the agent may read
+        self._trace_path = None  # cached baseline profile trace (fetched once)
         self._proposed: set[tuple] = set()  # de-dupe (command, edited-paths)
         self._notes: list[str] = []
         self._plan = "LLM-driven search over faithful throughput knobs"
         self._n = 0
+
+    def _ensure_profile(self) -> None:
+        """Ask the harness for a baseline profiler trace once (the agent's call)."""
+        if self._profiler is None or self._trace_path is not None:
+            return
+        print("[llm] requesting a profiler trace of the baseline...", flush=True)
+        try:
+            self._trace_path = self._profiler() or ""
+        except Exception as e:  # profiling is best-effort; proceed without it
+            print(f"[llm] profile request failed ({e})", flush=True)
+            self._trace_path = ""
+        print(
+            f"[llm] profiler trace: {self._trace_path or '(unavailable)'}", flush=True
+        )
 
     def _transcript(self, prompt: str, reply: str) -> None:
         if not self.log_path:
@@ -240,12 +264,16 @@ class LLMAgent:
             "math-preserving throughput knobs: activation checkpointing, "
             "torch.compile, FSDP reshard policy, tensor-parallel degree, attention "
             "backend, comm/memory layout.\n\n"
-            "BE PROFILER-GUIDED: optimize the MEASURED bottleneck in the PROFILE "
-            "below, not a guess. If the run is overhead/comm-bound (low MFU), "
-            "compute optimizations like compile/fusion will NOT help -- target FSDP "
-            "comm overlap and per-step overhead instead. Do not blind-sweep knobs "
-            "that are off the critical path.\n"
-            f"PROFILE: {obs.profile or '(not available)'}\n\n"
+            "BE PROFILER-GUIDED: optimize the MEASURED bottleneck, not a guess. A "
+            "profiler trace of the baseline is provided below -- READ and analyze "
+            "it yourself (it is a PyTorch chrome trace; aggregate GPU-kernel "
+            "durations by name and compare NCCL/comm time vs GEMM/compute time) to "
+            "decide what the run is bound by, then target THAT. Do not blind-sweep "
+            "knobs that are off the critical path.\n"
+            f"PROFILER TRACE (chrome json -- read it): {self._trace_path or '(none)'}\n"
+            f"RAW RUN LOGS dir (one .log per past run; read to diagnose crashes or "
+            f"inspect step times -- the ledger only summarizes): "
+            f"{self.logs_dir or '(none)'}\n\n"
             f"OBJECTIVE: {json.dumps(rules.get('objective', {}))}\n"
             f"QUALITY POLICY: {json.dumps(rules.get('quality', {}))}\n"
             f"WORKLOAD (locked, do NOT change): {json.dumps(rules.get('workload', {}))}\n"
@@ -274,6 +302,7 @@ class LLMAgent:
 
     def propose(self, obs: Observation) -> Candidate | None:
         self._n += 1
+        self._ensure_profile()  # the agent asks the harness for a baseline trace
         prompt = self._prompt(obs)
         for _ in range(2):  # one retry on a parse failure or a repeat
             print("[llm] querying claude for the next candidate...", flush=True)

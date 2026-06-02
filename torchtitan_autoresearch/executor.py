@@ -36,10 +36,6 @@ class ThroughputResult:
     tps_mean: float = 0.0
     tps_cv: float = 0.0
     peak_mem_gb: float = 0.0
-    peak_mem_pct: float = 0.0
-    mfu: float = 0.0  # % of peak FLOPS -> compute-bound vs overhead/comm-bound
-    tflops: float = 0.0
-    gpu: str = ""
     crash_text: str = ""  # populated when ok is False
 
 
@@ -67,6 +63,9 @@ class Executor(Protocol):
         ...
 
     def run_verify(self, c: Candidate) -> VerifyResult:
+        ...
+
+    def profile(self, command: list[str] | None = None) -> str:
         ...
 
 
@@ -105,6 +104,9 @@ class FakeExecutor:
         return VerifyResult(
             faithful=bool(s.get("faithful", True)), detail=s.get("verify_detail", "")
         )
+
+    def profile(self, command: list[str] | None = None) -> str:
+        return ""  # no real trace on CPU
 
 
 # ---------------------------------------------------------------------------
@@ -219,10 +221,6 @@ class SubprocessExecutor:
             tps_mean=meas.tps_mean,
             tps_cv=meas.tps_cv,
             peak_mem_gb=meas.peak_memory_gb,
-            peak_mem_pct=meas.peak_memory_pct,
-            mfu=(meas.mfu_mean or 0.0),
-            tflops=meas.tflops_mean,
-            gpu=meas.gpu,
         )
 
     # --- faithfulness probe -------------------------------------------------
@@ -289,6 +287,34 @@ class SubprocessExecutor:
         return VerifyResult(
             faithful=(la.ok and ga.ok), detail=f"loss[{la.detail}] grad[{ga.detail}]"
         )
+
+    def profile(self, command: list[str] | None = None) -> str:
+        """Run a SHORT profiled run and return the chrome-trace file PATH.
+
+        The harness only runs the profile and hands back the file; the agent reads
+        and analyzes the trace however it wants (the harness does no parsing). The
+        run is short (fewer steps than a candidate eval): one trace is captured at
+        step 5 (profiler warmup 3 + active 1).
+        """
+        c = Candidate(label="profile", command=list(command or []))
+        self._run(
+            c,
+            "profile",
+            [
+                "--training.steps=6",
+                "--profiler.enable-profiling",
+                "--profiler.profile-freq",
+                "5",
+            ],
+        )
+        trace = os.path.join(
+            self._dump_folder(c, "profile"),
+            "profiling",
+            "traces",
+            "iteration_5",
+            "rank0_trace.json",
+        )
+        return trace if os.path.isfile(trace) else ""
 
 
 def classify_crash(text: str) -> cc.CrashVerdict:

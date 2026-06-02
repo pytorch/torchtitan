@@ -69,9 +69,6 @@ class Observation:
     golden: dict | None
     deferred_families: list[str]
     ideas: list[dict]
-    profile: str = (
-        ""  # golden roofline/bound summary -> aim the agent at the bottleneck
-    )
 
 
 @dataclass

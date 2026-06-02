@@ -51,9 +51,6 @@ class Harness:
         self.ideas = load_ideas(ideas_path)
         self.ledger = Ledger(ledger_path)
         self.state = HarnessState.load(statefile)
-        # Roofline/bound summary of the golden, set by the driver after calibration;
-        # surfaced to the agent so it optimizes the measured bottleneck, not a guess.
-        self.profile_summary = ""
 
     # --- Harness -> Agent ---
     def observe(self) -> Observation:
@@ -82,8 +79,13 @@ class Harness:
             golden=golden,
             deferred_families=list(self.state.family_deferred),
             ideas=[asdict(i) for i in self.ideas],
-            profile=self.profile_summary,
         )
+
+    def profile(self, command: list[str] | None = None) -> str:
+        """Agent-requested profile: run a SHORT profiled run, return the trace
+        file path. The harness does no analysis -- the agent reads/analyzes the
+        trace however it wants. ``command`` defaults to the golden baseline."""
+        return self.executor.profile(command)
 
     def get_traces(self, commit: str) -> dict:
         # Real executors persist traces per run; the fake has none.
