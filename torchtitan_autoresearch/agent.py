@@ -422,13 +422,21 @@ class _BaseLLMAgent:
             f"EDITABLE FILE CONTENTS (for file_edits):\n{sources}\n\n"
             "Reply with ONE JSON object and nothing else:\n"
             '{"label": "<short unique label>", '
-            '"family": "<ac|compile|fsdp|tp|attn|...>", '
+            '"family": "<ac|compile|fsdp|tp|attn|nccl|...>", '
             '"command": ["--flag=value", ...], '
             '"file_edits": {"path": "<full new file content>"}, '
+            '"env": {"NCCL_MIN_NCHANNELS": "16"}, '
             '"rationale": "<why it is faster AND faithful>", '
             '"done": false}\n'
-            "Use command for CLI/config knobs and/or file_edits to rewrite an "
-            "editable file (full content; editable files only). Propose something "
+            "Use command for CLI/config knobs, file_edits to rewrite an editable "
+            "file (full content; editable files only), and/or env to set process "
+            "environment variables. The harness sets env on the training process "
+            "BEFORE launch (before init_process_group), so runtime knobs that must "
+            "precede process-group creation -- NCCL_* (channels, buffer size, "
+            "algorithm, protocol), CUDA_* -- ARE reachable via env (setting them in "
+            "an editable file via os.environ is too late: the PG inits eagerly). You "
+            "may NOT set determinism/seed env or MODULE/CONFIG/NGPU/PYTHONPATH "
+            "(harness-controlled; such candidates are rejected). Propose something "
             "NOT already in the ledger. Set done=true only if no promising "
             "candidate remains."
         )
@@ -462,19 +470,25 @@ class _BaseLLMAgent:
             file_edits = {
                 str(k): str(v) for k, v in (data.get("file_edits") or {}).items()
             }
-            if not command and not file_edits:
-                print("[llm] proposal had no command/file_edits; retrying", flush=True)
+            env = {str(k): str(v) for k, v in (data.get("env") or {}).items()}
+            if not command and not file_edits and not env:
+                print(
+                    "[llm] proposal had no command/file_edits/env; retrying",
+                    flush=True,
+                )
                 continue
-            # De-dupe on command + file-edit CONTENT (not just paths): two distinct
-            # rewrites of the same file (e.g. parallelize.py) are different
-            # candidates and must not collide.
+            # De-dupe on command + file-edit CONTENT (not just paths) + env: two
+            # distinct rewrites of the same file (e.g. parallelize.py), or the same
+            # command with different env, are different candidates and must not
+            # collide.
             edits_sig = tuple(
                 sorted(
                     (p, hashlib.md5(c.encode()).hexdigest())
                     for p, c in file_edits.items()
                 )
             )
-            key = (tuple(command), edits_sig)
+            env_sig = tuple(sorted(env.items()))
+            key = (tuple(command), edits_sig, env_sig)
             if key in self._proposed:
                 print(
                     f"[llm] '{data.get('label')}' already tried; asking for a different one",
@@ -494,6 +508,7 @@ class _BaseLLMAgent:
                 family=family,
                 command=command,
                 file_edits=file_edits,
+                env=env,
                 rationale=rationale,
             )
         print("[llm] no valid candidate after retries; stopping", flush=True)
@@ -543,6 +558,17 @@ class PersistentLLMAgent(_BaseLLMAgent):
             f"### {p}\n```python\n{c}\n```"
             for p, c in self._editable_sources(obs).items()
         )
+        # Re-surface the human's advisory ideas every turn. They are small and are
+        # the curated lever surface; relying on native memory alone biases the agent
+        # toward premature 'done' once recent turns are dominated by rejections.
+        ideas = (
+            "\n".join(
+                f"- [{i.get('kind')}] {i.get('id')} (w={i.get('weight')}): "
+                f"{i.get('text', '')}"
+                for i in obs.ideas
+            )
+            or "(none)"
+        )
         parts = []
         if last:
             summ = (last.get("profile_summary") or "").strip()
@@ -556,15 +582,30 @@ class PersistentLLMAgent(_BaseLLMAgent):
         if obs.deferred_families:
             parts.append(f"DEFERRED FAMILIES (skip these): {obs.deferred_families}")
         parts.append(
+            f"ADVISORY IDEAS (re-surfaced; honor soft_constraint/na-*):\n{ideas}"
+        )
+        parts.append(
             "CURRENT EDITABLE FILE CONTENTS (may have changed if a file edit was "
             f"promoted):\n{sources}"
         )
+        # Demanding done-bar: a comm-bound run still has many untried faithful
+        # levers (NCCL channel count / buffer size / algorithm, not just protocol;
+        # AC mode, torch.compile, attention backend, comm/memory layout, bucketing).
+        # Do NOT declare the surface exhausted after probing one dimension.
         parts.append(
-            "You remember the objective, constraints, advisory ideas, baseline "
-            "profile, and everything you have already tried. Stay profiler-guided "
-            "and faithful, do NOT repeat a past candidate, and propose the NEXT one "
-            "as ONE JSON object (same schema: label, family, command, file_edits, "
-            "rationale, done)."
+            "You remember the objective, constraints, baseline profile, and "
+            "everything you have already tried. Stay profiler-guided and faithful, "
+            "and do NOT repeat a past candidate. Set done=true ONLY if you have "
+            "genuinely run out of distinct, promising, faithful levers -- not merely "
+            "because the last few were rejected. Before declaring done, confirm you "
+            "have considered the full surface: for a comm-bound run that means NCCL "
+            "channel count / buffer size / algorithm (not just the protocol), FSDP "
+            "bucketing/reshard, AC mode, torch.compile, attention backend, and "
+            "comm/memory layout. Reminder: NCCL_*/CUDA_* runtime knobs are reachable "
+            "via the 'env' field (the harness sets env BEFORE init_process_group); "
+            "setting them via os.environ in an editable file is too late. Propose "
+            "the NEXT candidate as ONE JSON object (same schema: label, family, "
+            "command, file_edits, env, rationale, done)."
         )
         return "\n\n".join(parts)
 

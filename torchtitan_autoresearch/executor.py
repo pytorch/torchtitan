@@ -65,7 +65,9 @@ class Executor(Protocol):
     def run_verify(self, c: Candidate) -> VerifyResult:
         ...
 
-    def profile(self, command: list[str] | None = None) -> str:
+    def profile(
+        self, command: list[str] | None = None, env: dict[str, str] | None = None
+    ) -> str:
         ...
 
 
@@ -105,7 +107,9 @@ class FakeExecutor:
             faithful=bool(s.get("faithful", True)), detail=s.get("verify_detail", "")
         )
 
-    def profile(self, command: list[str] | None = None) -> str:
+    def profile(
+        self, command: list[str] | None = None, env: dict[str, str] | None = None
+    ) -> str:
         return ""  # no real trace on CPU
 
 
@@ -166,12 +170,15 @@ class SubprocessExecutor:
         self._log_cache: dict[tuple[str, str], str] = {}
 
     def _key(self, c: Candidate) -> str:
-        # Key by commit AND command: command-only candidates share a commit, so
-        # keying on commit alone would make them all reuse the first run's cache.
+        # Key by commit AND command AND env: command/env-only candidates share a
+        # commit, so keying on commit alone would make them all reuse the first
+        # run's cache. env is part of the run config, so two candidates that differ
+        # only by env must not collide.
         import hashlib
 
+        env_sig = ";".join(f"{k}={c.env[k]}" for k in sorted(c.env))
         h = hashlib.md5(
-            ((c.commit or "") + "|" + " ".join(c.command)).encode()
+            ((c.commit or "") + "|" + " ".join(c.command) + "|" + env_sig).encode()
         ).hexdigest()[:8]
         label = (c.label or "cand").replace("/", "_").replace(" ", "_")[:24]
         return f"{label}_{h}"
@@ -195,8 +202,14 @@ class SubprocessExecutor:
         # Run inside repo_root (the experiment's worktree): cwd so relative paths
         # (tokenizer, dumps) resolve there, and PYTHONPATH so the worktree's
         # torchtitan (with this candidate's edits) is imported, not the primary.
+        # The candidate's env is layered in BEFORE the harness operational keys so
+        # those keys (and the worktree PYTHONPATH) always win -- the admissibility
+        # guard already rejects candidate env that touches them, this is defense in
+        # depth. Candidate env reaches the workers before init_process_group, which
+        # is why NCCL_*/CUDA_* runtime knobs are a real lever here.
         env = {
             **os.environ,
+            **(c.env or {}),
             "NGPU": str(self.ngpu),
             "MODULE": self.module,
             "CONFIG": self.config,
@@ -288,16 +301,18 @@ class SubprocessExecutor:
             faithful=(la.ok and ga.ok), detail=f"loss[{la.detail}] grad[{ga.detail}]"
         )
 
-    def profile(self, command: list[str] | None = None) -> str:
+    def profile(
+        self, command: list[str] | None = None, env: dict[str, str] | None = None
+    ) -> str:
         """Run a tiny single-step profile and return the chrome-trace file PATH.
 
         Captures ONE step (#3: warmup 2 + active 1) in a 4-step run -- much shorter
         than a candidate eval. The harness only runs it and hands back the file;
         the agent reads/analyzes the trace however it wants (the harness parses
-        nothing). ``command`` defaults to the golden baseline; the gate passes a
-        candidate's command to profile that candidate.
+        nothing). ``command``/``env`` default to the golden baseline; the gate
+        passes a candidate's command AND env so the profile reflects that candidate.
         """
-        c = Candidate(label="profile", command=list(command or []))
+        c = Candidate(label="profile", command=list(command or []), env=dict(env or {}))
         self._run(
             c,
             "profile",

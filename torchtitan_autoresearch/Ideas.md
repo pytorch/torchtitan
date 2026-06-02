@@ -61,9 +61,14 @@ knobs. **Optimize the measured bottleneck, not a guess.**
   kind: hint
   target: runtime
   weight: 0.5
-  text: Screen graph-invariant env/runtime flags as ONE factorial mini-sweep,
-    not one run each (NCCL CTA/NVLS knobs, dataloader workers + prefetch).
-    Re-confirm any keeper in isolation; most neighboring NCCL knobs are noise.
+  text: Screen graph-invariant env/runtime flags (NCCL channels/buffer size/
+    algorithm/protocol, CUDA_DEVICE_MAX_CONNECTIONS, dataloader workers). Set
+    these via the candidate `env` field -- the harness applies env BEFORE launch
+    (before init_process_group), so NCCL reads them; setting them with os.environ
+    inside an editable file is TOO LATE (the process group inits eagerly, so the
+    var never takes -- the profile will show the protocol/channels unchanged).
+    Re-confirm any keeper in isolation; many neighboring NCCL knobs are noise, so
+    lean on the speed gate's significance check.
 
 ## Guardrails — do not
 

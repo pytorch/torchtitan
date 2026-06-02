@@ -47,6 +47,7 @@ def _record(c: Candidate, v: Verdict) -> Record:
         label=c.label,
         addresses=c.addresses,
         rationale=c.rationale,
+        env=c.env,
         profile_trace=v.profile_trace,
         profile_summary=v.profile_summary,
     )
@@ -119,7 +120,7 @@ def gate(
     # trace file, then a one-off LLM call (profile_summarizer) aggregates that file
     # into a tiny comm-vs-compute summary. The agent reads the small summary (fast);
     # the raw trace path stays as a deep-dive fallback. Best-effort; "" on failure.
-    prof_trace = executor.profile(c.command)
+    prof_trace = executor.profile(c.command, c.env)
     if profile_summarizer is not None and prof_trace:
         prof_summary = profile_summarizer(prof_trace)
 

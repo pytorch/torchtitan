@@ -85,11 +85,13 @@ class Harness:
             ideas=[asdict(i) for i in self.ideas],
         )
 
-    def profile(self, command: list[str] | None = None) -> str:
+    def profile(
+        self, command: list[str] | None = None, env: dict[str, str] | None = None
+    ) -> str:
         """Agent-requested profile: run a SHORT profiled run; return a tiny
         LLM-aggregated summary of the trace (or the raw trace path if no summarizer
-        is configured). ``command`` defaults to the golden baseline."""
-        path = self.executor.profile(command)
+        is configured). ``command``/``env`` default to the golden baseline."""
+        path = self.executor.profile(command, env)
         if self.profile_summarizer is not None and path:
             return self.profile_summarizer(path) or path
         return path

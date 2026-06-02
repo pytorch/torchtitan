@@ -30,6 +30,7 @@ HEADER = [
     "label",
     "addresses",
     "rationale",
+    "env",
     "profile_trace",
     "profile_summary",
 ]
@@ -50,12 +51,14 @@ class Record:
     label: str = ""
     addresses: list[str] = field(default_factory=list)  # ideas ids acted on
     rationale: str = ""
+    env: dict[str, str] = field(default_factory=dict)  # candidate env overrides
     profile_trace: str = ""  # path to the candidate's single-step chrome trace
     profile_summary: str = ""  # LLM-aggregated tiny summary of that trace
 
     def to_row(self) -> list[str]:
         d = asdict(self)
         d["addresses"] = ",".join(self.addresses)
+        d["env"] = ";".join(f"{k}={self.env[k]}" for k in sorted(self.env))
         d["tps_mean"] = f"{int(self.tps_mean)}"
         d["tps_cv"] = f"{self.tps_cv:.3f}"
         d["quality_margin"] = f"{self.quality_margin:.4f}"

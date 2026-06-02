@@ -21,12 +21,19 @@ class Candidate:
 
     ``command`` is the CLI knob list for the launcher; ``changed_files`` is the
     set of repo files the commit touched (used to enforce editable scope).
-    ``addresses`` lists ids from ideas.md the candidate responds to.
+    ``env`` are environment variables the harness sets on the training subprocess
+    BEFORE launch (i.e. before ``init_process_group``), so runtime knobs that must
+    precede process-group creation -- NCCL_*, CUDA_* -- are reachable here, unlike
+    ``os.environ`` inside an editable file which runs too late. ``addresses`` lists
+    ids from ideas.md the candidate responds to.
     """
 
     label: str
     command: list[str] = field(default_factory=list)
     file_edits: dict[str, str] = field(default_factory=dict)  # path -> full new content
+    env: dict[str, str] = field(
+        default_factory=dict
+    )  # extra subprocess env (pre-launch)
     commit: str = (
         ""  # harness-assigned (the sha the harness creates); agent never sets it
     )

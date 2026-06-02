@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Admissibility: reject candidates that violate the constitution before any run.
 
 This is step 1 of the pipeline (ARCHITECTURE.md section 5.3) and the cheap
@@ -19,6 +25,32 @@ _WORKLOAD_CLI = {
     "dataset": ["--dataloader.dataset", "--dataloader"],
     "model_flavor": ["--config", "--module"],
 }
+
+# Environment variables a candidate may NOT set. The agent's ``env`` is otherwise
+# unrestricted (NCCL_*, CUDA_*, etc. are a real runtime lever the faithfulness gate
+# adjudicates like any other change). These keys are rejected because they would
+# game the harness rather than the workload: the operational keys define the run
+# itself (model/config/world size/import path), and the determinism keys govern the
+# verify run's reproducibility -- the one thing the faithfulness gate cannot defend
+# against if the candidate subverts it. Determinism is also matched by name pattern
+# so a candidate cannot smuggle it through an unlisted variable.
+_PROTECTED_ENV_KEYS = {
+    "NGPU",
+    "MODULE",
+    "CONFIG",
+    "PYTHONPATH",
+    "PYTHONHASHSEED",
+    "CUBLAS_WORKSPACE_CONFIG",
+    "CUDA_LAUNCH_BLOCKING",
+}
+_PROTECTED_ENV_PATTERNS = ("SEED", "DETERMINISTIC")
+
+
+def _protected_env_key(key: str) -> bool:
+    up = key.upper()
+    if up in _PROTECTED_ENV_KEYS:
+        return True
+    return any(pat in up for pat in _PROTECTED_ENV_PATTERNS)
 
 
 class WorkloadViolation(ValueError):
@@ -53,7 +85,10 @@ def admissible(c: Candidate, rules: Rules) -> tuple[bool, str]:
     for fieldname in rules.banned_workload_fields:
         prefixes = _WORKLOAD_CLI.get(fieldname, [f"--{fieldname}"])
         if _sets_field(c.command, prefixes):
-            return False, f"WorkloadViolation: candidate changes banned field '{fieldname}'"
+            return (
+                False,
+                f"WorkloadViolation: candidate changes banned field '{fieldname}'",
+            )
 
     # 2. Other fixed fields may not be overridden on the command line.
     for fieldname in rules.fixed_fields:
@@ -68,6 +103,16 @@ def admissible(c: Candidate, rules: Rules) -> tuple[bool, str]:
             if any(path.startswith(lp) for lp in rules.locked_paths):
                 return False, f"candidate edits locked path: {path}"
             return False, f"candidate edits a file outside editable scope: {path}"
+
+    # 4. Environment overrides must not subvert the harness itself: the verify
+    #    run's determinism/seed (which the faithfulness gate relies on) or the
+    #    operational keys that define the run. Everything else is allowed.
+    for key in c.env:
+        if _protected_env_key(key):
+            return False, (
+                f"candidate sets harness-controlled env '{key}' "
+                "(determinism/seed or run-defining key); not permitted"
+            )
 
     return True, ""
 
