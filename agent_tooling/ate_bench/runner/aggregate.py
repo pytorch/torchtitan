@@ -26,11 +26,24 @@ METRIC_KEYS = [
     ("per_turn_context", "Per-Turn Ctx"),
     ("output_tokens", "Output Tok"),
     ("session_duration_s", "Duration(s)"),
+    ("active_gpu_time_s", "GPU Time(s)"),
 ]
 
 
+def _is_correct(row: dict) -> bool | None:
+    """Pull a correctness verdict from operate (passed) or feature (correct) rows."""
+    c = row.get("correctness")
+    if not isinstance(c, dict):
+        return None
+    if "correct" in c:
+        return bool(c["correct"])
+    if "passed" in c:
+        return bool(c["passed"])
+    return None
+
+
 def load_task_medians(results_dir: Path) -> dict[str, dict]:
-    """Return {task_id: {metric: median_value, 'n': n_ok, 'n_err': n_err}}."""
+    """Return {task_id: {metric: median_value, 'n', 'n_err', 'n_correct'}}."""
     out: dict[str, dict] = {}
     for task_dir in sorted(p for p in results_dir.iterdir() if p.is_dir()):
         metric_files = sorted(task_dir.glob("run*.metrics.json"))
@@ -39,7 +52,14 @@ def load_task_medians(results_dir: Path) -> dict[str, dict]:
         rows = [json.loads(f.read_text()) for f in metric_files]
         ok = [r for r in rows if not r.get("is_error") and not r.get("error")]
         n_err = len(rows) - len(ok)
-        agg: dict = {"n": len(ok), "n_err": n_err}
+        verdicts = [_is_correct(r) for r in rows]
+        graded = [v for v in verdicts if v is not None]
+        agg: dict = {
+            "n": len(ok),
+            "n_err": n_err,
+            "n_correct": sum(1 for v in graded if v),
+            "n_graded": len(graded),
+        }
         for key, _ in METRIC_KEYS:
             vals = [r[key] for r in ok if r.get(key) is not None]
             agg[key] = median(vals) if vals else None
@@ -52,19 +72,20 @@ def _fmt(key: str, val) -> str:
         return "-"
     if key in ("per_turn_context", "output_tokens"):
         return f"{val / 1000:.1f}K"
-    if key == "session_duration_s":
+    if key in ("session_duration_s", "active_gpu_time_s"):
         return f"{val:.0f}"
     return f"{val:.0f}"
 
 
 def print_single(label: str, medians: dict[str, dict]) -> None:
     print(f"\n# {label}  (median of attempts; lower is more efficient)\n")
-    header = ["Task", "n(ok/err)"] + [h for _, h in METRIC_KEYS]
-    widths = [max(len(header[0]), 6), 10] + [max(len(h), 12) for _, h in METRIC_KEYS]
+    header = ["Task", "n(ok/err)", "correct"] + [h for _, h in METRIC_KEYS]
+    widths = [max(len(header[0]), 6), 10, 8] + [max(len(h), 12) for _, h in METRIC_KEYS]
     print("  ".join(h.ljust(w) for h, w in zip(header, widths)))
     print("  ".join("-" * w for w in widths))
     for task_id, agg in medians.items():
-        row = [task_id, f"{agg['n']}/{agg['n_err']}"]
+        correct = f"{agg['n_correct']}/{agg['n_graded']}" if agg.get("n_graded") else "-"
+        row = [task_id, f"{agg['n']}/{agg['n_err']}", correct]
         row += [_fmt(k, agg.get(k)) for k, _ in METRIC_KEYS]
         print("  ".join(c.ljust(w) for c, w in zip(row, widths)))
 

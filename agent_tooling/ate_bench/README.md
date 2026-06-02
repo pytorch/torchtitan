@@ -29,36 +29,56 @@ Five metrics, reported independently (no single scalar):
 | Per-turn context | mean of `input + cache_read + cache_creation` per assistant turn | ✅ (Table 5) |
 | Output tokens | sum of assistant `output_tokens` | ✅ (Table 5) |
 | Session duration | `result.duration_ms` | extra |
-| Active GPU time | training-run GPU time | ❌ N/A for Q&A (no training) |
+| Active GPU time | sampled via `gpu_monitor.py` (nvidia-smi) | ❌ N/A for Q&A; ✅ for operate/feature |
 
 ## Task suite (20 tasks, paper §4 / Appendix B)
 | Category | Count | Status here |
 |---|---|---|
-| **Q&A** — answer a code-property question, read-only, cite `file:line` | 12 | ✅ runnable (`tasks/qa/`) |
-| **Operate & Profile** — run / train+eval / routing trace / Nsight | 4 | 📋 specified, deferred (`tasks/operate_profile/`) |
-| **New Feature** — port Diff-attn / DynMoE / MoBA / MoE++ end-to-end | 4 | 📋 specified, deferred (`tasks/new_feature/`) |
+| **Q&A** — answer a code-property question, read-only, cite `file:line` | 12 | ✅ runnable (`run_qa.py`) |
+| **Operate & Profile** — run / train+eval / routing trace / Nsight | 4 | ✅ harness ready, GPU-gated (`run_operate.py`) |
+| **New Feature** — port Diff-attn / DynMoE / MoBA / MoE++ end-to-end | 4 | ✅ harness ready, GPU-gated (`run_feature.py`) |
 
-Q&A is CPU-only and needs no checkpoints/data, so it's the first runnable slice.
-The GPU categories need 8 GPUs, an MoE checkpoint, DCLM data, vLLM +
-lm-evaluation-harness, and Nsight Systems — their full specs and correctness
-checks are captured in the two category READMEs, ready to wire up later.
+Q&A is CPU-only (no checkpoints/data) and runs today. The operate/feature harness
+is complete — prompts, runners, programmatic checks, GPU-time monitor, and the
+LLM judge — but actually *passing* the tasks needs the GPU substrate (see
+**Prerequisites** below). Without it the agent still runs and effort metrics are
+logged; the artifact/loss checks just won't pass.
+
+### TorchTitan mapping (fixed config, paper Appendix B)
+`PP=4, EP=2, DP=1`, seq_len 2048, global batch 1024, BF16, 8 GPUs → TorchTitan's
+`run_train.sh` with `--parallelism.{pipeline,expert}_parallel_degree` etc. Model:
+an MoE model (`deepseek_v3` default; also `qwen3` `debugmodel_moe`, `llama4`,
+`gpt_oss`). Dataset: **C4** (TorchTitan native; the paper used DCLM). Checkpoint
+export/import: `scripts/checkpoint_conversion/convert_{to,from}_hf.py`. All encoded
+in `runner/repro_config.py` + `setup/train.sh`.
 
 ## Layout
 ```
 agent_tooling/ate_bench/
-  README.md                     <- this file
+  README.md
   tasks/
-    qa/
-      universal_instruction.txt <- prepended verbatim to every Q&A query
-      q01_process_groups.md ... q12_checkpoint_serialization.md
-    operate_profile/README.md   <- 4 tasks specified (deferred)
-    new_feature/README.md       <- 4 tasks specified (deferred)
+    qa/            universal_instruction.txt + q01..q12          (read-only Q&A)
+    operate_profile/  preamble.md + op1..op4 + README            (run/instrument/profile)
+    new_feature/      preamble.md + nf1..nf4 + references.md + rules/  (integrate arch)
+  setup/
+    train.sh       fixed-config TorchTitan launcher (the "provided training script")
+    evaluate.sh    OP2 export-to-HF + lm-eval HellaSwag via vLLM
   runner/
-    run_qa.py                   <- drives the fixed agent per task, N runs
-    metrics.py                  <- stream-json transcript -> 5 metrics
-    aggregate.py                <- medians -> Table-5-style report
-    grade_qa.md                 <- human citation-grading protocol
-  results/<label>/              <- transcripts + metrics (created on run)
+    run_qa.py        read-only Q&A runner
+    run_operate.py   operate/profile runner (full tools, GPU-time, artifact checks)
+    run_feature.py   new-feature runner (worktree per attempt, loss check + judge)
+    metrics.py       stream-json transcript -> effort metrics
+    aggregate.py     medians -> Table-style report (+ GPU time, correctness)
+    repro_config.py  fixed config + prompt placeholder rendering
+    agent_session.py shared headless-agent runner + GPU monitor
+    gpu_monitor.py   active GPU time via nvidia-smi sampling
+    judge.py         independent LLM judge for new-feature rules
+    worktrees.py     git worktree isolation for feature attempts
+    grade_qa.md      human citation-grading protocol (Q&A)
+    checks/          op1..op4 + nf_loss_curve programmatic checks
+  workspace/<label>/  task artifacts (routing-traces/, heavy-kernels/, ...)  [gitignored]
+  results/<label>/    transcripts + metrics                                   [gitignored]
+  worktrees/          transient per-attempt worktrees                         [gitignored]
 ```
 
 ## Run the Q&A suite
@@ -93,6 +113,42 @@ claude -p --output-format stream-json --verbose \
 ```
 with the target `--repo` as the working directory.
 
+## Run the Operate & Profile suite (GPU)
+```bash
+python agent_tooling/ate_bench/runner/run_operate.py \
+    --tasks all --runs 3 --label titan \
+    --module deepseek_v3 --config deepseek_v3_debugmodel \
+    --out agent_tooling/ate_bench/results/operate_titan
+python agent_tooling/ate_bench/runner/aggregate.py agent_tooling/ate_bench/results/operate_titan
+```
+Full toolset (edits auto-accepted), runs in the main checkout, GPU time measured,
+and after each attempt the task's programmatic artifact check runs (OP1 finite
+loss at step 5, OP2 finite HellaSwag, OP3 routing-trace npz validation, OP4
+top-kernels CSV schema). OP3 instruments code in the working tree — `git checkout`
+afterward to reset.
+
+## Run the New-Feature suite (GPU)
+```bash
+python agent_tooling/ate_bench/runner/run_feature.py \
+    --tasks all --runs 3 --label titan \
+    --judge-model claude-opus-4-7 \
+    --out agent_tooling/ate_bench/results/feature_titan
+python agent_tooling/ate_bench/runner/aggregate.py agent_tooling/ate_bench/results/feature_titan
+```
+Each attempt runs in an isolated git **worktree** off `main`. Correctness has two
+axes (paper B.3): the 64-step CE loss must decrease + stay finite
+(`checks/nf_loss_curve.py`), **and** an independent LLM **judge** must PASS the diff
+against the 3 fixed per-feature rules (`runner/judge.py`, `tasks/new_feature/rules/`).
+Both must hold.
+
+## Prerequisites for the GPU tasks
+- **8 GPUs** for the fixed mesh (PP=4 × EP=2). The `*_debugmodel` configs are tiny
+  (harness validation); paper-scale numbers need a full MoE config + checkpoint.
+- A **released MoE checkpoint** (OP3/OP4 resume from it; download via
+  `scripts/checkpoint_conversion/` + `scripts/download_hf_assets.py`).
+- **vLLM + lm-evaluation-harness** for OP2; **Nsight Systems** (`nsys`) for OP4.
+- **C4** dataset access for training (TorchTitan's default loader).
+
 ## Reproducing the paper's comparison
 To compare TorchTitan vs PithTrain (or Megatron-LM) fairly, run the **same**
 `run_qa.py` with `--repo` pointed at each framework's checkout (each on the commit
@@ -104,9 +160,15 @@ you want), then `aggregate.py dir1 dir2`. Correctness is graded per
   `--model` to pin a model; there is no verified CLI flag for reasoning effort, so
   absolute numbers will not match the paper. Keep the agent **identical across
   frameworks** in any one comparison — that's what makes the comparison valid.
-- **`Bash` is pre-approved.** Faithful to the paper (the agent gets Read/Grep/Glob/
-  Bash), but it means the headless agent can run arbitrary read-only shell
-  commands without prompting. `Edit`/`Write`/`NotebookEdit` are disabled, so it
-  cannot modify the working tree — but run only against repos you trust.
+- **Tool access differs by category.** Q&A is read-only (`Edit`/`Write`/
+  `NotebookEdit` disabled). Operate and new-feature get the **full toolset with
+  edits auto-accepted** (`--permission-mode acceptEdits`) since they must run and
+  modify the framework — so the headless agent runs arbitrary shell/edits without
+  prompting. New-feature attempts are isolated in throwaway git worktrees;
+  operate runs in the main checkout (OP3 leaves instrumentation edits — reset with
+  `git checkout`). Run only against repos you trust.
 - **Correctness gates the metrics.** Effort numbers are only meaningful for
-  *correct* attempts. Grade Q&A answers (`runner/grade_qa.md`) before reporting.
+  *correct* attempts. Q&A is human-graded (`runner/grade_qa.md`); operate/feature
+  correctness is computed automatically (artifact checks; loss curve + LLM judge).
+- **`active_gpu_time_s` needs nvidia-smi.** Without a GPU it reports `null`
+  (Q&A always does, by design).

@@ -1,11 +1,12 @@
-# ATE-Bench — Operate-and-Profile tasks (4 tasks) — DEFERRED
+# ATE-Bench — Operate-and-Profile tasks (4 tasks)
 
 These tasks drive a real training workflow end-to-end. They require GPUs, a
-pre-staged MoE checkpoint, pre-tokenized data (DCLM/DCLM-derived), vLLM +
-lm-evaluation-harness, and Nsight Systems. They are **specified here but not yet
-wired into the runner** (Q&A is the first runnable slice). Correctness is checked
-on the *artifact the agent produces*, not the path taken — a mix of programmatic
-checks and human inspection.
+pre-staged MoE checkpoint, pre-tokenized data (TorchTitan uses C4; paper used
+DCLM), vLLM + lm-evaluation-harness, and Nsight Systems. The harness is **wired
+up**: prompts (`op1..op4`), runner (`runner/run_operate.py`), and programmatic
+checks (`runner/checks/op*.py`) — but passing them needs the GPU substrate above.
+Correctness is checked on the *artifact the agent produces*, not the path taken —
+a mix of programmatic checks and human inspection.
 
 Fixed evaluation config (shared with new-feature tasks): parallelism mesh
 `PP=4, EP=2, DP=1`, sequence length `2048`, global batch size `1024`, precision

@@ -1,11 +1,14 @@
-# ATE-Bench — New-Feature tasks (4 tasks) — DEFERRED
+# ATE-Bench — New-Feature tasks (4 tasks)
 
 Each task mimics integrating a recently published modeling architecture into a
 training framework. The agent is given the same materials an engineer would
-consult: the arXiv paper and the reference implementation. From these, the agent
-must produce a training script that integrates the new feature into the base model
-and runs on DCLM under the fixed config below. **Specified here but not yet wired
-into the runner** (requires GPUs + DCLM data).
+consult: the arXiv paper and the reference implementation (`references.md`). From
+these, the agent must produce a training script that integrates the new feature
+into the base model and runs on C4 (TorchTitan native; paper used DCLM) under the
+fixed config below. The harness is **wired up**: prompts (`nf1..nf4`), per-feature
+judge rules (`rules/`), runner (`runner/run_feature.py`, worktree-isolated), loss
+check (`runner/checks/nf_loss_curve.py`), and LLM judge (`runner/judge.py`).
+Running it requires GPUs + C4 data.
 
 Fixed evaluation config (shared with operate-and-profile tasks): parallelism mesh
 `PP=4, EP=2, DP=1`, sequence length `2048`, global batch size `1024`, precision
