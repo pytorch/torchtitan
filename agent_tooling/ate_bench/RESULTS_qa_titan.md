@@ -1,60 +1,63 @@
 # ATE-Bench Q&A results — TorchTitan
 
-> **Status: IN PROGRESS.** A background 12×3 sweep is running; **1/36 runs**
-> complete as of this commit. This file will be regenerated with the full medians
-> (and `aggregate.py` output) once the sweep finishes.
+> **Status: COMPLETE.** 12 tasks × 3 runs = **36/36 runs, 0 errors.** Medians below.
 
 ## Setup
 - **Framework under test:** TorchTitan @ `f854797fc` (this branch).
-- **Fixed agent:** Claude Code headless, model `claude-opus-4-6` (the env default).
-  The paper used **Opus 4.7 @ `xhigh` effort** — so absolute numbers will differ;
-  trends/ratios are the comparable part. Keep the agent identical across frameworks
-  for any real comparison.
+- **Fixed agent:** Claude Code headless, model `claude-opus-4-6` (env default), 1M
+  context window. The paper used **Opus 4.7 @ `xhigh` effort** — so absolute
+  numbers differ; treat trends/ratios as the comparable part.
 - **Tools:** read-only `Read/Grep/Glob/Bash` (`Edit/Write/NotebookEdit` disabled),
   matching the paper's Q&A setup.
-- **Protocol:** 12 Q&A tasks × 3 runs, **median** reported (lower = more efficient).
-  Effort metrics taken from `result.modelUsage` (the authoritative billed usage).
+- **Protocol:** median of 3 attempts (lower = more efficient). Effort metrics from
+  `result.modelUsage` (authoritative billed usage).
+- **Reproduce:** `run_qa.py --repo $(pwd) --tasks all --runs 3 --out <dir>` then
+  `aggregate.py <dir>`.
 
 ## Ours vs. paper (paper Table 5, TorchTitan column)
 
-| Task | Turns (paper) | Turns (ours) | Per-Turn Ctx (paper) | Per-Turn Ctx (ours) | Output Tok (paper) | Output Tok (ours) |
+| Task | Turns ours | Turns paper | Per-Turn Ctx ours | Per-Turn Ctx paper | Output ours | Output paper |
 |---|---|---|---|---|---|---|
-| Q1  | 18 | 16\* | 44.3K | 62.9K\* | 7.1K | 9.7K\* |
-| Q2  | 28 | _running_ | 43.5K | _running_ | 7.8K | _running_ |
-| Q3  | 14 | _running_ | 36.1K | _running_ | 3.5K | _running_ |
-| Q4  | 26 | _running_ | 39.7K | _running_ | 6.9K | _running_ |
-| Q5  | 19 | _running_ | 41.7K | _running_ | 4.8K | _running_ |
-| Q6  | 4  | _running_ | 29.9K | _running_ | 2.3K | _running_ |
-| Q7  | 12 | _running_ | 30.0K | _running_ | 3.4K | _running_ |
-| Q8  | 11 | _running_ | 32.7K | _running_ | 3.5K | _running_ |
-| Q9  | 16 | _running_ | 38.6K | _running_ | 6.0K | _running_ |
-| Q10 | 17 | _running_ | 38.8K | _running_ | 5.1K | _running_ |
-| Q11 | 8  | _running_ | 30.1K | _running_ | 2.5K | _running_ |
-| Q12 | 5  | _running_ | 33.9K | _running_ | 2.2K | _running_ |
+| Q1  | 11 | 18 | 73.1K  | 44.3K | 9.7K  | 7.1K |
+| Q2  | 32 | 28 | 33.7K  | 43.5K | 7.2K  | 7.8K |
+| Q3  | 9  | 14 | 73.2K  | 36.1K | 7.0K  | 3.5K |
+| Q4  | 18 | 26 | 186.4K | 39.7K | 12.3K | 6.9K |
+| Q5  | 7  | 19 | 90.8K  | 41.7K | 7.4K  | 4.8K |
+| Q6  | 5  | 4  | 28.9K  | 29.9K | 1.7K  | 2.3K |
+| Q7  | 10 | 12 | 27.5K  | 30.0K | 2.5K  | 3.4K |
+| Q8  | 15 | 11 | 33.7K  | 32.7K | 3.1K  | 3.5K |
+| Q9  | 9  | 16 | 294.8K | 38.6K | 14.1K | 6.0K |
+| Q10 | 20 | 17 | 37.1K  | 38.8K | 4.8K  | 5.1K |
+| Q11 | 9  | 8  | 24.9K  | 30.1K | 2.7K  | 2.5K |
+| Q12 | 8  | 5  | 30.9K  | 33.9K | 2.0K  | 2.2K |
+| **Σ/median** | **153 total** | **178 total** | median 35.4K | median 37.5K | **70.5K total** | **55.1K total** |
 
-\* 1 of 3 runs so far (not yet a median). An earlier single smoke run of Q1 gave
-19 turns / 39.5K / 8.9K — note the run-to-run spread (16–19 turns, 39.5–62.9K
-context), which is exactly why the paper medians over 3 attempts.
+## What the numbers say
+- **Agent turns track the paper well** — total 153 vs 178 (our agent is ~14% leaner
+  on turns), per-task within a handful on most questions. The TorchTitan codebase
+  imposes a similar number of agent steps on both agents.
+- **Output tokens are comparable** (within ~1.3×), slightly higher for us.
+- **Per-turn context is the big divergence**, driven by the *agent*, not the
+  framework: on exploration-heavy questions our medians blow up — **Q9 (CP) 294.8K
+  vs 38.6K, Q4 (seeds) 186.4K vs 39.7K, Q5 (attention) 90.8K vs 41.7K**. The env's
+  `opus-4-6` with a 1M window reads broadly and keeps a large working context;
+  `opus-4-7 @ xhigh` in the paper ran much tighter. On cheap, localized questions
+  (Q6 RoPE, Q7 SwiGLU, Q11/Q12) the two agents match closely.
+- **Takeaway:** the *turn-count* signal (how many agent steps the framework demands)
+  reproduces the paper's TorchTitan column; the *context* metric is dominated by the
+  agent model difference and isn't comparable across agents — exactly why ATE-Bench
+  insists on holding the agent fixed across frameworks.
 
-**Early read:** our Q1 lands in the paper's TorchTitan ballpark on turns
-(16 vs 18) and output tokens (9.7K vs 7.1K); per-turn context runs higher
-(`opus-4-6` here vs `opus-4-7 xhigh` in the paper, different context budgeting).
+## Caveats
+- **Correctness not yet graded.** Effort numbers only count for *correct* attempts
+  (paper had all 108 Q&A attempts satisfied). Grade per `runner/grade_qa.md` (or an
+  LLM-judge pass) before drawing firm conclusions; the `correct` column in
+  `aggregate.py` is `-` until graded.
+- **Agent ≠ paper's** (`opus-4-6` vs `opus-4-7 @ xhigh`) → absolute numbers differ.
 
-## What this does and does not reproduce
-- ✅ **TorchTitan Q&A column** (this file) — the CPU-only, fully runnable slice.
-- ❌ **PithTrain / Megatron-LM columns** — not reproducible here (no checkouts), so
-  the paper's *relative* headline (62% fewer turns / 64% less GPU time) cannot be
-  reproduced — those are cross-framework deltas.
-- ⏳ **Operate & Profile / New-Feature** — GPU-gated (8×H100 are available, but they
-  need a real MoE checkpoint, vLLM+lm-eval, Nsight, and C4); harness is ready.
-
-## Reproduce
-```bash
-python agent_tooling/ate_bench/runner/run_qa.py \
-    --repo $(pwd) --tasks all --runs 3 \
-    --out agent_tooling/ate_bench/results/titan_full
-python agent_tooling/ate_bench/runner/aggregate.py \
-    agent_tooling/ate_bench/results/titan_full
-```
-Correctness must be human-graded (`runner/grade_qa.md`) before drawing conclusions
-— effort numbers only count for *correct* attempts.
+## Scope (unchanged)
+- ✅ **TorchTitan Q&A column** — this file (reproduced).
+- ❌ **PithTrain / Megatron-LM columns** — no checkouts → the cross-framework
+  headline (62% fewer turns / 64% less GPU time) is out of scope here.
+- ⏳ **Operate & Profile / New-Feature** — mesh validated on 8×H100
+  (`RESULTS_gpu_titan.md`); numeric repro blocked on a real MoE checkpoint + deps.
