@@ -18,6 +18,7 @@ or a classical optimizer plug in the same way.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -372,7 +373,16 @@ class LLMAgent:
             if not command and not file_edits:
                 print("[llm] proposal had no command/file_edits; retrying", flush=True)
                 continue
-            key = (tuple(command), tuple(sorted(file_edits)))
+            # De-dupe on command + file-edit CONTENT (not just paths): two distinct
+            # rewrites of the same file (e.g. parallelize.py) are different
+            # candidates and must not collide.
+            edits_sig = tuple(
+                sorted(
+                    (p, hashlib.md5(c.encode()).hexdigest())
+                    for p, c in file_edits.items()
+                )
+            )
+            key = (tuple(command), edits_sig)
             if key in self._proposed:
                 print(
                     f"[llm] '{data.get('label')}' already tried; asking for a different one",
