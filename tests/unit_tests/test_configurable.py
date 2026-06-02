@@ -201,6 +201,39 @@ class TestConfigurable(unittest.TestCase):
         self.assertEqual(by_fqn["layers.0"], (cfg.layers, 0))
         self.assertEqual(by_fqn["layers.0.leaf"], (cfg.layers[0], "leaf"))
 
+    def test_traverse_includes_root_config(self):
+        """traverse(...) yields the root as non-replaceable."""
+
+        class Inner(Configurable):
+            @dataclass(kw_only=True, slots=True)
+            class Config(Configurable.Config):
+                value: int = 1
+
+            def __init__(self, config: Config):
+                self.config = config
+
+        class Outer(Configurable):
+            @dataclass(kw_only=True, slots=True)
+            class Config(Configurable.Config):
+                inner: Inner.Config = field(default_factory=Inner.Config)
+
+            def __init__(self, config: Config):
+                self.config = config
+
+        cfg = Outer.Config()
+
+        self.assertEqual(
+            [
+                (fqn, parent, attr)
+                for fqn, _cfg, parent, attr in cfg.traverse(Configurable.Config)
+            ],
+            [("", None, None)],
+        )
+        self.assertEqual(
+            [fqn for fqn, *_ in cfg.traverse(Configurable.Config, recurse=True)],
+            ["", "inner"],
+        )
+
     def test_repr(self):
         """repr() works for configs."""
         cfg = self.NoKwargsComponent.Config(x=42)

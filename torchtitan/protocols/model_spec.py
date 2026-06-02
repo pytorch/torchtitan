@@ -48,9 +48,7 @@ class ModelSpec:
 
     def traverse(
         self, config_cls: type, *, recurse: bool = False, _prefix: str = ""
-    ) -> Iterator[
-        tuple[str, "Configurable.Config", object | None, str | int | None]
-    ]:
+    ) -> Iterator[tuple[str, "Configurable.Config", object | None, str | int | None]]:
         """Expose the nested model config to ``Configurable.Config.traverse``.
 
         ``ModelSpec`` is a plain dataclass, not a ``Configurable.Config``, so a

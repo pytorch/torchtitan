@@ -12,7 +12,6 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 
-from torchtitan.config import Configurable
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.model import ModelConfigConverter
@@ -106,7 +105,7 @@ def _get_lora_cls(parent_cls: type) -> type:
 
 
 @dataclass(kw_only=True, slots=True)
-class FrozenConfig(Configurable.Config):
+class FrozenConfig(Module.Config):
     """Config wrapper that freezes direct parameters at build time.
 
     Child modules are frozen by their own configs so wrapping a composite module
@@ -114,6 +113,12 @@ class FrozenConfig(Configurable.Config):
     """
 
     inner: Module.Config
+
+    def __getattribute__(self, name: str):
+        if name == "__class__":
+            inner = object.__getattribute__(self, "inner")
+            return inner.__class__
+        return object.__getattribute__(self, name)
 
     def __getattr__(self, name: str):
         try:
@@ -185,7 +190,7 @@ class LoRAConverter(ModelConfigConverter):
         assert cfg._owner is not None
         lora_cls = _get_lora_cls(cfg._owner)
         return lora_cls.Config(  # pyrefly: ignore [missing-attribute]
-            **{f.name: getattr(cfg, f.name) for f in fields(cfg)},
+            **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
             rank=self.rank,
             alpha=self.alpha,
         )
@@ -203,10 +208,12 @@ class LoRAConverter(ModelConfigConverter):
         for fqn, cfg, parent, attr in model_config.traverse(
             Module.Config, recurse=True
         ):
+            assert isinstance(cfg, Module.Config)
             last_segment = fqn.rsplit(".", 1)[-1]
             is_target = isinstance(cfg, Linear.Config) and (
                 self.target_modules is None or last_segment in self.target_modules
             )
+
             if is_target:
                 new_cfg = self._make_lora_config(cfg)
                 matched.add(last_segment)
@@ -216,8 +223,10 @@ class LoRAConverter(ModelConfigConverter):
             if parent is None:
                 converted_root = new_cfg
             elif isinstance(parent, list):
+                assert isinstance(attr, int)
                 parent[attr] = new_cfg
             else:
+                assert isinstance(attr, str)
                 setattr(parent, attr, new_cfg)
 
         unmatched = (self.target_modules or set()) - matched

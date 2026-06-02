@@ -67,8 +67,7 @@ class BaseModel(Module):
         if failures:
             details = ", ".join(f"'{fqn}' ({cls})" for fqn, cls in failures)
             raise RuntimeError(
-                f"The following modules do not satisfy the Module protocol: "
-                f"{details}"
+                f"The following modules do not satisfy the Module protocol: {details}"
             )
 
     @dataclass(kw_only=True, slots=True)

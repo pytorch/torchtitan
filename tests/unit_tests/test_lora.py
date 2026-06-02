@@ -159,3 +159,40 @@ def test_lora_freezes_direct_params_on_composite_modules():
         if p.requires_grad and "lora_a" not in n and "lora_b" not in n
     }
     assert non_lora_trainable == set()
+
+
+def test_lora_freezes_direct_params_on_root_module():
+    """Root module direct params are frozen through the returned root config."""
+
+    class RootWithDirectParam(Module):
+        @dataclass(kw_only=True, slots=True)
+        class Config(Module.Config):
+            child: Linear.Config
+            dim: int = 4
+
+        def __init__(self, config: Config) -> None:
+            super().__init__()
+            self.direct = torch.nn.Parameter(torch.ones(config.dim))
+            self.child = config.child.build()
+
+    model_config = RootWithDirectParam.Config(
+        child=Linear.Config(in_features=4, out_features=4),
+        dim=4,
+    )
+
+    model_config = LoRAConverter(
+        LoRAConverter.Config(rank=2, alpha=4.0, target_modules=["child"])
+    ).convert(model_config)
+    model = model_config.build()
+
+    assert not model.direct.requires_grad
+    assert not model.child.weight.requires_grad
+    assert model.child.lora_a.weight.requires_grad
+    assert model.child.lora_b.weight.requires_grad
+
+    non_lora_trainable = {
+        n
+        for n, p in model.named_parameters()
+        if p.requires_grad and "lora_a" not in n and "lora_b" not in n
+    }
+    assert non_lora_trainable == set()
