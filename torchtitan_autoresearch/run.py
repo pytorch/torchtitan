@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import statistics
 import sys
 
 from torchtitan_autoresearch.agent import KnobAgent
@@ -61,12 +60,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--here", default="", help="repo root (default: cwd)")
     args = ap.parse_args(argv)
 
-    # A single dataset choice decides both the training set and its held-out eval
-    # split. c4's held-out split is c4_validation; toy c4_test has no separate split.
-    eval_split = {"c4": "c4_validation", "c4_test": "c4_test"}.get(
-        args.dataset, args.dataset
-    )
-    train_dataset, eval_dataset = args.dataset, eval_split
+    # v1 trains on this dataset; there is no held-out eval split (faithfulness-only).
+    train_dataset = args.dataset
 
     repo = args.here or _repo_root()
     const = os.path.join(repo, "torchtitan_autoresearch/Constitution.md")
@@ -83,8 +78,8 @@ def main(argv: list[str] | None = None) -> int:
         print("no GPUs detected; autoresearch needs at least one GPU", file=sys.stderr)
         return 2
     print(
-        f"[setup] world size (auto) = {ngpu} | dataset = {args.dataset} | "
-        f"(train {train_dataset} / eval {eval_dataset}) | run dir = {run_dir}"
+        f"[setup] world size (auto) = {ngpu} | train dataset = {train_dataset} | "
+        f"run dir = {run_dir}"
     )
 
     # Create the experiment in its OWN git worktree so all its commits/resets/runs
@@ -102,19 +97,15 @@ def main(argv: list[str] | None = None) -> int:
         log_freq=rules.log_freq,
         ngpu=ngpu,
         base_command=[f"--dataloader.dataset={train_dataset}"],
-        val_dataset=eval_dataset,
-        seq_len=rules.seq_len,
-        eval_tokens=rules.eval_tokens,
-        eval_fallback_steps=rules.eval_fallback_steps,
-        val_steps=rules.eval_val_steps,
-        warm_steps=rules.eval_warm_steps,
-        lr_total_steps=rules.eval_lr_total_steps,
         run_dir=os.path.join(run_dir, "runs"),
     )
     try:
-        # --- Calibrate the golden: throughput, faithfulness anchor, quality bar ---
+        # --- Calibrate the golden: throughput + faithfulness anchors/bands ---
+        # v1 is faithfulness-only: no held-out eval. We anchor on the golden's
+        # short deterministic loss+grad_norm trajectory and size the per-axis
+        # faithfulness bands from its OWN run-to-run rounding jitter.
         print(
-            "[calibrate] running golden baseline (throughput, deterministic, eval)...",
+            "[calibrate] running golden baseline (throughput + faithfulness anchor)...",
             flush=True,
         )
         gold = Candidate(label="golden", command=[])
@@ -125,81 +116,45 @@ def main(argv: list[str] | None = None) -> int:
                 tr.crash_text[-1500:],
             )
             return 1
-        det = ex.deterministic_losses(gold)
-        ex.golden_det_losses = det
-        # Calibrate the faithfulness tolerance from the golden's own rounding
-        # jitter (same seed/data, nondeterministic vs deterministic) x headroom,
-        # so rounding-noise changes pass as faithful but real math changes don't.
-        jit = ex.jitter_losses(gold)
-        if jit and len(jit) == len(det):
-            jitter = max(abs(a - b) / max(abs(b), 1e-9) for a, b in zip(jit, det))
-            ex.verify_tol = max(jitter * 10.0, 5e-4)
-            print(
-                f"[calibrate] faithfulness tol = {ex.verify_tol:.2e} "
-                f"(golden rounding jitter {jitter:.2e} x10)"
-            )
-        # Warm checkpoint (substrate soft point #2): pre-train the golden past
-        # warmup once so every held-out eval continues an already-good model a few
-        # post-warmup steps instead of measuring from-scratch chaos. Paid once.
-        if rules.eval_warm_steps > 0:
-            print(
-                f"[calibrate] building golden warm checkpoint @ {rules.eval_warm_steps} "
-                f"steps (LR horizon {rules.eval_lr_total_steps or 'run-length'})...",
-                flush=True,
-            )
-            wp = ex.prepare_warm_checkpoint(gold)
-            print(
-                f"[calibrate] warm checkpoint: {wp or 'FAILED -> evals run from scratch'}",
-                flush=True,
-            )
-
-        # Quality bar + eval-noise band: repeat the golden's held-out eval at a
-        # fixed TOKEN budget (equal-compute, not equal-steps) and measure its
-        # run-to-run spread. With a warm checkpoint these post-warmup evals are a
-        # tight signal; the floor uses the measured noise so the gate never rejects
-        # a candidate on a difference the eval itself cannot resolve.
-        gb = tr.global_batch
-        eval_steps = ex.eval_steps_for(gb)
-        reps = rules.eval_calibration_repeats
-        print(
-            f"[calibrate] golden eval x{reps} at ~{eval_steps} post-warmup steps "
-            f"({rules.eval_tokens:,} tokens / global batch {gb})...",
-            flush=True,
-        )
-        eval_losses: list[float] = []
-        last_crash = ""
-        for i in range(reps):
-            er = ex.run_eval(gold, global_batch=gb, run_tag=f"_cal{i}")
-            if er.ok:
-                eval_losses.append(er.eval_loss)
-                print(
-                    f"[calibrate]   golden eval[{i}] = {er.eval_loss:.4f}", flush=True
-                )
-            else:
-                last_crash = er.crash_text or ""
-                print(f"[calibrate]   golden eval[{i}] failed", flush=True)
-        if not eval_losses:
-            print(
-                "[calibrate] golden eval failed on every repeat; aborting:\n",
-                last_crash[-1500:],
-            )
+        det = ex.deterministic_steps(gold)
+        if not det:
+            print("[calibrate] golden deterministic run produced no steps; aborting")
             return 1
-        mean = sum(eval_losses) / len(eval_losses)
-        std = statistics.stdev(eval_losses) if len(eval_losses) > 1 else 0.0
-        band = max(rules.epsilon_rel * mean, rules.eval_z * std)
+        det_losses = [s.loss for s in det]
+        det_grads = [s.grad_norm for s in det]
+        ex.golden_det_losses = det_losses
+        ex.golden_det_grad_norms = det_grads
+
+        # Bands = the golden's own rounding noise (deterministic vs same-seed
+        # non-deterministic) x headroom, floored. A candidate is faithful only if
+        # it stays within this band AND is non-trending (see executor._check_axis).
+        jit = ex.jitter_steps(gold)
+
+        def _band(jit_vals: list[float], det_vals: list[float]) -> float:
+            n = min(len(jit_vals), len(det_vals))
+            if n == 0:
+                return 5e-4
+            worst = max(
+                abs(jit_vals[i] - det_vals[i]) / max(abs(det_vals[i]), 1e-9)
+                for i in range(n)
+            )
+            return max(worst * ex.band_headroom, 5e-4)
+
+        ex.loss_band = _band([s.loss for s in jit], det_losses)
+        ex.grad_band = _band([s.grad_norm for s in jit], det_grads)
         print(
             f"[calibrate] golden: tps={tr.tps_mean:.0f} (cv {tr.tps_cv:.3f})  "
-            f"eval_loss={mean:.4f} +/- {std:.4f}  "
-            f"floor=golden+{band:.4f} (rejects degradation > {band / mean * 100:.1f}% of golden)  "
-            f"det_losses={[round(x, 2) for x in det]}"
+            f"loss_band={ex.loss_band:.2e}  grad_band={ex.grad_band:.2e}  "
+            f"(jitter x{ex.band_headroom:g}, non-trending @ {ex.trend_factor:g}x band)  "
+            f"det_losses={[round(x, 2) for x in det_losses]}",
+            flush=True,
         )
         HarnessState(
             golden_commit=sess.base_commit[:7],
-            golden_eval_loss=mean,
-            golden_eval_losses=eval_losses,
-            eval_noise_abs=std,
-            eval_noise_rel=(std / mean if mean else 0.0),
-            golden_det_losses=det,
+            golden_det_losses=det_losses,
+            golden_det_grad_norms=det_grads,
+            loss_band=ex.loss_band,
+            grad_band=ex.grad_band,
             champion_commit=sess.base_commit[:7],
             champion_tps=[tr.tps_mean],
             tps_cv=max(tr.tps_cv, 0.01),

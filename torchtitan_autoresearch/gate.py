@@ -114,7 +114,6 @@ def gate(
     bootstrap = not state.champion_tps
     samples: list[float] = []
     last_cv = 0.0
-    last_gb = 0  # candidate's global batch -> equal-compute eval horizon
     tps_recommend, tps_detail = "promote", "bootstrap champion (no prior best)"
     for attempt in range(max_reruns + 1):
         tr = executor.run_throughput(c, steps, window)
@@ -136,7 +135,6 @@ def gate(
             )
         samples.append(tr.tps_mean)
         last_cv = tr.tps_cv
-        last_gb = tr.global_batch
         if bootstrap:
             break
         sv = sig.decide(samples, state.champion_tps, state.tps_noise())
@@ -179,28 +177,11 @@ def gate(
             )
         )
 
-    # 3. QUALITY (only reached when the candidate is faster): verify routes --
-    #    faithful changes are quality-preserved (no eval); affecting changes must
-    #    clear the held-out eval floor.
-    qo = Q.verify_routes_quality(c, executor, state, rules, global_batch=last_gb)
-    if qo.verify == "fail":
-        cv = classify_crash(qo.eval_crash_text or "")
-        budget.record(family, cv)
-        st = "oom" if cv.crash_class == "OOM" else "crash"
-        return finish(
-            Verdict(
-                True,
-                samples[-1],
-                last_cv,
-                qo.quality,
-                "-",
-                st,
-                cv.crash_class,
-                f"eval failed: {cv.crash_class}",
-                verify="fail",
-            )
-        )
-    if qo.quality.checked and not qo.quality.passed:
+    # 3. QUALITY (only reached when the candidate is faster): verify routes by
+    #    measured faithfulness. v1 policy: faithful => quality preserved, promote;
+    #    affecting (math moved beyond the golden's noise) => reject. No eval.
+    qo = Q.verify_routes_quality(c, executor, state, rules)
+    if not qo.quality.passed:
         return finish(
             Verdict(
                 True,
@@ -210,12 +191,12 @@ def gate(
                 "reject",
                 "discard",
                 "-",
-                f"faster but quality below floor (margin {qo.quality.margin:+.4f})",
+                f"faster but not faithful (affecting): {qo.detail}",
                 verify="affecting",
             )
         )
 
-    # 4. Faster AND quality preserved -> promote.
+    # 4. Faster AND faithful -> promote.
     state.champion_commit = c.commit
     state.champion_tps = samples
     return finish(
@@ -227,7 +208,7 @@ def gate(
             "promote",
             "keep",
             "-",
-            f"faster ({tps_detail}) and quality preserved",
-            verify=("affecting" if qo.quality.checked else "faithful"),
+            f"faster ({tps_detail}) and faithful (quality preserved)",
+            verify="faithful",
         )
     )

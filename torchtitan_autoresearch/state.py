@@ -24,17 +24,17 @@ from torchtitan_autoresearch import crash_classify as cc, significance as sig
 @dataclass
 class HarnessState:
     golden_commit: str = ""
-    golden_eval_loss: float | None = None  # the quality bar (lower is better)
-    golden_det_losses: list[float] = field(default_factory=list)  # faithfulness anchor
+    # v1 faithfulness anchors: the golden's short deterministic trajectory, plus
+    # the per-axis bands (golden's own rounding noise x headroom) a candidate must
+    # stay within to count as faithful. There is no held-out eval / quality bar.
+    golden_det_losses: list[float] = field(default_factory=list)
+    golden_det_grad_norms: list[float] = field(default_factory=list)
+    loss_band: float = 5e-4
+    grad_band: float = 5e-4
     champion_commit: str = ""
     champion_tps: list[float] = field(default_factory=list)
     tps_cv: float = 0.02
     tps_tail_pct: float = 4.5
-    eval_noise_rel: float = 0.0  # relative std of golden eval loss (informational)
-    eval_noise_abs: float = (
-        0.0  # absolute std of golden eval loss -> the floor's noise band
-    )
-    golden_eval_losses: list[float] = field(default_factory=list)  # calibration samples
     family_streaks: dict[str, int] = field(default_factory=dict)
     family_deferred: list[str] = field(default_factory=list)
 

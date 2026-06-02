@@ -7,17 +7,20 @@
 """The GPU-execution boundary, behind an injectable interface.
 
 The harness orchestration (gate, quality, api) only depends on this Protocol, so
-the whole control flow is testable on CPU with `FakeExecutor`. `SubprocessExecutor`
-is the real implementation that shells out to the TorchTitan launcher and the
-verify/eval torchrun entrypoints.
+the whole control flow is testable on CPU with ``FakeExecutor``.
+``SubprocessExecutor`` is the real implementation that shells out to the
+TorchTitan launcher.
 
-Throughput is the climbed axis; quality (eval loss, lower is better) is the
-floored axis; verify decides whether a change is faithful enough to skip the eval.
+v1 evaluation is FAITHFULNESS-ONLY. Throughput is the climbed axis; a candidate
+is quality-preserving iff its short seed-pinned deterministic loss AND grad_norm
+trajectory stays within the golden's own rounding noise -- no magnitude excursion
+beyond the calibrated band, and no directional bias (non-trending). A change that
+moves the math beyond that noise is "affecting" and is rejected; there is no
+held-out eval in v1, so quality is preserved by construction.
 """
 
 from __future__ import annotations
 
-import math
 import os
 import subprocess
 from dataclasses import dataclass
@@ -33,9 +36,6 @@ class ThroughputResult:
     tps_mean: float = 0.0
     tps_cv: float = 0.0
     peak_mem_gb: float = 0.0
-    global_batch: int = (
-        0  # effective global batch size; converts a token budget -> steps
-    )
     crash_text: str = ""  # populated when ok is False
 
 
@@ -46,10 +46,14 @@ class VerifyResult:
 
 
 @dataclass
-class EvalResult:
+class AxisCheck:
+    """Faithfulness verdict for one trajectory axis (loss or grad_norm)."""
+
     ok: bool
-    eval_loss: float = float("inf")
-    crash_text: str = ""
+    max_dev: float  # worst per-step relative deviation vs golden
+    mean_dev: float  # signed mean relative deviation (detects directional bias)
+    band: float
+    detail: str
 
 
 class Executor(Protocol):
@@ -61,28 +65,21 @@ class Executor(Protocol):
     def run_verify(self, c: Candidate) -> VerifyResult:
         ...
 
-    def run_eval(
-        self, c: Candidate, *, global_batch: int = 0, run_tag: str = ""
-    ) -> EvalResult:
-        ...
-
 
 # ---------------------------------------------------------------------------
-# Fake executor — deterministic canned results, for CPU testing of the harness.
+# Fake executor -- deterministic canned results, for CPU testing of the harness.
 # ---------------------------------------------------------------------------
 class FakeExecutor:
-    """Drives any scenario from a per-candidate spec dict keyed by commit.
+    """Drives any scenario from a per-candidate spec dict.
 
-    spec fields: tps, cv, faithful, eval_loss, crash (text), eval_crash (text).
-    Missing fields fall back to sensible defaults.
+    spec fields: tps, cv, faithful, crash (text), peak_mem. Missing fields fall
+    back to sensible defaults.
     """
 
     def __init__(self, specs: dict[str, dict]):
         self.specs = specs
 
     def _spec(self, c: Candidate) -> dict:
-        # Key by commit, then label, then family — so tests can key by whatever is
-        # stable (git shas are assigned at runtime under a real session).
         for key in (c.commit, c.label, c.family):
             if key and key in self.specs:
                 return self.specs[key]
@@ -105,36 +102,27 @@ class FakeExecutor:
             faithful=bool(s.get("faithful", True)), detail=s.get("verify_detail", "")
         )
 
-    def run_eval(self, c, *, global_batch: int = 0, run_tag: str = ""):
-        s = self._spec(c)
-        if s.get("eval_crash"):
-            return EvalResult(ok=False, crash_text=s["eval_crash"])
-        return EvalResult(ok=True, eval_loss=float(s.get("eval_loss", float("inf"))))
-
 
 # ---------------------------------------------------------------------------
-# Subprocess executor — the real implementation (needs GPUs + TorchTitan).
+# Subprocess executor -- the real implementation (needs GPUs + TorchTitan).
 # ---------------------------------------------------------------------------
 class SubprocessExecutor:
     """Runs candidates through the real TorchTitan launcher on GPUs.
 
-    Three run modes, each cached per (candidate, mode):
+    Two run modes, each cached per (candidate, mode):
       - ``tps``    : fast timed run (no validation, non-deterministic) -> throughput.
-      - ``verify`` : short deterministic run (seed-pinned) whose per-step loss
-                     trajectory is compared to the golden's; a faithful match means
-                     the change did not move the math, so quality is preserved and
-                     the eval is skipped (the design's verify-routing).
-      - ``warm``   : one-time golden pre-train (``warm_steps``) that saves a full
-                     checkpoint; every eval warm-starts from it so the quality
-                     signal is taken past warmup, not in from-scratch chaos.
-      - ``eval``   : validator-enabled run -> held-out eval loss (quality signal),
-                     warm-started from the golden checkpoint when available, and
-                     only run when verify says the change is quality-affecting.
+      - ``verify`` : short seed-pinned deterministic run whose per-step loss AND
+                     grad_norm trajectory is compared to the golden's. A candidate
+                     is faithful iff BOTH axes stay within the golden's own rounding
+                     band (magnitude) and show no directional bias (trend). Faithful
+                     => quality preserved by construction, so it is kept on speed
+                     alone; not faithful => affecting => rejected (v1).
 
     Measurement is harness-pinned: ``--metrics.log_freq`` and step caps come from
     the constitution, not the candidate. ``base_command`` carries fixed regime
-    flags prepended to each candidate command. ``golden_det_losses`` is the
-    faithfulness anchor, set by the driver after calibration.
+    flags prepended to each candidate command. The golden anchors
+    (``golden_det_losses``/``golden_det_grad_norms``) and the calibrated bands
+    (``loss_band``/``grad_band``) are set by the driver after calibration.
     """
 
     def __init__(
@@ -144,36 +132,25 @@ class SubprocessExecutor:
         ngpu: int,
         *,
         base_command: list[str] | None = None,
-        val_dataset: str = "c4_test",
-        val_steps: int = 8,
-        verify_steps: int = 3,
-        verify_tol: float = 5e-3,
-        seq_len: int = 4096,
-        eval_tokens: int = 0,
-        eval_fallback_steps: int = 50,
-        warm_steps: int = 0,
-        lr_total_steps: int = 0,
+        verify_steps: int = 8,
+        trend_factor: float = 0.5,
+        band_headroom: float = 3.0,
         run_dir: str = "/tmp/ar_runs",
     ):
         self.repo_root = repo_root
         self.log_freq = log_freq
         self.ngpu = ngpu
         self.base_command = base_command or []
-        self.val_dataset = val_dataset
-        self.val_steps = val_steps
-        self.verify_steps = verify_steps
-        self.verify_tol = verify_tol
-        self.seq_len = seq_len
-        self.eval_tokens = eval_tokens
-        self.eval_fallback_steps = eval_fallback_steps
-        self.warm_steps = warm_steps  # pre-train the golden this far past warmup
-        self.lr_total_steps = lr_total_steps  # real LR-schedule horizon (decoupled)
+        self.verify_steps = verify_steps  # deterministic steps compared to golden
+        self.trend_factor = trend_factor  # bias allowance as a fraction of the band
+        self.band_headroom = band_headroom  # golden jitter x this -> the band
         self.run_dir = run_dir
         os.makedirs(run_dir, exist_ok=True)
-        self.golden_det_losses: list[float] = []  # set by the driver after calibration
-        self.warm_ckpt_path: str = (
-            ""  # set by prepare_warm_checkpoint; evals warm-start here
-        )
+        # Faithfulness anchors + bands, set by the driver after calibration:
+        self.golden_det_losses: list[float] = []
+        self.golden_det_grad_norms: list[float] = []
+        self.loss_band: float = 5e-4
+        self.grad_band: float = 5e-4
         self._log_cache: dict[tuple[str, str], str] = {}
 
     def _key(self, c: Candidate) -> str:
@@ -232,131 +209,72 @@ class SubprocessExecutor:
             tps_mean=meas.tps_mean,
             tps_cv=meas.tps_cv,
             peak_mem_gb=meas.peak_memory_gb,
-            global_batch=meas.global_batch,
         )
 
-    def _short_losses(
+    # --- faithfulness probe -------------------------------------------------
+    def _short_steps(
         self, c: Candidate, mode: str, deterministic: bool
-    ) -> list[float]:
+    ) -> list[M.Step]:
         extra = [f"--training.steps={self.verify_steps}", "--debug.seed=42"]
         if deterministic:
             extra.append("--debug.deterministic")
         text = open(self._run(c, mode, extra)).read()
-        return [s.loss for s in M.parse_steps(text)]
+        return M.parse_steps(text)
 
-    def deterministic_losses(self, c: Candidate) -> list[float]:
-        """Per-step loss of a short seed-pinned deterministic run (the faithfulness probe)."""
-        return self._short_losses(c, "verify", deterministic=True)
+    def deterministic_steps(self, c: Candidate) -> list[M.Step]:
+        """Per-step loss+grad_norm of a short seed-pinned DETERMINISTIC run."""
+        return self._short_steps(c, "verify", deterministic=True)
 
-    def jitter_losses(self, c: Candidate) -> list[float]:
-        """Same seed/data but NON-deterministic -- exposes the run-to-run rounding
-        jitter used to calibrate the faithfulness tolerance (the 'harmless noise'
-        scale). This is same-data rounding noise, not seed-to-seed (different-data)
-        variation, which would be far too loose and let precision changes hide."""
-        return self._short_losses(c, "jitter", deterministic=False)
+    def jitter_steps(self, c: Candidate) -> list[M.Step]:
+        """Same seed/data but NON-deterministic: the golden's own run-to-run
+        rounding noise (float non-associativity), used to size the faithfulness
+        bands. This is same-data noise, not seed-to-seed (different-data) variation
+        which would be far too loose and let real changes hide."""
+        return self._short_steps(c, "jitter", deterministic=False)
+
+    @staticmethod
+    def _rel_devs(values: list[float], golden: list[float]) -> list[float]:
+        n = min(len(values), len(golden))
+        return [(values[i] - golden[i]) / max(abs(golden[i]), 1e-9) for i in range(n)]
+
+    def _check_axis(
+        self, values: list[float], golden: list[float], band: float
+    ) -> AxisCheck:
+        """Faithful on this axis iff within the band AND non-trending.
+
+        Magnitude: no per-step relative deviation exceeds the band (golden's own
+        rounding noise x headroom). Trend: the SIGNED mean deviation stays within
+        ``trend_factor`` x band -- unbiased rounding noise averages to ~0, while a
+        real systematic change shows a consistent same-sign offset.
+        """
+        devs = self._rel_devs(values, golden)
+        if not devs:
+            return AxisCheck(False, float("inf"), float("inf"), band, "no steps")
+        max_dev = max(abs(d) for d in devs)
+        mean_dev = sum(devs) / len(devs)
+        ok = (max_dev <= band) and (abs(mean_dev) <= band * self.trend_factor)
+        return AxisCheck(
+            ok,
+            max_dev,
+            mean_dev,
+            band,
+            f"max {max_dev:.2e} mean {mean_dev:+.2e} vs band {band:.2e}",
+        )
 
     def run_verify(self, c):
-        golden = self.golden_det_losses
-        if not golden:
+        gl, gg = self.golden_det_losses, self.golden_det_grad_norms
+        if not gl:
+            return VerifyResult(False, "no golden trajectory; treat as affecting")
+        steps = self.deterministic_steps(c)
+        if len(steps) < len(gl):
             return VerifyResult(
-                faithful=False, detail="no golden trajectory; treat as affecting"
+                False, "deterministic verify run failed; treat as affecting"
             )
-        losses = self.deterministic_losses(c)
-        if len(losses) < len(golden):
-            # deterministic run failed (e.g. compile+deterministic conflict) -> eval to be safe
-            return VerifyResult(
-                faithful=False, detail="deterministic verify run failed; eval"
-            )
-        worst = max(abs(a - b) / max(abs(b), 1e-9) for a, b in zip(losses, golden))
-        faithful = worst <= self.verify_tol
+        la = self._check_axis([s.loss for s in steps], gl, self.loss_band)
+        ga = self._check_axis([s.grad_norm for s in steps], gg, self.grad_band)
         return VerifyResult(
-            faithful=faithful,
-            detail=f"max loss rel-dev {worst:.2e} vs tol {self.verify_tol:.0e}",
+            faithful=(la.ok and ga.ok), detail=f"loss[{la.detail}] grad[{ga.detail}]"
         )
-
-    def eval_steps_for(self, global_batch: int) -> int:
-        """Steps to train before the held-out eval, at a fixed *token* budget.
-
-        Equal-compute, not equal-steps: a recipe with a bigger global batch runs
-        proportionally fewer steps to consume the same tokens, so the quality
-        comparison is per-compute (the objective) rather than penalizing/rewarding
-        whoever happens to see more data at a fixed step count.
-        """
-        if self.eval_tokens and global_batch:
-            return max(1, math.ceil(self.eval_tokens / (global_batch * self.seq_len)))
-        return self.eval_fallback_steps
-
-    def prepare_warm_checkpoint(self, golden: Candidate) -> str:
-        """Pre-train the golden ``warm_steps`` (past warmup) and save a full
-        checkpoint the evals warm-start from. Paid once per experiment.
-
-        Solves substrate soft point #2: a from-scratch held-out eval is dominated
-        by warmup chaos, so a short eval is pure noise. Continuing an already-good
-        model a few *post-warmup* steps is a tight, cheap, honest quality signal --
-        and it matches the operating assumption that the starting model is good and
-        we are sensitive to degradations. ``lr_scheduler.total_steps`` keeps the LR
-        curve on its real horizon so step W lands where it truly would in training.
-
-        Returns the checkpoint folder path (also stored on ``self.warm_ckpt_path``),
-        or "" if warm start is disabled (``warm_steps<=0``) or the run failed.
-        """
-        if self.warm_steps <= 0:
-            return ""
-        extra = [
-            f"--training.steps={self.warm_steps}",
-            "--checkpoint.enable",
-            "--checkpoint.folder=ckpt",
-            f"--checkpoint.interval={self.warm_steps}",  # one full checkpoint, at step W
-            "--checkpoint.no_last_save_model_only",  # full state (model+opt+sched)
-        ]
-        if self.lr_total_steps:
-            extra.append(f"--lr_scheduler.total_steps={self.lr_total_steps}")
-        self._run(golden, "warm", extra)
-        # DCP writes {dump}/ckpt/step-W/{.metadata,*.distcp}; initial_load_path must
-        # point at the STEP dir (where .metadata lives), not the parent folder.
-        step_dir = os.path.join(
-            self._dump_folder(golden, "warm"), "ckpt", f"step-{self.warm_steps}"
-        )
-        if not os.path.isfile(os.path.join(step_dir, ".metadata")):
-            return ""
-        self.warm_ckpt_path = step_dir
-        return step_dir
-
-    def run_eval(self, c, *, global_batch: int = 0, run_tag: str = ""):
-        eval_steps = self.eval_steps_for(global_batch)
-        extra = [
-            "--validator.enable",
-            f"--validator.dataloader.dataset={self.val_dataset}",
-            f"--validator.steps={self.val_steps}",
-        ]
-        if self.warm_ckpt_path:
-            # Warm-start from the golden checkpoint: resume at step W (full state),
-            # train eval_steps more *post-warmup* steps, then validate. The fresh
-            # per-run dump keeps checkpoint.folder empty so initial_load_path is honored.
-            total = self.warm_steps + eval_steps
-            extra += [
-                "--checkpoint.enable",
-                f"--checkpoint.initial_load_path={self.warm_ckpt_path}",
-                "--checkpoint.no_initial_load_model_only",  # resume opt+sched, not just weights
-                "--checkpoint.load_only",  # load the warm state; never save (eval is throwaway)
-                f"--training.steps={total}",
-                f"--validator.freq={total}",
-            ]
-            if self.lr_total_steps:
-                extra.append(f"--lr_scheduler.total_steps={self.lr_total_steps}")
-        else:
-            # No warm checkpoint: from-scratch eval (toy/offline mode).
-            extra += [
-                f"--training.steps={eval_steps}",
-                f"--validator.freq={eval_steps}",
-            ]
-        # run_tag distinguishes repeated golden evals so noise calibration gets
-        # independent (non-cached) runs rather than the same cached log.
-        text = open(self._run(c, "eval" + run_tag, extra)).read()
-        loss = M.parse_validation_loss(text)
-        if loss is None:
-            return EvalResult(ok=False, crash_text=text[-4000:])
-        return EvalResult(ok=True, eval_loss=loss)
 
 
 def classify_crash(text: str) -> cc.CrashVerdict:

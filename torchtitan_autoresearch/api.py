@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """The Harness: enforces the constitution and exposes the Agent API.
 
 This is the only surface the agent touches (ARCHITECTURE.md section 5.6). It
@@ -38,7 +44,9 @@ class Harness:
         self.executor = executor
         self.session = session
         self.statefile = statefile
-        self.report_path = report_path or os.path.join(os.path.dirname(statefile) or ".", "report.json")
+        self.report_path = report_path or os.path.join(
+            os.path.dirname(statefile) or ".", "report.json"
+        )
         self.rules = load_constitution(constitution_path)
         self.ideas = load_ideas(ideas_path)
         self.ledger = Ledger(ledger_path)
@@ -51,12 +59,19 @@ class Harness:
             champ = {
                 "commit": self.state.champion_commit,
                 "tps_samples": self.state.champion_tps,
-                "tps_mean": (sum(self.state.champion_tps) / len(self.state.champion_tps))
-                if self.state.champion_tps else 0.0,
+                "tps_mean": (
+                    sum(self.state.champion_tps) / len(self.state.champion_tps)
+                )
+                if self.state.champion_tps
+                else 0.0,
             }
         golden = None
-        if self.state.golden_eval_loss is not None:
-            golden = {"commit": self.state.golden_commit, "eval_loss": self.state.golden_eval_loss}
+        if self.state.golden_commit:
+            golden = {
+                "commit": self.state.golden_commit,
+                "loss_band": self.state.loss_band,
+                "grad_band": self.state.grad_band,
+            }
         return Observation(
             rules=self.rules.raw,
             ledger=self.ledger.read(),
@@ -74,9 +89,14 @@ class Harness:
     # --- Agent -> Harness (the only write) ---
     def submit(self, c: Candidate, mode: str = "screen") -> Verdict:
         return gate_mod.gate(
-            c, rules=self.rules, state=self.state, ledger=self.ledger,
-            executor=self.executor, statefile=self.statefile,
-            session=self.session, mode=mode,
+            c,
+            rules=self.rules,
+            state=self.state,
+            ledger=self.ledger,
+            executor=self.executor,
+            statefile=self.statefile,
+            session=self.session,
+            mode=mode,
         )
 
     # --- report projection (Harness-pulled, persisted, served) ---

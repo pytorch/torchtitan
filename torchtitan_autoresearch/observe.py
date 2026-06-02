@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Observer: the single human-facing control + follow-along agent.
 
 This is the ONLY way to start autoresearch. It is a *different* actor from the
@@ -64,20 +70,35 @@ class Observer:
             print(f"a loop is already running for {self.run_dir} (pid {self._pid()})")
             return 1
         argv = [
-            sys.executable, "-m", "torchtitan_autoresearch.run",
-            "--tag", tag, "--dataset", dataset,
-            "--max-iters", str(max_iters), "--run-dir", self.run_dir,
+            sys.executable,
+            "-m",
+            "torchtitan_autoresearch.run",
+            "--tag",
+            tag,
+            "--dataset",
+            dataset,
+            "--max-iters",
+            str(max_iters),
+            "--run-dir",
+            self.run_dir,
         ]
         with open(self.loop_log, "w") as f:
             p = subprocess.Popen(
-                argv, stdout=f, stderr=subprocess.STDOUT,
-                start_new_session=True, cwd=os.getcwd(),
+                argv,
+                stdout=f,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                cwd=os.getcwd(),
                 # Pin PYTHONUNBUFFERED so the loop's progress lines flush immediately
                 # to loop.out -- it's a file, not a TTY, so a shell that doesn't
                 # already export this would block-buffer stdout and the observer's
                 # watch/console would only see progress in delayed chunks.
-                env={**os.environ, "PYTHONPATH": os.getcwd(),
-                     "AR_RUN_FROM_OBSERVER": "1", "PYTHONUNBUFFERED": "1"},
+                env={
+                    **os.environ,
+                    "PYTHONPATH": os.getcwd(),
+                    "AR_RUN_FROM_OBSERVER": "1",
+                    "PYTHONUNBUFFERED": "1",
+                },
             )
         self._proc = p
         with open(self.pidfile, "w") as f:
@@ -149,15 +170,18 @@ class Observer:
         running = "running" if self.is_running() else "stopped/idle"
         lines = [
             f"experiment @ {self.run_dir}  [{running}]",
-            f"  champion: {champ}  (commit {st.get('champion_commit','-')})",
-            f"  golden:   eval_loss={st.get('golden_eval_loss')}",
-            f"  candidates: {len(rows)}  " + " ".join(f"{k}={v}" for k, v in sorted(by_status.items())),
+            f"  champion: {champ}  (commit {st.get('champion_commit', '-')})",
+            f"  golden:   loss_band={st.get('loss_band')} grad_band={st.get('grad_band')} (faithfulness)",
+            f"  candidates: {len(rows)}  "
+            + " ".join(f"{k}={v}" for k, v in sorted(by_status.items())),
         ]
         if st.get("family_deferred"):
             lines.append(f"  deferred families: {st['family_deferred']}")
         for r in rows[-3:]:
-            lines.append(f"    {r['status']:8s} {r['verdict']:8s} {r['tps_mean']:>7s} tps  "
-                         f"verify={r['verify']:9s} {r['label']}")
+            lines.append(
+                f"    {r['status']:8s} {r['verdict']:8s} {r['tps_mean']:>7s} tps  "
+                f"verify={r['verify']:9s} {r['label']}"
+            )
         if rep.get("plan"):
             lines.append(f"  agent plan: {rep['plan']}")
         return "\n".join(lines)
@@ -166,32 +190,77 @@ class Observer:
         ql = q.lower()
         rows = self.ledger.read()
         st = self._state()
-        if any(w in ql for w in ("status", "current", "how is", "how's", "going", "overall", "summary")):
+        if any(
+            w in ql
+            for w in (
+                "status",
+                "current",
+                "how is",
+                "how's",
+                "going",
+                "overall",
+                "summary",
+            )
+        ):
             return self.status()
         if any(w in ql for w in ("best", "champion", "fastest")):
             tps = st.get("champion_tps") or []
-            return (f"Champion is {int(tps[-1])} tps (commit {st.get('champion_commit')}), "
-                    f"golden eval_loss {st.get('golden_eval_loss')}.") if tps else "No champion yet."
+            return (
+                (
+                    f"Champion is {int(tps[-1])} tps (commit {st.get('champion_commit')}); "
+                    f"kept because it is faster than the prior best and faithful to the golden "
+                    f"(within loss_band {st.get('loss_band')}, grad_band {st.get('grad_band')})."
+                )
+                if tps
+                else "No champion yet."
+            )
         if any(w in ql for w in ("how many", "count", "progress")):
             return f"{len(rows)} candidates run so far; loop is {'running' if self.is_running() else 'not running'}."
         if "reject" in ql or "discard" in ql or "why" in ql:
-            bad = [r for r in rows if r["status"] in ("discard", "crash", "oom", "invalid")]
-            return ("Rejected:\n" + "\n".join(
-                f"  {r['label']}: {r['status']}/{r['verdict']} (crash={r['crash_class']})" for r in bad[-5:])
-            ) if bad else "Nothing rejected yet."
+            bad = [
+                r for r in rows if r["status"] in ("discard", "crash", "oom", "invalid")
+            ]
+            return (
+                (
+                    "Rejected:\n"
+                    + "\n".join(
+                        f"  {r['label']}: {r['status']}/{r['verdict']} (crash={r['crash_class']})"
+                        for r in bad[-5:]
+                    )
+                )
+                if bad
+                else "Nothing rejected yet."
+            )
         if "defer" in ql or "stuck" in ql:
             return f"Deferred families: {st.get('family_deferred') or 'none'}."
         if "quality" in ql or "eval" in ql:
             kept = [r for r in rows if r["status"] == "keep"]
-            return ("Quality (kept):\n" + "\n".join(
-                f"  {r['label']}: verify={r['verify']} margin={r['quality_margin']}" for r in kept)) if kept else "none kept yet"
+            return (
+                (
+                    "Quality (kept):\n"
+                    + "\n".join(
+                        f"  {r['label']}: verify={r['verify']} margin={r['quality_margin']}"
+                        for r in kept
+                    )
+                )
+                if kept
+                else "none kept yet"
+            )
         if "recent" in ql or "last" in ql or "latest" in ql:
-            return "\n".join(f"{r['label']}: {r['status']} ({r['tps_mean']} tps)" for r in rows[-5:]) or "nothing yet"
+            return (
+                "\n".join(
+                    f"{r['label']}: {r['status']} ({r['tps_mean']} tps)"
+                    for r in rows[-5:]
+                )
+                or "nothing yet"
+            )
         # Unrecognized phrasing: this is a keyword router, not an LLM, so fall back
         # to the live status (grounded) rather than a help string.
-        return (self.status() +
-                "\n(note: free-form Q&A needs an LLM backend; I matched on keywords. "
-                "Try: best, progress, rejected/why, deferred, quality, recent.)")
+        return (
+            self.status()
+            + "\n(note: free-form Q&A needs an LLM backend; I matched on keywords. "
+            "Try: best, progress, rejected/why, deferred, quality, recent.)"
+        )
 
     # --- full free-form Q&A via an LLM (falls back to keyword answer offline) ---
     def context(self) -> str:
@@ -205,7 +274,8 @@ class Observer:
                     f"  {r['label']}: status={r['status']} verdict={r['verdict']} "
                     f"tps={r['tps_mean']} cv={r['tps_cv']} verify={r['verify']} "
                     f"quality_margin={r['quality_margin']} crash={r['crash_class']} "
-                    f"rationale={r.get('rationale','')}")
+                    f"rationale={r.get('rationale', '')}"
+                )
         rep = self._report()
         if rep:
             parts.append("\nAgent report (its own learnings): " + json.dumps(rep))
@@ -226,8 +296,12 @@ class Observer:
             f"STATE:\n{self.context()}\n\nQUESTION: {question}"
         )
         try:
-            out = subprocess.run(["claude", "-p", prompt], capture_output=True,
-                                 text=True, timeout=timeout)
+            out = subprocess.run(
+                ["claude", "-p", prompt],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
             return out.stdout.strip() or self.answer(question)
         except (subprocess.TimeoutExpired, OSError):
             return self.answer(question)
@@ -261,7 +335,9 @@ class Observer:
                         if changed:
                             print("\n" + self.status())
                         if not running and rows and not done:
-                            print("\n[observer] the loop has finished. Ask questions, or 'quit'.")
+                            print(
+                                "\n[observer] the loop has finished. Ask questions, or 'quit'."
+                            )
                             done = True
                         print("> ", end="", flush=True)
                     seen, champ = len(rows), cur
@@ -270,8 +346,10 @@ class Observer:
         t = threading.Thread(target=broadcaster, daemon=True)
         t.start()
         llm = "(LLM-backed)" if shutil.which("claude") else "(offline keyword mode)"
-        print(f"Interactive observer {llm}. Ask anything, 'status', or 'quit' "
-              "('quit'/Ctrl-C stops the experiment).")
+        print(
+            f"Interactive observer {llm}. Ask anything, 'status', or 'quit' "
+            "('quit'/Ctrl-C stops the experiment)."
+        )
         print("> ", end="", flush=True)
         try:
             for line in sys.stdin:
@@ -317,23 +395,29 @@ class Observer:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="torchtitan_autoresearch.observe",
-                                 description="Start and follow autoresearch (the only entry point).")
+    ap = argparse.ArgumentParser(
+        prog="torchtitan_autoresearch.observe",
+        description="Start and follow autoresearch (the only entry point).",
+    )
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("start", "watch", "status", "ask", "stop"):
         p = sub.add_parser(name)
         p.add_argument("--tag", default=None)
         p.add_argument("--run-dir", default=None)
         if name == "start":
-            p.add_argument("--dataset", default="c4",
-                           help="dataset for training and its held-out eval split "
-                                "(c4 real/streamed; c4_test local/offline)")
+            p.add_argument(
+                "--dataset",
+                default="c4",
+                help="dataset for training and its held-out eval split "
+                "(c4 real/streamed; c4_test local/offline)",
+            )
             p.add_argument("--max-iters", type=int, default=8)
         if name == "ask":
             p.add_argument("question")
     args = ap.parse_args(argv)
     if args.cmd == "start" and not args.tag:
         import datetime
+
         args.tag = "qwen3-" + datetime.datetime.now().strftime("%m%d-%H%M%S")
         print(f"[observer] no --tag given; using auto tag: {args.tag}")
     obs = Observer(_run_dir(args.tag, args.run_dir))
@@ -344,6 +428,7 @@ def main(argv: list[str] | None = None) -> int:
         # GPU children are torn down. There is no detached mode.
         obs.start(tag=args.tag, dataset=args.dataset, max_iters=args.max_iters)
         import atexit
+
         atexit.register(obs.stop)
         for sig in (signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, lambda *_: sys.exit(0))  # -> atexit -> obs.stop()
@@ -358,7 +443,9 @@ def main(argv: list[str] | None = None) -> int:
         try:
             obs.watch()
         except KeyboardInterrupt:
-            print("\n[observer] detached (experiment still running; use `stop` to end it)")
+            print(
+                "\n[observer] detached (experiment still running; use `stop` to end it)"
+            )
     elif args.cmd == "status":
         print(obs.status())
     elif args.cmd == "ask":
