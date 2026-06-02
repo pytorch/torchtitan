@@ -11,7 +11,8 @@ Each function returns a complete ``RLTrainer.Config`` and is discoverable by
 ``ConfigManager`` via ``--module rl --config <function_name>``.
 """
 
-from dataclasses import dataclass, field
+import dataclasses
+from dataclasses import dataclass
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -35,29 +36,55 @@ from torchtitan.protocols.model import ModelConfigConverter
 _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
 
 
-class FlexKernelOptionsConverter(ModelConfigConverter):
-    """Traverse all FlexAttention layers and set kernel options."""
+class BatchInvariantFlexConverter(ModelConfigConverter):
+    """Pin flex attention kernel options for batch-invariant mode.
+
+    Sets fixed BLOCK_M/BLOCK_N=16 and BACKEND=TRITON on all
+    FlexAttention layers.
+
+    BACKEND=TRITON is to avoid flex_decode kernel.
+    """
+
+    # the triton BLOCK_N tile size needs to be pinned for stable numerics and
+    # needs to match vLLM's for identical results, today vLLM default is 16
+    # TODO: run some experiments to determine impact of small vs large tile sizes
+    _BLOCK_M = 16
+    _BLOCK_N = 16
 
     @dataclass(kw_only=True, slots=True)
     class Config(ModelConfigConverter.Config):
-        kernel_options: dict = field(default_factory=dict)
+        pass
 
     def __init__(self, config: Config):
-        self.kernel_options = config.kernel_options
+        pass
 
     def convert(self, model_config) -> None:
         for layer_cfg in model_config.layers:
             inner = layer_cfg.attention.inner_attention
             if isinstance(inner, FlexAttention.Config):
-                inner.kernel_options.update(self.kernel_options)
+                inner.kernel_options["BACKEND"] = "TRITON"
+                inner.kernel_options["BLOCK_M"] = self._BLOCK_M
+                inner.kernel_options["BLOCK_N"] = self._BLOCK_N
 
 
 def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
-    """GRPO training config for Qwen3-0.6B with varlen attention (6 GPUs: 4 gen + 2 train)."""
+    """GRPO training config for Qwen3-0.6B (6 GPUs: 4 gen + 2 train)."""
+    group_size = 8
     return RLTrainer.Config(
         model_spec=model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
+        num_prompts_per_step=5,
+        num_validation_samples=20,
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
+        validation_env=SumDigitsEnv.Config(
+            seed=99, correctness_reward=1.0, format_reward=0.3
+        ),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        batcher=Batcher.Config(
+            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
+        ),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -66,8 +93,15 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
             ),
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 disable_loss_parallel=True,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
             ),
             loss=GRPOLoss.Config(),
         ),
@@ -79,8 +113,9 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
+            checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
-                n=8,
+                n=group_size,
                 temperature=0.8,
                 top_p=0.95,
                 max_tokens=100,
@@ -91,15 +126,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
 
 def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B with flex attention (4 GPUs: 2 gen + 2 train)."""
-    spec = model_registry(
-        "0.6B",
-        attn_backend="flex",
-        converters=[
-            FlexKernelOptionsConverter.Config(
-                kernel_options={"SPLIT_KV": 1, "FORCE_USE_FLEX_ATTENTION": True},
-            ),
-        ],
-    )
+    spec = model_registry("0.6B", attn_backend="flex")
     group_size = 8
     return RLTrainer.Config(
         model_spec=spec,
@@ -107,6 +134,8 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
         num_steps=10,
         num_prompts_per_step=5,
         num_validation_samples=20,
+        # TODO: add aot_eager compiling overall, today it doesn't work because
+        # we are missing mechanism to scoop Flex region to plug in inductor backend support
         env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
         validation_env=SumDigitsEnv.Config(
             seed=99, correctness_reward=1.0, format_reward=0.3
@@ -137,7 +166,6 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            gpu_memory_limit=0.7,
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
@@ -159,73 +187,27 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B with flex attention and batch invariance
     for bitwise-identical numerics between trainer and generator (4 GPUs: 2 gen + 2 train).
     """
-    spec = model_registry(
+    config = rl_grpo_qwen3_0_6b_flex()
+    config.model_spec = model_registry(
         "0.6B",
         attn_backend="flex",
-        converters=[
-            FlexKernelOptionsConverter.Config(
-                kernel_options={
-                    "FORCE_USE_FLEX_ATTENTION": True,
-                    "BLOCK_M": 16,
-                    "BLOCK_N": 16,
-                },
-            ),
-        ],
+        converters=[BatchInvariantFlexConverter.Config()],
     )
-    return RLTrainer.Config(
-        model_spec=spec,
-        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
-        num_steps=10,
-        num_prompts_per_step=5,
-        num_validation_samples=20,
-        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
-        validation_env=SumDigitsEnv.Config(
-            seed=99, correctness_reward=1.0, format_reward=0.3
-        ),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
-        trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=2e-6),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
-                decay_type="linear",
-            ),
-            training=TrainingConfig(dtype="bfloat16"),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=2,
-                disable_loss_parallel=True,
-                enable_sequence_parallel=False,
-            ),
-            checkpoint=CheckpointManager.Config(
-                enable=True,
-                initial_load_in_hf=True,
-                interval=10,
-                last_save_model_only=False,
-            ),
-            debug=_BATCH_INVARIANT_DEBUG,
-            loss=GRPOLoss.Config(),
-        ),
-        generator=VLLMGenerator.Config(
-            model_dtype="bfloat16",
-            parallelism=ParallelismConfig(
-                tensor_parallel_degree=2,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
-            ),
-            checkpoint=CheckpointManager.Config(enable=False),
-            sampling=SamplingConfig(
-                n=8,
-                temperature=0.8,
-                top_p=0.95,
-                max_tokens=100,
-            ),
-            debug=_BATCH_INVARIANT_DEBUG,
+    block_size = config.model_spec.model.layers[0].attention.inner_attention.block_size
+    config.batcher = dataclasses.replace(
+        config.batcher, per_sample_pad_multiple=block_size
+    )
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        debug=_BATCH_INVARIANT_DEBUG,
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism, enable_sequence_parallel=False
         ),
     )
+    config.generator = dataclasses.replace(
+        config.generator, debug=_BATCH_INVARIANT_DEBUG
+    )
+    return config
 
 
 def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:

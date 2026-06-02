@@ -114,21 +114,17 @@ class Batcher(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         batch: BatchConfig = field(default_factory=BatchConfig)
+        per_sample_pad_multiple: int | None = None
+        """When non-zero, pad each sample to a multiple of this value
+        before packing. Used by flex attention in batch-invariant mode
+        so that block boundaries align regardless of batch composition."""
 
-    def __init__(
-        self,
-        config: Config,
-        *,
-        pad_id: int,
-        batch_invariant: bool = False,
-        block_size: int = 128,
-    ):
+    def __init__(self, config: Config, *, pad_id: int):
         self.local_batch_size = config.batch.local_batch_size
         self.global_batch_size = config.batch.global_batch_size
         self.seq_len = config.batch.seq_len
         self.pad_id = pad_id
-        self._batch_invariant = batch_invariant
-        self._block_size = block_size
+        self._per_sample_pad_multiple = config.per_sample_pad_multiple
 
     def num_tokens_target(self, dp_degree: int) -> int:
         global_batch_size = self.global_batch_size
@@ -212,10 +208,6 @@ class Batcher(Configurable):
 
         return microbatches, num_global_valid_tokens, packing_metrics
 
-    @staticmethod
-    def _align_to(length: int, alignment: int) -> int:
-        return ((length + alignment - 1) // alignment) * alignment
-
     def _pack_episodes(self, episodes: list[Episode]) -> Iterator[dict]:
         """Pack all episodes into [1, seq_len] rows.
 
@@ -223,8 +215,8 @@ class Batcher(Configurable):
         ``input_ids = raw[:-1]`` and ``labels = raw[1:]`` (both length
         N-1), matching the pre-training dataloader convention.
 
-        When ``_batch_invariant`` is True, each sample is padded to a
-        multiple of ``_block_size`` so that flex attention block
+        When ``_per_sample_pad_multiple`` is non-zero, each sample is padded
+        to a multiple of that value so that flex attention block
         boundaries align identically regardless of batch composition.
         """
         pad_values = {
@@ -250,9 +242,10 @@ class Batcher(Configurable):
                     "loss_mask": loss_mask[1:],
                     "advantages": advantages[1:],
                 }
-                if self._batch_invariant:
+                if self._per_sample_pad_multiple:
                     sample_len = len(sample["input_ids"])
-                    padded_len = self._align_to(sample_len, self._block_size)
+                    align = self._per_sample_pad_multiple
+                    padded_len = ((sample_len + align - 1) // align) * align
                     pad_count = padded_len - sample_len
                     if pad_count > 0:
                         for key in sample:

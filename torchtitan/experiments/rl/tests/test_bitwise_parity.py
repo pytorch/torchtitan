@@ -40,12 +40,10 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-import torch.nn.functional as F
 from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
-from torch.distributed.tensor import DTensor
 from torch.nn.attention.flex_attention import and_masks
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig
@@ -53,11 +51,14 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpoint import CheckpointManager
-
+from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.distributed.utils import is_in_batch_invariant_mode, set_batch_invariance
-from torchtitan.experiments.rl.batcher import Batcher
+from torchtitan.distributed.utils import (
+    is_in_batch_invariant_mode,
+    set_batch_invariance,
+)
+from torchtitan.experiments.rl.actors.trainer import compute_logprobs
 from torchtitan.experiments.rl.config_registry import (
     rl_grpo_qwen3_0_6b_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
@@ -266,7 +267,9 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
     batch_invariant = is_in_batch_invariant_mode()
 
     if batch_invariant:
-        padded_seq_lens = [Batcher._align_to(sl, block_size) for sl in seq_lens]
+        padded_seq_lens = [
+            ((sl + block_size - 1) // block_size) * block_size for sl in seq_lens
+        ]
     else:
         padded_seq_lens = list(seq_lens)
 
@@ -294,19 +297,20 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
 
     logits = model(packed_ids, attention_masks=attention_masks, positions=positions)
 
-    if isinstance(logits, DTensor):
-        logits = logits.to_local()
+    # Build pre-shifted labels matching the trainer convention:
+    # labels[i] = packed_ids[i+1] for valid positions, IGNORE_INDEX otherwise.
+    labels = torch.full_like(packed_ids, IGNORE_INDEX)
+    offset = 0
+    for sl, psl in zip(seq_lens, padded_seq_lens):
+        labels[0, offset : offset + sl - 1] = packed_ids[0, offset + 1 : offset + sl]
+        offset += psl
 
-    log_probs = F.log_softmax(logits[:, :-1, :].float(), dim=-1)
-    target_ids = packed_ids[:, 1:]
+    logprobs = compute_logprobs(logits, labels)
 
     results = []
     offset = 0
     for sl, psl in zip(seq_lens, padded_seq_lens):
-        seq_lps = log_probs[0, offset : offset + sl - 1]
-        seq_tgt = target_ids[0, offset : offset + sl - 1]
-        seq_lps = seq_lps.gather(1, seq_tgt.unsqueeze(-1)).squeeze(-1)
-        results.append(seq_lps)
+        results.append(logprobs[0, offset : offset + sl - 1])
         offset += psl
     return results
 
@@ -328,17 +332,19 @@ def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
 
     logits = model(padded, attention_masks=attention_masks, positions=positions)
 
-    if isinstance(logits, DTensor):
-        logits = logits.to_local()
+    # Build pre-shifted labels matching the trainer convention:
+    # labels[i] = padded[i+1] for valid positions, IGNORE_INDEX otherwise.
+    labels = torch.full_like(padded, IGNORE_INDEX)
+    for i, t in enumerate(input_tensors):
+        seq_len = t.shape[0]
+        labels[i, : seq_len - 1] = t[1:seq_len]
 
-    log_probs = F.log_softmax(logits[:, :-1, :].float(), dim=-1)
+    logprobs = compute_logprobs(logits, labels)
 
     results = []
     for i, t in enumerate(input_tensors):
         seq_len = t.shape[0]
-        seq_lps = log_probs[i, : seq_len - 1]
-        seq_lps = seq_lps.gather(1, t[1:seq_len].unsqueeze(-1)).squeeze(-1)
-        results.append(seq_lps)
+        results.append(logprobs[i, : seq_len - 1])
     return results
 
 
@@ -587,6 +593,12 @@ class BitwiseParityTestBase(unittest.TestCase):
         a, b = a[:n], b[:n]
 
         max_delta = (a - b).abs().max().item() if n > 0 else 0.0
+        num_diff = (a != b).sum().item()
+        print(
+            f"  {name}: max_delta={max_delta:.2e}, "
+            f"num_diff={num_diff}/{n}, "
+            f"bitwise_equal={torch.equal(a, b)}"
+        )
         self.assertTrue(
             torch.equal(a, b),
             f"{name}: NOT bitwise identical (max_delta={max_delta:.2e})\n"

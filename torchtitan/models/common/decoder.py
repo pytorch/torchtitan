@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import torch
 from torch.nn.attention.flex_attention import and_masks
 
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -263,6 +264,12 @@ class Decoder(BaseModel):
             seq_len,
             seq_len,
             BLOCK_SIZE=attn_config.inner_attention.block_size,
+            # when separate_full_blocks = True, kernel iterates through
+            # full blocks first (blocks where all elements are unmasked)
+            # but which blocks are "full" vs "partial" changes depending
+            # on the particular batch
+            # for batch invariance, we disable this optimization
+            separate_full_blocks=not is_in_batch_invariant_mode(),
         )
 
     def get_attention_masks(

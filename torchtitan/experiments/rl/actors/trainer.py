@@ -15,7 +15,6 @@ import torch.distributed.distributed_c10d as c10d
 import torch.nn.functional as F
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
-from torch.nn.attention.flex_attention import and_masks
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -33,13 +32,7 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingBatch
-from torchtitan.models.common.attention import (
-    create_attention_mask,
-    create_varlen_metadata_for_document,
-    FlexAttention,
-    get_causal_mask_mod,
-    get_document_mask_mod,
-)
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
@@ -214,13 +207,6 @@ class PolicyTrainer(Actor, Configurable):
         else:
             self.sd_adapter = None
 
-        # Detect attention backend for mask creation
-        inner_attn_cfg = model_spec.model.layers[0].attention.inner_attention
-        self._use_flex = isinstance(inner_attn_cfg, FlexAttention.Config)
-        self._batch_invariant = config.debug.batch_invariant
-        if self._use_flex:
-            self._flex_block_size = inner_attn_cfg.block_size
-
         # Create training policy model
         model = self._build_model(model_spec, config, device_type)
         model.train()
@@ -336,20 +322,6 @@ class PolicyTrainer(Actor, Configurable):
 
         return model
 
-    def _create_flex_masks(self, positions: torch.Tensor):
-        """Create a flex attention BlockMask from packed positions."""
-        B, S = positions.shape
-        mask_mod = and_masks(get_causal_mask_mod(), get_document_mask_mod(positions))
-        return create_attention_mask(
-            mask_mod,
-            B,
-            None,
-            S,
-            S,
-            BLOCK_SIZE=self._flex_block_size,
-            separate_full_blocks=not self._batch_invariant,
-        )
-
     @endpoint
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
         """Sync the structured-logger step counter from the controller."""
@@ -435,10 +407,7 @@ class PolicyTrainer(Actor, Configurable):
         generator_logprobs = local_batch.generator_logprobs.to(device)
         advantages = local_batch.advantages.to(device)
 
-        if self._use_flex:
-            attention_masks = self._create_flex_masks(positions)
-        else:
-            attention_masks = create_varlen_metadata_for_document(positions)
+        attention_masks = model.get_attention_masks(positions)
 
         with sl.log_trace_span("model_forward"):
             logits = model(
