@@ -31,3 +31,9 @@ Where the relevant code lives in TorchTitan:
 
 Save the 64-step training log to `{{WORKSPACE}}/{{LABEL}}/{{TASK_ID}}/train.log`
 so the loss-curve check can read it.
+
+**Stop condition (important).** The complete deliverable is: your code edits + ONE
+successful 64-step training run whose loss decreases and stays finite. As soon as
+that single run succeeds, you are DONE — stop and report. Do NOT run repeated
+trainings, hyperparameter sweeps, ablations, baseline comparisons, or extended
+verification. If the first run fails, fix and retry, but keep iterations minimal.

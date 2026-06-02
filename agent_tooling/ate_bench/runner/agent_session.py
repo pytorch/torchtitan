@@ -46,7 +46,11 @@ def run_session(
         )
         rc, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
     except subprocess.TimeoutExpired as exc:
-        rc, stdout, stderr = 124, (exc.stdout or ""), (exc.stderr or "") + "\n[timeout]"
+        def _s(x):
+            if x is None:
+                return ""
+            return x.decode("utf-8", "replace") if isinstance(x, (bytes, bytearray)) else x
+        rc, stdout, stderr = 124, _s(exc.stdout), _s(exc.stderr) + "\n[timeout]"
     gpu = mon.stop() if mon else {}
 
     tp = Path(transcript_path)
