@@ -221,7 +221,10 @@ class ParallelismConfig:
             )
         if self.enable_fsdp_symm_mem and (
             not torch.cuda.is_available()
-            or torch.cuda.get_device_capability() < (9, 0)
+            or (
+                torch.version.hip is None
+                and torch.cuda.get_device_capability() < (9, 0)
+            )
         ):
             raise ValueError(
                 "For NVIDIA GPUs, parallelism.enable_fsdp_symm_mem is only supported "
