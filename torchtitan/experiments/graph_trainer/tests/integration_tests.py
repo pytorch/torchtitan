@@ -353,8 +353,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep_full_inductor",
             ngpu=8,
         ),
-        # TODO: HybridEP requires the `deep_ep` package, which is not always
-        # available in CI. Re-enable where deep_ep is installed.
         OverrideDefinitions(
             [
                 [
