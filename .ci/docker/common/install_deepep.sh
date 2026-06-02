@@ -10,7 +10,7 @@
 # breakage from upstream changes. Update the commit hash when
 # upgrading to a newer DeepEP version.
 
-set -ex
+set -eux
 
 DEEPEP_COMMIT=${DEEPEP_COMMIT:-1b8f467}
 
