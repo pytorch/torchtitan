@@ -85,8 +85,7 @@ jobs:
 
         # Install DeepEP for HybridEP integration test
         bash /install_deepep.sh
-
-        sleep 7200
+        pip freeze
 
         # Enable CPP stacktraces for debugging symmetric memory initialization errors.
         # Disable Nvlink Sharp. The CI machine seems to be unstable state to support
