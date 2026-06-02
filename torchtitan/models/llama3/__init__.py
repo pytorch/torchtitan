@@ -15,6 +15,7 @@ from torchtitan.models.common import (
     Embedding,
     Linear,
     RMSNorm,
+    RoPE,
     TransformerBlock,
 )
 from torchtitan.models.common.config_utils import (
@@ -69,10 +70,7 @@ def _build_llama3_layers(
     dim: int,
     n_heads: int,
     hidden_dim: int,
-    rope_max_seq_len: int,
-    rope_theta: float,
-    rope_backend: str,
-    rope_scaling: str,
+    rope: RoPE.Config,
     n_kv_heads: int | None = None,
     fuse_qkv: bool = False,
     attn_backend: str,
@@ -96,10 +94,7 @@ def _build_llama3_layers(
                     inner_attention=inner_attention,
                     fuse_qkv=fuse_qkv,
                     mask_type=mask_type,
-                    rope_max_seq_len=rope_max_seq_len,
-                    rope_theta=rope_theta,
-                    rope_backend=rope_backend,
-                    rope_scaling=rope_scaling,
+                    rope=rope,
                 ),
                 feed_forward=make_ffn_config(
                     dim=dim,
@@ -133,10 +128,13 @@ def _debugmodel(attn_backend: str) -> Llama3Model.Config:
             n_kv_heads=None,
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
             fuse_qkv=False,
-            rope_max_seq_len=131072,
-            rope_theta=500000,
-            rope_backend="complex",
-            rope_scaling="llama",
+            rope=RoPE.Config(
+                dim=dim // n_heads,
+                max_seq_len=131072,
+                theta=500000,
+                backend="complex",
+                scaling="llama",
+            ),
             attn_backend=attn_backend,
         ),
     )
@@ -163,10 +161,13 @@ def _debugmodel_fused_qkv(attn_backend: str) -> Llama3Model.Config:
             n_kv_heads=None,
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
             fuse_qkv=True,
-            rope_max_seq_len=131072,
-            rope_theta=500000,
-            rope_backend="complex",
-            rope_scaling="llama",
+            rope=RoPE.Config(
+                dim=dim // n_heads,
+                max_seq_len=131072,
+                theta=500000,
+                backend="complex",
+                scaling="llama",
+            ),
             attn_backend=attn_backend,
         ),
     )
@@ -202,10 +203,13 @@ def _1b(attn_backend: str) -> Llama3Model.Config:
                 dim, multiple_of=1024, ffn_dim_multiplier=1.5
             ),
             fuse_qkv=False,
-            rope_max_seq_len=131072,
-            rope_theta=500000,
-            rope_backend="complex",
-            rope_scaling="llama",
+            rope=RoPE.Config(
+                dim=dim // n_heads,
+                max_seq_len=131072,
+                theta=500000,
+                backend="complex",
+                scaling="llama",
+            ),
             attn_backend=attn_backend,
         ),
     )
@@ -241,10 +245,13 @@ def _3b(attn_backend: str) -> Llama3Model.Config:
                 dim, multiple_of=1024, ffn_dim_multiplier=1.0
             ),
             fuse_qkv=False,
-            rope_max_seq_len=131072,
-            rope_theta=500000,
-            rope_backend="complex",
-            rope_scaling="llama",
+            rope=RoPE.Config(
+                dim=dim // n_heads,
+                max_seq_len=131072,
+                theta=500000,
+                backend="complex",
+                scaling="llama",
+            ),
             attn_backend=attn_backend,
         ),
     )
@@ -277,10 +284,13 @@ def _8b(attn_backend: str) -> Llama3Model.Config:
                 dim, multiple_of=1024, ffn_dim_multiplier=1.3
             ),
             fuse_qkv=False,
-            rope_max_seq_len=131072,
-            rope_theta=500000,
-            rope_backend="complex",
-            rope_scaling="llama",
+            rope=RoPE.Config(
+                dim=dim // n_heads,
+                max_seq_len=131072,
+                theta=500000,
+                backend="complex",
+                scaling="llama",
+            ),
             attn_backend=attn_backend,
         ),
     )
@@ -313,10 +323,13 @@ def _70b(attn_backend: str) -> Llama3Model.Config:
                 dim, multiple_of=4096, ffn_dim_multiplier=1.3
             ),
             fuse_qkv=False,
-            rope_max_seq_len=131072,
-            rope_theta=500000,
-            rope_backend="complex",
-            rope_scaling="llama",
+            rope=RoPE.Config(
+                dim=dim // n_heads,
+                max_seq_len=131072,
+                theta=500000,
+                backend="complex",
+                scaling="llama",
+            ),
             attn_backend=attn_backend,
         ),
     )
@@ -349,10 +362,13 @@ def _405b(attn_backend: str) -> Llama3Model.Config:
                 dim, multiple_of=4096, ffn_dim_multiplier=1.2
             ),
             fuse_qkv=False,
-            rope_max_seq_len=131072,
-            rope_theta=500000,
-            rope_backend="complex",
-            rope_scaling="llama",
+            rope=RoPE.Config(
+                dim=dim // n_heads,
+                max_seq_len=131072,
+                theta=500000,
+                backend="complex",
+                scaling="llama",
+            ),
             attn_backend=attn_backend,
         ),
     )

@@ -15,6 +15,7 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 
+from .rope import MRoPE
 from .vision_encoder import Qwen3VLVisionEncoder
 
 
@@ -94,7 +95,13 @@ class Qwen3VLModel(Qwen3Model):
 
         self.mrope_section = config.mrope_section
         for layer in self.layers.values():
-            layer.attention.rope.mrope_section = self.mrope_section
+            if not isinstance(layer.attention.rope, MRoPE):
+                raise ValueError("Qwen3-VL attention layers must use MRoPE.")
+            if layer.attention.rope.config.mrope_section != self.mrope_section:
+                raise ValueError(
+                    "Qwen3-VL model mrope_section must match attention MRoPE "
+                    "configuration."
+                )
 
         self.spatial_merge_size = config.vision_encoder.spatial_merge_size
 

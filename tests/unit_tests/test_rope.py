@@ -21,6 +21,7 @@ from torchtitan.models.common.rope import (
     apply_rotary_emb_cos_sin,
     RoPE,
 )
+from torchtitan.models.qwen3_vl.rope import MRoPE
 
 
 class TestApplyRotaryEmbCosSin(unittest.TestCase):
@@ -157,12 +158,11 @@ class TestMRoPECache(unittest.TestCase):
         torch.manual_seed(42)
         bsz, seqlen, n_heads = 2, 3, 4
         head_dim = 12
-        rope = RoPE.Config(
+        rope = MRoPE.Config(
             dim=head_dim,
             max_seq_len=8,
-            backend="cos_sin",
+            mrope_section=[2, 1, 1],
         ).build()
-        rope.mrope_section = [2, 1, 1]
         position_ids = torch.tensor(
             [
                 [[0, 1, 2], [3, 4, 5]],  # temporal
@@ -214,6 +214,17 @@ class TestPerLayerRoPECache(unittest.TestCase):
 
         self.assertTrue(all(isinstance(rope, RoPE) for rope in layer_ropes))
         self.assertEqual(len({id(rope) for rope in layer_ropes}), len(layer_ropes))
+
+    def test_decoder_builds_distinct_rope_configs_per_attention_layer(self):
+        from torchtitan.models.llama3 import llama3_configs
+
+        cfg = llama3_configs["debugmodel"]("sdpa")
+        layer_rope_cfgs = [layer.attention.rope for layer in cfg.layers]
+
+        self.assertEqual(
+            len({id(rope_cfg) for rope_cfg in layer_rope_cfgs}),
+            len(layer_rope_cfgs),
+        )
 
 
 class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
