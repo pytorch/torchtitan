@@ -108,7 +108,7 @@ def _build_llama4_layers(
 
     layers = []
     for layer_id in range(n_layers):
-        use_rope = (layer_id % every_n_layers_nope) != 0
+        layer_rope = rope if (layer_id % every_n_layers_nope) != 0 else None
         moe_enabled = (layer_id + 1) % interleave_moe_layer_step == 0
 
         attn = make_gqa_config(
@@ -117,10 +117,9 @@ def _build_llama4_layers(
             n_kv_heads=n_kv_heads,
             wqkv_param_init=_LINEAR_INIT,
             wo_param_init=_depth_init(layer_id),
-            use_rope=use_rope,
             inner_attention=inner_attention,
             mask_type=mask_type,
-            rope=rope,
+            rope=layer_rope,
         )
 
         if moe_enabled:
@@ -207,7 +206,6 @@ def _debugmodel(
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
-            n_kv_heads=None,
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
             moe_hidden_dim=compute_moe_hidden_dim(dim),
             num_experts=8,
@@ -215,9 +213,7 @@ def _debugmodel(
             interleave_moe_layer_step=2,
             fixed_attn_block_size=256,
             attn_backend=attn_backend,
-            shared_experts_hidden_dim=None,
             moe_comm_backend=moe_comm_backend,
-            non_blocking_capacity_factor=None,
             rope=RoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=1048576,
@@ -273,11 +269,8 @@ def _17bx16e(
             num_experts=16,
             every_n_layers_nope=4,
             interleave_moe_layer_step=1,
-            fixed_attn_block_size=8192,
             attn_backend=attn_backend,
-            shared_experts_hidden_dim=None,
             moe_comm_backend=moe_comm_backend,
-            non_blocking_capacity_factor=None,
             rope=RoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=10485760,
@@ -333,11 +326,8 @@ def _17bx128e(
             num_experts=128,
             every_n_layers_nope=4,
             interleave_moe_layer_step=1,
-            fixed_attn_block_size=8192,
             attn_backend=attn_backend,
-            shared_experts_hidden_dim=None,
             moe_comm_backend=moe_comm_backend,
-            non_blocking_capacity_factor=None,
             rope=RoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=1048576,

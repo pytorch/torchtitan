@@ -143,7 +143,7 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
             "x": dense_activation_placement(tp=Replicate()),
         },
     )
-    if attention_cfg.use_rope:
+    if attention_cfg.rope is not None:
         attention_cfg.rope.sharding_config = ShardingConfig(
             state_shardings={"cache": dense_param_placement(tp=Replicate())},
         )

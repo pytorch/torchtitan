@@ -77,8 +77,7 @@ def _set_gpt_oss_layer_sharding(
     layer_cfg.ffn_norm.sharding_config = norm
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
 
-    # Attention: input x gathered to Replicate. RoPE is read from the attention
-    # layer's local cache.
+    # Attention: input x gathered to Replicate.
     # sinks parameter is sharded across heads via state_shardings.
     attention.sharding_config = ShardingConfig(
         state_shardings={"sinks": dense_param_placement(tp=Shard(0))},

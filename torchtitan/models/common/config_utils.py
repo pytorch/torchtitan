@@ -69,23 +69,17 @@ def make_gqa_config(
     wqkv_param_init: dict[str, Callable],
     wo_param_init: dict[str, Callable],
     inner_attention: Module.Config,
-    rope: RoPE.Config,
+    rope: RoPE.Config | None,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
     fuse_qkv: bool = False,
-    use_rope: bool = True,
     mask_type: str = "causal",
     qk_norm: RMSNorm.Config | None = None,
 ) -> GQAttention.Config:
     """Build a fully-specified GQAttention.Config."""
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
-    if rope.dim != per_head_dim:
-        raise ValueError(
-            f"RoPE dim must match attention head dim, got {rope.dim=} and "
-            f"{per_head_dim=}."
-        )
-    rope = dataclasses.replace(rope)
+    rope = dataclasses.replace(rope) if rope is not None else None
 
     if fuse_qkv:
         qkv = FusedQKVLinear.Config(
@@ -125,7 +119,6 @@ def make_gqa_config(
             param_init=wo_param_init,
         ),
         qk_norm=qk_norm,
-        use_rope=use_rope,
         inner_attention=inner_attention,
         mask_type=mask_type,
         rope=rope,

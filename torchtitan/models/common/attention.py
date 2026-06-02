@@ -672,10 +672,9 @@ class GQAttention(BaseAttention):
         qk_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
-        use_rope: bool = True
         inner_attention: Module.Config
         mask_type: str = "causal"
-        rope: RoPE.Config
+        rope: RoPE.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -689,8 +688,8 @@ class GQAttention(BaseAttention):
             else config.dim // config.n_heads
         )
         self.enable_gqa = self.n_heads > self.n_kv_heads
-        self.use_rope = config.use_rope
-        self.rope = config.rope.build()
+        self.use_rope = config.rope is not None
+        self.rope = config.rope.build() if config.rope is not None else None
 
         # Pluggable QKV projection
         self.qkv_linear = config.qkv_linear.build()
@@ -724,6 +723,7 @@ class GQAttention(BaseAttention):
 
         # Apply rotary embeddings
         if self.use_rope:
+            assert self.rope is not None
             xq, xk = self.rope(xq, xk, positions)
 
         # Handle iRoPE dict masks (Llama4)

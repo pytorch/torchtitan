@@ -73,6 +73,17 @@ class Decoder(BaseModel):
         # and fix the typing here
         layers: list  # list[TransformerBlock.Config] or subclass configs
 
+        @property
+        def max_seq_len(self) -> int:
+            # Llama4/iRoPE can have NoPE layers with ``rope=None``; use the
+            # first layer that carries RoPE to expose the model context length.
+            for layer_cfg in self.layers:
+                attention_cfg = getattr(layer_cfg, "attention", None)
+                rope_cfg = getattr(attention_cfg, "rope", None)
+                if rope_cfg is not None:
+                    return rope_cfg.max_seq_len
+            raise ValueError("Decoder config does not define RoPE max_seq_len.")
+
         def update_from_config(
             self,
             *,
@@ -150,7 +161,10 @@ class Decoder(BaseModel):
 
                 for layer_cfg in self.layers:
                     attention_cfg = getattr(layer_cfg, "attention", None)
-                    if attention_cfg is not None and hasattr(attention_cfg, "rope"):
+                    if (
+                        attention_cfg is not None
+                        and getattr(attention_cfg, "rope", None) is not None
+                    ):
                         rope_cfg = attention_cfg.rope
                         if seq_len > rope_cfg.max_seq_len:
                             raise ValueError(

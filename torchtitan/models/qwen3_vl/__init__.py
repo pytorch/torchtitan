@@ -348,7 +348,6 @@ def _debugmodel(attn_backend: str) -> Qwen3VLModel.Config:
             num_position_embeddings=1024,
             deepstack_visual_indices=[1, 2, 3],
         ),
-        mrope_section=[8, 8, 8],
     )
 
 
@@ -404,7 +403,6 @@ def _debugmodel_moe(
             num_position_embeddings=1024,
             deepstack_visual_indices=[1, 2, 3],
         ),
-        mrope_section=[8, 8, 8],
     )
 
 
@@ -455,7 +453,6 @@ def _2b(attn_backend: str) -> Qwen3VLModel.Config:
             num_position_embeddings=2304,
             deepstack_visual_indices=[5, 11, 17],
         ),
-        mrope_section=[24, 20, 20],
     )
 
 
@@ -505,7 +502,6 @@ def _8b(attn_backend: str) -> Qwen3VLModel.Config:
             num_position_embeddings=2304,
             deepstack_visual_indices=[8, 16, 24],
         ),
-        mrope_section=[24, 20, 20],
     )
 
 
@@ -564,7 +560,6 @@ def _30b_a3b(
             num_position_embeddings=2304,
             deepstack_visual_indices=[8, 16, 24],
         ),
-        mrope_section=[24, 20, 20],
     )
 
 
@@ -620,7 +615,6 @@ def _235b_a22b(
             num_position_embeddings=2304,
             deepstack_visual_indices=[8, 16, 24],
         ),
-        mrope_section=[24, 20, 20],
     )
 
 

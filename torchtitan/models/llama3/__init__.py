@@ -125,9 +125,7 @@ def _debugmodel(attn_backend: str) -> Llama3Model.Config:
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
-            n_kv_heads=None,
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
-            fuse_qkv=False,
             rope=RoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=131072,
@@ -158,7 +156,6 @@ def _debugmodel_fused_qkv(attn_backend: str) -> Llama3Model.Config:
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
-            n_kv_heads=None,
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
             fuse_qkv=True,
             rope=RoPE.Config(
@@ -202,7 +199,6 @@ def _1b(attn_backend: str) -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=1024, ffn_dim_multiplier=1.5
             ),
-            fuse_qkv=False,
             rope=RoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=131072,
@@ -244,7 +240,6 @@ def _3b(attn_backend: str) -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=1024, ffn_dim_multiplier=1.0
             ),
-            fuse_qkv=False,
             rope=RoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=131072,
@@ -283,7 +278,6 @@ def _8b(attn_backend: str) -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=1024, ffn_dim_multiplier=1.3
             ),
-            fuse_qkv=False,
             rope=RoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=131072,
@@ -322,7 +316,6 @@ def _70b(attn_backend: str) -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=4096, ffn_dim_multiplier=1.3
             ),
-            fuse_qkv=False,
             rope=RoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=131072,
@@ -361,7 +354,6 @@ def _405b(attn_backend: str) -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=4096, ffn_dim_multiplier=1.2
             ),
-            fuse_qkv=False,
             rope=RoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=131072,

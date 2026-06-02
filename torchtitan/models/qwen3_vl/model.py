@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 from torch import nn
@@ -15,7 +15,6 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 
-from .rope import MRoPE
 from .vision_encoder import Qwen3VLVisionEncoder
 
 
@@ -54,10 +53,6 @@ class Qwen3VLModel(Qwen3Model):
     class Config(Qwen3Model.Config):
         vision_encoder: Qwen3VLVisionEncoder.Config
 
-        # MRoPE section sizes for interleaved multi-dimensional RoPE
-        # [temporal, height, width] - controls how position dimensions are interleaved
-        mrope_section: list[int] = field(default_factory=lambda: [24, 20, 20])
-
         def update_from_config(
             self,
             *,
@@ -92,16 +87,6 @@ class Qwen3VLModel(Qwen3Model):
         super().__init__(config)
 
         self.vision_encoder = config.vision_encoder.build()
-
-        self.mrope_section = config.mrope_section
-        for layer in self.layers.values():
-            if not isinstance(layer.attention.rope, MRoPE):
-                raise ValueError("Qwen3-VL attention layers must use MRoPE.")
-            if layer.attention.rope.config.mrope_section != self.mrope_section:
-                raise ValueError(
-                    "Qwen3-VL model mrope_section must match attention MRoPE "
-                    "configuration."
-                )
 
         self.spatial_merge_size = config.vision_encoder.spatial_merge_size
 
