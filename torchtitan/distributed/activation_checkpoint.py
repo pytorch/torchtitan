@@ -63,6 +63,9 @@ def _get_save_ops() -> set:
         # HybridEP (available when hybridep is installed)
         (torch.ops, "hybridep.dispatch.default"),
         (torch.ops, "hybridep.combine.default"),
+        # FlexEP (available when the FlexEP dispatcher is used)
+        (torch.ops, "flexep.dispatch.default"),
+        (torch.ops, "flexep.combine.default"),
     ]
 
     def _resolve_ops(op_specs: list) -> dict:

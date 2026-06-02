@@ -27,6 +27,7 @@ from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
+    FlexEPTokenDispatcher,
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
 )
@@ -209,6 +210,7 @@ def make_token_dispatcher_config(
       dispatch when EP=1, i.e. ep_mesh is None at runtime)
     - "deepep": Uses DeepEP custom kernels for H100/NVLink Switch
     - "hybridep": Uses HybridEP with TMA optimization for GB200/NVLink72
+    - "flexep": Uses FlexEP for the constrained DP==EP launch shape
 
     DeepEP/HybridEP requires installation:
     https://github.com/deepseek-ai/DeepEP
@@ -230,6 +232,12 @@ def make_token_dispatcher_config(
             score_before_experts=score_before_experts,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         )
+    elif comm_backend == "flexep":
+        return FlexEPTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+        )
     elif comm_backend == "standard":
         return AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
@@ -239,7 +247,7 @@ def make_token_dispatcher_config(
     else:
         raise ValueError(
             f"Unknown comm_backend: '{comm_backend}'. "
-            "Must be one of 'standard', 'deepep', 'hybridep'."
+            "Must be one of 'standard', 'deepep', 'hybridep', 'flexep'."
         )
 
 

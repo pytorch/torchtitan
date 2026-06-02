@@ -39,8 +39,8 @@ class LocalTokenDispatcher(Configurable):
     """Token dispatcher for EP=1. Handles local token reordering only.
 
     Also serves as the base class for EP dispatchers (AllToAllTokenDispatcher,
-    DeepEPTokenDispatcher, HybridEPTokenDispatcher) which override
-    dispatch() and combine().
+    DeepEPTokenDispatcher, HybridEPTokenDispatcher, FlexEPTokenDispatcher)
+    which override dispatch() and combine().
 
     Not an nn.Module — dispatchers have no learnable parameters or buffers.
     """
@@ -359,7 +359,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         ep_size = self.ep_mesh.size()
         e = num_global_tokens_per_local_expert_E.shape[0] // ep_size
         device = num_global_tokens_per_local_expert_E.device
-        total = num_global_tokens_per_local_expert_E.sum()
+        total = routed_input_RD.shape[0]
 
         # (EP, e) matrix of token counts per (rank, local_expert)
         t_mat = num_global_tokens_per_local_expert_E.view(ep_size, e)
@@ -377,12 +377,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         # For each output position, find its input position:
         #   output[p] = input[input_starts[seg] + (p - output_starts[seg])]
         seg_ids = torch.arange(segment_lens.shape[0], device=device).repeat_interleave(
-            segment_lens
+            segment_lens, output_size=total
         )
         output_starts = segment_lens.cumsum(0) - segment_lens
         permuted_indices = (
             input_starts[seg_ids]
-            + torch.arange(total, device=device)
+            + torch.arange(seg_ids.shape[0], device=device)
             - output_starts[seg_ids]
         )
 
@@ -548,9 +548,9 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
 
 @dataclass(frozen=True, kw_only=True)
 class DeepEPDispatchMetadata:
-    """Metadata for DeepEP and HybridEP token dispatch."""
+    """Metadata for DeepEP, HybridEP, and FlexEP token dispatch."""
 
-    state: object  # deepep.DispatchState or hybridep.DispatchState
+    state: object  # Backend-specific dispatch state.
 
 
 class DeepEPTokenDispatcher(LocalTokenDispatcher):
@@ -783,3 +783,99 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
             return out_TD
 
         return combined_TD
+
+
+class FlexEPTokenDispatcher(LocalTokenDispatcher):
+    """Token dispatcher using FlexEP for constrained EP communication.
+
+    This first integration supports EP with ``sp_size == 1`` only. TP/SP, CP,
+    PP, padding, and async combine overlap are intentionally out of scope.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(LocalTokenDispatcher.Config):
+        pass
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.ep_mesh: DeviceMesh | None = None
+        self.sp_size: int = 1
+
+        # Import to register custom ops so SAC saves communication outputs
+        # instead of recomputing them. This must happen before apply_ac.
+        from torchtitan.distributed import flexep  # noqa: F401
+
+    def wire_meshes(
+        self,
+        *,
+        ep_mesh: DeviceMesh | None,
+        tp_mesh: DeviceMesh | None,
+    ) -> None:
+        """Install the EP mesh used by FlexEP dispatch / combine."""
+        self.ep_mesh = ep_mesh
+        if tp_mesh is not None and tp_mesh.size() > 1:
+            raise ValueError(
+                "FlexEPTokenDispatcher does not support tensor or sequence "
+                "parallelism."
+            )
+        self.sp_size = 1
+
+    # pyrefly: ignore [bad-override]
+    def dispatch(
+        self,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
+        if self.ep_mesh is None:
+            raise ValueError(
+                "FlexEPTokenDispatcher requires expert parallelism "
+                "(ep_mesh must be set)."
+            )
+        if self.sp_size != 1:
+            raise ValueError("FlexEPTokenDispatcher requires sp_size == 1.")
+
+        ep_group = self.ep_mesh.get_group()
+        num_local_experts = self.num_experts // ep_group.size()
+
+        (
+            routed_input_ND,
+            num_local_tokens_per_expert_E,
+            token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N,
+        ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
+        routed_scores_N = (
+            None if self.score_before_experts else topk_scores_experts_sorted_N
+        )
+
+        from torchtitan.distributed.flexep import dispatch_tokens
+
+        hidden_states_RD, tokens_per_expert_E, state = dispatch_tokens(
+            routed_input_ND,
+            num_local_tokens_per_expert_E,
+            token_indices_experts_sorted_N,
+            routed_scores_N,
+            x_TD.shape[0],
+            num_local_experts,
+            ep_group,
+        )
+
+        metadata = DeepEPDispatchMetadata(state=state)
+        return hidden_states_RD, tokens_per_expert_E, metadata
+
+    # pyrefly: ignore [bad-override]
+    def combine(
+        self,
+        routed_output_RD: torch.Tensor,
+        metadata: DeepEPDispatchMetadata,
+        x_TD: torch.Tensor,
+    ) -> torch.Tensor:
+        """Combine tokens via FlexEP."""
+        del x_TD
+        if self.sp_size != 1:
+            raise ValueError("FlexEPTokenDispatcher requires sp_size == 1.")
+
+        from torchtitan.distributed.flexep import combine_tokens
+
+        # pyrefly: ignore [bad-argument-type]
+        return combine_tokens(routed_output_RD, metadata.state)

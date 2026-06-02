@@ -121,6 +121,26 @@ def deepseek_v3_16b_hybridep() -> Trainer.Config:
     return config
 
 
+def deepseek_v3_16b_flexep() -> Trainer.Config:
+    config = deepseek_v3_16b()
+    config.model_spec = model_registry(
+        "16B",
+        attn_backend="flex",
+        moe_comm_backend="flexep",
+    )
+    config.parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=1,
+        data_parallel_shard_degree=4,
+        tensor_parallel_degree=1,
+        context_parallel_degree=1,
+        pipeline_parallel_degree=1,
+        expert_parallel_degree=4,
+        enable_sequence_parallel=False,
+        pipeline_parallel_schedule="Interleaved1F1B",
+    )
+    return config
+
+
 def deepseek_v3_671b() -> Trainer.Config:
     compile_config = CompileConfig(enable=True, components=["loss"])
     model_compile_enabled = (
