@@ -4,30 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Qwen3 parallelization: minimal FSDP-only baseline.
-
-This is the starting configuration for autoresearch experiments. It applies
-composable FSDP (``fully_shard``) over the data-parallel mesh and nothing else:
-no tensor/context/pipeline/expert parallel, no quantization, no compile, no
-custom kernels. It is intentionally simple and high-precision so it can serve as
-the clean base recipe (and the quality golden) that experiments build on.
-"""
-
-import torch
-from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
+# This file applies the PT-D parallelisms (except pipeline parallelism) and various
+# training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
+    TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-from torchtitan.distributed.fsdp import (
-    disable_fsdp_gradient_division,
-    get_fsdp_reshard_after_forward_policy,
-)
+from torchtitan.distributed.compile import apply_compile
+from torchtitan.distributed.context_parallel import apply_cp_to_forward
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.tools.logging import logger
 
@@ -43,71 +35,85 @@ def parallelize_qwen3(
     dump_folder: str,
     skip_dp: bool = False,
 ):
-    """Apply the baseline FSDP-only parallelization for the Qwen3 14B workload.
+    assert (
+        training.seq_len % parallel_dims.seq_len_divisor == 0
+    ), f"""
+        Sequence length {training.seq_len} must be divisible by the product of TP degree
+        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
+        """
 
-    Wraps each transformer block, ``lm_head``, and the root model with composable
-    FSDP on the ``fsdp`` mesh, using the configured mixed-precision policy. This
-    baseline is DP-only; the experiment search is expected to extend it.
-    """
-    if parallel_dims.tp_enabled:
-        raise NotImplementedError("Qwen3 baseline FSDP does not support TP.")
+    model_compile_enabled = (
+        compile_config.enable and "model" in compile_config.components
+    )
+
+    # CP: wrap inner attention forward BEFORE parallelize() so CP logic
+    # runs inside the local_map boundary on local tensors.
     if parallel_dims.cp_enabled:
-        raise NotImplementedError("Qwen3 baseline FSDP does not support CP.")
-    if parallel_dims.pp_enabled:
-        raise NotImplementedError("Qwen3 baseline FSDP does not support PP.")
-    if parallel_dims.ep_enabled:
-        raise NotImplementedError("Qwen3 baseline FSDP does not support EP.")
+        apply_cp_to_forward(
+            # pyrefly: ignore [missing-attribute]
+            [block.attention.inner_attention for block in model.layers.values()],
+            parallel_dims.get_mesh("cp"),
+        )
 
-    if skip_dp or not parallel_dims.dp_enabled:
+    if parallel_dims.tp_enabled:
+        tp_mesh = parallel_dims.get_mesh("tp")
+        model.parallelize(tp_mesh)
+        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
+
+    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        apply_moe_ep_tp(
+            model,
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+        )
+
+    if ac_config.mode != "none":
+        apply_ac(
+            model,
+            ac_config,
+            model_compile_enabled=model_compile_enabled,
+            base_folder=dump_folder,
+        )
+
+    # turn on per-TransformerBlock compile after AC wrapping and before FSDP
+    if model_compile_enabled:
+        apply_compile(model, compile_config)
+
+    # Skip FSDP wrapper for inference. FSDP's forward hooks
+    # are incompatible with torch.inference_mode() used by vLLM.
+    # AC and compile are disabled via config (mode="none", enable=False).
+    if skip_dp:
         return model
 
-    if parallel_dims.dp_replicate != 1:
-        raise NotImplementedError("Qwen3 baseline FSDP does not support HSDP.")
+    dp_mesh_names = (
+        ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+    )
+    dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+
+    edp_mesh = None
+    if parallel_dims.ep_enabled:
+        edp_mesh_names = (
+            ["dp_replicate", "efsdp"]
+            if parallel_dims.dp_replicate_enabled
+            else ["efsdp"]
+        )
+        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+
+    apply_fsdp(
+        model,
+        dp_mesh,
+        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+        pp_enabled=parallel_dims.pp_enabled,
+        cpu_offload=training.enable_cpu_offload,
+        reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+        ep_degree=parallel_dims.ep,
+        edp_mesh=edp_mesh,
+    )
+
+    logger.info("Applied fully_shard to the model")
+
     if training.enable_cpu_offload:
-        raise NotImplementedError("Qwen3 baseline FSDP does not support CPU offload.")
+        logger.info("Applied CPU Offloading to the model")
 
-    # Apply the configured activation checkpointing before sharding. A 14B model
-    # at this sequence length does not fit without it, and the baseline config
-    # requests it; FSDP then shards the checkpoint-wrapped blocks.
-    if ac_config.mode != "none":
-        apply_ac(model, ac_config)
-        logger.info("Applied %s activation checkpointing", ac_config.mode)
-
-    fsdp_mesh = parallel_dims.get_mesh("fsdp")
-    mp_policy = MixedPrecisionPolicy(
-        param_dtype=getattr(torch, training.mixed_precision_param),
-        reduce_dtype=getattr(torch, training.mixed_precision_reduce),
-        cast_forward_inputs=False,
-    )
-    reshard_after_forward = get_fsdp_reshard_after_forward_policy(
-        parallelism.fsdp_reshard_after_forward,
-        parallel_dims.pp_enabled,
-    )
-    fsdp_config = {
-        "mesh": fsdp_mesh,
-        "mp_policy": mp_policy,
-        "reshard_after_forward": reshard_after_forward,
-    }
-
-    # Shard each transformer block, then lm_head, then the root (which also covers
-    # tok_embeddings). The last block keeps its parameters after forward because
-    # they are needed immediately at the start of backward.
-    layers = list(model.layers.values())
-    for idx, layer in enumerate(layers):
-        layer_config = fsdp_config
-        if idx == len(layers) - 1:
-            layer_config = {**fsdp_config, "reshard_after_forward": False}
-        fully_shard(layer, **layer_config)
-    fully_shard(model.lm_head, **fsdp_config)
-    fully_shard(model, **fsdp_config)
-
-    # TorchTitan scales gradients by the token count in the loss, so FSDP must not
-    # additionally divide gradients by the data-parallel size.
-    disable_fsdp_gradient_division(model)
-
-    logger.info(
-        "Applied baseline Qwen3 FSDP with dp_shard=%s, reshard_after_forward=%s",
-        parallel_dims.dp_shard,
-        reshard_after_forward,
-    )
     return model
