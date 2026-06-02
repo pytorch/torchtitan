@@ -72,10 +72,10 @@ class Qwen35StateDictAdapter(StateDictAdapter):
             "model.language_model.layers.{}.mlp.experts.down_proj": "layers.{}.moe.experts.w2",
             "model.language_model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
             # MoE shared expert
-            "model.language_model.layers.{}.mlp.shared_expert.gate_proj.weight": "layers.{}.shared_ffn.w1.weight",
-            "model.language_model.layers.{}.mlp.shared_expert.up_proj.weight": "layers.{}.shared_ffn.w3.weight",
-            "model.language_model.layers.{}.mlp.shared_expert.down_proj.weight": "layers.{}.shared_ffn.w2.weight",
-            "model.language_model.layers.{}.mlp.shared_expert_gate.weight": "layers.{}.shared_gate.weight",
+            "model.language_model.layers.{}.mlp.shared_expert.gate_proj.weight": "layers.{}.moe.shared_experts.w1.weight",
+            "model.language_model.layers.{}.mlp.shared_expert.up_proj.weight": "layers.{}.moe.shared_experts.w3.weight",
+            "model.language_model.layers.{}.mlp.shared_expert.down_proj.weight": "layers.{}.moe.shared_experts.w2.weight",
+            "model.language_model.layers.{}.mlp.shared_expert_gate.weight": "layers.{}.moe.shared_expert_gate.weight",
             # Final norm and output
             "model.language_model.norm.weight": "norm.weight",
             "lm_head.weight": "lm_head.weight",
@@ -286,9 +286,9 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     hf_abstract_key
                     == "model.language_model.layers.{}.linear_attn.in_proj_qkv.weight"
                 ):
-                    dn = self.model_config.layers[int(idx)].deltanet
-                    kd = dn.n_key_heads * dn.key_head_dim
-                    vd = dn.n_value_heads * dn.value_head_dim
+                    dn = self.model_config.layers[int(idx)].delta_net
+                    kd = dn.in_proj_q.out_features
+                    vd = dn.in_proj_v.out_features
                     q, k, v = value.split([kd, kd, vd], dim=0)
                     tt_state_dict[f"layers.{idx}.attn.in_proj_q.weight"] = q
                     tt_state_dict[f"layers.{idx}.attn.in_proj_k.weight"] = k
@@ -300,9 +300,9 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     hf_abstract_key
                     == "model.language_model.layers.{}.linear_attn.conv1d.weight"
                 ):
-                    dn = self.model_config.layers[int(idx)].deltanet
-                    kd = dn.n_key_heads * dn.key_head_dim
-                    vd = dn.n_value_heads * dn.value_head_dim
+                    dn = self.model_config.layers[int(idx)].delta_net
+                    kd = dn.in_proj_q.out_features
+                    vd = dn.in_proj_v.out_features
                     cq, ck, cv = value.split([kd, kd, vd], dim=0)
                     tt_state_dict[f"layers.{idx}.attn.conv_q.weight"] = cq
                     tt_state_dict[f"layers.{idx}.attn.conv_k.weight"] = ck

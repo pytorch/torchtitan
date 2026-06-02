@@ -11,7 +11,10 @@ This module applies PT-D parallelisms and various training techniques
 (activation checkpointing, compile, FSDP) to the Qwen3.5 model.
 """
 
+import torch
 import torch.nn as nn
+from torch.distributed._composable.fsdp import fully_shard
+from torch.distributed.fsdp import MixedPrecisionPolicy
 
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -24,14 +27,38 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.context_parallel import apply_cp_to_forward
+from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
-from torchtitan.models.qwen3_5.sharding import (
-    set_deltanet_sub_module_sharding,
-    set_vision_encoder_sub_module_sharding,
-)
+from torchtitan.models.llama4.parallelize import apply_fsdp
+from torchtitan.models.qwen3_5.sharding import set_deltanet_conv1d_sharding
 from torchtitan.tools.logging import logger
+
+
+def _apply_fsdp_to_vision_encoder(
+    vision_encoder: nn.Module,
+    dp_mesh,
+    param_dtype: torch.dtype,
+    reduce_dtype: torch.dtype,
+    reshard_after_forward_policy: str = "default",
+    pp_enabled: bool = False,
+):
+    """FSDP the vision encoder as a single unit.
+
+    One AllGather for all vision params is more efficient than per-layer
+    sharding — the vision encoder is small relative to the decoder.
+    Must be called before apply_fsdp on the decoder.
+    """
+    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+        reshard_after_forward_policy, pp_enabled=pp_enabled
+    )
+    fully_shard(
+        vision_encoder,
+        mesh=dp_mesh,
+        mp_policy=mp_policy,
+        reshard_after_forward=reshard_after_forward,
+    )
 
 
 def parallelize_qwen3_5(
@@ -51,50 +78,36 @@ def parallelize_qwen3_5(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
+    if parallelism.full_dtensor:
+        raise NotImplementedError("full_dtensor is not supported yet.")
+
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
 
-    # Context Parallel: wrap inner attention forward BEFORE TP so CP logic
-    # runs inside the local_map boundary on local tensors.
-    # Applies to full attention layers only — GatedDeltaNet is recurrent
-    # and allgathers the full sequence via cp=Replicate() in sharding.
     if parallel_dims.cp_enabled:
-        cp_mesh = parallel_dims.get_mesh("cp")
-        full_attn_inner_modules = [
-            block.attn.inner_attention  # pyrefly: ignore [missing-attribute]
-            for block in model.layers.values()  # pyrefly: ignore [not-callable]
-            if block.layer_type == "full_attn"  # pyrefly: ignore [missing-attribute]
-        ]
-        if full_attn_inner_modules:
-            apply_cp_to_forward(full_attn_inner_modules, cp_mesh)
+        raise NotImplementedError(
+            "Context Parallel is not yet supported for Qwen3.5. "
+            "GatedDeltaNet (75% of layers) requires full-sequence allgather, "
+            "and multimodal CP needs vision scatter before CP sharding."
+        )
 
-    if parallel_dims.tp_enabled:
+    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         if parallelism.enable_async_tensor_parallel and not model_compile_enabled:
             raise RuntimeError("Async TP requires torch.compile")
 
-        tp_mesh = parallel_dims.get_mesh("tp")
-
-        # For sub-modules built inline, set _sharding_config on built modules.
+        # Conv1d modules don't have Config fields, set sharding on built modules.
         # pyrefly: ignore [not-callable]
         for block in model.layers.values():
             # pyrefly: ignore [missing-attribute]
-            if block.layer_type != "full_attn":
+            if not block.full_attn:
                 # pyrefly: ignore [missing-attribute]
-                set_deltanet_sub_module_sharding(block.attn)
-        if model.vision_encoder is not None:
-            set_vision_encoder_sub_module_sharding(model.vision_encoder)
+                set_deltanet_conv1d_sharding(block.attn)
         # pyrefly: ignore [not-callable]
-        model.parallelize(tp_mesh)
-        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
+        model.parallelize(parallel_dims)
 
-    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        apply_moe_ep_tp(
-            model,
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            enable_sp=parallel_dims.tp_enabled,
-        )
+    if parallel_dims.tp_enabled:
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     if ac_config.mode != "none":
         apply_ac(
@@ -122,6 +135,16 @@ def parallelize_qwen3_5(
         ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
     )
     dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+
+    if model.vision_encoder is not None:
+        _apply_fsdp_to_vision_encoder(
+            model.vision_encoder,  # pyrefly: ignore [bad-argument-type]
+            dp_mesh,
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+            pp_enabled=parallel_dims.pp_enabled,
+        )
 
     edp_mesh = None
     if parallel_dims.ep_enabled:

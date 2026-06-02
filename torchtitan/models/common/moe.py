@@ -323,6 +323,7 @@ class MoE(Module):
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None
+        shared_expert_gate: Module.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -332,6 +333,11 @@ class MoE(Module):
         self.router = config.router.build()
         self.shared_experts = (
             config.shared_experts.build() if config.shared_experts is not None else None
+        )
+        self.shared_expert_gate = (
+            config.shared_expert_gate.build()
+            if config.shared_expert_gate is not None
+            else None
         )
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
@@ -447,6 +453,10 @@ class MoE(Module):
             sync_combine()
 
         if shared_out_BLD is not None:
+            if self.shared_expert_gate is not None:
+                shared_out_BLD = (
+                    torch.sigmoid(self.shared_expert_gate(x_BLD)) * shared_out_BLD
+                )
             out_BLD = out_BLD + shared_out_BLD
         return out_BLD
 

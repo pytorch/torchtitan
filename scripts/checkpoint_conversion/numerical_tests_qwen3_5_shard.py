@@ -7,8 +7,8 @@
 
 """Numerical comparison across parallelism configs for Qwen3.5.
 
-Feeds identical fake tokens across 4 configs and verifies logits match.
-Requires 8 GPUs.
+Feeds identical fake tokens across configs (no_parallel, FSDP, FSDP+EP,
+FSDP+EP+TP) and verifies logits match. Requires up to 8 GPUs.
 
 Usage:
   python scripts/checkpoint_conversion/numerical_tests_qwen3_5_shard.py
@@ -36,11 +36,10 @@ from torchtitan.models.qwen3_5 import qwen3_5_configs
 from torchtitan.models.qwen3_5.parallelize import parallelize_qwen3_5
 
 CONFIGS = [
-    {"ngpu": 1, "tp": 1, "ep": 1, "cp": 1, "label": "no_parallel"},
-    {"ngpu": 4, "tp": 1, "ep": 1, "cp": 1, "label": "fsdp"},
-    {"ngpu": 8, "tp": 1, "ep": 4, "cp": 1, "label": "fsdp+ep"},
-    {"ngpu": 8, "tp": 2, "ep": 2, "cp": 1, "label": "fsdp+ep+tp"},
-    {"ngpu": 8, "tp": 2, "ep": 2, "cp": 2, "label": "fsdp+ep+tp+cp"},
+    {"ngpu": 1, "tp": 1, "ep": 1, "label": "no_parallel"},
+    {"ngpu": 4, "tp": 1, "ep": 1, "label": "fsdp"},
+    {"ngpu": 8, "tp": 1, "ep": 4, "label": "fsdp+ep"},
+    {"ngpu": 8, "tp": 2, "ep": 2, "label": "fsdp+ep+tp"},
 ]
 
 
@@ -51,7 +50,7 @@ def run_worker(args):
     world_size = dist.get_world_size()
     torch.cuda.set_device(rank)
 
-    dp_shard = world_size // (args.tp * args.cp)
+    dp_shard = world_size // args.tp
 
     seed = 42
     torch.manual_seed(seed)
@@ -65,7 +64,7 @@ def run_worker(args):
     parallel_dims = ParallelDims(
         dp_shard=dp_shard,
         dp_replicate=1,
-        cp=args.cp,
+        cp=1,
         tp=args.tp,
         pp=1,
         ep=args.ep,
@@ -76,7 +75,6 @@ def run_worker(args):
     parallelism = ParallelismConfig(
         tensor_parallel_degree=args.tp,
         data_parallel_shard_degree=dp_shard,
-        context_parallel_degree=args.cp,
         expert_parallel_degree=args.ep,
     )
     training = TrainingConfig(
@@ -88,7 +86,7 @@ def run_worker(args):
     )
 
     config.update_from_config(
-        trainer_config=type(
+        config=type(
             "C",
             (),
             {
@@ -118,35 +116,15 @@ def run_worker(args):
     tokens = torch.randint(0, 248320, (1, seq_len), device="cuda")
     dist.broadcast(tokens, src=0)
 
-    extra_kwargs: dict = {}
-    if args.cp > 1:
-        # Shard tokens and create positions for CP
-        from torchtitan.distributed.context_parallel import (
-            prepare_context_parallel_input,
-        )
-
-        positions = torch.arange(seq_len, device="cuda").unsqueeze(0)
-        labels = tokens.clone()
-        extra_kwargs = {"positions": positions}
-        tokens, labels, extra_kwargs = prepare_context_parallel_input(
-            tokens,
-            labels,
-            extra_kwargs,
-            parallel_dims.get_mesh("cp"),
-            torch.device("cuda"),
-        )
-
     with torch.no_grad():
         output = model(
             tokens,
             special_tokens={"image_id": 151859, "video_id": 151860},
-            **extra_kwargs,
         )
 
     if isinstance(output, DTensor):
         output = output.full_tensor()
 
-    # With CP, each rank has partial output — gather first token's logits from rank 0's CP portion
     logits = output[0, 0, :10].float().tolist()
 
     if rank == 0:
@@ -172,12 +150,11 @@ def main():
                 "--worker",
                 f"--tp={cfg['tp']}",
                 f"--ep={cfg['ep']}",
-                f"--cp={cfg['cp']}",
                 f"--output={outfile}",
             ]
             print(
                 f"Running {cfg['label']} (ngpu={cfg['ngpu']}, "
-                f"tp={cfg['tp']}, ep={cfg['ep']}, cp={cfg['cp']})..."
+                f"tp={cfg['tp']}, ep={cfg['ep']})..."
             )
             result = subprocess.run(
                 cmd,
@@ -216,7 +193,6 @@ if __name__ == "__main__":
     parser.add_argument("--worker", action="store_true")
     parser.add_argument("--tp", type=int)
     parser.add_argument("--ep", type=int)
-    parser.add_argument("--cp", type=int, default=1)
     parser.add_argument("--output", type=str)
     args = parser.parse_args()
 

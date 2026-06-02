@@ -287,7 +287,6 @@ class FluxTrainer(Trainer):
         if self.gradient_accumulation_steps > 1:
             raise ValueError("FLUX doesn't support gradient accumulation for now.")
 
-        # pyrefly: ignore [no-matching-overload]
         input_dict, labels = next(data_iterator)
 
         loss = self.forward_backward_step(input_dict=input_dict, labels=labels)

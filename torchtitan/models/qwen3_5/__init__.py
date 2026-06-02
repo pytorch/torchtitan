@@ -6,11 +6,11 @@
 
 from collections.abc import Callable
 from functools import partial
+from typing import Literal
 
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.components.quantization import QuantizationConverter
 
 from torchtitan.models.common import Embedding, Linear, RoPE  # noqa: F401
 from torchtitan.models.common.config_utils import (
@@ -20,20 +20,32 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_router_config,
 )
+from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
+from torchtitan.models.utils import validate_converter_order
+from torchtitan.protocols.model import ModelConfigConverter
 
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import (
+    GatedDeltaKernel,
     GatedDeltaNet,
     OffsetRMSNorm,
     Qwen35Attention,
     Qwen35Model,
     Qwen35TransformerBlock,
+    RMSNormGated,
 )
 from .parallelize import parallelize_qwen3_5, pipeline_qwen3_5
 from .state_dict_adapter import Qwen35StateDictAdapter
-from .vision_encoder import Qwen35VisionEncoder
+from .vision_encoder import (
+    PatchMerger,
+    Qwen35VisionEncoder,
+    VisionAttention,
+    VisionMLP,
+    VisionRotaryEmbedding,
+    VisionTransformerBlock,
+)
 
 __all__ = [
     "parallelize_qwen3_5",
@@ -79,9 +91,9 @@ def _depth_init(layer_id: int) -> dict[str, Callable]:
 
 def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
     return {
-        "w1": partial(nn.init.trunc_normal_, std=0.02),
-        "w2": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-        "w3": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
+        "w2_EDF": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "w3_EFD": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
     }
 
 
@@ -102,7 +114,7 @@ def _offset_norm(dim: int) -> OffsetRMSNorm.Config:
     return OffsetRMSNorm.Config(dim=dim, eps=_EPS, param_init=_OFFSET_NORM_INIT)
 
 
-def _vision_encoder_config(
+def _qwen35_vision_encoder_config(
     *,
     dim: int,
     ffn_dim: int,
@@ -113,30 +125,51 @@ def _vision_encoder_config(
     spatial_merge_size: int,
     out_hidden_size: int,
     num_position_embeddings: int,
+    layer_norm_eps: float = 1e-6,
+    rope_theta: float = 10000.0,
     in_channels: int = 3,
 ) -> Qwen35VisionEncoder.Config:
     """Build a fully-specified Qwen35VisionEncoder.Config."""
     patch_dim = in_channels * temporal_patch_size * patch_size * patch_size
     merged_hidden_size = dim * (spatial_merge_size**2)
+    head_dim = dim // num_heads
+    _norm = LayerNorm.Config(normalized_shape=dim, eps=layer_norm_eps)
     return Qwen35VisionEncoder.Config(
         dim=dim,
-        ffn_dim=ffn_dim,
         num_layers=num_layers,
         num_heads=num_heads,
         patch_size=patch_size,
         temporal_patch_size=temporal_patch_size,
+        in_channels=in_channels,
         spatial_merge_size=spatial_merge_size,
-        out_hidden_size=out_hidden_size,
         num_position_embeddings=num_position_embeddings,
         patch_embed_proj=_linear(patch_dim, dim),
-        attn_wq=_linear(dim, dim),
-        attn_wk=_linear(dim, dim),
-        attn_wv=_linear(dim, dim),
-        attn_proj=_linear(dim, dim),
-        mlp_fc1=_linear(dim, ffn_dim),
-        mlp_fc2=_linear(ffn_dim, dim),
-        merger_fc1=_linear(merged_hidden_size, merged_hidden_size),
-        merger_fc2=_linear(merged_hidden_size, out_hidden_size),
+        block=VisionTransformerBlock.Config(
+            norm1=_norm,
+            norm2=_norm,
+            attn=VisionAttention.Config(
+                dim=dim,
+                num_heads=num_heads,
+                wq=_linear(dim, dim),
+                wk=_linear(dim, dim),
+                wv=_linear(dim, dim),
+                proj=_linear(dim, dim),
+            ),
+            mlp=VisionMLP.Config(
+                fc1=_linear(dim, ffn_dim),
+                fc2=_linear(ffn_dim, dim),
+            ),
+        ),
+        rotary_pos_emb=VisionRotaryEmbedding.Config(
+            dim=head_dim // 2, theta=rope_theta
+        ),
+        merger=PatchMerger.Config(
+            spatial_merge_size=spatial_merge_size,
+            merged_hidden_size=merged_hidden_size,
+            norm=LayerNorm.Config(normalized_shape=dim, eps=layer_norm_eps),
+            fc1=_linear(merged_hidden_size, merged_hidden_size),
+            fc2=_linear(merged_hidden_size, out_hidden_size),
+        ),
         param_init=_POS_EMBED_INIT,
     )
 
@@ -152,7 +185,7 @@ def _qwen35_attention_config(
     layer_id: int,
 ) -> Qwen35Attention.Config:
     """Build a fully-specified Qwen35Attention.Config."""
-    inner_attention, mask_type = get_qwen35_attention_config(attn_backend)
+    inner_attention, mask_type = get_attention_config(attn_backend)
     return Qwen35Attention.Config(
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
@@ -193,19 +226,35 @@ def _qwen35_deltanet_config(
     key_head_dim: int,
     value_head_dim: int,
     layer_id: int,
-    fla_backend: str = "fla_chunked",
+    fla_backend: Literal[
+        "fla_chunked", "fla_fused_recurrent", "torch_naive"
+    ] = "fla_chunked",
 ) -> GatedDeltaNet.Config:
     """Build a fully-specified GatedDeltaNet.Config."""
+    key_dim = n_key_heads * key_head_dim
+    value_dim = n_value_heads * value_head_dim
+
+    def _proj(in_f: int, out_f: int, init: dict) -> Linear.Config:
+        return Linear.Config(
+            in_features=in_f, out_features=out_f, bias=False, param_init=init
+        )
+
     return GatedDeltaNet.Config(
-        dim=dim,
-        n_key_heads=n_key_heads,
-        n_value_heads=n_value_heads,
         key_head_dim=key_head_dim,
         value_head_dim=value_head_dim,
-        fla_backend=fla_backend,
-        in_proj_init=_LINEAR_INIT,
-        out_proj_init=_depth_init(layer_id),
-        norm_init={"weight": nn.init.ones_},
+        in_proj_q=_proj(dim, key_dim, _LINEAR_INIT),
+        in_proj_k=_proj(dim, key_dim, _LINEAR_INIT),
+        in_proj_v=_proj(dim, value_dim, _LINEAR_INIT),
+        in_proj_z=_proj(dim, value_dim, _LINEAR_INIT),
+        in_proj_a=_proj(dim, n_value_heads, _LINEAR_INIT),
+        in_proj_b=_proj(dim, n_value_heads, _LINEAR_INIT),
+        kernel=GatedDeltaKernel.Config(backend=fla_backend),
+        norm=RMSNormGated.Config(
+            dim=value_head_dim,
+            eps=1e-6,
+            param_init={"weight": nn.init.ones_},
+        ),
+        out_proj=_proj(value_dim, dim, _depth_init(layer_id)),
         param_init={
             "A_log": _a_log_init,
             "dt_bias": nn.init.ones_,
@@ -228,24 +277,14 @@ def _build_qwen35_layers(
     value_head_dim: int,
     full_attention_interval: int = 4,
     attn_backend: str,
-    fla_backend: str = "fla_chunked",
+    fla_backend: Literal[
+        "fla_chunked", "fla_fused_recurrent", "torch_naive"
+    ] = "fla_chunked",
 ) -> list[Qwen35TransformerBlock.Config]:
     """Build per-layer configs for dense Qwen3.5 models."""
-    # Shared attention config — set on ALL layers so the trainer can read
-    # attn_config.inner_attention and mask_type from any layer.
-    shared_attn_config = _qwen35_attention_config(
-        dim=dim,
-        n_heads=n_heads,
-        n_kv_heads=n_kv_heads,
-        head_dim=head_dim,
-        rotary_dim=rotary_dim,
-        attn_backend=attn_backend,
-        layer_id=0,
-    )
     layers = []
     for layer_id in range(n_layers):
         is_full = (layer_id + 1) % full_attention_interval == 0
-        layer_type = "full_attn" if is_full else "linear_attn"
 
         attention = (
             _qwen35_attention_config(
@@ -258,7 +297,7 @@ def _build_qwen35_layers(
                 layer_id=layer_id,
             )
             if is_full
-            else shared_attn_config
+            else None
         )
         deltanet = (
             _qwen35_deltanet_config(
@@ -276,9 +315,8 @@ def _build_qwen35_layers(
 
         layers.append(
             Qwen35TransformerBlock.Config(
-                layer_type=layer_type,
                 attention=attention,
-                deltanet=deltanet,
+                delta_net=deltanet,
                 feed_forward=make_ffn_config(
                     dim=dim,
                     hidden_dim=hidden_dim,
@@ -310,24 +348,16 @@ def _build_qwen35_moe_layers(
     value_head_dim: int,
     full_attention_interval: int = 4,
     attn_backend: str,
-    fla_backend: str = "fla_chunked",
+    fla_backend: Literal[
+        "fla_chunked", "fla_fused_recurrent", "torch_naive"
+    ] = "fla_chunked",
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
 ) -> list[Qwen35TransformerBlock.Config]:
     """Build per-layer configs for MoE Qwen3.5 models with shared expert."""
-    shared_attn_config = _qwen35_attention_config(
-        dim=dim,
-        n_heads=n_heads,
-        n_kv_heads=n_kv_heads,
-        head_dim=head_dim,
-        rotary_dim=rotary_dim,
-        attn_backend=attn_backend,
-        layer_id=0,
-    )
     layers = []
     for layer_id in range(n_layers):
         is_full = (layer_id + 1) % full_attention_interval == 0
-        layer_type = "full_attn" if is_full else "linear_attn"
 
         attention = (
             _qwen35_attention_config(
@@ -340,7 +370,7 @@ def _build_qwen35_moe_layers(
                 layer_id=layer_id,
             )
             if is_full
-            else shared_attn_config
+            else None
         )
         deltanet = (
             _qwen35_deltanet_config(
@@ -358,9 +388,8 @@ def _build_qwen35_moe_layers(
 
         layers.append(
             Qwen35TransformerBlock.Config(
-                layer_type=layer_type,
                 attention=attention,
-                deltanet=deltanet,
+                delta_net=deltanet,
                 moe=make_moe_config(
                     num_experts=num_experts,
                     router=make_router_config(
@@ -381,17 +410,17 @@ def _build_qwen35_moe_layers(
                         comm_backend=moe_comm_backend,
                         non_blocking_capacity_factor=non_blocking_capacity_factor,
                     ),
-                ),
-                shared_ffn=make_ffn_config(
-                    dim=dim,
-                    hidden_dim=shared_expert_hidden_dim,
-                    w1_param_init=_LINEAR_INIT,
-                    w2w3_param_init=_depth_init(layer_id),
-                ),
-                shared_gate=Linear.Config(
-                    in_features=dim,
-                    out_features=1,
-                    param_init=_LINEAR_INIT,
+                    shared_experts=make_ffn_config(
+                        dim=dim,
+                        hidden_dim=shared_expert_hidden_dim,
+                        w1_param_init=_LINEAR_INIT,
+                        w2w3_param_init=_depth_init(layer_id),
+                    ),
+                    shared_expert_gate=Linear.Config(
+                        in_features=dim,
+                        out_features=1,
+                        param_init=_LINEAR_INIT,
+                    ),
                 ),
                 attention_norm=_offset_norm(dim),
                 ffn_norm=_offset_norm(dim),
@@ -445,7 +474,7 @@ def _debugmodel(attn_backend: str) -> Qwen35Model.Config:
             value_head_dim=64,
             fla_backend="fla_chunked",
         ),
-        vision_encoder=_vision_encoder_config(
+        vision_encoder=_qwen35_vision_encoder_config(
             dim=256,
             ffn_dim=512,
             num_layers=4,
@@ -510,7 +539,7 @@ def _debugmodel_moe(
             moe_comm_backend=moe_comm_backend,
             fla_backend="fla_chunked",
         ),
-        vision_encoder=_vision_encoder_config(
+        vision_encoder=_qwen35_vision_encoder_config(
             dim=256,
             ffn_dim=512,
             num_layers=2,
@@ -572,7 +601,7 @@ def _0_8b(attn_backend: str) -> Qwen35Model.Config:
             key_head_dim=128,
             value_head_dim=128,
         ),
-        vision_encoder=_vision_encoder_config(
+        vision_encoder=_qwen35_vision_encoder_config(
             dim=768,
             ffn_dim=3072,
             num_layers=12,
@@ -634,7 +663,7 @@ def _2b(attn_backend: str) -> Qwen35Model.Config:
             key_head_dim=128,
             value_head_dim=128,
         ),
-        vision_encoder=_vision_encoder_config(
+        vision_encoder=_qwen35_vision_encoder_config(
             dim=1024,
             ffn_dim=4096,
             num_layers=24,
@@ -695,7 +724,7 @@ def _4b(attn_backend: str) -> Qwen35Model.Config:
             key_head_dim=128,
             value_head_dim=128,
         ),
-        vision_encoder=_vision_encoder_config(
+        vision_encoder=_qwen35_vision_encoder_config(
             dim=1024,
             ffn_dim=4096,
             num_layers=24,
@@ -752,7 +781,7 @@ def _9b(attn_backend: str) -> Qwen35Model.Config:
             key_head_dim=128,
             value_head_dim=128,
         ),
-        vision_encoder=_vision_encoder_config(
+        vision_encoder=_qwen35_vision_encoder_config(
             dim=1152,
             ffn_dim=4304,
             num_layers=27,
@@ -809,7 +838,7 @@ def _27b(attn_backend: str) -> Qwen35Model.Config:
             key_head_dim=128,
             value_head_dim=128,
         ),
-        vision_encoder=_vision_encoder_config(
+        vision_encoder=_qwen35_vision_encoder_config(
             dim=1152,
             ffn_dim=4304,
             num_layers=27,
@@ -873,7 +902,7 @@ def _35b_a3b(
             value_head_dim=128,
             moe_comm_backend=moe_comm_backend,
         ),
-        vision_encoder=_vision_encoder_config(
+        vision_encoder=_qwen35_vision_encoder_config(
             dim=1152,
             ffn_dim=4304,
             num_layers=27,
@@ -937,7 +966,7 @@ def _122b_a10b(
             value_head_dim=128,
             moe_comm_backend=moe_comm_backend,
         ),
-        vision_encoder=_vision_encoder_config(
+        vision_encoder=_qwen35_vision_encoder_config(
             dim=1152,
             ffn_dim=4304,
             num_layers=27,
@@ -1001,7 +1030,7 @@ def _397b_a17b(
             value_head_dim=128,
             moe_comm_backend=moe_comm_backend,
         ),
-        vision_encoder=_vision_encoder_config(
+        vision_encoder=_qwen35_vision_encoder_config(
             dim=1152,
             ffn_dim=4304,
             num_layers=27,
@@ -1017,16 +1046,16 @@ def _397b_a17b(
 
 
 qwen3_5_configs = {
-    "debugmodel": _debugmodel_qwen35,
-    "debugmodel_moe": _debugmodel_moe_qwen35,
-    "0.8B": _0_8b_qwen35,
-    "2B": _2b_qwen35,
-    "4B": _4b_qwen35,
-    "9B": _9b_qwen35,
-    "27B": _27b_qwen35,
-    "35B-A3B": _35b_a3b_qwen35,
-    "122B-A10B": _122b_a10b_qwen35,
-    "397B-A17B": _397b_a17b_qwen35,
+    "debugmodel": _debugmodel,
+    "debugmodel_moe": _debugmodel_moe,
+    "0.8B": _0_8b,
+    "2B": _2b,
+    "4B": _4b,
+    "9B": _9b,
+    "27B": _27b,
+    "35B-A3B": _35b_a3b,
+    "122B-A10B": _122b_a10b,
+    "397B-A17B": _397b_a17b,
 }
 
 
@@ -1034,15 +1063,16 @@ def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
     moe_comm_backend: str | None = None,
-    quantization: list[QuantizationConverter.Config] | None = None,
+    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     kwargs = dict(attn_backend=attn_backend)
     if moe_comm_backend is not None:
         kwargs["moe_comm_backend"] = moe_comm_backend
     config = qwen3_5_configs[flavor](**kwargs)
-    if quantization is not None:
-        for q in quantization:
-            q.build().convert(config)
+    if converters is not None:
+        validate_converter_order(converters)
+        for c in converters:
+            c.build().convert(config)
 
     # Detect MoE: check if any layer has moe config
     has_moe = any(getattr(layer, "moe", None) is not None for layer in config.layers)

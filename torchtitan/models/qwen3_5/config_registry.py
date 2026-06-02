@@ -78,12 +78,13 @@ def qwen35_debugmodel_moe() -> Trainer.Config:
         optimizer=OptimizersContainer.Config(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
-            local_batch_size=1,
+            local_batch_size=2,
             seq_len=512,
             steps=10,
         ),
         parallelism=ParallelismConfig(
-            data_parallel_shard_degree=4,
+            data_parallel_shard_degree=2,
+            pipeline_parallel_degree=2,
             expert_parallel_degree=4,
             tensor_parallel_degree=2,
         ),

@@ -116,7 +116,18 @@ class Decoder(BaseModel):
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
-                attention = self.layers[0].attention
+                attention = next(
+                    (
+                        l.attention
+                        for l in self.layers
+                        if getattr(l, "attention", None) is not None
+                    ),
+                    None,
+                )
+                if attention is None:
+                    raise ValueError(
+                        "No layer with attention config found for TP validation."
+                    )
                 n_heads = attention.n_heads
                 n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
                 if n_heads % tp != 0:

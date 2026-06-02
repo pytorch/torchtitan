@@ -143,14 +143,15 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module qwen3_5 --config qwen35_debugmodel_moe",
-                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
                 ],
             ],
-            "Qwen3.5 MoE FSDP+TP+EP",
-            "qwen3_5_moe_fsdp+tp+ep",
-            ngpu=8,
+            "Qwen3.5 MoE FSDP+TP+EP+PP",
+            "qwen3_5_moe_fsdp+tp+ep+pp",
+            ngpu=32,
         ),
         # Integration Test Cases for gpt-oss
         # TODO: re-enable compile after fixing

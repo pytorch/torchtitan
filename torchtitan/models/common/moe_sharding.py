@@ -241,6 +241,14 @@ def set_moe_sharding_config(
             enable_ep=enable_ep, enable_sp=enable_sp
         )
 
+    if getattr(moe_cfg, "shared_expert_gate", None) is not None:
+        moe_cfg.shared_expert_gate.sharding_config = ShardingConfig(
+            state_shardings={
+                "weight": dense_param_placement(tp=Replicate()),
+                "bias": dense_param_placement(tp=Replicate()),
+            }
+        )
+
     # Routed experts: local_map converts DTensor inputs to local for
     # dispatch/compute/combine, then wraps local output as DTensor(Partial).
     # Routed experts: the three things that differ between EP and TP-only

@@ -66,10 +66,9 @@ pip install flash-linear-attention
 
 | Feature | Notes |
 |---------|-------|
-| FSDP / HSDP | Single `apply_fsdp` call covers both decoder and vision encoder |
+| FSDP / HSDP | Decoder sharded per-layer; vision encoder sharded as a single unit (one AllGather) |
 | Tensor Parallelism (TP) | With Sequence Parallel; head-sharded TP on GatedDeltaNet projections |
 | Expert Parallelism (EP) | For MoE variants |
-| Context Parallel (CP) | Text-only; full attention uses ring attention, GatedDeltaNet allgathers full sequence |
 | Pipeline Parallel (PP) | Vision encoder assigned to first stage; 1F1B and Interleaved1F1B schedules |
 | Sample Packing | Configurable via `packing_buffer_size` in dataloader config |
 
@@ -77,7 +76,7 @@ pip install flash-linear-attention
 
 End-to-end KL divergence against HuggingFace Transformers (4B, multimodal inputs): **~3e-7** average, with **100% top-1 and top-5 match**.
 
-Parallelism correctness: bitwise identical logits across no-parallel, FSDP, FSDP+EP, FSDP+EP+TP, and FSDP+EP+TP+CP configs.
+Parallelism correctness: bit-identical logits (max diff `0.0`) across no-parallel, FSDP, FSDP+EP, and FSDP+EP+TP configs.
 
 Test scripts:
 - `scripts/checkpoint_conversion/numerical_tests_qwen3_5.py` — HF vs TT comparison
@@ -86,3 +85,4 @@ Test scripts:
 ## TODO
 
 - Add video dataset training configs
+- Add Context Parallel (CP) support

@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn as nn
@@ -262,24 +262,26 @@ class PatchMerger(Module):
     two-layer MLP (fc1 → GELU → fc2).
     """
 
-    def __init__(
-        self,
-        hidden_size: int,
-        out_hidden_size: int,
-        spatial_merge_size: int,
-        layer_norm_eps: float,
-        *,
-        fc1: Linear.Config,
-        fc2: Linear.Config,
-    ):
-        super().__init__()
-        self.spatial_merge_size = spatial_merge_size
-        self.merged_hidden_size = hidden_size * (spatial_merge_size**2)
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        spatial_merge_size: int
+        merged_hidden_size: int
+        norm: LayerNorm.Config
+        fc1: Linear.Config
+        act_fn: GELU.Config = field(
+            default_factory=lambda: GELU.Config(approximate="tanh")
+        )
+        fc2: Linear.Config
 
-        self.norm = LayerNorm(hidden_size, eps=layer_norm_eps)
-        self.linear_fc1 = fc1.build()
-        self.act_fn = GELU(approximate="tanh")
-        self.linear_fc2 = fc2.build()
+    def __init__(self, config: Config):
+        super().__init__()
+        self.spatial_merge_size = config.spatial_merge_size
+        self.merged_hidden_size = config.merged_hidden_size
+
+        self.norm = config.norm.build()
+        self.linear_fc1 = config.fc1.build()
+        self.act_fn = config.act_fn.build()
+        self.linear_fc2 = config.fc2.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Merge spatial patches and project to output dimension.
@@ -304,26 +306,27 @@ class PatchMerger(Module):
 class VisionAttention(Module):
     """Multi-head attention with FlexAttention for efficient batched processing."""
 
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int,
-        *,
-        wq: Linear.Config,
-        wk: Linear.Config,
-        wv: Linear.Config,
-        proj: Linear.Config,
-    ):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        dim: int
+        num_heads: int
+        wq: Linear.Config
+        wk: Linear.Config
+        wv: Linear.Config
+        proj: Linear.Config
+        inner_attention: Module.Config = field(default_factory=FlexAttention.Config)
+
+    def __init__(self, config: Config):
         super().__init__()
-        self.dim = dim
-        self.num_heads = num_heads
+        self.dim = config.dim
+        self.num_heads = config.num_heads
         self.head_dim = self.dim // self.num_heads
 
-        self.wq = wq.build()
-        self.wk = wk.build()
-        self.wv = wv.build()
-        self.proj = proj.build()
-        self.flex_attention = FlexAttention.Config().build()
+        self.wq = config.wq.build()
+        self.wk = config.wk.build()
+        self.wv = config.wv.build()
+        self.proj = config.proj.build()
+        self.flex_attention = config.inner_attention.build()
 
     def forward(
         self,
@@ -369,26 +372,19 @@ class VisionMLP(Module):
 class VisionTransformerBlock(Module):
     """Single transformer block for vision encoder."""
 
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int,
-        layer_norm_eps: float,
-        *,
-        attn_wq: Linear.Config,
-        attn_wk: Linear.Config,
-        attn_wv: Linear.Config,
-        attn_proj: Linear.Config,
-        mlp_fc1: Linear.Config,
-        mlp_fc2: Linear.Config,
-    ):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        norm1: LayerNorm.Config
+        norm2: LayerNorm.Config
+        attn: VisionAttention.Config
+        mlp: VisionMLP.Config
+
+    def __init__(self, config: Config):
         super().__init__()
-        self.norm1 = LayerNorm(dim, eps=layer_norm_eps)
-        self.norm2 = LayerNorm(dim, eps=layer_norm_eps)
-        self.attn = VisionAttention(
-            dim, num_heads, wq=attn_wq, wk=attn_wk, wv=attn_wv, proj=attn_proj
-        )
-        self.mlp = VisionMLP(fc1=mlp_fc1, fc2=mlp_fc2)
+        self.norm1 = config.norm1.build()
+        self.norm2 = config.norm2.build()
+        self.attn = config.attn.build()
+        self.mlp = config.mlp.build()
 
     def forward(
         self,
@@ -415,27 +411,21 @@ class Qwen35VisionEncoder(Module):
         """Configuration for Qwen3.5 Vision Encoder (ViT)."""
 
         dim: int = 1280
-        ffn_dim: int = 5120
         num_layers: int = 32
         num_heads: int = 16
 
-        dim: int
-        n_heads: int
-        spatial_merge_size: int
-        num_position_embeddings: int
+        patch_size: int = 16
+        temporal_patch_size: int = 2
+        in_channels: int = 3
+        spatial_merge_size: int = 2
 
-        # Per-layer Linear configs for vision encoder sub-modules
-        # Linear instead of Conv3d — equivalent when kernel_size equals patch size,
-        # but more efficient via batched matmul on pre-flattened patches.
+        num_position_embeddings: int = 4096
+
+        # Sub-module configs
         patch_embed_proj: Linear.Config
-        attn_wq: Linear.Config
-        attn_wk: Linear.Config
-        attn_wv: Linear.Config
-        attn_proj: Linear.Config
-        mlp_fc1: Linear.Config
-        mlp_fc2: Linear.Config
-        merger_fc1: Linear.Config
-        merger_fc2: Linear.Config
+        block: VisionTransformerBlock.Config
+        rotary_pos_emb: VisionRotaryEmbedding.Config
+        merger: PatchMerger.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -452,38 +442,14 @@ class Qwen35VisionEncoder(Module):
         )
         self.num_grid_per_side = int(config.num_position_embeddings**0.5)
 
-        head_dim = config.dim // config.num_heads
-        self.rotary_pos_emb = VisionRotaryEmbedding(
-            head_dim // 2, theta=config.rope_theta
-        )
-        # Cached RoPE freq table — recomputed only when max_hw grows
+        self.rotary_pos_emb = config.rotary_pos_emb.build()
         self._cached_freq_table: torch.Tensor | None = None
 
         self.layers = ModuleDict(
-            {
-                str(idx): VisionTransformerBlock(
-                    config.dim,
-                    config.num_heads,
-                    config.layer_norm_eps,
-                    attn_wq=config.attn_wq,
-                    attn_wk=config.attn_wk,
-                    attn_wv=config.attn_wv,
-                    attn_proj=config.attn_proj,
-                    mlp_fc1=config.mlp_fc1,
-                    mlp_fc2=config.mlp_fc2,
-                )
-                for idx in range(config.num_layers)
-            }
+            {str(idx): config.block.build() for idx in range(config.num_layers)}
         )
 
-        self.merger = PatchMerger(
-            hidden_size=config.dim,
-            out_hidden_size=config.out_hidden_size,
-            spatial_merge_size=config.spatial_merge_size,
-            layer_norm_eps=config.layer_norm_eps,
-            fc1=config.merger_fc1,
-            fc2=config.merger_fc2,
-        )
+        self.merger = config.merger.build()
 
     def compute_position_embeddings(
         self, grid_thw: torch.Tensor, max_num_patch: int

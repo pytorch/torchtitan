@@ -188,7 +188,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         model_spec = config.model_spec
 
         device_module, device_type = utils.device_module, utils.device_type
-        # pyrefly: ignore [read-only]
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
@@ -593,8 +592,28 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # maskless backend (e.g. the SDPA config used by the graph_trainer
         # tests) still receives positions for RoPE but no masks — it relies on
         # is_causal instead.
-        if isinstance(self.model_config, Decoder.Config) and positions is not None:
-            inner_attention = self.model_config.layers[0].attention.inner_attention
+        if isinstance(self.model_config, Decoder.Config):
+            attn_config = next(
+                (
+                    l.attention
+                    for l in self.model_config.layers
+                    if getattr(l, "attention", None) is not None
+                ),
+                None,
+            )
+            inner_attention = (
+                attn_config.inner_attention if attn_config is not None else None
+            )
+
+            if attn_config is not None and attn_config.mask_type == "block_causal":
+                assert (
+                    positions is not None
+                ), "block_causal mask requires per-document positions from the dataloader"
+            else:
+                positions = torch.arange(
+                    inputs.shape[1], dtype=torch.int32, device=inputs.device
+                ).repeat(inputs.shape[0], 1)
+
             if isinstance(
                 inner_attention, (FlexAttention.Config, VarlenAttention.Config)
             ):

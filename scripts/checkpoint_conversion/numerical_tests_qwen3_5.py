@@ -14,17 +14,18 @@ so the test validates the full path: pixels → vision encoder → decoder → l
 
 Usage:
     python -m scripts.checkpoint_conversion.numerical_tests_qwen3_5 \
-        --hf_model_path ../hf_models/Qwen/Qwen3.5-4B \
+        --hf_model_path hf_assets/Qwen/Qwen3.5-4B \
         --tt_checkpoint_path outputs/Qwen/qwen3_5_4b_dcp
 
     python -m scripts.checkpoint_conversion.numerical_tests_qwen3_5 \
-        --hf_model_path ../hf_models/Qwen/Qwen3.5-35B-A3B \
+        --hf_model_path hf_assets/Qwen/Qwen3.5-35B-A3B \
         --tt_checkpoint_path outputs/Qwen/qwen3_5_35b_a3b_dcp \
         --model_flavor 35B-A3B
 """
 
 import argparse
 import os
+from typing import Any
 
 import torch
 import torch._dynamo
@@ -88,7 +89,9 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
         vision_to_patches,
     )
 
-    processor = AutoProcessor.from_pretrained(hf_model_path)
+    # Annotate as Any: AutoProcessor.from_pretrained is typed Optional, which
+    # trips the .apply_chat_template call on environments without transformers stubs.
+    processor: Any = AutoProcessor.from_pretrained(hf_model_path)
 
     model_config = model_registry(model_flavor).model
     # pyrefly: ignore [missing-attribute]
@@ -118,7 +121,6 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
                 ],
             }
         ]
-        # pyrefly: ignore [missing-attribute]
         hf_in = processor.apply_chat_template(
             messages,
             tokenize=True,
@@ -263,7 +265,7 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, device):
     # Replace FlexAttention with SDPA for single-process inference
     # (unfused FlexAttention without torch.compile has poor fp16 numerics).
     for layer in model.layers.values():
-        if layer.layer_type == "full_attention":
+        if layer.full_attn:
             layer.attn.inner_attention = ScaledDotProductAttention.Config().build()
 
     class _BidirectionalSDPA(torch.nn.Module):

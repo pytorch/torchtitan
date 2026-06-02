@@ -157,6 +157,7 @@ def make_moe_config(
     router: TokenChoiceTopKRouter.Config,
     experts: GroupedExperts.Config,
     shared_experts: FeedForward.Config | None = None,
+    shared_expert_gate: Module.Config | None = None,
     load_balance_coeff: float | None = 1e-3,
 ) -> MoE.Config:
     """Build a fully-specified MoE.Config."""
@@ -166,6 +167,7 @@ def make_moe_config(
         router=router,
         experts=experts,
         shared_experts=shared_experts,
+        shared_expert_gate=shared_expert_gate,
     )
 
 

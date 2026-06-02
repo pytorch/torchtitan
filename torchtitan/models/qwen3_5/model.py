@@ -5,25 +5,27 @@
 # LICENSE file in the root directory of this source tree.
 
 
-import dataclasses
 from dataclasses import dataclass, field
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.distributed.tensor import DTensor
 
+from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import AttentionMasksType, BaseAttention
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
-from torchtitan.tools.logging import logger
 
 from .sharding import set_qwen35_sharding_config
 from .vision_encoder import Qwen35VisionEncoder
 
-_Conv1d = Module.from_nn_module(nn.Conv1d)
+
+class _Conv1d(nn.Conv1d, Module):
+    pass
 
 
 try:
@@ -156,7 +158,9 @@ class GatedDeltaKernel(Module):
         # "fla_chunked": parallel within chunks, fast for training (default)
         # "fla_fused_recurrent": token-by-token, lower memory for long sequences
         # "torch_naive": pure-Python reference, for numerical testing only
-        backend: str = "fla_chunked"
+        backend: Literal[
+            "fla_chunked", "fla_fused_recurrent", "torch_naive"
+        ] = "fla_chunked"
 
     def __init__(self, config: Config):
         super().__init__()
@@ -188,12 +192,12 @@ class GatedDeltaKernel(Module):
 
         if self.backend == "fla_chunked":
             result = _fla_chunk_gated_delta_rule(
-                q,  # pyrefly: ignore [bad-argument-type]
-                k,  # pyrefly: ignore [bad-argument-count]
+                q,
+                k,
                 v,
                 g,
                 beta,
-                use_qk_l2norm_in_kernel=True,  # pyrefly: ignore [unexpected-keyword]
+                use_qk_l2norm_in_kernel=True,
             )
         elif self.backend == "fla_fused_recurrent":
             result = _fla_fused_recurrent_gated_delta_rule(
@@ -211,7 +215,6 @@ class GatedDeltaKernel(Module):
             )
 
         # FLA kernels return (output, final_state); we only need output
-        # pyrefly: ignore [unsupported-operation]
         return result[0]
 
 
@@ -225,17 +228,20 @@ class GatedDeltaNet(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        dim: int
-        n_key_heads: int
-        n_value_heads: int
         key_head_dim: int
         value_head_dim: int
         conv_kernel_size: int = 4
-        norm_eps: float = 1e-6
-        fla_backend: str = "fla_chunked"
-        in_proj_init: dict
-        out_proj_init: dict
-        norm_init: dict
+
+        # Sub-module configs
+        in_proj_q: Linear.Config
+        in_proj_k: Linear.Config
+        in_proj_v: Linear.Config
+        in_proj_z: Linear.Config
+        in_proj_a: Linear.Config
+        in_proj_b: Linear.Config
+        kernel: GatedDeltaKernel.Config
+        norm: RMSNormGated.Config
+        out_proj: Linear.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -243,45 +249,15 @@ class GatedDeltaNet(Module):
         self.value_head_dim = config.value_head_dim
         self.conv_kernel_size = config.conv_kernel_size
 
-        key_dim = config.n_key_heads * config.key_head_dim
-        value_dim = config.n_value_heads * config.value_head_dim
+        key_dim = config.in_proj_q.out_features
+        value_dim = config.in_proj_v.out_features
 
-        self.in_proj_q = Linear.Config(
-            in_features=config.dim,
-            out_features=key_dim,
-            bias=False,
-            param_init=config.in_proj_init,
-        ).build()
-        self.in_proj_k = Linear.Config(
-            in_features=config.dim,
-            out_features=key_dim,
-            bias=False,
-            param_init=config.in_proj_init,
-        ).build()
-        self.in_proj_v = Linear.Config(
-            in_features=config.dim,
-            out_features=value_dim,
-            bias=False,
-            param_init=config.in_proj_init,
-        ).build()
-        self.in_proj_z = Linear.Config(
-            in_features=config.dim,
-            out_features=value_dim,
-            bias=False,
-            param_init=config.in_proj_init,
-        ).build()
-        self.in_proj_a = Linear.Config(
-            in_features=config.dim,
-            out_features=config.n_value_heads,
-            bias=False,
-            param_init=config.in_proj_init,
-        ).build()
-        self.in_proj_b = Linear.Config(
-            in_features=config.dim,
-            out_features=config.n_value_heads,
-            bias=False,
-            param_init=config.in_proj_init,
-        ).build()
+        self.in_proj_q = config.in_proj_q.build()
+        self.in_proj_k = config.in_proj_k.build()
+        self.in_proj_v = config.in_proj_v.build()
+        self.in_proj_z = config.in_proj_z.build()
+        self.in_proj_a = config.in_proj_a.build()
+        self.in_proj_b = config.in_proj_b.build()
 
         self.conv_q = _Conv1d(
             in_channels=key_dim,
@@ -308,27 +284,38 @@ class GatedDeltaNet(Module):
             padding=0,
         )
 
-        self.A_log = nn.Parameter(torch.empty(config.n_value_heads))
-        self.dt_bias = nn.Parameter(torch.empty(config.n_value_heads))
+        n_value_heads = value_dim // config.value_head_dim
+        self.A_log = nn.Parameter(torch.empty(n_value_heads))
+        self.dt_bias = nn.Parameter(torch.empty(n_value_heads))
 
-        self.kernel = GatedDeltaKernel.Config(backend=config.fla_backend).build()
-
-        self.norm = RMSNormGated.Config(
-            dim=config.value_head_dim,
-            eps=config.norm_eps,
-            param_init=config.norm_init,
-        ).build()
-        self.out_proj = Linear.Config(
-            in_features=value_dim,
-            out_features=config.dim,
-            bias=False,
-            param_init=config.out_proj_init,
-        ).build()
+        self.kernel = config.kernel.build()
+        self.norm = config.norm.build()
+        self.out_proj = config.out_proj.build()
 
     def _causal_conv(self, x: torch.Tensor, conv: nn.Module) -> torch.Tensor:
         # pyrefly: ignore [bad-argument-type]
         x = F.pad(x.transpose(1, 2), (self.conv_kernel_size - 1, 0))
-        return F.silu(conv(x)).transpose(1, 2)
+        if isinstance(x, DTensor):
+            # TODO: Remove once DTensor Conv1d dispatch handles sharded groups.
+            mesh, plc = x.device_mesh, x.placements
+            w: torch.Tensor = conv.weight  # pyrefly: ignore [bad-assignment]
+            if isinstance(w, DTensor):
+                w = w.to_local()
+            local_groups = w.size(0)
+            # pyrefly: ignore [no-matching-overload]
+            out = F.conv1d(
+                x.to_local(),
+                w,
+                None,
+                conv.stride,
+                conv.padding,
+                conv.dilation,
+                local_groups,
+            )
+            x = DTensor.from_local(out, mesh, plc, run_check=False)
+        else:
+            x = conv(x)
+        return F.silu(x).transpose(1, 2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bs, seqlen, _ = x.shape
@@ -450,47 +437,36 @@ class Qwen35TransformerBlock(Module):
     """Hybrid transformer block for Qwen3.5.
 
     Each layer uses either full attention (Qwen35Attention) or linear
-    attention (GatedDeltaNet), determined by ``layer_type`` in config.
+    attention (GatedDeltaNet), determined by which config is provided.
     Both types share the same FFN/MoE structure.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        layer_type: str  # "full_attn" or "linear_attn"
         attention: Qwen35Attention.Config | None = None
-        deltanet: GatedDeltaNet.Config | None = None
+        delta_net: GatedDeltaNet.Config | None = None
         feed_forward: Module.Config | None = None
         moe: Module.Config | None = None
-        shared_ffn: Module.Config | None = None
-        shared_gate: Linear.Config | None = None
         attention_norm: OffsetRMSNorm.Config
         ffn_norm: OffsetRMSNorm.Config
 
     def __init__(self, config: Config):
         super().__init__()
-        self.layer_type = config.layer_type
+        self.full_attn = config.attention is not None
 
-        if config.layer_type == "full_attn":
-            assert config.attention is not None
-            self.attn = config.attention.build()
+        if self.full_attn:
+            self.attn = config.attention.build()  # pyrefly: ignore [missing-attribute]
         else:
-            assert config.deltanet is not None
-            self.attn = config.deltanet.build()
+            assert config.delta_net is not None
+            self.attn = config.delta_net.build()
 
         self.moe_enabled = config.moe is not None
-        self.shared_expert_enabled = config.shared_ffn is not None
         if self.moe_enabled:
             # pyrefly: ignore [missing-attribute]
             self.moe = config.moe.build()
         else:
             assert config.feed_forward is not None
             self.feed_forward = config.feed_forward.build()
-
-        if self.shared_expert_enabled:
-            # pyrefly: ignore [missing-attribute]
-            self.shared_ffn = config.shared_ffn.build()
-            assert config.shared_gate is not None
-            self.shared_gate = config.shared_gate.build()
 
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
@@ -503,7 +479,7 @@ class Qwen35TransformerBlock(Module):
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         h = self.attention_norm(x)
-        if self.layer_type == "full_attn":
+        if self.full_attn:
             h = self.attn(h, freqs_cis, attention_masks, positions)
         else:
             h = self.attn(h)
@@ -511,12 +487,7 @@ class Qwen35TransformerBlock(Module):
 
         h = self.ffn_norm(x)
         if self.moe_enabled:
-            moe_out = self.moe(h)
-            if self.shared_expert_enabled:
-                shared_out = torch.sigmoid(self.shared_gate(h)) * self.shared_ffn(h)
-                x = x + moe_out + shared_out
-            else:
-                x = x + moe_out
+            x = x + self.moe(h)
         else:
             x = x + self.feed_forward(h)
         return x
@@ -567,26 +538,11 @@ class Qwen35Model(Decoder):
         def update_from_config(
             self,
             *,
-            trainer_config,
+            config,
             **kwargs,
         ) -> None:
-            training = trainer_config.training
-            parallelism = trainer_config.parallelism
-            debug = trainer_config.debug
-            seq_len = training.seq_len
-            if seq_len > self.rope.max_seq_len:
-                logger.warning(
-                    f"Sequence length {seq_len} exceeds original maximum "
-                    f"{self.rope.max_seq_len}."
-                )
-            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
-
-            for layer_cfg in self.layers:
-                moe_cfg = getattr(layer_cfg, "moe", None)
-                if moe_cfg is not None:
-                    moe_cfg.router._debug_force_load_balance = (
-                        debug.moe_force_load_balance
-                    )
+            Decoder.Config.update_from_config(self, config=config, **kwargs)
+            parallelism = config.parallelism
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
@@ -603,21 +559,25 @@ class Qwen35Model(Decoder):
                         f"n_kv_heads ({attn_cfg.n_kv_heads})."
                     )
                 dn_cfg = next(
-                    (l.deltanet for l in self.layers if l.deltanet is not None),
+                    (l.delta_net for l in self.layers if l.delta_net is not None),
                     None,
                 )
-                if dn_cfg is not None and (
-                    dn_cfg.n_key_heads % tp != 0 or dn_cfg.n_value_heads % tp != 0
-                ):
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide "
-                        f"n_key_heads ({dn_cfg.n_key_heads}) and "
-                        f"n_value_heads ({dn_cfg.n_value_heads})."
+                if dn_cfg is not None:
+                    n_key_heads = dn_cfg.in_proj_q.out_features // dn_cfg.key_head_dim
+                    n_value_heads = (
+                        dn_cfg.in_proj_v.out_features // dn_cfg.value_head_dim
                     )
+                    if n_key_heads % tp != 0 or n_value_heads % tp != 0:
+                        raise ValueError(
+                            f"tensor_parallel_degree ({tp}) must divide "
+                            f"n_key_heads ({n_key_heads}) and "
+                            f"n_value_heads ({n_value_heads})."
+                        )
 
             set_qwen35_sharding_config(
                 self,
                 loss_parallel=not parallelism.disable_loss_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
         def get_nparams_and_flops(
@@ -631,7 +591,7 @@ class Qwen35Model(Decoder):
             n_heads = attn_cfg.n_heads
             # pyrefly: ignore [missing-attribute]
             head_dim = attn_cfg.head_dim
-            num_full_attn = sum(1 for l in self.layers if l.layer_type == "full_attn")
+            num_full_attn = sum(1 for l in self.layers if l.attention is not None)
             return get_moe_model_nparams_and_flops(
                 self,
                 model,
@@ -766,9 +726,9 @@ class Qwen35Model(Decoder):
                         video_index += 1
 
                     llm_grid_t, llm_grid_h, llm_grid_w = (
-                        t.item(),
-                        h.item() // spatial_merge_size,
-                        w.item() // spatial_merge_size,
+                        int(t.item()),
+                        int(h.item()) // spatial_merge_size,
+                        int(w.item()) // spatial_merge_size,
                     )
                     text_len = vision_start - pair_cursor
 
@@ -786,34 +746,28 @@ class Qwen35Model(Decoder):
                     # [vision tokens] — 3D grid positions (T, H, W)
                     grid_key = (llm_grid_t, llm_grid_h, llm_grid_w)
                     if grid_key not in grid_cache:
+                        hw = llm_grid_h * llm_grid_w
                         t_index = (
                             torch.arange(llm_grid_t)
                             .view(-1, 1)
-                            # pyrefly: ignore [no-matching-overload]
-                            .expand(-1, llm_grid_h * llm_grid_w)
+                            .expand(-1, hw)
                             .flatten()
                         )
                         h_index = (
                             torch.arange(llm_grid_h)
                             .view(1, -1, 1)
-                            # pyrefly: ignore [no-matching-overload]
                             .expand(llm_grid_t, -1, llm_grid_w)
                             .flatten()
                         )
                         w_index = (
                             torch.arange(llm_grid_w)
                             .view(1, 1, -1)
-                            # pyrefly: ignore [no-matching-overload]
                             .expand(llm_grid_t, llm_grid_h, -1)
                             .flatten()
                         )
-                        # pyrefly: ignore [unsupported-operation]
                         grid_cache[grid_key] = torch.stack([t_index, h_index, w_index])
                     doc_pos_ids_list.append(
-                        # pyrefly: ignore [bad-index]
-                        grid_cache[grid_key]
-                        + text_len
-                        + pos_id_offset
+                        grid_cache[grid_key] + text_len + pos_id_offset
                     )
                     pair_cursor = vision_start + llm_grid_t * llm_grid_h * llm_grid_w
 
@@ -835,7 +789,11 @@ class Qwen35Model(Decoder):
             position_ids[:, sample_i, :] = llm_positions.to(position_ids.device)
 
         # --- Compute interleaved MRoPE cos/sin from position IDs ---
+        # Convert to local — DTensor doesn't support fancy indexing with
+        # plain-tensor indices (cos_cache[t_pos], sin_cache[:, col][dim_pos]).
         freqs_cis = self.freqs_cis
+        if isinstance(freqs_cis, DTensor):
+            freqs_cis = freqs_cis.to_local()
         head_dim = freqs_cis.shape[-1] // 2
         cos_cache = freqs_cis[:, :head_dim]
         sin_cache = freqs_cis[:, head_dim:]
