@@ -25,6 +25,12 @@ Reload pattern (backward):
 This module works with the make_fx traced joint fwd+bwd graph, using
 ``meta["custom"]["module_fqn"]`` for layer boundaries and
 ``meta["autograd_backward"]`` to distinguish forward from backward nodes.
+
+NUMA note: On multi-NUMA machines (e.g. GB200 NVLink-C2C), CPU offload
+bandwidth depends on pinned memory landing on the NUMA node local to the
+GPU (~350 GB/s local vs ~120 GB/s cross-NUMA). torchrun's
+``--numa-binding node`` flag (set in run_train.sh) pins each worker to
+the correct NUMA node, which is sufficient for the multi-process case.
 """
 
 import operator

@@ -73,6 +73,14 @@ The `--compile.memory_policy` config selects the tagging strategy.
 New policies (e.g. budget-aware mixed SAC + offload) should be added
 as new branches in `tag_with_memory_policy_pass`.
 
+**NUMA requirement for CPU offload:** On multi-NUMA machines (e.g. GB200
+NVLink-C2C), D2H/H2D bandwidth is ~350 GB/s NUMA-local vs ~120 GB/s
+cross-NUMA. `run_train.sh` passes `--numa-binding node` to torchrun,
+which pins each worker process to the NUMA node containing its GPU.
+This is required for full offload bandwidth. Without it, pinned memory
+allocations can land on a remote NUMA node and degrade transfer speed
+by ~3x.
+
 **Inspecting tags:** `log_activation_memory_policy` (`log_activation_memory_policy.py`)
 prints all forward nodes consumed by backward, grouped by layer with
 identical patterns consolidated. Shows memory, dtype, policy
