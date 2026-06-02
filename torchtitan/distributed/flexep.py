@@ -18,20 +18,32 @@ import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 from torch._library.opaque_object import OpaqueBase, register_opaque_type
-from torch.distributed._functional_collectives import all_to_all_single
 from torch.utils._python_dispatch import _disable_current_modes
 
-from torchtitan.distributed.flexep_kernels import copy_peer
-from torchtitan.ops.scatter_add import deterministic_scatter_add
+from torchtitan.distributed.flexep_kernels import (
+    copy_full_counts_to_peers,
+    copy_rows_to_peers,
+    expand_topk_grad,
+    fill_combine_metadata,
+    fill_dispatch_metadata,
+    invert_flat_indices,
+    reduce_topk_slots,
+    topk_scores_grad,
+)
 from torchtitan.tools.logging import logger
 
 
-_buffer: torch.Tensor | None = None
-_hidden_recv_buffer: torch.Tensor | None = None
-_input_splits_buffer: torch.Tensor | None = None
-_all_input_splits_buffer: torch.Tensor | None = None
-_hidden_recv_handle: Any = None
-_input_splits_handle: Any = None
+_HIDDEN_RECV_BUFFER_COUNT = 2
+
+_hidden_recv_buffers: list[torch.Tensor] | None = None
+_hidden_recv_handles: list[Any] | None = None
+_hidden_recv_peer_buffers: list[list[torch.Tensor]] | None = None
+_hidden_recv_peer_ptrs: list[torch.Tensor] | None = None
+_hidden_recv_buffer_index: int = 0
+_counts_recv_buffer: torch.Tensor | None = None
+_counts_recv_handle: Any = None
+_counts_recv_peer_buffers: list[torch.Tensor] | None = None
+_counts_recv_peer_ptrs: torch.Tensor | None = None
 _rendezvous_handle: list[Any] | None = None
 _group: dist.ProcessGroup | None = None
 _group_name: str | None = None
@@ -40,6 +52,9 @@ _max_tokens_per_rank: int = 0
 _max_routed_tokens: int = 0
 _num_local_experts: int = 0
 _top_k: int = 0
+
+_HIDDEN_READY_CHANNEL = 0
+_COUNTS_READY_CHANNEL = 0
 
 
 class DispatchHandle(OpaqueBase):
@@ -71,9 +86,16 @@ register_opaque_type(DispatchHandle, typ="reference")
 @dataclass(frozen=True)
 class _DispatchRuntimeState:
     num_routed_tokens: int
-    input_splits: torch.Tensor
-    output_splits: torch.Tensor
-    permuted_indices: torch.Tensor
+    receive_capacity: int
+    dispatch_dst_ranks: torch.Tensor
+    dispatch_dst_rows: torch.Tensor
+    combine_dst_ranks: torch.Tensor
+    combine_dst_rows: torch.Tensor
+    combine_num_valid_rows: torch.Tensor
+    slot_to_row: torch.Tensor
+    input_is_token_ordered: bool
+    num_tokens: int
+    top_k: int
 
 
 @dataclass
@@ -81,9 +103,12 @@ class FlexEPDispatchState:
     """FlexEP state from dispatch needed for combine."""
 
     handle: DispatchHandle
-    token_indices: torch.Tensor
+    flat_token_indices: torch.Tensor
+    slot_to_row: torch.Tensor
     routed_scores: torch.Tensor | None = None
+    routed_scores_are_slot_ordered: bool = False
     num_tokens: int = 0
+    top_k: int = 0
 
 
 def init_buffer(
@@ -96,9 +121,11 @@ def init_buffer(
     device: torch.device,
 ) -> None:
     """Initialize the process-local FlexEP symmetric-memory buffer."""
-    global _buffer, _hidden_recv_buffer
-    global _input_splits_buffer, _all_input_splits_buffer
-    global _hidden_recv_handle, _input_splits_handle
+    global _hidden_recv_buffers, _hidden_recv_handles
+    global _hidden_recv_peer_buffers, _hidden_recv_peer_ptrs
+    global _hidden_recv_buffer_index
+    global _counts_recv_buffer, _counts_recv_handle, _counts_recv_peer_buffers
+    global _counts_recv_peer_ptrs
     global _rendezvous_handle, _group, _group_name
     global _hidden_dim, _max_tokens_per_rank, _max_routed_tokens
     global _num_local_experts, _top_k
@@ -121,18 +148,22 @@ def init_buffer(
         group.size() * max_tokens_per_rank * min(top_k, num_local_experts)
     )
     needs_init = (
-        _buffer is None
-        or _hidden_recv_buffer is None
-        or _input_splits_buffer is None
-        or _all_input_splits_buffer is None
+        _hidden_recv_buffers is None
+        or _hidden_recv_handles is None
+        or _hidden_recv_peer_buffers is None
+        or _hidden_recv_peer_ptrs is None
+        or _counts_recv_buffer is None
+        or _counts_recv_handle is None
+        or _counts_recv_peer_buffers is None
+        or _counts_recv_peer_ptrs is None
         or _group != group
         or _hidden_dim < hidden_dim
         or _max_tokens_per_rank < max_tokens_per_rank
         or _max_routed_tokens < max_routed_tokens
         or _num_local_experts < num_local_experts
         or _top_k < top_k
-        or _buffer.dtype != dtype
-        or _buffer.device != device
+        or _hidden_recv_buffers[0].dtype != dtype
+        or _hidden_recv_buffers[0].device != device
     )
     if not needs_init:
         return
@@ -155,36 +186,64 @@ def init_buffer(
                 f"backend, got {backend}."
             )
 
-        _buffer = symm_mem.empty(
-            max_routed_tokens,
-            hidden_dim,
-            dtype=dtype,
-            device=device,
-        )
-        _hidden_recv_buffer = symm_mem.empty(
-            max_routed_tokens,
-            hidden_dim,
-            dtype=dtype,
-            device=device,
-        )
-        _input_splits_buffer = symm_mem.empty(
+        _hidden_recv_buffers = [
+            symm_mem.empty(
+                max_routed_tokens,
+                hidden_dim,
+                dtype=dtype,
+                device=device,
+            )
+            for _ in range(_HIDDEN_RECV_BUFFER_COUNT)
+        ]
+        _counts_recv_buffer = symm_mem.empty(
             group.size(),
+            group.size() * num_local_experts,
             dtype=torch.int64,
             device=device,
         )
-        _all_input_splits_buffer = torch.empty(
-            group.size(),
-            group.size(),
+        _hidden_recv_handles = [
+            symm_mem.rendezvous(hidden_recv_buffer, group)
+            for hidden_recv_buffer in _hidden_recv_buffers
+        ]
+        _counts_recv_handle = symm_mem.rendezvous(_counts_recv_buffer, group)
+        _hidden_recv_peer_buffers = [
+            [
+                hidden_recv_handle.get_buffer(
+                    peer,
+                    hidden_recv_buffer.shape,
+                    hidden_recv_buffer.dtype,
+                )
+                for peer in range(group.size())
+            ]
+            for hidden_recv_buffer, hidden_recv_handle in zip(
+                _hidden_recv_buffers,
+                _hidden_recv_handles,
+            )
+        ]
+        _hidden_recv_peer_ptrs = [
+            torch.tensor(
+                [peer_buffer.data_ptr() for peer_buffer in hidden_recv_peer_buffers],
+                dtype=torch.int64,
+                device=device,
+            )
+            for hidden_recv_peer_buffers in _hidden_recv_peer_buffers
+        ]
+        _counts_recv_peer_buffers = [
+            _counts_recv_handle.get_buffer(
+                peer,
+                _counts_recv_buffer.shape,
+                _counts_recv_buffer.dtype,
+            )
+            for peer in range(group.size())
+        ]
+        _counts_recv_peer_ptrs = torch.tensor(
+            [peer_buffer.data_ptr() for peer_buffer in _counts_recv_peer_buffers],
             dtype=torch.int64,
             device=device,
         )
-        buffer_handle = symm_mem.rendezvous(_buffer, group)
-        _hidden_recv_handle = symm_mem.rendezvous(_hidden_recv_buffer, group)
-        _input_splits_handle = symm_mem.rendezvous(_input_splits_buffer, group)
         _rendezvous_handle = [
-            buffer_handle,
-            _hidden_recv_handle,
-            _input_splits_handle,
+            *_hidden_recv_handles,
+            _counts_recv_handle,
         ]
 
     _group = group
@@ -194,6 +253,7 @@ def init_buffer(
     _max_routed_tokens = max_routed_tokens
     _num_local_experts = num_local_experts
     _top_k = top_k
+    _hidden_recv_buffer_index = 0
 
 
 def _require_initialized(
@@ -201,12 +261,14 @@ def _require_initialized(
     x: torch.Tensor,
 ) -> None:
     if (
-        _buffer is None
-        or _hidden_recv_buffer is None
-        or _input_splits_buffer is None
-        or _all_input_splits_buffer is None
-        or _hidden_recv_handle is None
-        or _input_splits_handle is None
+        _hidden_recv_buffers is None
+        or _hidden_recv_handles is None
+        or _hidden_recv_peer_buffers is None
+        or _hidden_recv_peer_ptrs is None
+        or _counts_recv_buffer is None
+        or _counts_recv_handle is None
+        or _counts_recv_peer_buffers is None
+        or _counts_recv_peer_ptrs is None
         or _rendezvous_handle is None
     ):
         raise RuntimeError("FlexEP buffer not initialized.")
@@ -215,9 +277,9 @@ def _require_initialized(
             f"FlexEP buffer initialized for group {_group_name!r}, "
             f"but dispatch used group {group_name!r}."
         )
-    if x.device != _buffer.device:
+    if x.device != _hidden_recv_buffers[0].device:
         raise RuntimeError(
-            f"FlexEP buffer initialized on device {_buffer.device}, "
+            f"FlexEP buffer initialized on device {_hidden_recv_buffers[0].device}, "
             f"but dispatch used device {x.device}."
         )
     if x.shape[1] > _hidden_dim:
@@ -227,45 +289,23 @@ def _require_initialized(
         )
 
 
-def _wait_tensor(x: torch.Tensor) -> torch.Tensor:
-    return torch.ops._c10d_functional.wait_tensor(x)
-
-
-def _exchange_input_splits(input_splits: torch.Tensor) -> torch.Tensor:
-    assert _input_splits_buffer is not None
-    assert _all_input_splits_buffer is not None
-    assert _input_splits_handle is not None
-    assert _group is not None
-
-    group_size = _group.size()
-    rank = _group.rank()
-
-    # Ensure no rank overwrites its split vector while a peer may still read it
-    # from the previous all-to-allv.
-    _input_splits_handle.barrier()
-    _input_splits_buffer.copy_(input_splits.to(torch.int64))
-    _input_splits_handle.barrier()
-
-    for peer in range(group_size):
-        peer_splits = _input_splits_handle.get_buffer(
-            peer,
-            _input_splits_buffer.shape,
-            _input_splits_buffer.dtype,
-        )
-        _all_input_splits_buffer[peer].copy_(peer_splits)
-
-    _input_splits_handle.barrier()
-    return _all_input_splits_buffer[:, rank].contiguous()
-
-
-def _all_to_allv_cuda(
+def _copy_rows_to_peers_cuda(
     x: torch.Tensor,
-    input_splits: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    assert _buffer is not None
-    assert _hidden_recv_buffer is not None
-    assert _all_input_splits_buffer is not None
-    assert _hidden_recv_handle is not None
+    dst_ranks: torch.Tensor,
+    dst_rows: torch.Tensor,
+    valid_rows: torch.Tensor | None,
+    num_rows: int,
+    *,
+    block_m: int = 1,
+    num_warps: int = 4,
+    src_rows: torch.Tensor | None = None,
+    num_valid_rows: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, Any]:
+    global _hidden_recv_buffer_index
+    assert _hidden_recv_buffers is not None
+    assert _hidden_recv_handles is not None
+    assert _hidden_recv_peer_buffers is not None
+    assert _hidden_recv_peer_ptrs is not None
     assert _group is not None
 
     if x.shape[0] > _max_routed_tokens:
@@ -274,193 +314,315 @@ def _all_to_allv_cuda(
             f"than input rows ({x.shape[0]})."
         )
 
-    _buffer[: x.shape[0], : x.shape[1]].copy_(x)
-    output_splits = _exchange_input_splits(input_splits)
+    buffer_index = _hidden_recv_buffer_index
+    _hidden_recv_buffer_index = (
+        _hidden_recv_buffer_index + 1
+    ) % _HIDDEN_RECV_BUFFER_COUNT
+    hidden_recv_buffer = _hidden_recv_buffers[buffer_index]
+    hidden_recv_handle = _hidden_recv_handles[buffer_index]
+    hidden_recv_peer_buffers = _hidden_recv_peer_buffers[buffer_index]
+    hidden_recv_peer_ptrs = _hidden_recv_peer_ptrs[buffer_index]
+
+    copy_rows_to_peers(
+        x,
+        hidden_recv_peer_buffers,
+        dst_ranks,
+        dst_rows,
+        valid_rows,
+        ep_size=_group.size(),
+        num_rows=num_rows,
+        num_cols=x.shape[1],
+        block_m=block_m,
+        num_warps=num_warps,
+        src_rows=src_rows,
+        dst_ptrs=hidden_recv_peer_ptrs,
+        num_valid_rows=num_valid_rows,
+    )
+    _wait_hidden_ready(hidden_recv_handle)
+    return hidden_recv_buffer, hidden_recv_handle
+
+
+def _wait_hidden_ready(hidden_recv_handle: Any) -> None:
+    _wait_ready(hidden_recv_handle, _HIDDEN_READY_CHANNEL)
+
+
+def _wait_counts_ready() -> None:
+    assert _counts_recv_handle is not None
+    _wait_ready(_counts_recv_handle, _COUNTS_READY_CHANNEL)
+
+
+def _wait_ready(handle: Any, channel: int) -> None:
+    assert _group is not None
 
     rank = _group.rank()
-    group_size = _group.size()
-    for peer in range(group_size):
-        peer_recv_buffer = _hidden_recv_handle.get_buffer(
-            peer,
-            _hidden_recv_buffer.shape,
-            _hidden_recv_buffer.dtype,
-        )
-        copy_peer(
-            _buffer,
-            peer_recv_buffer,
-            _all_input_splits_buffer,
-            peer=peer,
-            rank=rank,
-            ep_size=group_size,
-            num_rows=x.shape[0],
-            num_cols=x.shape[1],
-        )
-
-    _hidden_recv_handle.barrier()
-    return _hidden_recv_buffer, output_splits
+    for peer in range(_group.size()):
+        if peer != rank:
+            handle.put_signal(
+                dst_rank=peer,
+                channel=channel,
+            )
+    for peer in range(_group.size()):
+        if peer != rank:
+            handle.wait_signal(
+                src_rank=peer,
+                channel=channel,
+            )
 
 
-def _permute_to_expert_major(
-    x: torch.Tensor,
-    num_global_tokens_per_local_expert_E: torch.Tensor,  # noqa: N803
+def _copy_all_counts_to_peers_cuda(
+    num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
     ep_size: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    num_local_experts = num_global_tokens_per_local_expert_E.shape[0] // ep_size
-    device = num_global_tokens_per_local_expert_E.device
-    capacity = x.shape[0]
+) -> torch.Tensor:
+    assert _counts_recv_buffer is not None
+    assert _counts_recv_peer_buffers is not None
+    assert _counts_recv_peer_ptrs is not None
+    assert _group is not None
 
-    token_count_matrix = num_global_tokens_per_local_expert_E.view(
-        ep_size, num_local_experts
+    num_experts = ep_size * _num_local_experts
+    if num_local_tokens_per_expert_E.numel() != num_experts:
+        raise RuntimeError(
+            "FlexEP count exchange expected "
+            f"{num_experts} counts, got {num_local_tokens_per_expert_E.numel()}."
+        )
+
+    copy_full_counts_to_peers(
+        num_local_tokens_per_expert_E,
+        _counts_recv_peer_buffers,
+        rank=_group.rank(),
+        ep_size=ep_size,
+        num_experts=num_experts,
+        dst_ptrs=_counts_recv_peer_ptrs,
     )
-    input_starts = (
-        num_global_tokens_per_local_expert_E.cumsum(0)
-        - num_global_tokens_per_local_expert_E
-    ).view(ep_size, num_local_experts)
+    return _counts_recv_buffer[:ep_size, :num_experts]
 
-    segment_lens = token_count_matrix.t().reshape(-1)
-    input_starts = input_starts.t().reshape(-1)
 
+def _compute_direct_metadata(
+    num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
+    all_tokens_per_expert_RE: torch.Tensor,  # noqa: N803
+    num_routed_tokens: int,
+    receive_capacity: int,
+    ep_size: int,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    assert _group is not None
+
+    rank = _group.rank()
+    num_experts = num_local_tokens_per_expert_E.numel()
+    num_local_experts = num_experts // ep_size
+
+    counts_sde = all_tokens_per_expert_RE.view(
+        ep_size,
+        ep_size,
+        num_local_experts,
+    )
+    source_prefix_sde = counts_sde.cumsum(0) - counts_sde
+    total_de = counts_sde.sum(0)
+    expert_starts_de = total_de.cumsum(1) - total_de
+    tokens_per_expert_e = total_de[rank]
+
+    local_dest_offsets_E = (  # noqa: N806
+        expert_starts_de + source_prefix_sde[rank]
+    ).reshape(num_experts)
+    local_count_ends_E = num_local_tokens_per_expert_E.cumsum(0)  # noqa: N806
+    local_count_starts_E = local_count_ends_E - num_local_tokens_per_expert_E  # noqa: N806
+    dispatch_dst_ranks_N, dispatch_dst_rows_N = fill_dispatch_metadata(  # noqa: N806
+        num_local_tokens_per_expert_E,
+        local_dest_offsets_E,
+        local_count_starts_E,
+        num_routed_tokens=num_routed_tokens,
+        num_local_experts=num_local_experts,
+        max_tokens_per_segment=_max_tokens_per_rank,
+    )
+
+    segment_lens = counts_sde[:, rank, :].t().reshape(-1)
     output_ends = segment_lens.cumsum(0)
     output_starts = output_ends - segment_lens
-    positions = torch.arange(capacity, device=device)
-    # Keep the dispatch output fixed-size so the CUDA token-count total never
-    # has to become a host-side tensor dimension. Rows at positions >= total
-    # are padding; grouped_mm ignores them because expert offsets end at total.
-    segment_ids = torch.searchsorted(output_ends, positions, right=True)
-    segment_ids = segment_ids.clamp(max=segment_lens.shape[0] - 1)
-    permuted_indices = (
-        input_starts[segment_ids]
-        + positions
-        - output_starts[segment_ids]
+    source_input_starts_RE = (  # noqa: N806
+        all_tokens_per_expert_RE.cumsum(1) - all_tokens_per_expert_RE
     )
-    total = output_ends[-1]
-    permuted_indices = torch.where(positions < total, permuted_indices, positions)
+    combine_dst_ranks, combine_dst_rows, combine_num_valid_rows = fill_combine_metadata(
+        segment_lens,
+        output_starts,
+        source_input_starts_RE,
+        ep_rank=rank,
+        ep_size=ep_size,
+        num_local_experts=num_local_experts,
+        receive_capacity=receive_capacity,
+        max_tokens_per_segment=_max_tokens_per_rank,
+    )
 
-    num_global_tokens_per_local_expert_e = token_count_matrix.sum(0)
     return (
-        x[permuted_indices, ...],
-        permuted_indices,
-        num_global_tokens_per_local_expert_e,
+        dispatch_dst_ranks_N,
+        dispatch_dst_rows_N,
+        combine_dst_ranks,
+        combine_dst_rows,
+        combine_num_valid_rows,
+        tokens_per_expert_e,
     )
-
-
-def _unpermute_from_expert_major(
-    x: torch.Tensor,
-    shape: tuple[int, ...],
-    permuted_indices: torch.Tensor,
-) -> torch.Tensor:
-    out = x.new_empty(shape)
-    out[permuted_indices, ...] = x
-    return out
 
 
 def _dispatch_to_experts(
     x_ND: torch.Tensor,  # noqa: N803
     state: _DispatchRuntimeState,
 ) -> torch.Tensor:
-    rank_major, _ = _all_to_allv_cuda(
+    hidden_recv_buffer, _ = _copy_rows_to_peers_cuda(
         x_ND,
-        state.input_splits,
+        state.dispatch_dst_ranks,
+        state.dispatch_dst_rows,
+        None,
+        state.num_routed_tokens,
+        block_m=4,
+        num_warps=8,
     )
-    return rank_major[state.permuted_indices, ...]
+    return hidden_recv_buffer[: state.receive_capacity, : x_ND.shape[1]]
 
 
 def _combine_to_origin(
     x_RD: torch.Tensor,  # noqa: N803
     state: _DispatchRuntimeState,
 ) -> torch.Tensor:
-    rank_major = _unpermute_from_expert_major(x_RD, x_RD.shape, state.permuted_indices)
-    combined, _ = _all_to_allv_cuda(
-        rank_major,
-        state.output_splits,
+    combined, _ = _copy_rows_to_peers_cuda(
+        x_RD,
+        state.combine_dst_ranks,
+        state.combine_dst_rows,
+        None,
+        state.receive_capacity,
+        block_m=4,
+        num_valid_rows=state.combine_num_valid_rows,
     )
-    return combined[: state.num_routed_tokens, : rank_major.shape[1]]
+    return combined[: state.num_routed_tokens, : x_RD.shape[1]]
 
 
 @torch.library.custom_op("flexep::dispatch", mutates_args=(), device_types="cuda")
 def _dispatch_impl(
-    routed_input_ND: torch.Tensor,  # noqa: N803
+    dispatch_input: torch.Tensor,
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
+    source_token_indices_N: torch.Tensor,  # noqa: N803
+    slot_to_row_N: torch.Tensor,  # noqa: N803
     num_tokens: int,
     ep_size: int,
     group_name: str,
+    input_is_token_ordered: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchHandle]:
     """Dispatch tokens to local experts through the EP process group."""
-    _require_initialized(group_name, routed_input_ND)
+    _require_initialized(group_name, dispatch_input)
     num_experts = num_local_tokens_per_expert_E.numel()
     if num_experts % ep_size != 0:
         raise ValueError(
             f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size})."
         )
 
-    group = dist.distributed_c10d._resolve_process_group(group_name)
     num_local_tokens_per_expert_E = num_local_tokens_per_expert_E.to(
         torch.int64
     ).contiguous()
     if num_tokens <= 0:
         raise ValueError(f"num_tokens must be positive, got {num_tokens}.")
-    if routed_input_ND.shape[0] % num_tokens != 0:
+    num_routed_tokens = source_token_indices_N.numel()
+    if num_routed_tokens % num_tokens != 0:
         raise ValueError(
             "routed input rows must be divisible by num_tokens. Got "
-            f"{routed_input_ND.shape[0]} rows and {num_tokens} tokens."
+            f"{num_routed_tokens} rows and {num_tokens} tokens."
         )
-    top_k = routed_input_ND.shape[0] // num_tokens
-    receive_capacity = ep_size * num_tokens * min(top_k, num_experts // ep_size)
+    if slot_to_row_N.numel() != num_routed_tokens:
+        raise ValueError(
+            "slot_to_row length must match routed rows. Got "
+            f"{slot_to_row_N.numel()} and {num_routed_tokens}."
+        )
+    if source_token_indices_N.dtype != torch.int64:
+        raise ValueError("source_token_indices_N must be int64.")
+    if source_token_indices_N.device != dispatch_input.device:
+        raise ValueError("source_token_indices_N must match dispatch input device.")
+    if slot_to_row_N.device != dispatch_input.device:
+        raise ValueError("slot_to_row_N must match dispatch input device.")
+    top_k = num_routed_tokens // num_tokens
+    if input_is_token_ordered:
+        if dispatch_input.shape[0] != num_tokens:
+            raise ValueError(
+                "token-ordered dispatch input rows must match num_tokens. Got "
+                f"{dispatch_input.shape[0]} and {num_tokens}."
+            )
+    elif dispatch_input.shape[0] != num_routed_tokens:
+        raise ValueError(
+            "routed dispatch input rows must match routed rows. Got "
+            f"{dispatch_input.shape[0]} and {num_routed_tokens}."
+        )
+    slot_size = num_tokens * min(top_k, num_experts // ep_size)
+    receive_capacity = ep_size * slot_size
     if receive_capacity > _max_routed_tokens:
         raise RuntimeError(
             f"FlexEP receive buffer capacity ({_max_routed_tokens}) is smaller "
             f"than required receive capacity ({receive_capacity})."
         )
 
-    num_global_tokens_per_local_expert_E = all_to_all_single(
+    all_tokens_per_expert_RE = _copy_all_counts_to_peers_cuda(  # noqa: N806
         num_local_tokens_per_expert_E,
-        None,
-        None,
-        group,
-    )
-    num_global_tokens_per_local_expert_E = _wait_tensor(
-        num_global_tokens_per_local_expert_E
-    )
-
-    input_splits = num_local_tokens_per_expert_E.view(ep_size, -1).sum(dim=1)
-
-    hidden_rank_major, output_splits = _all_to_allv_cuda(
-        routed_input_ND,
-        input_splits,
-    )
-    hidden_rank_major = hidden_rank_major[
-        :receive_capacity, : routed_input_ND.shape[1]
-    ]
-
-    hidden_RD, permuted_indices, tokens_per_expert_e = _permute_to_expert_major(
-        hidden_rank_major,
-        num_global_tokens_per_local_expert_E,
         ep_size,
     )
-
+    _wait_counts_ready()
+    (
+        dispatch_dst_ranks,
+        dispatch_dst_rows,
+        combine_dst_ranks,
+        combine_dst_rows,
+        combine_num_valid_rows,
+        tokens_per_expert_e,
+    ) = _compute_direct_metadata(
+        num_local_tokens_per_expert_E,
+        all_tokens_per_expert_RE,
+        num_routed_tokens,
+        receive_capacity,
+        ep_size,
+    )
+    hidden_recv_buffer, _ = _copy_rows_to_peers_cuda(
+        dispatch_input,
+        dispatch_dst_ranks,
+        dispatch_dst_rows,
+        None,
+        num_routed_tokens,
+        block_m=4,
+        num_warps=8,
+        src_rows=source_token_indices_N if input_is_token_ordered else None,
+    )
+    hidden_RD = hidden_recv_buffer[:receive_capacity, : dispatch_input.shape[1]]
     state = _DispatchRuntimeState(
-        num_routed_tokens=routed_input_ND.shape[0],
-        input_splits=input_splits.clone(),
-        output_splits=output_splits,
-        permuted_indices=permuted_indices,
+        num_routed_tokens=num_routed_tokens,
+        receive_capacity=receive_capacity,
+        dispatch_dst_ranks=dispatch_dst_ranks,
+        dispatch_dst_rows=dispatch_dst_rows,
+        combine_dst_ranks=combine_dst_ranks,
+        combine_dst_rows=combine_dst_rows,
+        combine_num_valid_rows=combine_num_valid_rows,
+        slot_to_row=slot_to_row_N,
+        input_is_token_ordered=input_is_token_ordered,
+        num_tokens=num_tokens,
+        top_k=top_k,
     )
     return hidden_RD, tokens_per_expert_e, DispatchHandle(value=state)
 
 
 @_dispatch_impl.register_fake
 def _dispatch_fake(
-    routed_input_ND: torch.Tensor,  # noqa: N803
+    dispatch_input: torch.Tensor,
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
+    source_token_indices_N: torch.Tensor,  # noqa: N803
+    slot_to_row_N: torch.Tensor,  # noqa: N803
     num_tokens: int,
     ep_size: int,
     group_name: str,
+    input_is_token_ordered: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchHandle]:
-    del group_name
+    del group_name, slot_to_row_N, input_is_token_ordered
     num_local_experts = num_local_tokens_per_expert_E.shape[0] // ep_size
-    top_k = routed_input_ND.shape[0] // num_tokens
+    top_k = source_token_indices_N.numel() // num_tokens
     out_tokens = num_tokens * ep_size * torch.sym_min(top_k, num_local_experts)
-    hidden = routed_input_ND.new_empty(out_tokens, routed_input_ND.shape[1])
-    tokens_per_expert = routed_input_ND.new_empty(num_local_experts, dtype=torch.int64)
+    hidden = dispatch_input.new_empty(out_tokens, dispatch_input.shape[1])
+    tokens_per_expert = dispatch_input.new_empty(num_local_experts, dtype=torch.int64)
     return hidden, tokens_per_expert, DispatchHandle()
 
 
@@ -471,7 +633,7 @@ def _combine_impl(
     num_routed_tokens: int,
 ) -> torch.Tensor:
     """Move expert outputs back to the origin rank's routed-token order."""
-    if _buffer is None:
+    if _hidden_recv_buffers is None:
         raise RuntimeError("FlexEP buffer not initialized.")
     state = handle.value
     assert isinstance(state, _DispatchRuntimeState)
@@ -495,11 +657,21 @@ def _dispatch_backward(ctx, grad_hidden, grad_tpe, grad_handle):
     state = ctx.dispatch_handle.value
     assert isinstance(state, _DispatchRuntimeState)
 
-    grad_routed_input = None
+    grad_input = None
     if grad_hidden is not None:
         grad_routed_input = _combine_to_origin(grad_hidden, state)
+        if state.input_is_token_ordered:
+            grad_input = reduce_topk_slots(
+                grad_routed_input,
+                state.slot_to_row,
+                None,
+                num_tokens=state.num_tokens,
+                top_k=state.top_k,
+            )
+        else:
+            grad_input = grad_routed_input
 
-    return grad_routed_input, None, None, None, None
+    return grad_input, None, None, None, None, None, None, None
 
 
 def _dispatch_setup_context(ctx, inputs, output):
@@ -527,19 +699,127 @@ _dispatch_impl.register_autograd(
 _combine_impl.register_autograd(_combine_backward, setup_context=_combine_setup_context)
 
 
+@torch.library.custom_op("flexep::reduce_topk", mutates_args=(), device_types="cuda")
+def _reduce_topk_impl(
+    routed_output_ND: torch.Tensor,  # noqa: N803
+    slot_to_row_N: torch.Tensor,  # noqa: N803
+    flat_token_indices_N: torch.Tensor,  # noqa: N803
+    routed_scores_N: torch.Tensor,  # noqa: N803
+    has_scores: bool,
+    scores_are_slot_ordered: bool,
+    num_tokens: int,
+    top_k: int,
+) -> torch.Tensor:
+    """Reduce routed top-k rows back to token order."""
+    del flat_token_indices_N
+    return reduce_topk_slots(
+        routed_output_ND,
+        slot_to_row_N,
+        routed_scores_N if has_scores else None,
+        num_tokens=num_tokens,
+        top_k=top_k,
+        scores_are_slot_ordered=scores_are_slot_ordered,
+    )
+
+
+@_reduce_topk_impl.register_fake
+def _reduce_topk_fake(
+    routed_output_ND: torch.Tensor,  # noqa: N803
+    slot_to_row_N: torch.Tensor,  # noqa: N803
+    flat_token_indices_N: torch.Tensor,  # noqa: N803
+    routed_scores_N: torch.Tensor,  # noqa: N803
+    has_scores: bool,
+    scores_are_slot_ordered: bool,
+    num_tokens: int,
+    top_k: int,
+) -> torch.Tensor:
+    del (
+        slot_to_row_N,
+        flat_token_indices_N,
+        routed_scores_N,
+        has_scores,
+        scores_are_slot_ordered,
+        top_k,
+    )
+    return routed_output_ND.new_empty(num_tokens, routed_output_ND.shape[1])
+
+
+def _reduce_topk_backward(ctx, grad_out):
+    flat_token_indices_N, routed_scores_N, routed_output_ND = ctx.saved_tensors  # noqa: N806
+    scores = routed_scores_N if ctx.has_scores else None
+    grad_routed_output = expand_topk_grad(
+        grad_out,
+        flat_token_indices_N,
+        scores,
+        top_k=ctx.top_k,
+        dtype=ctx.hidden_states_dtype,
+        scores_are_slot_ordered=ctx.scores_are_slot_ordered,
+    )
+    grad_scores = None
+    if ctx.has_scores and ctx.routed_scores_requires_grad:
+        grad_scores = topk_scores_grad(
+            routed_output_ND,
+            grad_out,
+            flat_token_indices_N,
+            top_k=ctx.top_k,
+            dtype=routed_scores_N.dtype,
+            scores_are_slot_ordered=ctx.scores_are_slot_ordered,
+        )
+
+    return grad_routed_output, None, None, grad_scores, None, None, None, None
+
+
+def _reduce_topk_setup_context(ctx, inputs, output):
+    del output
+    (
+        routed_output_ND,
+        _slot_to_row_N,
+        flat_token_indices_N,
+        routed_scores_N,
+        has_scores,
+        scores_are_slot_ordered,
+        _num_tokens,
+        top_k,
+    ) = inputs
+    ctx.has_scores = has_scores
+    ctx.scores_are_slot_ordered = scores_are_slot_ordered
+    ctx.top_k = top_k
+    ctx.hidden_states_dtype = routed_output_ND.dtype
+    ctx.routed_scores_requires_grad = routed_scores_N.requires_grad
+    saved_routed_output_ND = (  # noqa: N806
+        routed_output_ND
+        if has_scores and routed_scores_N.requires_grad
+        else routed_output_ND.new_empty(0)
+    )
+    ctx.save_for_backward(
+        flat_token_indices_N,
+        routed_scores_N,
+        saved_routed_output_ND,
+    )
+
+
+_reduce_topk_impl.register_autograd(
+    _reduce_topk_backward, setup_context=_reduce_topk_setup_context
+)
+
+
 def dispatch_tokens(
-    routed_input_ND: torch.Tensor,  # noqa: N803
+    dispatch_input: torch.Tensor,
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
-    token_indices_N: torch.Tensor,  # noqa: N803
+    source_token_indices_N: torch.Tensor,  # noqa: N803
+    flat_token_indices_N: torch.Tensor,  # noqa: N803
     routed_scores_N: torch.Tensor | None,  # noqa: N803
     num_tokens: int,
     num_local_experts: int,
     group: dist.ProcessGroup,
+    *,
+    input_is_token_ordered: bool = False,
+    routed_scores_are_slot_ordered: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, FlexEPDispatchState]:
     """Dispatch tokens to experts via FlexEP."""
-    if _buffer is None or _rendezvous_handle is None:
+    if _hidden_recv_buffers is None or _rendezvous_handle is None:
         raise RuntimeError("FlexEP buffer not initialized.")
-    _require_initialized(group.group_name, routed_input_ND)
+    _require_initialized(group.group_name, dispatch_input)
     if num_tokens > _max_tokens_per_rank:
         raise RuntimeError(
             "FlexEP buffer max_tokens_per_rank "
@@ -556,27 +836,44 @@ def dispatch_tokens(
         raise ValueError(
             f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size})."
         )
-    if routed_input_ND.shape[0] > _max_routed_tokens:
+    if flat_token_indices_N.numel() > _max_routed_tokens:
         raise RuntimeError(
             f"FlexEP buffer max_routed_tokens ({_max_routed_tokens}) is smaller "
-            f"than routed input rows ({routed_input_ND.shape[0]})."
+            f"than routed input rows ({flat_token_indices_N.numel()})."
         )
-    if routed_scores_N is not None and routed_scores_N.dtype != routed_input_ND.dtype:
-        routed_scores_N = routed_scores_N.to(routed_input_ND.dtype)
+    if source_token_indices_N.numel() != flat_token_indices_N.numel():
+        raise ValueError(
+            "source_token_indices_N and flat_token_indices_N must have the same "
+            f"length, got {source_token_indices_N.numel()} and "
+            f"{flat_token_indices_N.numel()}."
+        )
+    if routed_scores_N is not None and routed_scores_N.dtype != dispatch_input.dtype:
+        routed_scores_N = routed_scores_N.to(dispatch_input.dtype)
+
+    slot_to_row_N = invert_flat_indices(  # noqa: N806
+        flat_token_indices_N,
+        num_rows=flat_token_indices_N.numel(),
+    )
 
     hidden, tokens_per_expert, dispatch_handle = torch.ops.flexep.dispatch(
-        routed_input_ND,
+        dispatch_input,
         num_local_tokens_per_expert_E,
+        source_token_indices_N,
+        slot_to_row_N,
         num_tokens,
         ep_size,
         group.group_name,
+        input_is_token_ordered,
     )
 
     state = FlexEPDispatchState(
         handle=dispatch_handle,
-        token_indices=token_indices_N,
+        flat_token_indices=flat_token_indices_N,
+        slot_to_row=slot_to_row_N,
         routed_scores=routed_scores_N,
+        routed_scores_are_slot_ordered=routed_scores_are_slot_ordered,
         num_tokens=num_tokens,
+        top_k=flat_token_indices_N.numel() // num_tokens,
     )
     return hidden, tokens_per_expert, state
 
@@ -586,25 +883,28 @@ def combine_tokens(
     state: FlexEPDispatchState,
 ) -> torch.Tensor:
     """Combine expert outputs back to original token order."""
-    if _buffer is None or _rendezvous_handle is None:
+    if _hidden_recv_buffers is None or _rendezvous_handle is None:
         raise RuntimeError("FlexEP buffer not initialized.")
+    has_scores = state.routed_scores is not None
+    routed_scores_N = (  # noqa: N806
+        state.routed_scores
+        if state.routed_scores is not None
+        else hidden_states.new_empty(0)
+    )
     routed_output_ND = torch.ops.flexep.combine(  # noqa: N806
         hidden_states,
         state.handle,
-        state.token_indices.shape[0],
+        state.flat_token_indices.numel(),
     )
-    if state.routed_scores is not None:
-        routed_output_ND = routed_output_ND * state.routed_scores.reshape(-1, 1)
-    out_TD = torch.zeros(  # noqa: N806
-        state.num_tokens,
-        hidden_states.shape[1],
-        device=hidden_states.device,
-        dtype=hidden_states.dtype,
-    )
-    return deterministic_scatter_add(
-        out_TD,
-        state.token_indices.reshape(-1, 1).expand(-1, hidden_states.shape[1]),
+    return torch.ops.flexep.reduce_topk(
         routed_output_ND,
+        state.slot_to_row,
+        state.flat_token_indices,
+        routed_scores_N,
+        has_scores,
+        state.routed_scores_are_slot_ordered,
+        state.num_tokens,
+        state.top_k,
     )
 
 

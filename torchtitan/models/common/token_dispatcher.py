@@ -70,7 +70,15 @@ class LocalTokenDispatcher(Configurable):
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        *,
+        return_flat_indices: bool = False,
+        return_sorted_scores: bool = True,
+        return_routed_input: bool = True,
+        use_counting_sort: bool = False,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    ):
         """Reorder tokens by expert assignment for local expert computation.
 
         Groups tokens by expert index via histc + argsort, optionally
@@ -80,6 +88,13 @@ class LocalTokenDispatcher(Configurable):
             x_TD: ``(T, D)`` input tokens
             topk_scores_TK: ``(T, K)`` routing scores
             topk_expert_ids_TK: ``(T, K)`` expert indices
+            return_flat_indices: Return original flat ``T*K`` top-k positions.
+            return_sorted_scores: Gather scores in expert-sorted order. Set this
+                false when the caller consumes scores in original top-k slot order.
+            return_routed_input: Gather and return tokens in expert-sorted order.
+                Set this false when the caller can consume token indices directly.
+            use_counting_sort: Use the FlexEP counting-sort helper instead of
+                ``argsort``. Ordering within an expert segment is unspecified.
 
         Returns:
             routed_input_ND: ``(N, D)`` where N = T*K. Tokens in expert-sorted
@@ -87,24 +102,50 @@ class LocalTokenDispatcher(Configurable):
             num_tokens_per_expert_E: ``(E,)`` token counts per expert
             token_indices_experts_sorted_N: ``(N,)`` token-to-original mapping
             topk_scores_experts_sorted_N: ``(N,)`` scores in expert-sorted order
+            flat_indices_experts_sorted_N: Optional original ``T*K`` flat
+                top-k positions in expert-sorted order, returned only when
+                ``return_flat_indices`` is true.
         """
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert_E = torch.histc(
-            topk_expert_ids_TK.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
-        )
+        if self.score_before_experts and not return_routed_input:
+            raise ValueError(
+                "return_routed_input=False is incompatible with score_before_experts."
+            )
+        if use_counting_sort:
+            from torchtitan.distributed.flexep_kernels import expert_counting_sort
 
-        # Reorder the token indices to match the order of the experts where N = T*K
-        token_indices_experts_sorted_N = torch.argsort(
-            topk_expert_ids_TK.view(-1), stable=True
+            (
+                num_tokens_per_expert_E,
+                token_indices_experts_sorted_N,
+                flat_indices_experts_sorted_N,
+            ) = expert_counting_sort(
+                topk_expert_ids_TK,
+                num_experts=self.num_experts,
+            )
+        else:
+            # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
+            num_tokens_per_expert_E = torch.histc(
+                topk_expert_ids_TK.view(-1),
+                bins=self.num_experts,
+                min=0,
+                max=self.num_experts,
+            )
+
+            # Reorder the token indices to match the order of the experts where N = T*K
+            flat_indices_experts_sorted_N = torch.argsort(
+                topk_expert_ids_TK.view(-1), stable=True
+            )
+            token_indices_experts_sorted_N = (
+                flat_indices_experts_sorted_N // self.top_k
+            )
+        if self.score_before_experts or return_sorted_scores:
+            topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[
+                flat_indices_experts_sorted_N
+            ]
+        else:
+            topk_scores_experts_sorted_N = topk_scores_TK.new_empty(0)
+        routed_input_ND = (
+            x_TD[token_indices_experts_sorted_N] if return_routed_input else x_TD
         )
-        topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[
-            token_indices_experts_sorted_N
-        ]
-        token_indices_experts_sorted_N = token_indices_experts_sorted_N // self.top_k
-        routed_input_ND = x_TD[token_indices_experts_sorted_N]
 
         # Apply scores before expert computation if configured
         if self.score_before_experts:
@@ -112,6 +153,15 @@ class LocalTokenDispatcher(Configurable):
                 routed_input_ND.to(torch.float32)
                 * topk_scores_experts_sorted_N.reshape(-1, 1)
             ).to(x_TD.dtype)
+
+        if return_flat_indices:
+            return (
+                routed_input_ND,
+                num_tokens_per_expert_E,
+                token_indices_experts_sorted_N,
+                topk_scores_experts_sorted_N,
+                flat_indices_experts_sorted_N,
+            )
 
         return (
             routed_input_ND,
@@ -837,27 +887,40 @@ class FlexEPTokenDispatcher(LocalTokenDispatcher):
 
         ep_group = self.ep_mesh.get_group()
         num_local_experts = self.num_experts // ep_group.size()
+        input_is_token_ordered = not self.score_before_experts
 
         (
-            routed_input_ND,
+            dispatch_input,
             num_local_tokens_per_expert_E,
             token_indices_experts_sorted_N,
-            topk_scores_experts_sorted_N,
-        ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
+            _topk_scores_experts_sorted_N,
+            flat_indices_experts_sorted_N,
+        ) = self._local_reorder(
+            x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            return_flat_indices=True,
+            return_sorted_scores=self.score_before_experts,
+            return_routed_input=not input_is_token_ordered,
+            use_counting_sort=True,
+        )
         routed_scores_N = (
-            None if self.score_before_experts else topk_scores_experts_sorted_N
+            None if self.score_before_experts else topk_scores_TK.view(-1)
         )
 
         from torchtitan.distributed.flexep import dispatch_tokens
 
         hidden_states_RD, tokens_per_expert_E, state = dispatch_tokens(
-            routed_input_ND,
+            dispatch_input,
             num_local_tokens_per_expert_E,
             token_indices_experts_sorted_N,
+            flat_indices_experts_sorted_N,
             routed_scores_N,
             x_TD.shape[0],
             num_local_experts,
             ep_group,
+            input_is_token_ordered=input_is_token_ordered,
+            routed_scores_are_slot_ordered=routed_scores_N is not None,
         )
 
         metadata = DeepEPDispatchMetadata(state=state)
