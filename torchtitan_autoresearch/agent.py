@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """The Agent contract and reference implementations.
 
 The agent is a pluggable search policy (ARCHITECTURE.md section 6). The contract
@@ -16,8 +22,11 @@ from torchtitan_autoresearch.types import Candidate, Observation, Report
 
 
 class Agent(Protocol):
-    def propose(self, obs: Observation) -> Candidate | None: ...
-    def report(self) -> Report: ...
+    def propose(self, obs: Observation) -> Candidate | None:
+        ...
+
+    def report(self) -> Report:
+        ...
 
 
 class ScriptedAgent:
@@ -52,19 +61,26 @@ class KnobAgent:
 
     Emits a fixed exploration plan of command-only candidates (no code edits), so
     the packaged single-command entrypoint runs genuine autoresearch end to end
-    without an LLM. Each candidate is a real recipe knob the baseline respects
-    (batch size, activation-checkpoint mode, FSDP reshard policy). The LLM
-    code-writing agent is a separate, future plug behind the same contract.
+    without an LLM. The LLM code-writing agent is a separate, future plug behind
+    the same contract.
 
-    Families let the harness time-box knobs that keep crashing; quality-affecting
-    knobs (batch) get the eval, quality-neutral ones (AC/reshard) route faithful.
+    v1 is faithfulness-only (affecting changes are rejected), so the default plan
+    targets the math-preserving throughput knobs the verify path can promote for
+    free: activation-checkpoint mode, torch.compile, FSDP reshard policy, and TP
+    degree (a boundary case the faithfulness check adjudicates). Families let the
+    harness time-box knobs that keep crashing.
     """
 
     DEFAULT_KNOBS = [
-        ("local_batch_size=8", "batch", ["--training.local_batch_size=8"]),
-        ("selective_activation_checkpoint", "ac", ["--activation_checkpoint.mode=selective"]),
-        ("local_batch_size=12", "batch", ["--training.local_batch_size=12"]),
-        ("local_batch_size=16", "batch", ["--training.local_batch_size=16"]),
+        ("activation_checkpoint=none", "ac", ["--activation_checkpoint.mode=none"]),
+        ("activation_checkpoint=full", "ac", ["--activation_checkpoint.mode=full"]),
+        ("compile", "compile", ["--compile.enable"]),
+        (
+            "fsdp_reshard=never",
+            "fsdp",
+            ["--parallelism.fsdp_reshard_after_forward=never"],
+        ),
+        ("tensor_parallel=2", "tp", ["--parallelism.tensor_parallel_degree=2"]),
     ]
 
     def __init__(self, knobs: list[tuple[str, str, list[str]]] | None = None):
@@ -80,13 +96,17 @@ class KnobAgent:
                 self._notes[label] = "skipped: family deferred"
                 continue
             self._notes[label] = "tried"
-            return Candidate(label=label, family=family, command=command,
-                             rationale=f"config-space knob ({family})")
+            return Candidate(
+                label=label,
+                family=family,
+                command=command,
+                rationale=f"config-space knob ({family})",
+            )
         return None
 
     def report(self) -> Report:
         return Report(
-            beliefs=["exploring config-space throughput knobs (batch, AC, reshard)"],
+            beliefs=["exploring faithful throughput knobs (AC, compile, reshard, TP)"],
             conclusions=[],
             plan="exhaust the knob plan, skipping deferred families",
             ideas_usage=dict(self._notes),

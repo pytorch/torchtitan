@@ -131,6 +131,8 @@ class SubprocessExecutor:
         log_freq: int,
         ngpu: int,
         *,
+        module: str = "qwen3",
+        config: str = "qwen3_14b",
         base_command: list[str] | None = None,
         verify_steps: int = 8,
         trend_factor: float = 0.5,
@@ -140,6 +142,10 @@ class SubprocessExecutor:
         self.repo_root = repo_root
         self.log_freq = log_freq
         self.ngpu = ngpu
+        self.module = (
+            module  # TorchTitan --module (model family), from the constitution
+        )
+        self.config = config  # TorchTitan --config (config_fn), from the constitution
         self.base_command = base_command or []
         self.verify_steps = verify_steps  # deterministic steps compared to golden
         self.trend_factor = trend_factor  # bias allowance as a fraction of the band
@@ -186,8 +192,8 @@ class SubprocessExecutor:
         env = {
             **os.environ,
             "NGPU": str(self.ngpu),
-            "MODULE": "qwen3",
-            "CONFIG": "qwen3_14b",
+            "MODULE": self.module,
+            "CONFIG": self.config,
             "PYTHONPATH": self.repo_root
             + os.pathsep
             + os.environ.get("PYTHONPATH", ""),

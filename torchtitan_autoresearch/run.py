@@ -96,7 +96,16 @@ def main(argv: list[str] | None = None) -> int:
         sess.repo_root,
         log_freq=rules.log_freq,
         ngpu=ngpu,
-        base_command=[f"--dataloader.dataset={train_dataset}"],
+        module=rules.module,
+        config=rules.config_fn,
+        base_command=[
+            f"--dataloader.dataset={train_dataset}",
+            # seq_len is a locked workload field; pin it (llama3_8b defaults to 8192).
+            f"--training.seq_len={rules.seq_len}",
+        ],
+        verify_steps=rules.verify_steps,
+        band_headroom=rules.band_headroom,
+        trend_factor=rules.trend_factor,
         run_dir=os.path.join(run_dir, "runs"),
     )
     try:

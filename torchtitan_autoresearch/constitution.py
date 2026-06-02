@@ -40,6 +40,16 @@ class Rules:
         return self.raw["workload"]["model_flavor"]
 
     @property
+    def module(self) -> str:
+        """TorchTitan ``--module`` (model family), e.g. ``llama3``/``qwen3``."""
+        return self.raw["workload"]["module"]
+
+    @property
+    def config_fn(self) -> str:
+        """TorchTitan ``--config`` (config function), e.g. ``llama3_8b``."""
+        return self.raw["workload"].get("config_fn", self.model_flavor)
+
+    @property
     def dataset(self) -> str:
         return self.raw["workload"]["dataset"]
 
@@ -66,57 +76,24 @@ class Rules:
 
         return torch.cuda.device_count()
 
-    # --- quality (locked) ---
-    @property
-    def epsilon_rel(self) -> float:
-        return float(self.raw["quality"]["epsilon_rel"])
+    # --- quality (v1: faithfulness-only) ---
+    def _faithful(self) -> dict[str, Any]:
+        return self.raw.get("quality", {}).get("faithful", {})
 
     @property
-    def quality_affecting(self) -> set[str]:
-        return set(self.raw["quality"]["quality_affecting"])
+    def verify_steps(self) -> int:
+        """Deterministic steps in the faithfulness probe compared to the golden."""
+        return int(self._faithful().get("verify_steps", 8))
 
     @property
-    def coupled(self) -> list[list[str]]:
-        return self.raw["quality"].get("coupled", [])
-
-    # --- quality eval horizon + noise calibration ---
-    def _eval(self) -> dict[str, Any]:
-        return self.raw["quality"].get("eval", {})
+    def band_headroom(self) -> float:
+        """Multiplier on the golden's own rounding jitter to set the faithful band."""
+        return float(self._faithful().get("band_headroom", 3.0))
 
     @property
-    def eval_tokens(self) -> int:
-        """Token budget for the held-out eval (equal-compute across recipes)."""
-        return int(self._eval().get("tokens", 0))
-
-    @property
-    def eval_fallback_steps(self) -> int:
-        """Step count used only if the token budget can't be converted (no batch)."""
-        return int(self._eval().get("fallback_steps", 50))
-
-    @property
-    def eval_val_steps(self) -> int:
-        """Number of held-out validation batches averaged into the eval loss."""
-        return int(self._eval().get("val_steps", 16))
-
-    @property
-    def eval_calibration_repeats(self) -> int:
-        """Independent golden eval runs used to measure the eval-noise band."""
-        return int(self._eval().get("calibration_repeats", 3))
-
-    @property
-    def eval_warm_steps(self) -> int:
-        """Steps to pre-train the golden warm checkpoint (past warmup). 0 = from scratch."""
-        return int(self._eval().get("warm_steps", 0))
-
-    @property
-    def eval_lr_total_steps(self) -> int:
-        """Real LR-schedule horizon for warm evals (decoupled from run length). 0 = run length."""
-        return int(self._eval().get("lr_total_steps", 0))
-
-    @property
-    def eval_z(self) -> float:
-        """Multiplier on the eval-noise std for the quality floor's noise band."""
-        return float(self._eval().get("z", 3.0))
+    def trend_factor(self) -> float:
+        """Allowed signed-mean deviation as a fraction of the band (bias detector)."""
+        return float(self._faithful().get("trend_factor", 0.5))
 
     # --- scope ---
     @property
