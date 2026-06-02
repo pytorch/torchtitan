@@ -183,7 +183,10 @@ def main(argv: list[str] | None = None) -> int:
         # The LLM agent (claude -p) is the real autoresearcher; fall back to the
         # deterministic KnobAgent offline/CI so the loop still runs without the CLI.
         agent = (
-            LLMAgent(repo_root=sess.repo_root)
+            LLMAgent(
+                repo_root=sess.repo_root,
+                log_path=os.path.join(run_dir, "agent_io.log"),
+            )
             if shutil.which("claude")
             else KnobAgent()
         )

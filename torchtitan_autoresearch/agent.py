@@ -168,14 +168,29 @@ class LLMAgent:
     without the real CLI; by default it shells out to ``claude -p``.
     """
 
-    def __init__(self, *, repo_root: str = ".", ask=None, max_ledger: int = 30):
+    def __init__(
+        self, *, repo_root: str = ".", ask=None, max_ledger: int = 30, log_path=None
+    ):
         self.repo_root = repo_root
         self._ask = ask or _claude_ask
         self.max_ledger = max_ledger
+        self.log_path = log_path  # full prompt+reply transcript, for deep inspection
         self._proposed: set[tuple] = set()  # de-dupe (command, edited-paths)
         self._notes: list[str] = []
         self._plan = "LLM-driven search over faithful throughput knobs"
         self._n = 0
+
+    def _transcript(self, prompt: str, reply: str) -> None:
+        if not self.log_path:
+            return
+        try:
+            with open(self.log_path, "a") as f:
+                f.write(
+                    f"\n{'=' * 70}\n===== proposal #{self._n} =====\n"
+                    f"--- PROMPT ---\n{prompt}\n--- REPLY ---\n{reply}\n"
+                )
+        except OSError:
+            pass
 
     def _editable_sources(self, obs: Observation) -> dict[str, str]:
         out: dict[str, str] = {}
@@ -244,24 +259,34 @@ class LLMAgent:
         self._n += 1
         prompt = self._prompt(obs)
         for _ in range(2):  # one retry on a parse failure or a repeat
+            print("[llm] querying claude for the next candidate...", flush=True)
             try:
                 reply = self._ask(prompt)
-            except (subprocess.TimeoutExpired, OSError):
+            except (subprocess.TimeoutExpired, OSError) as e:
+                print(f"[llm] query failed ({e}); no candidate", flush=True)
                 return None
+            self._transcript(prompt, reply)
             data = _extract_json(reply or "")
             if data is None:
+                print("[llm] reply was not parseable JSON; retrying", flush=True)
                 continue
             if data.get("done"):
                 self._plan = str(data.get("rationale", self._plan))
+                print(f"[llm] signaled done: {self._plan[:200]}", flush=True)
                 return None
             command = [str(x) for x in (data.get("command") or [])]
             file_edits = {
                 str(k): str(v) for k, v in (data.get("file_edits") or {}).items()
             }
             if not command and not file_edits:
+                print("[llm] proposal had no command/file_edits; retrying", flush=True)
                 continue
             key = (tuple(command), tuple(sorted(file_edits)))
             if key in self._proposed:
+                print(
+                    f"[llm] '{data.get('label')}' already tried; asking for a different one",
+                    flush=True,
+                )
                 prompt += (
                     "\n\nThat candidate was already tried; propose a DIFFERENT one."
                 )
@@ -278,6 +303,7 @@ class LLMAgent:
                 file_edits=file_edits,
                 rationale=rationale,
             )
+        print("[llm] no valid candidate after retries; stopping", flush=True)
         return None
 
     def report(self) -> Report:
