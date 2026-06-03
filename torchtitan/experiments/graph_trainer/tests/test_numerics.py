@@ -366,7 +366,6 @@ class TestGraphTrainerNumerics(unittest.TestCase):
 class TestGraphTrainerAutoParallelNumerics(unittest.TestCase):
     """Test graph_trainer AutoParallel numerics equivalence against eager."""
 
-    @unittest.skip("upstream AutoParallel nll_loss assertion regression")
     def test_llama3_aot_fx_trace_autoparallel_vs_eager(self):
         self.assertTrue(_run_autoparallel_llama3_loss_compare())
 
