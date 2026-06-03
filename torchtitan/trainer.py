@@ -58,6 +58,7 @@ from torchtitan.distributed.spmd_types import (
     set_current_spmd_mesh,
     set_spmd_backend,
 )
+from torchtitan.protocols.types import MeshAxisName, NamedPlacement
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
@@ -798,6 +799,30 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 )
             else:
                 global_valid_tokens = local_valid_tokens.float()
+
+            # Stamp for SPMD type checking: replicated after all-reduce
+            if self.config.parallelism.spmd_backend == "spmd":
+                if not isinstance(global_valid_tokens, torch.Tensor):
+                    global_valid_tokens = torch.tensor(
+                        global_valid_tokens,
+                        dtype=torch.float,
+                        device=self.device,
+                    )
+                local_type, partition_spec = placement_to_spmd_assert_type(
+                    NamedPlacement(
+                        {
+                            MeshAxisName.DP: spmd.R,
+                            MeshAxisName.CP: spmd.R,
+                            MeshAxisName.TP: spmd.I,
+                        }
+                    )
+                )
+                if local_type:
+                    spmd.assert_type(
+                        global_valid_tokens,
+                        local_type,
+                        partition_spec=partition_spec,
+                    )
 
             for input_dict, labels in microbatches:
                 # Move tensors to GPU
