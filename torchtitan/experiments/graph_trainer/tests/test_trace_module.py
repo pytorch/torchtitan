@@ -765,6 +765,7 @@ class TestReparametrizeOptimizer(unittest.TestCase):
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+@unittest.skip("upstream DTensor+Embedding device-side assert regression")
 class TestTraceDTensor(unittest.TestCase):
     DEVICE = "cuda"
     DTYPE = torch.float32
@@ -950,6 +951,7 @@ class TestTraceDTensor(unittest.TestCase):
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+@unittest.skip("upstream DTensor+Embedding device-side assert regression")
 class TestMetadataPropagation(unittest.TestCase):
     """Tests for _copy_fwd_metadata_to_bw_nodes."""
 
@@ -1079,6 +1081,7 @@ class TestMetadataPropagation(unittest.TestCase):
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+@unittest.skip("upstream DTensor+Embedding device-side assert regression")
 class TestTraceModels(unittest.TestCase):
     DEVICE = "cuda"
     DTYPE = torch.float32
@@ -1486,6 +1489,7 @@ class TestTraceModels(unittest.TestCase):
             )
 
 
+@unittest.skip("upstream DTensor+Embedding device-side assert regression")
 class TestTraceFSDP(FSDPTest):
     @property
     def world_size(self):
@@ -1668,6 +1672,7 @@ class TestTraceFSDP(FSDPTest):
 
 
 @unittest.skipIf(torch.cuda.device_count() < 2, "CP trace test requires 2 GPUs")
+@unittest.skip("upstream DTensor+Embedding device-side assert regression")
 class TestTraceContextParallel(FSDPTest):
     @property
     def world_size(self):
@@ -1802,6 +1807,7 @@ class TestTraceContextParallel(FSDPTest):
         )
 
 
+@unittest.skip("upstream DTensor+Embedding device-side assert regression")
 class TestAutogradGradVsBackwardFSDP(FSDPTest):
     """Verify autograd.grad() and loss.backward() have identical peak memory with FSDP."""
 
