@@ -13,11 +13,11 @@ from torchtitan.experiments.rl.rollouts.types import Rollout
 from torchtitan.experiments.rl.types import Episode
 
 
-def last_assistant_text(rollout: Rollout) -> str:
-    """Return the assistant message text from the last turn, or `""`."""
+def last_completion_text(rollout: Rollout) -> str:
+    """Return the completion message text from the last turn, or `""`."""
     if not rollout.turns:
         return ""
-    msg = rollout.turns[-1].assistant_message
+    msg = rollout.turns[-1].parsed_completion_message
     return (msg.get("content") or "") if msg else ""
 
 
@@ -37,9 +37,9 @@ def rollout_to_episode(rollout: Rollout) -> Episode:
         policy_version=turn.policy_version,
         sample_id=rollout.sample_id,
         prompt_token_ids=turn.prompt_token_ids,
-        text=last_assistant_text(rollout),
-        token_ids=turn.assistant_token_ids,
-        token_logprobs=turn.assistant_logprobs,
+        completion_text=last_completion_text(rollout),
+        completion_token_ids=turn.completion_token_ids,
+        completion_logprobs=turn.completion_logprobs,
         reward=rollout.reward,
         advantage=rollout.advantage if rollout.advantage is not None else 0.0,
     )
@@ -54,10 +54,10 @@ def prepare_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
     """
     # Lengths, truncation, reward
     # TODO: adapt for multi-turn rollouts
-    response_lens = [len(t.assistant_token_ids) for r in rollouts for t in r.turns]
+    completion_lens = [len(t.completion_token_ids) for r in rollouts for t in r.turns]
     prompt_lens = [len(r.turns[0].prompt_token_ids) for r in rollouts if r.turns]
     total_lens = [
-        len(r.turns[-1].prompt_token_ids) + len(r.turns[-1].assistant_token_ids)
+        len(r.turns[-1].prompt_token_ids) + len(r.turns[-1].completion_token_ids)
         for r in rollouts
         if r.turns
     ]
@@ -66,8 +66,8 @@ def prepare_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
     rewards = [r.reward for r in rollouts if r.reward is not None]
 
     out: list[m.Metric] = [
-        m.Metric(f"{prefix}/response_length", m.Mean.from_list(response_lens)),
-        m.Metric(f"{prefix}/response_length", m.Max.from_list(response_lens)),
+        m.Metric(f"{prefix}/response_length", m.Mean.from_list(completion_lens)),
+        m.Metric(f"{prefix}/response_length", m.Max.from_list(completion_lens)),
         m.Metric(f"{prefix}/prompt_length", m.Mean.from_list(prompt_lens)),
         m.Metric(f"{prefix}/prompt_length", m.Max.from_list(prompt_lens)),
         m.Metric(f"{prefix}/total_length", m.Mean.from_list(total_lens)),

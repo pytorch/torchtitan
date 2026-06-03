@@ -33,9 +33,9 @@ class Episode:
     policy_version: int
     sample_id: str
     prompt_token_ids: list[int]
-    text: str
-    token_ids: list[int]
-    token_logprobs: list[float]
+    completion_text: str
+    completion_token_ids: list[int]
+    completion_logprobs: list[float]
     reward: float
     advantage: float
 
@@ -52,6 +52,8 @@ class TrainingBatch:
     token_ids: torch.Tensor  # [B, L]
     labels: torch.Tensor  # [B, L]
     positions: torch.Tensor  # [B, L]
+    # TODO(naming): rename generator_logprobs -> old_logprobs (PPO π_old) vs policy_logprobs,
+    # incl. GRPOLoss/trainer/batcher.
     generator_logprobs: torch.Tensor  # [B, L]
     loss_mask: torch.Tensor  # [B, L]
     advantages: torch.Tensor  # [B, L]

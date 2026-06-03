@@ -90,12 +90,12 @@ class Rubric(Configurable):
         """The rubric's reward fns + weights; built and weight-normalized at init."""
 
         truncation_reward: float | None = None
-        """Reward to assign a truncated rollout. If provided, reward fns are skipped.
-        If `None`, reward fns run for partial credit."""
+        """Reward for a truncated rollout. If set, the reward fns are SKIPPED and this fixed
+        reward is used. If None, the reward fns run on the truncated rollout."""
 
         error_reward: float | None = None
-        """Reward to assign an errored rollout. If provided, reward fns are skipped.
-        If `None`, reward fns run for partial credit."""
+        """Reward for a errored rollout. If set, the reward fns are SKIPPED and this fixed
+        reward is used. If None, the reward fns run on the errored rollout."""
 
     def __init__(self, config: Config) -> None:
         self._config = config

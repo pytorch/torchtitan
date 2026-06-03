@@ -20,7 +20,7 @@ from torchtitan.experiments.rl.tasks.sum_digits.rubric import (
 
 class SumDigitsTask(Task):
     """The SumDigits task: digit-sum train/val datasets, env, and a correctness +
-    format rubric. Pure config — all behavior (`make_envs`, `sample_*`,
+    format rubric. Pure config — all behavior (`make_env_group`, `sample_*`,
     `score_group`) is inherited from `Task`.
     """
 

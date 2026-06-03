@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from torchtitan.experiments.rl.rollouts import last_assistant_text, Rollout
+from torchtitan.experiments.rl.rollouts import last_completion_text, Rollout
 from torchtitan.experiments.rl.rubrics import RewardFn
 
 from torchtitan.experiments.rl.tasks.sum_digits.data import SumDigitsExample
@@ -27,7 +27,7 @@ class RewardCorrect(RewardFn):
         pass
 
     async def __call__(self, rollout: Rollout, env_input: SumDigitsExample) -> float:
-        text = last_assistant_text(rollout)
+        text = last_completion_text(rollout)
         matches = _ANSWER_RE.findall(text)
         if not matches:
             return 0.0
@@ -42,7 +42,7 @@ class RewardFormat(RewardFn):
         pass
 
     async def __call__(self, rollout: Rollout, env_input: object) -> float:
-        return 1.0 if _FORMAT_RE.search(last_assistant_text(rollout)) else 0.0
+        return 1.0 if _FORMAT_RE.search(last_completion_text(rollout)) else 0.0
 
 
 __all__ = ["RewardCorrect", "RewardFormat"]

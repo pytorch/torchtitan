@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from renderers import Renderer
 
 from torchtitan.config import Configurable
-from torchtitan.experiments.rl.env_types import MessageEnv, RendererWrapperEnv
+from torchtitan.experiments.rl.environments import MessageEnv, TokenEnv
 from torchtitan.experiments.rl.rollouts.types import Rollout
 from torchtitan.experiments.rl.rubrics import Rubric, RubricOutput
 
@@ -24,16 +24,16 @@ class Task(Configurable):
     datasets, the `MessageEnv` to build per example, and a `Rubric`.
 
     Subclass only to override specific methods, such as `score_group` for cross-sibling scoring,
-    or `make_envs` for custom logic, such as using a pool of envs instead of creating a new one.
+    or `make_env_group` for custom logic, such as using a pool of envs instead of creating a new one.
 
     The flow for one prompt group:
 
         example = task.sample_train_example()       # one env input from the dataset
-        envs    = task.make_envs(example=example, group_size=N, renderer=renderer)
+        envs    = task.make_env_group(example=example, group_size=N, renderer=renderer)
         ...                                          # the controller runs the rollout loop
         outputs = task.score_group(rollouts, example)  # the Rubric scores them
 
-    `MessageEnv` works in messages; `RendererWrapperEnv` (what `make_envs` returns)
+    `MessageEnv` works in messages; `TokenEnv` (what `make_env_group` returns)
     adds the message <-> token plumbing.
 
     Example:
@@ -59,12 +59,10 @@ class Task(Configurable):
         """Reward functions + weights used by `score_group`."""
 
         message_env: MessageEnv.Config
-        """The env to build per example; `make_envs` calls `build(env_input=example)`."""
+        """The env to build per example; `make_env_group` calls `build(env_input=example)`."""
 
-        env_wrapper_cfg: RendererWrapperEnv.Config = field(
-            default_factory=RendererWrapperEnv.Config
-        )
-        """Renderer-wrapper limits (e.g. `max_rollout_tokens`) passed to `make_envs`."""
+        token_env: TokenEnv.Config = field(default_factory=TokenEnv.Config)
+        """`TokenEnv` limits (e.g. `max_rollout_tokens`) passed to `make_env_group`."""
 
     rubric: Rubric
     """Built from `config.rubric` by `__init__`; used by `score_group`."""
@@ -74,7 +72,7 @@ class Task(Configurable):
         self._validation_dataset = config.validation_dataset.build()
         self.rubric = config.rubric.build()
         self._message_env_config = config.message_env
-        self._env_wrapper_cfg = config.env_wrapper_cfg
+        self._token_env_config = config.token_env
 
     # TODO: revisit this abstraction: should it return a sample or a dataset or an iterator?
     def sample_train_example(self) -> object:
@@ -85,15 +83,15 @@ class Task(Configurable):
         """Sample one validation example (the env input) from the validation dataset."""
         return next(self._validation_dataset)
 
-    # TODO: revisit the Renderer being injected into `make_envs` once we
+    # TODO: revisit the Renderer being injected into `make_env_group` once we
     # know whether Task should own a Renderer (per-task chat templates).
-    def make_envs(
+    def make_env_group(
         self,
         *,
         example: object,
         group_size: int,
         renderer: Renderer,
-    ) -> list[RendererWrapperEnv]:
+    ) -> list[TokenEnv]:
         """Construct `group_size` single-use envs from one dataset example.
 
         Args:
@@ -102,13 +100,12 @@ class Task(Configurable):
             renderer: Renderer shared by the rollout controller.
 
         Returns:
-            `group_size` `RendererWrapperEnv` instances, each ready for one rollout.
+            `TokenEnv` * `group_size` instances, each ready for one rollout.
         """
         return [
-            RendererWrapperEnv(
+            self._token_env_config.build(
                 message_env=self._message_env_config.build(env_input=example),
                 renderer=renderer,
-                config=self._env_wrapper_cfg,
             )
             for _ in range(group_size)
         ]

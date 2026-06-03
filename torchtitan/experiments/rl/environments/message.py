@@ -15,11 +15,11 @@ from torchtitan.config import Configurable
 
 
 @dataclass(kw_only=True, slots=True)
-class MessageResetOutput:
-    """Initial prompt messages + tool specs from `MessageEnv.reset`."""
+class MessageInitOutput:
+    """Initial messages + tool specs from `MessageEnv.init`."""
 
-    prompt_messages: list[Message]  # [M_prompt]
-    """The messages that form the initial prompt (e.g. [system, user])."""
+    init_prompt_messages: list[Message]  # [M_prompt]
+    """The opening messages (e.g. [system, user])."""
 
     tools: list[ToolSpec] = field(default_factory=list)  # [K_tools]
     """Tool schemas exposed to the assistant. Empty for tool-less envs."""
@@ -49,9 +49,9 @@ class MessageStepOutput:
 
 
 class MessageEnv(Configurable, abc.ABC):
-    """User-written env in message space. Implement `reset` + `step`.
+    """User-written env in message space. Implement `init` + `step`.
 
-    Tip: `MessageEnv` works in messages and never sees token ids; You can have `RendererWrapperEnv`
+    Tip: `MessageEnv` works in messages and never sees token ids; You can have `TokenEnv`
     wrap it and use a `Renderer` to convert messages <-> token ids for the generator.
     Example:
         # a one-tool calculator env. It is multi-turn — the env answers the
@@ -65,14 +65,14 @@ class MessageEnv(Configurable, abc.ABC):
             def __init__(self, config: Config, *, env_input: CalculatorExample) -> None:
                 self._expression = env_input.expression
 
-            async def reset(self) -> MessageResetOutput:
-                return MessageResetOutput(
-                    prompt_messages=[{"role": "user", "content": f"What is {self._expression}?"}],
+            async def init(self) -> MessageInitOutput:
+                return MessageInitOutput(
+                    init_prompt_messages=[{"role": "user", "content": f"What is {self._expression}?"}],
                     tools=[CALCULATOR_TOOL],
                 )
 
-            async def step(self, assistant_message: Message) -> MessageStepOutput:
-                tool_calls = assistant_message.get("tool_calls")
+            async def step(self, parsed_completion_message: Message) -> MessageStepOutput:
+                tool_calls = parsed_completion_message.get("tool_calls")
                 if not tool_calls:
                     return MessageStepOutput(done=True)  # assistant gave its final answer
                 result = run_calculator(tool_calls[0])
@@ -86,19 +86,19 @@ class MessageEnv(Configurable, abc.ABC):
         """Static env params; the per-rollout example is passed to `build(env_input=...)`."""
 
     @abc.abstractmethod
-    async def reset(self) -> MessageResetOutput:
+    async def init(self) -> MessageInitOutput:
         """Return the initial conversation + tools for prompt rendering."""
 
     @abc.abstractmethod
-    async def step(self, assistant_message: Message) -> MessageStepOutput:
-        """Advance the env one turn given the assistant's latest message.
+    async def step(self, parsed_completion_message: Message) -> MessageStepOutput:
+        """Advance the env one turn given the completion message.
 
-        `RendererWrapperEnv` parses the completion and handles
+        `TokenEnv` parses the completion and handles
         finish_reason / length / parse / timeout failures before calling this,
-        so the env only sees a well-formed assistant message.
+        so the env only sees a well-formed completion message.
 
         Args:
-            assistant_message: the assistant's parsed turn.
+            parsed_completion_message: the completion as a parsed message.
 
         Returns:
             `MessageStepOutput` with the env's reply messages.

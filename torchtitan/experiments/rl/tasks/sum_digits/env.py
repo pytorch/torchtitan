@@ -10,9 +10,9 @@ from dataclasses import dataclass
 
 from renderers import Message
 
-from torchtitan.experiments.rl.env_types import (
+from torchtitan.experiments.rl.environments import (
     MessageEnv,
-    MessageResetOutput,
+    MessageInitOutput,
     MessageStepOutput,
 )
 from torchtitan.experiments.rl.tasks.sum_digits.data import SumDigitsExample
@@ -40,16 +40,16 @@ class SumDigitsEnv(MessageEnv):
     def __init__(self, config: Config, *, env_input: SumDigitsExample) -> None:
         self._numbers = env_input.numbers
 
-    async def reset(self) -> MessageResetOutput:
+    async def init(self) -> MessageInitOutput:
         """Return the system prompt and one SumDigits user question."""
         question = f"What is the total digit sum of {self._numbers}?"
-        return MessageResetOutput(
-            prompt_messages=[
+        return MessageInitOutput(
+            init_prompt_messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": question},
             ]
         )
 
-    async def step(self, assistant_message: Message) -> MessageStepOutput:
-        # Single-turn env: end after the assistant's first message.
+    async def step(self, parsed_completion_message: Message) -> MessageStepOutput:
+        # Single-turn env: end after the first completion.
         return MessageStepOutput(done=True)

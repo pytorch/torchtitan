@@ -151,9 +151,6 @@ class VLLMCudagraphConfig:
 class SamplingConfig:
     """Sampling parameters passed to vLLM's SamplingParams."""
 
-    n: int = 8
-    """Number of completions to generate per prompt (vLLM SamplingParams.n)."""
-
     temperature: float = 0.8
     """Sampling temperature. 0.0 = greedy, higher = more random."""
 
@@ -162,9 +159,6 @@ class SamplingConfig:
 
     max_tokens: int = 100
     """Maximum number of tokens to generate per completion."""
-
-    stop_token_ids: list[int] = field(default_factory=list)
-    """Role-boundary stop tokens from the renderer (e.g. Qwen3 `<|im_end|>`)."""
 
 
 class VLLMGenerator(Actor, Configurable):
@@ -260,6 +254,7 @@ class VLLMGenerator(Actor, Configurable):
         compile_config: CompileConfig,
         max_num_seqs: int,
         output_dir: str,
+        stop_token_ids: list[int],
     ):
         init_logger()
         sl.init_structured_logger(
@@ -277,8 +272,12 @@ class VLLMGenerator(Actor, Configurable):
         # the upper bound for concurrent sequences, determines KV-cache
         # block allocation (and therefore GPU memory usage), and bounds
         # the CUDA graph capture sizes.  Always computed by the caller
-        # (RLTrainer) as num_prompts_per_step * sampling.n.
+        # (RLTrainer) as num_groups_per_rollout_batch * group_size.
         self._max_num_seqs = max_num_seqs
+
+        # Renderer role-boundary stop tokens (e.g. Qwen3 `<|im_end|>`), injected by the
+        # controller;
+        self._stop_token_ids = stop_token_ids
 
         # Register TorchTitan model + parser with vLLM
         registry_to_vllm(
@@ -390,8 +389,7 @@ class VLLMGenerator(Actor, Configurable):
 
         Takes ``tokenized_prompts`` as ``[num_prompts][prompt_tokens]``.
         Returns completions in the same order as ``request_ids`` plus generator
-        metrics. If ``SamplingConfig.n > 1``, completions for one prompt are
-        contiguous in vLLM's sample order.
+        metrics.
 
         Args:
             tokenized_prompts: Tokenized prompts shaped ``[num_prompts][prompt_tokens]``.
@@ -416,8 +414,8 @@ class VLLMGenerator(Actor, Configurable):
                 temperature=_sampling_config.temperature,
                 top_p=_sampling_config.top_p,
                 max_tokens=_sampling_config.max_tokens,
-                n=_sampling_config.n,
-                stop_token_ids=_sampling_config.stop_token_ids or None,
+                n=1,  # group_size pre-expands prompts; the RL loop always samples n=1
+                stop_token_ids=self._stop_token_ids or None,
                 seed=self.config.debug.seed,
                 logprobs=1,
                 output_kind=RequestOutputKind.FINAL_ONLY,
