@@ -327,9 +327,9 @@ def set_decoder_sharding_config(
         in_dst_shardings={"input": embed_input},
         out_src_shardings=embed_src,
         out_dst_shardings=embed_out,
-        # spmd backend relies on local SPMD + manual vocab-parallel embedding impl
+        # spmd_types backend relies on local SPMD + manual vocab-parallel embedding impl.
         local_map=LocalMapConfig(in_grad_placements=(None,))
-        if spmd_backend == "spmd"
+        if spmd_backend == "spmd_types"
         else None,
     )
     config.norm.sharding_config = pre_lm_head_norm_config(enable_sp=enable_sp)

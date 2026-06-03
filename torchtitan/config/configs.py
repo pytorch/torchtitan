@@ -139,13 +139,13 @@ class ParallelismConfig:
     enable_sequence_parallel: bool = True
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
 
-    spmd_backend: Literal["default", "full_dtensor", "spmd"] = "default"
+    spmd_backend: Literal["default", "full_dtensor", "spmd_types"] = "default"
     """
     SPMD backend selector.
 
     - "default": use the existing TorchTitan parallelism paths.
     - "full_dtensor": use the existing full DTensor path.
-    - "spmd": use the new local-tensor SPMD path.
+    - "spmd_types": use the spmd_types path.
     """
 
     pipeline_parallel_degree: int = 1
@@ -220,10 +220,10 @@ class ParallelismConfig:
     """
 
     def __post_init__(self):
-        if self.spmd_backend not in {"default", "full_dtensor", "spmd"}:
+        if self.spmd_backend not in {"default", "full_dtensor", "spmd_types"}:
             raise ValueError(
                 "parallelism.spmd_backend must be one of "
-                "'default', 'full_dtensor', or 'spmd'."
+                "'default', 'full_dtensor', or 'spmd_types'."
             )
         if self.context_parallel_load_balancer == "":
             raise ValueError(
@@ -378,7 +378,7 @@ class DebugConfig:
     """Choose the base RNG seed used for training"""
 
     spmd_typechecking: bool = False
-    """Enable global SPMD type checking for the local-tensor SPMD backend."""
+    """Enable global SPMD type checking; only effective under spmd_backend="spmd_types"."""
 
     deterministic: bool = False
     """Use deterministic algorithms wherever possible, may be slower"""

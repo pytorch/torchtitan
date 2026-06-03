@@ -142,7 +142,7 @@ jobs:
           --baseline-config=llama3_debugmodel_flex_attn \
           --test-config=llama3_debugmodel_flex_attn \
           --baseline-options="${spmd_dense_options} --parallelism.spmd_backend=full_dtensor" \
-          --test-options="${spmd_dense_options} --parallelism.spmd_backend=spmd --debug.spmd_typechecking" \
+          --test-options="${spmd_dense_options} --parallelism.spmd_backend=spmd_types --debug.spmd_typechecking" \
           --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/spmd_loss_comparison" \
           --no-seed-checkpoint --assert-equal --steps=10
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*

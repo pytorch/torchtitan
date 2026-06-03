@@ -95,7 +95,7 @@ class Llama3Model(Decoder):
             chunked_loss = isinstance(config.loss, ChunkedCELoss.Config)
             loss_parallel = not parallelism.disable_loss_parallel
             if (
-                parallelism.spmd_backend == "spmd"
+                parallelism.spmd_backend == "spmd_types"
                 and loss_parallel
                 and not chunked_loss
             ):
