@@ -143,6 +143,7 @@ def muse_glimmer_debugmodel_mm() -> Trainer.Config:
             local_batch_size=4,
             seq_len=512,
             steps=10,
+            disable_cuda_graphs=True,
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,
@@ -208,6 +209,7 @@ def muse_glimmer_30b_mm() -> Trainer.Config:
             local_batch_size=1,
             seq_len=8192,
             steps=1000,
+            disable_cuda_graphs=True,
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,
