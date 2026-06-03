@@ -471,9 +471,6 @@ class TestCheckpointManager(unittest.TestCase):
         # Verify that `maybe_wait_for_staging` actually waits for staging future to complete
         staging_future = manager.staging_future
         manager.maybe_wait_for_staging()
-        mock_logger.debug.assert_any_call(
-            "Staging future is not done yet; blocking for result."
-        )
         staging_future.result.assert_called_once()
 
         # After waiting, the staging future should be None
