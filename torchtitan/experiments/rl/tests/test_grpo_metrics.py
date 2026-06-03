@@ -20,13 +20,13 @@ import pytest
 
 import torch
 
-from torchtitan.experiments.rl.grpo import _build_reward_metrics, GRPOLoss, RLTrainer
+from torchtitan.experiments.rl.grpo import _prepare_reward_metrics, GRPOLoss, RLTrainer
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import Completion, Step, Trajectory
 
 
 # ---------------------------------------------------------------------------
-# _build_reward_metrics
+# _prepare_reward_metrics
 # ---------------------------------------------------------------------------
 
 
@@ -39,13 +39,14 @@ def _reward_trajectory(rewards: dict[str, float], sample_idx: int = 0) -> Trajec
     fake_completion = Completion(
         policy_version=0,
         prompt_idx=sample_idx,
-        prompt_token_ids=[],
         text="",
         token_ids=[],
         token_logprobs=[],
     )
     return Trajectory(
-        sample_idx=sample_idx, transitions=[(fake_completion, _step(rewards))]
+        sample_idx=sample_idx,
+        prompt_token_ids=[],
+        transitions=[(fake_completion, _step(rewards))],
     )
 
 
@@ -55,7 +56,7 @@ class TestBuildRewardMetrics:
             _reward_trajectory({"correctness": 1.0, "format": 0.5}, sample_idx=0),
             _reward_trajectory({"correctness": 0.0, "format": 1.0}, sample_idx=1),
         ]
-        metrics = _build_reward_metrics("reward/component", trajectories)
+        metrics = _prepare_reward_metrics("reward/component", trajectories)
         keys = {entry.key for entry in metrics}
         assert keys == {
             "reward/component/correctness",
@@ -71,17 +72,17 @@ class TestBuildRewardMetrics:
             _reward_trajectory({"correctness": 1.0}, sample_idx=0),
             _reward_trajectory({"format": 0.5}, sample_idx=1),
         ]
-        metrics = _build_reward_metrics("reward/component", trajectories)
+        metrics = _prepare_reward_metrics("reward/component", trajectories)
         agg = m.MetricsProcessor._aggregate_metrics(metrics)
         assert agg["reward/component/correctness/mean"] == 1.0
         assert agg["reward/component/format/mean"] == 0.5
 
     def test_empty_input(self) -> None:
-        assert _build_reward_metrics("reward/component", []) == []
+        assert _prepare_reward_metrics("reward/component", []) == []
 
     def test_prefix_controls_namespace(self) -> None:
         trajectories = [_reward_trajectory({"correctness": 1.0}, sample_idx=0)]
-        metrics = _build_reward_metrics("validation/reward/component", trajectories)
+        metrics = _prepare_reward_metrics("validation/reward/component", trajectories)
         assert metrics[0].key == "validation/reward/component/correctness"
 
 
@@ -92,7 +93,6 @@ class TestBuildRewardMetrics:
 
 def _completion(
     prompt_idx: int,
-    prompt_len: int,
     response_len: int,
     finish_reason: str | None = "stop",
     *,
@@ -101,7 +101,6 @@ def _completion(
     return Completion(
         policy_version=policy_version,
         prompt_idx=prompt_idx,
-        prompt_token_ids=list(range(prompt_len)),
         text="x" * response_len,
         token_ids=list(range(response_len)),
         token_logprobs=[0.0] * response_len,
@@ -112,8 +111,8 @@ def _completion(
 class _FakeEnv:
     """Minimal env stub: step(text) returns a preset reward dict."""
 
-    def __init__(self, rewards: dict[str, float]):
-        self.prompt = "p"
+    def __init__(self, rewards: dict[str, float], prompt: str = "p"):
+        self.prompt = prompt
         self._rewards = rewards
 
     def step(self, text: str) -> Step:
@@ -126,9 +125,9 @@ def _build_collect_rollouts_inputs(self_obj):
     """
 
     completions = [
-        _completion(prompt_idx=0, prompt_len=4, response_len=10),
-        _completion(prompt_idx=0, prompt_len=4, response_len=20),
-        _completion(prompt_idx=1, prompt_len=6, response_len=15),
+        _completion(prompt_idx=0, response_len=10),
+        _completion(prompt_idx=0, response_len=20),
+        _completion(prompt_idx=1, response_len=15),
     ]
 
     class _RewardEnvBuilder:
@@ -138,14 +137,25 @@ def _build_collect_rollouts_inputs(self_obj):
 
     self_obj.config = MagicMock()
     self_obj.config.env = _RewardEnvBuilder
+    self_obj.tokenizer = MagicMock()
+    self_obj.tokenizer.encode.side_effect = lambda prompt, **_: [ord(prompt)]
     self_obj.generator = MagicMock()
     # `_get_rank_0_value` is the layer that strips Monarch's ValueMesh,
     # so just make it return whatever it's handed.
-    self_obj._get_rank_0_value = lambda value, has_gpus=True: completions
+    self_obj._get_rank_0_value = lambda value, has_gpus=True: (completions, [])
     return completions
 
 
 class TestCollectRollouts:
+    def test_passes_token_ids_to_generator(self) -> None:
+        """Controller tokenizes env prompts and hands the IDs (not strings)
+        to ``generator.generate.call``."""
+        controller = RLTrainer.__new__(RLTrainer)
+        _build_collect_rollouts_inputs(controller)
+        controller._collect_rollouts(num_groups=2, step=0)
+        # _FakeEnv.prompt == "p"; encode side_effect returns [ord(prompt)] = [112].
+        controller.generator.generate.call.assert_called_once_with([[112], [112]])
+
     def test_emits_expected_metric_keys(self) -> None:
         controller = RLTrainer.__new__(RLTrainer)
         completions = _build_collect_rollouts_inputs(controller)
@@ -170,17 +180,19 @@ class TestCollectRollouts:
         finish_reason == 'length' over completions."""
         controller = RLTrainer.__new__(RLTrainer)
         completions = [
-            _completion(0, 4, 10, finish_reason="length"),
-            _completion(0, 4, 10, finish_reason="stop"),
-            _completion(1, 4, 10, finish_reason="length"),
-            _completion(1, 4, 10, finish_reason="length"),
+            _completion(0, 10, finish_reason="length"),
+            _completion(0, 10, finish_reason="stop"),
+            _completion(1, 10, finish_reason="length"),
+            _completion(1, 10, finish_reason="length"),
         ]
 
         controller.config = MagicMock()
         controller.config.env = MagicMock()
         controller.config.env.build = lambda *, step, group_idx: _FakeEnv({"r": 1.0})
+        controller.tokenizer = MagicMock()
+        controller.tokenizer.encode.side_effect = lambda prompt, **_: [ord(prompt)]
         controller.generator = MagicMock()
-        controller._get_rank_0_value = lambda value, has_gpus=True: completions
+        controller._get_rank_0_value = lambda value, has_gpus=True: (completions, [])
 
         _, rollout_metrics = controller._collect_rollouts(num_groups=2, step=0)
         agg = m.MetricsProcessor._aggregate_metrics(rollout_metrics)
@@ -194,28 +206,57 @@ class TestCollectRollouts:
         controller = RLTrainer.__new__(RLTrainer)
 
         # Carefully chosen so per-side maxes don't align: the longest
-        # prompt has the shortest response, etc.
+        # prompt has the shortest response, etc. The tokenizer mock below
+        # produces token lists of length == len(prompt), so the env prompts
+        # control prompt-side lengths.
+        env_prompts = {0: "x" * 10, 1: "x" * 2, 2: "x" * 5}
         completions = [
-            _completion(prompt_idx=0, prompt_len=10, response_len=2),  # total 12
-            _completion(prompt_idx=1, prompt_len=2, response_len=10),  # total 12
-            _completion(prompt_idx=2, prompt_len=5, response_len=5),  # total 10
+            _completion(prompt_idx=0, response_len=2),  # total 10 + 2 = 12
+            _completion(prompt_idx=1, response_len=10),  # total 2 + 10 = 12
+            _completion(prompt_idx=2, response_len=5),  # total 5 + 5 = 10
         ]
         controller.config = MagicMock()
         controller.config.env = MagicMock()
-        controller.config.env.build = lambda *, step, group_idx: _FakeEnv({"r": 1.0})
+        controller.config.env.build = lambda *, step, group_idx: _FakeEnv(
+            {"r": 1.0}, prompt=env_prompts[group_idx]
+        )
+        controller.tokenizer = MagicMock()
+        controller.tokenizer.encode.side_effect = lambda prompt, **_: list(
+            prompt.encode()
+        )
         controller.generator = MagicMock()
-        controller._get_rank_0_value = lambda value, has_gpus=True: completions
+        controller._get_rank_0_value = lambda value, has_gpus=True: (completions, [])
 
-        _, rollout_metrics = controller._collect_rollouts(num_groups=3, step=0)
+        trajectories, rollout_metrics = controller._collect_rollouts(
+            num_groups=3, step=0
+        )
         agg = m.MetricsProcessor._aggregate_metrics(rollout_metrics)
-        per_side_max_sum = max(c.prompt_token_ids[-1] + 1 for c in completions) + max(
-            c.token_ids[-1] + 1 for c in completions
+        per_side_max_sum = max(len(t.prompt_token_ids) for t in trajectories) + max(
+            len(c.token_ids) for c in completions
         )  # = 10 + 10 = 20
         actual_max = max(
-            len(c.prompt_token_ids) + len(c.token_ids) for c in completions
+            len(t.prompt_token_ids) + len(c.token_ids)
+            for t, c in zip(trajectories, completions, strict=True)
         )  # = 12
         assert agg["rollout/total_length/max"] == actual_max
         assert agg["rollout/total_length/max"] < per_side_max_sum
+
+    def test_group_offset_keeps_rollout_rounds_distinct(self) -> None:
+        controller = RLTrainer.__new__(RLTrainer)
+        _build_collect_rollouts_inputs(controller)
+
+        first_round, _ = controller._collect_rollouts(
+            num_groups=2, step=0, group_offset=0
+        )
+        second_round, _ = controller._collect_rollouts(
+            num_groups=2, step=0, group_offset=2
+        )
+
+        assert [t.sample_idx for t in first_round] == [0, 0, 1]
+        assert [t.sample_idx for t in second_round] == [2, 2, 3]
+
+        episodes, _ = RLTrainer._build_episodes(first_round + second_round)
+        assert all(ep.advantage == 0.0 for ep in episodes)
 
 
 def _trajectory(
@@ -226,11 +267,10 @@ def _trajectory(
     *,
     policy_version: int = 0,
 ) -> Trajectory:
-    completion = _completion(
-        sample_idx, prompt_len, response_len, policy_version=policy_version
-    )
+    completion = _completion(sample_idx, response_len, policy_version=policy_version)
     return Trajectory(
         sample_idx=sample_idx,
+        prompt_token_ids=list(range(prompt_len)),
         transitions=[(completion, _step({"r": reward}))],
     )
 
@@ -353,11 +393,11 @@ class TestRLTrainerConfigWiring:
         assert "X" not in fresh.metrics.console_log_keys_train
         assert "Y" not in fresh.metrics.console_log_keys_validation
 
-    def test_metrics_default_wandb_disabled(self) -> None:
+    def test_metrics_default_wandb_enabled(self) -> None:
         from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b
 
         cfg = rl_grpo_qwen3_0_6b()
-        assert cfg.metrics.enable_wandb is False
+        assert cfg.metrics.enable_wandb is True
         assert cfg.metrics.enable_tensorboard is False
 
 

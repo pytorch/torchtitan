@@ -305,7 +305,11 @@ _FLEX_ATTENTION_OPS = {
 }
 
 
-def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
+def is_cudagraph_compatible(
+    gm: torch.fx.GraphModule,
+    *,
+    skip_flex_attention_check: bool = False,
+) -> bool:
     """Check whether the graph can be safely captured by CUDA graph.
 
     Returns False (with a warning) when the graph contains patterns
@@ -325,7 +329,24 @@ def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
       Math implementation that is incompatible with CUDA graph capture.
       The expected workflow is to apply regional_inductor first to compile
       flex_attention regions, then apply cudagraph.
+
+    Args:
+        gm: The graph module to check.
+        skip_flex_attention_check: When True, skip the flex_attention HOP
+            check. Used by ``full_inductor_compilation_pass`` which always
+            compiles flex_attention HOPs away during the collapse.
     """
+    # ``full_inductor_compilation_pass`` collapses the FX graph into one
+    # opaque ``standalone_compile_inner`` node, hiding ops the per-node
+    # scan below would otherwise catch. That pass stashes its pre-collapse
+    # verdict in ``gm.meta``; honor it.
+    if gm.meta.get("cudagraph_compatible") is False:
+        logger.warning(
+            "Skipping cudagraph: gm.meta['cudagraph_compatible'] is False "
+            "(set by full_inductor_compilation_pass before the collapse)."
+        )
+        return False
+
     for node in gm.graph.nodes:
         if node.op != "call_function":
             continue
@@ -367,14 +388,15 @@ def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
                 )
                 return False
 
-    for node in gm.graph.nodes:
-        if node.op == "call_function" and node.target in _FLEX_ATTENTION_OPS:
-            logger.warning(
-                "Skipping cudagraph: graph contains flex_attention higher-order "
-                "ops that require regional_inductor to compile before cudagraph "
-                "can capture"
-            )
-            return False
+    if not skip_flex_attention_check:
+        for node in gm.graph.nodes:
+            if node.op == "call_function" and node.target in _FLEX_ATTENTION_OPS:
+                logger.warning(
+                    "Skipping cudagraph: graph contains flex_attention higher-order "
+                    "ops that require regional_inductor to compile before cudagraph "
+                    "can capture"
+                )
+                return False
 
     return True
 

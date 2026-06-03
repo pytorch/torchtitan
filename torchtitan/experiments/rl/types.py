@@ -42,7 +42,6 @@ class Completion:
 
     policy_version: int
     prompt_idx: int
-    prompt_token_ids: list[int]
     text: str
     token_ids: list[int]
     token_logprobs: list[float]
@@ -55,11 +54,12 @@ class Trajectory:
     """One rollout: a sequence of ``(Completion, Step)`` transitions.
 
     Single-turn tasks produce trajectories with one transition. The
-    Completion carries the generator's token-level metadata; the Step
-    carries the env's reward and done flag.
+    Completion carries the generator's response-side metadata; the Step
+    carries the env's reward and done flag;
     """
 
     sample_idx: int
+    prompt_token_ids: list[int]
     transitions: list[tuple[Completion, Step]]
 
     @property
@@ -87,14 +87,19 @@ class Episode:
 
 @dataclass(kw_only=True, slots=True)
 class TrainingBatch:
-    token_ids: torch.Tensor  # [1, total_tokens]
-    prompt_lens: list[int]  # [num_episodes]
-    response_lens: list[int]  # [num_episodes]
-    seq_lens: list[int]  # [num_episodes] (prompt_lens + response_lens)
-    advantages: torch.Tensor  # [num_episodes]
-    token_logprobs: list[
-        list[float]
-    ]  # [num_episodes][response_len_i] per-token logprobs from rollout
+    """Packed training batch for the RL trainer.
+
+    Each episode's raw tokens (length N) are split into
+    ``token_ids = raw[:-1]`` and ``labels = raw[1:]`` (both length
+    N-1), matching the pre-training dataloader convention.
+    """
+
+    token_ids: torch.Tensor  # [B, L]
+    labels: torch.Tensor  # [B, L]
+    positions: torch.Tensor  # [B, L]
+    generator_logprobs: torch.Tensor  # [B, L]
+    loss_mask: torch.Tensor  # [B, L]
+    advantages: torch.Tensor  # [B, L]
 
 
 @dataclass(frozen=True, slots=True)

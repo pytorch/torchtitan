@@ -18,8 +18,8 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_router_config,
 )
+from torchtitan.models.common.nn_modules import LayerNorm, RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
-from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.qwen3.model import Qwen3TransformerBlock
 from torchtitan.models.utils import validate_converter_order
 
@@ -29,7 +29,15 @@ from torchtitan.protocols.model_spec import ModelSpec
 from .model import Qwen3VLModel
 from .parallelize import parallelize_qwen3_vl
 from .state_dict_adapter import Qwen3VLStateDictAdapter
-from .vision_encoder import Qwen3VLVisionEncoder
+from .vision_encoder import (
+    PatchEmbed,
+    PatchMerger,
+    Qwen3VLVisionEncoder,
+    VisionAttention,
+    VisionMLP,
+    VisionRotaryEmbedding,
+    VisionTransformerBlock,
+)
 
 __all__ = [
     "parallelize_qwen3_vl",
@@ -76,9 +84,9 @@ def _depth_init(layer_id: int) -> dict[str, Callable]:
 
 def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
     return {
-        "w1": partial(nn.init.trunc_normal_, std=0.02),
-        "w2": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-        "w3": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
+        "w2_EDF": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "w3_EFD": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
     }
 
 
@@ -95,8 +103,46 @@ def _qwen3_vl_norm(dim: int) -> RMSNorm.Config:
     return RMSNorm.Config(normalized_shape=dim, eps=_EPS, param_init=_NORM_INIT)
 
 
-def _qwen3_vl_q_norm(dim: int) -> RMSNorm.Config:
-    return RMSNorm.Config(normalized_shape=dim, eps=_EPS, param_init=_NORM_INIT)
+def _vl_layer_norm(normalized_shape: int) -> LayerNorm.Config:
+    return LayerNorm.Config(normalized_shape=normalized_shape, eps=_EPS)
+
+
+def _build_qwen3_vl_vision_block(
+    *, dim: int, ffn_dim: int, n_heads: int
+) -> VisionTransformerBlock.Config:
+    return VisionTransformerBlock.Config(
+        attn=VisionAttention.Config(
+            dim=dim,
+            n_heads=n_heads,
+            qkv=_vl_linear(dim, dim * 3),
+            proj=_vl_linear(dim, dim),
+        ),
+        mlp=VisionMLP.Config(
+            fc1=_vl_linear(dim, ffn_dim),
+            fc2=_vl_linear(ffn_dim, dim),
+        ),
+        norm1=_vl_layer_norm(dim),
+        norm2=_vl_layer_norm(dim),
+    )
+
+
+def _build_qwen3_vl_merger(
+    *,
+    dim: int,
+    out_hidden_size: int,
+    spatial_merge_size: int,
+    use_postshuffle_norm: bool,
+) -> PatchMerger.Config:
+    merged_hidden_size = dim * (spatial_merge_size**2)
+    norm_dim = merged_hidden_size if use_postshuffle_norm else dim
+    return PatchMerger.Config(
+        hidden_size=dim,
+        spatial_merge_size=spatial_merge_size,
+        fc1=_vl_linear(merged_hidden_size, merged_hidden_size),
+        fc2=_vl_linear(merged_hidden_size, out_hidden_size),
+        norm=_vl_layer_norm(norm_dim),
+        use_postshuffle_norm=use_postshuffle_norm,
+    )
 
 
 def _vl_vision_encoder_config(
@@ -115,25 +161,39 @@ def _vl_vision_encoder_config(
 ) -> Qwen3VLVisionEncoder.Config:
     """Build a fully-specified Qwen3VLVisionEncoder.Config."""
     patch_dim = in_channels * temporal_patch_size * patch_size * patch_size
-    merged_hidden_size = dim * (spatial_merge_size**2)
+    head_dim = dim // n_heads
     return Qwen3VLVisionEncoder.Config(
         dim=dim,
-        ffn_dim=ffn_dim,
-        n_layers=n_layers,
         n_heads=n_heads,
-        patch_size=patch_size,
-        temporal_patch_size=temporal_patch_size,
         spatial_merge_size=spatial_merge_size,
-        out_hidden_size=out_hidden_size,
         num_position_embeddings=num_position_embeddings,
         deepstack_visual_indices=deepstack_visual_indices,
-        patch_embed_proj=_vl_linear(patch_dim, dim),
-        attn_qkv=_vl_linear(dim, dim * 3),
-        attn_proj=_vl_linear(dim, dim),
-        mlp_fc1=_vl_linear(dim, ffn_dim),
-        mlp_fc2=_vl_linear(ffn_dim, dim),
-        merger_fc1=_vl_linear(merged_hidden_size, merged_hidden_size),
-        merger_fc2=_vl_linear(merged_hidden_size, out_hidden_size),
+        patch_embed=PatchEmbed.Config(
+            patch_size=patch_size,
+            temporal_patch_size=temporal_patch_size,
+            in_channels=in_channels,
+            proj=_vl_linear(patch_dim, dim),
+        ),
+        rotary_pos_emb=VisionRotaryEmbedding.Config(dim=head_dim // 2),
+        layers=[
+            _build_qwen3_vl_vision_block(dim=dim, ffn_dim=ffn_dim, n_heads=n_heads)
+            for _ in range(n_layers)
+        ],
+        merger=_build_qwen3_vl_merger(
+            dim=dim,
+            out_hidden_size=out_hidden_size,
+            spatial_merge_size=spatial_merge_size,
+            use_postshuffle_norm=False,
+        ),
+        deepstack_mergers=[
+            _build_qwen3_vl_merger(
+                dim=dim,
+                out_hidden_size=out_hidden_size,
+                spatial_merge_size=spatial_merge_size,
+                use_postshuffle_norm=True,
+            )
+            for _ in range(len(deepstack_visual_indices))
+        ],
         param_init=_POS_EMBED_INIT,
     )
 
@@ -166,7 +226,7 @@ def _build_qwen3_vl_layers(
                     inner_attention=inner_attention,
                     mask_type=mask_type,
                     rope_backend="cos_sin",
-                    qk_norm=_qwen3_vl_q_norm(head_dim),
+                    qk_norm=_qwen3_vl_norm(head_dim),
                 ),
                 feed_forward=make_ffn_config(
                     dim=dim,
@@ -211,7 +271,7 @@ def _build_qwen3_vl_moe_layers(
                     inner_attention=inner_attention,
                     mask_type=mask_type,
                     rope_backend="cos_sin",
-                    qk_norm=_qwen3_vl_q_norm(head_dim),
+                    qk_norm=_qwen3_vl_norm(head_dim),
                 ),
                 moe=make_moe_config(
                     num_experts=num_experts,

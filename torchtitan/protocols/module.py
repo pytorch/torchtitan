@@ -21,12 +21,6 @@ from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
 from torchtitan.protocols.types import NamedPlacement
 
 
-# Cache: maps nn.Module subclass -> created Module wrapper class.
-# Module classes are typically created at import time and live for
-# the process lifetime.
-_created_classes: dict[type, type] = {}
-
-
 class Module(nn.Module, Configurable):
     """Base class for all configurable nn.Module components.
     Combines nn.Module with Configurable, so subclasses only inherit from Module.
@@ -108,14 +102,36 @@ class Module(nn.Module, Configurable):
             )
 
     def _init_self_parameters(self) -> None:
-        """Initialize this module's own parameters via ``_init_param``.
+        """Initialize this module's own direct parameters.
 
-        Overridden internally by ``from_nn_module`` to delegate to
-        ``reset_parameters``. Not intended for subclass override — configure
-        parameter initialization via ``param_init`` on the Config instead.
+        Resolution order:
+
+        1. If ``param_init`` is set, use per-parameter dict lookup via
+           ``_init_param``.
+        2. Otherwise, fall back to ``reset_parameters()`` if it is
+           available on ``self`` (typically inherited from the
+           underlying ``nn`` class, but a subclass override is also
+           honored). This is the standard PyTorch convention used by
+           ``nn.Linear``, ``nn.LayerNorm``, ``nn.Conv2d``, etc.
+        3. Otherwise, raise if there are any own parameters.
         """
-        for name, param in self.named_parameters(recurse=False):
-            self._init_param(name, param)
+        if self._param_init is not None:
+            for name, param in self.named_parameters(recurse=False):
+                self._init_param(name, param)
+            return
+
+        reset = getattr(self, "reset_parameters", None)
+        if callable(reset):
+            reset()
+            return
+
+        own_param_names = [name for name, _ in self.named_parameters(recurse=False)]
+        if own_param_names:
+            raise ValueError(
+                f"{type(self).__name__} has parameters {own_param_names} "
+                "but neither param_init nor reset_parameters is available. "
+                "Set param_init on the Config or define reset_parameters."
+            )
 
     def _init_param(self, name: str, param: nn.Parameter) -> None:
         """Initialize a single parameter via dict lookup in ``_param_init``.
@@ -301,14 +317,6 @@ class Module(nn.Module, Configurable):
         if sharding_config.local_map is None:
             return fn
 
-        if sharding_config.local_input_grad_placements is not None:
-            raise ValueError(
-                f"{type(self).__name__}: local_map and "
-                "local_input_grad_placements cannot coexist. "
-                "Use LocalMapConfig.in_grad_placements for modules "
-                "wrapped with local_map."
-            )
-
         lm = sharding_config.local_map
         in_dst = sharding_config.in_dst_shardings or {}
         pos_args = self._cache_pos_arg_names()
@@ -386,16 +394,14 @@ class Module(nn.Module, Configurable):
 
         in_dst_shardings = sharding_config.in_dst_shardings or {}
         in_src_shardings = sharding_config.in_src_shardings or {}
-        in_grad_shardings = sharding_config.local_input_grad_placements or {}
 
         for name, value in new_kwargs.items():
             if not isinstance(value, torch.Tensor):
                 continue
             src_named_placements = in_src_shardings.get(name)
             dst_named_placements = in_dst_shardings.get(name)
-            grad_named_placements = in_grad_shardings.get(name)
             mesh = parallel_dims.resolve_shared_mesh(
-                [src_named_placements, dst_named_placements, grad_named_placements]
+                [src_named_placements, dst_named_placements]
             )
             if mesh is None:
                 continue
@@ -405,15 +411,11 @@ class Module(nn.Module, Configurable):
 
             if not isinstance(value, DTensor) and src_named_placements is not None:
                 layout = resolve_placements(src_named_placements, mesh)
-                grad_placements: tuple | None = None
-                if grad_named_placements is not None:
-                    grad_placements = resolve_placements(grad_named_placements, mesh)
                 value = DTensor.from_local(
                     value,
                     mesh,
                     layout,
                     run_check=False,
-                    grad_placements=grad_placements,
                 )
 
             if dst_named_placements is not None and isinstance(value, DTensor):
@@ -439,10 +441,7 @@ class Module(nn.Module, Configurable):
         assert sharding_config is not None
 
         out_named_placements = sharding_config.out_dst_shardings
-        out_grad_named_placements = sharding_config.local_output_grad_placements
-        mesh = parallel_dims.resolve_shared_mesh(
-            [out_named_placements, out_grad_named_placements]
-        )
+        mesh = parallel_dims.resolve_shared_mesh([out_named_placements])
         if mesh is None:
             return outputs
 
@@ -451,54 +450,7 @@ class Module(nn.Module, Configurable):
             if isinstance(outputs, DTensor) and outputs.placements != desired:
                 outputs = outputs.redistribute(placements=desired, async_op=True)
 
-        # Unwrap DTensor output to local tensor with the declared backward
-        # gradient placement. Mirrors NoParallel(local_output_grad_placements
-        # =...): the module returns a local tensor; in backward, the
-        # upstream local d_output is wrapped back as a DTensor with the
-        # declared placement (e.g. Partial to skip a downstream all-reduce).
-        if out_grad_named_placements is not None and isinstance(outputs, DTensor):
-            grad_placements = resolve_placements(out_grad_named_placements, mesh)
-            outputs = outputs.to_local(grad_placements=grad_placements)
         return outputs
-
-    @classmethod
-    def from_nn_module(cls, nn_module_cls: type[nn.Module]) -> type["Module"]:
-        """Create a ``Module``-protocol-compatible version of *nn_module_cls*.
-
-        The returned class inherits from ``(nn_module_cls, Module)`` and has the
-        same constructor signature as *nn_module_cls*.
-
-        * If *nn_module_cls* defines ``reset_parameters``, the injected
-          ``_init_self_parameters`` delegates to it.
-        * Otherwise ``_init_self_parameters`` is the inherited default from
-          ``Module``.
-
-        Results are cached so that repeated calls with the same class return
-        the identical class object.
-
-        Usage::
-
-            Conv2d = Module.from_nn_module(nn.Conv2d)
-            LayerNorm = Module.from_nn_module(nn.LayerNorm)
-            # Then use Conv2d / LayerNorm exactly like nn.Conv2d / nn.LayerNorm
-        """
-        if nn_module_cls in _created_classes:
-            return _created_classes[nn_module_cls]
-
-        attrs: dict[str, Any] = {}
-        if hasattr(nn_module_cls, "reset_parameters"):
-
-            def _init_self_parameters(self: Any) -> None:
-                self.reset_parameters()
-
-            attrs["_init_self_parameters"] = _init_self_parameters
-
-        name = f"Module({nn_module_cls.__name__})"
-        new_cls = type(name, (nn_module_cls, Module), attrs)
-        new_cls.__module__ = __name__
-        new_cls.__qualname__ = name
-        _created_classes[nn_module_cls] = new_cls
-        return new_cls
 
 
 class ModuleList(nn.ModuleList, Module):
