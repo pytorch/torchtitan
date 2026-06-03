@@ -67,7 +67,7 @@ jobs:
         pip install uv
 
         # 1. Install Monarch and TorchStore
-        uv pip install torchmonarch==0.3.0
+        uv pip install torchmonarch
         uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
         uv pip install pygtrie portpicker
 
