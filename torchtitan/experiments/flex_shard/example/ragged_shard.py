@@ -13,10 +13,11 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from torch._prims_common import make_contiguous_strides_for
 from typing_extensions import override
 
 from ..flex_shard.placement_contract import (
+    BucketParamStorageLayout,
+    BucketStorageLayout,
     Placement,
     PlacementPreparedReduceGrad,
     PlacementPreparedUnshard,
@@ -453,10 +454,6 @@ class GroupedRaggedShard(RaggedShard):
             "GroupedRaggedShard(" f"dims={self.dims}, local_units={self.local_units})"
         )
 
-    @override
-    def uses_bucket_param_infos(self) -> bool:
-        return True
-
     def _bucket_layout(self, info: ParamInfo) -> BucketLayout:
         layout = info.bucket_layout
         if layout is None:
@@ -478,7 +475,7 @@ class GroupedRaggedShard(RaggedShard):
     ) -> torch.Size:
         raise NotImplementedError(
             "GroupedRaggedShard computes local shapes from the whole bucket. "
-            "Use create_bucket_param_infos() instead."
+            "Use bucket_storage_layout() instead."
         )
 
     @override
@@ -553,20 +550,16 @@ class GroupedRaggedShard(RaggedShard):
         return torch.Size([local_numel // suffix_numel, *suffix_shape])
 
     @override
-    def create_bucket_param_infos(
+    def bucket_storage_layout(
         self,
         named_params: list[tuple[str, nn.Parameter]],
         param_placements: dict[str, tuple[Placement, ...]],
         mesh: DeviceMesh,
-    ) -> tuple[dict[str, ParamInfo], int] | None:
-        from ..flex_shard.bucket_storage import (
-            BucketLayout,
-            BucketParamLayout,
-            ParamInfo,
-        )
+    ) -> BucketStorageLayout:
+        from ..flex_shard.bucket_storage import BucketLayout, BucketParamLayout
 
         if not named_params:
-            return {}, 0
+            return BucketStorageLayout(param_layouts={}, total_bytes=0)
         if len(self.local_units) != mesh.size():
             raise ValueError(
                 "GroupedRaggedShard local_units length must match world size: "
@@ -627,22 +620,14 @@ class GroupedRaggedShard(RaggedShard):
             rank_numels=rank_numels,
             param_layouts=param_layouts,
         )
-        param_infos: dict[str, ParamInfo] = {}
-        for fqn, param in named_params:
-            placements = param_placements[fqn]
+        storage_layouts: dict[str, BucketParamStorageLayout] = {}
+        for fqn, _ in named_params:
             local_shape, local_numel, byte_offset = local_metadata[fqn]
-            param_infos[fqn] = ParamInfo(
-                fqn=fqn,
-                global_shape=param.shape,
-                global_stride=tuple(make_contiguous_strides_for(param.shape)),
-                dtype=dtype,
-                requires_grad=param.requires_grad,
-                placements=placements,
+            storage_layouts[fqn] = BucketParamStorageLayout(
                 local_shape=local_shape,
                 local_numel=local_numel,
                 byte_offset=byte_offset,
                 storage_nbytes=local_numel * dtype.itemsize,
-                global_numel=param.numel(),
                 bucket_layout=bucket_layout,
             )
 
@@ -653,7 +638,10 @@ class GroupedRaggedShard(RaggedShard):
                 "that assign parameter data to every non-empty rank."
             )
 
-        return param_infos, rank_numels[rank] * dtype.itemsize
+        return BucketStorageLayout(
+            param_layouts=storage_layouts,
+            total_bytes=rank_numels[rank] * dtype.itemsize,
+        )
 
     @override
     def copy_param_to_storage(

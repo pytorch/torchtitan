@@ -29,6 +29,25 @@ class LocalStorageLayout:
     storage_nbytes: int
 
 
+@dataclass(frozen=True)
+class BucketParamStorageLayout:
+    """Placement-owned bucket storage layout for one parameter."""
+
+    local_shape: torch.Size
+    local_numel: int
+    byte_offset: int
+    storage_nbytes: int
+    bucket_layout: Any | None = None
+
+
+@dataclass(frozen=True)
+class BucketStorageLayout:
+    """Placement-owned storage layout for a whole bucket."""
+
+    param_layouts: dict[str, BucketParamStorageLayout]
+    total_bytes: int
+
+
 class Placement(ABC):
     """Base class for FlexShard placement strategies.
 
@@ -97,6 +116,19 @@ class Placement(ABC):
             storage_nbytes=local_numel * dtype.itemsize,
         )
 
+    def bucket_storage_layout(
+        self,
+        named_params: list[tuple[str, nn.Parameter]],
+        param_placements: dict[str, tuple[Placement, ...]],
+        mesh: DeviceMesh,
+    ) -> BucketStorageLayout | None:
+        """Return an optional bucket-global storage layout.
+
+        Returning None asks ShardedBucketStorage to use the default sequential
+        per-parameter layout derived from local_storage_layout().
+        """
+        return None
+
     def copy_param_to_storage(
         self,
         byte_storage: torch.Tensor,
@@ -133,23 +165,6 @@ class Placement(ABC):
         nbytes = info.local_numel * info.dtype.itemsize
         byte_view = byte_storage[info.byte_offset : info.byte_offset + nbytes]
         return byte_view.view(info.dtype).view(info.local_shape)
-
-    def uses_bucket_param_infos(self) -> bool:
-        """Return whether this placement needs bucket-level storage planning."""
-        return False
-
-    def create_bucket_param_infos(
-        self,
-        named_params: list[tuple[str, nn.Parameter]],
-        param_placements: dict[str, tuple[Placement, ...]],
-        mesh: DeviceMesh,
-    ) -> tuple[dict[str, ParamInfo], int] | None:
-        """Optionally create ParamInfo for a whole bucket at once.
-
-        Placements with bucket-global storage requirements can override this
-        method. Returning ``None`` keeps the default per-parameter storage path.
-        """
-        return None
 
     def prepare_unshard_bucket(
         self,
@@ -238,6 +253,8 @@ class PlacementReduceGradResult:
 
 
 __all__ = [
+    "BucketParamStorageLayout",
+    "BucketStorageLayout",
     "LocalStorageLayout",
     "Placement",
     "PlacementPreparedUnshard",
