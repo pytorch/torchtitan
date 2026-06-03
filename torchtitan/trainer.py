@@ -52,10 +52,10 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.distributed.spmd_types import (
-    parallelize_spmd_inputs,
+    annotate_input_spmd_types,
     placement_to_spmd_assert_type,
     preserve_buffer_spmd,
-    set_current_mesh,
+    set_current_spmd_mesh,
     set_spmd_backend,
 )
 from torchtitan.tools import utils
@@ -131,6 +131,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 and self.debug.spmd_typechecking
                 and self.parallelism.pipeline_parallel_degree > 1
             ):
+                # TODO(sanketpurandare): Enable SPMD typechecking under PP.
                 raise ValueError(
                     "SPMD typechecking is not supported with pipeline parallelism. "
                     "Validate the same config without PP "
@@ -227,6 +228,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
+        # TODO(pianpwk): Transitional until the local-SPMD and full-DTensor
+        # backends share one runtime mesh/type mechanism.
         set_spmd_backend(config.parallelism.spmd_backend)
 
         # Logging needs to happen after distributed initialized
@@ -672,7 +675,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
         elif self.config.parallelism.spmd_backend == "spmd":
-            parallelize_spmd_inputs(
+            annotate_input_spmd_types(
                 self.parallel_dims, inputs, labels, extra_inputs, extra_kwargs
             )
 
@@ -743,7 +746,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     pred = pred.to_local()
                 loss = self.loss_fn(pred, labels, global_valid_tokens)
                 del pred
-                loss.backward()
+                backward_context = (
+                    spmd.no_typecheck()
+                    if self.config.parallelism.spmd_backend == "spmd"
+                    else contextlib.nullcontext()
+                )
+                with backward_context:
+                    loss.backward()
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
@@ -774,7 +783,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         local_valid_tokens = local_valid_tokens.to(self.device)
 
         spmd_mesh_context = (
-            set_current_mesh(
+            set_current_spmd_mesh(
                 self.parallel_dims.get_activated_mesh(["dp", "cp", "tp"])
             )
             if self.config.parallelism.spmd_backend == "spmd"
