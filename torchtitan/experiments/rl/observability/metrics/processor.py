@@ -61,6 +61,7 @@ class MetricsProcessor(Configurable):
                 "rollout/response_length/max",
                 "train/grad_norm/mean",
                 "train/lr",
+                "bit_wise/logprob_diff/max",
                 "perf/tokens_per_second",
                 "timing/step",
             ]

@@ -464,7 +464,9 @@ class PolicyTrainer(Actor, Configurable):
         with sl.log_trace_span("model_backward"):
             loss.backward()
 
-        # Metrics for bitwise verification of policy logprobs.
+        # Metrics for bitwise verification of policy logprobs. This compares
+        # trainer logits post-processed by vLLM's selected-token logprob kernel
+        # against the generator logprobs produced by vLLM.
         verification: PartialLogprobDrift = verify_logprob_identity(
             generator_logprobs=generator_logprobs,
             policy_logprobs=identity_logprobs,
