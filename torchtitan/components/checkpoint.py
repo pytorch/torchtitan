@@ -11,7 +11,6 @@ import functools
 import os
 import queue
 import re
-import shutil
 import threading
 import time
 from concurrent.futures import Future
@@ -22,10 +21,13 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
+
+from fsspec.core import url_to_fs
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
+from torch.distributed.checkpoint._fsspec_filesystem import FsspecReader, FsspecWriter
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
@@ -37,6 +39,7 @@ from torch.distributed.checkpoint.state_dict_saver import (
     AsyncSaveResponse,
 )
 from torch.distributed.checkpoint.stateful import Stateful
+from torch.distributed.checkpoint.storage import StorageWriter
 
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -52,6 +55,34 @@ OPTIMIZER = "optimizer"
 LR_SCHEDULER = "lr_scheduler"
 DATALOADER = "dataloader"
 TRAIN_STATE = "train_state"
+
+
+def _fs_exists(path: str) -> bool:
+    fs, fs_path = url_to_fs(path)
+    return fs.exists(fs_path)
+
+
+def _fs_isdir(path: str) -> bool:
+    fs, fs_path = url_to_fs(path)
+    if fs.isfile(fs_path):
+        return False
+    return fs.isdir(fs_path) or bool(_fs_ls(path))
+
+
+def _fs_ls(path: str) -> list[str]:
+    fs, fs_path = url_to_fs(path)
+    try:
+        return [os.fspath(entry) for entry in fs.ls(fs_path, detail=False)]
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+
+
+def _fs_rm(path: str, *, recursive: bool = False) -> None:
+    fs, fs_path = url_to_fs(path)
+    try:
+        fs.rm(fs_path, recursive=recursive)
+    except FileNotFoundError:
+        pass
 
 
 class AsyncMode(str, enum.Enum):
@@ -110,7 +141,7 @@ def purge_thread(purge_queue: queue.Queue):
             assert isinstance(path, str)
             logger.info("Checkpointer is deleting %s.", path)
             begin = time.monotonic()
-            shutil.rmtree(path, ignore_errors=True)
+            _fs_rm(path, recursive=True)
             logger.info(
                 "Checkpointer deleted %s in %.2f seconds.",
                 path,
@@ -445,7 +476,7 @@ class CheckpointManager(Configurable):
 
         ret: Future | AsyncSaveResponse | None = None
 
-        storage_writer: HuggingFaceStorageWriter | None = None
+        storage_writer: StorageWriter | None = None
         checkpoint_save_id: str | None = None
         fqn_to_index_mapping: dict[Any, int] | None = None
         if to_hf:
@@ -475,6 +506,7 @@ class CheckpointManager(Configurable):
 
         else:
             checkpoint_save_id = checkpoint_id
+            storage_writer = FsspecWriter(checkpoint_id)
 
         if async_mode == AsyncMode.ASYNC:
             ret = dcp.async_save(
@@ -544,7 +576,11 @@ class CheckpointManager(Configurable):
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
             self.states[MODEL].load_state_dict(state_dict)
         else:
-            dcp.load(state_dict, checkpoint_id=checkpoint_id)
+            dcp.load(
+                state_dict,
+                storage_reader=FsspecReader(checkpoint_id),
+                checkpoint_id=checkpoint_id,
+            )
 
             # TODO: Since we flatten the model states in state_dict, we need to
             # manually call load_state_dict() for the model. Need to fix this.
@@ -640,7 +676,7 @@ class CheckpointManager(Configurable):
         model_only = False
         from_hf = False
         from_quantized = False
-        if not os.path.exists(self.folder):
+        if not self._checkpoint_folder_exists():
             model_only = self.initial_load_model_only
             from_hf = self.initial_load_in_hf
             from_quantized = self.initial_load_in_hf_quantized
@@ -656,7 +692,7 @@ class CheckpointManager(Configurable):
 
             if self.initial_load_path:
                 checkpoint_id = self.initial_load_path
-                if not os.path.isdir(checkpoint_id):
+                if not self._checkpoint_exists(checkpoint_id, from_hf=from_hf):
                     raise ValueError(
                         "checkpoint.initial_load_path is specified but the path is not valid."
                     )
@@ -671,7 +707,7 @@ class CheckpointManager(Configurable):
                 ), "from_hf is True but sd_adapter or hf_assets_path is not provided."
                 hf_assets_path = self.sd_adapter.hf_assets_path
                 checkpoint_id = hf_assets_path
-                if not os.path.isdir(checkpoint_id):
+                if not _fs_isdir(checkpoint_id):
                     raise ValueError(
                         "model.hf_assets_path is being used to load HF weights but the path is not valid. \
                         Either make sure hf_assets_path is correct or provide a valid checkpoint.initial_load_path"
@@ -698,7 +734,7 @@ class CheckpointManager(Configurable):
             model_only = step == 0
             checkpoint_id = self._create_checkpoint_id(step)
 
-            if not os.path.isdir(checkpoint_id):
+            if not self._checkpoint_exists(checkpoint_id, from_hf=False):
                 raise FileNotFoundError(
                     f"--checkpoint.load_step={step} but checkpoint {checkpoint_id} is not found."
                 )
@@ -740,29 +776,48 @@ class CheckpointManager(Configurable):
             int: The step to load the checkpoint for.
         """
         folder = folder if folder else self.folder
-        pattern = r"step-(\d+)"
-        step_counts = []
-
-        if not os.path.isdir(folder):
-            return -1
-
-        for filename in os.listdir(folder):
-            match = re.search(pattern, filename)
-            dcp_metadata_probe = os.path.join(folder, filename, ".metadata")
-            safetensors_metadata_probe = os.path.join(
-                folder, filename, "model.safetensors.index.json"
-            )
-            if match and os.path.isfile(dcp_metadata_probe):
-                step_counts.append(int(match.group(1)))
-            elif match and os.path.isfile(safetensors_metadata_probe):
-                step_counts.append(int(match.group(1)))
-        if not step_counts:
-            return -1
-        return max(step_counts)
+        step_counts = self._list_checkpoint_steps(folder, require_metadata=True)
+        return max(step_counts) if step_counts else -1
 
     def _create_checkpoint_id(self, step: int, folder: str = "") -> str:
         folder = folder if folder else self.folder
         return os.path.join(folder, f"step-{step}")
+
+    def _checkpoint_folder_exists(self, folder: str = "") -> bool:
+        folder = folder if folder else self.folder
+        return _fs_isdir(folder)
+
+    def _checkpoint_exists(self, checkpoint_id: str, from_hf: bool) -> bool:
+        metadata_names = ["model.safetensors.index.json"] if from_hf else [".metadata"]
+        return _fs_exists(checkpoint_id) or any(
+            _fs_exists(os.path.join(checkpoint_id, metadata_name))
+            for metadata_name in metadata_names
+        )
+
+    def _list_checkpoint_steps(
+        self, folder: str, *, require_metadata: bool
+    ) -> list[int]:
+        steps = []
+        for path in _fs_ls(folder):
+            name = os.path.basename(path.rstrip("/"))
+            match = re.fullmatch(r"step-(\d+)", name)
+            if not match:
+                continue
+            step = int(match.group(1))
+            if not require_metadata or any(
+                _fs_exists(os.path.join(folder, name, metadata_name))
+                for metadata_name in (".metadata", "model.safetensors.index.json")
+            ):
+                steps.append(step)
+        return sorted(steps)
+
+    def _discover_checkpoints(self, folder: str = "") -> list[tuple[int, str]]:
+        folder = folder if folder else self.folder
+
+        return [
+            (step, os.path.join(folder, f"step-{step}"))
+            for step in self._list_checkpoint_steps(folder, require_metadata=False)
+        ]
 
     def _flattened_model_states_sd(
         self, state_dict: dict[str, Any] | None = None
@@ -875,18 +930,12 @@ class CheckpointManager(Configurable):
         return (
             self.keep_latest_k > 0
             and dist.get_rank() == 0
-            and os.path.isdir(self.folder)
+            and self._checkpoint_folder_exists()
         )
 
     def _purge_stale_checkpoints(self):
         if self._should_purge():
-            discovered_checkpoints = []
-            for filename in os.listdir(self.folder):
-                match = re.search(r"step-(\d+)", filename)
-                if match:
-                    path = os.path.join(self.folder, filename)
-                    discovered_checkpoints.append((int(match.group(1)), path))
-
+            discovered_checkpoints = self._discover_checkpoints()
             discovered_checkpoints.sort()
             to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
 

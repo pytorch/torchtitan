@@ -153,7 +153,7 @@ class TestCheckpointManager(unittest.TestCase):
                 sd_to_save[key] = val
         torch.save(sd_to_save, os.path.join(checkpoint_id, "state_dict.pt"))
 
-    def fake_load(self, states: dict, checkpoint_id=None):
+    def fake_load(self, states: dict, checkpoint_id=None, storage_reader=None):
         path = os.path.join(checkpoint_id, "state_dict.pt")
         loaded = torch.load(path, weights_only="False")
         for key, val in loaded.items():
@@ -675,7 +675,7 @@ class TestCheckpointManager(unittest.TestCase):
                 self.assertNotIn("optimizer", state_dict)
             return
 
-        def fake_load(state_dict: dict, checkpoint_id=None):
+        def fake_load(state_dict: dict, checkpoint_id=None, storage_reader=None):
             self.assertIn("bias", state_dict)
             self.assertIn("weight", state_dict)
             # No model prefix
