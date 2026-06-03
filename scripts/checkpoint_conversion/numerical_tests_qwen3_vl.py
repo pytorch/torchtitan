@@ -92,8 +92,8 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
 
     model_config = model_registry(model_flavor).model
     encoder_config = model_config.vision_encoder  # pyrefly: ignore[missing-attribute]
-    patch_size = encoder_config.patch_size
-    temporal_patch_size = encoder_config.temporal_patch_size
+    patch_size = encoder_config.patch_embed.patch_size
+    temporal_patch_size = encoder_config.patch_embed.temporal_patch_size
     merge_size = encoder_config.spatial_merge_size
 
     hf_inputs, tt_inputs, pixel_comparisons = [], [], []

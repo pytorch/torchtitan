@@ -49,30 +49,34 @@ def run_loss_compare(
     Returns:
         True if the assertion passed, False otherwise.
     """
-    cmd = [
-        sys.executable,
-        "scripts/loss_compare.py",
-        ".",
-        ".",
-        f"--baseline-module={baseline_module}",
-        f"--baseline-config={baseline_config}",
-        f"--test-module={test_module}",
-        f"--test-config={test_config}",
-        "--assert-equal",
-        f"--steps={STEPS}",
-        f"--baseline-ngpus={baseline_ngpus}",
-        f"--test-ngpus={test_ngpus}",
-    ]
-    if baseline_options:
-        cmd.append(f"--baseline-options={baseline_options}")
-    if test_options:
-        cmd.append(f"--test-options={test_options}")
+    # Use a temp dump folder instead of loss_compare.py's default ("outputs"),
+    # which is created relative to cwd and is not writable in CI containers.
+    with tempfile.TemporaryDirectory() as job_dump_folder:
+        cmd = [
+            sys.executable,
+            "scripts/loss_compare.py",
+            ".",
+            ".",
+            f"--baseline-module={baseline_module}",
+            f"--baseline-config={baseline_config}",
+            f"--test-module={test_module}",
+            f"--test-config={test_config}",
+            "--assert-equal",
+            f"--steps={STEPS}",
+            f"--baseline-ngpus={baseline_ngpus}",
+            f"--test-ngpus={test_ngpus}",
+            f"--job-dump-folder={job_dump_folder}",
+        ]
+        if baseline_options:
+            cmd.append(f"--baseline-options={baseline_options}")
+        if test_options:
+            cmd.append(f"--test-options={test_options}")
 
-    print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, text=True)
-    if result.returncode != 0:
-        print("loss_compare.py failed")
-    return result.returncode == 0
+        print(f"Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, text=True)
+        if result.returncode != 0:
+            print("loss_compare.py failed")
+        return result.returncode == 0
 
 
 def run_loss_compare_close(
@@ -286,10 +290,6 @@ def _run_autoparallel_deepseek_v3_loss_compare() -> bool:
 class TestGraphTrainerNumerics(unittest.TestCase):
     """Test numerics equivalence between graph_trainer and FSDP2 eager."""
 
-    # TODO: Disabled due to upstream PyTorch nightly DTensor regression.
-    # Sharding propagation fails for aten.mm.default with mixed dtypes
-    # (bf16 activations, f32 weights) on the TP mesh. Re-enable once fixed.
-    @unittest.skip("upstream DTensor mixed-dtype sharding propagation regression")
     def test_dense_llama3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_llama3_loss_compare(test_options_extra="--compile.mode aot_fx_trace"),
@@ -332,10 +332,6 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             ),
         )
 
-    # TODO: Disabled due to upstream PyTorch nightly DTensor regression.
-    # Sharding propagation fails for aten.mm.default with mixed dtypes
-    # (bf16 activations, f32 weights) on the TP mesh. Re-enable once fixed.
-    @unittest.skip("upstream DTensor mixed-dtype sharding propagation regression")
     def test_moe_dsv3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_deepseek_v3_loss_compare(
@@ -343,19 +339,11 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             ),
         )
 
-    # TODO: Disabled due to upstream PyTorch nightly DTensor regression.
-    # Sharding propagation fails for aten.mm.default with mixed dtypes
-    # (bf16 activations, f32 weights) on the TP mesh. Re-enable once fixed.
-    @unittest.skip("upstream DTensor mixed-dtype sharding propagation regression")
     def test_dense_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_qwen3_loss_compare(test_options_extra="--compile.mode aot_fx_trace"),
         )
 
-    # TODO: Disabled due to upstream PyTorch nightly DTensor regression.
-    # Sharding propagation fails for aten.mm.default with mixed dtypes
-    # (bf16 activations, f32 weights) on the TP mesh. Re-enable once fixed.
-    @unittest.skip("upstream DTensor mixed-dtype sharding propagation regression")
     def test_moe_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_qwen3_moe_loss_compare(
@@ -371,6 +359,7 @@ class TestGraphTrainerNumerics(unittest.TestCase):
 class TestGraphTrainerAutoParallelNumerics(unittest.TestCase):
     """Test graph_trainer AutoParallel numerics equivalence against eager."""
 
+    @unittest.skip("upstream AutoParallel nll_loss assertion regression")
     def test_llama3_aot_fx_trace_autoparallel_vs_eager(self):
         self.assertTrue(_run_autoparallel_llama3_loss_compare())
 
