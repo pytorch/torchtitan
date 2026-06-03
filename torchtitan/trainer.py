@@ -45,9 +45,19 @@ from torchtitan.distributed.activation_checkpoint import (
     SelectiveAC,
 )
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
+from torchtitan.distributed.cudagraph import (
+    cudagraph_teardown,
+    CUDAGraphInputSpec,
+    CUDAGraphWrapper,
+)
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.token_dispatcher import (
+    HybridEPTokenDispatcher,
+    LocalTokenDispatcher,
+    MinimalAsyncEPTokenDispatcher,
+)
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
@@ -129,6 +139,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     f"({pp_microbatch_size}) when pipeline parallelism is enabled."
                 )
 
+            self._validate_cuda_graphs()
+
             if (
                 self.parallelism.spmd_backend == "spmd_types"
                 and self.debug.spmd_typechecking
@@ -163,6 +175,40 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "Memory budget activation checkpointing requires the model to be "
                     "compiled: set --compile.enable and include 'model' in "
                     "--compile.components."
+                )
+
+        def _validate_cuda_graphs(self) -> None:
+            if not self.training.enable_cuda_graphs:
+                return
+
+            if self.parallelism.pipeline_parallel_degree > 1:
+                raise ValueError(
+                    "training.enable_cuda_graphs does not support pipeline "
+                    "parallelism yet."
+                )
+
+            if self.parallelism.expert_parallel_degree == 1 or self.model_spec is None:
+                return
+
+            unsupported_dispatchers = {
+                type(dispatcher_config).__qualname__
+                for _, dispatcher_config, _, _ in self.model_spec.model.traverse(
+                    LocalTokenDispatcher.Config
+                )
+                if not isinstance(
+                    dispatcher_config, MinimalAsyncEPTokenDispatcher.Config
+                )
+                and not (
+                    isinstance(dispatcher_config, HybridEPTokenDispatcher.Config)
+                    and dispatcher_config.non_blocking_capacity_factor is not None
+                )
+            }
+            if unsupported_dispatchers:
+                raise ValueError(
+                    "training.enable_cuda_graphs supports expert parallelism "
+                    "only with HybridEP when non_blocking_capacity_factor is "
+                    "set, or with MinimalAsyncEP. Unsupported token "
+                    f"dispatchers: {sorted(unsupported_dispatchers)}."
                 )
 
         def to_dict(self) -> dict[str, Any]:
@@ -311,6 +357,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # loss, dataloader, …) are built later in __init__.
         if config.override.imports:
             apply_overrides(config.override, config)
+        config._validate_cuda_graphs()
 
         logger.info(f"Building {model_spec.name} {model_spec.flavor}")
 
@@ -752,14 +799,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
 
         assert len(model_parts) == 1
-        with self.train_context():
-            pred = model_parts[0](inputs, **extra_kwargs)
-            loss, _ = self.loss_fn(pred, labels, global_valid_tokens)
-            del pred
-            with spmd.no_typecheck():
-                # this propagates types through BWD, causing unnecessary conflicts
-                # between torch_function and internals (e.g. AC). FWD is sufficient.
-                loss.backward()
+        if self.config.training.enable_cuda_graphs:
+            loss = self._cuda_graph_fwd_bwd(
+                inputs, labels, global_valid_tokens, extra_kwargs
+            )
+        else:
+            with self.train_context():
+                pred = model_parts[0](inputs, **extra_kwargs)
+                loss, _ = self.loss_fn(pred, labels, global_valid_tokens)
+                del pred
+                with spmd.no_typecheck():
+                    # this propagates types through BWD, causing unnecessary conflicts
+                    # between torch_function and internals (e.g. AC). FWD is sufficient.
+                    loss.backward()
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
@@ -802,10 +854,75 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             return torch.sum(torch.stack(losses)).to(self.device)
         return torch.tensor([-1.0], device=self.device)
 
+    def _cuda_graph_fwd_bwd(
+        self,
+        inputs: torch.Tensor,
+        labels: torch.Tensor,
+        global_valid_tokens: float,
+        extra_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        """Forward+backward wrapped with CUDA graph capture/replay."""
+        global_valid_tokens_tensor = torch.tensor(
+            global_valid_tokens,
+            dtype=torch.int64,
+            device=self.device,
+        )
+
+        if not hasattr(self, "_cg_wrapper"):
+            model = self.model_parts[0]
+            train_context = self.train_context
+            loss_fn = self.loss_fn
+            extra_input_spec = CUDAGraphInputSpec(extra_kwargs)
+            self._cg_extra_input_spec = extra_input_spec
+
+            def _forward_backward(
+                step_inputs: torch.Tensor,
+                step_labels: torch.Tensor,
+                step_global_valid_tokens: torch.Tensor,
+                *flat_extra_inputs: Any,
+            ) -> torch.Tensor:
+                step_extra_kwargs = cast(
+                    dict[str, Any], extra_input_spec.unflatten(flat_extra_inputs)
+                )
+                with train_context():
+                    pred = model(step_inputs, **step_extra_kwargs)
+                    loss, _ = loss_fn(pred, step_labels, step_global_valid_tokens)
+                    del pred
+                    with spmd.no_typecheck():
+                        loss.backward()
+                return loss
+
+            extra_flat = self._cg_extra_input_spec.flatten(extra_kwargs)
+            example_inputs = [
+                inputs,
+                labels,
+                global_valid_tokens_tensor,
+                *extra_flat,
+            ]
+            self._cg_wrapper = CUDAGraphWrapper(
+                _forward_backward,
+                example_inputs,
+            )
+        else:
+            extra_flat = self._cg_extra_input_spec.flatten(extra_kwargs)
+
+        loss = self._cg_wrapper(
+            inputs,
+            labels,
+            global_valid_tokens_tensor,
+            *extra_flat,
+        )
+        # CUDA graph outputs are overwritten by each replay.
+        # TODO: Avoid this clone by migrating loss accumulation to a persistent
+        # tensor updated with add_().
+        return loss.clone()
+
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
-        self.optimizers.zero_grad()
+        self.optimizers.zero_grad(
+            set_to_none=not self.config.training.enable_cuda_graphs
+        )
         # Save per-optimizer-group learning rates for logging
         lr_metrics = self.lr_schedulers.get_metrics()
 
@@ -1009,6 +1126,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.ntokens_seen = state_dict["ntokens_seen"]
 
     def close(self) -> None:
+        if hasattr(self, "_cg_wrapper"):
+            cudagraph_teardown()
         if hasattr(self, "checkpointer") and self.checkpointer:
             self.checkpointer.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:
