@@ -61,7 +61,7 @@ class Task(Configurable):
         message_env: MessageEnv.Config
         """The env to build per example; `make_envs` calls `build(env_input=example)`."""
 
-        env_config: RendererWrapperEnv.Config = field(
+        env_wrapper_cfg: RendererWrapperEnv.Config = field(
             default_factory=RendererWrapperEnv.Config
         )
         """Renderer-wrapper limits (e.g. `max_rollout_tokens`) passed to `make_envs`."""
@@ -74,7 +74,7 @@ class Task(Configurable):
         self._validation_dataset = config.validation_dataset.build()
         self.rubric = config.rubric.build()
         self._message_env_config = config.message_env
-        self._env_config = config.env_config
+        self._env_wrapper_cfg = config.env_wrapper_cfg
 
     # TODO: revisit this abstraction: should it return a sample or a dataset or an iterator?
     def sample_train_example(self) -> object:
@@ -108,7 +108,7 @@ class Task(Configurable):
             RendererWrapperEnv(
                 message_env=self._message_env_config.build(env_input=example),
                 renderer=renderer,
-                config=self._env_config,
+                config=self._env_wrapper_cfg,
             )
             for _ in range(group_size)
         ]
