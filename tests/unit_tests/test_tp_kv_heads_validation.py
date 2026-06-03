@@ -26,6 +26,7 @@ try:
 
     from torchtitan.config import ParallelismConfig
     from torchtitan.models.common import (
+        ComplexRoPE,
         compute_ffn_hidden_dim,
         Embedding,
         Linear,
@@ -76,11 +77,10 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
                     wqkv_param_init=_LINEAR_INIT,
                     wo_param_init=_LINEAR_INIT,
                     inner_attention=ScaledDotProductAttention.Config(),
-                    rope=RoPE.Config(
+                    rope=ComplexRoPE.Config(
                         dim=_DIM // n_heads,
                         max_seq_len=4096,
                         theta=500000,
-                        backend="complex",
                         scaling="llama",
                     ),
                 ),

@@ -12,6 +12,7 @@ import torch.nn as nn
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
+    ComplexRoPE,
     compute_ffn_hidden_dim,
     Embedding,
     Linear,
@@ -214,11 +215,10 @@ def _debugmodel(
             fixed_attn_block_size=256,
             attn_backend=attn_backend,
             moe_comm_backend=moe_comm_backend,
-            rope=RoPE.Config(
+            rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=1048576,
                 theta=500000,
-                backend="complex",
                 scaling="llama",
                 scaling_factor=16.0,
                 high_freq_factor=1.0,
@@ -271,11 +271,10 @@ def _17bx16e(
             interleave_moe_layer_step=1,
             attn_backend=attn_backend,
             moe_comm_backend=moe_comm_backend,
-            rope=RoPE.Config(
+            rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=10485760,
                 theta=500000,
-                backend="complex",
                 scaling="llama",
                 scaling_factor=16.0,
                 high_freq_factor=1.0,
@@ -328,11 +327,10 @@ def _17bx128e(
             interleave_moe_layer_step=1,
             attn_backend=attn_backend,
             moe_comm_backend=moe_comm_backend,
-            rope=RoPE.Config(
+            rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=1048576,
                 theta=500000,
-                backend="complex",
                 scaling="none",
             ),
         ),

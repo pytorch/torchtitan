@@ -5,37 +5,35 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field
-from typing import Literal
 
 import torch
 from torch.distributed.tensor import distribute_tensor, DTensor
 
-from torchtitan.models.common.rope import _maybe_check_max_pos, RoPE
+from torchtitan.models.common.rope import _maybe_check_max_pos, CosSinRoPE, RoPE
 
 
-class MRoPE(RoPE):
+class MRoPE(CosSinRoPE):
     """Multi-dimensional RoPE for Qwen3-VL temporal/height/width positions."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(RoPE.Config):
-        backend: Literal["cos_sin"] = "cos_sin"
+    class Config(CosSinRoPE.Config):
         mrope_section: list[int] = field(default_factory=lambda: [24, 20, 20])
 
     def __init__(self, config: Config):
-        if config.backend != "cos_sin":
-            raise ValueError("MRoPE only supports cos/sin RoPE.")
         if len(config.mrope_section) != 3:
             raise ValueError(
                 f"mrope_section must have 3 entries, got {config.mrope_section}."
             )
         super().__init__(config)
 
-    def _cache_for_positions(
-        self, positions: torch.Tensor | None = None
-    ) -> torch.Tensor:
+    def _prepare_rope_cache(
+        self,
+        query: torch.Tensor,
+        positions: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if positions is not None and positions.ndim == 3:
-            return self._compute_mrope_cache(positions)
-        return self.cache
+            return self._compute_mrope_cache(positions), None
+        return super()._prepare_rope_cache(query, positions)
 
     def _compute_mrope_cache(self, position_ids: torch.Tensor) -> torch.Tensor:
         cfg = self.config

@@ -20,7 +20,7 @@ from torchtitan.models.llama4.parallelize import apply_fsdp
 
 def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
     """Build a tiny Llama4Model with a configurable number of experts."""
-    from torchtitan.models.common import compute_ffn_hidden_dim, RoPE
+    from torchtitan.models.common import ComplexRoPE, compute_ffn_hidden_dim, RoPE
 
     # Use the standard debugmodel config but override num_experts.
     # Rebuild layers with the requested num_experts.
@@ -54,11 +54,10 @@ def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
             shared_experts_hidden_dim=None,
             moe_comm_backend="standard",
             non_blocking_capacity_factor=None,
-            rope=RoPE.Config(
+            rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=2048,
                 theta=500000,
-                backend="complex",
                 scaling="llama",
                 scaling_factor=16.0,
                 high_freq_factor=1.0,

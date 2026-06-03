@@ -16,9 +16,9 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.common.rope import (
+    ComplexRoPE,
+    CosSinRoPE,
     _maybe_check_max_pos,
-    apply_rotary_emb_complex,
-    apply_rotary_emb_cos_sin,
     RoPE,
 )
 from torchtitan.models.qwen3_vl.rope import MRoPE
@@ -39,15 +39,26 @@ class TestApplyRotaryEmbCosSin(unittest.TestCase):
         )
         self.rope_cache = torch.randn(
             self.seqlen, self.head_dim * 2, dtype=torch.float32
+        ).view(1, self.seqlen, 1, self.head_dim * 2)
+        self.rope = CosSinRoPE(
+            ComplexCosSinRoPE.Config(dim=self.head_dim, max_seq_len=self.seqlen)
         )
 
     def test_output_dtype_matches_input(self):
-        xq_out, xk_out = apply_rotary_emb_cos_sin(self.xq, self.xk, self.rope_cache)
+        xq_out, xk_out = self.rope.apply_rotary_emb(
+            self.xq,
+            self.xk,
+            self.rope_cache,
+        )
         self.assertEqual(xq_out.dtype, self.xq.dtype)
         self.assertEqual(xk_out.dtype, self.xk.dtype)
 
     def test_output_shape_matches_input(self):
-        xq_out, xk_out = apply_rotary_emb_cos_sin(self.xq, self.xk, self.rope_cache)
+        xq_out, xk_out = self.rope.apply_rotary_emb(
+            self.xq,
+            self.xk,
+            self.rope_cache,
+        )
         self.assertEqual(xq_out.shape, self.xq.shape)
         self.assertEqual(xk_out.shape, self.xk.shape)
 
@@ -57,10 +68,14 @@ class TestApplyRotaryEmbCosSin(unittest.TestCase):
         Ensures inductor cannot fuse away the fp32 upcast when compiling
         adjacent ops (e.g. q_norm/k_norm) with the RoPE computation.
         """
-        xq_out, xk_out = apply_rotary_emb_cos_sin(self.xq, self.xk, self.rope_cache)
+        xq_out, xk_out = self.rope.apply_rotary_emb(
+            self.xq,
+            self.xk,
+            self.rope_cache,
+        )
 
-        cos = self.rope_cache[..., : self.head_dim].unsqueeze(0).unsqueeze(2)
-        sin = self.rope_cache[..., self.head_dim :].unsqueeze(0).unsqueeze(2)
+        cos = self.rope_cache[..., : self.head_dim]
+        sin = self.rope_cache[..., self.head_dim :]
 
         def rotate_half(x):
             half = x.shape[-1] // 2
@@ -102,18 +117,18 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
         torch.manual_seed(42)
         self.head_dim = 64
         self.max_seq_len = 32
-        rope_cfg = RoPE.Config(
-            dim=self.head_dim, max_seq_len=self.max_seq_len, backend="complex"
+        rope_cfg = ComplexCosSinRoPE.Config(
+            dim=self.head_dim, max_seq_len=self.max_seq_len
         )
-        rope = rope_cfg.build()
-        self.freqs_cis = rope.cache
+        self.rope = rope_cfg.build()
+        self.assertIsInstance(self.rope, ComplexRoPE)
 
     def test_valid_positions(self):
         bsz, seqlen = 2, 8
         xq = torch.randn(bsz, seqlen, 4, self.head_dim)
         xk = torch.randn(bsz, seqlen, 4, self.head_dim)
         positions = torch.arange(seqlen).unsqueeze(0).expand(bsz, -1)
-        apply_rotary_emb_complex(xq, xk, self.freqs_cis, positions)
+        self.rope(xq, xk, positions)
 
     def test_out_of_range_positions_raises(self):
         bsz, seqlen = 1, 4
@@ -121,7 +136,7 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
         xk = torch.randn(bsz, seqlen, 4, self.head_dim)
         positions = torch.tensor([[0, 1, self.max_seq_len, self.max_seq_len + 1]])
         with self.assertRaises(RuntimeError):
-            apply_rotary_emb_complex(xq, xk, self.freqs_cis, positions)
+            self.rope(xq, xk, positions)
 
 
 class TestRoPEPositionBoundsCosSin(unittest.TestCase):
@@ -131,18 +146,18 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
         torch.manual_seed(42)
         self.head_dim = 64
         self.max_seq_len = 32
-        rope_cfg = RoPE.Config(
-            dim=self.head_dim, max_seq_len=self.max_seq_len, backend="cos_sin"
+        rope_cfg = ComplexCosSinRoPE.Config(
+            dim=self.head_dim, max_seq_len=self.max_seq_len
         )
-        rope = rope_cfg.build()
-        self.rope_cache = rope.cache
+        self.rope = rope_cfg.build()
+        self.assertIsInstance(self.rope, CosSinRoPE)
 
     def test_valid_positions(self):
         bsz, seqlen = 2, 8
         xq = torch.randn(bsz, seqlen, 4, self.head_dim)
         xk = torch.randn(bsz, seqlen, 4, self.head_dim)
         positions = torch.arange(seqlen).unsqueeze(0).expand(bsz, -1)
-        apply_rotary_emb_cos_sin(xq, xk, self.rope_cache, positions)
+        self.rope(xq, xk, positions)
 
     def test_out_of_range_positions_raises(self):
         bsz, seqlen = 1, 4
@@ -150,7 +165,7 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
         xk = torch.randn(bsz, seqlen, 4, self.head_dim)
         positions = torch.tensor([[0, 1, self.max_seq_len, self.max_seq_len + 1]])
         with self.assertRaises(RuntimeError):
-            apply_rotary_emb_cos_sin(xq, xk, self.rope_cache, positions)
+            self.rope(xq, xk, positions)
 
 
 class TestMRoPECache(unittest.TestCase):
@@ -158,7 +173,7 @@ class TestMRoPECache(unittest.TestCase):
         torch.manual_seed(42)
         bsz, seqlen, n_heads = 2, 3, 4
         head_dim = 12
-        rope = MRoPE.Config(
+        rope = MComplexCosSinRoPE.Config(
             dim=head_dim,
             max_seq_len=8,
             mrope_section=[2, 1, 1],
@@ -197,7 +212,7 @@ class TestPerLayerRoPECache(unittest.TestCase):
             wo=Linear.Config(in_features=dim, out_features=dim),
             inner_attention=ScaledDotProductAttention.Config(),
             mask_type="causal",
-            rope=RoPE.Config(dim=head_dim, max_seq_len=16, backend="complex"),
+            rope=ComplexCosSinRoPE.Config(dim=head_dim, max_seq_len=16),
         ).build()
 
         x = torch.randn(2, 4, dim)

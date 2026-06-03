@@ -11,7 +11,13 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
-from torchtitan.models.common import Embedding, Linear, RoPE, TransformerBlock
+from torchtitan.models.common import (
+    CosSinRoPE,
+    Embedding,
+    Linear,
+    RoPE,
+    TransformerBlock,
+)
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_experts_config,
@@ -209,11 +215,10 @@ def _debugmodel(attn_backend: str) -> Qwen3Model.Config:
             head_dim=head_dim,
             hidden_dim=3072,
             attn_backend=attn_backend,
-            rope=RoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_seq_len=4096,
                 theta=1000000.0,
-                backend="cos_sin",
             ),
         ),
     )
@@ -248,11 +253,10 @@ def _debugmodel_fused_qkv(attn_backend: str) -> Qwen3Model.Config:
             hidden_dim=3072,
             fuse_qkv=True,
             attn_backend=attn_backend,
-            rope=RoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_seq_len=4096,
                 theta=1000000.0,
-                backend="cos_sin",
             ),
         ),
     )
@@ -286,11 +290,10 @@ def _0_6b(attn_backend: str) -> Qwen3Model.Config:
             head_dim=head_dim,
             hidden_dim=3072,
             attn_backend=attn_backend,
-            rope=RoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_seq_len=4096,
                 theta=1000000.0,
-                backend="cos_sin",
             ),
         ),
     )
@@ -324,11 +327,10 @@ def _1_7b(attn_backend: str) -> Qwen3Model.Config:
             head_dim=head_dim,
             hidden_dim=6144,
             attn_backend=attn_backend,
-            rope=RoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_seq_len=4096,
                 theta=1000000.0,
-                backend="cos_sin",
             ),
         ),
     )
@@ -362,11 +364,10 @@ def _4b(attn_backend: str) -> Qwen3Model.Config:
             head_dim=head_dim,
             hidden_dim=9728,
             attn_backend=attn_backend,
-            rope=RoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_seq_len=4096,
                 theta=1000000.0,
-                backend="cos_sin",
             ),
         ),
     )
@@ -397,11 +398,10 @@ def _8b(attn_backend: str) -> Qwen3Model.Config:
             head_dim=head_dim,
             hidden_dim=12288,
             attn_backend=attn_backend,
-            rope=RoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_seq_len=4096,
                 theta=1000000.0,
-                backend="cos_sin",
             ),
         ),
     )
@@ -432,11 +432,10 @@ def _14b(attn_backend: str) -> Qwen3Model.Config:
             head_dim=head_dim,
             hidden_dim=17408,
             attn_backend=attn_backend,
-            rope=RoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_seq_len=4096,
                 theta=1000000.0,
-                backend="cos_sin",
             ),
         ),
     )
@@ -467,11 +466,10 @@ def _32b(attn_backend: str) -> Qwen3Model.Config:
             head_dim=head_dim,
             hidden_dim=25600,
             attn_backend=attn_backend,
-            rope=RoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_seq_len=4096,
                 theta=1000000.0,
-                backend="cos_sin",
             ),
         ),
     )
@@ -510,11 +508,10 @@ def _debugmodel_moe(
             num_experts=64,
             top_k=8,
             attn_backend=attn_backend,
-            rope=RoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_seq_len=4096,
                 theta=1000000.0,
-                backend="cos_sin",
             ),
             moe_comm_backend=moe_comm_backend,
         ),
@@ -551,11 +548,10 @@ def _30b_a3b(
             num_experts=128,
             top_k=8,
             attn_backend=attn_backend,
-            rope=RoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_seq_len=262144,
                 theta=1000000.0,
-                backend="cos_sin",
             ),
             moe_comm_backend=moe_comm_backend,
         ),
@@ -592,11 +588,10 @@ def _235b_a22b(
             num_experts=128,
             top_k=8,
             attn_backend=attn_backend,
-            rope=RoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_seq_len=4096,
                 theta=5000000.0,
-                backend="cos_sin",
             ),
             moe_comm_backend=moe_comm_backend,
         ),

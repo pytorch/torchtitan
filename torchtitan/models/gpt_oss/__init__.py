@@ -10,7 +10,14 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
+from torchtitan.models.common import (
+    CosSinRoPE,
+    Embedding,
+    Linear,
+    RMSNorm,
+    RoPE,
+    TransformerBlock,
+)
 from torchtitan.models.common.attention import FusedQKVLinear, QKVLinear
 from torchtitan.models.common.config_utils import make_token_dispatcher_config
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
@@ -121,11 +128,10 @@ def _make_gptoss_attn_config(
         ),
         sliding_window_size=sliding_window_size,
         param_init=sinks_init,
-        rope=RoPE.Config(
+        rope=CosSinRoPE.Config(
             dim=head_dim,
             max_seq_len=rope_max_seq_len,
             theta=rope_theta,
-            backend="cos_sin",
             scaling=rope_scaling,
             rope_factor=rope_factor,
             beta_slow=rope_beta_slow,

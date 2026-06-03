@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
+import itertools
 from dataclasses import dataclass
 
 import torch
@@ -204,6 +205,18 @@ class Decoder(BaseModel):
         *,
         buffer_device: torch.device | None = None,
     ) -> None:
+        # Compute buffer_device before recursion so children (RoPE) get the
+        # correct device when buffer_device is not explicitly provided. 
+        # Iterate through the model's existing non-meta paramters/buffers
+        # to infer the post-to_empty device from state.
+        if buffer_device is None:
+            for tensor in itertools.chain(
+                self.parameters(recurse=True),
+                self.buffers(recurse=True),
+            ):
+                if tensor.device.type != "meta":
+                    buffer_device = tensor.device
+                    break
         super().init_states(buffer_device=buffer_device)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:

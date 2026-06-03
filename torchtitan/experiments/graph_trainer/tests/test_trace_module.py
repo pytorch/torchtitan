@@ -1250,7 +1250,7 @@ class TestTraceModels(unittest.TestCase):
             get_document_mask_mod,
         )
         from torchtitan.models.common.nn_modules import Linear, RMSNorm
-        from torchtitan.models.common.rope import RoPE
+        from torchtitan.models.common.rope import ComplexRoPE, RoPE
         from torchtitan.models.deepseek_v3.model import Attention as DSAttention
 
         dim = 64
@@ -1300,10 +1300,9 @@ class TestTraceModels(unittest.TestCase):
                     ),
                 )
                 self.rope = RoPE(
-                    RoPE.Config(
+                    ComplexRoPE.Config(
                         dim=rope_dim,
                         max_seq_len=seq_len,
-                        backend="complex",
                         scaling="none",
                     )
                 )

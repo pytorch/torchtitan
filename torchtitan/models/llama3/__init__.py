@@ -11,6 +11,7 @@ import torch.nn as nn
 
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
+    ComplexRoPE,
     compute_ffn_hidden_dim,
     Embedding,
     Linear,
@@ -126,11 +127,10 @@ def _debugmodel(attn_backend: str) -> Llama3Model.Config:
             dim=dim,
             n_heads=n_heads,
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
-            rope=RoPE.Config(
+            rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=131072,
                 theta=500000,
-                backend="complex",
                 scaling="llama",
             ),
             attn_backend=attn_backend,
@@ -158,11 +158,10 @@ def _debugmodel_fused_qkv(attn_backend: str) -> Llama3Model.Config:
             n_heads=n_heads,
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
             fuse_qkv=True,
-            rope=RoPE.Config(
+            rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=131072,
                 theta=500000,
-                backend="complex",
                 scaling="llama",
             ),
             attn_backend=attn_backend,
@@ -199,11 +198,10 @@ def _1b(attn_backend: str) -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=1024, ffn_dim_multiplier=1.5
             ),
-            rope=RoPE.Config(
+            rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=131072,
                 theta=500000,
-                backend="complex",
                 scaling="llama",
             ),
             attn_backend=attn_backend,
@@ -240,11 +238,10 @@ def _3b(attn_backend: str) -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=1024, ffn_dim_multiplier=1.0
             ),
-            rope=RoPE.Config(
+            rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=131072,
                 theta=500000,
-                backend="complex",
                 scaling="llama",
             ),
             attn_backend=attn_backend,
@@ -278,11 +275,10 @@ def _8b(attn_backend: str) -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=1024, ffn_dim_multiplier=1.3
             ),
-            rope=RoPE.Config(
+            rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=131072,
                 theta=500000,
-                backend="complex",
                 scaling="llama",
             ),
             attn_backend=attn_backend,
@@ -316,11 +312,10 @@ def _70b(attn_backend: str) -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=4096, ffn_dim_multiplier=1.3
             ),
-            rope=RoPE.Config(
+            rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=131072,
                 theta=500000,
-                backend="complex",
                 scaling="llama",
             ),
             attn_backend=attn_backend,
@@ -354,11 +349,10 @@ def _405b(attn_backend: str) -> Llama3Model.Config:
             hidden_dim=compute_ffn_hidden_dim(
                 dim, multiple_of=4096, ffn_dim_multiplier=1.2
             ),
-            rope=RoPE.Config(
+            rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=131072,
                 theta=500000,
-                backend="complex",
                 scaling="llama",
             ),
             attn_backend=attn_backend,

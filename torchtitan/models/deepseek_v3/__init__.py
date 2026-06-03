@@ -13,7 +13,14 @@ import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
-from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
+from torchtitan.models.common import (
+    ComplexRoPE,
+    Embedding,
+    Linear,
+    RMSNorm,
+    RoPE,
+    TransformerBlock,
+)
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_experts_config,
@@ -46,11 +53,10 @@ _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
 
 
 def _dsv3_rope_config(rope_dim: int) -> RoPE.Config:
-    return RoPE.Config(
+    return ComplexRoPE.Config(
         dim=rope_dim,
         max_seq_len=4096 * 4,
         theta=10000.0,
-        backend="complex",
         scaling="yarn",
         rope_factor=40.0,
         beta_fast=32.0,

@@ -9,7 +9,13 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.models.common import Embedding, Linear, RoPE, TransformerBlock
+from torchtitan.models.common import (
+    CosSinRoPE,
+    Embedding,
+    Linear,
+    RoPE,
+    TransformerBlock,
+)
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_experts_config,
@@ -117,6 +123,7 @@ def _build_qwen3_vl_vision_block(
             n_heads=n_heads,
             qkv=_vl_linear(dim, dim * 3),
             proj=_vl_linear(dim, dim),
+            rope=CosSinRoPE.Config(dim=dim // n_heads, max_seq_len=1, backend="cos_sin"),
         ),
         mlp=VisionMLP.Config(
             fc1=_vl_linear(dim, ffn_dim),
