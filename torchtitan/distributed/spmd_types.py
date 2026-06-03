@@ -40,14 +40,14 @@ __all__ = [
     "PlacementSpec",
     "current_mesh",
     "mesh_size",
-    "parallelize_spmd_inputs",
+    "annotate_input_spmd_types",
     "active_placement",
     "is_placement_like",
     "placement_axes",
     "placement_to_spmd_assert_type",
     "preserve_buffer_spmd",
     "redistribute_spmd_per_axis",
-    "set_current_mesh",
+    "set_current_spmd_mesh",
     "set_spmd_backend",
 ]
 
@@ -96,7 +96,7 @@ def mesh_size(axis_name: str) -> int:
 
 
 @contextlib.contextmanager
-def set_current_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
+def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
     """Set TorchTitan and spmd_types current mesh state for one runtime region."""
     if _spmd_backend != "spmd":
         yield
@@ -304,7 +304,7 @@ def placement_to_spmd_assert_type(
     }, partition_spec
 
 
-def parallelize_spmd_inputs(
+def annotate_input_spmd_types(
     parallel_dims: Any,
     inputs: torch.Tensor,
     labels: torch.Tensor,

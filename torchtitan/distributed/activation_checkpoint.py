@@ -24,7 +24,7 @@ from torch.utils.checkpoint import (
 )
 
 from torchtitan.config import ActivationCheckpointConfig as ACConfig
-from torchtitan.distributed.spmd_types import current_mesh, set_current_mesh
+from torchtitan.distributed.spmd_types import current_mesh, set_current_spmd_mesh
 from torchtitan.tools.logging import logger
 
 
@@ -102,7 +102,7 @@ def _with_spmd_recompute_context(context_fn):
 
         @contextlib.contextmanager
         def recompute_with_mesh():
-            with set_current_mesh(mesh), recompute_context:
+            with set_current_spmd_mesh(mesh), recompute_context:
                 yield
 
         return forward_context, recompute_with_mesh()
