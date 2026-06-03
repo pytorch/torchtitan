@@ -57,9 +57,13 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
     )
 
 
-def deepseek_v3_debugmodel_ep() -> Trainer.Config:
+def deepseek_v3_debugmodel_hybridep() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
-    config.model_spec = model_registry("debugmodel")
+    config.model_spec = model_registry(
+        "debugmodel",
+        moe_comm_backend="hybridep",
+        non_blocking_capacity_factor=1.0,
+    )
     return config
 
 
@@ -117,7 +121,7 @@ def deepseek_v3_671b() -> Trainer.Config:
         model_spec=model_registry(
             "671B",
             attn_backend="flex",
-            quantization=[
+            converters=[
                 Float8LinearConverter.Config(
                     filter_fqns=["output", "router.gate"],
                     model_compile_enabled=model_compile_enabled,

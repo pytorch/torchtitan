@@ -219,14 +219,14 @@ class HFTransformerModel(BaseModel):
         def update_from_config(
             self,
             *,
-            trainer_config=None,
+            config=None,
             **kwargs,
         ):
-            training = trainer_config.training
-            parallelism = trainer_config.parallelism
-            debug = trainer_config.debug
-            # Extract HF model ID from the extended trainer_config
-            hf_model_id = getattr(trainer_config, "hf_model", "")
+            training = config.training
+            parallelism = config.parallelism
+            debug = config.debug
+            # Extract HF model ID from the extended config
+            hf_model_id = getattr(config, "hf_model", "")
             # Load HF config (overwrites our HF attributes)
             hf_model_config = AutoConfig.from_pretrained(
                 hf_model_id,
@@ -285,11 +285,6 @@ class HFTransformerModel(BaseModel):
 
     def __init__(self, config: Config):
         super().__init__()
-
-        # NOTE(3outeille): This prevents Hugging Face modeling from initializing ROPE (inv_freq) buffers to NaN.
-        # Needed when loading from seed checkpoint.
-        if hasattr(config, "deterministic") and config.deterministic:
-            torch.utils.deterministic.fill_uninitialized_memory = False
 
         # Try to import the model class dynamically from the transformers library if not found in globals
         model_class_name = config.architectures[0]

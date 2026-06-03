@@ -24,6 +24,7 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.logger import init_logger
 
+from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b
 
 
@@ -46,6 +47,11 @@ def generate():
         config.model_spec,
         parallelism=gen_config.parallelism,
         compile_config=config.compile,
+        checkpoint_config=CheckpointManager.Config(
+            enable=True,
+            initial_load_in_hf=True,
+            initial_load_path=model_path,
+        ),
     )
     logger.info("Registered TorchTitan model with vLLM")
 
