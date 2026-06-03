@@ -688,7 +688,6 @@ class GQAttention(BaseAttention):
             else config.dim // config.n_heads
         )
         self.enable_gqa = self.n_heads > self.n_kv_heads
-        self.use_rope = config.rope is not None
         self.rope = config.rope.build() if config.rope is not None else None
 
         # Pluggable QKV projection
@@ -722,13 +721,12 @@ class GQAttention(BaseAttention):
             xk = self.k_norm(xk)
 
         # Apply rotary embeddings
-        if self.use_rope:
-            assert self.rope is not None
+        if self.rope is not None:
             xq, xk = self.rope(xq, xk, positions)
 
         # Handle iRoPE dict masks (Llama4)
         if isinstance(attention_masks, dict):
-            mask_key = "rope" if self.use_rope else "nope"
+            mask_key = "rope" if self.rope is not None else "nope"
             attention_masks = attention_masks[mask_key]
 
         output = self.inner_attention(
