@@ -123,7 +123,7 @@ def _build_qwen3_vl_vision_block(
             n_heads=n_heads,
             qkv=_vl_linear(dim, dim * 3),
             proj=_vl_linear(dim, dim),
-            rope=CosSinRoPE.Config(dim=dim // n_heads, max_seq_len=1, backend="cos_sin"),
+            rope=CosSinRoPE.Config(dim=dim // n_heads, max_seq_len=1),
         ),
         mlp=VisionMLP.Config(
             fc1=_vl_linear(dim, ffn_dim),
