@@ -217,11 +217,12 @@ class ParallelDims:
                 ("pp", "dp_replicate", "dp_shard", "cp", "tp"),
                 (self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp),
             )
-            spmd_dense_mesh = unflatten_mesh(
+            spmd_dense_parent_mesh = unflatten_mesh(
                 self._world_mesh,
                 tuple(["pp"] + candidate_spmd_dense_axes),
                 (self.pp, batch, self.cp, self.tp),
             )
+            spmd_dense_mesh = spmd_dense_parent_mesh["dp", "cp", "tp"]
         else:
             # Legacy path folds ``dp_shard`` and ``cp`` into ``fsdp``.
             candidate_spmd_dense_axes = ["dp_replicate", "fsdp", "tp"]
