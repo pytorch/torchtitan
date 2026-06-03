@@ -10,14 +10,14 @@
 # breakage from upstream changes. Update the commit hash when
 # upgrading to a newer DeepEP version.
 
-set -ex
+set -eux
 
 DEEPEP_COMMIT=${DEEPEP_COMMIT:-1b8f467}
 
 # Dependencies for DeepEP compilation (NVSHMEM needs libcudacxx, IB headers).
 sudo apt-get update -qq && sudo apt-get install -y -qq rdma-core libibverbs1 libmlx5-1 libibverbs-dev
 sudo apt-get autoclean && sudo apt-get clean
-sudo rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+sudo rm -rf /var/lib/apt/lists/* /var/tmp/*
 
 # CCCL headers live under include/cccl/ in CUDA 13+ — symlink so
 # NVSHMEM's #include "cuda/std/tuple" resolves correctly.
