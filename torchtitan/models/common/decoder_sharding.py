@@ -172,13 +172,13 @@ def norm_config(*, enable_sp: bool) -> ShardingConfig:
     composes with DTensor activations (otherwise plain Tensor + DTensor
     would mix inside the op).
     """
-    state = {"weight": dense_param_placement(tp=spmd.I)}
+    state_tp = spmd.R if enable_sp else spmd.I
+    state = {"weight": dense_param_placement(tp=state_tp)}
     if not enable_sp:
         return ShardingConfig(state_shardings=state)
     sp_placement = dense_sequence_parallel_placement()
     return ShardingConfig(
         state_shardings=state,
-        state_shardings_for_computation={"weight": dense_param_placement(tp=spmd.R)},
         in_src_shardings={"input": sp_placement},
         in_dst_shardings={"input": sp_placement},
         out_dst_shardings=sp_placement,
