@@ -32,7 +32,7 @@ from torchtitan.components.loss import (
     GradAccumulator,
     IGNORE_INDEX,
 )
-from torchtitan.distributed.spmd_types import set_current_mesh, set_spmd_backend
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_backend
 from torchtitan.models.common.decoder_sharding import lm_head_sharding_config
 from torchtitan.protocols.types import MeshAxisName
 
@@ -675,7 +675,7 @@ class TestChunkedCELossSPMD(DTensorTestBase):
                     )
                     set_spmd_backend("spmd")
                     try:
-                        with set_current_mesh(mesh):
+                        with set_current_spmd_mesh(mesh):
                             spmd_mesh_names = spmd.current_mesh_names()
                             assert spmd_mesh_names is not None
                             dp_axis = spmd_mesh_names["dp"]
