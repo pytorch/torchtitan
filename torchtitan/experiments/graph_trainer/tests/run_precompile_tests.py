@@ -72,8 +72,11 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
             # regression in PyTorch nightly. Re-enable once fixed.
             disabled=True,
         ),
-        # TODO: disabled due to upstream histc int64 regression breaking
-        # MoE model tracing. Re-enable once fixed upstream.
+        # TODO: disabled by a data-dependent MoE EP all_to_all_single failure
+        # ("Split sizes doesn't match total dim 0 size") on imbalanced routing;
+        # passes deterministically with --debug.seed 42 --debug.deterministic, so
+        # the dispatch math is correct. Re-enable once the data-dependent split
+        # execution is fixed.
         PrecompileTestDefinition(
             precompile_command=(
                 "python -m torchtitan.experiments.graph_trainer.precompile_main"

@@ -313,10 +313,17 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
         # Note: cudagraph is auto-skipped for DSv3 because MoE load-balancing
         # introduces CUDA→CPU transfers incompatible with CUDA graph capture.
         #
-        # TODO: aot_fx_trace MoE tests are disabled due to an upstream PyTorch
-        # regression: histc's meta kernel doesn't support int64 inputs,
-        # breaking tracing for all MoE models. Re-enable once the histc
-        # meta kernel is fixed upstream.
+        # The original histc int64 meta-kernel regression that disabled these
+        # MoE traces is fixed upstream (histc now propagates int64 fake tensors
+        # on CUDA), and the MoE token-gather crash (a dead DTensor shadow gather
+        # on an uninitialized index buffer, newly tripped by the upstream
+        # vectorized gather kernel's bounds assert) is fixed by
+        # _eliminate_dead_code in make_fx_tracer. The remaining failures
+        # below are distinct and tracked per-test.
+        #
+        # TODO: disabled by an upstream context-parallel regression: tracing the
+        # CP `local_map` SDPA path raises "aten.add.Tensor got mixed torch.Tensor
+        # and DTensor". Re-enable once fixed upstream.
         OverrideDefinitions(
             [
                 [
@@ -334,6 +341,11 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             ngpu=8,
             disabled=True,
         ),
+        # TODO: disabled by a data-dependent MoE EP all_to_all_single failure
+        # ("Split sizes doesn't match total dim 0 size") on imbalanced routing;
+        # passes deterministically with --debug.seed 42 --debug.deterministic, so
+        # the dispatch math is correct. Re-enable once the data-dependent split
+        # execution is fixed. (full_inductor below passes; the gather OOB is fixed.)
         OverrideDefinitions(
             [
                 [
@@ -365,8 +377,9 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace deepseek_v3 FSDP+TP+EP+full_inductor",
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep_full_inductor",
             ngpu=8,
-            disabled=True,
         ),
+        # TODO: disabled — requires DeepEP, and shares the data-dependent MoE EP
+        # all-to-all failure of the other DSv3 EP traces. Re-enable once fixed.
         OverrideDefinitions(
             [
                 [
@@ -408,7 +421,6 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
             ngpu=8,
             disabled=True,
         ),
-        # TODO: disabled due to upstream histc int64 regression (see DSv3 comment)
         OverrideDefinitions(
             [
                 [
@@ -423,7 +435,6 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace qwen3 MoE FSDP+TP+EP",
             "aot_fx_trace_qwen3_moe_fsdp_tp_ep",
             ngpu=8,
-            disabled=True,
         ),
     ]
 
