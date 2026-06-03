@@ -41,6 +41,7 @@ Then two assertions:
 import filecmp
 import importlib
 import os
+import re
 import tempfile
 import unittest
 
@@ -59,7 +60,28 @@ _MODEL_FLAVORS = [
     # llama3: fused-QKV path, exercises fused_to_separate_qkv /
     # separate_to_fused_qkv.
     ("llama3", "debugmodel_fused_qkv"),
+    # llama4: interleaved dense + MoE decoder. Exercises shape-suffix MoE keys
+    # (w1_EFD / w2_EDF / w3_EFD), dense FF mappings on non-MoE layers, and
+    # expert_bias_E reinit (see _NATIVE_EXCLUSIONS).
+    ("llama4", "debugmodel"),
 ]
+
+# Native-side keys (or regex patterns) excluded from the bitwise comparison,
+# keyed by (model_name, flavor). Every exclusion MUST have a comment that
+# explains why the key cannot round-trip exactly through HF format — these
+# are intentional design carve-outs, not unexplained skips.
+_NATIVE_EXCLUSIONS: dict[tuple[str, str], list[str]] = {
+    # llama4: `moe.expert_bias_E` is auxiliary-loss-free load-balancing bias
+    # (DeepSeek paper, adapted for Qwen/Mixtral-style routers including
+    # llama4). HF transformers' Llama4 router has no equivalent buffer
+    # (Llama4Router is plain nn.Linear with bias=False), so there is no
+    # HF key to map to. The adapter intentionally drops it on to_hf
+    # (matches HF format) and reinitializes it to zeros on from_hf
+    # (preserves the key set). The bias therefore does not survive an HF
+    # round-trip by design; the optimizer pre-hook recomputes it during
+    # training. Resuming from an HF checkpoint loses any accumulated bias.
+    ("llama4", "debugmodel"): [r".*\.moe\.expert_bias_E$"],
+}
 
 
 def _build_model_and_adapter(model_name: str, flavor: str):
@@ -89,6 +111,17 @@ class TestHFCheckpointRoundtrip(unittest.TestCase):
         # native → HF (second pass)
         hf_second = adapter.to_hf(tt_back)
 
+        # Native keys that are intentionally excluded from the bitwise tensor
+        # comparison (e.g. buffers that have no HF equivalent and get
+        # reinitialized to zeros on from_hf). The key set itself is still
+        # required to match — exclusions only apply to tensor-value comparison.
+        exclusion_patterns = [
+            re.compile(p) for p in _NATIVE_EXCLUSIONS.get((model_name, flavor), [])
+        ]
+
+        def _is_excluded(fqn: str) -> bool:
+            return any(p.search(fqn) for p in exclusion_patterns)
+
         # ---- Native-side: tt_back must equal tt_orig key-for-key, bit-for-bit.
         missing = tt_orig.keys() - tt_back.keys()
         extra = tt_back.keys() - tt_orig.keys()
@@ -111,6 +144,8 @@ class TestHFCheckpointRoundtrip(unittest.TestCase):
                 f"{model_name}/{flavor}: native dtype diverged for {fqn}: "
                 f"{orig_tensor.dtype} vs {back_tensor.dtype}",
             )
+            if _is_excluded(fqn):
+                continue
             if not torch.equal(orig_tensor, back_tensor):
                 max_abs_diff = (
                     (orig_tensor.to(torch.float64) - back_tensor.to(torch.float64))
