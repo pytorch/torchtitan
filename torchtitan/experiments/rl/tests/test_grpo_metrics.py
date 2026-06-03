@@ -241,6 +241,23 @@ class TestCollectRollouts:
         assert agg["rollout/total_length/max"] == actual_max
         assert agg["rollout/total_length/max"] < per_side_max_sum
 
+    def test_group_offset_keeps_rollout_rounds_distinct(self) -> None:
+        controller = RLTrainer.__new__(RLTrainer)
+        _build_collect_rollouts_inputs(controller)
+
+        first_round, _ = controller._collect_rollouts(
+            num_groups=2, step=0, group_offset=0
+        )
+        second_round, _ = controller._collect_rollouts(
+            num_groups=2, step=0, group_offset=2
+        )
+
+        assert [t.sample_idx for t in first_round] == [0, 0, 1]
+        assert [t.sample_idx for t in second_round] == [2, 2, 3]
+
+        episodes, _ = RLTrainer._build_episodes(first_round + second_round)
+        assert all(ep.advantage == 0.0 for ep in episodes)
+
 
 def _trajectory(
     sample_idx: int,
