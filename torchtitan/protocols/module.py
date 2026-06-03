@@ -23,15 +23,12 @@ from torch.utils._pytree import tree_map
 from torchtitan.config import Configurable
 from torchtitan.distributed.spmd_types import (
     active_placement,
-    is_placement_like,
-    placement_axes,
     placement_to_spmd_assert_type,
     redistribute_spmd_per_axis,
 )
-from torchtitan.distributed.spmd_types import current_mesh, set_current_spmd_mesh
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.protocols.sharding import (
     NamedPlacement,
-    PlacementLike,
     resolve_placements,
     ShardingConfig,
 )
@@ -259,11 +256,11 @@ class Module(nn.Module, Configurable):
         parallel_dims: ParallelDims,
         name: str,
         tensor: torch.Tensor,
-        placement: PlacementLike,
+        placement: NamedPlacement,
         *,
         is_param: bool,
     ) -> None:
-        mesh = parallel_dims.resolve_mesh(placement_axes(placement))
+        mesh = parallel_dims.resolve_mesh(placement.axes())
         if mesh is None:
             return
 
@@ -324,7 +321,7 @@ class Module(nn.Module, Configurable):
             out_types = tree_map(
                 placement_to_spmd_assert_type,
                 out_src,
-                is_leaf=is_placement_like,
+                is_leaf=lambda x: isinstance(x, NamedPlacement),
             )
 
             def local_map_call(*checked_args: Any) -> Any:
@@ -335,7 +332,6 @@ class Module(nn.Module, Configurable):
             return spmd.local_map(
                 in_types=in_types,
                 out_types=out_types,
-                local_typecheck=True,
             )(local_map_call)(*checked_values)
 
         return wrapper
@@ -367,7 +363,7 @@ class Module(nn.Module, Configurable):
                     is_param=True,
                 )
                 continue
-            axes = placement_axes(named_placements)
+            axes = named_placements.axes()
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
                 continue
@@ -410,7 +406,7 @@ class Module(nn.Module, Configurable):
                     is_param=False,
                 )
                 continue
-            axes = placement_axes(named_placements)
+            axes = named_placements.axes()
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
                 continue
@@ -533,14 +529,34 @@ class Module(nn.Module, Configurable):
                 continue
 
             if parallel_dims.spmd_backend == "spmd":
-                if src_named_placements is None or dst_named_placements is None:
+                if src_named_placements is None:
+                    if dst_named_placements is not None:
+                        raise ValueError(
+                            f"{type(self).__name__}.{name}: SPMD input "
+                            "redistribution requires explicit in_src_shardings."
+                        )
                     continue
-                with set_current_spmd_mesh(mesh):
-                    value = redistribute_spmd_per_axis(
+
+                # SPMD source placements are part of the config contract: assert
+                # before redistributing so typechecking catches boundary drift.
+                local_type, partition_spec = placement_to_spmd_assert_type(
+                    src_named_placements
+                )
+                if local_type:
+                    spmd.assert_type(
                         value,
-                        active_placement(src_named_placements),
-                        active_placement(dst_named_placements),
+                        local_type,
+                        partition_spec=partition_spec,
                     )
+
+                if dst_named_placements is None:
+                    new_kwargs[name] = value
+                    continue
+                value = redistribute_spmd_per_axis(
+                    value,
+                    active_placement(src_named_placements),
+                    active_placement(dst_named_placements),
+                )
                 new_kwargs[name] = value
                 continue
 
@@ -581,26 +597,41 @@ class Module(nn.Module, Configurable):
         sharding_config = self._sharding_config
         assert sharding_config is not None
 
-        out_named_placements = sharding_config.out_dst_shardings
         if parallel_dims.spmd_backend == "spmd":
-            out_dst = out_named_placements
-            if out_dst is None or not isinstance(outputs, torch.Tensor):
+            if not isinstance(outputs, torch.Tensor):
                 return outputs
 
-            out_src = sharding_config.out_src_shardings or out_dst
-            if not is_placement_like(out_src):
+            out_src = sharding_config.out_src_shardings
+            if out_src is None:
+                if sharding_config.out_dst_shardings is not None:
+                    raise ValueError(
+                        f"{type(self).__name__}: SPMD output redistribution "
+                        "requires explicit out_src_shardings."
+                    )
                 return outputs
+            # SPMD source placements are part of the config contract: assert
+            # before redistributing so typechecking catches boundary drift.
+            local_type, partition_spec = placement_to_spmd_assert_type(out_src)
+            if local_type:
+                spmd.assert_type(
+                    outputs,
+                    local_type,
+                    partition_spec=partition_spec,
+                )
 
+            out_dst = sharding_config.out_dst_shardings
+            if out_dst is None:
+                return outputs
             mesh = parallel_dims.resolve_shared_mesh([out_src, out_dst])
             if mesh is None:
                 return outputs
-            with set_current_spmd_mesh(mesh):
-                return redistribute_spmd_per_axis(
-                    outputs,
-                    active_placement(out_src),
-                    active_placement(out_dst),
-                )
+            return redistribute_spmd_per_axis(
+                outputs,
+                active_placement(out_src),
+                active_placement(out_dst),
+            )
 
+        out_named_placements = sharding_config.out_dst_shardings
         mesh = parallel_dims.resolve_shared_mesh([out_named_placements])
         if mesh is None:
             return outputs

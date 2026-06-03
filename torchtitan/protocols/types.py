@@ -10,8 +10,11 @@ Houses small types reused across the protocols package (and its callers)
 so individual protocol modules don't grow their own copies.
 """
 
+from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
+import spmd_types as spmd
 from torch.distributed.tensor import Placement
 
 
@@ -45,6 +48,44 @@ class MeshAxisName(StrEnum):
     EFSDP = "efsdp"
 
 
-NamedPlacement = dict[MeshAxisName, Placement]
+@dataclass(frozen=True, slots=True)
+class NamedPlacement:
+    """Placement annotations keyed by logical mesh axis name.
 
+    ``placements`` may contain DTensor ``Placement`` values or local-SPMD
+    per-axis types. ``partition_spec`` is only used by local-SPMD typechecking
+    to disambiguate multi-axis sharding of one tensor dimension.
+    """
 
+    placements: dict[MeshAxisName, Placement | spmd.PerMeshAxisSpmdType]
+    partition_spec: spmd.PartitionSpec | tuple[Any, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if not self.placements:
+            raise ValueError("NamedPlacement requires at least one mesh axis.")
+        if self.partition_spec is not None and not isinstance(
+            self.partition_spec, tuple
+        ):
+            raise TypeError(
+                f"Expected partition_spec to be a tuple, got "
+                f"{self.partition_spec!r}."
+            )
+        for axis_name, axis_type in self.placements.items():
+            if not isinstance(axis_name, MeshAxisName):
+                raise TypeError(f"Expected MeshAxisName key, got {axis_name!r}.")
+            if not isinstance(axis_type, Placement) and not isinstance(
+                axis_type, spmd.PerMeshAxisSpmdType
+            ):
+                raise TypeError(
+                    f"Expected DTensor Placement or SPMD axis type for "
+                    f"{axis_name.value!r}, got {axis_type!r}."
+                )
+
+    def axes(self) -> tuple[MeshAxisName, ...]:
+        return tuple(self.placements)
+
+    def is_spmd(self) -> bool:
+        return all(
+            isinstance(axis_type, spmd.PerMeshAxisSpmdType)
+            for axis_type in self.placements.values()
+        )
