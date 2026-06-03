@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import CompileConfig, ParallelismConfig
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -129,6 +130,7 @@ def registry_to_vllm(
     *,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
+    checkpoint_config: CheckpointManager.Config,
 ) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
 
@@ -138,16 +140,16 @@ def registry_to_vllm(
       1. ``VLLMModelFromSpec`` (subclass of ``VLLMModelWrapper``)
          with vLLM's ``ModelRegistry`` under the name ``VLLM_MODEL_NAME``.
          The dynamic subclass closes over
-         ``model_spec``/``parallelism``/``compile_config`` and forwards them
-         when vLLM constructs the model.
+         ``model_spec``/``parallelism``/``compile_config``/``checkpoint_config``
+         and forwards them when vLLM constructs the model.
       2. ``TorchTitanConfigParser`` (subclass of ``ConfigParserBase``)
          with vLLM's parser registry under ``TORCHTITAN_CONFIG_FORMAT``. This
          produces the HF-shaped ``PretrainedConfig`` from ``model_spec``.
 
-    Per-engine torchtitan config (parallelism, compile) is delivered to the
-    wrapper via closure rather than via vLLM's ``hf_overrides`` channel. This
-    keeps the parser scope strictly HF-shaped and isolates vLLM-specific
-    plumbing from torchtitan-specific config.
+    Per-engine torchtitan config (parallelism, compile, checkpoint) is
+    delivered to the wrapper via closure rather than via vLLM's
+    ``hf_overrides`` channel. This keeps the parser scope strictly HF-shaped
+    and isolates vLLM-specific plumbing from torchtitan-specific config.
 
     Args:
         model_spec: TorchTitan ModelSpec containing model config and components.
@@ -157,6 +159,10 @@ def registry_to_vllm(
             ``EngineArgs`` so vLLM's own world layout matches.
         compile_config: torch.compile config applied per-layer by the
             wrapper's parallelize step.
+        checkpoint_config: CheckpointManager config controlling initial
+            weight loading. Set ``enable=True`` with ``initial_load_in_hf``
+            and ``initial_load_path`` for standalone inference. Set
+            ``enable=False`` to skip loading (RL loop, weights from TorchStore).
     """
     from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
     from vllm.logger import init_logger
@@ -179,6 +185,7 @@ def registry_to_vllm(
                 model_spec=model_spec,
                 parallelism=parallelism,
                 compile_config=compile_config,
+                checkpoint_config=checkpoint_config,
                 vllm_config=vllm_config,
                 prefix=prefix,
             )
