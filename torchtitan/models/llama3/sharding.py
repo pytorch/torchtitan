@@ -46,7 +46,10 @@ def set_llama3_sharding_config(
         chunked_loss=chunked_loss,
     )
     for layer_cfg in config.layers:
-        _set_llama3_layer_sharding(layer_cfg, enable_sp=enable_sp)
+        _set_llama3_layer_sharding(
+            layer_cfg,
+            enable_sp=enable_sp,
+        )
 
 
 def _set_llama3_layer_sharding(
@@ -67,8 +70,13 @@ def _set_llama3_layer_sharding(
     layer_cfg.ffn_norm.sharding_config = norm
     attn_x_placement = spmd.S(1) if enable_sp else spmd.I
 
-    set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
-    set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)
+    set_gqa_attention_sharding(
+        layer_cfg.attention,
+        enable_sp=enable_sp,
+    )
+    set_gqa_inner_attention_local_map(
+        layer_cfg.attention.inner_attention,
+    )
 
     assert layer_cfg.feed_forward is not None
     set_dense_ffn_sharding(

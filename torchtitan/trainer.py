@@ -58,7 +58,7 @@ from torchtitan.distributed.spmd_types import (
     set_current_spmd_mesh,
     set_spmd_backend,
 )
-from torchtitan.protocols.types import MeshAxisName
+from torchtitan.protocols.types import MeshAxisName, NamedPlacement
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
@@ -815,11 +815,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         device=self.device,
                     )
                 local_type, partition_spec = placement_to_spmd_assert_type(
-                    {
-                        MeshAxisName.DP: spmd.R,
-                        MeshAxisName.CP: spmd.R,
-                        MeshAxisName.TP: spmd.I,
-                    }
+                    NamedPlacement(
+                        {
+                            MeshAxisName.DP: spmd.R,
+                            MeshAxisName.CP: spmd.R,
+                            MeshAxisName.TP: spmd.I,
+                        }
+                    )
                 )
                 if local_type:
                     spmd.assert_type(

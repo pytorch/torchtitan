@@ -18,13 +18,8 @@ add more if a new callsite needs them.
 
 from dataclasses import dataclass
 
-import spmd_types as spmd
-import torch
-import torch.distributed as dist
 import torch.nn as nn
-import torch.nn.functional as F
 
-from torchtitan.distributed.spmd_types import current_mesh, mesh_size
 from torchtitan.protocols.module import Module
 
 
@@ -50,66 +45,6 @@ class Conv2d(nn.Conv2d, Module):
             stride=config.stride,
             padding=config.padding,
             bias=config.bias,
-        )
-
-
-class Embedding(nn.Embedding, Module):
-    """Configurable nn.Embedding."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        num_embeddings: int
-        embedding_dim: int
-        enable_sp: bool | None = None
-
-    def __init__(self, config: Config):
-        super().__init__(config.num_embeddings, config.embedding_dim)
-        self.enable_sp = config.enable_sp
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        """Runs vocab-parallel embedding when the current mesh has a TP axis."""
-        weight = self.weight
-        tp_size = mesh_size("tp")
-
-        if tp_size == 1:
-            return F.embedding(
-                input,
-                weight,
-                self.padding_idx,
-                self.max_norm,
-                self.norm_type,
-                self.scale_grad_by_freq,
-                self.sparse,
-            )
-
-        assert self.enable_sp is not None
-        mesh = current_mesh()
-        assert mesh is not None
-        tp_pg = mesh.get_group("tp")
-        chunk_size = (
-            self.num_embeddings + tp_size - 1
-        ) // tp_size
-        offset = dist.get_rank(tp_pg) * chunk_size
-        mask = (input >= offset) & (input < offset + weight.shape[0])
-        local_input = (input - offset).clamp(0, weight.shape[0] - 1)
-        out = F.embedding(
-            local_input,
-            weight,
-            self.padding_idx,
-            self.max_norm,
-            self.norm_type,
-            self.scale_grad_by_freq,
-            self.sparse,
-        )
-        out = out * mask.unsqueeze(-1).to(out.dtype)
-        bwd = {"op_dtype": torch.float32} if out.dtype != torch.float32 else None
-        tp_out_type = spmd.S(1) if self.enable_sp else spmd.I
-        return spmd.redistribute(
-            out,
-            tp_pg,
-            src=spmd.P,
-            dst=tp_out_type,
-            backward_options=bwd,
         )
 
 
@@ -216,7 +151,6 @@ class SiLU(nn.SiLU, Module):
 
 __all__ = [
     "Conv2d",
-    "Embedding",
     "GELU",
     "GroupNorm",
     "Identity",
