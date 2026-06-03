@@ -271,6 +271,34 @@ def selective_activation_remat_pass(
             return bwd_wait
         return x
 
+    def duplicate_subgraph_get_attrs(
+        fwd_node: fx.Node, bwd_target: fx.Node
+    ) -> dict[fx.Node, fx.Node]:
+        """Give a recompute dup private copies of its subgraph get_attr inputs.
+
+        HOPs like ``flex_attention`` reference their ``score_mod`` / ``mask_mod``
+        subgraphs through ``get_attr`` nodes. If the dup shared the original's
+        get_attr, the later ``regional_inductor`` pass — which partitions the
+        annotated flex node together with its subgraph get_attrs — could only
+        place that shared get_attr in one flex region's partition, leaving the
+        other flex with the subgraph passed as a raw ``GraphModule`` arg (which
+        fails to compile). Fresh get_attr nodes (same target, same submodule)
+        keep each flex region self-contained. Plain-tensor get_attrs are left
+        shared: they are never annotated, so they stay cross-region inputs for
+        both the original and the dup, exactly as before.
+        """
+        dups: dict[fx.Node, fx.Node] = {}
+        for arg in fwd_node.all_input_nodes:
+            if arg.op != "get_attr":
+                continue
+            if not isinstance(getattr(gm, arg.target, None), fx.GraphModule):
+                continue
+            with gm.graph.inserting_before(bwd_target):
+                dup_attr = gm.graph.get_attr(arg.target)
+            dup_attr.meta.update(arg.meta)
+            dups[arg] = dup_attr
+        return dups
+
     # Iterate the claimed must_recompute fwd nodes in graph order so that
     # each dup's upstream deps are already duped (and visible via
     # ``recomputed_nodes``) by the time we copy a downstream node.
@@ -283,8 +311,17 @@ def selective_activation_remat_pass(
             bwd_wait = offloaded_fwd_to_bwd_wait.get(arg)
             if bwd_wait is not None:
                 ensure_offload_chain_before(bwd_wait, bwd_target)
+        # HOP subgraph get_attrs must be private to each recompute dup so
+        # regional_inductor can partition each flex region independently.
+        get_attr_dups = duplicate_subgraph_get_attrs(fwd_node, bwd_target)
+
+        def remat_and_dup_get_attr(x: object, _dups=get_attr_dups) -> object:
+            if isinstance(x, fx.Node) and x in _dups:
+                return _dups[x]
+            return remat_input(x)
+
         with gm.graph.inserting_before(bwd_target):
-            dup = gm.graph.node_copy(fwd_node, remat_input)
+            dup = gm.graph.node_copy(fwd_node, remat_and_dup_get_attr)
         dup.name = fwd_node.name + "_recomputed"
         dup.meta["autograd_backward"] = True
         recomputed_nodes[fwd_node] = dup
