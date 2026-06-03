@@ -24,7 +24,6 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
-from torch.utils._pytree import tree_map
 
 # Avoid circular import — MeshAxisName and NamedPlacement live in protocols.*,
 # whose __init__ imports module.py which imports us.
@@ -38,7 +37,6 @@ __all__ = [
     "current_mesh",
     "mesh_size",
     "annotate_input_spmd_types",
-    "active_placement",
     "placement_to_spmd_assert_type",
     "preserve_buffer_spmd",
     "redistribute_spmd_per_axis",
@@ -156,93 +154,40 @@ def spmd_to_dtensor_placement(placement: NamedPlacement) -> NamedPlacement:
     return NamedPlacement(result)
 
 
-def active_placement(
+def placement_to_spmd_assert_type(
     placement: NamedPlacement,
-) -> spmd.PerMeshAxisSpmdTypes:
-    """Return the SPMD placement restricted to active current-mesh axes.
+) -> tuple[spmd.PerMeshAxisSpmdTypes, spmd.PartitionSpec | None]:
+    """Resolve a placement to ``assert_type`` args for local SPMD typechecking.
 
-    Sharding configs declare placements for all possible axes (DP, CP, TP,
-    etc.), but the runtime mesh may only have a subset active (e.g. TP-only
-    when DP/CP are size 1). This filters the placement dict to only the
-    axes present in ``spmd.current_mesh_names()``, so ``spmd.assert_type``
-    and ``spmd.redistribute`` see only the axes they can resolve.
-
-    Raises ``ValueError`` if *placement* is a DTensor placement (not SPMD).
-    Returns an empty dict if no current mesh is set.
+    If a ``NamedPlacement`` carries an explicit ``PartitionSpec``, shard
+    entries are omitted from the per-axis type dict. ``spmd.assert_type``
+    infers ``V`` for axes referenced by the normalized ``PartitionSpec``.
+    Singleton axes are intentionally left in the returned values:
+    ``spmd_types`` resolves names through ``current_mesh_all_names()`` and
+    drops size-1 axes during normalization.
     """
     if not placement.is_spmd():
         raise ValueError(
             "SPMD backend requires SPMD placements. "
             f"Got DTensor placement: {placement!r}."
         )
-    mesh_names = spmd.current_mesh_names()
-    if mesh_names is None:
-        return {}
-
-    resolved: spmd.PerMeshAxisSpmdTypes = {}
-    for axis_name, value in placement.placements.items():
-        if axis_name in mesh_names:
-            resolved[axis_name] = value
-    return resolved
-
-
-def placement_to_spmd_assert_type(
-    placement: NamedPlacement,
-) -> tuple[spmd.PerMeshAxisSpmdTypes, spmd.PartitionSpec | None]:
-    """Resolve a placement to ``assert_type`` args for local SPMD typechecking.
-
-    Two normalizations are needed because sharding configs use ``S(dim)`` for
-    readability, but ``spmd.assert_type`` expects ``V`` (varying) with shard
-    ordering carried separately in a ``PartitionSpec``:
-
-    1. ``S(dim)`` entries in the per-axis type dict are converted to ``V``.
-    2. When a ``NamedPlacement`` carries a ``PartitionSpec`` with nested axis
-       tuples (e.g. ``(DP, (CP, TP), None)``), inactive axes are filtered
-       out based on ``current_mesh_names()``.
-
-    TODO(pianpwk) before landing: Move this logic into ``spmd_types`` so it accepts
-    ``S(*)`` directly and does the ``S`` → ``V`` + ``PartitionSpec``
-    normalization internally.
-    """
-    local_type = active_placement(placement)
+    local_type = dict(placement.placements)
     if placement.partition_spec is None:
         return local_type, None
 
-    mesh_names = spmd.current_mesh_names()
-    if mesh_names is None:
-        return local_type, None
-
-    def active_partition_entry(entry):
-        filtered = tree_map(
-            lambda axis_name: axis_name if axis_name in mesh_names else None,
-            entry,
-        )
-        if filtered is None:
-            return None
-        if not isinstance(filtered, tuple):
-            return filtered
-
-        active_axes = tuple(
-            axis_name for axis_name in filtered if axis_name is not None
-        )
-        if not active_axes:
-            return None
-        return active_axes[0] if len(active_axes) == 1 else active_axes
-
-    partition_spec = spmd.PartitionSpec(
-        *(active_partition_entry(entry) for entry in placement.partition_spec)
+    partition_spec = spmd.normalize_partition_spec(
+        spmd.PartitionSpec(*placement.partition_spec)
     )
     return {
-        axis_name: spmd.V if isinstance(value, spmd.Shard) else value
+        axis_name: value
         for axis_name, value in local_type.items()
+        if not isinstance(value, spmd.Shard)
     }, partition_spec
 
 
 def annotate_input_spmd_types(
-    parallel_dims: Any,
     inputs: torch.Tensor,
     labels: torch.Tensor,
-    extra_inputs: dict[str, torch.Tensor],
     extra_kwargs: dict[str, Any],
 ) -> None:
     """Annotate decoder inputs/labels with local SPMD types.
@@ -275,8 +220,7 @@ def annotate_input_spmd_types(
 
     def assert_type(tensor: torch.Tensor, placement: NamedPlacement) -> None:
         local_type, partition_spec = placement_to_spmd_assert_type(placement)
-        if local_type:
-            spmd.assert_type(tensor, local_type, partition_spec=partition_spec)
+        spmd.assert_type(tensor, local_type, partition_spec=partition_spec)
 
     assert_type(inputs, token_placement)
     assert_type(labels, label_placement)
@@ -322,9 +266,17 @@ def redistribute_spmd_per_axis(
     if mesh is None:
         return x
 
+    for axis_types in (src_types, dst_types):
+        for axis_name, axis_type in axis_types.items():
+            if not isinstance(axis_type, spmd.PerMeshAxisSpmdType):
+                raise ValueError(
+                    "SPMD backend requires SPMD placements. "
+                    f"Got {axis_type!r} for axis {axis_name!r}."
+                )
+
     for axis_name, dst_t in dst_types.items():
         src_t = src_types.get(axis_name)
-        if src_t is None or src_t == dst_t:
+        if src_t is None or src_t == dst_t or mesh_size(axis_name) == 1:
             continue
         x = spmd.redistribute(
             x,

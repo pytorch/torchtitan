@@ -675,9 +675,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
         elif self.config.parallelism.spmd_backend == "spmd_types":
-            annotate_input_spmd_types(
-                self.parallel_dims, inputs, labels, extra_inputs, extra_kwargs
-            )
+            annotate_input_spmd_types(inputs, labels, extra_kwargs)
 
         return inputs, labels, extra_inputs, extra_kwargs
 
@@ -784,7 +782,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         spmd_mesh_context = (
             set_current_spmd_mesh(
-                self.parallel_dims.get_activated_mesh(["dp", "cp", "tp"])
+                self.parallel_dims._global_meshes["spmd_dense"]
             )
             if self.config.parallelism.spmd_backend == "spmd_types"
             else contextlib.nullcontext()
@@ -816,12 +814,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         }
                     )
                 )
-                if local_type:
-                    spmd.assert_type(
-                        global_valid_tokens,
-                        local_type,
-                        partition_spec=partition_spec,
-                    )
+                spmd.assert_type(
+                    global_valid_tokens,
+                    local_type,
+                    partition_spec=partition_spec,
+                )
 
             for input_dict, labels in microbatches:
                 # Move tensors to GPU
