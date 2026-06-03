@@ -267,8 +267,10 @@ def apply_fsdp(
                 # ep_degree > 1: per-param mesh
                 from torch.distributed.fsdp._fully_shard._fsdp_common import (
                     FSDPMeshInfo,
-                    HSDPMeshInfo,
                     ShardPlacementResult,
+                )
+                from torch.distributed.fsdp._fully_shard._fsdp_init import (
+                    _get_mesh_info,
                 )
 
                 assert edp_mesh is not None
@@ -276,25 +278,17 @@ def apply_fsdp(
                 def _get_fsdp_mesh_info(
                     mesh: DeviceMesh, mesh_dims: "Any"
                 ) -> FSDPMeshInfo:
-                    # full_dtensor: SPMD meshes spanning multiple DP axes;
-                    # pass dp_mesh_dims + spmd_mesh so FSDP2 knows which
-                    # axes are data-parallel.
-                    if mesh_dims is not None:
-                        return FSDPMeshInfo(
-                            mesh=mesh,
-                            shard_mesh_dim=0,
-                            dp_mesh_dims=mesh_dims,
-                            spmd_mesh=mesh,
-                        )
-                    if mesh.ndim == 1:
-                        return FSDPMeshInfo(mesh=mesh, shard_mesh_dim=0)
-                    if mesh.ndim == 2:
-                        return HSDPMeshInfo(
-                            mesh=mesh, replicate_mesh_dim=0, shard_mesh_dim=1
-                        )
-                    raise ValueError(
-                        f"Expected 1D or 2D FSDP mesh, got {mesh.ndim}D mesh."
-                    )
+                    # Delegate to FSDP2's mesh-info builder. Under full_dtensor
+                    # (mesh_dims set) it extracts and FLATTENS the DP submesh from
+                    # the full SPMD mesh. The previous hand-built version kept the
+                    # full mesh as mesh_info.mesh, which double-counted the TP axis
+                    # in _build_spmd_sharding_spec when CP added a second DP-shard
+                    # dim (dp_shard + cp).
+                    # _get_mesh_info is typed to the DataParallelMeshInfo base;
+                    # with a shard dim it always yields FSDPMeshInfo/HSDPMeshInfo.
+                    mesh_info = _get_mesh_info(mesh, mesh_dims)
+                    assert isinstance(mesh_info, FSDPMeshInfo)
+                    return mesh_info
 
                 edp_mesh_info = _get_fsdp_mesh_info(edp_mesh, edp_mesh_dims)
                 dp_mesh_info = _get_fsdp_mesh_info(dp_mesh, dp_mesh_dims)

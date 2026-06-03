@@ -10,7 +10,7 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributed.tensor import DTensor, Partial
+from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.models.common.feed_forward import FeedForward
@@ -27,18 +27,6 @@ from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
 #       per-local-expert token counts after EP dispatch /_permute),
 #   K = top-k, T = num tokens (B*L flattened),
 #   N = routed tokens (T*K), R = routed tokens assigned to local experts
-
-
-def _grad_dual(param: DTensor) -> list:
-    """Gradient placements for a parameter ``to_local`` (the R->P duality).
-
-    A weight that is ``Replicate`` on a data-parallel axis has a ``Partial``
-    gradient on that axis; ``Shard``/``Partial`` axes are self-dual. This is
-    what a plain DTensor op's backward produces; passing it to ``to_local``
-    keeps manual unwrapping consistent instead of defaulting to the forward
-    Replicate placement.
-    """
-    return [Partial() if p.is_replicate() else p for p in param.placements]
 
 
 class GroupedExperts(Module):
@@ -79,15 +67,11 @@ class GroupedExperts(Module):
         if isinstance(self.w1_EFD, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            # grad_placements applies the R->P duality (a replicated weight has a
-            # Partial gradient): without it ``to_local`` defaults to keeping the
-            # forward Replicate placement on the FSDP axes, mislabeling the
-            # data-parallel gradient as Replicate.
-            w1_EFD = self.w1_EFD.to_local(grad_placements=_grad_dual(self.w1_EFD))
-            # pyrefly: ignore [missing-attribute, bad-argument-type]
-            w2_EDF = self.w2_EDF.to_local(grad_placements=_grad_dual(self.w2_EDF))
-            # pyrefly: ignore [missing-attribute, bad-argument-type]
-            w3_EFD = self.w3_EFD.to_local(grad_placements=_grad_dual(self.w3_EFD))
+            w1_EFD = self.w1_EFD.to_local()
+            assert isinstance(self.w2_EDF, DTensor)
+            w2_EDF = self.w2_EDF.to_local()
+            assert isinstance(self.w3_EFD, DTensor)
+            w3_EFD = self.w3_EFD.to_local()
         else:
             w1_EFD = self.w1_EFD
             w2_EDF = self.w2_EDF
@@ -140,7 +124,13 @@ class GroupedExperts(Module):
         routed_output_RD = self._experts_forward(
             routed_input_RD, num_global_tokens_per_local_expert_e
         )
-        return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        out_TD = self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        # Un-flatten back to 3-D (B, *, D) so the local_map output placement
+        # shards the batch (dim 0) and seq (dim 1) on separate tensor dims.
+        # A 2-D (T, D) output would put both dp_shard and cp on dim 0 at once
+        # (a _StridedShard that DTensor mishandles under CP). The combine row
+        # count is always a multiple of B, so the seq dim is inferred.
+        return out_TD.view(B, -1, D)
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize expert weights, then wire EP/TP meshes on the dispatcher
@@ -383,8 +373,6 @@ class MoE(Module):
         operates on DTensors — the DTensor→local conversion happens at
         the GroupedExperts boundary.
         """
-        B, L, D = x_BLD.shape
-
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # scores_BLE shape (B, L, E)
         (
@@ -438,7 +426,7 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert_E.add_(num_local_tokens_per_expert_E)
 
-        out_TD = self.experts(
+        out_BLD = self.experts(
             x_BLD,
             topk_scores_BLK,
             topk_expert_ids_BLK,
@@ -461,7 +449,7 @@ class MoE(Module):
 
             sync_combine()
 
-        out_BLD = out_TD.view(B, L, D)
+        # experts() already returns 3-D (B, L, D).
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD
         return out_BLD

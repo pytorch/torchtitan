@@ -83,15 +83,14 @@ _DENSE_SPMD_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
 _SPARSE_SPMD_AXES = ["dp_replicate", "efsdp", "ep"]
 
 
-def get_sparse_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
+def _get_sparse_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
     """Build ``DataParallelMeshDims`` for routed-expert (sparse) parameters.
 
-    Sparse FSDP storage axis is ``efsdp`` (mirrors dense ``dp_shard``);
-    ``dp_replicate`` is shared with the dense path.
+    The FSDP axis is ``efsdp`` and ``dp_replicate`` is shared with the dense path.
     """
-    shard: str | None = "efsdp" if parallel_dims.ep_enabled else None
-    replicate = "dp_replicate" if parallel_dims.dp_replicate_enabled else None
-    return DataParallelMeshDims(shard=shard, replicate=replicate)
+    shard_axis = "efsdp" if parallel_dims.ep_enabled else None
+    replicate_axis = "dp_replicate" if parallel_dims.dp_replicate_enabled else None
+    return DataParallelMeshDims(shard=shard_axis, replicate=replicate_axis)
 
 
 def resolve_fsdp_mesh(
@@ -115,7 +114,7 @@ def resolve_sparse_fsdp_mesh(
         return None, None
     sparse_mesh = parallel_dims.get_activated_mesh(_SPARSE_SPMD_AXES)
     assert sparse_mesh is not None
-    return sparse_mesh, get_sparse_dp_mesh_axes(parallel_dims)
+    return sparse_mesh, _get_sparse_dp_mesh_axes(parallel_dims)
 
 
 def parallelize_inputs(
