@@ -105,8 +105,13 @@ def _router_gate_config(*, enable_ep: bool) -> ShardingConfig:
     """Router gate: Replicate weights, output stays DTensor.
 
     EP off: input Replicate, gate computes on all tokens, output DTensor(Replicate).
-    EP on:  input Shard(1) (slen dim of 3-D activation), gate computes on
-            local shard, output DTensor(Shard(1)).
+    EP on:  input is gathered to Replicate on the TP/SP axis for the gate matmul,
+            output scattered back to Shard(1) for the EP dispatch. Routing is a
+            per-token linear, so gathering SP and computing redundantly is
+            numerically identical to computing on the local SP shard. We gather
+            rather than keep Shard(1) because, under CP+SP, slen sharded by both
+            cp and tp makes the gate's F.linear hit a DTensor
+            multi-axis-_StridedShard unflatten bug.
     """
     state = {
         "weight": dense_param_placement(tp=Replicate()),
@@ -115,7 +120,7 @@ def _router_gate_config(*, enable_ep: bool) -> ShardingConfig:
     if enable_ep:
         return ShardingConfig(
             state_shardings=state,
-            in_dst_shardings={"input": dense_activation_placement(tp=Shard(1))},
+            in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
             out_dst_shardings=dense_activation_placement(tp=Shard(1)),
         )
     else:
@@ -227,8 +232,13 @@ def set_moe_sharding_config(
 
     # Routed experts: local_map converts DTensor inputs to local for
     # dispatch/compute/combine, then wraps local output as DTensor(Partial).
-    # Routed experts: the three things that differ between EP and TP-only
-    # are state_shardings, input layout, and input grad layout.
+    # The forward un-flattens the combined output back to 3D (bs, slen, dim)
+    # before returning, so the OUTPUT placement keeps dp_shard on the batch
+    # dim (0) and cp on the seq dim (1). A 2D (bs*slen, dim) output would put
+    # both dp_shard and cp on dim 0 at once -- a _StridedShard that DTensor
+    # mishandles under CP.
+    # The three things that differ between EP and TP-only are state_shardings,
+    # input layout, and input grad layout.
     experts_out_layout = dense_activation_placement(tp=Partial())
     if enable_ep:
         state_shardings: dict[str, NamedPlacement] = {

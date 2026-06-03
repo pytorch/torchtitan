@@ -68,9 +68,9 @@ class GroupedExperts(Module):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
             w1_EFD = self.w1_EFD.to_local()
-            # pyrefly: ignore [missing-attribute]
+            assert isinstance(self.w2_EDF, DTensor)
             w2_EDF = self.w2_EDF.to_local()
-            # pyrefly: ignore [missing-attribute]
+            assert isinstance(self.w3_EFD, DTensor)
             w3_EFD = self.w3_EFD.to_local()
         else:
             w1_EFD = self.w1_EFD
@@ -124,7 +124,13 @@ class GroupedExperts(Module):
         routed_output_RD = self._experts_forward(
             routed_input_RD, num_global_tokens_per_local_expert_e
         )
-        return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        out_TD = self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        # Un-flatten back to 3-D (B, *, D) so the local_map output placement
+        # shards the batch (dim 0) and seq (dim 1) on separate tensor dims.
+        # A 2-D (T, D) output would put both dp_shard and cp on dim 0 at once
+        # (a _StridedShard that DTensor mishandles under CP). The combine row
+        # count is always a multiple of B, so the seq dim is inferred.
+        return out_TD.view(B, -1, D)
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize expert weights, then wire EP/TP meshes on the dispatcher
@@ -367,8 +373,6 @@ class MoE(Module):
         operates on DTensors — the DTensor→local conversion happens at
         the GroupedExperts boundary.
         """
-        B, L, D = x_BLD.shape
-
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # scores_BLE shape (B, L, E)
         (
@@ -422,7 +426,7 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert_E.add_(num_local_tokens_per_expert_E)
 
-        out_TD = self.experts(
+        out_BLD = self.experts(
             x_BLD,
             topk_scores_BLK,
             topk_expert_ids_BLK,
@@ -445,7 +449,7 @@ class MoE(Module):
 
             sync_combine()
 
-        out_BLD = out_TD.view(B, L, D)
+        # experts() already returns 3-D (B, L, D).
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD
         return out_BLD

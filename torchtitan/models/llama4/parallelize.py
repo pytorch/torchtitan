@@ -28,6 +28,11 @@ from torchtitan.distributed.fsdp import (
     enable_fsdp_symm_mem,
     get_fsdp_reshard_after_forward_policy,
 )
+from torchtitan.distributed.full_dtensor import (
+    resolve_fsdp_mesh,
+    resolve_sparse_fsdp_mesh,
+    validate_config,
+)
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama4.model import Llama4Model
 from torchtitan.tools.logging import logger
@@ -58,19 +63,19 @@ def parallelize_llama(
         """
 
     if parallelism.full_dtensor:
-        raise NotImplementedError("full_dtensor is not supported yet.")
-
-    # CP: wrap inner attention forward BEFORE parallelize() so CP logic
-    # runs inside the local_map boundary on local tensors.
-    if parallel_dims.cp_enabled:
-        apply_cp_to_forward(
-            # pyrefly: ignore [missing-attribute]
-            [block.attention.inner_attention for block in model.layers.values()],
-            parallel_dims.get_mesh("cp"),
-        )
-
-    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)
+    else:
+        # CP: wrap inner attention forward BEFORE parallelize() so CP logic
+        # runs inside the local_map boundary on local tensors.
+        if parallel_dims.cp_enabled:
+            apply_cp_to_forward(
+                # pyrefly: ignore [missing-attribute]
+                [block.attention.inner_attention for block in model.layers.values()],
+                parallel_dims.get_mesh("cp"),
+            )
+        if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+            model.parallelize(parallel_dims)
     if parallel_dims.tp_enabled:
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
@@ -90,19 +95,17 @@ def parallelize_llama(
     if model_compile_enabled:
         apply_compile(model, compile_config)
 
-    dp_mesh_names = (
-        ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-    )
-    dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
-
-    edp_mesh = None
-    if parallel_dims.ep_enabled:
-        edp_mesh_names = (
-            ["dp_replicate", "efsdp"]
-            if parallel_dims.dp_replicate_enabled
-            else ["efsdp"]
-        )
-        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+    if parallelism.full_dtensor:
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
+    else:
+        dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
+        assert dp_mesh is not None
+        dp_mesh_dims = None
+        edp_mesh = None
+        edp_mesh_dims = None
+        if parallel_dims.ep_enabled:
+            edp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "efsdp"])
 
     apply_fsdp(
         model,
@@ -115,6 +118,8 @@ def parallelize_llama(
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
         enable_symm_mem=parallelism.enable_fsdp_symm_mem,
+        dp_mesh_dims=dp_mesh_dims,
+        edp_mesh_dims=edp_mesh_dims,
     )
 
     logger.info("Applied fully_shard to the model")
@@ -136,6 +141,8 @@ def apply_fsdp(
     ep_degree: int = 1,
     edp_mesh: DeviceMesh | None = None,
     enable_symm_mem: bool = False,
+    dp_mesh_dims: "Any" = None,
+    edp_mesh_dims: "Any" = None,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -143,6 +150,8 @@ def apply_fsdp(
     Args:
         model (nn.Module): The model to apply data parallelism to.
         dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
+            Under full_dtensor, this is the dense SPMD mesh; under
+            non-full_dtensor, the conventional dp_mesh.
         param_dtype (torch.dtype): The data type to use for model parameters.
         reduce_dtype (torch.dtype): The data type to use for reduction operations.
         pp_enabled (bool): Whether pipeline parallelism is enabled.
@@ -152,7 +161,15 @@ def apply_fsdp(
             - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
             - "always" will enable `reshard_after_forward` for all forward passes.
             - "never" will disable `reshard_after_forward` for all forward passes.
-
+        ep_degree: Expert parallel degree (>= 1).
+        edp_mesh: Routed-expert FSDP mesh. Under full_dtensor, the
+            sparse SPMD mesh; under non-full_dtensor, the conventional
+            efsdp / (dp_replicate, efsdp) mesh.
+        dp_mesh_dims: When provided (full_dtensor path), tells FSDP which
+            axes of the dense SPMD mesh are data-parallel. ``None`` under
+            non-full_dtensor.
+        edp_mesh_dims: Sibling of ``dp_mesh_dims`` for the sparse SPMD
+            mesh used by routed experts.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
@@ -160,6 +177,8 @@ def apply_fsdp(
         cast_forward_inputs=False,
     )
     fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if dp_mesh_dims is not None:
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
@@ -248,25 +267,31 @@ def apply_fsdp(
                 # ep_degree > 1: per-param mesh
                 from torch.distributed.fsdp._fully_shard._fsdp_common import (
                     FSDPMeshInfo,
-                    HSDPMeshInfo,
                     ShardPlacementResult,
+                )
+                from torch.distributed.fsdp._fully_shard._fsdp_init import (
+                    _get_mesh_info,
                 )
 
                 assert edp_mesh is not None
 
-                def _get_fsdp_mesh_info(mesh: DeviceMesh) -> FSDPMeshInfo:
-                    if mesh.ndim == 1:
-                        return FSDPMeshInfo(mesh=mesh, shard_mesh_dim=0)
-                    if mesh.ndim == 2:
-                        return HSDPMeshInfo(
-                            mesh=mesh, replicate_mesh_dim=0, shard_mesh_dim=1
-                        )
-                    raise ValueError(
-                        f"Expected 1D or 2D FSDP mesh, got {mesh.ndim}D mesh."
-                    )
+                def _get_fsdp_mesh_info(
+                    mesh: DeviceMesh, mesh_dims: "Any"
+                ) -> FSDPMeshInfo:
+                    # Delegate to FSDP2's mesh-info builder. Under full_dtensor
+                    # (mesh_dims set) it extracts and FLATTENS the DP submesh from
+                    # the full SPMD mesh. The previous hand-built version kept the
+                    # full mesh as mesh_info.mesh, which double-counted the TP axis
+                    # in _build_spmd_sharding_spec when CP added a second DP-shard
+                    # dim (dp_shard + cp).
+                    # _get_mesh_info is typed to the DataParallelMeshInfo base;
+                    # with a shard dim it always yields FSDPMeshInfo/HSDPMeshInfo.
+                    mesh_info = _get_mesh_info(mesh, mesh_dims)
+                    assert isinstance(mesh_info, FSDPMeshInfo)
+                    return mesh_info
 
-                edp_mesh_info = _get_fsdp_mesh_info(edp_mesh)
-                dp_mesh_info = _get_fsdp_mesh_info(dp_mesh)
+                edp_mesh_info = _get_fsdp_mesh_info(edp_mesh, edp_mesh_dims)
+                dp_mesh_info = _get_fsdp_mesh_info(dp_mesh, dp_mesh_dims)
 
                 def _shard_placement_fn(
                     param: nn.Parameter,

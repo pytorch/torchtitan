@@ -181,7 +181,12 @@ class GptOssGroupedExperts(Module):
         routed_output_RD = self._experts_forward(
             routed_input_RD, num_global_tokens_per_local_expert_e
         )
-        return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        out_TD = self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        # Un-flatten to 3-D so the local_map output placement keeps dp_shard on
+        # the batch dim (0) and cp on the seq dim (1), instead of folding both
+        # onto dim 0 (a _StridedShard that DTensor mishandles under CP).
+        # Mirrors GroupedExperts.forward.
+        return out_TD.view(B, -1, D)
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize experts and wire dispatcher meshes.
