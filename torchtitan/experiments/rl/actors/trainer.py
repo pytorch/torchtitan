@@ -65,6 +65,38 @@ def compute_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     ).reshape(B, S)
 
 
+@torch.no_grad()
+@sl.log_trace_span("compute_vllm_compatible_logprobs")
+def compute_vllm_compatible_logprobs(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    loss_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Compute selected-token logprobs with vLLM's Triton kernel.
+
+    This helper is for generator-vs-trainer identity diagnostics only. The
+    differentiable training loss uses ``compute_logprobs`` above.
+    """
+    from torch.distributed.tensor import DTensor
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    if isinstance(logits, DTensor):
+        logits = logits.to_local()
+
+    if logits.device.type != "cuda":
+        raise RuntimeError("vLLM-compatible logprob verification requires CUDA.")
+
+    B, S, V = logits.shape
+    token_ids = labels.reshape(B * S, 1).to(torch.int64)
+    if loss_mask is not None:
+        token_ids = token_ids.masked_fill(~loss_mask.reshape(B * S, 1), 0)
+    else:
+        token_ids = token_ids.masked_fill(token_ids == IGNORE_INDEX, 0)
+
+    return compute_token_logprobs(logits.reshape(B * S, V), token_ids).reshape(B, S)
+
+
 @dataclass(frozen=True, slots=True)
 class PartialLogprobDrift:
     """Per-rank generator-vs-trainer logprob drift awaiting reduction across the loss-mesh."""
@@ -413,6 +445,11 @@ class PolicyTrainer(Actor, Configurable):
                 token_ids, attention_masks=attention_masks, positions=positions
             )
         policy_logprobs = compute_logprobs(logits, labels)
+        identity_logprobs = compute_vllm_compatible_logprobs(
+            logits.detach(),
+            labels,
+            loss_mask=loss_mask,
+        )
 
         with sl.log_trace_span("loss_fn"):
             loss, loss_metrics = self.loss_fn(
@@ -430,7 +467,7 @@ class PolicyTrainer(Actor, Configurable):
         # Metrics for bitwise verification of policy logprobs.
         verification: PartialLogprobDrift = verify_logprob_identity(
             generator_logprobs=generator_logprobs,
-            policy_logprobs=policy_logprobs,
+            policy_logprobs=identity_logprobs,
             loss_mask=loss_mask,
             num_global_valid_tokens=num_global_valid_tokens,
         )
