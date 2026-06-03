@@ -72,6 +72,11 @@ _MODEL_FLAVORS = [
     # MoE models here: HF DeepSeek has e_score_correction_bias as a real
     # buffer, so expert_bias_E genuinely round-trips (no exclusion needed).
     ("deepseek_v3", "debugmodel"),
+    # qwen3: weight-tied lm_head + GQA. Exercises the from_hf input-copy
+    # contract and the tying-restore path.
+    ("qwen3", "debugmodel"),
+    # qwen3: fused-QKV variant of the above.
+    ("qwen3", "debugmodel_fused_qkv"),
 ]
 
 # Native-side keys (or regex patterns) excluded from the bitwise comparison,

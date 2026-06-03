@@ -181,6 +181,14 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
         2. Concate separate expert's wegiht into GroupedExperts' weight.
         """
 
+        # Shallow-copy the input so we never mutate the caller's dict. The
+        # weight-tying restore below adds `lm_head.weight` to whichever dict
+        # we iterate; without this copy it leaks back into the caller and
+        # corrupts any later use of the HF dict (notably, makes the dict
+        # unserializable via safetensors because `lm_head.weight` and
+        # `model.embed_tokens.weight` would share storage).
+        hf_state_dict = dict(hf_state_dict)
+
         state_dict = {}
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
         # Collect Q/K/V per layer for fusing (only used when fuse_qkv=True)
