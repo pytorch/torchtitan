@@ -83,10 +83,6 @@ class ShardingConfig:
         state_shardings: Parameter/buffer placements for ``distribute_tensor``.
             Outer dict keys are param names.
             e.g. ``{"weight": {TP: Shard(0)}}`` for colwise.
-        state_shardings_for_computation: Parameter/buffer placements used only during
-            forward compute when they differ from ``state_shardings``. This is
-            for local SPMD type changes such as an ``I@TP`` norm weight that
-            must be read as ``R@TP`` while computing.
         in_src_shardings: Source placements of inputs, keyed by ``forward()``
             arg name. Used to annotate plain tensors as DTensors via
             ``DTensor.from_local`` when inputs arrive plain (e.g. from
@@ -115,7 +111,6 @@ class ShardingConfig:
     """
 
     state_shardings: dict[str, PlacementLike] = field(default_factory=dict)
-    state_shardings_for_computation: dict[str, PlacementLike] = field(default_factory=dict)
     in_src_shardings: dict[str, PlacementLike] | None = None
     in_dst_shardings: dict[str, PlacementLike] | None = None
     out_src_shardings: PlacementLike | tuple[PlacementLike, ...] | None = None
