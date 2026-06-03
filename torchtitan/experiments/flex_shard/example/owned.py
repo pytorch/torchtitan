@@ -29,7 +29,7 @@ from ..flex_shard.utils import _record_comm_if_eager, _record_function_if_eager
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
-    from ..flex_shard.bucket_storage import ParamInfo
+    from ..flex_shard.bucket_storage import ParamInfo, PlacementFn
 
 
 class Owned(Placement):
@@ -249,12 +249,67 @@ def param_boundary_placements(
     named_params: list[tuple[str, nn.Parameter]],
     mesh: DeviceMesh,
 ) -> dict[str, tuple[Placement, ...]]:
-    """Assign each full parameter to one rank using Owned placements."""
+    """Assign each full parameter to one rank using Owned placements.
+
+    Load-balances each parameter independently, so two params in the same bucket
+    may get different owners. Only safe when each bucket holds a single parameter,
+    because a FlexShard bucket must use one uniform placement. To keep a multi-param
+    bucket (e.g. a whole transformer layer) on one rank, use
+    :func:`make_owned_placement_fn` instead.
+    """
     assignments = _assign_params_to_ranks(named_params, mesh.size())
     return {fqn: (Owned(assignments[fqn]),) for fqn, _ in named_params}
 
 
+def make_owned_placement_fn(owner_rank: int) -> PlacementFn:
+    """Return a placement function that assigns one owner to a whole bucket.
+
+    Unlike :func:`param_boundary_placements`, which load-balances each parameter
+    independently, this assigns *every* parameter in the bucket to ``owner_rank``.
+    That keeps the bucket's placement uniform (FlexShard requires all params in a
+    bucket to share one placement), so it is the helper to use when a bucket groups
+    several parameters that must live together on one rank — e.g. a transformer
+    layer whose 2D matrices the owner runs Muon on without any collective.
+    """
+
+    def placement_fn(
+        named_params: list[tuple[str, nn.Parameter]],
+        mesh: DeviceMesh,
+    ) -> dict[str, tuple[Placement, ...]]:
+        return {fqn: (Owned(owner_rank),) for fqn, _ in named_params}
+
+    return placement_fn
+
+
+def assign_layer_owners_lpt(layer_numels: list[int], world_size: int) -> list[int]:
+    """Balance whole layers across ranks with greedy Longest-Processing-Time.
+
+    Returns one owner rank per layer such that total owned numel is as even as
+    possible, subject to keeping each layer on a single rank (so the layer can be
+    one uniform-placement Owned bucket). For homogeneous layers this matches
+    round-robin; for heterogeneous layers (e.g. dense vs MoE, fatter first/last
+    blocks) it balances far better. Residual imbalance is bounded by the largest
+    single layer, which cannot be split while it stays in one bucket.
+    """
+    if world_size <= 0:
+        raise ValueError(f"world_size must be positive, but got {world_size}.")
+    loads = [(0, rank) for rank in range(world_size)]
+    heapq.heapify(loads)
+    owners = [0] * len(layer_numels)
+    for layer_idx in sorted(
+        range(len(layer_numels)),
+        key=lambda i: layer_numels[i],
+        reverse=True,
+    ):
+        load, rank = heapq.heappop(loads)
+        owners[layer_idx] = rank
+        heapq.heappush(loads, (load + layer_numels[layer_idx], rank))
+    return owners
+
+
 __all__ = [
+    "assign_layer_owners_lpt",
+    "make_owned_placement_fn",
     "Owned",
     "param_boundary_placements",
 ]
