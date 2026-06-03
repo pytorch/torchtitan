@@ -4,6 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.experiments.rl.rubrics.rubric import Reward, RewardFn, Rubric
+from torchtitan.experiments.rl.rubrics.rubric import RewardFn, Rubric, RubricOutput
 
-__all__ = ["Reward", "RewardFn", "Rubric"]
+__all__ = ["RewardFn", "Rubric", "RubricOutput"]

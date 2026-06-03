@@ -102,10 +102,12 @@ def _generator(outputs):
     return generator
 
 
-def _run_generate(generator, tokenized_prompts, **kwargs):
+def _run_generate(generator, tokenized_prompts, *, request_ids=None, **kwargs):
+    if request_ids is None:
+        request_ids = [str(i) for i in range(len(tokenized_prompts))]
     return asyncio.run(
         VLLMGenerator.generate._method(
-            generator, tokenized_prompts, **kwargs
+            generator, tokenized_prompts, request_ids=request_ids, **kwargs
         )  # noqa: SLF001
     )
 

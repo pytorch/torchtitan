@@ -6,74 +6,40 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, fields
 
-from pydantic import TypeAdapter
-from renderers import create_renderer, Renderer, RendererConfig as _RendererConfig
+from renderers import config_from_name, create_renderer, Renderer
 
 from torchtitan.config import Configurable
 
-if TYPE_CHECKING:
-    from torchtitan.protocols.model_spec import ModelSpec
-
-# `renderers` exposes a pydantic discriminated union (on `name`); let it route
-# `name` -> the matching config class
-_RENDERER_CONFIG = TypeAdapter(_RendererConfig)
-
-# Map a TorchTitan model family (`ModelSpec.name`) to a `renderers` name, used to
-# resolve `name="auto"` without relying on the HF tokenizer's `name_or_path`
-# (a local path for our checkpoints, which misses the renderers auto map).
-_TORCHTITAN_RENDERER_BY_MODEL: dict[str, str] = {
+# Map a TorchTitan model name to its `renderers` renderer. Models not listed fall
+# back to "auto" (renderers resolves from the tokenizer)
+# https://github.com/PrimeIntellect-ai/renderers/blob/942449c37ab6e9fab26d59b40336514c8baa6b13/renderers/configs.py#L404
+_RENDERER_BY_MODEL = {
     "qwen3": "qwen3",
+    "qwen3_vl": "qwen3-vl",
+    "gpt_oss": "gpt-oss",
+    "deepseek_v3": "deepseek-v3",
+    "default": "default",  # llama3, llama4
+    "auto": "auto",  # ignores knobs, resolves from tokenizer,
 }
-
-
-def _resolve_renderer_name(name: str, model_spec: "ModelSpec | None") -> str:
-    """Resolve `name="auto"` via the TorchTitan model; explicit names pass through."""
-    if name != "auto":
-        return name
-    if model_spec is not None:
-        mapped = _TORCHTITAN_RENDERER_BY_MODEL.get(model_spec.name)
-        if mapped is not None:
-            return mapped
-    # Last resort: let `renderers` resolve from the tokenizer's model id.
-    return "auto"
-
-
-def _build_renderer_config(name: str, cfg: "RendererConfig"):
-    """Build the `renderers` config for `name`, passing only the knobs it supports."""
-    if name == "auto":
-        return None
-    config_cls = type(_RENDERER_CONFIG.validate_python({"name": name}))
-    supported_args: dict[str, bool | str] = {
-        field: getattr(cfg, field)
-        for field in (
-            "enable_thinking",
-            "preserve_all_thinking",
-            "preserve_thinking_between_tool_calls",
-            "tool_parser",
-            "reasoning_parser",
-        )
-        if field in config_cls.model_fields and getattr(cfg, field) is not None
-    }
-    return config_cls(**supported_args)
 
 
 @dataclass(kw_only=True, slots=True)
 class RendererConfig(Configurable.Config):
-    """Selects the renderer used for message <-> token conversion.
+    """Selects the renderer used for chat message <-> token conversion.
 
     Wraps `PrimeIntellect-ai/renderers`. `build` loads a tokenizer from
-    `tokenizer_path` and constructs the `renderers` config for `name`.
+    `tokenizer_path`, maps the model `name` to a renderer, and forwards any
+    supported knobs.
 
     Args:
-        name: Renderer name. `"auto"` resolves from the TorchTitan model
-            (`ModelSpec.name`); or name it explicitly: `"qwen3"`, `"gpt-oss"`,
-            `"deepseek-v3"`, ... (see renderers `RENDERER_REGISTRY`).
-        tool_parser: Tool-call parser name (renderer-specific).
-        reasoning_parser: Reasoning parser name (renderer-specific).
-        enable_thinking: Let the model emit reasoning.
+        name: TorchTitan model name (e.g. `"qwen3"`, `"llama3"`). Mapped to a
+            `renderers` renderer via `_RENDERER_BY_MODEL`; unmapped models use
+            `"auto"` (renderers resolves from the tokenizer).
+        tool_parser: Tool-call parser name, when the renderer supports it.
+        reasoning_parser: Reasoning parser name, when the renderer supports it.
+        enable_thinking: Let the model emit reasoning, when supported.
         preserve_all_thinking: Keep historical reasoning in future prompts.
         preserve_thinking_between_tool_calls: Keep reasoning during tool loops.
 
@@ -92,13 +58,32 @@ class RendererConfig(Configurable.Config):
     preserve_all_thinking: bool = False
     preserve_thinking_between_tool_calls: bool = False
 
-    def build(
-        self, *, tokenizer_path: str, model_spec: "ModelSpec | None" = None
-    ) -> Renderer:
+    def build(self, *, tokenizer_path: str) -> Renderer:
         # TODO(renderers#70): use TorchTitan's tokenizer once `renderers` supports
         # bring-your-own-tokenizer (PR adds a Tokenizer protocol; drops transformers).
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-        renderer_name = _resolve_renderer_name(self.name, model_spec)
-        return create_renderer(tokenizer, _build_renderer_config(renderer_name, self))
+
+        renderer_name = _RENDERER_BY_MODEL.get(self.name)
+
+        # `config_from_name` returns the typed renderers config, or `None` for
+        # "auto" (which makes `create_renderer` resolve from the tokenizer).
+        renderer_config = config_from_name(renderer_name)
+        if renderer_config is None:
+            return create_renderer(tokenizer, None)
+
+        # Forward our knobs (every field except `name`) that this renderer config
+        # supports. Configs are frozen pydantic models, so update via model_copy.
+        overrides = {}
+        for field in fields(self):
+            if (
+                field.name != "name"
+                and field.name in type(renderer_config).model_fields
+            ):
+                overrides[field.name] = getattr(self, field.name)
+
+        if overrides:
+            renderer_config = renderer_config.model_copy(update=overrides)
+
+        return create_renderer(tokenizer, renderer_config)

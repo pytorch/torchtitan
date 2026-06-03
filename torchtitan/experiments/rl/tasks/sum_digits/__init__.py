@@ -6,7 +6,7 @@
 
 from torchtitan.experiments.rl.tasks.sum_digits.data import (
     SumDigitsDataset,
-    SumDigitsInput,
+    SumDigitsExample,
 )
 from torchtitan.experiments.rl.tasks.sum_digits.env import SumDigitsEnv
 from torchtitan.experiments.rl.tasks.sum_digits.rubric import (
@@ -20,6 +20,6 @@ __all__ = [
     "RewardFormat",
     "SumDigitsDataset",
     "SumDigitsEnv",
-    "SumDigitsInput",
+    "SumDigitsExample",
     "SumDigitsTask",
 ]

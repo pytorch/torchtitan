@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from renderers import Message
 
 from torchtitan.experiments.rl.env_types import (
@@ -13,7 +15,7 @@ from torchtitan.experiments.rl.env_types import (
     MessageResetOutput,
     MessageStepOutput,
 )
-from torchtitan.experiments.rl.tasks.sum_digits.data import SumDigitsInput
+from torchtitan.experiments.rl.tasks.sum_digits.data import SumDigitsExample
 
 
 SYSTEM_PROMPT = """\
@@ -31,7 +33,11 @@ Sum all digits: 1 + 2 + 3 + 4 + 5 + 6 + 7 = 28
 
 
 class SumDigitsEnv(MessageEnv):
-    def __init__(self, *, env_input: SumDigitsInput) -> None:
+    @dataclass(kw_only=True, slots=True)
+    class Config(MessageEnv.Config):
+        pass
+
+    def __init__(self, config: Config, *, env_input: SumDigitsExample) -> None:
         self._numbers = env_input.numbers
 
     async def reset(self) -> MessageResetOutput:

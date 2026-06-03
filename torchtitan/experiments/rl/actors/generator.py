@@ -382,17 +382,20 @@ class VLLMGenerator(Actor, Configurable):
         self,
         tokenized_prompts: list[list[int]],
         *,
+        request_ids: list[str],
         sampling_config: SamplingConfig | None = None,
         metrics_prefix: str = "generator",
     ) -> tuple[list[Completion], list[m.Metric]]:
         """Generate completions and generator metrics for tokenized prompts.
 
         Takes ``tokenized_prompts`` as ``[num_prompts][prompt_tokens]``.
-        Returns completions as ``[num_prompts * n]`` plus generator metrics,
-        where ``n`` is the resolved ``SamplingConfig.n`` completions per prompt.
+        Returns completions in the same order as ``request_ids`` plus generator
+        metrics. If ``SamplingConfig.n > 1``, completions for one prompt are
+        contiguous in vLLM's sample order.
 
         Args:
             tokenized_prompts: Tokenized prompts shaped ``[num_prompts][prompt_tokens]``.
+            request_ids: One id per prompt echoed on each ``Completion.request_id``.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig. ``seed`` always comes from
                 ``config.debug.seed`` (not part of SamplingConfig).
@@ -420,6 +423,13 @@ class VLLMGenerator(Actor, Configurable):
                 output_kind=RequestOutputKind.FINAL_ONLY,
             )
 
+            if len(request_ids) != len(tokenized_prompts):
+                raise ValueError(
+                    f"got {len(request_ids)} request_ids for {len(tokenized_prompts)} prompts"
+                )
+            if len(set(request_ids)) != len(request_ids):
+                raise ValueError(f"request_ids must be unique; got {request_ids}")
+
             # render_cmpl is vLLM's input-pipeline entry.
             # The tokenize step is a no-op for already-tokenized prompts. The
             # lower-level alternative is vllm.inputs.tokens_input; we use the
@@ -427,9 +437,11 @@ class VLLMGenerator(Actor, Configurable):
             engine_inputs = self._engine.renderer.render_cmpl(
                 [{"prompt_token_ids": ids} for ids in tokenized_prompts]
             )
-            for i, engine_input in enumerate(engine_inputs):
+            for engine_input, request_id in zip(
+                engine_inputs, request_ids, strict=True
+            ):
                 self._engine.add_request(
-                    request_id=str(i),
+                    request_id=request_id,
                     prompt=engine_input,
                     params=sampling_params,
                 )
@@ -439,15 +451,14 @@ class VLLMGenerator(Actor, Configurable):
                 while self._engine.has_unfinished_requests():
                     all_outputs.extend(self._engine.step())
 
-            # vLLM may return requests out of order; sort by the integer
-            # request_id we assigned so request_idx lines up with the input.
-            all_outputs.sort(key=lambda o: int(o.request_id))
+            # Return completions in caller input order; the controller maps positionally.
+            request_order = {request_id: i for i, request_id in enumerate(request_ids)}
+            all_outputs.sort(key=lambda output: request_order[output.request_id])
 
             completions: list[Completion] = []
             generation_metrics: list[m.Metric] = []
             output_token_counts: list[int] = []
             for output in all_outputs:
-                request_idx = int(output.request_id)
                 generation_metrics.extend(
                     _prepare_generation_request_metrics(output, prefix=metrics_prefix)
                 )
@@ -460,7 +471,7 @@ class VLLMGenerator(Actor, Configurable):
                     completions.append(
                         Completion(
                             policy_version=self.policy_version,
-                            request_idx=request_idx,
+                            request_id=output.request_id,
                             token_ids=sample.token_ids,
                             token_logprobs=per_token_logprobs,
                             finish_reason=sample.finish_reason,

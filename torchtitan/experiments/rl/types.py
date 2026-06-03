@@ -14,7 +14,9 @@ class Completion:
     """A single generated sequence from the generator."""
 
     policy_version: int
-    request_idx: int
+    request_id: str
+    """Echoes the id the caller passed to `generate`, so callers can validate
+    ordered completions or map by id."""
     token_ids: list[int]
     token_logprobs: list[float]
     finish_reason: str | None = None
@@ -29,7 +31,7 @@ class Episode:
     ready for collation into a batch."""
 
     policy_version: int
-    prompt_idx: int
+    sample_id: str
     prompt_token_ids: list[int]
     text: str
     token_ids: list[int]

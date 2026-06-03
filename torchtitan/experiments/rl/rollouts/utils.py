@@ -35,7 +35,7 @@ def rollout_to_episode(rollout: Rollout) -> Episode:
     turn = rollout.turns[0]
     return Episode(
         policy_version=turn.policy_version,
-        prompt_idx=rollout.sample_idx,
+        sample_id=rollout.sample_id,
         prompt_token_ids=turn.prompt_token_ids,
         text=last_assistant_text(rollout),
         token_ids=turn.assistant_token_ids,

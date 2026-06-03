@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 
 from renderers import Message, ToolSpec
 
+from torchtitan.config import Configurable
+
 
 @dataclass(kw_only=True, slots=True)
 class MessageResetOutput:
@@ -46,20 +48,26 @@ class MessageStepOutput:
             )
 
 
-class MessageEnv(abc.ABC):
+class MessageEnv(Configurable, abc.ABC):
     """User-written env in message space. Implement `reset` + `step`.
 
     Tip: `MessageEnv` works in messages and never sees token ids; You can have `RendererWrapperEnv`
     wrap it and use a `Renderer` to convert messages <-> token ids for the generator.
-
     Example:
         # a one-tool calculator env. It is multi-turn — the env answers the
         # assistant's tool call, then ends once the assistant replies without a tool.
 
         class CalculatorEnv(MessageEnv):
+            @dataclass(kw_only=True, slots=True)
+            class Config(MessageEnv.Config):
+                pass
+
+            def __init__(self, config: Config, *, env_input: CalculatorExample) -> None:
+                self._expression = env_input.expression
+
             async def reset(self) -> MessageResetOutput:
                 return MessageResetOutput(
-                    prompt_messages=[{"role": "user", "content": "What is 12 * 7?"}],
+                    prompt_messages=[{"role": "user", "content": f"What is {self._expression}?"}],
                     tools=[CALCULATOR_TOOL],
                 )
 
@@ -72,6 +80,10 @@ class MessageEnv(abc.ABC):
                     env_messages=[{"role": "tool", "content": result}]
                 )
     """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        """Static env params; the per-rollout example is passed to `build(env_input=...)`."""
 
     @abc.abstractmethod
     async def reset(self) -> MessageResetOutput:

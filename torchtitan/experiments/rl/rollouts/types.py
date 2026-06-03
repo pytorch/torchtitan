@@ -56,8 +56,9 @@ class RolloutTurn:
     """Per-token logprobs from the generator policy for the assistant tokens."""
 
     # Filtering / debugging
-    policy_version: int
-    """Trainer policy version when this response was sampled."""
+    policy_version: int | None = None
+    """Trainer policy version when this response was sampled; `None` for a
+    prompt-only turn (no generation happened, e.g. the prompt was too long)."""
 
     # Logging
     prompt_messages: list[Message] = field(default_factory=list)  # [M_prompt]
@@ -84,8 +85,8 @@ class Rollout:
     group_id: str
     """Prompt-group ID; siblings share it for advantage centering."""
 
-    sample_idx: int
-    """Sample index within the group (0..group_size-1)."""
+    sample_id: str
+    """Unique rollout id within the step, e.g. `"step=3/group=5/sample=2"`."""
 
     turns: list[RolloutTurn] = field(default_factory=list)  # [K_turns]
     """Ordered rollout turns."""
@@ -108,9 +109,6 @@ class Rollout:
 class RolloutGroup:
     group_id: str
     """Prompt-group ID; siblings share it for advantage centering."""
-
-    env_input: object
-    """The env input (dataset payload) shared by the group; passed to the rubric."""
 
     rollouts: list[Rollout]  # [group_size]
     """Sibling rollouts sampled from the group's shared prompt."""

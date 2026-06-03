@@ -12,7 +12,6 @@ from torchtitan.experiments.rl.env_types.message_env import (
 from torchtitan.experiments.rl.env_types.renderer_env import (
     RendererWrapperEnv,
     TokenizedStepOutput,
-    TurnMessages,
 )
 
 __all__ = [
@@ -21,5 +20,4 @@ __all__ = [
     "MessageStepOutput",
     "RendererWrapperEnv",
     "TokenizedStepOutput",
-    "TurnMessages",
 ]

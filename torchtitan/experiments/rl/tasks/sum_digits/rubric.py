@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from torchtitan.experiments.rl.rollouts import last_assistant_text, Rollout
 from torchtitan.experiments.rl.rubrics import RewardFn
 
-from torchtitan.experiments.rl.tasks.sum_digits.data import SumDigitsInput
+from torchtitan.experiments.rl.tasks.sum_digits.data import SumDigitsExample
 
 
 _ANSWER_RE = re.compile(r"\[ANSWER\]\s*(-?\d+)")
@@ -26,7 +26,7 @@ class RewardCorrect(RewardFn):
     class Config(RewardFn.Config):
         pass
 
-    async def __call__(self, rollout: Rollout, env_input: SumDigitsInput) -> float:
+    async def __call__(self, rollout: Rollout, env_input: SumDigitsExample) -> float:
         text = last_assistant_text(rollout)
         matches = _ANSWER_RE.findall(text)
         if not matches:

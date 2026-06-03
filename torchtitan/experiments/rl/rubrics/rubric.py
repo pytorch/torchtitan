@@ -51,27 +51,28 @@ class RewardFn(Configurable, abc.ABC):
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class Reward:
-    """One rollout's reward + per-reward-fn breakdown.
+class RubricOutput:
+    """One rollout's reward, as returned by a `Rubric`.
 
     Example:
-        >>> Reward(reward=0.5, reward_breakdown={"RewardCorrect": 1.0, "RewardFormat": 0.0})
+        >>> RubricOutput(reward=0.5, reward_breakdown={"RewardCorrect": 1.0, "RewardFormat": 0.0})
     """
 
     reward: float
-    """Final weighted reward for this rollout; the only field the loss uses."""
+    """Final scalar reward for this rollout; assigned to `Rollout.reward`."""
 
     reward_breakdown: dict[str, float] = field(default_factory=dict)
-    """Raw per-reward-fn outputs (unweighted), keyed by reward-fn class name,
-    used to compute the scalar `reward`."""
+    """Per-reward-fn outputs (unweighted), keyed by reward-fn class name.
+    The default `Rubric` computes `reward` from these; callers may also use them for per-reward
+    advantage, reweighting, metrics, or inspection."""
 
 
 class Rubric(Configurable):
-    """Holds reward functions and scores rollouts with their weighted sum.
+    """Scores rollouts with a set of weighted reward functions.
 
-    Reward fns and their weights live in config (`reward_fns`), so a rubric is
-    just configured for common cases— no subclass needed. Subclass and override `score_group`
-    for cross-sibling scoring (pairwise comparison, diversity, rank normalization).
+    The reward fns and their weights live in config (`reward_fns`), so common
+    cases need no subclass. Subclass and override `score_group` for cross-sibling
+    scoring (pairwise comparison, diversity, rank normalization).
 
     Setting `truncation_reward` / `error_reward` short-circuits the reward fns for
     rollouts whose status is truncated / errored.
@@ -115,7 +116,7 @@ class Rubric(Configurable):
     @sl.log_trace_span("score_single_rollout")
     async def _score_single_rollout(
         self, rollout: Rollout, env_input: object
-    ) -> Reward:
+    ) -> RubricOutput:
         """Score one rollout. Short-circuits to `truncation_reward` /
         `error_reward` when those are set and the rollout truncated / errored.
 
@@ -126,17 +127,18 @@ class Rubric(Configurable):
         Returns:
             Final weighted reward + per-fn raw breakdown.
         """
-        # Short-circuit on truncate / error and return the configured reward.
+        # Short-circuit on truncate / error and return the configured reward. The
+        # breakdown records the short-circuit reason so it shows up in metrics.
         cfg = self._config
         if cfg.truncation_reward is not None and rollout.status.is_truncated():
-            return Reward(
+            return RubricOutput(
                 reward=cfg.truncation_reward,
-                components={"truncated": cfg.truncation_reward},
+                reward_breakdown={"truncated": cfg.truncation_reward},
             )
         if cfg.error_reward is not None and rollout.status.is_error():
-            return Reward(
+            return RubricOutput(
                 reward=cfg.error_reward,
-                components={"errored": cfg.error_reward},
+                reward_breakdown={"errored": cfg.error_reward},
             )
 
         # Run all reward fns and weight-sum (weights normalized to sum to 1.0).
@@ -150,14 +152,14 @@ class Rubric(Configurable):
             reward_breakdown[type(fn).__name__] = r
             total_reward += (fn.weight / self._weight_sum) * r
 
-        return Reward(reward=total_reward, reward_breakdown=reward_breakdown)
+        return RubricOutput(reward=total_reward, reward_breakdown=reward_breakdown)
 
     @sl.log_trace_span("score_group")
     async def score_group(
         self,
         rollouts: list[Rollout],
         env_input: object,
-    ) -> list[Reward]:
+    ) -> list[RubricOutput]:
         """Score every rollout in one prompt group.
 
         Override for cross-rollout rewards (pairwise comparison, diversity,
@@ -168,7 +170,7 @@ class Rubric(Configurable):
             env_input: Dataset payload originally used to construct the rollout env.
 
         Returns:
-            One `Reward` per rollout, in input order.
+            One `RubricOutput` per rollout, in input order.
         """
         return await asyncio.gather(
             *(self._score_single_rollout(r, env_input) for r in rollouts)
