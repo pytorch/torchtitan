@@ -69,6 +69,8 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
             test_name="aot_fx_trace_llama3_precompile_fsdp_tp",
             ngpu=8,
         ),
+        # TODO: disabled due to upstream histc int64 regression breaking
+        # MoE model tracing. Re-enable once fixed upstream.
         PrecompileTestDefinition(
             precompile_command=(
                 "python -m torchtitan.experiments.graph_trainer.precompile_main"
@@ -92,6 +94,7 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
             test_descr="aot_fx_trace deepseek_v3 precompile FSDP+TP+EP",
             test_name="aot_fx_trace_deepseek_v3_precompile_fsdp_tp_ep",
             ngpu=8,
+            disabled=True,
         ),
     ]
 
