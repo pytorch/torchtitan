@@ -180,6 +180,10 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
         ),
         # === aot_fx_trace mode tests ===
         # Note: aot_fx_trace applies cudagraph by default, so skip_rocm_test=True.
+        #
+        # TODO: disabled due to upstream PyTorch cuDNN regression in nightly:
+        # CUDNN_STATUS_BAD_PARAM_STREAM_MISMATCH with CUDA graphs + context
+        # parallelism. Re-enable once fixed upstream.
         OverrideDefinitions(
             [
                 [
@@ -195,8 +199,12 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_llama3_fsdp_tp_cp",
             ngpu=8,
             skip_rocm_test=True,
+            disabled=True,
         ),
         # async_tp test lives in graph_trainer_h100 suite (needs NVLink).
+        # TODO: disabled due to upstream PyTorch FlexAttention regression in
+        # nightly: device-side assert triggered during CUDA graph replay.
+        # Re-enable once fixed upstream.
         OverrideDefinitions(
             [
                 [
@@ -210,6 +218,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace llama3 FSDP+TP+FlexAttn",
             "aot_fx_trace_llama3_fsdp_tp_flexattn",
             ngpu=8,
+            disabled=True,
         ),
         # TODO: Disabled due to upstream PyTorch cuDNN regression in nightly
         # dev20260506. _scaled_dot_product_cudnn_attention fails with
@@ -303,6 +312,11 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
         # === aot_fx_trace mode tests ===
         # Note: cudagraph is auto-skipped for DSv3 because MoE load-balancing
         # introduces CUDA→CPU transfers incompatible with CUDA graph capture.
+        #
+        # TODO: aot_fx_trace MoE tests are disabled due to an upstream PyTorch
+        # regression: histc's meta kernel doesn't support int64 inputs,
+        # breaking tracing for all MoE models. Re-enable once the histc
+        # meta kernel is fixed upstream.
         OverrideDefinitions(
             [
                 [
@@ -318,6 +332,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace deepseek_v3 FSDP+TP+CP+EP",
             "aot_fx_trace_deepseek_v3_fsdp_tp_cp_ep",
             ngpu=8,
+            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -333,6 +348,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace deepseek_v3 FSDP+TP+EP+FlexAttn",
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep_flexattn",
             ngpu=8,
+            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -349,6 +365,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace deepseek_v3 FSDP+TP+EP+full_inductor",
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep_full_inductor",
             ngpu=8,
+            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -364,7 +381,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace deepseek_v3 FSDP+TP+HybridEP",
             "aot_fx_trace_deepseek_v3_hybridep",
             ngpu=4,
-            disabled=not _DEEPEP_AVAILABLE,
+            disabled=True,
         ),
     ]
 
@@ -372,6 +389,9 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
 def _build_qwen3_tests() -> list[OverrideDefinitions]:
     """Qwen3-based integration tests (dense + MoE)."""
     return [
+        # TODO: disabled due to upstream PyTorch cuDNN regression in nightly:
+        # CUDA graphs + context parallelism triggers
+        # CUDNN_STATUS_BAD_PARAM_STREAM_MISMATCH. Re-enable once fixed upstream.
         OverrideDefinitions(
             [
                 [
@@ -386,7 +406,9 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace qwen3 FSDP+TP+CP",
             "aot_fx_trace_qwen3_fsdp_tp_cp",
             ngpu=8,
+            disabled=True,
         ),
+        # TODO: disabled due to upstream histc int64 regression (see DSv3 comment)
         OverrideDefinitions(
             [
                 [
@@ -401,6 +423,7 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace qwen3 MoE FSDP+TP+EP",
             "aot_fx_trace_qwen3_moe_fsdp_tp_ep",
             ngpu=8,
+            disabled=True,
         ),
     ]
 
@@ -445,6 +468,9 @@ def _build_async_tp_tests() -> list[OverrideDefinitions]:
 def _build_autoparallel_tests() -> list[OverrideDefinitions]:
     """AutoParallel integration tests for default runners."""
     return [
+        # TODO: disabled due to upstream AutoParallel regression in nightly:
+        # nll_loss assertion failure (t >= 0 && t < n_classes) from incorrect
+        # loss partitioning. Re-enable once fixed upstream.
         OverrideDefinitions(
             [
                 [
@@ -459,6 +485,7 @@ def _build_autoparallel_tests() -> list[OverrideDefinitions]:
             "autoparallel llama3 FSDP+TP",
             "autoparallel_llama3_fsdp_tp",
             ngpu=4,
+            disabled=True,
         ),
     ]
 
