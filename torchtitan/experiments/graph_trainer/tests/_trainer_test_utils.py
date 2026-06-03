@@ -24,7 +24,6 @@ def build_minimal_trainer(
     activation_checkpoint_mode: str = "none",
     compile_enable_passes: bool = True,
     compile_passes: list[str] | None = None,
-    compile_joint_passes: list[str] | None = None,
     compile_numerics_changing_optim: bool = False,
     tokenizer=None,
     fsdp_reshard_after_forward: str = "default",
@@ -46,15 +45,17 @@ def build_minimal_trainer(
                 mode="aot_fx_trace",
                 enable_passes=compile_enable_passes,
                 passes=[] if compile_passes is None else list(compile_passes),
-                joint_passes=(
-                    [] if compile_joint_passes is None else list(compile_joint_passes)
-                ),
                 precompile_artifact_dir="",
                 memory_policy="default",
+                pass_pipeline="default",
                 inductor_compilation="regional",
                 numerics_changing_optim=compile_numerics_changing_optim,
-                enable_cudagraph=True,
+                disable_passes=[],
+                enable_fsdp_ag_rs_overlap=False,
                 debug_graph_passes=False,
+                cpu_offload_prefetch_n_layers=1,
+                cpu_offload_defer_n_layers=1,
+                cpu_offload_budget_gb=100.0,
             ),
             model_spec=SimpleNamespace(model=model_config),
             activation_checkpoint=ActivationCheckpointConfig(
@@ -64,11 +65,14 @@ def build_minimal_trainer(
                 pipeline_parallel_degree=1,
                 fsdp_reshard_after_forward=fsdp_reshard_after_forward,
                 enable_async_tensor_parallel=False,
+                full_dtensor=False,
             ),
         )
         trainer._fwd_bwd_step_module = None
         trainer._traced_step = None
     else:
-        trainer.config = SimpleNamespace()
+        trainer.config = SimpleNamespace(
+            parallelism=SimpleNamespace(full_dtensor=False),
+        )
 
     return trainer
