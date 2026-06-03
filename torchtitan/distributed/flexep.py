@@ -352,21 +352,18 @@ def _wait_counts_ready() -> None:
 
 
 def _wait_ready(handle: Any, channel: int) -> None:
-    assert _group is not None
+    """EP-group barrier: ensure every peer has finished writing into this
+    rank's symmetric receive buffer before the buffer is read.
 
-    rank = _group.rank()
-    for peer in range(_group.size()):
-        if peer != rank:
-            handle.put_signal(
-                dst_rank=peer,
-                channel=channel,
-            )
-    for peer in range(_group.size()):
-        if peer != rank:
-            handle.wait_signal(
-                src_rank=peer,
-                channel=channel,
-            )
+    Issues a single fused ``barrier`` kernel that signals and polls all peers
+    concurrently. This was previously a Python loop of ``2 * (ep_size - 1)``
+    per-peer ``put_signal`` / ``wait_signal`` kernels, all serialized and fully
+    exposed on the critical path (each ``wait_signal`` its own spin-wait
+    kernel) -- the dominant FlexEP comm cost once CPU-launch overhead is removed
+    by CUDA graphs / compiled steps.
+    """
+    assert _group is not None
+    handle.barrier(channel=channel)
 
 
 def _copy_all_counts_to_peers_cuda(
