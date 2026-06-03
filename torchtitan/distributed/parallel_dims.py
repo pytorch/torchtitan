@@ -425,12 +425,13 @@ class ParallelDims:
         non_none = [p for p in placements if p is not None]
         if not non_none:
             return None
-        axes = non_none[0].keys()
+        axes = non_none[0].axes()
         for p in non_none[1:]:
-            assert p.keys() == axes, (
+            p_axes = p.axes()
+            assert p_axes == axes, (
                 f"Inconsistent mesh axes within a boundary: "
                 f"{sorted(k.value for k in axes)} vs "
-                f"{sorted(k.value for k in p.keys())}"
+                f"{sorted(k.value for k in p_axes)}"
             )
         return self.resolve_mesh(axes)
 
