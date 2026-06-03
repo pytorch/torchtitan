@@ -418,6 +418,10 @@ def init_distributed(
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/{prefix}")
 
     device_id: torch.device | None = None
+    if device_type == "cuda":
+        # Bind the device to the process group (recommended practice; also lets
+        # split_group duplicate communicators, e.g. for per-direction PP P2P).
+        device_id = torch.device(device_type, int(os.environ["LOCAL_RANK"]))
     if comm_config.mode == "torchcomms":
         try:
             # pyrefly: ignore[missing-import]
@@ -429,7 +433,6 @@ def init_distributed(
         import torch.distributed.config as dist_config
 
         dist_config.use_torchcomms = True
-        device_id = torch.device(device_type, int(os.environ["LOCAL_RANK"]))
 
     torch.distributed.init_process_group(
         backend=_get_distributed_backend(enable_cpu_backend),

@@ -96,6 +96,12 @@ def pipeline_llm(
     for i, stage_ms in enumerate(module_names_per_stage):
         logger.debug(f"Stage {i}: {stage_ms}")
 
+    if parallelism.pipeline_parallel_per_direction_p2p:
+        logger.info(
+            "Pipeline P2P: using per-direction communicators "
+            "(forward/backward on separate comms)"
+        )
+
     get_mesh_cb = _build_get_mesh_callback(parallel_dims)
     stages, model_parts = _pipeline_module_split(
         model,
@@ -104,6 +110,7 @@ def pipeline_llm(
         device,
         module_names_per_stage,
         get_mesh=get_mesh_cb,
+        p2p_per_direction=parallelism.pipeline_parallel_per_direction_p2p,
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -532,6 +539,7 @@ def _pipeline_module_split(
     device: torch.device,
     module_names_per_stage: list[list[str]],
     get_mesh: Callable | None = None,
+    p2p_per_direction: bool = False,
 ) -> tuple[list[PipelineStage], list[nn.Module]]:
     """Create pipeline stages based on specified module names for each stage.
 
@@ -585,6 +593,7 @@ def _pipeline_module_split(
             device,
             group=pp_mesh.get_group("pp"),
             get_mesh=get_mesh,
+            p2p_per_direction=p2p_per_direction,
         )
         logger.info(
             f"PP rank {pp_rank} is building stage_idx {stage_idx} "

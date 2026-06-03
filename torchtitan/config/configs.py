@@ -202,6 +202,18 @@ class ParallelismConfig:
     The global training batch size must be evenly divisible by pipeline_parallel_microbatch_size.
     """
 
+    pipeline_parallel_per_direction_p2p: bool = False
+    """
+    Carry forward (downstream) and backward (upstream) pipeline P2P on two
+    separate communicators instead of sharing one. A single PP communicator
+    serializes all send/recv in one FIFO; coalescing makes a single mixed batch
+    safe, but across batches (pipeline skew, looped / V schedules, skip
+    connections) the shared FIFO can still form a dependency cycle and deadlock.
+    Splitting by direction removes that hazard and restores full-duplex
+    bandwidth. Requires a device-bound process group (set automatically with
+    --comm.mode=torchcomms; for nccl it relies on init binding a device_id).
+    """
+
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
