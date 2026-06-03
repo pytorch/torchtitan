@@ -27,12 +27,14 @@ def dense_param_placement(*, tp: Placement) -> NamedPlacement:
     requires a mesh switch between FSDP storage and computation — likely
     resolved by FlexShard. Revisit once FlexShard lands.
     """
-    return {
-        DP_REPLICATE: Replicate(),
-        DP_SHARD: Replicate(),
-        CP: Replicate(),
-        TP: tp,
-    }
+    return NamedPlacement(
+        {
+            DP_REPLICATE: Replicate(),
+            DP_SHARD: Replicate(),
+            CP: Replicate(),
+            TP: tp,
+        }
+    )
 
 
 def dense_activation_placement(
@@ -46,12 +48,14 @@ def dense_activation_placement(
     (``Shard(1)``); override to ``Replicate()`` for K/V after all-gather.
     TP placement is caller-specified.
     """
-    return {
-        DP_REPLICATE: Shard(0),
-        DP_SHARD: Shard(0),
-        CP: cp,
-        TP: tp,
-    }
+    return NamedPlacement(
+        {
+            DP_REPLICATE: Shard(0),
+            DP_SHARD: Shard(0),
+            CP: cp,
+            TP: tp,
+        }
+    )
 
 
 def colwise_config() -> ShardingConfig:

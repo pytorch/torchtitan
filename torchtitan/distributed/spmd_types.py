@@ -6,7 +6,7 @@
 
 """SPMD type helpers for the local-tensor parallelization path.
 
-Bridges torchtitan's ``PlacementLike`` sharding annotations with
+Bridges torchtitan's ``NamedPlacement`` sharding annotations with
 ``spmd_types`` runtime APIs (``assert_type``, ``redistribute``,
 ``PartitionSpec``).
 """
@@ -16,7 +16,6 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from threading import local
 from typing import Any
 
@@ -27,23 +26,19 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 from torch.utils._pytree import tree_map
 
-# Avoid circular import — MeshAxisName, PlacementLike, and NamedPlacement
-# live in protocols.*, whose __init__ imports module.py which imports us.
+# Avoid circular import — MeshAxisName and NamedPlacement live in protocols.*,
+# whose __init__ imports module.py which imports us.
 # Use TYPE_CHECKING for annotations; import at use-site for runtime.
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from torchtitan.protocols.sharding import PlacementLike
-    from torchtitan.protocols.types import MeshAxisName, NamedPlacement
+    from torchtitan.protocols.types import NamedPlacement
 
 __all__ = [
-    "PlacementSpec",
     "current_mesh",
     "mesh_size",
     "annotate_input_spmd_types",
     "active_placement",
-    "is_placement_like",
-    "placement_axes",
     "placement_to_spmd_assert_type",
     "preserve_buffer_spmd",
     "redistribute_spmd_per_axis",
@@ -120,66 +115,8 @@ def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
             assert popped is mesh
 
 
-@dataclass(frozen=True, kw_only=True, slots=True)
-class PlacementSpec:
-    """Placement with explicit global partition spec ordering.
-
-    Use this only when multiple mesh axes shard the same tensor dimension.
-    ``placement`` carries per-axis runtime placement. ``partition_spec`` only
-    disambiguates ordering for type assertions in the local-tensor SPMD path.
-    """
-
-    placement: spmd.PerMeshAxisSpmdTypes
-    partition_spec: spmd.PartitionSpec
-
-
-def _is_spmd_placement(value: object) -> bool:
-    """Return ``True`` if *value* is an SPMD placement (not a DTensor one).
-
-    Checks structure: must be a ``PlacementSpec``, or a non-empty dict with
-    ``MeshAxisName`` keys and ``PerMeshAxisSpmdType`` values.
-    """
-    if isinstance(value, PlacementSpec):
-        return True
-    from torchtitan.protocols.types import MeshAxisName
-    return (
-        isinstance(value, dict)
-        and bool(value)
-        and all(
-            isinstance(k, MeshAxisName) and isinstance(v, spmd.PerMeshAxisSpmdType)
-            for k, v in value.items()
-        )
-    )
-
-
-def is_placement_like(value: object) -> bool:
-    """Return ``True`` if *value* is any kind of placement (SPMD or DTensor).
-
-    A placement is a ``PlacementSpec``, or a non-empty dict with
-    ``MeshAxisName`` keys and either ``PerMeshAxisSpmdType`` or DTensor
-    ``Placement`` values.
-    """
-    if _is_spmd_placement(value):
-        return True
-    from torchtitan.protocols.types import MeshAxisName
-    return (
-        isinstance(value, dict)
-        and bool(value)
-        and all(isinstance(k, MeshAxisName) for k in value)
-    )
-
-
-def placement_axes(placement: PlacementLike) -> tuple[MeshAxisName, ...]:
-    """Return the mesh axis names declared in *placement*."""
-    named = placement.placement if isinstance(placement, PlacementSpec) else placement
-    return tuple(named.keys())
-
-
-def spmd_to_dtensor_placement(placement: PlacementLike) -> NamedPlacement | None:
-    """Convert an SPMD placement to a DTensor ``NamedPlacement``.
-
-    Returns ``None`` if *placement* is not an SPMD placement (i.e. it is
-    already a DTensor ``NamedPlacement``).
+def spmd_to_dtensor_placement(placement: NamedPlacement) -> NamedPlacement:
+    """Convert a placement with SPMD axis types to DTensor placements.
 
     Conversion rules:
     - ``I`` / ``R`` → ``Replicate()`` (DTensor has no Invariant concept)
@@ -194,16 +131,13 @@ def spmd_to_dtensor_placement(placement: PlacementLike) -> NamedPlacement | None
     ``resolve_placements`` can serve both backends while sharding configs
     are written in spmd_types.
     """
-    from torchtitan.protocols.sharding import NamedPlacement as _NP
-    from torchtitan.protocols.types import MeshAxisName
+    from torchtitan.protocols.types import MeshAxisName, NamedPlacement
 
-    if not _is_spmd_placement(placement):
-        return None
-    named = placement.placement if isinstance(placement, PlacementSpec) else placement
-
-    result: _NP = {}
-    for axis_name, axis_type in named.items():
-        if axis_type == spmd.I or axis_type == spmd.R:
+    result = {}
+    for axis_name, axis_type in placement.placements.items():
+        if isinstance(axis_type, Placement):
+            dtensor_placement = axis_type
+        elif axis_type == spmd.I or axis_type == spmd.R:
             dtensor_placement: Placement = Replicate()
         elif axis_type == spmd.P:
             dtensor_placement = Partial()
@@ -211,18 +145,19 @@ def spmd_to_dtensor_placement(placement: PlacementLike) -> NamedPlacement | None
             dtensor_placement = Shard(axis_type.dim)
         else:
             raise ValueError(
-                f"Unsupported SPMD placement for axis {axis_name!r}: {axis_type!r}."
+                f"Unsupported placement for axis {axis_name!r}: {axis_type!r}."
             )
+        # unfold DP axis
         if axis_name == MeshAxisName.DP:
             result[MeshAxisName.DP_REPLICATE] = dtensor_placement
             result[MeshAxisName.DP_SHARD] = dtensor_placement
         else:
             result[axis_name] = dtensor_placement
-    return result
+    return NamedPlacement(result)
 
 
 def active_placement(
-    placement: PlacementLike,
+    placement: NamedPlacement,
 ) -> spmd.PerMeshAxisSpmdTypes:
     """Return the SPMD placement restricted to active current-mesh axes.
 
@@ -235,25 +170,24 @@ def active_placement(
     Raises ``ValueError`` if *placement* is a DTensor placement (not SPMD).
     Returns an empty dict if no current mesh is set.
     """
-    named = placement.placement if isinstance(placement, PlacementSpec) else placement
-    if not _is_spmd_placement(placement):
+    if not placement.is_spmd():
         raise ValueError(
             "SPMD backend requires SPMD placements. "
-            f"Got DTensor placement: {named!r}."
+            f"Got DTensor placement: {placement!r}."
         )
     mesh_names = spmd.current_mesh_names()
     if mesh_names is None:
         return {}
 
     resolved: spmd.PerMeshAxisSpmdTypes = {}
-    for axis_name, value in named.items():
+    for axis_name, value in placement.placements.items():
         if axis_name in mesh_names:
             resolved[axis_name] = value
     return resolved
 
 
 def placement_to_spmd_assert_type(
-    placement: PlacementLike,
+    placement: NamedPlacement,
 ) -> tuple[spmd.PerMeshAxisSpmdTypes, spmd.PartitionSpec | None]:
     """Resolve a placement to ``assert_type`` args for local SPMD typechecking.
 
@@ -262,7 +196,7 @@ def placement_to_spmd_assert_type(
     ordering carried separately in a ``PartitionSpec``:
 
     1. ``S(dim)`` entries in the per-axis type dict are converted to ``V``.
-    2. When a ``PlacementSpec`` carries a ``PartitionSpec`` with nested axis
+    2. When a ``NamedPlacement`` carries a ``PartitionSpec`` with nested axis
        tuples (e.g. ``(DP, (CP, TP), None)``), inactive axes are filtered
        out based on ``current_mesh_names()``.
 
@@ -271,7 +205,7 @@ def placement_to_spmd_assert_type(
     normalization internally.
     """
     local_type = active_placement(placement)
-    if not isinstance(placement, PlacementSpec):
+    if placement.partition_spec is None:
         return local_type, None
 
     mesh_names = spmd.current_mesh_names()
@@ -318,24 +252,28 @@ def annotate_input_spmd_types(
     Analogous to ``full_dtensor.parallelize_inputs()`` but for the
     local-tensor SPMD path.
     """
-    from torchtitan.protocols.types import MeshAxisName
+    from torchtitan.protocols.types import MeshAxisName, NamedPlacement
 
     DP = MeshAxisName.DP
     CP = MeshAxisName.CP
     TP = MeshAxisName.TP
 
-    token_placement: spmd.PerMeshAxisSpmdTypes = {
-        DP: spmd.S(0),
-        CP: spmd.S(1),
-        TP: spmd.R,
-    }
-    label_placement: spmd.PerMeshAxisSpmdTypes = {
-        DP: spmd.S(0),
-        CP: spmd.S(1),
-        TP: spmd.I,
-    }
+    token_placement = NamedPlacement(
+        {
+            DP: spmd.S(0),
+            CP: spmd.S(1),
+            TP: spmd.R,
+        }
+    )
+    label_placement = NamedPlacement(
+        {
+            DP: spmd.S(0),
+            CP: spmd.S(1),
+            TP: spmd.I,
+        }
+    )
 
-    def assert_type(tensor: torch.Tensor, placement: spmd.PerMeshAxisSpmdTypes) -> None:
+    def assert_type(tensor: torch.Tensor, placement: NamedPlacement) -> None:
         local_type, partition_spec = placement_to_spmd_assert_type(placement)
         if local_type:
             spmd.assert_type(tensor, local_type, partition_spec=partition_spec)

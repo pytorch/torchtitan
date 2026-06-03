@@ -13,13 +13,11 @@ from typing import Literal, TYPE_CHECKING
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from torchtitan.config.configs import ParallelismConfig
-from torchtitan.distributed.spmd_types import placement_axes
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 
 if TYPE_CHECKING:
-    from torchtitan.protocols.sharding import PlacementLike
-    from torchtitan.protocols.types import MeshAxisName
+    from torchtitan.protocols.types import MeshAxisName, NamedPlacement
 
 
 __all__ = ["ParallelDims"]
@@ -245,6 +243,8 @@ class ParallelDims:
             "dense": full_dense_mesh,
             "sparse": full_sparse_mesh,
         }
+        if spmd_dense_mesh is not None:
+            self._global_meshes["spmd_dense"] = spmd_dense_mesh
         self._single_axis_meshes = {
             "pp": dataloading_mesh["pp"],
             "batch": dataloading_mesh["batch"],
@@ -456,7 +456,7 @@ class ParallelDims:
         return mesh
 
     def resolve_shared_mesh(
-        self, placements: Iterable["PlacementLike | None"]
+        self, placements: Iterable["NamedPlacement | None"]
     ) -> DeviceMesh | None:
         """Resolve the mesh shared by a list of NamedPlacements.
 
@@ -473,9 +473,9 @@ class ParallelDims:
         non_none = [p for p in placements if p is not None]
         if not non_none:
             return None
-        axes = placement_axes(non_none[0])
+        axes = non_none[0].axes()
         for p in non_none[1:]:
-            p_axes = placement_axes(p)
+            p_axes = p.axes()
             assert p_axes == axes, (
                 f"Inconsistent mesh axes within a boundary: "
                 f"{sorted(k.value for k in axes)} vs "
