@@ -21,7 +21,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torch.utils._debug_mode import DebugMode
 
-from torchtitan.distributed.spmd_types import set_current_mesh, set_spmd_backend
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_backend
 from torchtitan.models.common.nn_modules import Embedding
 
 
@@ -157,7 +157,7 @@ class TestVocabParallelEmbedding(DTensorTestBase):
                     out_type = spmd.S(1) if enable_sp else spmd.I
                     set_spmd_backend("spmd")
                     try:
-                        with set_current_mesh(mesh):
+                        with set_current_spmd_mesh(mesh):
                             with typecheck(strict_mode="strict", local=True):
                                 local_tokens = spmd.assert_type(
                                     local_tokens, {tp_group: spmd.R}
