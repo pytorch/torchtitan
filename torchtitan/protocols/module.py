@@ -354,7 +354,7 @@ class Module(nn.Module, Configurable):
                     f"{type(self).__name__}.{name} has no placement declared "
                     "in sharding_config.state_shardings."
                 )
-            if parallel_dims.spmd_backend == "spmd":
+            if parallel_dims.spmd_backend == "spmd_types":
                 self._register_spmd_state(
                     parallel_dims,
                     name,
@@ -397,7 +397,7 @@ class Module(nn.Module, Configurable):
                 # ``register_buffer(name, None)`` reserves a slot to be filled
                 # by ``init_states`` later; nothing to distribute yet.
                 continue
-            if parallel_dims.spmd_backend == "spmd":
+            if parallel_dims.spmd_backend == "spmd_types":
                 self._register_spmd_state(
                     parallel_dims,
                     name,
@@ -433,7 +433,7 @@ class Module(nn.Module, Configurable):
         """
         sharding_config = self._sharding_config
         assert sharding_config is not None
-        if parallel_dims.spmd_backend == "spmd":
+        if parallel_dims.spmd_backend == "spmd_types":
             return self._maybe_wrap_with_local_spmd(fn)
 
         if sharding_config.local_map is None:
@@ -528,7 +528,7 @@ class Module(nn.Module, Configurable):
             if mesh is None:
                 continue
 
-            if parallel_dims.spmd_backend == "spmd":
+            if parallel_dims.spmd_backend == "spmd_types":
                 if src_named_placements is None:
                     if dst_named_placements is not None:
                         raise ValueError(
@@ -597,7 +597,7 @@ class Module(nn.Module, Configurable):
         sharding_config = self._sharding_config
         assert sharding_config is not None
 
-        if parallel_dims.spmd_backend == "spmd":
+        if parallel_dims.spmd_backend == "spmd_types":
             if not isinstance(outputs, torch.Tensor):
                 return outputs
 
