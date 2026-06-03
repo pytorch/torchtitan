@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import copy
+import unittest
 from contextlib import contextmanager
 from unittest import mock
 
@@ -17,11 +18,13 @@ from torch.testing._internal.common_fsdp import FSDPTest, get_devtype
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard import (
+    BucketSpec,
     flex_shard,
     get_global_shape,
     get_placements,
 )
 from torchtitan.experiments.flex_shard.example.muon import (
+    _default_muon_predicate,
     build_comm_free_muon_optimizers,
     build_muon_param_groups,
     CombinedOptimizer,
@@ -33,7 +36,7 @@ from torchtitan.experiments.flex_shard.example.owned import (
     make_owned_placement_fn,
     Owned,
 )
-from torchtitan.experiments.flex_shard.example.shard import Shard
+from torchtitan.experiments.flex_shard.example.shard import per_param_placements, Shard
 from torchtitan.experiments.flex_shard.tests.common import (
     expected_shard,
     make_transformer_model,
@@ -42,6 +45,25 @@ from torchtitan.experiments.flex_shard.tests.common import (
 
 
 device_type = torch.device(get_devtype())
+
+try:
+    from torchtitan.models.deepseek_v3 import deepseekv3_configs as _deepseekv3_configs
+except Exception:  # pragma: no cover - deepseek_v3 may be unavailable in some envs
+    _deepseekv3_configs = None
+
+
+def _build_deepseekv3_kimi_model() -> nn.Module:
+    """Build the DeepSeek-V3 debugmodel -- Kimi-K2's architecture family.
+
+    MLA attention + DeepSeekMoE: a dense first layer, then MoE layers with 3D
+    grouped experts ``(num_experts, m, n)``, shared experts, and a router gate,
+    plus tok_embeddings / final norm / lm_head. Exercises GroupedMuon (the 3D
+    experts) alongside torch.optim.Muon (the 2D attention / FFN matrices).
+    """
+    config = _deepseekv3_configs["debugmodel"](
+        attn_backend="sdpa", moe_comm_backend="standard"
+    )
+    return config.build()
 
 
 def _init_params_deterministically(model: nn.Module) -> None:
@@ -336,6 +358,26 @@ class TestCommFreeMuonHelpers(TestCase):
         with self.assertRaisesRegex(ValueError, "ndim >= 3"):
             GroupedMuon([nn.Parameter(torch.zeros(4, 4))], lr=0.01)
 
+    @unittest.skipIf(_deepseekv3_configs is None, "deepseek_v3 unavailable")
+    def test_deepseekv3_kimi_experts_are_grouped_muon_eligible(self) -> None:
+        # Kimi-K2 family (DeepSeek-V3): MoE experts are 3D stacks
+        # (num_experts, m, n), so they are Muon-eligible via GroupedMuon (batched
+        # Newton-Schulz), not torch.optim.Muon (which is 2D-only).
+        model = _build_deepseekv3_kimi_model()
+        expert_params = [
+            (name, p)
+            for name, p in model.named_parameters()
+            if "experts.w" in name and "shared_experts" not in name
+        ]
+        self.assertTrue(expert_params)
+        num_experts = {p.shape[0] for _, p in expert_params}
+        self.assertEqual(len(num_experts), 1)  # dim 0 is the expert count
+        self.assertGreater(next(iter(num_experts)), 1)
+        for name, p in expert_params:
+            self.assertEqual(p.ndim, 3, name)  # (num_experts, m, n)
+            # the default predicate routes these stacks to GroupedMuon
+            self.assertTrue(_default_muon_predicate(name, p.shape))
+
 
 class TestCommFreeMuon(FSDPTest):
     @property
@@ -532,6 +574,80 @@ class TestCommFreeMuon(FSDPTest):
         optim.zero_grad(set_to_none=True)
         model(x).sum().backward()
 
+        with _assert_no_collectives(self):
+            optim.step()
+
+    @skip_if_lt_x_gpu(2)
+    @unittest.skipIf(_deepseekv3_configs is None, "deepseek_v3 unavailable")
+    def test_comm_free_muon_on_deepseekv3_moe(self) -> None:
+        # Kimi-K2 architecture family: MLA attention + DeepSeekMoE with 3D grouped
+        # experts. Verifies FlexShard accepts the model, the 3D experts route to
+        # GroupedMuon (not AdamW), and the optimizer step is communication-free.
+        mesh = self._mesh()
+        model = _build_deepseekv3_kimi_model()
+
+        # DSV3 stores `layers` as a ModuleDict, so build per-layer Owned buckets
+        # from the layer FQNs (comm_free_muon_buckets assumes a ModuleList), plus
+        # Shard buckets for embeddings / final norm / lm_head.
+        layer_numel: dict[str, int] = {}
+        for fqn, p in model.named_parameters():
+            if fqn.startswith("layers."):
+                lid = fqn.split(".")[1]
+                layer_numel[lid] = layer_numel.get(lid, 0) + p.numel()
+        layer_ids = sorted(layer_numel, key=int)
+        owners = assign_layer_owners_lpt(
+            [layer_numel[lid] for lid in layer_ids], self.world_size
+        )
+        buckets = [
+            BucketSpec(
+                [f"layers.{lid}.*"],
+                placement_fn=make_owned_placement_fn(owners[i]),
+                reshard_after_forward=False,
+            )
+            for i, lid in enumerate(layer_ids)
+        ]
+        buckets += [
+            BucketSpec(
+                [pattern],
+                placement_fn=per_param_placements,
+                reshard_after_forward=False,
+            )
+            for pattern in ("tok_embeddings.*", "norm.*", "lm_head.*")
+        ]
+        # FlexShard must accept the MLA + MoE (incl. 3D grouped experts) structure.
+        flex_shard(model, mesh, buckets=buckets)
+
+        # Router gate (2D, tiny) stays on AdamW, like Keller's recipe.
+        def muon_pred(fqn, global_shape):
+            return (
+                global_shape is not None
+                and len(global_shape) >= 2
+                and "router.gate" not in fqn
+            )
+
+        muon_params, other_params = build_muon_param_groups(
+            model, mesh, muon_param_predicate=muon_pred
+        )
+        name_by_id = {id(p): n for n, p in model.named_parameters()}
+        grouped = [p for p in muon_params if p.ndim >= 3]
+
+        # The 3D grouped experts are Muon-eligible (-> GroupedMuon), never AdamW.
+        self.assertGreater(len(grouped), 0)
+        self.assertTrue(any("experts.w" in name_by_id[id(p)] for p in grouped))
+        self.assertTrue(all(p.ndim != 3 for p in other_params))
+
+        optim = build_comm_free_muon_optimizers(
+            model,
+            mesh,
+            muon_kwargs=dict(lr=0.02, momentum=0.9, weight_decay=0.0),
+            adamw_kwargs=dict(lr=0.01, weight_decay=0.0),
+            muon_param_predicate=muon_pred,
+        )
+        self.assertIn("GroupedMuon", {type(o).__name__ for o in optim.optimizers})
+
+        # Dummy grads on each optimized param, then assert the step is collective-free.
+        for p in muon_params + other_params:
+            p.grad = torch.randn_like(p)
         with _assert_no_collectives(self):
             optim.step()
 
