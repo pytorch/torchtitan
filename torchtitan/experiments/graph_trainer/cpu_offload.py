@@ -218,17 +218,17 @@ def _collect_view_replay_info(
     """
     replay_views: list[Node] = []
     view_bwd_redirects: list[tuple[Node, Node]] = []
-    visited: set[Node] = set()
+    visited_views: set[Node] = set()
 
     def _walk(n: Node, in_chain: bool) -> None:
         for user in n.users:
-            if user.op != "call_function" or user in visited:
+            if user.op != "call_function":
                 continue
-            visited.add(user)
             if _is_backward_node(user):
                 if in_chain:
                     view_bwd_redirects.append((n, user))
-            elif _is_view(user):
+            elif _is_view(user) and user not in visited_views:
+                visited_views.add(user)
                 replay_views.append(user)
                 _walk(user, True)
 
