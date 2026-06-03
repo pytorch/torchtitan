@@ -22,7 +22,7 @@ from torch.utils._pytree import tree_map
 
 from torchtitan.config import Configurable
 from torchtitan.distributed.spmd_types import (
-    active_placement,
+    mesh_size as spmd_mesh_size,
     placement_to_spmd_assert_type,
     redistribute_spmd_per_axis,
 )
@@ -260,14 +260,11 @@ class Module(nn.Module, Configurable):
         *,
         is_param: bool,
     ) -> None:
-        mesh = parallel_dims.resolve_mesh(placement.axes())
-        if mesh is None:
-            return
+        mesh = parallel_dims._global_meshes["spmd_dense"]
 
         with set_current_spmd_mesh(mesh):
-            local_type, partition_spec = placement_to_spmd_assert_type(placement)
-            for axis_name, axis_type in active_placement(placement).items():
-                if isinstance(axis_type, spmd.Shard):
+            for axis_name, axis_type in placement.placements.items():
+                if isinstance(axis_type, spmd.Shard) and spmd_mesh_size(axis_name) > 1:
                     tensor = spmd.shard(
                         tensor,
                         mesh.get_group(axis_name),
@@ -283,12 +280,12 @@ class Module(nn.Module, Configurable):
                 self.register_buffer(name, tensor, persistent=persistent)
                 registered = self._buffers[name]
 
-            if local_type:
-                spmd.assert_type(
-                    registered,
-                    local_type,
-                    partition_spec=partition_spec,
-                )
+            local_type, partition_spec = placement_to_spmd_assert_type(placement)
+            spmd.assert_type(
+                registered,
+                local_type,
+                partition_spec=partition_spec,
+            )
 
     def _maybe_wrap_with_local_spmd(self, fn: Callable) -> Callable:
         sharding_config = self._sharding_config
@@ -522,11 +519,6 @@ class Module(nn.Module, Configurable):
                 continue
             src_named_placements = in_src_shardings.get(name)
             dst_named_placements = in_dst_shardings.get(name)
-            mesh = parallel_dims.resolve_shared_mesh(
-                [src_named_placements, dst_named_placements]
-            )
-            if mesh is None:
-                continue
 
             if parallel_dims.spmd_backend == "spmd_types":
                 if src_named_placements is None:
@@ -542,22 +534,27 @@ class Module(nn.Module, Configurable):
                 local_type, partition_spec = placement_to_spmd_assert_type(
                     src_named_placements
                 )
-                if local_type:
-                    spmd.assert_type(
-                        value,
-                        local_type,
-                        partition_spec=partition_spec,
-                    )
+                spmd.assert_type(
+                    value,
+                    local_type,
+                    partition_spec=partition_spec,
+                )
 
                 if dst_named_placements is None:
                     new_kwargs[name] = value
                     continue
                 value = redistribute_spmd_per_axis(
                     value,
-                    active_placement(src_named_placements),
-                    active_placement(dst_named_placements),
+                    src_named_placements.placements,
+                    dst_named_placements.placements,
                 )
                 new_kwargs[name] = value
+                continue
+
+            mesh = parallel_dims.resolve_shared_mesh(
+                [src_named_placements, dst_named_placements]
+            )
+            if mesh is None:
                 continue
 
             if (
@@ -612,23 +609,19 @@ class Module(nn.Module, Configurable):
             # SPMD source placements are part of the config contract: assert
             # before redistributing so typechecking catches boundary drift.
             local_type, partition_spec = placement_to_spmd_assert_type(out_src)
-            if local_type:
-                spmd.assert_type(
-                    outputs,
-                    local_type,
-                    partition_spec=partition_spec,
-                )
+            spmd.assert_type(
+                outputs,
+                local_type,
+                partition_spec=partition_spec,
+            )
 
             out_dst = sharding_config.out_dst_shardings
             if out_dst is None:
                 return outputs
-            mesh = parallel_dims.resolve_shared_mesh([out_src, out_dst])
-            if mesh is None:
-                return outputs
             return redistribute_spmd_per_axis(
                 outputs,
-                active_placement(out_src),
-                active_placement(out_dst),
+                out_src.placements,
+                out_dst.placements,
             )
 
         out_named_placements = sharding_config.out_dst_shardings
