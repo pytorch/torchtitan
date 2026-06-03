@@ -130,13 +130,12 @@ def deepseek_v3_16b_flexep() -> Trainer.Config:
     )
     config.parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,
-        data_parallel_shard_degree=4,
+        data_parallel_shard_degree=-1,
         tensor_parallel_degree=1,
         context_parallel_degree=1,
         pipeline_parallel_degree=1,
-        expert_parallel_degree=4,
+        expert_parallel_degree=-1,
         enable_sequence_parallel=False,
-        pipeline_parallel_schedule="Interleaved1F1B",
     )
     return config
 
