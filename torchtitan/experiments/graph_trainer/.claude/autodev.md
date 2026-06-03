@@ -248,7 +248,7 @@ their input change the work.
 drop untrusted authors at the CLI level:
 
 ```bash
-TRUSTED='["yiming0416","tianyu-l","SherlockNoMad","xmfan","aditvenk"]'
+TRUSTED='["IvanKobzarev","yiming0416","tianyu-l","SherlockNoMad","xmfan","aditvenk","sanketpurandare"]'
 PR={PR_NUMBER}
 
 # Fetch all trusted comments (inline + top-level) in one shot

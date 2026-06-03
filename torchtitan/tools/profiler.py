@@ -24,7 +24,7 @@ from torchtitan.tools.utils import device_module
 # Paths expects by meta internal tooling
 PROFILE_DIR = "profiling/traces"  # Profiler.Config.save_traces_folder default
 PROFILE_ITER_DIR = "iteration_{step}"  # PROFILE_DIR/{PROFILE_ITER_DIR}
-PROFILE_FILE = "rank{rank}_trace.json"  # PROFILE_DIR/PROFILE_ITER_DIR/{PROFILE_FILE}
+PROFILE_FILE = "rank{rank}_trace.json.gz"  # PROFILE_DIR/PROFILE_ITER_DIR/{PROFILE_FILE}
 
 MEMORY_DIR = (
     "profiling/memory_snapshot"  # Profiler.Config.save_memory_snapshot_folder default
@@ -87,7 +87,8 @@ class MemoryProfiler:
             curr_snapshot_dir, MEMORY_FILE.format(rank=self._rank, step=curr_step)
         )
         with open(output_file, "wb") as output:
-            pickle.dump(device_module.memory._snapshot(), output)
+            # Protocol 4 for compatibility with pytorch.org/memory_viz JS parser
+            pickle.dump(device_module.memory._snapshot(), output, protocol=4)
         logger.info(
             f"Finished dumping memory snapshot in {time.monotonic() - begin:.2f} seconds"
         )
@@ -157,27 +158,6 @@ class Profiler(Configurable):
         profiler_warmup: int = 3
         """
         The number of warmup steps before the active step in each profiling cycle.
-
-        This is used to configure torch.profiler.schedule.
-        """
-
-        profiler_repeat: int | None = None
-        """
-        The number of times to repeat the profiling cycle
-
-        This is used to configure torch.profiler.schedule.
-        """
-
-        profiler_skip_first: int | None = None
-        """
-        The number of initial profiling cycles to skip
-
-        This is used to configure torch.profiler.schedule.
-        """
-
-        profiler_skip_first_wait: int | None = None
-        """
-        The number of initial profiling cycles to skip the wait time
 
         This is used to configure torch.profiler.schedule.
         """
@@ -289,16 +269,6 @@ class Profiler(Configurable):
             cfg.profiler_warmup,
             cfg.profiler_active,
         )
-
-        additional_params = {
-            key: val
-            for key, val in [
-                ("repeat", cfg.profiler_repeat),
-                ("skip_first", cfg.profiler_skip_first),
-                ("skip_first_wait", cfg.profiler_skip_first_wait),
-            ]
-            if val is not None
-        }
 
         rank = torch.distributed.get_rank()
         post_processor = (

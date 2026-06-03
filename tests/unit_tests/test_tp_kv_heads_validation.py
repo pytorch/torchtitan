@@ -24,6 +24,7 @@ try:
         sys.modules["triton"] = MagicMock()
         sys.modules["triton.language"] = MagicMock()
 
+    from torchtitan.config import ParallelismConfig
     from torchtitan.models.common import (
         compute_ffn_hidden_dim,
         Embedding,
@@ -43,14 +44,11 @@ _VOCAB_SIZE = 2048
 
 
 def _make_trainer_config(tp: int, seq_len: int = 2048):
-    """Minimal trainer_config stub with just the fields update_from_config reads."""
+    """Minimal config stub with just the fields update_from_config reads."""
     training = SimpleNamespace(seq_len=seq_len)
-    parallelism = SimpleNamespace(
+    parallelism = ParallelismConfig(
         tensor_parallel_degree=tp,
-        context_parallel_degree=1,
-        pipeline_parallel_degree=1,
         disable_loss_parallel=True,
-        enable_sequence_parallel=False,
     )
     return SimpleNamespace(training=training, parallelism=parallelism)
 
@@ -119,7 +117,7 @@ class TestTPKVHeadsValidation(unittest.TestCase):
         """n_kv_heads=2, tp=4 → fractional KV heads per rank → ValueError."""
         cfg = _make_llama3_config(n_heads=8, n_kv_heads=2)
         with self.assertRaises(ValueError):
-            cfg.update_from_config(trainer_config=_make_trainer_config(tp=4))
+            cfg.update_from_config(config=_make_trainer_config(tp=4))
 
     # ------------------------------------------------------------------
     # n_heads not divisible by TP  →  should raise
@@ -129,7 +127,7 @@ class TestTPKVHeadsValidation(unittest.TestCase):
         """n_heads=6, tp=4 → fractional Q heads per rank → ValueError."""
         cfg = _make_llama3_config(n_heads=6, n_kv_heads=6)
         with self.assertRaises(ValueError):
-            cfg.update_from_config(trainer_config=_make_trainer_config(tp=4))
+            cfg.update_from_config(config=_make_trainer_config(tp=4))
 
     # ------------------------------------------------------------------
     # Valid configs  →  should not raise
@@ -138,17 +136,17 @@ class TestTPKVHeadsValidation(unittest.TestCase):
     def test_llama3_valid_gqa_does_not_raise(self):
         """n_kv_heads=8, n_heads=16, tp=4 → both divisible → no error."""
         cfg = _make_llama3_config(n_heads=16, n_kv_heads=8)
-        cfg.update_from_config(trainer_config=_make_trainer_config(tp=4))
+        cfg.update_from_config(config=_make_trainer_config(tp=4))
 
     def test_llama3_mha_none_kv_heads_does_not_raise(self):
         """n_kv_heads=None (MHA, falls back to n_heads=16), tp=4 → no error."""
         cfg = _make_llama3_config(n_heads=16, n_kv_heads=None)
-        cfg.update_from_config(trainer_config=_make_trainer_config(tp=4))
+        cfg.update_from_config(config=_make_trainer_config(tp=4))
 
     def test_llama3_tp1_skips_check(self):
         """tp=1 → check skipped even with indivisible n_kv_heads."""
         cfg = _make_llama3_config(n_heads=8, n_kv_heads=3)
-        cfg.update_from_config(trainer_config=_make_trainer_config(tp=1))
+        cfg.update_from_config(config=_make_trainer_config(tp=1))
 
 
 if __name__ == "__main__":

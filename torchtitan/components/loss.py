@@ -11,6 +11,9 @@ from typing import TypeAlias
 
 import torch
 import torch.nn as nn
+from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
+from torch.distributed.tensor.experimental import local_map
+
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.tools.logging import logger
 
@@ -22,12 +25,88 @@ LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
+    if isinstance(pred, DTensor) and isinstance(labels, DTensor):
+        return _cross_entropy_via_local_map(pred, labels)
+
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
         labels.flatten(0, 1),
         reduction="sum",
         ignore_index=IGNORE_INDEX,
     )
+
+
+def _cross_entropy_via_local_map(pred: DTensor, labels: DTensor) -> torch.Tensor:
+    mesh = pred.device_mesh
+    # Labels don't have a vocab dim.
+    expected_labels_placements = tuple(
+        Replicate() if isinstance(p, Shard) and p.dim == 2 else p
+        for p in pred.placements
+    )
+    if labels.placements != expected_labels_placements:
+        raise ValueError(
+            f"cross_entropy_loss: expected labels placements {expected_labels_placements}, "
+            f"got {labels.placements}"
+        )
+
+    # After local flatten(0, 1), tensor dims are [batch*seq, vocab].
+    # Per-axis placement:
+    #   Shard on batch/seq -> Shard(0) (valid because reduction is sum)
+    #   Shard on vocab -> Shard(1)
+    def _flatten_placement(p):
+        if isinstance(p, Shard):
+            return Shard(0 if p.dim == 0 else p.dim - 1)
+        return p
+
+    vocab_sharded = any(isinstance(p, Shard) and p.dim == 2 for p in pred.placements)
+
+    # Per-axis output placement for sum reduction:
+    #   Shard on non-vocab-dim -> Partial
+    #   Shard on vocab-dim -> Replicate
+    out_placements = [
+        Partial() if isinstance(p, Shard) and p.dim != 2 else Replicate()
+        for p in pred.placements
+    ]
+
+    @local_map(
+        out_placements=out_placements,
+        in_placements=(pred.placements, labels.placements),
+        in_grad_placements=(pred.placements, labels.placements),
+        device_mesh=mesh,
+    )
+    def _local_cross_entropy(
+        pred_local: torch.Tensor, labels_local: torch.Tensor
+    ) -> torch.Tensor:
+        flat_pred = pred_local.flatten(0, 1).float()
+        flat_labels = labels_local.flatten(0, 1)
+        if not vocab_sharded:
+            return torch.nn.functional.cross_entropy(
+                flat_pred,
+                flat_labels,
+                reduction="sum",
+                ignore_index=IGNORE_INDEX,
+            )
+
+        # vocab_sharded == True => loss parallel case
+        # TODO: rewrite the entire loss parallel using megatron style.
+        flat_pred_placements = tuple(_flatten_placement(p) for p in pred.placements)
+        flat_labels_placements = tuple(_flatten_placement(p) for p in labels.placements)
+        pred_dtensor = DTensor.from_local(
+            flat_pred, mesh, flat_pred_placements, run_check=False
+        )
+        labels_dtensor = DTensor.from_local(
+            flat_labels, mesh, flat_labels_placements, run_check=False
+        )
+        loss_dtensor = torch.nn.functional.cross_entropy(
+            pred_dtensor,
+            labels_dtensor,
+            reduction="sum",
+            ignore_index=IGNORE_INDEX,
+        )
+        assert isinstance(loss_dtensor, DTensor)
+        return loss_dtensor.to_local()
+
+    return _local_cross_entropy(pred, labels)
 
 
 def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
@@ -107,8 +186,13 @@ class GradAccumulator:
     this uses a pre-allocated buffer with in-place copies for better memory efficiency.
 
     Args:
-        reference: Reference tensor to derive shape, device, and DTensor metadata.
-            If a DTensor, result() returns a DTensor with matching placements.
+        reference: Reference tensor for shape, device, and DTensor-ness. If a
+            DTensor, only its device mesh is reused; the placement of the
+            returned DTensor is taken from the first added chunk (see add()),
+            not from this reference, so the buffer is labeled with the actual
+            gradient placement (e.g. Partial(sum) on the TP axis when the
+            forward used a Replicate input with a Shard(0) weight, as in
+            ColwiseParallel lm_head) rather than the activation placement.
         num_chunks: Number of chunks that will be added.
         seq_dim: The sequence dimension along which chunks are accumulated.
         dtype: Dtype for the buffer.
@@ -135,12 +219,11 @@ class GradAccumulator:
         self.seq_dim = seq_dim
         self._next_idx = 0
         self._device_mesh: DeviceMesh | None = None
+        # Captured from the first added chunk; see __init__ docstring.
         self._placements: tuple[Placement, ...] | None = None
 
-        # Track DTensor metadata for transparent wrap-back in result()
         if isinstance(reference, DTensor):
             self._device_mesh = reference.device_mesh
-            self._placements = reference.placements
             local = reference.to_local()
         else:
             local = reference
@@ -157,9 +240,25 @@ class GradAccumulator:
         if self._next_idx >= self.num_chunks:
             raise ValueError(f"Already added {self.num_chunks} chunks, cannot add more")
 
-        # Extract local tensor if DTensor
         if isinstance(chunk_grad, DTensor):
+            if self._placements is None:
+                self._placements = chunk_grad.placements
+            elif chunk_grad.placements != self._placements:
+                # All chunks come from the same op chain and must share a
+                # placement. Otherwise the buffer mixes frames and result()
+                # would mislabel them.
+                raise ValueError(
+                    f"chunk_grad placement {chunk_grad.placements} does not "
+                    f"match first chunk's placement {self._placements}"
+                )
             chunk_grad = chunk_grad.to_local()
+        elif self._placements is not None:
+            # Earlier chunks were DTensor but this one is a plain tensor;
+            # mixing the two would silently drop the implied reduction.
+            raise ValueError(
+                "chunk_grad is a plain tensor but earlier chunks were "
+                f"DTensor with placement {self._placements}"
+            )
 
         if chunk_grad.dtype != self._buffer.dtype:
             chunk_grad = chunk_grad.to(self._buffer.dtype)
@@ -175,10 +274,21 @@ class GradAccumulator:
         self._next_idx += 1
 
     def result(self) -> torch.Tensor:
-        """Return the accumulated gradient tensor, wrapped as DTensor if needed."""
+        """Return the accumulated gradient tensor, wrapped as DTensor if needed.
+
+        When the chunks were Partial(sum), the returned DTensor is also
+        Partial(sum); autograd performs the implied reduction once when this
+        gradient lands on the decoder-side leaf.
+        """
         from torch.distributed.tensor import DTensor
 
         if self._device_mesh is not None:
+            if self._placements is None:
+                raise ValueError(
+                    "No DTensor chunk was added; cannot wrap the buffer as "
+                    "DTensor without a known placement. Either pass DTensor "
+                    "chunks to add(), or use a plain reference tensor."
+                )
             return DTensor.from_local(
                 self._buffer,
                 device_mesh=self._device_mesh,
@@ -264,7 +374,6 @@ class ChunkedCELoss(BaseLoss):
         through the decoder via a custom autograd Function.
         """
         from torch.distributed._composable.fsdp import FSDPModule
-        from torch.distributed.tensor import DTensor, Replicate
 
         hidden_states = pred
         num_chunks = self.num_chunks
@@ -287,19 +396,38 @@ class ChunkedCELoss(BaseLoss):
         # Check if it's training model or validation mode
         requires_grad = hidden_states.requires_grad
 
-        # Split hidden states and labels into chunks along seq dim.
-        # Use .contiguous() to break shared storage from torch.chunk().
-        # TODO: When CP mesh is in DTensor, chunking along dim=1 won't work
-        # directly with Shard(1) on CP. Need local_map to operate on local tensors
-        h_detached = hidden_states.detach().requires_grad_(requires_grad)
+        # Chunking always operates on the *local* view: when ``t`` is a
+        # Shard(1) DTensor, chunking the global view would distribute whole
+        # chunks across ranks (e.g. size=2, num_chunks=8: chunks 0-3 on
+        # rank 0, 4-7 on rank 1), leaving half the per-chunk DTensors with
+        # local seq=0 and breaking GradAccumulator's slice writes.
+        # ``local_map`` runs the chunking body on plain tensors; under the
+        # non-DTensor (eager) path we call ``_chunk_local`` directly.
+        # ``.contiguous()`` breaks shared storage from ``torch.chunk``.
+        def _chunk_local(t):
+            return tuple(c.contiguous() for c in torch.chunk(t, num_chunks, dim=1))
+
+        def _chunk(t):
+            if not isinstance(t, DTensor):
+                return _chunk_local(t)
+            p = t.placements
+            wrapped = local_map(
+                _chunk_local,
+                out_placements=(p,) * num_chunks,
+                in_placements=(p,),
+                device_mesh=t.device_mesh,
+            )
+            return wrapped(t)
+
+        # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
+        # accumulates ``.grad`` for ``GradAccumulator``.
         h_chunks = [
-            c.contiguous().detach().requires_grad_(requires_grad)
-            for c in torch.chunk(h_detached, num_chunks, dim=1)
+            c.detach().requires_grad_(requires_grad) for c in _chunk(hidden_states)
         ]
-        label_chunks = torch.chunk(labels, num_chunks, dim=1)
+        label_chunks = list(_chunk(labels))
 
         grad_accumulator = GradAccumulator(
-            h_detached,
+            hidden_states,
             num_chunks=num_chunks,
             dtype=torch.float32,
         )
@@ -345,10 +473,25 @@ class ChunkedCELoss(BaseLoss):
 
         accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
-        # Return a differentiable loss via _DecoderOutputGradientBackProp. When
-        # .backward() is called (by the trainer or PP schedule), autograd
-        # calls _DecoderOutputGradientBackProp.backward which returns accumulated_grad
-        # as the gradient for hidden_states, propagating through the decoder.
+        return self._gradient_backprop(
+            hidden_states, accumulated_grad, total_loss, lm_head, fsdp_enabled
+        )
+
+    @staticmethod
+    def _gradient_backprop(
+        hidden_states: torch.Tensor,
+        accumulated_grad: torch.Tensor,
+        total_loss: torch.Tensor,
+        lm_head: nn.Module,
+        fsdp_enabled: bool,
+    ) -> torch.Tensor:
+        """Return a differentiable loss via _DecoderOutputGradientBackProp.
+        When ``.backward()`` is called (by the trainer or PP schedule),
+        autograd calls ``_DecoderOutputGradientBackProp.backward`` which
+        returns ``accumulated_grad`` as the gradient for ``hidden_states``,
+        propagating through the decoder. Subclasses override to swap in a
+        different autograd Function.
+        """
         return _DecoderOutputGradientBackProp.apply(
             hidden_states, accumulated_grad, total_loss
         )
@@ -358,8 +501,8 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
     """Bridges chunked lm_head backward with decoder backward via autograd.
 
     Forward takes hidden_states (connected to decoder graph), the accumulated
-    gradient from chunked lm_head backward, and the loss value. Returns the
-    loss value as a differentiable tensor.
+    gradient from chunked lm_head backward, and the loss value. Returns a
+    detached loss with this Function as its grad_fn.
 
     Backward returns accumulated_grad as the gradient for hidden_states.
     Autograd then propagates this through the decoder layers automatically —
@@ -375,9 +518,7 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         loss: torch.Tensor,
     ) -> torch.Tensor:
         ctx.save_for_backward(accumulated_grad)
-        # Return a tensor with the correct loss value. We clone to avoid
-        # in-place issues, and the grad_fn comes from this Function.
-        return loss.detach().clone()
+        return loss.detach()
 
     @staticmethod
     def backward(  # pyrefly: ignore[bad-override]
@@ -389,4 +530,8 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         # decoder graph — equivalent to hidden_states.backward(accumulated_grad)
         # but expressed as a return value so autograd handles the traversal
         # in a single pass (no "backward through graph twice" error).
+        # Note: this is not safe if downstream accidentally runs tensor ops after
+        # the loss returns, which would produce a non-trivial grad_output that we need
+        # to properly handle. The complicated part is that grad_output might not be
+        # on the same device mesh as accumlated_grad.
         return accumulated_grad, None, None

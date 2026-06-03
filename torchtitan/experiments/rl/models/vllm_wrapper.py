@@ -12,21 +12,17 @@ TorchTitan models for vLLM.
 """
 
 import dataclasses
+from dataclasses import dataclass
 
 import torch
 import torch._dynamo
 import torch.distributed as dist
-import torch.distributed.checkpoint as dcp
 from torch.distributed._tensor import DTensor, Replicate
-from torch.distributed.checkpoint.state_dict import (
-    set_model_state_dict,
-    StateDictOptions,
-)
 
+from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
-    DebugConfig,
     ParallelismConfig,
     TrainingConfig,
 )
@@ -120,6 +116,7 @@ class VLLMModelWrapper(Module):
         model_spec: ModelSpec,
         parallelism: ParallelismConfig,
         compile_config: CompileConfig,
+        checkpoint_config: CheckpointManager.Config,
         vllm_config: VllmConfig,
         prefix: str = "",
     ):
@@ -183,18 +180,15 @@ class VLLMModelWrapper(Module):
 
         # Fill sharding configs on the config BEFORE build so every sub-module
         # is constructed with its ShardingConfig attached (required by the
-        # declarative model.parallelize() API).
-        # TODO: Refactor update_from_config to accept ParallelismConfig
-        # directly instead of requiring a trainer_config wrapper.
-        from types import SimpleNamespace
+        # declarative model.parallelize() API). Need to be called after Attention
+        # module replacement.
+        # Provides the generic config shape (has .parallelism) so
+        # update_from_config can extract parallelism uniformly.
+        @dataclass(kw_only=True, slots=True)
+        class _InferenceConfig:
+            parallelism: ParallelismConfig
 
-        self.config.update_from_config(
-            trainer_config=SimpleNamespace(
-                training=TrainingConfig(),
-                parallelism=parallelism,
-                debug=DebugConfig(),
-            )
-        )
+        self.config.update_from_config(config=_InferenceConfig(parallelism=parallelism))
 
         # Build model on meta device to avoid allocating full model on every
         # GPU. This is critical for large MoE models where replicating all
@@ -203,9 +197,6 @@ class VLLMModelWrapper(Module):
         # shards on the actual device.
         with torch.device("meta"):
             self.model = self.config.build()
-
-        # RoPE config from model for cache extension
-        self.rope_config = self.config.rope
 
         # With TP, collectives may return AsyncCollectiveTensor (overlap
         # path) or plain Tensor (sync path) depending on timing.  Dynamo
@@ -227,6 +218,9 @@ class VLLMModelWrapper(Module):
             skip_dp=True,
         )
 
+        # Load initial weights based on checkpoint config.
+        self._checkpoint_config = checkpoint_config
+
         # vLLM runs under torch.inference_mode(); the autograd functional
         # collectives don't dispatch correctly there. Flip MoE token
         # dispatchers to the non-autograd a2a path. Read at trace time.
@@ -244,62 +238,8 @@ class VLLMModelWrapper(Module):
         # model) thanks to EP/TP DTensor sharding applied above.
         device_type = vllm_config.device_config.device.type
         self.model.to_empty(device=device_type)
+        self._maybe_initial_load_weights()
 
-        # Pre-extend RoPE cache to cover vLLM's max model length (profiling
-        # may use up to 2x max_seq_len, so use max_model_len which already
-        # accounts for this). This avoids data-dependent control flow in
-        # forward() which is incompatible with torch.compile.
-        max_model_len = vllm_config.model_config.max_model_len
-        if self.model.freqs_cis.shape[0] < max_model_len:
-            self.model.freqs_cis = self._extend_rope_cache(
-                self.model.freqs_cis, max_model_len
-            )
-
-        # Initial load model weights from HuggingFace checkpoint path.
-        self._initial_load_weights(checkpoint_path=vllm_config.model_config.model)
-
-    def _extend_rope_cache(
-        self, rope_cache: torch.Tensor, required_len: int
-    ) -> torch.Tensor:
-        """
-        Build an extended RoPE cache of at least ``required_len`` positions.
-
-        Args:
-            rope_cache: Current RoPE cache tensor
-            required_len: Minimum number of positions the cache must cover
-
-        Returns:
-            Extended RoPE cache tensor
-        """
-        # Handle DTensor case
-        is_dtensor = isinstance(rope_cache, DTensor)
-        if is_dtensor:
-            device_mesh = rope_cache.device_mesh
-            local_rope_cache = rope_cache.to_local()
-            device = local_rope_cache.device
-            dtype = local_rope_cache.dtype
-        else:
-            device = rope_cache.device
-            dtype = rope_cache.dtype
-
-        # Build a new RoPE module with extended max_seq_len
-        extended_rope_config = dataclasses.replace(
-            self.rope_config, max_seq_len=required_len
-        )
-        extended_rope = extended_rope_config.build()
-        extended_cache = extended_rope.cache.to(device=device, dtype=dtype)
-
-        # Convert back to DTensor if needed
-        if is_dtensor:
-            rope_cache = DTensor.from_local(
-                extended_cache,
-                device_mesh=device_mesh,
-                placements=[Replicate()],
-            )
-        else:
-            rope_cache = extended_cache
-
-        return rope_cache
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """vLLM required API.
@@ -391,81 +331,37 @@ class VLLMModelWrapper(Module):
 
         return logits
 
-    def load_weights_from_state_dict(self, state_dict):
+    def _maybe_initial_load_weights(self) -> None:
+        """Load initial HF weights via CheckpointManager.
+
+        Controlled by ``self._checkpoint_config``:
+        - ``enable=True`` and ``initial_load_in_hf=True``: load from HF
+          via CheckpointManager (standalone inference path).
+        - ``enable=False``: skip (RL loop — weights arrive via TorchStore).
         """
-        Load model weights from a state dict.
+        cfg = self._checkpoint_config
+        if not cfg.enable:
+            return
 
-        Expects DTensor-wrapped tensors matching the model's placements.
-        The caller is responsible for reconstructing DTensors from plain
-        local tensors before calling this method.
-        """
-        set_model_state_dict(
-            model=self.model,
-            model_state_dict=state_dict,
-            options=StateDictOptions(strict=False),
-        )
-
-        return state_dict.keys()
-
-    def _initial_load_weights(self, checkpoint_path):
-        """
-        Helper function to load torchtitan model weights from HF checkpoint when initialize this model.
-
-        Args:
-            checkpoint_path: Path to the HuggingFace checkpoint directory
-        """
-        # Create adapter instance
-        adapter = self.state_dict_adapter(
-            model_config=self.config,
-            hf_assets_path=None,
-        )
-
-        # Get HF storage reader from adapter
-        storage_reader = adapter.get_hf_storage_reader(checkpoint_path)
-
-        # Load HF state dict using DCP
-        hf_state_dict = adapter.to_hf(self.model.state_dict())
-
-        # TODO: remove the ``expert_bias`` exemption after #3000 lands and the
-        # affected models switch to aux-loss-based LB (load_balance_coeff=None).
-        # Until then, HF MoE checkpoints don't carry ``expert_bias``, so ignore
-        # it; any other missing key still raises.
-        hf_keys_in_checkpoint = set(
-            storage_reader.read_metadata().state_dict_metadata.keys()
-        )
-        missing = set(hf_state_dict.keys()) - hf_keys_in_checkpoint
-        unexpected_missing = {k for k in missing if not k.endswith(".expert_bias")}
-        if unexpected_missing:
-            raise ValueError(
-                f"HF checkpoint at {checkpoint_path} is missing keys "
-                f"required by the model: {sorted(unexpected_missing)}"
+        sd_adapter = None
+        if self.state_dict_adapter is not None:
+            sd_adapter = self.state_dict_adapter(
+                model_config=self.config,
+                hf_assets_path=cfg.initial_load_path,
             )
-        hf_state_dict = {
-            k: v for k, v in hf_state_dict.items() if k in hf_keys_in_checkpoint
-        }
 
-        dcp.load(hf_state_dict, storage_reader=storage_reader)
-
-        # Convert HF state dict to TorchTitan format
-        torchtitan_state_dict = adapter.from_hf(hf_state_dict)
-
-        model_state_dict = {k: v for k, v in self.model.state_dict().items()}
-
-        # Convert to DTensor if target is DTensor (when the target model is sharded)
-        # This only happens when initial loading from HF full state dict
-        for name, tensor in torchtitan_state_dict.items():
-            if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
-                if isinstance(tensor, DTensor):
-                    continue
-                target_dtensor = model_state_dict[name]
-                device_mesh = target_dtensor.device_mesh
-                torchtitan_state_dict[name] = DTensor.from_local(
-                    tensor.to(device_mesh.device_type),
-                    device_mesh=device_mesh,
-                    placements=[Replicate()] * device_mesh.ndim,
-                )
-
-        return self.load_weights_from_state_dict(torchtitan_state_dict)
+        # Model-only CheckpointManager: initial_load_model_only=True (default)
+        # ensures only MODEL state is loaded, so None optimizer/lr_scheduler
+        # are never accessed.
+        checkpointer = cfg.build(
+            dataloader=None,
+            model_parts=[self.model],
+            optimizers=None,
+            lr_schedulers=None,
+            states={},
+            sd_adapter=sd_adapter,
+        )
+        checkpointer.load()
 
     def load_weights(self, weights_iter):
         """

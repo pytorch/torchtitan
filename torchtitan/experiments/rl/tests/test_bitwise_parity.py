@@ -51,6 +51,8 @@ from vllm.config import AttentionConfig
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from torchtitan.components.checkpoint import CheckpointManager
+
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
@@ -112,7 +114,7 @@ def build_trainer_model(
     # so each Module is constructed with its ShardingConfig / LocalMapConfig.
     # Without this the trainer side would run un-parallelized while the vLLM
     # generator runs fully TP-parallelized, breaking trainer-vs-vLLM parity.
-    model_spec.model.update_from_config(trainer_config=config.trainer)
+    model_spec.model.update_from_config(config=config.trainer)
 
     # Build on meta device, parallelize, then materialize
     with torch.device("meta"):
@@ -203,6 +205,7 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     if not has_cuda_capability(9, 0):
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
+    engine_kwargs["max_model_len"] = config.model_spec.model.rope.max_seq_len
     max_num_seqs = config.num_prompts_per_step * gen_config.sampling.n
     engine_kwargs["max_num_seqs"] = max_num_seqs
     vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
@@ -451,6 +454,11 @@ class TestBitwiseParity(unittest.TestCase):
             config.model_spec,
             parallelism=config.generator.parallelism,
             compile_config=config.compile,
+            checkpoint_config=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                initial_load_path=config.hf_assets_path,
+            ),
         )
 
         # Test runs trainer and generator in the same process, so limit
