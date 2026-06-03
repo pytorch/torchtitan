@@ -37,6 +37,14 @@ from typing import Any, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+from torch.optim._muon import (
+    _adjust_lr,
+    DEFAULT_A,
+    DEFAULT_B,
+    DEFAULT_C,
+    DEFAULT_NS_STEPS,
+    EPS,
+)
 
 from ..flex_shard.bucket_storage import BucketSpec
 from ..flex_shard.sharded_param import get_global_shape, get_placements
@@ -52,6 +60,7 @@ __all__ = [
     "build_muon_param_groups",
     "CombinedOptimizer",
     "comm_free_muon_buckets",
+    "GroupedMuon",
 ]
 
 
@@ -141,8 +150,13 @@ MuonParamPredicate = Callable[[str, "torch.Size | None"], bool]
 
 
 def _default_muon_predicate(fqn: str, global_shape: torch.Size | None) -> bool:
-    """Muon-eligible iff the parameter is a 2D matrix."""
-    return global_shape is not None and len(global_shape) == 2
+    """Muon-eligible iff a 2D matrix or a stack of matrices (>= 3D, e.g. MoE experts).
+
+    build_comm_free_muon_optimizers routes 2D params to ``torch.optim.Muon`` and
+    >= 3D stacked params (grouped experts) to :class:`GroupedMuon`, which runs a
+    batched Newton-Schulz over the leading dim(s).
+    """
+    return global_shape is not None and len(global_shape) >= 2
 
 
 def build_muon_param_groups(
@@ -234,6 +248,145 @@ class CombinedOptimizer:
             optimizer.load_state_dict(sub_state)
 
 
+def _grouped_zeropower_via_newtonschulz(
+    grad: torch.Tensor,
+    ns_coefficients: tuple[float, float, float],
+    ns_steps: int,
+    eps: float,
+) -> torch.Tensor:
+    """Batched Newton-Schulz over the leading dim(s) of a ``>= 3D`` tensor.
+
+    Treats ``grad`` of shape ``(*lead, m, n)`` as a batch of ``(m, n)`` matrices and
+    orthogonalizes each independently. Mirrors ``torch.optim``'s
+    ``_zeropower_via_newtonschulz`` exactly, but with ``baddbmm`` / ``transpose(-2,
+    -1)`` and a per-matrix norm, so the result equals running the 2D iteration on
+    each matrix separately. Returns bfloat16 (like the upstream helper).
+    """
+    if grad.ndim < 3:
+        raise ValueError("grouped Newton-Schulz expects a >= 3D (batched) tensor")
+    if ns_steps >= 100:
+        raise ValueError(
+            "Number of steps must be less than 100 for computational efficiency"
+        )
+    if len(ns_coefficients) != 3:
+        raise ValueError("Coefficients must be a tuple of exactly 3 values")
+    a, b, c = ns_coefficients
+    lead = grad.shape[:-2]
+    m, n = grad.shape[-2], grad.shape[-1]
+    ortho = grad.reshape(-1, m, n).bfloat16()
+    transposed = m > n
+    if transposed:
+        ortho = ortho.transpose(-2, -1)
+    # Per-matrix spectral-norm proxy (Frobenius norm is transpose-invariant).
+    ortho = ortho.div_(ortho.norm(dim=(-2, -1), keepdim=True).clamp(min=eps))
+    for _ in range(ns_steps):
+        gram = torch.bmm(ortho, ortho.transpose(-2, -1))
+        gram_update = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
+        ortho = torch.baddbmm(ortho, gram_update, ortho, beta=a)
+    if transposed:
+        ortho = ortho.transpose(-2, -1)
+    return ortho.reshape(*lead, m, n)
+
+
+class GroupedMuon(torch.optim.Optimizer):
+    """Muon for stacked weight matrices (``ndim >= 3``), e.g. MoE grouped experts.
+
+    A parameter of shape ``(*lead, m, n)`` is treated as a batch of ``(m, n)``
+    matrices: Newton-Schulz runs batched over the leading dim(s), orthogonalizing
+    each matrix independently. This is numerically identical to running
+    ``torch.optim.Muon`` on each ``(m, n)`` sub-matrix separately (same momentum,
+    Nesterov, decoupled weight decay, LR adjustment, and NS coefficients). Use
+    ``torch.optim.Muon`` for plain 2D matrices.
+    """
+
+    def __init__(
+        self,
+        params: Any,
+        lr: float = 1e-3,
+        weight_decay: float = 0.1,
+        momentum: float = 0.95,
+        nesterov: bool = True,
+        ns_coefficients: tuple[float, float, float] = (DEFAULT_A, DEFAULT_B, DEFAULT_C),
+        eps: float = EPS,
+        ns_steps: int = DEFAULT_NS_STEPS,
+        adjust_lr_fn: str | None = None,
+    ) -> None:
+        if not 0.0 <= lr:
+            raise ValueError(f"Learning rate should be >= 0 but is: {lr}")
+        if not 0.0 <= momentum:
+            raise ValueError(f"momentum should be >= 0 but is: {momentum}")
+        if not 0.0 <= weight_decay:
+            raise ValueError(f"weight decay should be >= 0 but is: {weight_decay}")
+        if adjust_lr_fn is not None and adjust_lr_fn not in (
+            "original",
+            "match_rms_adamw",
+        ):
+            raise ValueError(
+                f"Adjust learning rate function {adjust_lr_fn} is not supported"
+            )
+        defaults = {
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "momentum": momentum,
+            "nesterov": nesterov,
+            "ns_coefficients": ns_coefficients,
+            "eps": eps,
+            "ns_steps": ns_steps,
+            "adjust_lr_fn": adjust_lr_fn,
+        }
+        super().__init__(params, defaults)
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.ndim < 3:
+                    raise ValueError(
+                        "GroupedMuon expects stacked matrices with ndim >= 3 "
+                        f"(e.g. grouped experts), but found shape {tuple(p.size())}. "
+                        "Use torch.optim.Muon for 2D parameters."
+                    )
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        """Perform a single optimization step (batched Muon over leading dims)."""
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = group["lr"]
+            weight_decay = group["weight_decay"]
+            momentum = group["momentum"]
+            nesterov = group["nesterov"]
+            ns_coefficients = group["ns_coefficients"]
+            eps = group["eps"]
+            ns_steps = group["ns_steps"]
+            adjust_lr_fn = group["adjust_lr_fn"]
+
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                grad = p.grad
+                if grad.is_sparse:
+                    raise RuntimeError("GroupedMuon does not support sparse gradients")
+
+                state = self.state[p]
+                if "momentum_buffer" not in state:
+                    state["momentum_buffer"] = torch.zeros_like(
+                        grad, memory_format=torch.preserve_format
+                    )
+                buf = state["momentum_buffer"]
+                buf.lerp_(grad, 1 - momentum)
+                update = grad.lerp(buf, momentum) if nesterov else buf
+                update = _grouped_zeropower_via_newtonschulz(
+                    update, ns_coefficients, ns_steps, eps
+                )
+                # LR adjustment uses the per-matrix shape (m, n), not the batch dim.
+                adjusted_lr = _adjust_lr(lr, adjust_lr_fn, p.shape[-2:])
+                p.mul_(1 - lr * weight_decay)
+                p.add_(update, alpha=-adjusted_lr)
+        return loss
+
+
 def build_comm_free_muon_optimizers(
     model: nn.Module,
     mesh: DeviceMesh,
@@ -244,9 +397,11 @@ def build_comm_free_muon_optimizers(
 ) -> CombinedOptimizer:
     """Build this rank's Muon + AdamW optimizers for communication-free Muon.
 
-    Muon optimizes this rank's owned 2D matrices (full tensors, so Newton-Schulz is
-    exact and local); AdamW optimizes the rest of this rank's local parameters.
-    Sub-optimizers with no parameters on this rank are omitted.
+    ``torch.optim.Muon`` optimizes this rank's owned 2D matrices and
+    :class:`GroupedMuon` optimizes its owned ``>= 3D`` stacked matrices (e.g. MoE
+    grouped experts) via batched Newton-Schulz -- both on full tensors, so the
+    iteration is exact and local. AdamW optimizes the rest of this rank's local
+    parameters. Sub-optimizers with no parameters on this rank are omitted.
 
     Args:
         model: A model already wrapped by ``flex_shard`` (see
@@ -265,9 +420,15 @@ def build_comm_free_muon_optimizers(
         mesh,
         muon_param_predicate=muon_param_predicate,
     )
+    # 2D matrices -> torch.optim.Muon; >= 3D stacked matrices (e.g. MoE grouped
+    # experts) -> GroupedMuon (batched Newton-Schulz over the leading dim(s)).
+    muon_2d = [p for p in muon_params if p.ndim == 2]
+    muon_grouped = [p for p in muon_params if p.ndim >= 3]
     optimizers: list[torch.optim.Optimizer] = []
-    if muon_params:
-        optimizers.append(torch.optim.Muon(muon_params, **(muon_kwargs or {})))
+    if muon_2d:
+        optimizers.append(torch.optim.Muon(muon_2d, **(muon_kwargs or {})))
+    if muon_grouped:
+        optimizers.append(GroupedMuon(muon_grouped, **(muon_kwargs or {})))
     if other_params:
         optimizers.append(torch.optim.AdamW(other_params, **(adamw_kwargs or {})))
     return CombinedOptimizer(optimizers)

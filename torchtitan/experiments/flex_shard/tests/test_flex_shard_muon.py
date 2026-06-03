@@ -26,6 +26,7 @@ from torchtitan.experiments.flex_shard.example.muon import (
     build_muon_param_groups,
     CombinedOptimizer,
     comm_free_muon_buckets,
+    GroupedMuon,
 )
 from torchtitan.experiments.flex_shard.example.owned import (
     assign_layer_owners_lpt,
@@ -274,6 +275,66 @@ class TestCommFreeMuonHelpers(TestCase):
             _reshard_after_forward_policy(None, torch.ops.aten.mm.default),
             CheckpointPolicy.PREFER_RECOMPUTE,
         )
+
+    def test_grouped_muon_matches_per_expert_torch_muon(self) -> None:
+        # GroupedMuon on a (num_experts, m, n) stack must equal running
+        # torch.optim.Muon on each expert's 2D slice separately.
+        torch.manual_seed(0)
+        num_experts, m, n = 6, 48, 32
+        kwargs = dict(lr=0.02, momentum=0.9, weight_decay=0.01, nesterov=True)
+        w0 = torch.randn(num_experts, m, n)
+
+        grouped = nn.Parameter(w0.clone())
+        grouped_opt = GroupedMuon([grouped], **kwargs)
+
+        per_expert = [nn.Parameter(w0[e].clone()) for e in range(num_experts)]
+        per_expert_opt = torch.optim.Muon(per_expert, **kwargs)
+
+        for _ in range(3):  # multiple steps to exercise the momentum buffer
+            g = torch.randn(num_experts, m, n)
+            grouped_opt.zero_grad(set_to_none=True)
+            per_expert_opt.zero_grad(set_to_none=True)
+            grouped.grad = g.clone()
+            for e in range(num_experts):
+                per_expert[e].grad = g[e].clone()
+            grouped_opt.step()
+            per_expert_opt.step()
+
+        expected = torch.stack([p.detach() for p in per_expert])
+        self.assertEqual(grouped.detach(), expected)
+
+    def test_grouped_muon_matches_per_matrix_for_4d(self) -> None:
+        # >3D stacks (e.g. (E1, E2, m, n)) flatten leading dims and still match.
+        torch.manual_seed(1)
+        shape = (2, 3, 40, 24)
+        m, n = shape[-2], shape[-1]
+        kwargs = dict(lr=0.02, momentum=0.9, weight_decay=0.0)
+        w0 = torch.randn(*shape)
+
+        grouped = nn.Parameter(w0.clone())
+        grouped_opt = GroupedMuon([grouped], **kwargs)
+
+        flat0 = w0.reshape(-1, m, n)
+        per_matrix = [nn.Parameter(flat0[i].clone()) for i in range(flat0.shape[0])]
+        per_matrix_opt = torch.optim.Muon(per_matrix, **kwargs)
+
+        for _ in range(2):
+            g = torch.randn(*shape)
+            grouped_opt.zero_grad(set_to_none=True)
+            per_matrix_opt.zero_grad(set_to_none=True)
+            grouped.grad = g.clone()
+            gf = g.reshape(-1, m, n)
+            for i in range(gf.shape[0]):
+                per_matrix[i].grad = gf[i].clone()
+            grouped_opt.step()
+            per_matrix_opt.step()
+
+        expected = torch.stack([p.detach() for p in per_matrix]).reshape(*shape)
+        self.assertEqual(grouped.detach(), expected)
+
+    def test_grouped_muon_rejects_2d(self) -> None:
+        with self.assertRaisesRegex(ValueError, "ndim >= 3"):
+            GroupedMuon([nn.Parameter(torch.zeros(4, 4))], lr=0.01)
 
 
 class TestCommFreeMuon(FSDPTest):

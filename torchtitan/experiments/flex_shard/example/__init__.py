@@ -9,6 +9,7 @@ from .muon import (
     build_muon_param_groups,
     CombinedOptimizer,
     comm_free_muon_buckets,
+    GroupedMuon,
 )
 from .owned import (
     assign_layer_owners_lpt,
@@ -31,6 +32,7 @@ __all__ = [
     "build_muon_param_groups",
     "CombinedOptimizer",
     "comm_free_muon_buckets",
+    "GroupedMuon",
     "GroupedRaggedShard",
     "make_grouped_ragged_placement_fn",
     "make_owned_placement_fn",
