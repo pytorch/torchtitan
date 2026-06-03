@@ -71,7 +71,7 @@ def _mesh_stack() -> list[DeviceMesh | None]:
 
 def current_mesh() -> DeviceMesh | None:
     """Return the current runtime mesh, or ``None`` if unset."""
-    if _spmd_backend != "spmd":
+    if _spmd_backend != "spmd_types":
         return None
     stack = _mesh_stack()
     if not stack:
@@ -93,7 +93,7 @@ def mesh_size(axis_name: str) -> int:
 @contextlib.contextmanager
 def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
     """Set TorchTitan and spmd_types current mesh state for one runtime region."""
-    if _spmd_backend != "spmd":
+    if _spmd_backend != "spmd_types":
         yield
         return
 
@@ -250,7 +250,7 @@ def annotate_input_spmd_types(
     Hardcodes the standard decoder convention: inputs and positions are
     ``S(0)@DP, S(1)@CP, R@TP``; labels are ``S(0)@DP, S(1)@CP, I@TP``.
     Analogous to ``full_dtensor.parallelize_inputs()`` but for the
-    local-tensor SPMD path.
+    ``spmd_types`` path.
     """
     from torchtitan.protocols.types import MeshAxisName, NamedPlacement
 

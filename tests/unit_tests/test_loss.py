@@ -667,7 +667,7 @@ class TestChunkedCELossSPMD(DTensorTestBase):
                     h_grad_ref = h_ref.grad.clone()
 
                     h_spmd = hidden_cp.clone().detach().requires_grad_(True)
-                    set_spmd_backend("spmd")
+                    set_spmd_backend("spmd_types")
                     try:
                         with set_current_spmd_mesh(mesh):
                             hidden_type = {

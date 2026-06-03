@@ -154,7 +154,7 @@ class TestVocabParallelEmbedding(DTensorTestBase):
                     # The module returns P@TP; the Module sharding wrapper owns
                     # the final P -> S(1)/I redistribution.
                     out_type = spmd.S(1) if enable_sp else spmd.I
-                    set_spmd_backend("spmd")
+                    set_spmd_backend("spmd_types")
                     try:
                         with set_current_spmd_mesh(mesh):
                             with typecheck(strict_mode="strict", local=True):
