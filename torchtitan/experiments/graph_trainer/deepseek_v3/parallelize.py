@@ -13,11 +13,18 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.full_dtensor import (
+    resolve_fsdp_mesh,
+    resolve_sparse_fsdp_mesh,
+    validate_config,
+)
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
     apply_cp_to_attention,
     apply_simple_fsdp,
+    legacy_dp_mesh,
+    legacy_edp_mesh,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
@@ -70,9 +77,6 @@ def parallelize_deepseekv3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
         """
 
-    if parallel_dims.cp_enabled:
-        apply_cp_to_attention(model, parallel_dims)
-
     annotate_deepseekv3(model)
 
     # Read comm_backend from the model's token dispatcher config
@@ -87,16 +91,37 @@ def parallelize_deepseekv3(
     if is_hybridep:
         from torchtitan.distributed.deepep import hybridep  # noqa: F401
 
-    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+    if parallelism.full_dtensor:
+        validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)
+    else:
+        if parallel_dims.cp_enabled:
+            apply_cp_to_attention(model, parallel_dims)
+        if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+            model.parallelize(parallel_dims)
 
     if parallel_dims.tp_enabled:
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
-    # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
-    # real backend (see ParallelDims._mesh_exist), even at degree 1, so that
-    # MixedPrecisionPolicy's param_dtype cast still applies in single-GPU runs.
-    model = apply_simple_fsdp(model, parallel_dims=parallel_dims, training=training)
+    # Always run simple_fsdp. The DP mesh always exists with a real backend
+    # (see ParallelDims._mesh_exist), even at degree 1, so the
+    # MixedPrecisionPolicy param_dtype cast still applies in single-GPU runs.
+    if parallelism.full_dtensor:
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
+    else:
+        dp_mesh, dp_mesh_dims = legacy_dp_mesh(parallel_dims), None
+        edp_mesh, edp_mesh_dims = legacy_edp_mesh(parallel_dims), None
+
+    model = apply_simple_fsdp(
+        model,
+        dp_mesh,
+        edp_mesh,
+        training=training,
+        ep_degree=parallel_dims.ep,
+        dp_mesh_dims=dp_mesh_dims,
+        edp_mesh_dims=edp_mesh_dims,
+    )
 
     # TODO: HybridEP applies to other sparse models (e.g. Qwen3). Refactor
     # the common HybridEP buffer init into a shared utility.

@@ -10,7 +10,7 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Partial
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.models.common.feed_forward import FeedForward
@@ -27,6 +27,18 @@ from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
 #       per-local-expert token counts after EP dispatch /_permute),
 #   K = top-k, T = num tokens (B*L flattened),
 #   N = routed tokens (T*K), R = routed tokens assigned to local experts
+
+
+def _grad_dual(param: DTensor) -> list:
+    """Gradient placements for a parameter ``to_local`` (the R->P duality).
+
+    A weight that is ``Replicate`` on a data-parallel axis has a ``Partial``
+    gradient on that axis; ``Shard``/``Partial`` axes are self-dual. This is
+    what a plain DTensor op's backward produces; passing it to ``to_local``
+    keeps manual unwrapping consistent instead of defaulting to the forward
+    Replicate placement.
+    """
+    return [Partial() if p.is_replicate() else p for p in param.placements]
 
 
 class GroupedExperts(Module):
@@ -67,11 +79,15 @@ class GroupedExperts(Module):
         if isinstance(self.w1_EFD, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            w1_EFD = self.w1_EFD.to_local()
-            assert isinstance(self.w2_EDF, DTensor)
-            w2_EDF = self.w2_EDF.to_local()
-            assert isinstance(self.w3_EFD, DTensor)
-            w3_EFD = self.w3_EFD.to_local()
+            # grad_placements applies the R->P duality (a replicated weight has a
+            # Partial gradient): without it ``to_local`` defaults to keeping the
+            # forward Replicate placement on the FSDP axes, mislabeling the
+            # data-parallel gradient as Replicate.
+            w1_EFD = self.w1_EFD.to_local(grad_placements=_grad_dual(self.w1_EFD))
+            # pyrefly: ignore [missing-attribute, bad-argument-type]
+            w2_EDF = self.w2_EDF.to_local(grad_placements=_grad_dual(self.w2_EDF))
+            # pyrefly: ignore [missing-attribute, bad-argument-type]
+            w3_EFD = self.w3_EFD.to_local(grad_placements=_grad_dual(self.w3_EFD))
         else:
             w1_EFD = self.w1_EFD
             w2_EDF = self.w2_EDF
