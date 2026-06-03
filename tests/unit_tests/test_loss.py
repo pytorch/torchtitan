@@ -309,11 +309,14 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                 ):
                     # Build global test data once, then let DTensor derive the
                     # exact local shards for TP-only and DP+TP placements.
-                    torch.manual_seed(seed)
+                    generator = torch.Generator(device=self.device_type).manual_seed(
+                        seed
+                    )
                     global_logits = torch.randn(
                         num_tokens,
                         vocab_size,
                         device=self.device_type,
+                        generator=generator,
                     )
                     global_labels = torch.randint(
                         0,
@@ -321,6 +324,7 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         (num_tokens,),
                         device=self.device_type,
                         dtype=torch.long,
+                        generator=generator,
                     )
                     if ignore:
                         mask = torch.rand(
@@ -431,12 +435,9 @@ class _FakeVocabParallelLmHead(nn.Module):
         self.weight = nn.Parameter(torch.empty(global_vocab_size // tp_degree, dim))
         self.out_features = global_vocab_size
         self.tp_group = tp_group
-        self.enable_sp = enable_sp
         self.loss_parallel = loss_parallel
         self.sharding_config = lm_head_sharding_config(
             loss_parallel=loss_parallel,
-            enable_sp=enable_sp,
-            spmd_backend="spmd",
         )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -532,13 +533,14 @@ class TestChunkedCELoss(unittest.TestCase):
         hidden_states = torch.randn(B, L, D)
 
         losses = []
+        ref_state_dict = None
         for num_chunks in [1, 2, 4, 8]:
             model, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
             # Use same lm_head weights
-            if losses:
-                model.output.load_state_dict(ref_state_dict)
-            else:
+            if ref_state_dict is None:
                 ref_state_dict = model.output.state_dict()
+            else:
+                model.output.load_state_dict(ref_state_dict)
 
             h = hidden_states.detach().requires_grad_(True)
 
@@ -611,28 +613,27 @@ class TestChunkedCELossSPMD(DTensorTestBase):
         labels[0, 1] = IGNORE_INDEX
         labels[1, 3] = IGNORE_INDEX
 
-        # DP shards the batch, CP shards the sequence. When SP is enabled, TP
-        # further shards each CP-local sequence segment before the chunked loss.
+        # DP shards the batch and CP shards the sequence. The pre-lm-head norm
+        # emits hidden states replicated on TP before ChunkedCELoss runs.
         b_start = dp_rank * (B // dp_degree)
         b_end = b_start + (B // dp_degree)
         cp_seq = L // cp_degree
         cp_start = cp_rank * cp_seq
         cp_end = cp_start + cp_seq
-        tp_seq = cp_seq // tp_degree
-        tp_start = tp_rank * tp_seq
-        tp_end = tp_start + tp_seq
 
         hidden_cp = hidden_states[b_start:b_end, cp_start:cp_end].detach()
         labels_cp = labels[b_start:b_end, cp_start:cp_end]
-        hidden_sp = hidden_cp[:, tp_start:tp_end].detach()
 
         dp_group = mesh.get_group("dp")
         cp_group = mesh.get_group("cp")
         tp_group = mesh.get_group("tp")
 
         for enable_sp in (False, True):
-            for loss_parallel in (False, True):
-                with self.subTest(enable_sp=enable_sp, loss_parallel=loss_parallel):
+            for enable_loss_parallel in (False, True):
+                with self.subTest(
+                    enable_sp=enable_sp,
+                    loss_parallel=enable_loss_parallel,
+                ):
                     # Reference loss runs on the full local CP sequence and a
                     # full-vocab lm_head. This is the numerical oracle for each
                     # local rank.
@@ -650,7 +651,7 @@ class TestChunkedCELossSPMD(DTensorTestBase):
                         vocab_size=V,
                         num_chunks=num_chunks,
                         enable_sp=enable_sp,
-                        loss_parallel=loss_parallel,
+                        loss_parallel=enable_loss_parallel,
                         tp_group=tp_group,
                     )
                     model_spmd.to(self.device_type)
@@ -665,40 +666,15 @@ class TestChunkedCELossSPMD(DTensorTestBase):
                     loss_ref.backward()
                     h_grad_ref = h_ref.grad.clone()
 
-                    # The SPMD input is CP-local for non-SP and CP+TP-local for
-                    # SP. The expected hidden grad mirrors that layout below.
-                    h_spmd = (
-                        (hidden_sp if enable_sp else hidden_cp)
-                        .clone()
-                        .detach()
-                        .requires_grad_(True)
-                    )
+                    h_spmd = hidden_cp.clone().detach().requires_grad_(True)
                     set_spmd_backend("spmd")
                     try:
                         with set_current_spmd_mesh(mesh):
-                            spmd_mesh_names = spmd.current_mesh_names()
-                            assert spmd_mesh_names is not None
-                            dp_axis = spmd_mesh_names["dp"]
-                            cp_axis = spmd_mesh_names["cp"]
-                            tp_axis = spmd_mesh_names["tp"]
-                            hidden_type = (
-                                # SP shards one tensor dimension across both
-                                # CP and TP, so use PartitionSpec below to make
-                                # the combined seq-axis sharding explicit.
-                                {
-                                    dp_axis: spmd.V,
-                                    cp_axis: spmd.V,
-                                    tp_axis: spmd.V,
-                                }
-                                if enable_sp
-                                else {
-                                    # Without SP, TP does not shard the hidden
-                                    # sequence; lm_head handles TP internally.
-                                    dp_group: spmd.S(0),
-                                    cp_group: spmd.S(1),
-                                    tp_group: spmd.I,
-                                }
-                            )
+                            hidden_type = {
+                                dp_group: spmd.S(0),
+                                cp_group: spmd.S(1),
+                                tp_group: spmd.R,
+                            }
                             labels_type = {
                                 dp_group: spmd.S(0),
                                 cp_group: spmd.S(1),
@@ -710,25 +686,14 @@ class TestChunkedCELossSPMD(DTensorTestBase):
                                 ]
                             )
                             weight_type = {
-                                dp_group: weight_placement[MeshAxisName.DP],
-                                cp_group: weight_placement[MeshAxisName.CP],
-                                tp_group: weight_placement[MeshAxisName.TP],
+                                dp_group: weight_placement.placements[MeshAxisName.DP],
+                                cp_group: weight_placement.placements[MeshAxisName.CP],
+                                tp_group: weight_placement.placements[MeshAxisName.TP],
                             }
                             # Check the boundary contract before executing the
                             # loss: inputs/labels are local data shards and the
                             # lm_head weight is vocab-sharded on TP.
-                            if enable_sp:
-                                spmd.assert_type(
-                                    h_spmd,
-                                    hidden_type,
-                                    partition_spec=spmd.PartitionSpec(
-                                        dp_axis,
-                                        (cp_axis, tp_axis),
-                                        None,
-                                    ),
-                                )
-                            else:
-                                spmd.assert_type(h_spmd, hidden_type)
+                            spmd.assert_type(h_spmd, hidden_type)
                             spmd.assert_type(labels_cp, labels_type)
                             spmd.assert_type(model_spmd.output.weight, weight_type)
                             with typecheck(strict_mode="strict"):
@@ -756,10 +721,9 @@ class TestChunkedCELossSPMD(DTensorTestBase):
                     # the eager local oracle for all LP on/off x SP on/off cases.
                     loss_spmd.backward()
                     torch.testing.assert_close(loss_spmd, loss_ref)
-                    expected_h_grad = (
-                        h_grad_ref[:, tp_start:tp_end] if enable_sp else h_grad_ref
-                    )
-                    torch.testing.assert_close(h_spmd.grad, expected_h_grad)
+                    h_grad_spmd = h_spmd.grad.clone()
+                    dist.all_reduce(h_grad_spmd, group=tp_group)
+                    torch.testing.assert_close(h_grad_spmd, h_grad_ref)
 
 
 if __name__ == "__main__":
