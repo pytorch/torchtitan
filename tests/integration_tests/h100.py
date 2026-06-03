@@ -49,6 +49,9 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             "FSDP symmetric memory",
             "fsdp_symm_mem",
             ngpu=2,
+            # NOTE: --parallelism.enable-fsdp-symm-mem hard-errors at config
+            # parse time on non-NVIDIA-Hopper GPUs, so skip on ROCm runners.
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
