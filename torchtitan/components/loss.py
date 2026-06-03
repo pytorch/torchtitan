@@ -472,10 +472,8 @@ class ChunkedCELoss(BaseLoss):
         fires per-chunk, and FSDP2 accumulates the sharded gradients correctly.
 
     TP / SP composability:
-        Hidden states are redistributed to ``Replicate()`` on the TP mesh
-        before chunking, so each chunk enters the lm_head as ``Replicate()``
-        input regardless of whether SP is enabled. With SP, this is an
-        all-gather from ``Shard(1)``; without SP, it's a no-op.
+        The pre-lm-head norm emits hidden states replicated on the TP axis,
+        so each chunk enters the lm_head with the expected input placement.
 
         When loss parallel is applied, each TP rank
         computes partial CE on its ``V/tp`` slice, with an internal
@@ -501,39 +499,11 @@ class ChunkedCELoss(BaseLoss):
         self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
-        self.enable_sp: bool = False
         self.loss_parallel: bool = False
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Set the lm_head module. Must be called before the first __call__."""
         self.lm_head = lm_head
-
-    def replicate_seq_dim(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Replicate hidden states on the TP axis before applying lm_head."""
-        if mesh_size("tp") > 1:
-            mesh = current_mesh()
-            assert mesh is not None
-            src = spmd.S(1) if self.enable_sp else spmd.I
-            return spmd.redistribute(
-                hidden_states,
-                mesh.get_group("tp"),
-                src=src,
-                dst=spmd.R,
-                backward_options={"op_dtype": hidden_states.dtype},
-            )
-
-        # If SP is enabled, hidden states are Shard(1) on the TP mesh dim.
-        # Redistribute only the TP dim to Replicate before chunking so that
-        # the lm_head receives Replicate input on TP.
-        if isinstance(hidden_states, DTensor):
-            mesh = hidden_states.device_mesh
-            if mesh.mesh_dim_names is not None and "tp" in mesh.mesh_dim_names:
-                tp_dim = mesh.mesh_dim_names.index("tp")
-                placements = list(hidden_states.placements)
-                if not isinstance(placements[tp_dim], Replicate):
-                    placements[tp_dim] = Replicate()
-                    hidden_states = hidden_states.redistribute(mesh, tuple(placements))
-        return hidden_states
 
     def chunk_states_and_labels(
         self,
@@ -747,7 +717,6 @@ class ChunkedCELoss(BaseLoss):
         lm_head = self.lm_head
         assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
         fsdp_enabled = isinstance(lm_head, FSDPModule)
-        hidden_states = self.replicate_seq_dim(hidden_states)
 
         # Check if it's training model or validation mode
         requires_grad = hidden_states.requires_grad

@@ -5,12 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import spmd_types as spmd
+from torch.distributed.tensor import Placement
 
-from torchtitan.distributed.spmd_types import PlacementSpec
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
 from torchtitan.protocols.sharding import (
     LocalMapConfig,
-    PlacementLike,
+    NamedPlacement,
     ShardingConfig,
 )
 from torchtitan.protocols.types import MeshAxisName
@@ -21,135 +21,90 @@ TP = MeshAxisName.TP
 
 
 def dense_param_placement(
-    *, tp: spmd.PerMeshAxisSpmdType
-) -> spmd.PerMeshAxisSpmdTypes:
+    *, tp: Placement | spmd.PerMeshAxisSpmdType
+) -> NamedPlacement:
     """Placement for dense-path params/buffers.
 
-    The logical SPMD DP axis translates to the current DTensor storage axes
-    in ``resolve_placements`` for non-SPMD backends.
+    DP/CP axes are replicated. TP placement is caller-specified.
+    DTensor backend unfolds the DP axis to shard/replicate DTensor storage axes.
     """
-    return {
-        DP: spmd.R,
-        CP: spmd.R,
-        TP: tp,
-    }
+    return NamedPlacement(
+        {
+            DP: spmd.R,
+            CP: spmd.R,
+            TP: tp,
+        }
+    )
 
 
 def dense_activation_placement(
     *,
-    tp: spmd.PerMeshAxisSpmdType,
-    cp: spmd.PerMeshAxisSpmdType = spmd.S(1),
-) -> spmd.PerMeshAxisSpmdTypes:
+    tp: Placement | spmd.PerMeshAxisSpmdType,
+    cp: Placement | spmd.PerMeshAxisSpmdType = spmd.S(1),
+) -> NamedPlacement:
     """Placement for dense-path activations.
 
-    DP is batch-sharded. CP defaults to seq-sharded; override to ``spmd.R``
-    for K/V after all-gather.
-    TP placement is caller-specified.
+    DP is batch-sharded. CP defaults to seq-sharded S(1); override to R/I
+    for K/V after all-gather. TP placement is caller-specified.
     """
-    return {
-        DP: spmd.S(0),
-        CP: cp,
-        TP: tp,
-    }
-
-
-def dense_sequence_parallel_placement() -> PlacementSpec:
-    """Rank-3 ``(batch, seq, hidden)`` placement for SP activations."""
-    return PlacementSpec(
-        placement=dense_activation_placement(tp=spmd.S(1)),
-        partition_spec=(DP, (CP, TP), None),
+    return NamedPlacement(
+        {
+            DP: spmd.S(0),
+            CP: cp,
+            TP: tp,
+        }
     )
 
 
-def decoder_token_placement(
-    *, tp: spmd.PerMeshAxisSpmdType
-) -> spmd.PerMeshAxisSpmdTypes:
-    """Local-SPMD placement for decoder token/label tensors."""
-    return {
-        DP: spmd.S(0),
-        CP: spmd.S(1),
-        TP: tp,
-    }
-
-
-def _decoder_activation_placement(
-    *,
-    enable_sp: bool,
-    spmd_backend: str,
-) -> PlacementLike:
-    return (
-        dense_sequence_parallel_placement()
-        if enable_sp
-        else dense_activation_placement(tp=spmd.I)
+def dense_sequence_parallel_placement() -> NamedPlacement:
+    """SP activations with CP-TP shard ordering on sequence dimension."""
+    return NamedPlacement(
+        {
+            DP: spmd.S(0),
+            CP: spmd.S(1),
+            TP: spmd.S(1),
+        },
+        partition_spec=(DP, (CP, TP), None),
     )
 
 
 def lm_head_sharding_config(
     *,
     loss_parallel: bool,
-    enable_sp: bool,
-    spmd_backend: str = "default",
-    chunked_loss: bool = True,
 ) -> ShardingConfig:
     """Sharding for the decoder lm_head projection."""
-    if spmd_backend == "spmd":
-        if enable_sp:
-            # ChunkedCELoss manually writes the S(1)->R all-gather before
-            # chunking. Normal decoder forward needs the lm_head boundary to
-            # perform that all-gather itself.
-            in_src = (
-                dense_activation_placement(tp=spmd.R)
-                if chunked_loss
-                else dense_sequence_parallel_placement()
-            )
-            in_dst = dense_activation_placement(tp=spmd.R)
-        else:
-            in_src = dense_activation_placement(tp=spmd.R)
-            in_dst = dense_activation_placement(tp=spmd.R)
+    in_src = dense_activation_placement(tp=spmd.R)
+    in_dst = dense_activation_placement(tp=spmd.R)
 
-        if loss_parallel:
-            out_src = None
-            out_dst = None
-        else:
-            out_src = dense_activation_placement(tp=spmd.S(-1))
-            out_dst = dense_activation_placement(tp=spmd.I)
+    out_src = dense_activation_placement(tp=spmd.S(-1))
+    out_dst = out_src if loss_parallel else dense_activation_placement(tp=spmd.I)
 
-        return ShardingConfig(
-            state_shardings={
-                "weight": dense_param_placement(tp=spmd.S(0)),
-            },
-            in_src_shardings={"input": in_src},
-            in_dst_shardings={"input": in_dst},
-            out_src_shardings=out_src,
-            out_dst_shardings=out_dst,
-        )
-
-    activation_tp = spmd.S(1) if enable_sp else spmd.I
-    loss_tp = spmd.S(-1) if loss_parallel else spmd.I
     return ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={"input": dense_activation_placement(tp=activation_tp)},
-        in_dst_shardings={"input": dense_activation_placement(tp=spmd.I)},
-        out_dst_shardings=dense_activation_placement(tp=loss_tp),
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(0)),
+        },
+        in_src_shardings={"input": in_src},
+        in_dst_shardings={"input": in_dst},
+        out_src_shardings=out_src,
+        out_dst_shardings=out_dst,
     )
 
 
 def colwise_config() -> ShardingConfig:
-    """ColwiseParallel: weight Shard(0), output Shard(-1)."""
+    """ColwiseParallel: weight S(0), output S(-1)."""
     return ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.S(0)),
             "bias": dense_param_placement(tp=spmd.S(0)),
         },
-        out_dst_shardings=dense_activation_placement(tp=spmd.S(-1)),
+        out_src_shardings=dense_activation_placement(tp=spmd.S(-1)),
     )
 
 
 def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
-    """RowwiseParallel: weight Shard(1), bias Replicate (no-op if bias absent).
-
-    ``output_sp=True``  -> output ``Shard(1)`` (reduce-scatter into SP region).
-    ``output_sp=False`` -> output ``Replicate()`` (all-reduce).
+    """
+    RowwiseParallel: weight S(1), bias I (no-op if bias absent).
+    Output redistributes to S(1) (reduce-scatter) if SP on, else I (all-reduce).
     """
     out_tp = spmd.S(1) if output_sp else spmd.I
     return ShardingConfig(
@@ -163,25 +118,46 @@ def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
 
 
 def norm_config(*, enable_sp: bool) -> ShardingConfig:
-    """Norm sharding.
-
-    ``enable_sp=True``: SequenceParallel — weight Replicate, activations
-    Shard(1) across boundary.
-    ``enable_sp=False``: Plain-TP — weight Replicate, activations pass
-    through. Still distributes the norm's weight as a DTensor so it
-    composes with DTensor activations (otherwise plain Tensor + DTensor
-    would mix inside the op).
     """
-    state_tp = spmd.R if enable_sp else spmd.I
-    state = {"weight": dense_param_placement(tp=state_tp)}
-    if not enable_sp:
-        return ShardingConfig(state_shardings=state)
-    sp_placement = dense_sequence_parallel_placement()
+    Norm sharding.
+    Weight is unsharded@TP: R if SP (pending BWD AR handled by FSDP), else I.
+    """
+    state = {
+        "weight": dense_param_placement(tp=spmd.R if enable_sp else spmd.I)
+    }
+    activation = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I)
+    )
     return ShardingConfig(
         state_shardings=state,
-        in_src_shardings={"input": sp_placement},
-        in_dst_shardings={"input": sp_placement},
-        out_dst_shardings=sp_placement,
+        in_src_shardings={"input": activation},
+        out_src_shardings=activation,
+    )
+
+
+def pre_lm_head_norm_config(*, enable_sp: bool) -> ShardingConfig:
+    """Root decoder norm sharding before ``lm_head`` / chunked CE loss.
+
+    With sequence parallelism, decoder blocks emit sequence-sharded hidden
+    states. ``ChunkedCELoss`` chunks those hidden states and applies
+    ``lm_head`` inside the loss, so this root norm is the last clean module
+    boundary to all-gather the TP sequence shard back to replicated hidden
+    states before chunking starts.
+    """
+    activation = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I)
+    )
+    return ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.R if enable_sp else spmd.I)
+        },
+        in_src_shardings={"input": activation},
+        out_src_shardings=activation,
+        out_dst_shardings=dense_activation_placement(tp=spmd.R),
     )
 
 
@@ -217,15 +193,19 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         f"set_gqa_attention_sharding requires GQAttention.Config, "
         f"got {type(attention_cfg).__name__}"
     )
+    x_src = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I)
+    )
+    x_dst = dense_activation_placement(tp=spmd.R)
     attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={
-            "x": dense_sequence_parallel_placement()
-            if enable_sp
-            else dense_activation_placement(tp=spmd.I),
+            "x": x_src,
             "rope_cache": dense_param_placement(tp=spmd.R),
         },
         in_dst_shardings={
-            "x": dense_activation_placement(tp=spmd.R),
+            "x": x_dst,
             "rope_cache": dense_param_placement(tp=spmd.R),
         },
     )
@@ -262,11 +242,12 @@ def set_gqa_inner_attention_local_map(
     kv_src_placements = dense_activation_placement(tp=spmd.S(2))
     kv_placements = dense_activation_placement(tp=spmd.S(2), cp=spmd.R)
     kv_grad_placements = dense_activation_placement(tp=spmd.S(2), cp=spmd.P)
-    out_src: PlacementLike | tuple[PlacementLike, ...] = (
+    out_src: NamedPlacement | tuple[NamedPlacement, ...] = (
         (q_placements, q_placements) if return_lse else q_placements
     )
     inner_attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={
+            "q": q_placements,
             "k": kv_src_placements,
             "v": kv_src_placements,
         },
@@ -285,7 +266,7 @@ def set_gqa_inner_attention_local_map(
 def set_dense_ffn_sharding(
     feed_forward_cfg,
     *,
-    attn_x_placement: spmd.PerMeshAxisSpmdType,
+    attn_x_placement: Placement | spmd.PerMeshAxisSpmdType,
     enable_sp: bool,
 ) -> None:
     """Standard dense FFN (``w1``/``w2``/``w3``) TP sharding.
@@ -294,12 +275,13 @@ def set_dense_ffn_sharding(
     should match the layout that the layer's attention block emits so the
     FFN's input wrap is a no-op redistribute when placements already agree.
     """
+    in_src = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=attn_x_placement)
+    )
     feed_forward_cfg.sharding_config = ShardingConfig(
-        in_src_shardings={
-            "x": dense_sequence_parallel_placement()
-            if enable_sp
-            else dense_activation_placement(tp=attn_x_placement)
-        },
+        in_src_shardings={"x": in_src},
         in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
     )
     feed_forward_cfg.w1.sharding_config = colwise_config()
@@ -330,41 +312,28 @@ def set_decoder_sharding_config(
     config.sharding_config = ShardingConfig(
         state_shardings={"freqs_cis": dense_param_placement(tp=spmd.R)},
     )
-    if spmd_backend == "spmd":
-        embed_out = _decoder_activation_placement(
-            enable_sp=enable_sp,
-            spmd_backend=spmd_backend,
-        )
-        config.tok_embeddings.sharding_config = ShardingConfig(
-            state_shardings={
-                "weight": dense_param_placement(tp=spmd.S(0)),
-            },
-            in_src_shardings={
-                "input": dense_activation_placement(tp=spmd.R),
-            },
-            in_dst_shardings={
-                "input": dense_activation_placement(tp=spmd.R),
-            },
-            out_src_shardings=embed_out,
-            out_dst_shardings=embed_out,
-            local_map=LocalMapConfig(in_grad_placements=(None,)),
-        )
-    else:
-        config.tok_embeddings.sharding_config = ShardingConfig(
-            state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-            in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
-            in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
-            out_dst_shardings=_decoder_activation_placement(
-                enable_sp=enable_sp,
-                spmd_backend=spmd_backend,
-            ),
-        )
-    config.tok_embeddings.enable_sp = enable_sp
-    config.norm.sharding_config = norm_config(enable_sp=enable_sp)
+    embed_input = dense_activation_placement(tp=spmd.R)
+    embed_out = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I)
+    )
+    embed_src = dense_activation_placement(tp=spmd.P)
+    config.tok_embeddings.sharding_config = ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(0)),
+        },
+        in_src_shardings={"input": embed_input},
+        in_dst_shardings={"input": embed_input},
+        out_src_shardings=embed_src,
+        out_dst_shardings=embed_out,
+        # spmd backend relies on local SPMD + manual vocab-parallel embedding impl
+        local_map=LocalMapConfig(in_grad_placements=(None,))
+        if spmd_backend == "spmd"
+        else None,
+    )
+    config.norm.sharding_config = pre_lm_head_norm_config(enable_sp=enable_sp)
 
     config.lm_head.sharding_config = lm_head_sharding_config(
         loss_parallel=loss_parallel,
-        enable_sp=enable_sp,
-        spmd_backend=spmd_backend,
-        chunked_loss=chunked_loss,
     )
