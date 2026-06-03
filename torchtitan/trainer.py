@@ -17,7 +17,6 @@ from typing import Annotated, Any, cast
 import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
-import torch.utils._pytree as pytree
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor import DTensor
@@ -128,7 +127,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         "Optimizers in backward is not supported with Pipeline Parallel."
                     )
             if (
-                self.parallelism.spmd_backend == "spmd"
+                self.parallelism.spmd_backend == "spmd_types"
                 and self.debug.spmd_typechecking
                 and self.parallelism.pipeline_parallel_degree > 1
             ):
@@ -508,7 +507,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.train_context = dist_utils.get_train_context(
             enable_loss_parallel=loss_parallel_enabled,
             spmd_typechecking=(
-                config.parallelism.spmd_backend == "spmd"
+                config.parallelism.spmd_backend == "spmd_types"
                 and config.debug.spmd_typechecking
             ),
         )
@@ -680,7 +679,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
-        elif self.config.parallelism.spmd_backend == "spmd":
+        elif self.config.parallelism.spmd_backend == "spmd_types":
             annotate_input_spmd_types(
                 self.parallel_dims, inputs, labels, extra_inputs, extra_kwargs
             )
@@ -755,7 +754,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 del pred
                 backward_context = (
                     spmd.no_typecheck()
-                    if self.config.parallelism.spmd_backend == "spmd"
+                    if self.config.parallelism.spmd_backend == "spmd_types"
                     else contextlib.nullcontext()
                 )
                 with backward_context:
@@ -793,7 +792,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             set_current_spmd_mesh(
                 self.parallel_dims.get_activated_mesh(["dp", "cp", "tp"])
             )
-            if self.config.parallelism.spmd_backend == "spmd"
+            if self.config.parallelism.spmd_backend == "spmd_types"
             else contextlib.nullcontext()
         )
         accumulated_losses = []
@@ -807,7 +806,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 global_valid_tokens = local_valid_tokens.float()
 
             # Stamp for SPMD type checking: replicated after all-reduce
-            if self.config.parallelism.spmd_backend == "spmd":
+            if self.config.parallelism.spmd_backend == "spmd_types":
                 if not isinstance(global_valid_tokens, torch.Tensor):
                     global_valid_tokens = torch.tensor(
                         global_valid_tokens,
