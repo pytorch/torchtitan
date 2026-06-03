@@ -41,7 +41,7 @@ class TestApplyRotaryEmbCosSin(unittest.TestCase):
             self.seqlen, self.head_dim * 2, dtype=torch.float32
         ).view(1, self.seqlen, 1, self.head_dim * 2)
         self.rope = CosSinRoPE(
-            ComplexCosSinRoPE.Config(dim=self.head_dim, max_seq_len=self.seqlen)
+            CosSinRoPE.Config(dim=self.head_dim, max_seq_len=self.seqlen)
         )
 
     def test_output_dtype_matches_input(self):
@@ -117,7 +117,7 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
         torch.manual_seed(42)
         self.head_dim = 64
         self.max_seq_len = 32
-        rope_cfg = ComplexCosSinRoPE.Config(
+        rope_cfg = ComplexRoPE.Config(
             dim=self.head_dim, max_seq_len=self.max_seq_len
         )
         self.rope = rope_cfg.build()
@@ -146,7 +146,7 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
         torch.manual_seed(42)
         self.head_dim = 64
         self.max_seq_len = 32
-        rope_cfg = ComplexCosSinRoPE.Config(
+        rope_cfg = CosSinRoPE.Config(
             dim=self.head_dim, max_seq_len=self.max_seq_len
         )
         self.rope = rope_cfg.build()
@@ -173,7 +173,7 @@ class TestMRoPECache(unittest.TestCase):
         torch.manual_seed(42)
         bsz, seqlen, n_heads = 2, 3, 4
         head_dim = 12
-        rope = MComplexCosSinRoPE.Config(
+        rope = MRoPE.Config(
             dim=head_dim,
             max_seq_len=8,
             mrope_section=[2, 1, 1],
@@ -212,7 +212,7 @@ class TestPerLayerRoPECache(unittest.TestCase):
             wo=Linear.Config(in_features=dim, out_features=dim),
             inner_attention=ScaledDotProductAttention.Config(),
             mask_type="causal",
-            rope=ComplexCosSinRoPE.Config(dim=head_dim, max_seq_len=16),
+            rope=ComplexRoPE.Config(dim=head_dim, max_seq_len=16),
         ).build()
 
         x = torch.randn(2, 4, dim)
