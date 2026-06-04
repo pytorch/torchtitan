@@ -80,9 +80,8 @@ jobs:
           --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
           --index-strategy unsafe-best-match
 
-        # 4. Install torchtitan in editable mode because integration test spawns
-        # python train.py as a subprocess
-        uv pip install -e .
+        # 4. Make the checkout importable for subprocesses spawned by the test.
+        export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 
         # 5. Download HF model checkpoint for tests
         MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
