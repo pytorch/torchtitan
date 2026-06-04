@@ -358,6 +358,70 @@ class RLTrainer(Configurable):
             kwargs["gpus"] = 0
         return result.item(**kwargs)
 
+    async def _generate_sharded(
+        self,
+        tokenized_prompts: list[list[int]],
+        *,
+        sampling_config: SamplingConfig | None = None,
+        metrics_prefix: str = "generator",
+    ) -> tuple[list[Completion], list[m.Metric]]:
+        """Run generation across the generator's data-parallel replicas.
+
+        The generator mesh is laid out as ``dp_replicate`` independent vLLM
+        engines, each a ``tensor_parallel_degree``-rank TP group occupying a
+        contiguous block of ranks (replica ``r`` -> gpus ``[r*tp, (r+1)*tp)``),
+        matching vLLM's ``dp_rank = RANK // tp`` grouping. Prompts are sharded
+        across replicas (strided), broadcast to every TP rank within a replica
+        (TP requires identical input), and the completions gathered. At
+        ``dp_replicate == 1`` this is exactly the previous broadcast-and-take-
+        rank-0 behavior.
+
+        Replicas are dispatched concurrently: vLLM's external_launcher DP runs a
+        per-step coordination all-reduce across the dp group, so every replica
+        must be in its engine loop together -- sequential dispatch would deadlock.
+        """
+        p = self.config.generator.parallelism
+        # Number of independent-data groups = dp_replicate * dp_shard. The MoE EP
+        # layout puts DP-attention on dp_shard (dp_replicate=1); the dense DP
+        # layout uses dp_replicate. Both must be sharded across here.
+        dp = max(p.data_parallel_replicate_degree, 1) * max(
+            p.data_parallel_shard_degree, 1
+        )
+        tp = p.tensor_parallel_degree
+
+        # Strided assignment: replica r owns global indices r, r+dp, r+2dp, ...
+        replica_global_idx = [
+            list(range(r, len(tokenized_prompts), dp)) for r in range(dp)
+        ]
+
+        async def _run_replica(r: int):
+            idxs = replica_global_idx[r]
+            shard = [tokenized_prompts[i] for i in idxs]
+            logger.info(
+                "[dp-shard] replica %d (gpus %d:%d) <- %d prompts (global idx %s)",
+                r,
+                r * tp,
+                (r + 1) * tp,
+                len(shard),
+                idxs,
+            )
+            replica = self.generator.slice(gpus=slice(r * tp, (r + 1) * tp))
+            completions, metrics = self._get_rank_0_value(
+                await replica.generate.call(
+                    shard,
+                    sampling_config=sampling_config,
+                    metrics_prefix=metrics_prefix,
+                )
+            )
+            for c in completions:  # local shard index -> global prompt index
+                c.prompt_idx = idxs[c.prompt_idx]
+            return completions, metrics
+
+        per_replica = await asyncio.gather(*(_run_replica(r) for r in range(dp)))
+        completions = [c for comps, _ in per_replica for c in comps]
+        generation_metrics = [mm for _, mets in per_replica for mm in mets]
+        return completions, generation_metrics
+
     @staticmethod
     def _compute_world_size(p: ParallelismConfig) -> int:
         """Compute world size from all parallel dimensions."""
@@ -564,8 +628,8 @@ class RLTrainer(Configurable):
             self.tokenizer.encode(env.prompt, add_bos=True, add_eos=False)
             for env in envs
         ]
-        completions, generation_metrics = self._get_rank_0_value(
-            await self.generator.generate.call(tokenized_prompts)
+        completions, generation_metrics = await self._generate_sharded(
+            tokenized_prompts
         )
 
         trajectories: list[Trajectory] = []
@@ -689,12 +753,10 @@ class RLTrainer(Configurable):
             self.tokenizer.encode(env.prompt, add_bos=True, add_eos=False)
             for env in envs
         ]
-        completions, generation_metrics = self._get_rank_0_value(
-            await self.generator.generate.call(
-                tokenized_prompts,
-                sampling_config=greedy,
-                metrics_prefix="validation_generator",
-            )
+        completions, generation_metrics = await self._generate_sharded(
+            tokenized_prompts,
+            sampling_config=greedy,
+            metrics_prefix="validation_generator",
         )
 
         trajectories = [

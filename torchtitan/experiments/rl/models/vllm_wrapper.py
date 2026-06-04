@@ -171,9 +171,14 @@ class VLLMModelWrapper(Module):
 
         # Build ParallelDims from the torchtitan ParallelismConfig (the
         # controller's source of truth) rather than vLLM's parallel_config.
+        # dp_shard carries DP-attention for the MoE EP layout (dp_replicate=1,
+        # dp_shard>1, ep=dp_shard*tp). With skip_dp=True (inference) no FSDP is
+        # applied, so dp_shard just provides the mesh axis: dense params stay
+        # TP-sharded + replicated across dp_shard groups, experts go on the ep
+        # mesh. Previously hardcoded to 1 (TP-only).
         self.parallel_dims = ParallelDims(
             dp_replicate=parallelism.data_parallel_replicate_degree,
-            dp_shard=1,
+            dp_shard=max(parallelism.data_parallel_shard_degree, 1),
             cp=1,
             tp=parallelism.tensor_parallel_degree,
             pp=1,
