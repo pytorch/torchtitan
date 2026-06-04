@@ -50,31 +50,6 @@ from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
 
 
-def _maybe_apply_numa_binding(gpu_index: int, device_type: str) -> None:
-    """Pin this process to the NUMA node of its GPU for local memory bandwidth.
-
-    On multi-NUMA machines (e.g. GB200 NVLink-C2C), pinned-memory allocations
-    that land on the GPU's local NUMA node get ~350 GB/s D2H bandwidth vs
-    ~120 GB/s cross-NUMA. Must run before any pinned memory is allocated.
-    """
-    if device_type != "cuda":
-        return
-    from torch.numa.binding import (
-        _maybe_apply_numa_binding_to_current_process,
-        AffinityMode,
-        NumaOptions,
-    )
-
-    _maybe_apply_numa_binding_to_current_process(
-        gpu_index=gpu_index,
-        numa_options=NumaOptions(
-            affinity_mode=AffinityMode.NODE,
-            should_fall_back_if_binding_fails=True,
-        ),
-    )
-    logger.info("NUMA binding applied for GPU %d", gpu_index)
-
-
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -217,8 +192,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
-
-        _maybe_apply_numa_binding(self.device.index, device_type)
 
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
