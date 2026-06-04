@@ -43,6 +43,7 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
 from torchtitan.experiments.graph_trainer.passes import selective_activation_remat_pass
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     canonicalize_graph_pass,
+    eliminate_dead_code_pass,
     normalize_view_ops_as_reshape,
     remove_b2b_transpose_pass,
     remove_detach_pass,
@@ -2221,6 +2222,38 @@ class TestSelectiveActivationRematPass(TestCase):
         # middle_bwd still consumes bwd_wait at its original location.
         for inp in middle_bwd.all_input_nodes:
             self.assertIs(inp, bwd_wait)
+
+
+class TestEliminateDeadCodePass(TestCase):
+    """Unit tests for eliminate_dead_code_pass."""
+
+    def test_removes_dead_pure_node_keeps_live(self):
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        live = g.call_function(torch.ops.aten.relu.default, (x,))
+        g.call_function(torch.ops.aten.add.Tensor, (x, x))  # dead: no users
+        g.output(live)
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+
+        eliminate_dead_code_pass(gm)
+        targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
+        self.assertIn(torch.ops.aten.relu.default, targets)
+        self.assertNotIn(torch.ops.aten.add.Tensor, targets)
+
+    def test_keeps_impure_node_with_no_users(self):
+        # copy_ mutates its first arg (impure); DCE must keep it even though its
+        # own result is unused.
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        y = g.placeholder("y")
+        g.call_function(torch.ops.aten.copy_.default, (x, y))  # impure, unused result
+        out = g.call_function(torch.ops.aten.relu.default, (x,))
+        g.output(out)
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+
+        eliminate_dead_code_pass(gm)
+        targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
+        self.assertIn(torch.ops.aten.copy_.default, targets)
 
 
 if __name__ == "__main__":
