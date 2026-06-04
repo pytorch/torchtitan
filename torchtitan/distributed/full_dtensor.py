@@ -4,10 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Full DTensor infrastructure for SPMD-style parallelization.
+"""Full DTensor infrastructure for multi-axis parallelization.
 
 When ``parallelism.spmd_backend == "full_dtensor"`` is enabled, all model parameters,
-buffers, and inputs become DTensors on a multi-dimensional SPMD mesh.
+buffers, and inputs become DTensors on a multi-dimensional dense mesh.
 FSDP uses ``DataParallelMeshDims`` to identify which mesh axes
 are data-parallel.
 
@@ -31,7 +31,7 @@ def validate_config(
     parallel_dims: ParallelDims,
     model: nn.Module,
 ) -> None:
-    """Validate that the current configuration is compatible with SPMD backends.
+    """Validate that the current configuration is compatible with multi-axis backends.
 
     Walks ``model`` to discover the actual attention modules in use and
     raises ``NotImplementedError`` with a clear message if incompatible.
@@ -62,12 +62,12 @@ def validate_config(
 def _get_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
     """Build ``DataParallelMeshDims`` for dense (non-MoE) parameters.
 
-    ``dp_shard`` is always included (force-kept-alive in the SPMD mesh
+    ``dp_shard`` is always included (force-kept-alive in the dense storage mesh
     even at size 1) so FSDP can pick the DP submesh out of the multi-axis
-    SPMD mesh inside ``DeviceMesh._concatenate([dp_mesh, tp_mesh])``.
+    storage mesh inside ``DeviceMesh._concatenate([dp_mesh, tp_mesh])``.
     """
     assert parallel_dims.spmd_backend in ("full_dtensor", "spmd_types"), (
-        "_get_dp_mesh_axes is only meaningful under SPMD-style backends"
+        "_get_dp_mesh_axes is only meaningful under full_dtensor or spmd_types"
     )
     shard_axes: list[str] = ["dp_shard"]
     if parallel_dims.cp_enabled:
@@ -85,19 +85,19 @@ def _get_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
     return DataParallelMeshDims(shard=shard, replicate=replicate)
 
 
-_DENSE_SPMD_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
+_DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
 
 
 def resolve_fsdp_mesh(
     parallel_dims: ParallelDims,
 ) -> tuple[DeviceMesh, DataParallelMeshDims]:
-    """Select the dense storage mesh and DataParallelMeshDims for SPMD backends."""
+    """Select the dense storage mesh and DataParallelMeshDims."""
     assert parallel_dims.spmd_backend in ("full_dtensor", "spmd_types"), (
-        "resolve_fsdp_mesh is only meaningful under SPMD-style backends"
+        "resolve_fsdp_mesh is only meaningful under full_dtensor or spmd_types"
     )
-    spmd_mesh = parallel_dims.get_activated_mesh(_DENSE_SPMD_AXES)
-    assert spmd_mesh is not None
-    return spmd_mesh, _get_dp_mesh_axes(parallel_dims)
+    storage_mesh = parallel_dims.get_activated_mesh(_DENSE_STORAGE_AXES)
+    assert storage_mesh is not None
+    return storage_mesh, _get_dp_mesh_axes(parallel_dims)
 
 
 def parallelize_inputs(
@@ -108,11 +108,11 @@ def parallelize_inputs(
 ) -> tuple[DTensor, DTensor, dict[str, Any]]:
     """Wrap ``inputs``, ``labels``, and tensor ``extra_kwargs`` as DTensors.
 
-    Placements on the dense SPMD mesh: DP -> Shard(0), CP -> Shard(1),
+    Placements on the dense storage mesh: DP -> Shard(0), CP -> Shard(1),
     TP -> Replicate. Inputs are assumed already sharded; this only
     re-wraps via ``from_local``.
     """
-    mesh = parallel_dims.get_activated_mesh(_DENSE_SPMD_AXES)
+    mesh = parallel_dims.get_activated_mesh(_DENSE_STORAGE_AXES)
     assert mesh is not None
     assert mesh.mesh_dim_names is not None
     input_shardings: dict[str, Placement] = {}
