@@ -104,29 +104,26 @@ def _shared_expert_rowwise_config() -> ShardingConfig:
 def _router_gate_config(*, enable_ep: bool) -> ShardingConfig:
     """Router gate: Replicate weights, output stays DTensor.
 
-    EP off: input Replicate, gate computes on all tokens, output Replicate.
-    EP on:  keep the sequence-parallel input and let F.linear produce a
-            Shard(1) output directly, with no all-gather. Routing is a
-            per-token linear, so computing on the local sequence shard is
-            numerically identical to gathering. The sequence dim may be sharded
-            by both cp and tp under CP+SP; DTensor handles that F.linear
-            directly. Output is Shard(1) for the EP dispatch.
+    EP off: input Replicate, gate computes on all tokens, output DTensor(Replicate).
+    EP on:  input Shard(1) (slen dim of 3-D activation), gate computes on
+            local shard, output DTensor(Shard(1)).
     """
     state = {
         "weight": dense_param_placement(tp=Replicate()),
         "bias": dense_param_placement(tp=Replicate()),
     }
-    if not enable_ep:
+    if enable_ep:
+        return ShardingConfig(
+            state_shardings=state,
+            in_dst_shardings={"input": dense_activation_placement(tp=Shard(1))},
+            out_dst_shardings=dense_activation_placement(tp=Shard(1)),
+        )
+    else:
         return ShardingConfig(
             state_shardings=state,
             in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
             out_dst_shardings=dense_activation_placement(tp=Replicate()),
         )
-    return ShardingConfig(
-        state_shardings=state,
-        in_dst_shardings={"input": dense_activation_placement(tp=Shard(1))},
-        out_dst_shardings=dense_activation_placement(tp=Shard(1)),
-    )
 
 
 def _tokens_per_expert_placement(*, enable_ep: bool) -> NamedPlacement:
@@ -230,13 +227,8 @@ def set_moe_sharding_config(
 
     # Routed experts: local_map converts DTensor inputs to local for
     # dispatch/compute/combine, then wraps local output as DTensor(Partial).
-    # The forward un-flattens the combined output back to 3D (bs, slen, dim)
-    # before returning, so the OUTPUT placement keeps dp_shard on the batch
-    # dim (0) and cp on the seq dim (1). A 2D (bs*slen, dim) output would put
-    # both dp_shard and cp on dim 0 at once -- a _StridedShard that DTensor
-    # mishandles under CP.
-    # The three things that differ between EP and TP-only are state_shardings,
-    # input layout, and input grad layout.
+    # Routed experts: the three things that differ between EP and TP-only
+    # are state_shardings, input layout, and input grad layout.
     experts_out_layout = dense_activation_placement(tp=Partial())
     if enable_ep:
         state_shardings: dict[str, NamedPlacement] = {

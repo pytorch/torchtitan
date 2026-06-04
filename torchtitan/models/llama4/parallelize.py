@@ -106,6 +106,7 @@ def parallelize_llama(
         edp_mesh_dims = None
         if parallel_dims.ep_enabled:
             edp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "efsdp"])
+            assert edp_mesh is not None
 
     apply_fsdp(
         model,
@@ -275,23 +276,15 @@ def apply_fsdp(
 
                 assert edp_mesh is not None
 
-                def _get_fsdp_mesh_info(
-                    mesh: DeviceMesh, mesh_dims: "Any"
-                ) -> FSDPMeshInfo:
-                    # Delegate to FSDP2's mesh-info builder. Under full_dtensor
-                    # (mesh_dims set) it extracts and FLATTENS the DP submesh from
-                    # the full SPMD mesh. The previous hand-built version kept the
-                    # full mesh as mesh_info.mesh, which double-counted the TP axis
-                    # in _build_spmd_sharding_spec when CP added a second DP-shard
-                    # dim (dp_shard + cp).
-                    # _get_mesh_info is typed to the DataParallelMeshInfo base;
-                    # with a shard dim it always yields FSDPMeshInfo/HSDPMeshInfo.
-                    mesh_info = _get_mesh_info(mesh, mesh_dims)
-                    assert isinstance(mesh_info, FSDPMeshInfo)
-                    return mesh_info
-
-                edp_mesh_info = _get_fsdp_mesh_info(edp_mesh, edp_mesh_dims)
-                dp_mesh_info = _get_fsdp_mesh_info(dp_mesh, dp_mesh_dims)
+                # Delegate to FSDP2's mesh-info builder. Under full_dtensor
+                # (mesh_dims set) it extracts and FLATTENS the DP submesh from
+                # the full SPMD mesh.
+                edp_mesh_info = _get_mesh_info(edp_mesh, edp_mesh_dims)
+                dp_mesh_info = _get_mesh_info(dp_mesh, dp_mesh_dims)
+                # _get_mesh_info is typed to the DataParallelMeshInfo base; with
+                # a shard dim it always yields FSDPMeshInfo/HSDPMeshInfo.
+                assert isinstance(edp_mesh_info, FSDPMeshInfo)
+                assert isinstance(dp_mesh_info, FSDPMeshInfo)
 
                 def _shard_placement_fn(
                     param: nn.Parameter,
