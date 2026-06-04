@@ -571,6 +571,36 @@ class TestApplySACPass(TestCase):
         self.assertEqual(len(recomputed_nodes), 1)
         self.assertTrue(recomputed_nodes[0].meta["autograd_backward"])
 
+    def test_remat_dup_gets_independent_custom_meta(self):
+        # fx.Graph.node_copy shallow-copies node.meta, so without intervention a
+        # recompute dup shares the SAME nested meta["custom"] dict as its forward
+        # original -- annotating one would silently mutate the other. The pass must
+        # give the dup its own copy (preserving the values).
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        fwd = graph.call_function(torch.ops.aten.add.Tensor, args=(x, x))
+        # A forward consumer keeps the original alive (remat erases originals whose
+        # consumers are all backward) so we can compare it against the dup.
+        fwd_use = graph.call_function(torch.ops.aten.relu.default, args=(fwd,))
+        bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(fwd, 2))
+        graph.output((fwd_use, bwd))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        fwd.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+        fwd.meta["custom"] = {_MODULE_FQN: "layers.0.attention_norm"}
+        bwd.meta["autograd_backward"] = True
+
+        gm = selective_activation_remat_pass(gm)
+
+        fwd_node = next(n for n in gm.graph.nodes if n.name == "add_tensor")
+        dup = next(n for n in gm.graph.nodes if n.name == "add_tensor_recomputed")
+        # Independent dict object, same values preserved.
+        self.assertIsNot(dup.meta["custom"], fwd_node.meta["custom"])
+        self.assertEqual(dup.meta["custom"][_MODULE_FQN], "layers.0.attention_norm")
+        # Mutating the dup's annotation must not leak into the original.
+        dup.meta["custom"]["cudagraph_partition"] = "cudagraph_9"
+        self.assertNotIn("cudagraph_partition", fwd_node.meta["custom"])
+
 
 class TestFullMemoryPolicy(TestCase):
     """Unit tests for the full recompute memory policy."""
