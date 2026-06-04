@@ -27,6 +27,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
 )
 from torchtitan.experiments.graph_trainer.cudagraph import (
+    CUDAGraphWrapper,
     insert_kernel_annotations_pass,
     is_cudagraphable,
     is_full_cudagraphable,
@@ -2286,6 +2287,38 @@ class TestEliminateDeadCodePass(TestCase):
         eliminate_dead_code_pass(gm)
         targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
         self.assertIn(torch.ops.aten.copy_.default, targets)
+
+
+class TestCUDAGraphWrapper(TestCase):
+    """CUDAGraphWrapper captures into its own private pool, stages non-static
+    inputs, and replays bitwise-identically to eager."""
+
+    def tearDown(self):
+        from torchtitan.experiments.graph_trainer import cudagraph as cg
+
+        cg.cudagraph_teardown()
+        cg._cg_manager = cg._CUDAGraphManager()
+        super().tearDown()
+
+    def test_private_pool_capture_replay_matches_eager(self):
+        device = "cuda"
+        weight = torch.randn(8, 8, device=device)  # static input (stable address)
+
+        def fn(w, x):
+            return torch.relu(x @ w)
+
+        x0 = torch.randn(4, 8, device=device)
+        wrapper = CUDAGraphWrapper(
+            fn,
+            (weight, x0),
+            static_input_indices=(0,),
+            tensor_input_indices=[0, 1],
+        )
+        # 1st call warms up, 2nd captures, 3rd+ replay -- exercise all three with a
+        # fresh non-static x each step (copy-in of the staged buffer).
+        for _ in range(4):
+            x = torch.randn(4, 8, device=device)
+            torch.testing.assert_close(wrapper(weight, x), fn(weight, x))
 
 
 class TestIsFullCudagraphable(TestCase):

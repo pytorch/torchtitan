@@ -27,11 +27,16 @@ from torchtitan.tools.logging import logger
 
 
 class _CUDAGraphManager:
-    """A manager to hold a shared graph pool, stream, and wrapper registry."""
+    """Holds the shared capture stream, the per-graph private pools, and the
+    wrapper registry (for teardown)."""
 
     def __init__(self) -> None:
         self._initialized = False
         self._cudagraph_wrappers: list["CUDAGraphWrapper"] = []
+        # One private graph pool per CUDAGraphWrapper (full capture or piecewise
+        # segment), each kept alive by a dummy graph. Stored as
+        # (pool_handle, dummy_graph) so both are released together at teardown.
+        self._private_pools: list[tuple[Any, "torch.cuda.CUDAGraph"]] = []
         self._teardown_called = False
         # toolsId (graph_id << 32 | node_id) -> list of annotation dicts
         # (e.g. [{"module_fqn": "layers.0.attention.wq"}]).
@@ -44,32 +49,40 @@ class _CUDAGraphManager:
 
         self._initialized = True
 
-        # create a global cudagraph memory pool to allow memory reuse across cudagraphs.
-        self.graph_pool = torch.cuda.graph_pool_handle()
-
-        # create a global cuda stream for graph capture. we need to use a single stream
-        # for all allocations to the memory pool, otherwise the allocations to separate
-        # streams will not be used.
+        # create a global cuda stream for graph capture. we need to use a single
+        # stream for all allocations to the (per-segment private) pools, otherwise
+        # allocations on separate streams will not be reused.
         self.stream = torch.cuda.Stream()
 
-        # use a dummy graph to keep the global graph pool alive
-        self._dummy_graph = torch.cuda.CUDAGraph()
+    def register_wrapper(self, wrapper: "CUDAGraphWrapper") -> None:
+        assert not self._teardown_called, "Cannot register new cudagraph after teardown"
+        self._cudagraph_wrappers.append(wrapper)
+
+    def new_pool(self) -> Any:
+        """Create a fresh private graph pool kept alive by a dummy graph, and
+        return its handle (used by each :class:`CUDAGraphWrapper`).
+
+        Every wrapper captures into its own pool so that one graph's
+        capture/replay cannot clobber another's live tensors (e.g. a forward
+        activation saved for a backward segment). The bare ``torch.cuda.graph``
+        API has no cross-graph liveness tracking, so a shared pool would be unsafe
+        across the eager regions that separate segments.
+        """
+        self.maybe_initialize()
+        pool = torch.cuda.graph_pool_handle()
+        dummy = torch.cuda.CUDAGraph()
         with (
-            # suppress an empty cudagraph warning, since we intentionally create
-            # an empty cudagraph here
             warnings.catch_warnings(record=True),
             torch.cuda.graph(
-                self._dummy_graph,
-                pool=self.graph_pool,
+                dummy,
+                pool=pool,
                 stream=self.stream,
                 capture_error_mode="thread_local",
             ),
         ):
             pass
-
-    def register_wrapper(self, wrapper: "CUDAGraphWrapper") -> None:
-        assert not self._teardown_called, "Cannot register new cudagraph after teardown"
-        self._cudagraph_wrappers.append(wrapper)
+        self._private_pools.append((pool, dummy))
+        return pool
 
     def teardown(self) -> None:
         """Destroy all cudagraphs and release the cudagraph memory pool.
@@ -90,9 +103,11 @@ class _CUDAGraphManager:
             wrapper.teardown()
         self._cudagraph_wrappers.clear()
 
-        self._dummy_graph = None
+        # Release private pools and their dummy graphs. Must happen after the
+        # wrappers drop their cudagraphs (above) so no graph still references a
+        # pool. See Note [explicit cudagraph teardown].
+        self._private_pools.clear()
         self.stream = None
-        self.graph_pool = None
         self._teardown_called = True
 
 
@@ -182,6 +197,11 @@ class CUDAGraphWrapper:
     ):
         _cg_manager.maybe_initialize()
         _cg_manager.register_wrapper(self)
+        # Each wrapper captures into its own private pool so one graph's
+        # capture/replay cannot clobber another's live tensors (the bare
+        # torch.cuda.graph API has no cross-graph liveness tracking). A full
+        # (single-piece) capture is just the one-wrapper case.
+        self._pool = _cg_manager.new_pool()
 
         self._runnable = runnable
         self._static_input_indices = OrderedSet(
@@ -254,29 +274,40 @@ class CUDAGraphWrapper:
 
             # warmup in cudagraph memory pool to avoid fragmentation
             # across eager memory pool and cudagraph memory pool.
-            with _use_cuda_memory_pool_manager(
-                device, _cg_manager.graph_pool, _cg_manager.stream
-            ):
+            with _use_cuda_memory_pool_manager(device, self._pool, _cg_manager.stream):
                 out = self._runnable(*args)
             return out
 
         if self._cudagraph is None:
             self._validate_inputs(args)
-            self._args = args
+            # Stage non-static inputs into persistent buffers so the capture reads
+            # stream-local memory. A captured graph that reads an input produced on
+            # another stream (e.g. an eager collective output or a cross-segment
+            # value living on the NCCL comm stream) records a dependency on
+            # uncaptured cross-stream work and fails capture with "dependency
+            # created on uncaptured work in another stream". Cloning on the current
+            # stream before capture launders that dependency; the graph reads the
+            # buffer, and replay copies fresh values into it via
+            # ``_copy_non_static_inputs``. Static inputs (params/buffers, other
+            # cudagraph segments' outputs) keep their stable addresses.
+            self._args = list(args)
+            for i in self._input_indices_to_copy:
+                self._args[i] = args[i].clone()
             self._input_addresses = [
-                x.data_ptr() if isinstance(x, torch.Tensor) else None for x in args
+                x.data_ptr() if isinstance(x, torch.Tensor) else None
+                for x in self._args
             ]
 
             self._cudagraph = torch.cuda.CUDAGraph()
 
             with torch.cuda.graph(
                 self._cudagraph,
-                pool=_cg_manager.graph_pool,
+                pool=self._pool,
                 stream=_cg_manager.stream,
                 enable_annotations=_cg_manager.enable_annotations,
             ):
                 # `output` is managed by pytorch's cudagraph pool
-                self._output = self._runnable(*args)
+                self._output = self._runnable(*self._args)
 
             if _cg_manager.enable_annotations:
                 from torch.cuda._graph_annotations import get_kernel_annotations
