@@ -234,8 +234,6 @@ def _validate_placements(
             f"provided parameters; {', '.join(msg_parts)}."
         )
 
-    rank = mesh.get_local_rank()
-    world_size = mesh.size()
     from .placement_contract import Placement
 
     for fqn, placements in param_placements.items():
@@ -244,29 +242,6 @@ def _validate_placements(
             raise TypeError(
                 "BucketSpec.placement_fn must return Placement instances, but "
                 f"{fqn!r} uses {type(placement).__name__}."
-            )
-        param = param_dict[fqn]
-        try:
-            layout = placement.local_storage_layout(
-                param.shape,
-                param.dtype,
-                rank,
-                world_size,
-            )
-        except NotImplementedError as exc:
-            raise TypeError(
-                f"Placement {placement!r} for parameter {fqn!r} must implement "
-                "the FlexShard storage layout contract."
-            ) from exc
-        except Exception as exc:
-            raise ValueError(
-                f"Placement {placement!r} is invalid for parameter {fqn!r} "
-                f"with shape {tuple(param.shape)}: {exc}"
-            ) from exc
-        if layout.local_numel < 0 or layout.storage_nbytes < 0:
-            raise ValueError(
-                f"Placement {placement!r} returned negative storage layout "
-                f"values for parameter {fqn!r}."
             )
 
 

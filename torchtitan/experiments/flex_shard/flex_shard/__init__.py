@@ -6,11 +6,18 @@
 
 from .bucket_storage import BucketSpec, MixedPrecisionPolicy, OffloadPolicy, PlacementFn
 from .flex_shard import flex_shard
-from .placement_contract import LocalStorageLayout, Placement
+from .placement_contract import (
+    BucketParamStorageLayout,
+    BucketStorageLayout,
+    LocalStorageLayout,
+    Placement,
+)
 from .sharded_param import get_global_shape, get_placements, is_flex_shard_param
 
 __all__ = [
+    "BucketParamStorageLayout",
     "BucketSpec",
+    "BucketStorageLayout",
     "flex_shard",
     "get_global_shape",
     "get_placements",

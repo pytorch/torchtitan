@@ -21,7 +21,7 @@ from .utils import _get_single_placement, _set_param_on_module
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
-    from .placement_contract import Placement
+    from .placement_contract import BucketStorageLayout, LocalStorageLayout, Placement
     from .reshard_after_forward import _ReshardAfterForwardRecomputeState
 
 
@@ -99,6 +99,25 @@ class BucketSpec:
     reshard_after_forward: bool = True
 
 
+@dataclass(frozen=True)
+class BucketParamLayout:
+    """Bucket-global layout metadata for one parameter."""
+
+    param_offset: int
+    local_global_offset: int
+
+
+@dataclass(frozen=True)
+class BucketLayout:
+    """Bucket-global storage layout shared by parameters in one bucket."""
+
+    global_numel: int
+    local_numel: int
+    rank_offsets: tuple[int, ...]
+    rank_numels: tuple[int, ...]
+    param_layouts: dict[str, BucketParamLayout]
+
+
 @dataclass
 class ParamInfo:
     """Metadata for a parameter in chunked storage."""
@@ -114,6 +133,7 @@ class ParamInfo:
     byte_offset: int = 0  # byte offset into the sharded storage
     storage_nbytes: int = 0  # bytes reserved for this param's local storage
     global_numel: int = 0  # total elements in unsharded param
+    bucket_layout: BucketLayout | None = None
 
     @property
     def placement(self) -> Placement:
@@ -196,19 +216,6 @@ class ShardedBucketStorage:
         bucket_storage.install_sharded_params(expected_param_device)
         return bucket_storage
 
-    @staticmethod
-    def _compute_local_storage_layout(
-        global_shape: torch.Size,
-        dtype: torch.dtype,
-        mesh: DeviceMesh,
-        placements: tuple[Placement, ...],
-    ):
-        """Compute the placement-owned local storage layout."""
-        rank = mesh.get_local_rank()
-        world_size = mesh.size()
-        placement = _get_single_placement(placements)
-        return placement.local_storage_layout(global_shape, dtype, rank, world_size)
-
     @classmethod
     def create_param_infos(
         cls,
@@ -223,41 +230,199 @@ class ShardedBucketStorage:
         uniform dtype. Each placement owns its per-parameter local storage layout;
         bucket storage only places those layouts sequentially in the byte buffer.
         """
+        if not named_params:
+            return {}, 0
+
+        first_fqn = named_params[0][0]
+        placement = _get_single_placement(param_placements[first_fqn])
+        bucket_layout = placement.bucket_storage_layout(
+            named_params,
+            param_placements,
+            mesh,
+        )
+        if bucket_layout is not None:
+            return cls._create_param_infos_from_bucket_layout(
+                named_params,
+                param_placements,
+                bucket_layout,
+            )
+        return cls._create_param_infos_from_local_layouts(
+            named_params,
+            mesh,
+            param_placements,
+        )
+
+    @classmethod
+    def _create_param_infos_from_local_layouts(
+        cls,
+        named_params: list[tuple[str, nn.Parameter]],
+        mesh: DeviceMesh,
+        param_placements: dict[str, tuple[Placement, ...]],
+    ) -> tuple[dict[str, ParamInfo], int]:
+        rank = mesh.get_local_rank()
+        world_size = mesh.size()
         param_infos: dict[str, ParamInfo] = {}
         current_byte_offset = 0
-
         for fqn, param in named_params:
             placements = param_placements[fqn]
-            global_shape = param.shape
-            global_stride = make_contiguous_strides_for(global_shape)
-            dtype = param.dtype
+            placement = _get_single_placement(placements)
             local_storage_layout = cls._compute_local_storage_layout(
-                global_shape, dtype, mesh, placements
+                fqn,
+                param,
+                placement,
+                rank,
+                world_size,
             )
-            global_numel = param.numel()
-
             if local_storage_layout.storage_nbytes > 0:
                 byte_offset = current_byte_offset
                 current_byte_offset += local_storage_layout.storage_nbytes
             else:
                 byte_offset = 0
 
-            info = ParamInfo(
+            param_infos[fqn] = cls._create_param_info(
                 fqn=fqn,
-                global_shape=global_shape,
-                global_stride=tuple(global_stride),
-                dtype=dtype,
-                requires_grad=param.requires_grad,
+                param=param,
                 placements=placements,
                 local_shape=local_storage_layout.local_shape,
                 local_numel=local_storage_layout.local_numel,
                 byte_offset=byte_offset,
                 storage_nbytes=local_storage_layout.storage_nbytes,
-                global_numel=global_numel,
             )
-            param_infos[fqn] = info
 
         return param_infos, current_byte_offset
+
+    @staticmethod
+    def _compute_local_storage_layout(
+        fqn: str,
+        param: nn.Parameter,
+        placement: Placement,
+        rank: int,
+        world_size: int,
+    ) -> LocalStorageLayout:
+        try:
+            local_storage_layout = placement.local_storage_layout(
+                param.shape,
+                param.dtype,
+                rank,
+                world_size,
+            )
+        except NotImplementedError as exc:
+            raise TypeError(
+                f"Placement {placement!r} for parameter {fqn!r} must implement "
+                "the FlexShard storage layout contract."
+            ) from exc
+        except Exception as exc:
+            raise ValueError(
+                f"Placement {placement!r} is invalid for parameter {fqn!r} "
+                f"with shape {tuple(param.shape)}: {exc}"
+            ) from exc
+
+        if local_storage_layout.local_numel < 0:
+            raise ValueError(
+                f"Placement {placement!r} returned negative local_numel "
+                f"for parameter {fqn!r}."
+            )
+        if local_storage_layout.storage_nbytes < 0:
+            raise ValueError(
+                f"Placement {placement!r} returned negative storage_nbytes "
+                f"for parameter {fqn!r}."
+            )
+        return local_storage_layout
+
+    @classmethod
+    def _create_param_infos_from_bucket_layout(
+        cls,
+        named_params: list[tuple[str, nn.Parameter]],
+        param_placements: dict[str, tuple[Placement, ...]],
+        bucket_layout: BucketStorageLayout,
+    ) -> tuple[dict[str, ParamInfo], int]:
+        expected_fqns = {fqn for fqn, _ in named_params}
+        actual_fqns = set(bucket_layout.param_layouts)
+        if actual_fqns != expected_fqns:
+            msg_parts = []
+            missing_fqns = expected_fqns - actual_fqns
+            extra_fqns = actual_fqns - expected_fqns
+            if missing_fqns:
+                msg_parts.append(f"missing layouts for {sorted(missing_fqns)}")
+            if extra_fqns:
+                msg_parts.append(f"unexpected layouts for {sorted(extra_fqns)}")
+            raise ValueError(
+                "Placement bucket_storage_layout() must return layouts for "
+                f"exactly the provided parameters; {', '.join(msg_parts)}."
+            )
+        if bucket_layout.total_bytes < 0:
+            raise ValueError(
+                "Placement bucket_storage_layout() returned negative total_bytes."
+            )
+
+        param_infos: dict[str, ParamInfo] = {}
+        for fqn, param in named_params:
+            placements = param_placements[fqn]
+            layout = bucket_layout.param_layouts[fqn]
+            if layout.local_numel < 0:
+                raise ValueError(
+                    "Placement bucket_storage_layout() returned negative "
+                    f"local_numel for parameter {fqn!r}."
+                )
+            if layout.byte_offset < 0:
+                raise ValueError(
+                    "Placement bucket_storage_layout() returned negative "
+                    f"byte_offset for parameter {fqn!r}."
+                )
+            if layout.storage_nbytes < 0:
+                raise ValueError(
+                    "Placement bucket_storage_layout() returned negative "
+                    f"storage_nbytes for parameter {fqn!r}."
+                )
+            if (
+                layout.storage_nbytes > 0
+                and layout.byte_offset + layout.storage_nbytes
+                > bucket_layout.total_bytes
+            ):
+                raise ValueError(
+                    "Placement bucket_storage_layout() returned storage for "
+                    f"parameter {fqn!r} outside the bucket byte range."
+                )
+
+            param_infos[fqn] = cls._create_param_info(
+                fqn=fqn,
+                param=param,
+                placements=placements,
+                local_shape=layout.local_shape,
+                local_numel=layout.local_numel,
+                byte_offset=layout.byte_offset,
+                storage_nbytes=layout.storage_nbytes,
+                bucket_layout=layout.bucket_layout,
+            )
+
+        return param_infos, bucket_layout.total_bytes
+
+    @staticmethod
+    def _create_param_info(
+        *,
+        fqn: str,
+        param: nn.Parameter,
+        placements: tuple[Placement, ...],
+        local_shape: torch.Size,
+        local_numel: int,
+        byte_offset: int,
+        storage_nbytes: int,
+        bucket_layout: BucketLayout | None = None,
+    ) -> ParamInfo:
+        return ParamInfo(
+            fqn=fqn,
+            global_shape=param.shape,
+            global_stride=tuple(make_contiguous_strides_for(param.shape)),
+            dtype=param.dtype,
+            requires_grad=param.requires_grad,
+            placements=placements,
+            local_shape=local_shape,
+            local_numel=local_numel,
+            byte_offset=byte_offset,
+            storage_nbytes=storage_nbytes,
+            global_numel=param.numel(),
+            bucket_layout=bucket_layout,
+        )
 
     def copy_params_from(
         self,
