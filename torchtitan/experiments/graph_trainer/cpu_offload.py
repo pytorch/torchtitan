@@ -28,9 +28,9 @@ This module works with the make_fx traced joint fwd+bwd graph, using
 
 NUMA note: On multi-NUMA machines (e.g. GB200 NVLink-C2C), CPU offload
 bandwidth depends on pinned memory landing on the NUMA node local to the
-GPU (~350 GB/s local vs ~120 GB/s cross-NUMA). torchrun's
-``--numa-binding node`` flag (set in run_train.sh) pins each worker to
-the correct NUMA node, which is sufficient for the multi-process case.
+GPU (~350 GB/s local vs ~120 GB/s cross-NUMA). GraphTrainer automatically
+applies NUMA binding (``AffinityMode.NODE``) when the ``sac_and_offload``
+memory policy is active (see ``_apply_numa_binding`` in trainer.py).
 """
 
 import operator
@@ -399,9 +399,9 @@ def apply_cpu_offload_pass(
 
     for node, bwd_users in offloadable:
         val = node.meta.get("val")
-        assert (
-            val is not None
-        ), f"Node {node.name} tagged for offload has no 'val' metadata"
+        assert val is not None, (
+            f"Node {node.name} tagged for offload has no 'val' metadata"
+        )
 
         device = val.device
         # Propagate source node metadata to offload chain nodes so
@@ -418,7 +418,7 @@ def apply_cpu_offload_pass(
             offload_node.meta["val"] = val.to(torch.device("cpu"))
 
         # Find the last forward consumer of this node's storage (including
-        # through views) so the wait_tensor encodes the dependency directly.
+        # through views) so the defer pass knows the earliest safe point.
         chain_nodes, _ = _get_storage_chain(node)
         last_consumer = node
         last_consumer_pos = node_to_index[node]
@@ -430,12 +430,12 @@ def apply_cpu_offload_pass(
                 last_consumer = c
                 last_consumer_pos = c_pos
 
-        # ao::wait_tensor's last_use_of_storage arg expects Optional[Tensor].
-        # If last_consumer produces a non-Tensor value (e.g. sort returns a
-        # tuple), fall back to None to avoid a runtime type error.
+        # ao::wait_tensor's last_use_of_storage schema requires
+        # Optional[Tensor]. If the real last consumer produces a
+        # non-Tensor (e.g. sort -> tuple), pass None for the schema
+        # but store the actual consumer in metadata for defer_offload_waits.
         last_use_arg = last_consumer
-        last_use_val = last_consumer.meta.get("val")
-        if not isinstance(last_use_val, torch.Tensor):
+        if not isinstance(last_consumer.meta.get("val"), torch.Tensor):
             last_use_arg = None
 
         with gm.graph.inserting_after(offload_node):
@@ -445,6 +445,7 @@ def apply_cpu_offload_pass(
             )
             wait_offload_node.meta.update(src_meta)
             wait_offload_node.meta["val"] = offload_node.meta["val"]
+            wait_offload_node.meta["last_consumer"] = last_consumer
 
         wait_offload_map[node] = wait_offload_node
 
@@ -566,10 +567,11 @@ def defer_offload_waits(
         if node_idx is None:
             continue
 
-        # The last_use_of_storage arg on wait_tensor encodes the last
-        # forward consumer of the offloaded node's storage (set during
-        # insertion).
-        last_use = wait_node.args[2] if len(wait_node.args) > 2 else node
+        # Prefer metadata (handles non-Tensor consumers that can't be
+        # passed as args), fall back to the wait_tensor arg.
+        last_use = wait_node.meta.get("last_consumer")
+        if last_use is None:
+            last_use = wait_node.args[2] if len(wait_node.args) > 2 else node
         last_use_idx = node_to_region_idx.get(last_use, node_idx)
 
         # Defer at least n_layers past the node for D2H overlap, but

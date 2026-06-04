@@ -73,13 +73,12 @@ The `--compile.memory_policy` config selects the tagging strategy.
 New policies (e.g. budget-aware mixed SAC + offload) should be added
 as new branches in `tag_with_memory_policy_pass`.
 
-**NUMA requirement for CPU offload:** On multi-NUMA machines (e.g. GB200
+**NUMA binding for CPU offload:** On multi-NUMA machines (e.g. GB200
 NVLink-C2C), D2H/H2D bandwidth is ~350 GB/s NUMA-local vs ~120 GB/s
-cross-NUMA. `run_train.sh` passes `--numa-binding node` to torchrun,
-which pins each worker process to the NUMA node containing its GPU.
-This is required for full offload bandwidth. Without it, pinned memory
-allocations can land on a remote NUMA node and degrade transfer speed
-by ~3x.
+cross-NUMA. `GraphTrainer` automatically applies NUMA binding
+(`AffinityMode.NODE`) when `sac_and_offload` is active, pinning each
+worker to the NUMA node of its GPU. Falls back gracefully on non-CUDA
+hardware or when `numactl` is unavailable.
 
 **Inspecting tags:** `log_activation_memory_policy` (`log_activation_memory_policy.py`)
 prints all forward nodes consumed by backward, grouped by layer with
