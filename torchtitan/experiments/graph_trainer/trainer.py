@@ -207,6 +207,14 @@ class GraphTrainer(Trainer):
 
         return loss
 
+    def train(self):
+        from torch._functorch._activation_offloading.offload_ops import (
+            pinned_memory_pool,
+        )
+
+        with pinned_memory_pool():
+            super().train()
+
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
