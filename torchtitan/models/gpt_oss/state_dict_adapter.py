@@ -11,6 +11,7 @@ import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
 from torchtitan.models.common.attention import FusedQKVLinear
+from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.utils import MoEStateDictAdapter
 from .model import GptOssModel
 
@@ -62,6 +63,15 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "lm_head.weight",
         }
+
+    def _validate_hf_rope_config(self) -> None:
+        for layer in self.model_config.layers:
+            rope = layer.attention.rope
+            if not isinstance(rope, CosSinRoPE.Config):
+                raise ValueError(
+                    "GPT-OSS HF checkpoint conversion assumes CosSinRoPE.Config; "
+                    f"got {type(rope).__name__}."
+                )
 
     def get_hf_storage_reader(
         self, path: str, from_quantized: bool = False
@@ -141,6 +151,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         Warning: Conversion does not support saving to mxfp4 quantization format.
                  One can save into unquantized hf checkpoints with last_save_in_hf = true.
         """
+
         if self.fuse_qkv:
             to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
             n_heads, n_kv_heads, head_dim = self._get_attention_dims()
@@ -202,6 +213,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         """
         Convert from hf format state dict to tt model state dict.
         """
+        self._validate_hf_rope_config()
 
         state_dict = {}
         # Collect Q/K/V per layer for fusing (only used when fuse_qkv=True)

@@ -101,7 +101,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
         )
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        self._validate_hf_rope_config()
+
         n_heads = self.model_config.layers[0].attention.n_heads
         n_kv_heads = (
             self.model_config.layers[0].attention.n_kv_heads
