@@ -86,6 +86,18 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Maximum CPU memory budget (in GB per rank) for offloaded activations.
     Tensors are selected largest-first until the budget is exhausted."""
 
+    cpu_offload_view_replay: bool = False
+    """When True, offload tensors whose backward consumers reach them through
+    view chains (transpose, reshape, etc.) by replaying the view ops after
+    reload. Without this, only tensors with direct backward consumers are
+    offloaded."""
+
+    cpu_offload_selection: str = "largest"
+    """Strategy for selecting which tensors to offload within the budget.
+    ``"largest"``: pick largest tensors first.
+    ``"lifetime"``: score by size x lifetime — prefers early-layer tensors
+    that contribute most to sustained memory pressure."""
+
     enable_fsdp_ag_rs_overlap: bool = False
     """When True, run ``overlap_fsdp_ag_rs_pass``. The pass moves backward
     FSDP all-gathers onto a separate CUDA stream from reduce-scatters so the

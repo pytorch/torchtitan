@@ -200,6 +200,42 @@ def _has_recompute_consumer(node: Node) -> bool:
     return False
 
 
+def _collect_view_replay_info(
+    node: Node,
+) -> tuple[list[Node], list[tuple[Node, Node]]]:
+    """Collect view chain nodes and backward consumers reachable through views.
+
+    Starting from node, walks through view op users recursively. For each
+    view node encountered, records backward consumers that need redirection
+    after the view chain is replayed in backward.
+
+    Does not include direct backward users of node itself (those are handled
+    separately by the caller).
+
+    Returns:
+        replay_views: view nodes to replay in backward (graph order)
+        view_bwd_redirects: (consumed_view_node, bwd_user) pairs to redirect
+    """
+    replay_views: list[Node] = []
+    view_bwd_redirects: list[tuple[Node, Node]] = []
+    visited_views: set[Node] = set()
+
+    def _walk(n: Node, in_chain: bool) -> None:
+        for user in n.users:
+            if user.op != "call_function":
+                continue
+            if _is_backward_node(user):
+                if in_chain:
+                    view_bwd_redirects.append((n, user))
+            elif _is_view(user) and user not in visited_views:
+                visited_views.add(user)
+                replay_views.append(user)
+                _walk(user, True)
+
+    _walk(node, False)
+    return replay_views, view_bwd_redirects
+
+
 # ============================================================
 # Forward/backward node classification for make_fx traced graphs
 # ============================================================
@@ -240,6 +276,7 @@ def tag_all_offloadable_activations(
     example_inputs: tuple | None = None,
     *,
     cpu_budget_gb: float = 100.0,
+    selection: str = "largest",
 ) -> torch.fx.GraphModule:
     """Tag saved activations eligible for CPU offloading.
 
@@ -253,14 +290,15 @@ def tag_all_offloadable_activations(
     benefit. This may not hold for chunked loss where the last layer's
     activations are consumed later.
 
-    Applies a CPU memory budget: tensors are selected largest-first until
-    the budget is exhausted.
-
     Args:
         gm: The GraphModule containing the full fwd+bwd graph.
         example_inputs: Example inputs (unused, required by graph pass interface).
         cpu_budget_gb: Maximum CPU memory budget (GB per rank) for offloaded
-            activations. Tensors are selected largest-first.
+            activations.
+        selection: Strategy for picking tensors within the budget.
+            ``"largest"``: largest tensors first (default).
+            ``"lifetime"``: score by size × lifetime — prefers early-layer
+            tensors that are alive longest and contribute most to peak memory.
 
     Returns:
         The GraphModule with eligible nodes tagged for offload.
@@ -304,9 +342,22 @@ def tag_all_offloadable_activations(
 
         candidates.append((node, _tensor_bytes(node.meta["val"])))
 
-    # Apply budget: select largest-first until exhausted.
+    # Apply budget: select by strategy until exhausted.
     budget_bytes = cpu_budget_gb * (1024**3)
-    candidates.sort(key=lambda t: t[1], reverse=True)
+    if selection == "lifetime":
+        node_to_idx = {n: i for i, n in enumerate(gm.graph.nodes)}
+        total_nodes = len(node_to_idx)
+
+        def _lifetime_score(item: tuple[Node, int]) -> float:
+            node, nbytes = item
+            birth = node_to_idx.get(node, 0)
+            # Lifetime = distance from birth to end of graph (later layers freed later in bwd)
+            lifetime = total_nodes - birth
+            return nbytes * lifetime
+
+        candidates.sort(key=_lifetime_score, reverse=True)
+    else:
+        candidates.sort(key=lambda t: t[1], reverse=True)
     tagged = 0
     total_bytes = 0
     selected_sizes: list[int] = []
@@ -342,6 +393,7 @@ def apply_cpu_offload_pass(
     *,
     prefetch_lookahead: int = 1,
     defer_n_layers: int = 1,
+    enable_view_replay: bool = False,
 ) -> torch.fx.GraphModule:
     """Insert ao offload/reload/wait_tensor ops for nodes tagged ``MUST_CPU_OFFLOAD``.
 
@@ -371,15 +423,20 @@ def apply_cpu_offload_pass(
     Returns:
         The transformed GraphModule with offload/reload ops inserted.
     """
-    # 1. Collect nodes tagged for offload with their backward consumers.
-    offloadable: list[tuple[Node, list[Node]]] = []
+    # 1. Collect nodes tagged for offload with backward consumers (direct + through views).
+    offloadable: list[tuple[Node, list[Node], list[Node], list[tuple[Node, Node]]]] = []
     for node in gm.graph.nodes:
         if node.meta.get("recompute") is not CheckpointPolicy.MUST_CPU_OFFLOAD:
             continue
-        bwd_users = [u for u in node.users if _is_backward_node(u)]
-        if not bwd_users:
+        direct_bwd_users = [u for u in node.users if _is_backward_node(u)]
+        if enable_view_replay:
+            replay_views, view_bwd_redirects = _collect_view_replay_info(node)
+        else:
+            replay_views, view_bwd_redirects = [], []
+        all_bwd_users = direct_bwd_users + [u for _, u in view_bwd_redirects]
+        if not all_bwd_users:
             continue
-        offloadable.append((node, bwd_users))
+        offloadable.append((node, direct_bwd_users, replay_views, view_bwd_redirects))
 
     if not offloadable:
         return gm
@@ -391,7 +448,8 @@ def apply_cpu_offload_pass(
     total_bytes = 0
     wait_offload_map: dict[Node, Node] = {}
 
-    for node, bwd_users in offloadable:
+    replay_count = 0
+    for node, direct_bwd_users, replay_views, view_bwd_redirects in offloadable:
         val = node.meta.get("val")
         assert (
             val is not None
@@ -419,6 +477,18 @@ def apply_cpu_offload_pass(
         for c in chain_nodes:
             if c.target in _AO_OPS:
                 continue
+            c_val = c.meta.get("val")
+            if not isinstance(c_val, torch.Tensor):
+                # For tuple-producing ops (e.g. torch.sort), use a getitem
+                # user instead — it produces a tensor and preserves the
+                # dependency edge.
+                for u in c.users:
+                    if u.target is operator.getitem:
+                        u_pos = node_to_index.get(u)
+                        if u_pos is not None and u_pos > last_consumer_pos:
+                            last_consumer = u
+                            last_consumer_pos = u_pos
+                continue
             c_pos = node_to_index.get(c)
             if c_pos is not None and c_pos > last_consumer_pos:
                 last_consumer = c
@@ -435,7 +505,8 @@ def apply_cpu_offload_pass(
         wait_offload_map[node] = wait_offload_node
 
         # --- Backward: async CPU->GPU reload before earliest consumer ---
-        first_consumer = min(bwd_users, key=lambda n: node_to_index[n])
+        all_bwd_users = direct_bwd_users + [u for _, u in view_bwd_redirects]
+        first_consumer = min(all_bwd_users, key=lambda n: node_to_index[n])
 
         with gm.graph.inserting_before(first_consumer):
             reload_node = gm.graph.call_function(
@@ -449,14 +520,45 @@ def apply_cpu_offload_pass(
         with gm.graph.inserting_before(first_consumer):
             wait_node = gm.graph.call_function(
                 torch.ops.ao.wait_tensor.default,
-                args=(reload_node,),
+                args=(reload_node, wait_offload_node),
             )
             wait_node.meta.update(src_meta)
             wait_node.meta["val"] = val
             wait_node.meta["autograd_backward"] = True
 
-        for user in bwd_users:
+        for user in direct_bwd_users:
             user.replace_input_with(node, wait_node)
+
+        # View replay: clone view ops in backward, redirect view-chain consumers
+        if replay_views:
+            replay_count += 1
+            replay_map: dict[Node, Node] = {node: wait_node}
+            sorted_views = sorted(replay_views, key=lambda n: node_to_index[n])
+            for view_node in sorted_views:
+                new_args = tuple(
+                    replay_map.get(a, a) if isinstance(a, Node) else a
+                    for a in view_node.args
+                )
+                new_kwargs = {
+                    k: replay_map.get(v, v) if isinstance(v, Node) else v
+                    for k, v in view_node.kwargs.items()
+                }
+                with gm.graph.inserting_before(first_consumer):
+                    replayed = gm.graph.call_function(
+                        view_node.target,
+                        args=new_args,
+                        kwargs=new_kwargs,
+                    )
+                    replayed.meta.update(
+                        {k: v for k, v in view_node.meta.items() if k != "recompute"}
+                    )
+                    replayed.meta["autograd_backward"] = True
+                replay_map[view_node] = replayed
+
+            for consumed_node, bwd_user in view_bwd_redirects:
+                replayed = replay_map.get(consumed_node)
+                if replayed is not None:
+                    bwd_user.replace_input_with(consumed_node, replayed)
 
         logger.debug(
             f"CPU offload: offloading {node.name} "
@@ -479,6 +581,7 @@ def apply_cpu_offload_pass(
     logger.info(
         f"CPU offload: offloaded {len(offloadable)} tensors "
         f"({total_bytes / 1024 / 1024:.2f} MB), "
+        f"{replay_count} with view replay, "
         f"deferred {deferred} forward waits"
     )
     return gm
