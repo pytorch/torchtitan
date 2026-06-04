@@ -212,15 +212,13 @@ class VLLMGenerator(Actor, Configurable):
         """Debug and determinism settings."""
 
         def __post_init__(self):
-            # VLLMGenerator only supports TP. vLLM handles its own parallelism;
-            # we only apply TP via the core parallelize function.
+            # Supported generator parallelism: tensor, data (replicate + shard),
+            # and expert. Pipeline/context/sequence parallelism are rejected
+            # below. The model's TP/EP sharding is applied by the core
+            # parallelize_fn; data parallelism is driven by vLLM (each DP group
+            # has its own KV cache), and the controller shards prompts across the
+            # DP groups (RLTrainer._generate_sharded).
             p = self.parallelism
-            # EXPERIMENT: allow data-parallel replication (dp_replicate > 1) so
-            # the generator runs as `dp_replicate` independent vLLM engines, each
-            # a `tensor_parallel_degree`-rank TP group. vLLM's external_launcher
-            # DP support (PR #24899) sizes world_size = tp*pp*dp and auto-derives
-            # each rank's dp_rank from $RANK. Prompt sharding across replicas is
-            # done by the controller (see RLTrainer._generate_sharded).
             if p.pipeline_parallel_degree > 1:
                 raise ValueError(
                     f"Generator does not support pipeline parallelism, "
@@ -231,10 +229,6 @@ class VLLMGenerator(Actor, Configurable):
                     f"Generator does not support context parallelism, "
                     f"got cp={p.context_parallel_degree}"
                 )
-            # EXPERIMENT: allow expert parallelism (ep > 1). Core
-            # parallelize_qwen3 calls model.parallelize() when ep_enabled, which
-            # shards GroupedExperts on the ep mesh and wires the token
-            # dispatcher's all-to-all (handled entirely below the controller).
             if p.enable_sequence_parallel:
                 raise ValueError(
                     "Generator does not support sequence parallelism: "
@@ -313,15 +307,15 @@ class VLLMGenerator(Actor, Configurable):
             # With external_launcher, world_size = tp*pp*dp must match the number
             # of ranks Monarch spawned. vLLM's data-parallel degree is the number
             # of independent-data groups = dp_replicate * dp_shard (the latter
-            # carries DP-attention for the MoE EP layout). vLLM auto-assigns each
-            # rank's dp_rank from $RANK (PR #24899). Same value on every rank (SPMD).
+            # carries DP-attention for the MoE EP layout). vLLM derives each
+            # rank's dp_rank from its global rank. Same value on every rank (SPMD).
             data_parallel_size=(
                 max(config.parallelism.data_parallel_replicate_degree, 1)
                 * max(config.parallelism.data_parallel_shard_degree, 1)
             ),
-            # When EP is on, vLLM spreads experts across the dp*tp world and runs
-            # the cross-group all-to-all; the torchtitan MoE module issues it via
-            # its own ep mesh (model.parallelize), this flag aligns vLLM's groups.
+            # Set when ep > 1. The expert all-to-all is performed by the torchtitan
+            # MoE module via its own ep mesh (applied by the core parallelize_fn's
+            # model.parallelize()), not by vLLM's native FusedMoE.
             enable_expert_parallel=config.parallelism.expert_parallel_degree > 1,
             # Monarch already spawned TP workers via proc mesh. "external_launcher"
             # tells vLLM to run one worker per process (no subprocess spawning)
