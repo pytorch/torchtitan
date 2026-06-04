@@ -231,11 +231,10 @@ class VLLMGenerator(Actor, Configurable):
                     f"Generator does not support context parallelism, "
                     f"got cp={p.context_parallel_degree}"
                 )
-            if p.expert_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support expert parallelism, "
-                    f"got ep={p.expert_parallel_degree}"
-                )
+            # EXPERIMENT: allow expert parallelism (ep > 1). Core
+            # parallelize_qwen3 calls model.parallelize() when ep_enabled, which
+            # shards GroupedExperts on the ep mesh and wires the token
+            # dispatcher's all-to-all (handled entirely below the controller).
             if p.enable_sequence_parallel:
                 raise ValueError(
                     "Generator does not support sequence parallelism: "
@@ -312,10 +311,18 @@ class VLLMGenerator(Actor, Configurable):
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
             # With external_launcher, world_size = tp*pp*dp must match the number
-            # of ranks Monarch spawned. Passing data_parallel_size makes vLLM size
-            # its world correctly and auto-assign each rank's dp_rank from $RANK
-            # (PR #24899). Same value on every rank (SPMD).
-            data_parallel_size=config.parallelism.data_parallel_replicate_degree,
+            # of ranks Monarch spawned. vLLM's data-parallel degree is the number
+            # of independent-data groups = dp_replicate * dp_shard (the latter
+            # carries DP-attention for the MoE EP layout). vLLM auto-assigns each
+            # rank's dp_rank from $RANK (PR #24899). Same value on every rank (SPMD).
+            data_parallel_size=(
+                max(config.parallelism.data_parallel_replicate_degree, 1)
+                * max(config.parallelism.data_parallel_shard_degree, 1)
+            ),
+            # When EP is on, vLLM spreads experts across the dp*tp world and runs
+            # the cross-group all-to-all; the torchtitan MoE module issues it via
+            # its own ep mesh (model.parallelize), this flag aligns vLLM's groups.
+            enable_expert_parallel=config.parallelism.expert_parallel_degree > 1,
             # Monarch already spawned TP workers via proc mesh. "external_launcher"
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",
