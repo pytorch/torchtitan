@@ -27,11 +27,16 @@ from torchtitan.tools.logging import logger
 
 
 class _CUDAGraphManager:
-    """A manager to hold a shared graph pool, stream, and wrapper registry."""
+    """Holds the shared capture stream, the per-graph private pools, and the
+    wrapper registry (for teardown)."""
 
     def __init__(self) -> None:
         self._initialized = False
         self._cudagraph_wrappers: list["CUDAGraphWrapper"] = []
+        # One private graph pool per CUDAGraphWrapper (full capture or piecewise
+        # segment), each kept alive by a dummy graph. Stored as
+        # (pool_handle, dummy_graph) so both are released together at teardown.
+        self._private_pools: list[tuple[Any, "torch.cuda.CUDAGraph"]] = []
         self._teardown_called = False
         # toolsId (graph_id << 32 | node_id) -> list of annotation dicts
         # (e.g. [{"module_fqn": "layers.0.attention.wq"}]).
@@ -44,32 +49,40 @@ class _CUDAGraphManager:
 
         self._initialized = True
 
-        # create a global cudagraph memory pool to allow memory reuse across cudagraphs.
-        self.graph_pool = torch.cuda.graph_pool_handle()
-
-        # create a global cuda stream for graph capture. we need to use a single stream
-        # for all allocations to the memory pool, otherwise the allocations to separate
-        # streams will not be used.
+        # create a global cuda stream for graph capture. we need to use a single
+        # stream for all allocations to the (per-segment private) pools, otherwise
+        # allocations on separate streams will not be reused.
         self.stream = torch.cuda.Stream()
 
-        # use a dummy graph to keep the global graph pool alive
-        self._dummy_graph = torch.cuda.CUDAGraph()
+    def register_wrapper(self, wrapper: "CUDAGraphWrapper") -> None:
+        assert not self._teardown_called, "Cannot register new cudagraph after teardown"
+        self._cudagraph_wrappers.append(wrapper)
+
+    def new_pool(self) -> Any:
+        """Create a fresh private graph pool kept alive by a dummy graph, and
+        return its handle (used by each :class:`CUDAGraphWrapper`).
+
+        Every wrapper captures into its own pool so that one graph's
+        capture/replay cannot clobber another's live tensors (e.g. a forward
+        activation saved for a backward segment). The bare ``torch.cuda.graph``
+        API has no cross-graph liveness tracking, so a shared pool would be unsafe
+        across the eager regions that separate segments.
+        """
+        self.maybe_initialize()
+        pool = torch.cuda.graph_pool_handle()
+        dummy = torch.cuda.CUDAGraph()
         with (
-            # suppress an empty cudagraph warning, since we intentionally create
-            # an empty cudagraph here
             warnings.catch_warnings(record=True),
             torch.cuda.graph(
-                self._dummy_graph,
-                pool=self.graph_pool,
+                dummy,
+                pool=pool,
                 stream=self.stream,
                 capture_error_mode="thread_local",
             ),
         ):
             pass
-
-    def register_wrapper(self, wrapper: "CUDAGraphWrapper") -> None:
-        assert not self._teardown_called, "Cannot register new cudagraph after teardown"
-        self._cudagraph_wrappers.append(wrapper)
+        self._private_pools.append((pool, dummy))
+        return pool
 
     def teardown(self) -> None:
         """Destroy all cudagraphs and release the cudagraph memory pool.
@@ -90,9 +103,11 @@ class _CUDAGraphManager:
             wrapper.teardown()
         self._cudagraph_wrappers.clear()
 
-        self._dummy_graph = None
+        # Release private pools and their dummy graphs. Must happen after the
+        # wrappers drop their cudagraphs (above) so no graph still references a
+        # pool. See Note [explicit cudagraph teardown].
+        self._private_pools.clear()
         self.stream = None
-        self.graph_pool = None
         self._teardown_called = True
 
 
@@ -182,6 +197,11 @@ class CUDAGraphWrapper:
     ):
         _cg_manager.maybe_initialize()
         _cg_manager.register_wrapper(self)
+        # Each wrapper captures into its own private pool so one graph's
+        # capture/replay cannot clobber another's live tensors (the bare
+        # torch.cuda.graph API has no cross-graph liveness tracking). A full
+        # (single-piece) capture is just the one-wrapper case.
+        self._pool = _cg_manager.new_pool()
 
         self._runnable = runnable
         self._static_input_indices = OrderedSet(
@@ -254,29 +274,40 @@ class CUDAGraphWrapper:
 
             # warmup in cudagraph memory pool to avoid fragmentation
             # across eager memory pool and cudagraph memory pool.
-            with _use_cuda_memory_pool_manager(
-                device, _cg_manager.graph_pool, _cg_manager.stream
-            ):
+            with _use_cuda_memory_pool_manager(device, self._pool, _cg_manager.stream):
                 out = self._runnable(*args)
             return out
 
         if self._cudagraph is None:
             self._validate_inputs(args)
-            self._args = args
+            # Stage non-static inputs into persistent buffers so the capture reads
+            # stream-local memory. A captured graph that reads an input produced on
+            # another stream (e.g. an eager collective output or a cross-segment
+            # value living on the NCCL comm stream) records a dependency on
+            # uncaptured cross-stream work and fails capture with "dependency
+            # created on uncaptured work in another stream". Cloning on the current
+            # stream before capture launders that dependency; the graph reads the
+            # buffer, and replay copies fresh values into it via
+            # ``_copy_non_static_inputs``. Static inputs (params/buffers, other
+            # cudagraph segments' outputs) keep their stable addresses.
+            self._args = list(args)
+            for i in self._input_indices_to_copy:
+                self._args[i] = args[i].clone()
             self._input_addresses = [
-                x.data_ptr() if isinstance(x, torch.Tensor) else None for x in args
+                x.data_ptr() if isinstance(x, torch.Tensor) else None
+                for x in self._args
             ]
 
             self._cudagraph = torch.cuda.CUDAGraph()
 
             with torch.cuda.graph(
                 self._cudagraph,
-                pool=_cg_manager.graph_pool,
+                pool=self._pool,
                 stream=_cg_manager.stream,
                 enable_annotations=_cg_manager.enable_annotations,
             ):
                 # `output` is managed by pytorch's cudagraph pool
-                self._output = self._runnable(*args)
+                self._output = self._runnable(*self._args)
 
             if _cg_manager.enable_annotations:
                 from torch.cuda._graph_annotations import get_kernel_annotations
@@ -299,10 +330,79 @@ class CUDAGraphWrapper:
         self._output = None
 
 
-_FLEX_ATTENTION_OPS = {
-    torch.ops.higher_order.flex_attention,
-    torch.ops.higher_order.flex_attention_backward,
-}
+def _has_dynamic_shape(val: Any) -> bool:
+    """True if ``val`` is (or contains) a tensor with a symbolic (data-dependent)
+    shape — i.e. any dimension is a ``torch.SymInt`` rather than a concrete int."""
+    if isinstance(val, torch.Tensor):
+        return any(isinstance(s, torch.SymInt) for s in val.shape)
+    if isinstance(val, (list, tuple)):
+        return any(_has_dynamic_shape(v) for v in val)
+    return False
+
+
+def is_cudagraphable(
+    node: torch.fx.Node, dyn_map: dict[torch.fx.Node, bool] | None = None
+) -> bool:
+    """Whether ``node`` can be captured by a CUDA graph.
+
+    Per-node predicate for the partitioner (:func:`cudagraph_pass`) and the
+    build-time gate (:func:`is_full_cudagraphable`). ``dyn_map``, when given, is a
+    precomputed ``{node: has_dynamic_shape(out)}`` map so the shape check is an
+    O(1) lookup instead of recomputing per consumer.
+
+    flex_attention HOPs count as cudagraphable: regional_inductor compiles them to
+    Triton kernels before cudagraph, so this never sees a flex HOP at capture time.
+    """
+    if node.op != "call_function":
+        return True
+
+    # Cross-device copy from/to unpinned CPU memory: cudagraph requires the CPU
+    # side to be pinned for the async H2D/D2H copy.
+    if node.target in (
+        torch.ops.aten.copy_.default,
+        torch.ops.aten._to_copy.default,
+    ):
+        val = node.meta.get("val")
+        if isinstance(val, torch.Tensor):
+            for inp in node.all_input_nodes:
+                inp_val = inp.meta.get("val")
+                if (
+                    isinstance(inp_val, torch.Tensor)
+                    and inp_val.device.type != val.device.type
+                ):
+                    cpu_val = val if val.device.type == "cpu" else inp_val
+                    if not cpu_val.is_pinned():
+                        return False
+
+    # aten._grouped_mm may perform internal CPU<->CUDA copies not visible in FX
+    # metadata; resolved on sm_100+.
+    if node.target == torch.ops.aten._grouped_mm.default:
+        if torch.cuda.get_device_capability() < (10, 0):
+            return False
+
+    # .item()/.tolist() need a device-to-host sync a cudagraph replay can't redo.
+    if node.target == torch.ops.aten._local_scalar_dense.default:
+        return False
+
+    # Op with a dynamic (data-dependent / unbacked-SymInt) input or output shape.
+    def _dyn(n: torch.fx.Node) -> bool:
+        if dyn_map is not None:
+            return dyn_map.get(n, False)
+        return _has_dynamic_shape(n.meta.get("val"))
+
+    if _dyn(node) or any(_dyn(inp) for inp in node.all_input_nodes):
+        return False
+
+    return True
+
+
+def is_full_cudagraphable(gm: torch.fx.GraphModule) -> bool:
+    """True if every node is cudagraphable (:func:`is_cudagraphable`), i.e. the
+    graph can be captured as one full CUDA graph. Used to resolve
+    ``cudagraph_mode='auto'`` to full vs piecewise at pipeline-build time. Run on
+    the pre-inductor graph; flex counts as cudagraphable (compiled before capture),
+    matching the post-inductor reality."""
+    return all(is_cudagraphable(node) for node in gm.graph.nodes)
 
 
 def is_cudagraph_compatible(
@@ -310,95 +410,25 @@ def is_cudagraph_compatible(
     *,
     skip_flex_attention_check: bool = False,
 ) -> bool:
-    """Check whether the graph can be safely captured by CUDA graph.
+    """Whole-graph cudagraph gate: True iff the graph has no cudagraph-unsafe op.
 
-    Returns False (with a warning) when the graph contains patterns
-    incompatible with CUDA graph capture:
+    Used by the all-or-nothing :func:`cudagraph_pass` and by
+    ``full_inductor_compilation_pass`` (which stashes its pre-collapse verdict in
+    ``gm.meta`` -- the collapse hides ops from the scan). Delegates to the per-node
+    predicate via :func:`is_full_cudagraphable`.
 
-    - **Unpinned CPU↔CUDA copies** (``aten.copy_``, ``aten._to_copy``):
-      e.g. MoE load-balancing counters that copy tensors between CPU and
-      CUDA.  CUDA graph capture requires pinned CPU memory for such copies.
-    - **``aten._grouped_mm``**: the grouped matmul kernel used by MoE may
-      perform internal CPU↔CUDA copies (e.g. workspace allocation) that
-      are invisible in the FX graph metadata, breaking CUDA graph capture.
-      On sm_100+ (GB200/Blackwell) this is resolved and _grouped_mm is
-      cudagraph-compatible.
-    - **flex_attention HOPs**: flex_attention higher-order ops require
-      torch.compile (e.g. regional_inductor) to lower them into fused
-      Triton kernels.  Without compilation they fall back to an unfused
-      Math implementation that is incompatible with CUDA graph capture.
-      The expected workflow is to apply regional_inductor first to compile
-      flex_attention regions, then apply cudagraph.
-
-    Args:
-        gm: The graph module to check.
-        skip_flex_attention_check: When True, skip the flex_attention HOP
-            check. Used by ``full_inductor_compilation_pass`` which always
-            compiles flex_attention HOPs away during the collapse.
+    TODO: ``skip_flex_attention_check`` is now a no-op (flex_attention HOPs are no
+    longer flagged -- regional_inductor compiles them before cudagraph). Remove the
+    arg (and, once the all-or-nothing path is gone, this whole function) in a later
+    PR.
     """
-    # ``full_inductor_compilation_pass`` collapses the FX graph into one
-    # opaque ``standalone_compile_inner`` node, hiding ops the per-node
-    # scan below would otherwise catch. That pass stashes its pre-collapse
-    # verdict in ``gm.meta``; honor it.
     if gm.meta.get("cudagraph_compatible") is False:
         logger.warning(
             "Skipping cudagraph: gm.meta['cudagraph_compatible'] is False "
             "(set by full_inductor_compilation_pass before the collapse)."
         )
         return False
-
-    for node in gm.graph.nodes:
-        if node.op != "call_function":
-            continue
-
-        # Check for aten.copy_ / aten._to_copy between CPU and CUDA
-        # without pin_memory (MoE load-balancing counters).
-        if node.target in (
-            torch.ops.aten.copy_.default,
-            torch.ops.aten._to_copy.default,
-        ):
-            val = node.meta.get("val")
-            if not isinstance(val, torch.Tensor):
-                continue
-            for inp in node.all_input_nodes:
-                inp_val = inp.meta.get("val")
-                if (
-                    isinstance(inp_val, torch.Tensor)
-                    and inp_val.device.type != val.device.type
-                ):
-                    logger.warning(
-                        "Skipping cudagraph: graph contains unpinned CPU↔CUDA "
-                        f"copy ({node.target})"
-                    )
-                    return False
-
-        # Check for aten._grouped_mm unconditionally.
-        # _grouped_mm may perform internal CPU↔CUDA copies (e.g. workspace
-        # allocation) that are not visible from the FX graph metadata, so we
-        # cannot rely on checking input device types alone.
-        # On sm_100+ (GB200/Blackwell) this is resolved and _grouped_mm is
-        # cudagraph-compatible.
-        if node.target == torch.ops.aten._grouped_mm.default:
-            capability = torch.cuda.get_device_capability()
-            if capability < (10, 0):
-                logger.warning(
-                    "Skipping cudagraph: graph contains aten._grouped_mm "
-                    "which may perform internal CPU↔CUDA copies incompatible "
-                    "with CUDA graph capture"
-                )
-                return False
-
-    if not skip_flex_attention_check:
-        for node in gm.graph.nodes:
-            if node.op == "call_function" and node.target in _FLEX_ATTENTION_OPS:
-                logger.warning(
-                    "Skipping cudagraph: graph contains flex_attention higher-order "
-                    "ops that require regional_inductor to compile before cudagraph "
-                    "can capture"
-                )
-                return False
-
-    return True
+    return is_full_cudagraphable(gm)
 
 
 def get_static_input_indices(gm: torch.fx.GraphModule, is_forward: bool) -> list[int]:
