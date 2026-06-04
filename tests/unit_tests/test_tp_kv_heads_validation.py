@@ -57,7 +57,6 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
     """Build a minimal Llama3Model.Config with the given head counts."""
     from torchtitan.models.common.attention import ScaledDotProductAttention
     from torchtitan.models.common.config_utils import make_ffn_config, make_gqa_config
-    from torchtitan.models.common.rope import RoPE
 
     _LINEAR_INIT = {"weight": lambda t: t}
     _NORM_INIT = {"weight": lambda t: t}

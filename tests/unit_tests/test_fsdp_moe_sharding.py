@@ -13,14 +13,13 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-
 from torchtitan.models.llama4.model import compute_moe_hidden_dim, Llama4Model
 from torchtitan.models.llama4.parallelize import apply_fsdp
 
 
 def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
     """Build a tiny Llama4Model with a configurable number of experts."""
-    from torchtitan.models.common import ComplexRoPE, compute_ffn_hidden_dim, RoPE
+    from torchtitan.models.common import ComplexRoPE, compute_ffn_hidden_dim
 
     # Use the standard debugmodel config but override num_experts.
     # Rebuild layers with the requested num_experts.

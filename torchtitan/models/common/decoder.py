@@ -158,6 +158,13 @@ class Decoder(BaseModel):
             if isinstance(config, Trainer.Config):
                 debug = config.debug
                 seq_len = config.training.seq_len
+                max_seq_len = self.max_seq_len
+                if seq_len > max_seq_len:
+                    raise ValueError(
+                        f"Training sequence length {seq_len} exceeds "
+                        f"attention RoPE maximum supported sequence "
+                        f"length {max_seq_len}."
+                    )
 
                 for layer_cfg in self.layers:
                     attention_cfg = getattr(layer_cfg, "attention", None)
@@ -166,12 +173,6 @@ class Decoder(BaseModel):
                         and getattr(attention_cfg, "rope", None) is not None
                     ):
                         rope_cfg = attention_cfg.rope
-                        if seq_len > rope_cfg.max_seq_len:
-                            raise ValueError(
-                                f"Training sequence length {seq_len} exceeds "
-                                f"attention RoPE maximum supported sequence "
-                                f"length {rope_cfg.max_seq_len}."
-                            )
                         attention_cfg.rope = dataclasses.replace(
                             rope_cfg, max_seq_len=seq_len
                         )
@@ -198,12 +199,6 @@ class Decoder(BaseModel):
 
         self.norm = config.norm.build()
         self.lm_head = config.lm_head.build()
-
-    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
-        assert buffer_device is None or buffer_device.type != "meta", (
-            f"buffer_device must not be meta, got {buffer_device}. "
-            f"Buffers should be initialized on a real device after to_empty()."
-        )
 
     def forward(
         self,

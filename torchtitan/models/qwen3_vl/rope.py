@@ -5,11 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field
+from typing import cast
 
 import torch
 from torch.distributed.tensor import distribute_tensor, DTensor
 
-from torchtitan.models.common.rope import _maybe_check_max_pos, CosSinRoPE, RoPE
+from torchtitan.models.common.rope import _maybe_check_max_pos, CosSinRoPE
 
 
 class MRoPE(CosSinRoPE):
@@ -46,17 +47,22 @@ class MRoPE(CosSinRoPE):
             )
 
         rope_cache = self.cache
-        cache_was_dtensor = isinstance(rope_cache, DTensor)
-        if cache_was_dtensor:
-            rope_cache = rope_cache.to_local()
+        cache_dtensor = rope_cache if isinstance(rope_cache, DTensor) else None
+        if cache_dtensor is not None:
+            rope_cache = cast(torch.Tensor, cache_dtensor.to_local())
+
+        position_dtensor = position_ids if isinstance(position_ids, DTensor) else None
         pos_local = (
-            position_ids.to_local()
-            if isinstance(position_ids, DTensor)
+            cast(torch.Tensor, position_dtensor.to_local())
+            if position_dtensor is not None
             else position_ids
         )
         pos_local = pos_local.to(device=rope_cache.device)
 
-        _maybe_check_max_pos(pos_local, max_valid_pos=rope_cache.shape[0] - 1)
+        _maybe_check_max_pos(
+            pos_local,  # pyrefly: ignore[bad-argument-type]
+            max_valid_pos=rope_cache.shape[0] - 1,
+        )
         head_dim = rope_cache.shape[-1] // 2
         cos_cache = rope_cache[:, :head_dim]
         sin_cache = rope_cache[:, head_dim:]
@@ -77,10 +83,10 @@ class MRoPE(CosSinRoPE):
             mrope_sin[..., col_indices] = sin_cache[:, col_indices][dim_pos]
 
         mrope_cache = torch.cat([mrope_cos, mrope_sin], dim=-1).unsqueeze(2)
-        if cache_was_dtensor:
-            mrope_cache = distribute_tensor(
-                mrope_cache,
-                self.cache.device_mesh,
-                list(self.cache.placements),
+        if cache_dtensor is not None:
+            return distribute_tensor(  # pyrefly: ignore[bad-return]
+                mrope_cache,  # pyrefly: ignore[bad-argument-type]
+                cache_dtensor.device_mesh,
+                list(cache_dtensor.placements),
             )
-        return mrope_cache
+        return mrope_cache  # pyrefly: ignore[bad-return]

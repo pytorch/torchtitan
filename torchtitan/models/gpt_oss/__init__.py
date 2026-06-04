@@ -6,18 +6,12 @@
 
 from collections.abc import Callable
 from functools import partial
+from typing import Literal
 
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.models.common import (
-    CosSinRoPE,
-    Embedding,
-    Linear,
-    RMSNorm,
-    RoPE,
-    TransformerBlock,
-)
+from torchtitan.models.common import CosSinRoPE, Embedding, Linear, RMSNorm
 from torchtitan.models.common.attention import FusedQKVLinear, QKVLinear
 from torchtitan.models.common.config_utils import make_token_dispatcher_config
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
@@ -25,9 +19,7 @@ from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
-
 from .model import Attention, GptOssModel, GptOssTransformerBlock
-
 from .moe import GptOssGroupedExperts, GptOssMoE
 from .parallelize import parallelize_gptoss
 from .state_dict_adapter import GptOssStateDictAdapter
@@ -69,7 +61,7 @@ def _make_gptoss_attn_config(
     fuse_qkv: bool = False,
     rope_max_seq_len: int,
     rope_theta: float,
-    rope_scaling: str,
+    rope_scaling: Literal["llama", "none", "yarn"],
     rope_factor: float,
     rope_beta_slow: float,
     rope_beta_fast: float,
@@ -189,12 +181,12 @@ def _build_gptoss_layers(
     non_blocking_capacity_factor: float | None = None,
     rope_max_seq_len: int,
     rope_theta: float,
-    rope_scaling: str,
+    rope_scaling: Literal["llama", "none", "yarn"],
     rope_factor: float,
     rope_beta_slow: float,
     rope_beta_fast: float,
     rope_original_seq_len: int,
-) -> list[TransformerBlock.Config]:
+) -> list[GptOssTransformerBlock.Config]:
     """Build per-layer configs for GPT-OSS.
 
     Even-indexed layers (0, 2, 4, ...) use sliding window attention.

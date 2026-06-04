@@ -126,11 +126,8 @@ class RoPE(Module):
             # After ``to_empty()``, the existing cache records the target device.
             # Recompute there when the caller does not pass an explicit buffer device.
             buffer_device = self.cache.device
-        if buffer_device.type == "meta":
+        with torch.device(buffer_device):
             self.cache = self._precompute_cache()
-        else:
-            with torch.device(buffer_device):
-                self.cache = self._precompute_cache()
 
 
 class ComplexRoPE(RoPE):
@@ -386,9 +383,7 @@ def _reshape_for_broadcast(
         rope_cache = torch.gather(
             rope_cache_expanded,
             dim=1,
-            index=positions.view(bsz, seqlen, 1, 1).expand(
-                bsz, seqlen, 1, cache_width
-            ),
+            index=positions.view(bsz, seqlen, 1, 1).expand(bsz, seqlen, 1, cache_width),
         )
         return rope_cache
 

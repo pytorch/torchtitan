@@ -8,7 +8,6 @@ import dataclasses
 import unittest
 
 import torch
-
 from torchtitan.models.common.attention import (
     GQAttention,
     QKVLinear,
@@ -16,9 +15,9 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.common.rope import (
+    _maybe_check_max_pos,
     ComplexRoPE,
     CosSinRoPE,
-    _maybe_check_max_pos,
     RoPE,
 )
 from torchtitan.models.qwen3_vl.rope import MRoPE
@@ -117,9 +116,7 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
         torch.manual_seed(42)
         self.head_dim = 64
         self.max_seq_len = 32
-        rope_cfg = ComplexRoPE.Config(
-            dim=self.head_dim, max_seq_len=self.max_seq_len
-        )
+        rope_cfg = ComplexRoPE.Config(dim=self.head_dim, max_seq_len=self.max_seq_len)
         self.rope = rope_cfg.build()
         self.assertIsInstance(self.rope, ComplexRoPE)
 
@@ -146,9 +143,7 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
         torch.manual_seed(42)
         self.head_dim = 64
         self.max_seq_len = 32
-        rope_cfg = CosSinRoPE.Config(
-            dim=self.head_dim, max_seq_len=self.max_seq_len
-        )
+        rope_cfg = CosSinRoPE.Config(dim=self.head_dim, max_seq_len=self.max_seq_len)
         self.rope = rope_cfg.build()
         self.assertIsInstance(self.rope, CosSinRoPE)
 
@@ -261,20 +256,17 @@ class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
 
         return llama3_configs["debugmodel"]("sdpa")
 
-    def _first_rope(self, cfg):
-        return cfg.layers[0].attention.rope
-
     def test_rejects_oversized_seq_len(self):
         cfg = self._make_config()
-        rope_max = self._first_rope(cfg).max_seq_len
+        rope_max = cfg.max_seq_len
         with self.assertRaises(ValueError):
             cfg.update_from_config(config=self._make_trainer_config(rope_max + 1))
 
     def test_accepts_valid_seq_len(self):
         cfg = self._make_config()
-        rope_max = self._first_rope(cfg).max_seq_len
+        rope_max = cfg.max_seq_len
         cfg.update_from_config(config=self._make_trainer_config(rope_max))
-        self.assertEqual(self._first_rope(cfg).max_seq_len, rope_max)
+        self.assertEqual(cfg.max_seq_len, rope_max)
 
     def test_vllm_max_model_len_as_seq_len(self):
         """vLLM wrapper translates max_model_len to TrainingConfig.seq_len.
@@ -283,9 +275,9 @@ class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
         the model's intrinsic maximum.
         """
         cfg = self._make_config()
-        original_max = self._first_rope(cfg).max_seq_len
+        original_max = cfg.max_seq_len
         cfg.update_from_config(config=self._make_trainer_config(original_max))
-        self.assertEqual(self._first_rope(cfg).max_seq_len, original_max)
+        self.assertEqual(cfg.max_seq_len, original_max)
 
 
 if __name__ == "__main__":
