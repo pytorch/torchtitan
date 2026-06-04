@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from torchtitan.experiments.rl.observability import metrics as m
-from torchtitan.experiments.rl.rollouts.types import Rollout
+from torchtitan.experiments.rl.rollout.types import Rollout
 from torchtitan.experiments.rl.types import Episode
 
 

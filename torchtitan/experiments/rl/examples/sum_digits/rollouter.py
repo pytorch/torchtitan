@@ -8,13 +8,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from torchtitan.experiments.rl.rollouts.rollouter import Rollouter
-from torchtitan.experiments.rl.rollouts.sum_digits.data import SumDigitsDataset
-from torchtitan.experiments.rl.rollouts.sum_digits.env import SumDigitsEnv
-from torchtitan.experiments.rl.rollouts.sum_digits.rubric import (
+from torchtitan.experiments.rl.examples.sum_digits.data import SumDigitsDataset
+from torchtitan.experiments.rl.examples.sum_digits.env import SumDigitsEnv
+from torchtitan.experiments.rl.examples.sum_digits.rubric import (
     RewardCorrect,
     RewardFormat,
 )
+
+from torchtitan.experiments.rl.rollout.rollouter import Rollouter
 
 from torchtitan.experiments.rl.rubrics import Rubric
 

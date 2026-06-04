@@ -52,10 +52,10 @@ from torchtitan.experiments.rl.actors.generator import (
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import Batcher
-from torchtitan.experiments.rl.environments import TokenEnv, TokenEnvOutput
+from torchtitan.experiments.rl.environment import TokenEnv, TokenEnvOutput
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.renderer import RendererConfig
-from torchtitan.experiments.rl.rollouts import (
+from torchtitan.experiments.rl.rollout import (
     last_completion_text,
     prepare_rollout_metrics,
     Rollout,
@@ -64,7 +64,7 @@ from torchtitan.experiments.rl.rollouts import (
     RolloutStatus,
     RolloutTurn,
 )
-from torchtitan.experiments.rl.rollouts.rollouter import Rollouter
+from torchtitan.experiments.rl.rollout.rollouter import Rollouter
 from torchtitan.experiments.rl.types import Episode
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec

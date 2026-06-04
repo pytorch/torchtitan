@@ -9,9 +9,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from torchtitan.experiments.rl.rollouts import last_completion_text, Rollout
+from torchtitan.experiments.rl.examples.sum_digits.data import SumDigitsExample
 
-from torchtitan.experiments.rl.rollouts.sum_digits.data import SumDigitsExample
+from torchtitan.experiments.rl.rollout import last_completion_text, Rollout
 from torchtitan.experiments.rl.rubrics import RewardFn
 
 

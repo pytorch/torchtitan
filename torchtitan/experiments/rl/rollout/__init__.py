@@ -4,16 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# NOTE: `Rollouter` is intentionally NOT re-exported here. It imports `environments`,
-# which imports `rollouts.types` — re-exporting it from this package `__init__` would make
-# that a circular import. Import it from the submodule: `rollouts.rollouter import Rollouter`.
-from torchtitan.experiments.rl.rollouts.types import (
+# NOTE: `Rollouter` is intentionally NOT re-exported here. It imports `environment`,
+# which imports `rollout.types` — re-exporting it from this package `__init__` would make
+# that a circular import. Import it from the submodule: `rollout.rollouter import Rollouter`.
+from torchtitan.experiments.rl.rollout.types import (
     Rollout,
     RolloutGroup,
     RolloutStatus,
     RolloutTurn,
 )
-from torchtitan.experiments.rl.rollouts.utils import (
+from torchtitan.experiments.rl.rollout.utils import (
     last_completion_text,
     prepare_rollout_metrics,
     rollout_to_episode,

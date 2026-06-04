@@ -4,12 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.experiments.rl.environments.message import (
+from torchtitan.experiments.rl.environment.message import (
     MessageEnv,
     MessageInitOutput,
     MessageStepOutput,
 )
-from torchtitan.experiments.rl.environments.token import TokenEnv, TokenEnvOutput
+from torchtitan.experiments.rl.environment.token import TokenEnv, TokenEnvOutput
 
 __all__ = [
     "MessageEnv",

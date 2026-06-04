@@ -14,8 +14,8 @@ from typing import TYPE_CHECKING
 from renderers import Message, Renderer, ToolSpec
 
 from torchtitan.config import Configurable
-from torchtitan.experiments.rl.environments.message import MessageEnv
-from torchtitan.experiments.rl.rollouts.types import RolloutStatus
+from torchtitan.experiments.rl.environment.message import MessageEnv
+from torchtitan.experiments.rl.rollout.types import RolloutStatus
 
 if TYPE_CHECKING:
     from torchtitan.experiments.rl.actors.generator import Completion

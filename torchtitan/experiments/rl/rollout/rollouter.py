@@ -11,8 +11,8 @@ from dataclasses import dataclass, field
 from renderers import Renderer
 
 from torchtitan.config import Configurable
-from torchtitan.experiments.rl.environments import MessageEnv, TokenEnv
-from torchtitan.experiments.rl.rollouts.types import Rollout
+from torchtitan.experiments.rl.environment import MessageEnv, TokenEnv
+from torchtitan.experiments.rl.rollout.types import Rollout
 from torchtitan.experiments.rl.rubrics import Rubric, RubricOutput
 
 

@@ -10,12 +10,12 @@ from dataclasses import dataclass
 
 from renderers import Message
 
-from torchtitan.experiments.rl.environments import (
+from torchtitan.experiments.rl.environment import (
     MessageEnv,
     MessageInitOutput,
     MessageStepOutput,
 )
-from torchtitan.experiments.rl.rollouts.sum_digits.data import SumDigitsExample
+from torchtitan.experiments.rl.examples.sum_digits.data import SumDigitsExample
 
 
 SYSTEM_PROMPT = """\

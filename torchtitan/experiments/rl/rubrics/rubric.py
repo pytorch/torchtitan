@@ -11,7 +11,7 @@ import asyncio
 from dataclasses import dataclass, field
 
 from torchtitan.config import Configurable
-from torchtitan.experiments.rl.rollouts.types import Rollout
+from torchtitan.experiments.rl.rollout.types import Rollout
 from torchtitan.observability import structured_logger as sl
 
 
