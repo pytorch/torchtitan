@@ -27,7 +27,10 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
 )
 from torchtitan.experiments.graph_trainer.cudagraph import (
+    CUDAGraphWrapper,
     insert_kernel_annotations_pass,
+    is_cudagraphable,
+    is_full_cudagraphable,
 )
 from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
     isolate_ep_process_group_pass,
@@ -43,6 +46,7 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
 from torchtitan.experiments.graph_trainer.passes import selective_activation_remat_pass
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     canonicalize_graph_pass,
+    eliminate_dead_code_pass,
     normalize_view_ops_as_reshape,
     remove_b2b_transpose_pass,
     remove_detach_pass,
@@ -569,6 +573,36 @@ class TestApplySACPass(TestCase):
         ]
         self.assertEqual(len(recomputed_nodes), 1)
         self.assertTrue(recomputed_nodes[0].meta["autograd_backward"])
+
+    def test_remat_dup_gets_independent_custom_meta(self):
+        # fx.Graph.node_copy shallow-copies node.meta, so without intervention a
+        # recompute dup shares the SAME nested meta["custom"] dict as its forward
+        # original -- annotating one would silently mutate the other. The pass must
+        # give the dup its own copy (preserving the values).
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        fwd = graph.call_function(torch.ops.aten.add.Tensor, args=(x, x))
+        # A forward consumer keeps the original alive (remat erases originals whose
+        # consumers are all backward) so we can compare it against the dup.
+        fwd_use = graph.call_function(torch.ops.aten.relu.default, args=(fwd,))
+        bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(fwd, 2))
+        graph.output((fwd_use, bwd))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        fwd.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+        fwd.meta["custom"] = {_MODULE_FQN: "layers.0.attention_norm"}
+        bwd.meta["autograd_backward"] = True
+
+        gm = selective_activation_remat_pass(gm)
+
+        fwd_node = next(n for n in gm.graph.nodes if n.name == "add_tensor")
+        dup = next(n for n in gm.graph.nodes if n.name == "add_tensor_recomputed")
+        # Independent dict object, same values preserved.
+        self.assertIsNot(dup.meta["custom"], fwd_node.meta["custom"])
+        self.assertEqual(dup.meta["custom"][_MODULE_FQN], "layers.0.attention_norm")
+        # Mutating the dup's annotation must not leak into the original.
+        dup.meta["custom"]["cudagraph_partition"] = "cudagraph_9"
+        self.assertNotIn("cudagraph_partition", fwd_node.meta["custom"])
 
 
 class TestFullMemoryPolicy(TestCase):
@@ -2221,6 +2255,95 @@ class TestSelectiveActivationRematPass(TestCase):
         # middle_bwd still consumes bwd_wait at its original location.
         for inp in middle_bwd.all_input_nodes:
             self.assertIs(inp, bwd_wait)
+
+
+class TestEliminateDeadCodePass(TestCase):
+    """Unit tests for eliminate_dead_code_pass."""
+
+    def test_removes_dead_pure_node_keeps_live(self):
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        live = g.call_function(torch.ops.aten.relu.default, (x,))
+        g.call_function(torch.ops.aten.add.Tensor, (x, x))  # dead: no users
+        g.output(live)
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+
+        eliminate_dead_code_pass(gm)
+        targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
+        self.assertIn(torch.ops.aten.relu.default, targets)
+        self.assertNotIn(torch.ops.aten.add.Tensor, targets)
+
+    def test_keeps_impure_node_with_no_users(self):
+        # copy_ mutates its first arg (impure); DCE must keep it even though its
+        # own result is unused.
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        y = g.placeholder("y")
+        g.call_function(torch.ops.aten.copy_.default, (x, y))  # impure, unused result
+        out = g.call_function(torch.ops.aten.relu.default, (x,))
+        g.output(out)
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+
+        eliminate_dead_code_pass(gm)
+        targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
+        self.assertIn(torch.ops.aten.copy_.default, targets)
+
+
+class TestCUDAGraphWrapper(TestCase):
+    """CUDAGraphWrapper captures into its own private pool, stages non-static
+    inputs, and replays bitwise-identically to eager."""
+
+    def tearDown(self):
+        from torchtitan.experiments.graph_trainer import cudagraph as cg
+
+        cg.cudagraph_teardown()
+        cg._cg_manager = cg._CUDAGraphManager()
+        super().tearDown()
+
+    def test_private_pool_capture_replay_matches_eager(self):
+        device = "cuda"
+        weight = torch.randn(8, 8, device=device)  # static input (stable address)
+
+        def fn(w, x):
+            return torch.relu(x @ w)
+
+        x0 = torch.randn(4, 8, device=device)
+        wrapper = CUDAGraphWrapper(
+            fn,
+            (weight, x0),
+            static_input_indices=(0,),
+            tensor_input_indices=[0, 1],
+        )
+        # 1st call warms up, 2nd captures, 3rd+ replay -- exercise all three with a
+        # fresh non-static x each step (copy-in of the staged buffer).
+        for _ in range(4):
+            x = torch.randn(4, 8, device=device)
+            torch.testing.assert_close(wrapper(weight, x), fn(weight, x))
+
+
+class TestIsFullCudagraphable(TestCase):
+    """Pure-CPU tests for the per-node cudagraph-safety predicate and the
+    whole-graph gate built on it."""
+
+    def test_clean_graph_is_full_cudagraphable(self):
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        relu = g.call_function(torch.ops.aten.relu.default, (x,))
+        g.output(relu)
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+        self.assertTrue(is_cudagraphable(relu))
+        self.assertTrue(is_full_cudagraphable(gm))
+
+    def test_local_scalar_dense_is_unsafe(self):
+        # _local_scalar_dense (.item()/.tolist()) extracts a host scalar a CUDA
+        # graph replay can't reproduce -> unsafe, so the graph is not one piece.
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        s = g.call_function(torch.ops.aten._local_scalar_dense.default, (x,))
+        g.output(s)
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+        self.assertFalse(is_cudagraphable(s))
+        self.assertFalse(is_full_cudagraphable(gm))
 
 
 if __name__ == "__main__":
