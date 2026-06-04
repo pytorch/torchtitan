@@ -10,9 +10,9 @@ import re
 from dataclasses import dataclass
 
 from torchtitan.experiments.rl.rollouts import last_completion_text, Rollout
-from torchtitan.experiments.rl.rubrics import RewardFn
 
-from torchtitan.experiments.rl.tasks.sum_digits.data import SumDigitsExample
+from torchtitan.experiments.rl.rollouts.sum_digits.data import SumDigitsExample
+from torchtitan.experiments.rl.rubrics import RewardFn
 
 
 _ANSWER_RE = re.compile(r"\[ANSWER\]\s*(-?\d+)")

@@ -17,27 +17,31 @@ from torchtitan.experiments.rl.rubrics import Rubric, RubricOutput
 
 
 # TODO(continuous-batching): when VLLMGenerator gains continuous batching,
-# move the rollout loop onto Task as `run_rollout(example, client) -> Rollout`,
+# move the rollout loop onto Rollouter as `run_rollout(example, client) -> Rollout`,
 # so each rollout drives its own generate calls.
-class Task(Configurable):
-    """Bundles everything to run and score one prompt group: train and validation
-    datasets, the `MessageEnv` to build per example, and a `Rubric`.
+class Rollouter(Configurable):
+    """Turns a problem (train/val datasets, the `MessageEnv` to build per example, and a
+    `Rubric`) into scored rollouts — the RL training data.
+
+    Like a `Dataloader` turns a `Dataset` into training batches, a `Rollouter`
+    turns a problem into rollouts: it builds the envs, the controller drives them against
+    the inference engine, and `score_group` scores the results.
 
     Subclass only to override specific methods, such as `score_group` for cross-sibling scoring,
     or `make_env_group` for custom logic, such as using a pool of envs instead of creating a new one.
 
     The flow for one prompt group:
 
-        example = task.sample_train_example()       # one env input from the dataset
-        envs    = task.make_env_group(example=example, group_size=N, renderer=renderer)
-        ...                                          # the controller runs the rollout loop
-        outputs = task.score_group(rollouts, example)  # the Rubric scores them
+        example = rollouter.sample_train_example()  # one env input from the dataset
+        envs = rollouter.make_env_group(example=example, group_size=N, renderer=renderer)
+        ...  # the controller runs the rollout loop
+        outputs = rollouter.score_group(rollouts, example)  # the Rubric scores them
 
     `MessageEnv` works in messages; `TokenEnv` (what `make_env_group` returns)
     adds the message <-> token plumbing.
 
     Example:
-        task = Task.Config(
+        rollouter = Rollouter.Config(
             train_dataset=MyDataset.Config(seed=42),
             validation_dataset=MyDataset.Config(seed=99),
             rubric=Rubric.Config(
@@ -84,7 +88,7 @@ class Task(Configurable):
         return next(self._validation_dataset)
 
     # TODO: revisit the Renderer being injected into `make_env_group` once we
-    # know whether Task should own a Renderer (per-task chat templates).
+    # know whether Rollouter should own a Renderer (per-rollouter chat templates).
     def make_env_group(
         self,
         *,

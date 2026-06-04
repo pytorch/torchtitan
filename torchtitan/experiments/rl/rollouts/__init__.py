@@ -4,6 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# NOTE: `Rollouter` is intentionally NOT re-exported here. It imports `environments`,
+# which imports `rollouts.types` — re-exporting it from this package `__init__` would make
+# that a circular import. Import it from the submodule: `rollouts.rollouter import Rollouter`.
 from torchtitan.experiments.rl.rollouts.types import (
     Rollout,
     RolloutGroup,

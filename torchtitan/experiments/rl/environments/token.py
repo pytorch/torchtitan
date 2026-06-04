@@ -27,11 +27,11 @@ logger = logging.getLogger(__name__)
 class TokenEnvOutput:
     """What `TokenEnv.init`/`.step` return"""
 
-    next_prompt_token_ids: list[int] | None  # [L_prompt] or None
+    next_prompt_token_ids: list[int] | None  # [num_prompt_tokens] or None
     """Tokens for the next `generate` call. `None` once no further prompt is
     rendered (COMPLETED, or a completion-level error)."""
 
-    next_prompt_messages: list[Message] | None = None  # [M_prompt] or None
+    next_prompt_messages: list[Message] | None = None  # [num_prompt_messages] or None
     """Message form of `next_prompt_token_ids`; `None` whenever that is `None`."""
 
     status: RolloutStatus
@@ -40,7 +40,7 @@ class TokenEnvOutput:
     parsed_completion_message: Message | None = None
     """This turn's parsed completion message. `None` on init and on parse failure."""
 
-    env_messages: list[Message] = field(default_factory=list)  # [M_env]
+    env_messages: list[Message] = field(default_factory=list)  # [num_env_messages]
     """The env's reply on this step (tool / user). Empty on init and on terminals
     where the env was not stepped."""
 

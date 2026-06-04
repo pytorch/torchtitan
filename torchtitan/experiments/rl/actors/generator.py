@@ -161,6 +161,7 @@ class SamplingConfig:
     """Maximum number of tokens to generate per completion."""
 
 
+# TODO(naming): rename VLLMGenerator -> InferenceEngine.
 class VLLMGenerator(Actor, Configurable):
     """
     Generates rollouts using vLLM engine.

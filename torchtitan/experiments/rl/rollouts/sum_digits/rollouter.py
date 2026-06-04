@@ -8,24 +8,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from torchtitan.experiments.rl.rubrics import Rubric
-from torchtitan.experiments.rl.tasks import Task
-from torchtitan.experiments.rl.tasks.sum_digits.data import SumDigitsDataset
-from torchtitan.experiments.rl.tasks.sum_digits.env import SumDigitsEnv
-from torchtitan.experiments.rl.tasks.sum_digits.rubric import (
+from torchtitan.experiments.rl.rollouts.rollouter import Rollouter
+from torchtitan.experiments.rl.rollouts.sum_digits.data import SumDigitsDataset
+from torchtitan.experiments.rl.rollouts.sum_digits.env import SumDigitsEnv
+from torchtitan.experiments.rl.rollouts.sum_digits.rubric import (
     RewardCorrect,
     RewardFormat,
 )
 
+from torchtitan.experiments.rl.rubrics import Rubric
 
-class SumDigitsTask(Task):
-    """The SumDigits task: digit-sum train/val datasets, env, and a correctness +
-    format rubric. Pure config — all behavior (`make_env_group`, `sample_*`,
-    `score_group`) is inherited from `Task`.
+
+class SumDigitsRollouter(Rollouter):
+    """The SumDigits rollouter: digit-sum train/val datasets, env, and a
+    correctness + format rubric. Pure config — all behavior (`make_env_group`,
+    `sample_*`, `score_group`) is inherited from `Rollouter`.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Task.Config):
+    class Config(Rollouter.Config):
         train_dataset: SumDigitsDataset.Config = field(
             default_factory=lambda: SumDigitsDataset.Config(seed=42)
         )

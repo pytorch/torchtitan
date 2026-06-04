@@ -18,10 +18,10 @@ from torchtitan.config import Configurable
 class MessageInitOutput:
     """Initial messages + tool specs from `MessageEnv.init`."""
 
-    init_prompt_messages: list[Message]  # [M_prompt]
+    init_prompt_messages: list[Message]  # [num_prompt_messages]
     """The opening messages (e.g. [system, user])."""
 
-    tools: list[ToolSpec] = field(default_factory=list)  # [K_tools]
+    tools: list[ToolSpec] = field(default_factory=list)  # [num_tools]
     """Tool schemas exposed to the assistant. Empty for tool-less envs."""
 
 
@@ -29,7 +29,7 @@ class MessageInitOutput:
 class MessageStepOutput:
     """The env's reply to the assistant's turn."""
 
-    env_messages: list[Message] = field(default_factory=list)  # [M_env]
+    env_messages: list[Message] = field(default_factory=list)  # [num_env_messages]
     """The env's reply messages (tool / user). Empty when the rollout terminates
     with no follow-up."""
 

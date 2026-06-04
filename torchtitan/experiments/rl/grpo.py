@@ -64,7 +64,7 @@ from torchtitan.experiments.rl.rollouts import (
     RolloutStatus,
     RolloutTurn,
 )
-from torchtitan.experiments.rl.tasks import Task
+from torchtitan.experiments.rl.rollouts.rollouter import Rollouter
 from torchtitan.experiments.rl.types import Episode
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
@@ -221,8 +221,8 @@ class RLTrainer(Configurable):
     """Top-level RL training orchestrator.
 
     Owns a `PolicyTrainer` actor (gradient updates), a `VLLMGenerator` actor
-    (sampling), and a `Task` (datasets + rubric + env construction). Each
-    training step samples groups of rollouts, scores them via the task's rubric,
+    (sampling), and a `Rollouter` (datasets + rubric + env construction). Each
+    training step samples groups of rollouts, scores them via the rollouter's rubric,
     builds GRPO advantages, and syncs trainer weights to the generator.
 
     Example:
@@ -263,9 +263,9 @@ class RLTrainer(Configurable):
         num_validation_samples: int = 20
         """Number of held-out prompts scored greedily (temp=0, n=1) per validation pass."""
 
-        task: Task.Config
-        """The task: its datasets, envs, and rubric."""
-        # TODO: support multiple tasks for data mixing.
+        rollouter: Rollouter.Config
+        """The rollouter: its datasets, envs, and rubric."""
+        # TODO: support multiple rollouters for data mixing.
 
         renderer: RendererConfig
         """Message-to-token renderer config."""
@@ -341,7 +341,7 @@ class RLTrainer(Configurable):
         self.batcher = Batcher(
             config.batcher, pad_id=self.renderer._tokenizer.eos_token_id
         )
-        self._task: Task = config.task.build()
+        self._rollouter: Rollouter = config.rollouter.build()
 
     async def close(self):
         """Best-effort: tear down actors, close metric backends, then stop proc meshes."""
@@ -595,7 +595,7 @@ class RLTrainer(Configurable):
         3. Reset every env to get each rollout's first prompt
         4. Split groups by init status
         5. Run one batched `generate` over valid groups (n=1; pre-expanded)
-        6. For each group: step generated rollouts if needed, then score with `task.score_group`
+        6. For each group: step generated rollouts if needed, then score with `rollouter.score_group`
 
         Args:
             is_validation: Sample from the validation dataset (else train).
@@ -613,7 +613,7 @@ class RLTrainer(Configurable):
         instead of batching one `generate` over all prompts at once.
         """
 
-        task: Task = self._task
+        rollouter: Rollouter = self._rollouter
         generation_metrics_prefix = (
             "validation_generator" if is_validation else "generator"
         )
@@ -624,12 +624,12 @@ class RLTrainer(Configurable):
         group_states: list[_RolloutGroupState] = []
         for group_idx in range(num_groups):
             example = (
-                task.sample_validation_example()
+                rollouter.sample_validation_example()
                 if is_validation
-                else task.sample_train_example()
+                else rollouter.sample_train_example()
             )
             group_id = f"step={step}/group={group_offset + group_idx}"
-            envs = task.make_env_group(
+            envs = rollouter.make_env_group(
                 example=example, group_size=group_size, renderer=self.renderer
             )
             group_states.append(
@@ -718,7 +718,7 @@ class RLTrainer(Configurable):
             *(
                 self._run_group_rollout(
                     group_state=group_state,
-                    task=task,
+                    rollouter=rollouter,
                 )
                 for group_state in valid_group_states
             )
@@ -756,13 +756,13 @@ class RLTrainer(Configurable):
         self,
         *,
         group_state: _RolloutGroupState,
-        task: Task,
+        rollouter: Rollouter,
     ) -> RolloutGroup | None:
         """Step generated rollouts, score the group, and return it.
 
         Args:
             group_state: One prompt group's envs, prompt steps, and rollout slots.
-            task: `Task` for this group, containing the scoring function.
+            rollouter: `Rollouter` for this group, containing the scoring function.
 
         Returns:
             Scored rollout group, or `None` if this group failed and should be dropped.
@@ -791,7 +791,7 @@ class RLTrainer(Configurable):
                 )
             )
 
-            outputs = await task.score_group(rollouts, group_state.example)
+            outputs = await rollouter.score_group(rollouts, group_state.example)
             for rollout, output in zip(rollouts, outputs, strict=True):
                 rollout.reward = output.reward
                 rollout.reward_breakdown = output.reward_breakdown
@@ -821,7 +821,7 @@ class RLTrainer(Configurable):
         """Step one env with its completion into a `Rollout`. On failure, return the
         turns collected so far with an `ERROR` status.
 
-        Reward is left unset; the controller scores via `task.score_group(...)`
+        Reward is left unset; the controller scores via `rollouter.score_group(...)`
         afterward and fills `reward` / `reward_breakdown`.
 
         Args:

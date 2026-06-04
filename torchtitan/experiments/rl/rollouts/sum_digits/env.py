@@ -15,7 +15,7 @@ from torchtitan.experiments.rl.environments import (
     MessageInitOutput,
     MessageStepOutput,
 )
-from torchtitan.experiments.rl.tasks.sum_digits.data import SumDigitsExample
+from torchtitan.experiments.rl.rollouts.sum_digits.data import SumDigitsExample
 
 
 SYSTEM_PROMPT = """\
