@@ -104,31 +104,29 @@ def _shared_expert_rowwise_config() -> ShardingConfig:
 def _router_gate_config(*, enable_ep: bool) -> ShardingConfig:
     """Router gate: Replicate weights, output stays DTensor.
 
-    EP off: input Replicate, gate computes on all tokens, output DTensor(Replicate).
-    EP on:  input is gathered to Replicate on the TP/SP axis for the gate matmul,
-            output scattered back to Shard(1) for the EP dispatch. Routing is a
-            per-token linear, so gathering SP and computing redundantly is
-            numerically identical to computing on the local SP shard. We gather
-            rather than keep Shard(1) because, under CP+SP, slen sharded by both
-            cp and tp makes the gate's F.linear hit a DTensor
-            multi-axis-_StridedShard unflatten bug.
+    EP off: input Replicate, gate computes on all tokens, output Replicate.
+    EP on:  keep the sequence-parallel input and let F.linear produce a
+            Shard(1) output directly, with no all-gather. Routing is a
+            per-token linear, so computing on the local sequence shard is
+            numerically identical to gathering. The sequence dim may be sharded
+            by both cp and tp under CP+SP; DTensor handles that F.linear
+            directly. Output is Shard(1) for the EP dispatch.
     """
     state = {
         "weight": dense_param_placement(tp=Replicate()),
         "bias": dense_param_placement(tp=Replicate()),
     }
-    if enable_ep:
-        return ShardingConfig(
-            state_shardings=state,
-            in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
-            out_dst_shardings=dense_activation_placement(tp=Shard(1)),
-        )
-    else:
+    if not enable_ep:
         return ShardingConfig(
             state_shardings=state,
             in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
             out_dst_shardings=dense_activation_placement(tp=Replicate()),
         )
+    return ShardingConfig(
+        state_shardings=state,
+        in_dst_shardings={"input": dense_activation_placement(tp=Shard(1))},
+        out_dst_shardings=dense_activation_placement(tp=Shard(1)),
+    )
 
 
 def _tokens_per_expert_placement(*, enable_ep: bool) -> NamedPlacement:
