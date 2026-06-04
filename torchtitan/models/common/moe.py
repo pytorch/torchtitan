@@ -141,11 +141,8 @@ class GroupedExperts(Module):
             routed_input_RD, num_global_tokens_per_local_expert_e
         )
         out_TD = self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
-        # Un-flatten back to 3-D (B, *, D) so the local_map output placement
-        # shards the batch (dim 0) and seq (dim 1) on separate tensor dims.
-        # A 2-D (T, D) output would put both dp_shard and cp on dim 0 at once
-        # (a _StridedShard that DTensor mishandles under CP). The combine row
-        # count is always a multiple of B, so the seq dim is inferred.
+        # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
+        # won't cause _StridedShard in the downstream view (e.g., CP is used).
         return out_TD.view(B, -1, D)
 
     def parallelize(self, parallel_dims) -> None:
@@ -465,7 +462,6 @@ class MoE(Module):
 
             sync_combine()
 
-        # experts() already returns 3-D (B, L, D).
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD
         return out_BLD

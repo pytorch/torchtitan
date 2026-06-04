@@ -52,10 +52,6 @@ def parallelize_qwen3(
     )
 
     if parallelism.full_dtensor:
-        # Under full_dtensor, all axes participate in distribute_tensor;
-        # CP is captured inside LocalMapConfig on inner attention. No
-        # apply_cp_to_forward; resolve_mesh skips its non-full_dtensor
-        # axis filter.
         validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)
     else:
@@ -101,6 +97,7 @@ def parallelize_qwen3(
         edp_mesh_dims = None
         if parallel_dims.ep_enabled:
             edp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "efsdp"])
+            assert edp_mesh is not None
 
     apply_fsdp(
         model,

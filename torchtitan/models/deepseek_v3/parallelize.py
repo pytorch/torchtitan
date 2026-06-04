@@ -87,6 +87,7 @@ def parallelize_deepseekv3(
         edp_mesh_dims = None
         if parallel_dims.ep_enabled:
             edp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "efsdp"])
+            assert edp_mesh is not None
 
     apply_fsdp(
         model,
