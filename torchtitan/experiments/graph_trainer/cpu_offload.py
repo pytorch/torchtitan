@@ -477,10 +477,17 @@ def apply_cpu_offload_pass(
         for c in chain_nodes:
             if c.target in _AO_OPS:
                 continue
-            # Skip nodes producing tuples (e.g. torch.sort) —
-            # wait_tensor expects Optional[Tensor].
             c_val = c.meta.get("val")
             if not isinstance(c_val, torch.Tensor):
+                # For tuple-producing ops (e.g. torch.sort), use a getitem
+                # user instead — it produces a tensor and preserves the
+                # dependency edge.
+                for u in c.users:
+                    if u.target is operator.getitem:
+                        u_pos = node_to_index.get(u)
+                        if u_pos is not None and u_pos > last_consumer_pos:
+                            last_consumer = u
+                            last_consumer_pos = u_pos
                 continue
             c_pos = node_to_index.get(c)
             if c_pos is not None and c_pos > last_consumer_pos:
