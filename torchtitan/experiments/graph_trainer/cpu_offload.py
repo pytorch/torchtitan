@@ -55,6 +55,26 @@ aten = torch.ops.aten
 
 
 # ============================================================
+# Helpers
+# ============================================================
+
+
+def _find_tensor_child(node: Node) -> Node | None:
+    """Find a Tensor-producing child of a non-Tensor node (e.g. getitem after sort).
+
+    Used to create a data-dependency edge through wait_tensor's
+    last_use_of_storage arg when the actual last consumer produces
+    a non-Tensor value. Returns None if no Tensor child exists.
+    """
+    for user in node.users:
+        if user.op == "call_function" and isinstance(
+            user.meta.get("val"), torch.Tensor
+        ):
+            return user
+    return None
+
+
+# ============================================================
 # Node eligibility
 # ============================================================
 
@@ -399,9 +419,9 @@ def apply_cpu_offload_pass(
 
     for node, bwd_users in offloadable:
         val = node.meta.get("val")
-        assert (
-            val is not None
-        ), f"Node {node.name} tagged for offload has no 'val' metadata"
+        assert val is not None, (
+            f"Node {node.name} tagged for offload has no 'val' metadata"
+        )
 
         device = val.device
         # Propagate source node metadata to offload chain nodes so
@@ -418,7 +438,7 @@ def apply_cpu_offload_pass(
             offload_node.meta["val"] = val.to(torch.device("cpu"))
 
         # Find the last forward consumer of this node's storage (including
-        # through views) so the wait_tensor encodes the dependency directly.
+        # through views) so the defer pass knows the earliest safe point.
         chain_nodes, _ = _get_storage_chain(node)
         last_consumer = node
         last_consumer_pos = node_to_index[node]
@@ -430,10 +450,19 @@ def apply_cpu_offload_pass(
                 last_consumer = c
                 last_consumer_pos = c_pos
 
+        # ao::wait_tensor's last_use_of_storage arg enforces a topo edge
+        # so GPU storage stays alive until the last consumer finishes.
+        # The schema requires Optional[Tensor], so if the last consumer
+        # produces a non-Tensor (e.g. sort returns a tuple), find a
+        # Tensor-producing child (e.g. getitem) to preserve the edge.
+        last_use_arg = last_consumer
+        if not isinstance(last_consumer.meta.get("val"), torch.Tensor):
+            last_use_arg = _find_tensor_child(last_consumer)
+
         with gm.graph.inserting_after(offload_node):
             wait_offload_node = gm.graph.call_function(
                 torch.ops.ao.wait_tensor.default,
-                args=(offload_node, node, last_consumer),
+                args=(offload_node, node, last_use_arg),
             )
             wait_offload_node.meta.update(src_meta)
             wait_offload_node.meta["val"] = offload_node.meta["val"]
