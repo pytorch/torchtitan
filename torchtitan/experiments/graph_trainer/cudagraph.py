@@ -11,6 +11,7 @@ This module provides a cudagraph pass that can be applied to graph modules
 during compilation.
 """
 
+import gzip
 import json
 import warnings
 from collections.abc import Callable, Sequence
@@ -144,12 +145,17 @@ def _cudagraph_annotate_trace_file(trace_path: str) -> None:
         )
         return
 
-    with open(trace_path) as f:
+    # Profiler.export_chrome_trace gzip-compresses when the path ends in
+    # ".gz" (the default PROFILE_FILE since #3483), so read/write the trace
+    # through gzip for those paths and fall back to plain text otherwise.
+    open_trace = gzip.open if trace_path.endswith(".gz") else open
+
+    with open_trace(trace_path, "rt") as f:
         trace = json.load(f)
 
     count = annotate_trace(trace, annotations)
     if count > 0:
-        with open(trace_path, "w") as f:
+        with open_trace(trace_path, "wt") as f:
             json.dump(trace, f)
         logger.info(f"Annotated {count} CUDAGraph kernel event(s) in profiler trace")
 
