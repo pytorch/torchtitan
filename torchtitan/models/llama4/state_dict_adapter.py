@@ -14,6 +14,7 @@ import torch
 logger = logging.getLogger()
 
 from torchtitan.models.common.attention import FusedQKVLinear
+from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 from .model import Llama4Model
 
@@ -58,6 +59,16 @@ class Llama4StateDictAdapter(StateDictAdapter):
             "language_model.model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
         }
 
+    def _validate_hf_rope_config(self) -> None:
+        for layer in self.model_config.layers:
+            rope = layer.attention.rope
+            if rope is not None and not isinstance(rope, ComplexRoPE.Config):
+                raise ValueError(
+                    "Llama4 HF checkpoint conversion assumes ComplexRoPE.Config "
+                    "for RoPE layers; "
+                    f"got {type(rope).__name__}."
+                )
+
     def _get_attention_dims(self) -> tuple[int, int, int]:
         """Return (n_heads, n_kv_heads, head_dim) from model config."""
         attn = self.model_config.layers[0].attention
@@ -71,6 +82,7 @@ class Llama4StateDictAdapter(StateDictAdapter):
         return n_heads, n_kv_heads, head_dim
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        self._validate_hf_rope_config()
         if self.fuse_qkv:
             to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
             n_heads, n_kv_heads, head_dim = self._get_attention_dims()
@@ -153,6 +165,7 @@ class Llama4StateDictAdapter(StateDictAdapter):
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+        self._validate_hf_rope_config()
         state_dict = {}
         # Collect Q/K/V per layer for fusing (only used when fuse_qkv=True)
         pending_qkv: dict[str, dict[str, torch.Tensor]] = {}

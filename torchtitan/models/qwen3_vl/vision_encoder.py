@@ -404,6 +404,8 @@ class VisionAttention(Module):
         )
         # Each: (num_vision, max_num_patch, n_heads, head_dim)
         q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(0)
+        # Vision RoPE cache is already position-specific from grid_thw, so
+        # bypass RoPE.forward() and apply the prepared cache directly.
         q, k = self.rope.apply_rotary_emb(q, k, rope_cache)
         attn_output = self.flex_attention(q, k, v, attention_masks=attention_mask)
         attn_output = attn_output.reshape(num_vision, max_num_patch, -1)

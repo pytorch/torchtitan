@@ -106,6 +106,9 @@ class Qwen3VLModel(Qwen3Model):
 
         Constructs temporal/height/width position IDs for each token. The RoPE
         module consumes these IDs and computes the interleaved cos/sin cache.
+        Text tokens use the same position value across all three axes. Vision
+        tokens use temporal, height, and width positions derived from their
+        patch grid.
 
         Args:
             tokens: (batch, seq_len) token IDs

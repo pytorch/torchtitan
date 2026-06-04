@@ -68,13 +68,27 @@ class RoPE(Module):
         self.register_buffer("cache", self._precompute_cache(), persistent=False)
 
     def _precompute_cache(self) -> torch.Tensor:
+        """Build the reusable cache for all positions up to ``max_seq_len``.
+
+        Returns:
+            RoPE cache for all valid positions.
+        """
         raise NotImplementedError
 
     def _prepare_rope_cache(
         self,
         query: torch.Tensor,
         positions: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> torch.Tensor:
+        """Return a cache aligned to ``query`` and ``positions``.
+
+        Args:
+            query: Query tensor of shape ``(batch, seq_len, n_heads, head_dim)``.
+            positions: Optional position IDs of shape ``(batch, seq_len)``.
+
+        Returns:
+            Prepared RoPE cache for the concrete RoPE format.
+        """
         raise NotImplementedError
 
     def apply_rotary_emb(
@@ -82,8 +96,19 @@ class RoPE(Module):
         query: torch.Tensor,
         key: torch.Tensor,
         rope_cache: torch.Tensor,
-        positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply a prepared RoPE cache to query and key.
+
+        Args:
+            query: Query tensor of shape ``(batch, seq_len, n_heads, head_dim)``.
+            key: Key tensor of shape ``(batch, seq_len, n_heads, head_dim)``.
+            rope_cache: Prepared cache broadcastable to ``query`` and ``key``
+                according to the concrete RoPE format.
+
+        Returns:
+            Rotated query and key tensors with the same shapes and dtypes as
+            ``query`` and ``key``.
+        """
         raise NotImplementedError
 
     def forward(
@@ -93,8 +118,8 @@ class RoPE(Module):
         positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply rotary embeddings to query and key tensors."""
-        rope_cache, positions = self._prepare_rope_cache(query, positions)
-        return self.apply_rotary_emb(query, key, rope_cache, positions)
+        rope_cache = self._prepare_rope_cache(query, positions)
+        return self.apply_rotary_emb(query, key, rope_cache)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:
@@ -114,6 +139,11 @@ class ComplexRoPE(RoPE):
         pass
 
     def _precompute_cache(self) -> torch.Tensor:
+        """Precompute complex cis values.
+
+        Returns:
+            Cache of shape ``(max_seq_len, dim / 2)``.
+        """
         cfg = self.config
         dim = cfg.dim
         end = cfg.max_seq_len
@@ -195,22 +225,27 @@ class ComplexRoPE(RoPE):
         self,
         query: torch.Tensor,
         positions: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        return self.cache, positions
+    ) -> torch.Tensor:
+        """Return complex cache shaped for query/key broadcast.
+
+        Returns:
+            Cache of shape ``(1 or batch, seq_len, 1, dim / 2)``.
+        """
+        positions = _maybe_wrap_positions(positions, query)
+        if positions is not None:
+            _maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
+        xq_ = torch.view_as_complex(query.float().reshape(*query.shape[:-1], -1, 2))
+        return _reshape_for_broadcast(self.cache, xq_, positions)
 
     def apply_rotary_emb(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         rope_cache: torch.Tensor,
-        positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        positions = _maybe_wrap_positions(positions, query)
-        if positions is not None:
-            _maybe_check_max_pos(positions, max_valid_pos=rope_cache.shape[0] - 1)
+        """Apply complex RoPE using adjacent-dim pairs."""
         xq_ = torch.view_as_complex(query.float().reshape(*query.shape[:-1], -1, 2))
         xk_ = torch.view_as_complex(key.float().reshape(*key.shape[:-1], -1, 2))
-        rope_cache = _reshape_for_broadcast(rope_cache, xq_, positions)
         xq_out = torch.view_as_real(xq_ * rope_cache).flatten(3)
         xk_out = torch.view_as_real(xk_ * rope_cache).flatten(3)
         return xq_out.type_as(query), xk_out.type_as(key)
@@ -222,6 +257,11 @@ class CosSinRoPE(RoPE):
         pass
 
     def _precompute_cache(self) -> torch.Tensor:
+        """Precompute cos/sin values.
+
+        Returns:
+            Cache of shape ``(max_seq_len, dim * 2)``.
+        """
         cfg = self.config
         dim = cfg.dim
         max_seq_len = cfg.max_seq_len
@@ -275,19 +315,24 @@ class CosSinRoPE(RoPE):
         self,
         query: torch.Tensor,
         positions: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> torch.Tensor:
+        """Return cos/sin cache shaped for query/key broadcast.
+
+        Returns:
+            Cache of shape ``(1 or batch, seq_len, 1, dim * 2)``.
+        """
         positions = _maybe_wrap_positions(positions, query)
         if positions is not None:
             _maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
-        return _reshape_for_broadcast(self.cache, query, positions), None
+        return _reshape_for_broadcast(self.cache, query, positions)
 
     def apply_rotary_emb(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         rope_cache: torch.Tensor,
-        positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply cos/sin RoPE using the rotate-half convention."""
         if rope_cache.ndim != 4:
             raise ValueError(
                 f"CosSinRoPE expects a prepared 4D RoPE cache, got {rope_cache.ndim}D."

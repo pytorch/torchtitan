@@ -52,19 +52,6 @@ _NORM_INIT = {"weight": nn.init.ones_}
 _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
 
 
-def _dsv3_rope_config(rope_dim: int) -> RoPE.Config:
-    return ComplexRoPE.Config(
-        dim=rope_dim,
-        max_seq_len=4096 * 4,
-        theta=10000.0,
-        scaling="yarn",
-        rope_factor=40.0,
-        beta_fast=32.0,
-        beta_slow=1.0,
-        original_seq_len=4096,
-    )
-
-
 def _output_linear_init(dim: int) -> dict[str, Callable]:
     s = dim**-0.5
     return {
@@ -315,7 +302,16 @@ def _debugmodel(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
-        rope=_dsv3_rope_config(rope_dim),
+        rope=ComplexRoPE.Config(
+            dim=rope_dim,
+            max_seq_len=4096 * 4,
+            theta=10000.0,
+            scaling="yarn",
+            rope_factor=40.0,
+            beta_fast=32.0,
+            beta_slow=1.0,
+            original_seq_len=4096,
+        ),
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -370,7 +366,16 @@ def _16b(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
-        rope=_dsv3_rope_config(rope_dim),
+        rope=ComplexRoPE.Config(
+            dim=rope_dim,
+            max_seq_len=4096 * 4,
+            theta=10000.0,
+            scaling="yarn",
+            rope_factor=40.0,
+            beta_fast=32.0,
+            beta_slow=1.0,
+            original_seq_len=4096,
+        ),
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -429,7 +434,16 @@ def _236b(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
-        rope=_dsv3_rope_config(rope_dim),
+        rope=ComplexRoPE.Config(
+            dim=rope_dim,
+            max_seq_len=4096 * 4,
+            theta=10000.0,
+            scaling="yarn",
+            rope_factor=40.0,
+            beta_fast=32.0,
+            beta_slow=1.0,
+            original_seq_len=4096,
+        ),
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -489,7 +503,16 @@ def _671b(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
-        rope=_dsv3_rope_config(rope_dim),
+        rope=ComplexRoPE.Config(
+            dim=rope_dim,
+            max_seq_len=4096 * 4,
+            theta=10000.0,
+            scaling="yarn",
+            rope_factor=40.0,
+            beta_fast=32.0,
+            beta_slow=1.0,
+            original_seq_len=4096,
+        ),
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,

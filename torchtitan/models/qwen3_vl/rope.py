@@ -30,9 +30,10 @@ class MRoPE(CosSinRoPE):
         self,
         query: torch.Tensor,
         positions: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> torch.Tensor:
+        """Build a position-specific cache for 3D MRoPE position IDs."""
         if positions is not None and positions.ndim == 3:
-            return self._compute_mrope_cache(positions), None
+            return self._compute_mrope_cache(positions)
         return super()._prepare_rope_cache(query, positions)
 
     def _compute_mrope_cache(self, position_ids: torch.Tensor) -> torch.Tensor:

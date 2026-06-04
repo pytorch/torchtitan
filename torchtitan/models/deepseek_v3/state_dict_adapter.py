@@ -13,6 +13,7 @@ from torch.distributed.checkpoint import HuggingFaceStorageReader
 
 from torch.distributed.tensor import DTensor
 
+from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.utils import MoEStateDictAdapter
 
 from .model import DeepSeekV3Model
@@ -72,6 +73,16 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 }
             )
 
+    def _validate_hf_rope_config(self) -> None:
+        for layer in self.model_config.layers:
+            rope = layer.attention.rope
+            if not isinstance(rope, ComplexRoPE.Config):
+                raise ValueError(
+                    "DeepSeek-V3 HF checkpoint conversion assumes "
+                    "ComplexRoPE.Config; "
+                    f"got {type(rope).__name__}."
+                )
+
     def get_hf_storage_reader(
         self, path: str, from_quantized: bool = False
     ) -> HuggingFaceStorageReader:
@@ -100,6 +111,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         1. Convert between the HF shape and the torchtitan shape.
         2. Split the GroupedExperts' weight into separate expert's weight.
         """
+        self._validate_hf_rope_config()
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
         hf_state_dict = {}
@@ -162,6 +174,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         2. Convert between the HF shape and the torchtitan shape.
         3. Concat separate expert's weight into GroupedExperts' weight.
         """
+        self._validate_hf_rope_config()
 
         state_dict = {}
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}

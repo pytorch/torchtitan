@@ -30,6 +30,7 @@ from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .model import Qwen3VLModel
+from .rope import MRoPE
 
 
 class Qwen3VLStateDictAdapter(StateDictAdapter):
@@ -112,6 +113,15 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
             "model.visual.deepstack_merger_list.{}.linear_fc2.bias": "vision_encoder.deepstack_merger_list.{}.linear_fc2.bias",
         }
 
+    def _validate_hf_rope_config(self) -> None:
+        for layer in self.model_config.layers:
+            rope = layer.attention.rope
+            if not isinstance(rope, MRoPE.Config):
+                raise ValueError(
+                    "Qwen3-VL HF checkpoint conversion assumes MRoPE.Config; "
+                    f"got {type(rope).__name__}."
+                )
+
     def _get_attention_dims(self) -> tuple[int, int, int]:
         """Return (n_heads, n_kv_heads, head_dim) from model config."""
         attn = self.model_config.layers[0].attention
@@ -126,6 +136,7 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert torchtitan state dict to HuggingFace Qwen3-VL format."""
+        self._validate_hf_rope_config()
         if self.fuse_qkv:
             to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
             n_heads, n_kv_heads, head_dim = self._get_attention_dims()
@@ -229,6 +240,7 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert HuggingFace Qwen3-VL state dict to torchtitan format."""
+        self._validate_hf_rope_config()
         tt_state_dict = {}
         # Collect Q/K/V per layer for fusing (only used when fuse_qkv=True)
         pending_qkv: dict[str, dict[str, torch.Tensor]] = {}
