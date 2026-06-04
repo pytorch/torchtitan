@@ -97,7 +97,7 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
+                [num_blocks, 2, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -134,8 +134,11 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             AttentionType.ENCODER,
         ), "Encoder-only attention not supported yet."
 
-        # For decoder and cross-attention, use KV cache as before
-        key_cache, value_cache = kv_cache.unbind(0)
+        # For decoder and cross-attention, use KV cache as before.
+        # vLLM's FlashAttentionBackend.get_kv_cache_shape lays the cache out as
+        # (num_blocks, 2, block_size, num_kv_heads, head_size), so the K/V split
+        # is on dim 1, not dim 0.
+        key_cache, value_cache = kv_cache.unbind(1)
 
         assert not self.kv_cache_dtype.startswith(
             "fp8"
