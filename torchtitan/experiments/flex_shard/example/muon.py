@@ -27,7 +27,13 @@ This module wires that up for the example Transformer:
 * :func:`build_comm_free_muon_optimizers` constructs this rank's Muon + AdamW
   optimizers from those groups.
 
-See ``communication_free_muon_plan.md`` for the design and trade-offs.
+For the memory-balanced (not comm-free) alternative, :func:`grouped_ragged_shard_muon_buckets`
++ :class:`RaggedShardMuon` evenly shard each Muon matrix across ranks and all-gather it
+inside the step to run Newton-Schulz -- byte-perfect memory balance and no idle ranks, at
+the cost of one collective per bucket (instead of ``Owned``'s zero). The step stays
+bit-identical to single-device Muon either way.
+
+See ``muon_flex_shard_placement_strategies.md`` for the design and trade-offs.
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ import torch
 import torch.nn as nn
 from torch.optim._muon import (
     _adjust_lr,
+    _zeropower_via_newtonschulz,
     DEFAULT_A,
     DEFAULT_B,
     DEFAULT_C,
@@ -54,6 +61,11 @@ from .owned import (
     make_owned_placement_fn,
     Owned,
 )
+from .ragged_shard import (
+    GroupedRaggedShard,
+    make_grouped_ragged_placement_fn,
+    RaggedShard,
+)
 from .shard import per_param_placements, Shard
 
 if TYPE_CHECKING:
@@ -63,9 +75,12 @@ if TYPE_CHECKING:
 __all__ = [
     "build_comm_free_muon_optimizers",
     "build_muon_param_groups",
+    "build_ragged_shard_muon_optimizers",
     "CombinedOptimizer",
     "comm_free_muon_buckets",
     "GroupedMuon",
+    "grouped_ragged_shard_muon_buckets",
+    "RaggedShardMuon",
 ]
 
 
@@ -215,6 +230,80 @@ def comm_free_muon_buckets(
         for pattern in patterns
     ]
     return [*layer_buckets, *rest_buckets]
+
+
+def grouped_ragged_shard_muon_buckets(
+    model: nn.Module,
+    world_size: int,
+    *,
+    reshard_after_forward: bool = False,
+    rest_patterns: list[str] | None = None,
+) -> list[BucketSpec]:
+    """Build FlexShard buckets for memory-balanced (gather-based) Muon.
+
+    Each transformer layer's 2D matrices share **one** ``GroupedRaggedShard`` bucket:
+    the bucket is flattened param-major and cut into ``world_size`` byte-balanced ranges
+    that cross matrix boundaries, so every rank holds an exactly ``1/world_size`` slice
+    of the layer's matrices -- no whole-matrix hotspot, and no idle ranks even when a
+    layer has fewer matrices than ranks. :class:`RaggedShardMuon` all-gathers each
+    bucket inside the step to run Newton-Schulz on the full matrix. Each non-2D param
+    gets its own ``Shard(0)`` bucket (>= 3D experts -> ``GroupedMuon``, 1D norms ->
+    AdamW), and embeddings / LM head / final norm stay ``Shard(0)`` for AdamW.
+
+    Unlike :func:`comm_free_muon_buckets` this is **not communication-free**: it spends
+    one all-gather per bucket to buy byte-perfect memory balance. See
+    ``muon_flex_shard_placement_strategies.md`` for the trade-off.
+
+    Args:
+        model: A FlexShard-compatible Transformer exposing ``model.layers``.
+        world_size: Number of ranks in the 1D FlexShard mesh.
+        reshard_after_forward: Free unsharded params after forward (defaults to
+            ``False``; ``RaggedShardMuon`` maps bucket params by FQN, and the
+            activation-checkpoint wrappers that reshard-after-forward inserts would
+            rename them).
+        rest_patterns: FQN globs for the non-Muon (Shard + AdamW) region; each becomes
+            its own bucket. Defaults to embeddings, LM head, and final norm.
+
+    Returns:
+        A list of ``BucketSpec`` for ``flex_shard(model, mesh, buckets)``.
+    """
+    grouped_ragged = make_grouped_ragged_placement_fn(
+        dims=(0,), local_units=(1,) * world_size
+    )
+    buckets: list[BucketSpec] = []
+    for i in range(len(model.layers)):
+        matrices: list[str] = []
+        other: list[str] = []
+        for name, param in model.layers[i].named_parameters():
+            fqn = f"layers.{i}.{name}"
+            (matrices if param.ndim == 2 else other).append(fqn)
+        if matrices:
+            buckets.append(
+                BucketSpec(
+                    matrices,
+                    placement_fn=grouped_ragged,
+                    reshard_after_forward=reshard_after_forward,
+                )
+            )
+        for fqn in other:
+            buckets.append(
+                BucketSpec(
+                    [fqn],
+                    placement_fn=per_param_placements,  # Shard(0)
+                    reshard_after_forward=reshard_after_forward,
+                )
+            )
+
+    patterns = _DEFAULT_REST_PATTERNS if rest_patterns is None else rest_patterns
+    buckets += [
+        BucketSpec(
+            [pattern],
+            placement_fn=per_param_placements,
+            reshard_after_forward=reshard_after_forward,
+        )
+        for pattern in patterns
+    ]
+    return buckets
 
 
 MuonParamPredicate = Callable[[str, "torch.Size | None"], bool]
@@ -472,6 +561,221 @@ class GroupedMuon(torch.optim.Optimizer):
         return loss
 
 
+def _discover_ragged_muon_buckets(
+    model: nn.Module,
+) -> list[dict[str, Any]]:
+    """Find this rank's ``RaggedShard`` / ``GroupedRaggedShard`` 2D-matrix buckets.
+
+    Returns one entry per Muon bucket with its placement, ``ParamInfo`` list (bucket
+    order), the matching local parameter objects (by FQN), and the bucket storage.
+    Buckets whose placement is not a (subclass of) ``RaggedShard``, or that hold any
+    non-2D param, are skipped -- experts / norms / embeddings are optimized by
+    GroupedMuon / AdamW instead.
+    """
+    param_by_fqn = dict(model.named_parameters())
+    buckets: list[dict[str, Any]] = []
+    for storage in getattr(model, "sharded_bucket_storages", []):
+        infos = list(storage.param_infos.values())
+        if not infos:
+            continue
+        placement = infos[0].placement
+        # GroupedRaggedShard is a subclass of RaggedShard, so this covers both.
+        if not isinstance(placement, RaggedShard):
+            continue
+        if not all(len(info.global_shape) == 2 for info in infos):
+            continue
+        params = [param_by_fqn.get(info.fqn) for info in infos]
+        if any(p is None for p in params):
+            raise ValueError(
+                "RaggedShardMuon could not map bucket parameters to model parameters "
+                "by FQN; reshard-after-forward renames them, which the ragged Muon "
+                "recipe does not yet support. Use reshard_after_forward=False."
+            )
+        buckets.append(
+            {
+                "placement": placement,
+                "infos": infos,
+                "params": params,
+                "storage": storage,
+            }
+        )
+    return buckets
+
+
+class RaggedShardMuon(torch.optim.Optimizer):
+    """Memory-balanced Muon for ``RaggedShard`` / ``GroupedRaggedShard`` 2D matrices.
+
+    Each Muon matrix is evenly sharded across ranks -- byte-perfect across the bucket
+    with ``GroupedRaggedShard`` (the cut crosses parameter boundaries) or row-even per
+    matrix with ``RaggedShard`` -- so parameters, gradients, and the momentum buffer are
+    all balanced ``1/N``. Newton-Schulz needs the *full* matrix, so the step all-gathers
+    each bucket's matrices (**one collective per bucket**), runs Newton-Schulz on the
+    full matrix on every rank, and writes back only this rank's shard of the update. The
+    momentum buffer stays sharded (its update is element-wise); only the pre-NS update is
+    gathered.
+
+    The result is **bit-identical to single-device** ``torch.optim.Muon`` (NS runs on
+    the genuine full matrix with the batch-averaged gradient). Unlike ``Owned`` +
+    ``torch.optim.Muon`` this is **not communication-free**: it trades the per-bucket
+    all-gather for perfect memory balance and zero idle ranks. Take the model after
+    ``flex_shard`` (with :func:`grouped_ragged_shard_muon_buckets`) and the 1D mesh; the
+    optimizer discovers its ragged buckets from ``model.sharded_bucket_storages``.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        mesh: DeviceMesh,
+        *,
+        lr: float = 1e-3,
+        weight_decay: float = 0.1,
+        momentum: float = 0.95,
+        nesterov: bool = True,
+        ns_coefficients: tuple[float, float, float] = (DEFAULT_A, DEFAULT_B, DEFAULT_C),
+        eps: float = EPS,
+        ns_steps: int = DEFAULT_NS_STEPS,
+        adjust_lr_fn: str | None = None,
+    ) -> None:
+        if not 0.0 <= lr:
+            raise ValueError(f"Learning rate should be >= 0 but is: {lr}")
+        if not 0.0 <= momentum:
+            raise ValueError(f"momentum should be >= 0 but is: {momentum}")
+        if not 0.0 <= weight_decay:
+            raise ValueError(f"weight decay should be >= 0 but is: {weight_decay}")
+        if adjust_lr_fn is not None and adjust_lr_fn not in (
+            "original",
+            "match_rms_adamw",
+        ):
+            raise ValueError(
+                f"Adjust learning rate function {adjust_lr_fn} is not supported"
+            )
+        self._mesh = mesh
+        self._buckets = _discover_ragged_muon_buckets(model)
+        params: list[nn.Parameter] = []
+        seen: set[int] = set()
+        for bucket in self._buckets:
+            for param in bucket["params"]:
+                if param.numel() > 0 and id(param) not in seen:
+                    seen.add(id(param))
+                    params.append(param)
+        if not params:
+            raise ValueError(
+                "RaggedShardMuon found no RaggedShard/GroupedRaggedShard 2D matrices on "
+                "this rank. Place Muon matrices with grouped_ragged_shard_muon_buckets()."
+            )
+        defaults = {
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "momentum": momentum,
+            "nesterov": nesterov,
+            "ns_coefficients": ns_coefficients,
+            "eps": eps,
+            "ns_steps": ns_steps,
+            "adjust_lr_fn": adjust_lr_fn,
+        }
+        super().__init__(params, defaults)
+
+    @staticmethod
+    def _local_update_shard(
+        full_update: torch.Tensor,
+        placement: RaggedShard,
+        info: Any,
+        rank: int,
+        world_size: int,
+    ) -> torch.Tensor:
+        """This rank's shard of the full Newton-Schulz update."""
+        if isinstance(placement, GroupedRaggedShard):
+            # Byte-balanced cut crosses matrix boundaries: slice the flat full matrix
+            # at this rank's offset within the param (mirrors copy_param_to_storage).
+            layout = info.bucket_layout.param_layouts[info.fqn]
+            start = layout.local_global_offset - layout.param_offset
+            return full_update.reshape(-1)[start : start + info.local_numel].view(
+                info.local_shape
+            )
+        return placement.extract_local_shard(full_update, rank, world_size)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        """All-gather each bucket, run NS on the full matrix, write back the local shard."""
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        group = self.param_groups[0]
+        lr = group["lr"]
+        weight_decay = group["weight_decay"]
+        momentum = group["momentum"]
+        nesterov = group["nesterov"]
+        ns_coefficients = group["ns_coefficients"]
+        eps = group["eps"]
+        ns_steps = group["ns_steps"]
+        adjust_lr_fn = group["adjust_lr_fn"]
+        rank = self._mesh.get_local_rank()
+        world_size = self._mesh.size()
+
+        for bucket in self._buckets:
+            placement = bucket["placement"]
+            infos = bucket["infos"]
+            params = bucket["params"]
+            storage = bucket["storage"]
+
+            # Stage each local shard's pre-NS update into one bucket-shaped scratch
+            # buffer so GroupedRaggedShard can view it as a contiguous bucket slice;
+            # the momentum buffer stays sharded (its update is element-wise).
+            scratch = torch.zeros(
+                storage.total_bytes,
+                dtype=torch.uint8,
+                device=storage.byte_storage.device,
+            )
+            pre_views = [
+                placement.make_local_storage_view(scratch, info) for info in infos
+            ]
+            active: list[bool] = []
+            for info, param, pre_view in zip(infos, params, pre_views, strict=True):
+                has_update = info.local_numel > 0 and param.grad is not None
+                active.append(has_update)
+                if not has_update:
+                    continue
+                grad = param.grad
+                if grad.is_sparse:
+                    raise RuntimeError(
+                        "RaggedShardMuon does not support sparse gradients"
+                    )
+                state = self.state[param]
+                if "momentum_buffer" not in state:
+                    state["momentum_buffer"] = torch.zeros_like(
+                        grad, memory_format=torch.preserve_format
+                    )
+                buf = state["momentum_buffer"]
+                buf.lerp_(grad, 1 - momentum)
+                pre_view.copy_(grad.lerp(buf, momentum) if nesterov else buf)
+
+            # One collective per bucket: all-gather the staged pre-NS shards and
+            # reconstruct each full matrix on every rank.
+            prepared = placement.prepare_unshard_bucket(
+                pre_views, infos, self._mesh, None
+            )
+            placement.run_prepared_unshard(prepared)
+            full_pre_updates = placement.finish_prepared_unshard(prepared).full_params
+
+            for info, param, full_pre, has_update in zip(
+                infos, params, full_pre_updates, active, strict=True
+            ):
+                if not has_update:
+                    continue
+                full_update = _zeropower_via_newtonschulz(
+                    full_pre, ns_coefficients, ns_steps, eps
+                )
+                adjusted_lr = _adjust_lr(lr, adjust_lr_fn, info.global_shape)
+                update_shard = self._local_update_shard(
+                    full_update, placement, info, rank, world_size
+                )
+                param.mul_(1 - lr * weight_decay)
+                param.add_(update_shard, alpha=-adjusted_lr)
+        return loss
+
+
 def build_comm_free_muon_optimizers(
     model: nn.Module,
     mesh: DeviceMesh,
@@ -514,6 +818,78 @@ def build_comm_free_muon_optimizers(
         optimizers.append(torch.optim.Muon(muon_2d, **(muon_kwargs or {})))
     if muon_grouped:
         optimizers.append(GroupedMuon(muon_grouped, **(muon_kwargs or {})))
+    if other_params:
+        optimizers.append(torch.optim.AdamW(other_params, **(adamw_kwargs or {})))
+    return CombinedOptimizer(optimizers)
+
+
+def build_ragged_shard_muon_optimizers(
+    model: nn.Module,
+    mesh: DeviceMesh,
+    *,
+    muon_kwargs: dict[str, Any] | None = None,
+    adamw_kwargs: dict[str, Any] | None = None,
+) -> CombinedOptimizer:
+    """Build this rank's optimizers for the memory-balanced ragged Muon recipe.
+
+    :class:`RaggedShardMuon` optimizes the ragged-sharded 2D matrices (all-gather +
+    Newton-Schulz, byte-balanced), :class:`GroupedMuon` optimizes ``Shard(0)`` >= 3D
+    grouped experts (comm-free), and AdamW optimizes the rest of this rank's local
+    parameters. Sub-optimizers with no parameters on this rank are omitted.
+
+    Args:
+        model: A model already wrapped by ``flex_shard`` (see
+            :func:`grouped_ragged_shard_muon_buckets`).
+        mesh: The 1D FlexShard mesh.
+        muon_kwargs: Keyword args forwarded to ``RaggedShardMuon`` and ``GroupedMuon``.
+        adamw_kwargs: Keyword args forwarded to ``torch.optim.AdamW``.
+
+    Returns:
+        A :class:`CombinedOptimizer` over the constructed optimizers.
+    """
+    optimizers: list[torch.optim.Optimizer] = []
+
+    # Ragged 2D matrices -> RaggedShardMuon (discovers its own buckets). Only build it
+    # when this rank actually holds ragged Muon shards (it always does under an even
+    # ragged split, but guard so an all-AdamW rank does not error).
+    has_ragged = any(
+        param.numel() > 0
+        for bucket in _discover_ragged_muon_buckets(model)
+        for param in bucket["params"]
+    )
+    if has_ragged:
+        optimizers.append(RaggedShardMuon(model, mesh, **(muon_kwargs or {})))
+
+    grouped_params: list[nn.Parameter] = []
+    other_params: list[nn.Parameter] = []
+    for _, param in model.named_parameters():
+        if param.numel() == 0:
+            continue
+        placements = get_placements(param)
+        global_shape = get_global_shape(param)
+        placement = (
+            placements[0] if placements is not None and len(placements) == 1 else None
+        )
+        # Ragged 2D matrices are handled by RaggedShardMuon above (GroupedRaggedShard
+        # is a RaggedShard subclass, so this also skips it).
+        if (
+            isinstance(placement, RaggedShard)
+            and global_shape is not None
+            and len(global_shape) == 2
+        ):
+            continue
+        # Shard(0) of a >= 3D stack keeps whole (m, n) matrices -> comm-free GroupedMuon.
+        if (
+            isinstance(placement, Shard)
+            and placement.dim == 0
+            and global_shape is not None
+            and len(global_shape) >= 3
+        ):
+            grouped_params.append(param)
+        else:
+            other_params.append(param)
+    if grouped_params:
+        optimizers.append(GroupedMuon(grouped_params, **(muon_kwargs or {})))
     if other_params:
         optimizers.append(torch.optim.AdamW(other_params, **(adamw_kwargs or {})))
     return CombinedOptimizer(optimizers)

@@ -7,9 +7,12 @@
 from .muon import (
     build_comm_free_muon_optimizers,
     build_muon_param_groups,
+    build_ragged_shard_muon_optimizers,
     CombinedOptimizer,
     comm_free_muon_buckets,
+    grouped_ragged_shard_muon_buckets,
     GroupedMuon,
+    RaggedShardMuon,
 )
 from .owned import (
     assign_layer_owners_lpt,
@@ -32,10 +35,12 @@ __all__ = [
     "assign_matrix_owners_per_layer_balanced",
     "build_comm_free_muon_optimizers",
     "build_muon_param_groups",
+    "build_ragged_shard_muon_optimizers",
     "CombinedOptimizer",
     "comm_free_muon_buckets",
     "GroupedMuon",
     "GroupedRaggedShard",
+    "grouped_ragged_shard_muon_buckets",
     "make_grouped_ragged_placement_fn",
     "make_owned_placement_fn",
     "make_ragged_placement_fn",
@@ -44,5 +49,6 @@ __all__ = [
     "per_param_placements",
     "per_param_ragged_placements",
     "RaggedShard",
+    "RaggedShardMuon",
     "Shard",
 ]

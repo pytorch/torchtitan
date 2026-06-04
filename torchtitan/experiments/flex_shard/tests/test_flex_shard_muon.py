@@ -27,8 +27,10 @@ from torchtitan.experiments.flex_shard.example.muon import (
     _default_muon_predicate,
     build_comm_free_muon_optimizers,
     build_muon_param_groups,
+    build_ragged_shard_muon_optimizers,
     CombinedOptimizer,
     comm_free_muon_buckets,
+    grouped_ragged_shard_muon_buckets,
     GroupedMuon,
 )
 from torchtitan.experiments.flex_shard.example.owned import (
@@ -36,6 +38,10 @@ from torchtitan.experiments.flex_shard.example.owned import (
     assign_matrix_owners_per_layer_balanced,
     make_owned_placement_fn,
     Owned,
+)
+from torchtitan.experiments.flex_shard.example.ragged_shard import (
+    GroupedRaggedShard,
+    RaggedShard,
 )
 from torchtitan.experiments.flex_shard.example.shard import per_param_placements, Shard
 from torchtitan.experiments.flex_shard.tests.common import (
@@ -121,6 +127,20 @@ def _is_owned_2d(param: nn.Parameter) -> bool:
         and global_shape is not None
         and len(global_shape) == 2
     )
+
+
+def _ragged_local_shard(full, placement, info, rank, world_size):
+    """This rank's local shard of a full tensor under any FlexShard placement.
+
+    Mirrors ``RaggedShardMuon._local_update_shard``: for ``GroupedRaggedShard`` the
+    byte-balanced cut crosses matrix boundaries, so slice the flat tensor at this rank's
+    offset within the param; otherwise use the placement's own ``extract_local_shard``.
+    """
+    if isinstance(placement, GroupedRaggedShard):
+        layout = info.bucket_layout.param_layouts[info.fqn]
+        start = layout.local_global_offset - layout.param_offset
+        return full.reshape(-1)[start : start + info.local_numel].view(info.local_shape)
+    return placement.extract_local_shard(full, rank, world_size)
 
 
 def _checkpoint_execution_units(model: nn.Module) -> None:
@@ -360,6 +380,45 @@ class TestCommFreeMuonHelpers(TestCase):
         )
         # 4 layers x (experts + norm) + 2 rest -> Shard buckets
         self.assertEqual(len(sharded), 4 * 2 + 2)
+
+    def test_grouped_ragged_shard_muon_buckets_structure(self) -> None:
+        model = (
+            _make_per_matrix_moe_model()
+        )  # 4 layers; each: wq, wo (2D), experts(3D), norm(1D)
+        world_size = 2
+        buckets = grouped_ragged_shard_muon_buckets(
+            model,
+            world_size,
+            rest_patterns=["tok_embeddings.*", "output.*"],
+        )
+
+        class _Mesh:  # make_grouped_ragged_placement_fn needs mesh.size()
+            def size(self):
+                return world_size
+
+        mesh = _Mesh()
+
+        def placement_of(bucket):
+            placements = bucket.placement_fn(
+                [(bucket.patterns[0], nn.Parameter(torch.zeros(2, 2)))], mesh
+            )
+            return next(iter(placements.values()))[0]
+
+        grouped = [
+            b for b in buckets if isinstance(placement_of(b), GroupedRaggedShard)
+        ]
+        sharded = [b for b in buckets if type(placement_of(b)).__name__ == "Shard"]
+        # One GroupedRaggedShard bucket per layer, holding that layer's 2 matrices.
+        self.assertEqual(len(grouped), 4)
+        for b in grouped:
+            self.assertEqual(len(b.patterns), 2)
+            self.assertTrue(
+                all(p.endswith((".wq.weight", ".wo.weight")) for p in b.patterns)
+            )
+        # 4 layers x (experts + norm) + 2 rest -> Shard buckets.
+        self.assertEqual(len(sharded), 4 * 2 + 2)
+        # Ragged Muon maps params by FQN, so reshard-after-forward must stay off.
+        self.assertTrue(all(not b.reshard_after_forward for b in buckets))
 
     def test_reshard_policy_recomputes_unshard_collectives(self) -> None:
         from torch.utils.checkpoint import CheckpointPolicy
@@ -862,6 +921,115 @@ class TestCommFreeMuon(FSDPTest):
             p.grad = torch.randn_like(p)
         with _assert_no_collectives(self):
             optim.step()
+
+    @skip_if_lt_x_gpu(2)
+    def test_grouped_ragged_shard_muon_matches_single_device_muon(self) -> None:
+        # Memory-balanced recipe: each layer's 2D matrices share one GroupedRaggedShard
+        # bucket (byte-balanced, crossing matrix boundaries); the step all-gathers and
+        # runs Newton-Schulz on the full matrix. Must match single-device Muon
+        # bit-for-bit, with bucket bytes balanced 1/N (no whole-matrix hotspot), and --
+        # unlike the Owned path -- the step does issue a collective (one all-gather/bucket).
+        mesh = self._mesh()
+        torch.manual_seed(0)
+        model = _make_per_matrix_moe_model().to(device_type)
+        _init_params_deterministically(model)
+        reference = copy.deepcopy(model)
+        n_layers = len(model.layers)
+
+        flex_shard(
+            model,
+            mesh,
+            buckets=grouped_ragged_shard_muon_buckets(
+                model,
+                self.world_size,
+                rest_patterns=["tok_embeddings.*", "output.*"],
+            ),
+        )
+
+        muon_kwargs = dict(lr=0.02, momentum=0.9, weight_decay=0.0)
+        adamw_kwargs = dict(lr=0.01, weight_decay=0.0)
+        optim = build_ragged_shard_muon_optimizers(
+            model, mesh, muon_kwargs=muon_kwargs, adamw_kwargs=adamw_kwargs
+        )
+        opt_types = {type(o).__name__ for o in optim.optimizers}
+        self.assertIn("RaggedShardMuon", opt_types)  # ragged 2D matrices
+        self.assertIn("GroupedMuon", opt_types)  # 3D experts (comm-free)
+
+        info_by_fqn = {}
+        for bs in model.sharded_bucket_storages:
+            info_by_fqn.update(bs.param_infos)
+
+        # Byte-perfect balance: every layer's matrix bucket is split evenly across ranks
+        # (so wq + wo together, not each whole on one rank).
+        for i in range(n_layers):
+            rank_numels = info_by_fqn[f"layers.{i}.wq.weight"].bucket_layout.rank_numels
+            self.assertEqual(max(rank_numels), min(rank_numels))
+
+        # Reference: the same Muon / GroupedMuon / AdamW split on the full params.
+        ref_by_fqn = dict(reference.named_parameters())
+        ref_muon, ref_grouped, ref_other = [], [], []
+        for fqn, flex_p in model.named_parameters():
+            placement = get_placements(flex_p)[0]
+            global_shape = get_global_shape(flex_p)
+            ref_p = ref_by_fqn[fqn]
+            if isinstance(placement, RaggedShard) and len(global_shape) == 2:
+                ref_muon.append(ref_p)
+            elif (
+                isinstance(placement, Shard)
+                and placement.dim == 0
+                and len(global_shape) >= 3
+            ):
+                ref_grouped.append(ref_p)
+            else:
+                ref_other.append(ref_p)
+        ref_optim = CombinedOptimizer(
+            [
+                torch.optim.Muon(ref_muon, **muon_kwargs),
+                GroupedMuon(ref_grouped, **muon_kwargs),
+                torch.optim.AdamW(ref_other, **adamw_kwargs),
+            ]
+        )
+
+        # Identical full grads on every rank (== the AVG-reduced grad); the flex model
+        # gets each param's local shard of that full grad.
+        torch.manual_seed(1234)
+        full_grads = {
+            fqn: torch.randn_like(p) for fqn, p in reference.named_parameters()
+        }
+        for fqn, ref_p in reference.named_parameters():
+            ref_p.grad = full_grads[fqn].clone()
+        for fqn, flex_p in model.named_parameters():
+            placement = get_placements(flex_p)[0]
+            shard = _ragged_local_shard(
+                full_grads[fqn], placement, info_by_fqn[fqn], self.rank, self.world_size
+            )
+            flex_p.grad = shard.clone().contiguous()
+
+        # The step is NOT communication-free: it all-gathers each ragged bucket.
+        real_all_gather = dist.all_gather
+        gathers = 0
+
+        def counting_all_gather(*a, **k):
+            nonlocal gathers
+            gathers += 1
+            return real_all_gather(*a, **k)
+
+        with mock.patch.object(dist, "all_gather", side_effect=counting_all_gather):
+            optim.step()
+        self.assertGreaterEqual(gathers, n_layers)
+        ref_optim.step()
+
+        # Bit-exact parity: every local shard equals the reference's matching shard.
+        for fqn, flex_p in model.named_parameters():
+            placement = get_placements(flex_p)[0]
+            expected = _ragged_local_shard(
+                ref_by_fqn[fqn].detach(),
+                placement,
+                info_by_fqn[fqn],
+                self.rank,
+                self.world_size,
+            )
+            self.assertEqual(flex_p.detach(), expected)
 
 
 if __name__ == "__main__":
