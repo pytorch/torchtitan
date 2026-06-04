@@ -454,9 +454,6 @@ def _build_async_tp_tests() -> list[OverrideDefinitions]:
 def _build_autoparallel_tests() -> list[OverrideDefinitions]:
     """AutoParallel integration tests for default runners."""
     return [
-        # TODO: disabled due to upstream AutoParallel regression in nightly:
-        # nll_loss assertion failure (t >= 0 && t < n_classes) from incorrect
-        # loss partitioning. Re-enable once fixed upstream.
         OverrideDefinitions(
             [
                 [
@@ -471,7 +468,6 @@ def _build_autoparallel_tests() -> list[OverrideDefinitions]:
             "autoparallel llama3 FSDP+TP",
             "autoparallel_llama3_fsdp_tp",
             ngpu=4,
-            disabled=True,
         ),
     ]
 
