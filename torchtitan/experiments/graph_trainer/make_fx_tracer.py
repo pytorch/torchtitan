@@ -155,76 +155,6 @@ def _wrap_subclasses(
     return wrapped
 
 
-def _remove_dead_empty_strided_chains(gm: torch.fx.GraphModule) -> None:
-    """Remove dead node chains rooted at ``aten.empty_strided``.
-
-    DTensor shard propagation runs each op on fake global-shape tensors to
-    derive output metadata. When that inference is traced by make_fx, it
-    leaves a dead "shadow" node for every DTensor op (global shape, backed by
-    ``empty_strided`` placeholders) that no real (local-shard) output ever
-    consumes.
-
-    These dead shadow nodes are usually harmless, but ops with bounds checking
-    like ``aten.embedding`` read the uninitialized ``empty_strided`` index
-    tensor and trigger out-of-bounds access on the (TP-sharded) weight,
-    crashing with "device-side assert triggered". Any aot_fx_trace config with
-    ``tensor_parallel_degree > 1`` hits this.
-
-    This is a targeted dead-code elimination: starting from every
-    ``empty_strided`` node (any device), it walks the forward closure of
-    descendants and erases those that bottom out with no users — i.e. each
-    chain that starts at an ``empty_strided`` and ends with no consumer.
-    Nodes that reach a live consumer or the graph output are preserved, so a
-    chain that partially feeds real computation keeps its live portion.
-    Restricting removal to ``empty_strided`` descendants keeps this narrower
-    than a whole-graph ``eliminate_dead_code``.
-
-    TODO: this is a workaround for the dead shadow nodes described above. The
-    upstream fix wraps shard propagation's fake-tensor metadata inference in
-    ``disable_proxy_modes_tracing`` so it never enters the make_fx graph (see
-    ``ShardingPropagator._propagate_tensor_meta_non_cached`` in PyTorch).
-    Remove this pass once that fix lands in the graph_trainer CI nightly.
-    """
-    # Forward closure of every empty_strided node: the only nodes this pass
-    # is allowed to erase.
-    candidates: set[torch.fx.Node] = set()
-    queue = [
-        node
-        for node in gm.graph.nodes
-        if node.op == "call_function"
-        and node.target == torch.ops.aten.empty_strided.default
-    ]
-    while queue:
-        node = queue.pop()
-        if node in candidates:
-            continue
-        candidates.add(node)
-        queue.extend(node.users)
-
-    # Reverse-topological order: a node is visited only after all of its
-    # users, so erasing dead leaves first lets their now-userless producers
-    # become removable too, cascading the deletion up each chain. Nodes still
-    # feeding live consumers are left in place.
-    #
-    # ``impure_random=False`` lets randomness-tagged ops be removed: a dead
-    # shadow op (e.g. the wrapper-level ``_scaled_dot_product_cudnn_attention``
-    # operating on ``empty_strided`` garbage) is a spurious duplicate of the
-    # real local-tensor op, so dropping it draws us back toward eager numerics
-    # rather than away. Genuinely memory-mutating ops (``schema.is_mutable``)
-    # are still treated as impure and preserved.
-    for node in reversed(list(gm.graph.nodes)):
-        if (
-            node in candidates
-            and node.op == "call_function"
-            and not node.users
-            and not node.is_impure(impure_random=False)
-        ):
-            gm.graph.erase_node(node)
-
-    gm.graph.lint()
-    gm.recompile()
-
-
 def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
     """Copy forward metadata to backward nodes across all nested FX subgraphs.
 
@@ -575,10 +505,8 @@ def minimal_fx_tracer(
             )(*fake_args)
 
         # Copy forward annotations to backward nodes.
-        # Must run before DCE so that forward nodes used for matching aren't removed.
         _copy_fwd_metadata_to_bw_nodes(traced)
 
-        _remove_dead_empty_strided_chains(traced)
         if _insert_runtime_asserts:
             _insert_runtime_asserts_pass(traced, fake_mode)
 
