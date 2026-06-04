@@ -467,6 +467,7 @@ def register_moe_load_balancing_hook(
                     tokens_per_expert_E_by_layer,
                     # pyrefly: ignore [unbound-name]
                     device_mesh=dtensor_mesh,
+                    # pyrefly: ignore [unbound-name]
                     placements=[Replicate()] * dtensor_mesh.ndim,
                     run_check=False,
                 )
