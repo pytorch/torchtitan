@@ -73,18 +73,85 @@ single gathered `W` (fp8 `(out, in)` row-major + scale `(out/128, in/128)`):
 | backward dgrad (`W` col-major) | `gathered` transpose-copy | `scale` (direct) | one **local fp8 copy** (1 byte/elem) |
 
 No re-quantization, **no second collective** — just a stride reinterpret (forward) and
-a cheap local fp8 transpose (backward dgrad). This is precisely **why the weight recipe
-is square `128×128`** while activations are `1×128`: the weight is the gathered,
-reused-across-passes tensor, so it must be transpose-stable; activations are
-re-quantized per use. torchao's non-all-gather prototype instead re-quantizes the local
-bf16 weight twice (`..._weight_quant_transposed_rhs` for forward, `..._weight_quant_rhs`
-for backward) — with fp8 all-gather we gather once and transpose.
+a cheap local fp8 transpose (backward dgrad). Square is the *unique* tiling with this
+property (derived in [§ Non-square tiles](#non-square-tiles-no-free-reuse)), so the
+all-gathered, reused-across-passes weight should be square. torchao's non-all-gather
+prototype instead re-quantizes the local bf16 weight twice
+(`..._weight_quant_transposed_rhs` for forward, `..._weight_quant_rhs` for backward) —
+with fp8 all-gather we gather once and transpose.
+
+> **Attribution (corrected):** transpose-reuse is a *derivable property* of square tiles,
+> **not** DeepSeek-V3's stated rationale. The DeepSeek-V3 report §3.3.2 motivates the
+> 128×128 weight block (and 1×128 activation tile) by FP8's *limited dynamic range* and
+> *activation outliers* (*"better accommodate outliers by adapting the scale according
+> to smaller groups"*), and does not mention forward/backward reuse. It does, in §3.5.2,
+> describe the cost a square weight *avoids*: a 1×128 activation must be *"dequantized,
+> transposed, re-quantized into 128×1 tiles"* in backward — corroborating the mechanics
+> below, but framed as a hardware ask, not a weight-tiling reason.
 
 **Guarded in code:** `blockwise_transpose(fp8, scale, block)` returns the transposed
 `(Wᵀ, scale.t())` views and **rejects any non-square tiling** (a `scale` whose shape is
 not `(out/block, in/block)`), because the `fp8(Wᵀ)=fp8(W)ᵀ` identity holds *only* for
 square tiles — a `1×128` (activation) or non-square weight tiling would regroup elements
 under transpose and **silently corrupt numerics**.
+
+## Non-square tiles: no free reuse
+
+The single-gather trick is special to **square** tiles. The constraint: a scaled fp8
+GEMM dequantizes **per K-block** — `Σ_k (a_k·s_a)(b_k·s_b)` only factors if the scales
+are constant over each K-block — so the weight's scale must be 128-blocked along the
+GEMM's contraction dim:
+
+- forward contracts over `N = in` → weight scales must be blocked along **N**;
+- backward dgrad contracts over `M = out` → weight scales must be blocked along **M**.
+
+`128×128` is the **only** tiling blocked along *both* M and N, so one fp8 buffer is
+K-correct for both passes (and transpose-reusable). Any non-square tiling is K-aligned
+for one orientation only — `1×128` (along N) is forward-correct / backward-wrong;
+`128×1` (along M) is backward-correct / forward-wrong. And fp8 is lossy and
+tiling-specific: one fp8 buffer cannot be re-derived to another tiling without returning
+to high precision. So a non-square weight **cannot serve both passes from one fp8
+buffer**.
+
+### Options for non-square (ranked)
+
+1. **Promote the gathered weight to square 128×128 (recommended).** One gather,
+   transpose-reusable; `blockwise_transpose` enforces it. `1×128` belongs to tensors
+   quantized fresh per matmul (activations), which are not all-gathered as weights.
+   ✅ **Implemented:** `promote_to_square_block(block_m, block_n)` (= `lcm`, the smallest
+   square that tiles both — coarser scale, transpose-reusable) feeding the square
+   `Fp8BlockwiseGroupedRaggedShard`.
+2. **Two fp8 buffers, one per orientation.** Gather `fp8(W)` tiled `(1, block)` (forward,
+   scale grouped along `in`) and `fp8(W)` tiled `(block, 1)` (backward, scale grouped
+   along `out`). Correct, but needs **two** gathered buffers (see bandwidth) and two
+   quant recipes. ✅ **Implemented:** `Fp8TwoOrientationGroupedRaggedShard` /
+   `make_fp8_two_orientation_grouped_ragged_placement_fn` — aligns the cut to `block`
+   rows, gathers both fp8 buffers + both scales, and `finish` returns the forward weight
+   with `_fp8_backward` / `_scale_forward` `(out, in/block)` / `_scale_backward`
+   `(out/block, in)` attached.
+3. **bf16 all-gather + local per-orientation quant** (torchao prototype; universal
+   fallback). Any tiling, no fp8-gather savings — route such params to plain
+   `GroupedRaggedShard`.
+4. **Dequant → requant** the gathered fp8 to the other tiling — avoid (double-quant
+   error; needs the high-precision value to be meaningful anyway).
+
+### Bandwidth: square vs non-square vs bf16
+
+Bytes/elem moved across fwd+bwd. The durable fact is **square needs one gathered buffer,
+non-square needs two** (the two orientations are distinct fp8 buffers that can't share):
+
+| scheme | reshard off (gather once, keep) | reshard on (re-gather in backward) |
+|---|---|---|
+| bf16 | 2 B (1 gather, both passes via local re-quant) | 4 B (2 gathers) |
+| fp8 **square** | **1 B** (transpose serves both) | **2 B** (2 gathers) |
+| fp8 **non-square** (2 buffers) | **2 B** (both orientations) | **2 B** (1 orientation/pass) |
+
+So non-square fp8 **is** a 2× win versus a per-pass re-gathering (**reshard-on**) bf16
+baseline, but only **ties** the gather-once-and-keep (**reshard-off**) bf16 baseline.
+Square wins 2× vs bf16 in *both* regimes, is ≤ non-square always (strictly 2× cheaper
+reshard-off; tie reshard-on), and its smaller footprint can keep it reshard-off where
+bf16 would force reshard-on (up to ~4× vs the bf16 you'd actually run). **Net: prefer
+square because `square ≤ non-square`, not because non-square is bandwidth-useless.**
 
 ## Design
 

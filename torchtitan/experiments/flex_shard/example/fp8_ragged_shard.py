@@ -47,59 +47,91 @@ if TYPE_CHECKING:
 EPS = 1e-12
 
 
+def _as_block_pair(block_size: int | tuple[int, int]) -> tuple[int, int]:
+    """Normalize ``block_size`` to ``(block_m, block_n)``; an int means a square tile."""
+    if isinstance(block_size, int):
+        return block_size, block_size
+    block_m, block_n = block_size
+    return block_m, block_n
+
+
 def blockwise_quant_weight(
     weight: torch.Tensor,
-    block_size: int,
+    block_size: int | tuple[int, int],
     fp8_dtype: torch.dtype = torch.float8_e4m3fn,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Block-wise fp8 weight quant (DeepSeek-V3 / torchao recipe), pure PyTorch.
 
-    Quantizes a 2D ``(M, N)`` weight in ``block_size x block_size`` tiles: one
-    ``amax`` per tile -> ``scale = fp8_max / amax`` -> ``clamp(x*scale)``. Returns
-    the fp8 data (same shape) and the **reciprocal** scales (fp32, shape
-    ``(M//block, N//block)``), matching torchao's stored ``1/scale`` so the fp8
-    GEMM applies ``dot * a_s * b_s`` directly.
+    Quantizes a 2D ``(M, N)`` weight in ``block_m x block_n`` tiles: one ``amax`` per
+    tile -> ``scale = fp8_max / amax`` -> ``clamp(x*scale)``. ``block_size`` is an int
+    for a **square** tile (the transpose-reusable weight recipe) or a
+    ``(block_m, block_n)`` pair for a **rectangular** tile (e.g. ``(1, 128)`` /
+    ``(128, 1)`` groupwise). Returns the fp8 data (same shape) and the **reciprocal**
+    scales (fp32, shape ``(M//block_m, N//block_n)``), matching torchao's stored
+    ``1/scale`` so the fp8 GEMM applies ``dot * a_s * b_s`` directly.
     """
     if weight.ndim != 2:
         raise ValueError(
             f"blockwise_quant_weight expects 2D, got {tuple(weight.shape)}"
         )
     m, n = weight.shape
-    bs = block_size
-    if m % bs != 0 or n % bs != 0:
+    block_m, block_n = _as_block_pair(block_size)
+    if m % block_m != 0 or n % block_n != 0:
         raise ValueError(
-            f"both dims of {tuple(weight.shape)} must be divisible by block_size {bs}"
+            f"dims {tuple(weight.shape)} must be divisible by block "
+            f"({block_m}, {block_n})"
         )
     fp8_max = torch.finfo(fp8_dtype).max
     tiles = (
-        weight.reshape(m // bs, bs, n // bs, bs)
+        weight.reshape(m // block_m, block_m, n // block_n, block_n)
         .permute(0, 2, 1, 3)
-        .reshape(-1, bs * bs)
+        .reshape(-1, block_m * block_n)
     )
     amax = tiles.abs().amax(dim=1, keepdim=True).clamp(min=EPS).to(torch.float64)
     scale = (fp8_max / amax).to(torch.float32)
     quant = (tiles.to(torch.float32) * scale).clamp(-fp8_max, fp8_max).to(fp8_dtype)
-    quant = quant.reshape(m // bs, n // bs, bs, bs).permute(0, 2, 1, 3).reshape(m, n)
-    recip_scale = (1.0 / scale).reshape(m // bs, n // bs).to(torch.float32)
+    quant = (
+        quant.reshape(m // block_m, n // block_n, block_m, block_n)
+        .permute(0, 2, 1, 3)
+        .reshape(m, n)
+    )
+    recip_scale = (1.0 / scale).reshape(m // block_m, n // block_n).to(torch.float32)
     return quant.contiguous(), recip_scale.contiguous()
 
 
 def blockwise_dequant_weight(
     quant: torch.Tensor,
     recip_scale: torch.Tensor,
-    block_size: int,
+    block_size: int | tuple[int, int],
 ) -> torch.Tensor:
     """Inverse of :func:`blockwise_quant_weight` (fp8 + reciprocal scale -> fp32)."""
     m, n = quant.shape
-    bs = block_size
+    block_m, block_n = _as_block_pair(block_size)
     tiles = (
-        quant.reshape(m // bs, bs, n // bs, bs)
+        quant.reshape(m // block_m, block_m, n // block_n, block_n)
         .permute(0, 2, 1, 3)
-        .reshape(-1, bs * bs)
+        .reshape(-1, block_m * block_n)
         .to(torch.float32)
     )
     deq = tiles * recip_scale.reshape(-1, 1).to(torch.float32)
-    return deq.reshape(m // bs, n // bs, bs, bs).permute(0, 2, 1, 3).reshape(m, n)
+    return (
+        deq.reshape(m // block_m, n // block_n, block_m, block_n)
+        .permute(0, 2, 1, 3)
+        .reshape(m, n)
+    )
+
+
+def promote_to_square_block(block_m: int, block_n: int) -> int:
+    """Smallest square block that tiles a ``block_m x block_n`` grid into whole tiles.
+
+    Promoting a non-square request (e.g. ``1x128``) to this square block (``128``) makes
+    the gathered weight **transpose-reusable** -- one fp8 buffer serves both the forward
+    and backward GEMMs -- at the cost of a **coarser** scale (one per square tile instead
+    of per non-square tile), i.e. slightly weaker outlier adaptation. Use when the
+    single-gather / transpose win outweighs the fidelity loss; otherwise keep the
+    non-square tiling and pay two buffers (:class:`Fp8TwoOrientationGroupedRaggedShard`).
+    """
+    return math.lcm(block_m, block_n)
 
 
 def blockwise_transpose(
@@ -386,10 +418,317 @@ def make_fp8_blockwise_grouped_ragged_placement_fn(
     return fp8_blockwise_placements
 
 
+class Fp8TwoOrientationGroupedRaggedShard(GroupedRaggedShard):
+    """Non-square block-wise fp8 all-gather: two fp8 buffers, one per matmul orientation.
+
+    When the weight uses a **non-square** tiling, ``fp8(Wᵀ) != fp8(W)ᵀ``, so a single
+    gathered buffer cannot serve both passes. This placement gathers **two** fp8 weights
+    from one bf16 shard: the **forward** buffer tiled ``(1, block)`` (scale grouped along
+    ``in`` -- the forward contraction dim) and the **backward** buffer tiled
+    ``(block, 1)`` (scale grouped along ``out`` -- the backward dgrad contraction dim).
+    Each is bit-identical to quantizing the full bf16 weight in that tiling. The cut is
+    aligned to whole ``block`` rows so the ``(block, 1)`` tiling owns complete tiles.
+
+    Bandwidth is ~2x the square path (two fp8 data buffers) -- see
+    ``fp8_allgather_grouped_ragged_shard_plan.md``; prefer the square
+    :class:`Fp8BlockwiseGroupedRaggedShard` (one buffer, transpose-reused) unless a
+    non-square recipe is required. Storage stays bf16 (master); even ``local_units``.
+
+    ``finish`` returns the forward fp8 weight with the backward weight and both scales
+    attached: ``_fp8_backward``, ``_scale_forward`` ``(out, in/block)``,
+    ``_scale_backward`` ``(out/block, in)``, ``_block_size``.
+    """
+
+    @dataclass(frozen=True)
+    class _TwoOrientationState:
+        infos: list[ParamInfo]
+        pg: Any
+        debug_fqn: str | None
+        rank_offsets: tuple[int, ...]
+        rank_numels: tuple[int, ...]
+
+    def __init__(
+        self,
+        dims: tuple[int, ...] = (0,),
+        local_units: tuple[int, ...] = (1,),
+        block_size: int = 128,
+        fp8_dtype: torch.dtype = torch.float8_e4m3fn,
+    ) -> None:
+        super().__init__(dims, local_units)
+        if block_size <= 0:
+            raise ValueError(f"block_size must be positive, got {block_size}.")
+        self.block_size = block_size
+        self.fp8_dtype = fp8_dtype
+
+    def __eq__(self, other: object) -> bool:
+        if type(other) is not Fp8TwoOrientationGroupedRaggedShard:
+            return False
+        return (
+            self.dims == other.dims
+            and self.local_units == other.local_units
+            and self.block_size == other.block_size
+            and self.fp8_dtype == other.fp8_dtype
+        )
+
+    def __hash__(self) -> int:
+        return hash(
+            (type(self), self.dims, self.local_units, self.block_size, self.fp8_dtype)
+        )
+
+    def __repr__(self) -> str:
+        return (
+            "Fp8TwoOrientationGroupedRaggedShard("
+            f"dims={self.dims}, local_units={self.local_units}, "
+            f"block_size={self.block_size})"
+        )
+
+    def _require_even_units(self) -> None:
+        if len(set(self.local_units)) != 1:
+            raise ValueError(
+                "Fp8TwoOrientationGroupedRaggedShard currently requires even "
+                f"local_units (all equal); got {self.local_units}."
+            )
+
+    @override
+    def _param_alignment_numel(
+        self,
+        named_params: list[tuple[str, nn.Parameter]],
+    ) -> int:
+        # Align the cut to whole `block` rows so the (block, 1) backward tiling owns
+        # complete tiles (the (1, block) forward tiling is row-granular, always local).
+        alignment = 1
+        for fqn, param in named_params:
+            prefix_numel = self._prefix_numel(param.shape)
+            suffix_numel = self._suffix_numel(param.shape)
+            if (
+                prefix_numel % self.block_size != 0
+                or suffix_numel % self.block_size != 0
+            ):
+                raise ValueError(
+                    "Fp8TwoOrientationGroupedRaggedShard requires both the sharded "
+                    f"prefix ({prefix_numel}) and the kept suffix ({suffix_numel}) of "
+                    f"{fqn!r} to be divisible by block_size ({self.block_size})."
+                )
+            alignment = math.lcm(alignment, self.block_size * suffix_numel)
+        return alignment
+
+    @override
+    def prepare_unshard_bucket(
+        self,
+        tensors: list[torch.Tensor],
+        infos: list[ParamInfo],
+        mesh: DeviceMesh,
+        debug_fqn: str | None,
+    ) -> PlacementPreparedUnshard:
+        """Quantize each shard in both orientations and pack the four send buffers."""
+        self._require_even_units()
+        bs = self.block_size
+        bucket_layout = self._bucket_layout(infos[0])
+        rank = mesh.get_local_rank()
+        device = next((t.device for t in tensors if t.numel() > 0), tensors[0].device)
+        rank_offset = bucket_layout.rank_offsets[rank]
+        rank_numel = bucket_layout.rank_numels[rank]
+
+        with _record_function_if_eager("FlexShard::all_gather_copy_in", debug_fqn):
+            local_fwd = torch.zeros(rank_numel, dtype=self.fp8_dtype, device=device)
+            local_bwd = torch.zeros(rank_numel, dtype=self.fp8_dtype, device=device)
+            local_scale_fwd = torch.zeros(
+                rank_numel // bs, dtype=torch.float32, device=device
+            )
+            local_scale_bwd = torch.zeros(
+                rank_numel // bs, dtype=torch.float32, device=device
+            )
+            for tensor, info in zip(tensors, infos, strict=True):
+                if info.local_numel == 0:
+                    continue
+                shard = tensor.reshape(info.local_shape)
+                # forward: scale grouped along `in` (the forward contraction dim).
+                q_fwd, s_fwd = blockwise_quant_weight(shard, (1, bs), self.fp8_dtype)
+                # backward: scale grouped along `out` (the dgrad contraction dim).
+                q_bwd, s_bwd = blockwise_quant_weight(shard, (bs, 1), self.fp8_dtype)
+                offset = self._param_layout(info).local_global_offset - rank_offset
+                local_fwd[offset : offset + info.local_numel].copy_(q_fwd.reshape(-1))
+                local_bwd[offset : offset + info.local_numel].copy_(q_bwd.reshape(-1))
+                scale_offset = offset // bs
+                scale_numel = info.local_numel // bs
+                local_scale_fwd[scale_offset : scale_offset + scale_numel].copy_(
+                    s_fwd.reshape(-1)
+                )
+                local_scale_bwd[scale_offset : scale_offset + scale_numel].copy_(
+                    s_bwd.reshape(-1)
+                )
+
+        gathered_fwd = torch.empty(
+            bucket_layout.global_numel, dtype=self.fp8_dtype, device=device
+        )
+        gathered_bwd = torch.empty(
+            bucket_layout.global_numel, dtype=self.fp8_dtype, device=device
+        )
+        gathered_scale_fwd = torch.empty(
+            bucket_layout.global_numel // bs, dtype=torch.float32, device=device
+        )
+        gathered_scale_bwd = torch.empty(
+            bucket_layout.global_numel // bs, dtype=torch.float32, device=device
+        )
+        return PlacementPreparedUnshard(
+            placement=self,
+            buffers=[
+                local_fwd,
+                local_bwd,
+                local_scale_fwd,
+                local_scale_bwd,
+                gathered_fwd,
+                gathered_bwd,
+                gathered_scale_fwd,
+                gathered_scale_bwd,
+            ],
+            placement_state=Fp8TwoOrientationGroupedRaggedShard._TwoOrientationState(
+                infos=infos,
+                pg=mesh.get_group(),
+                debug_fqn=debug_fqn,
+                rank_offsets=bucket_layout.rank_offsets,
+                rank_numels=bucket_layout.rank_numels,
+            ),
+        )
+
+    @override
+    def run_prepared_unshard(self, prepared: PlacementPreparedUnshard) -> None:
+        """All-gather both fp8 orientations (as bytes) and both fp32 scale sets."""
+        state = prepared.placement_state
+        if not isinstance(
+            state, Fp8TwoOrientationGroupedRaggedShard._TwoOrientationState
+        ):
+            raise AssertionError(
+                "Expected Fp8TwoOrientationGroupedRaggedShard._TwoOrientationState, "
+                f"got {type(state).__name__}"
+            )
+        (
+            local_fwd,
+            local_bwd,
+            local_scale_fwd,
+            local_scale_bwd,
+            gathered_fwd,
+            gathered_bwd,
+            gathered_scale_fwd,
+            gathered_scale_bwd,
+        ) = prepared.buffers
+        bs = self.block_size
+
+        def _data_views(gathered: torch.Tensor) -> list[torch.Tensor]:
+            return [
+                gathered[offset : offset + numel].view(torch.uint8)
+                for offset, numel in zip(
+                    state.rank_offsets, state.rank_numels, strict=True
+                )
+            ]
+
+        def _scale_views(gathered: torch.Tensor) -> list[torch.Tensor]:
+            return [
+                gathered[offset // bs : offset // bs + numel // bs]
+                for offset, numel in zip(
+                    state.rank_offsets, state.rank_numels, strict=True
+                )
+            ]
+
+        with _record_comm_if_eager("FlexShard::all_gather", state.debug_fqn):
+            dist.all_gather(
+                _data_views(gathered_fwd), local_fwd.view(torch.uint8), group=state.pg
+            )
+            dist.all_gather(
+                _data_views(gathered_bwd), local_bwd.view(torch.uint8), group=state.pg
+            )
+            dist.all_gather(
+                _scale_views(gathered_scale_fwd), local_scale_fwd, group=state.pg
+            )
+            dist.all_gather(
+                _scale_views(gathered_scale_bwd), local_scale_bwd, group=state.pg
+            )
+
+    @override
+    def finish_prepared_unshard(
+        self,
+        prepared: PlacementPreparedUnshard,
+    ) -> PlacementUnshardResult:
+        """Slice each param's forward + backward fp8 weight and scales."""
+        state = prepared.placement_state
+        if not isinstance(
+            state, Fp8TwoOrientationGroupedRaggedShard._TwoOrientationState
+        ):
+            raise AssertionError(
+                "Expected Fp8TwoOrientationGroupedRaggedShard._TwoOrientationState, "
+                f"got {type(state).__name__}"
+            )
+        gathered_fwd = prepared.buffers[4]
+        gathered_bwd = prepared.buffers[5]
+        gathered_scale_fwd = prepared.buffers[6]
+        gathered_scale_bwd = prepared.buffers[7]
+        bs = self.block_size
+        full_params: list[torch.Tensor] = []
+        with _record_function_if_eager(
+            "FlexShard::all_gather_copy_out", state.debug_fqn
+        ):
+            for info in state.infos:
+                param_offset = self._param_layout(info).param_offset
+                out_dim, in_dim = info.global_shape
+                num = info.global_numel
+                data_fwd = gathered_fwd[param_offset : param_offset + num].view(
+                    info.global_shape
+                )
+                data_bwd = gathered_bwd[param_offset : param_offset + num].view(
+                    info.global_shape
+                )
+                scale_start = param_offset // bs
+                scale_fwd = gathered_scale_fwd[
+                    scale_start : scale_start + num // bs
+                ].view(out_dim, in_dim // bs)
+                scale_bwd = gathered_scale_bwd[
+                    scale_start : scale_start + num // bs
+                ].view(out_dim // bs, in_dim)
+                # Forward weight is the returned param; backward weight + both scales
+                # ride along for the fp8-aware consumer (no transpose reuse here).
+                data_fwd._scale_forward = scale_fwd
+                data_fwd._fp8_backward = data_bwd
+                data_fwd._scale_backward = scale_bwd
+                data_fwd._block_size = bs
+                full_params.append(data_fwd)
+        return PlacementUnshardResult(full_params, prepared.buffers)
+
+
+def make_fp8_two_orientation_grouped_ragged_placement_fn(
+    *,
+    block_size: int = 128,
+    local_units: tuple[int, ...],
+    fp8_dtype: torch.dtype = torch.float8_e4m3fn,
+) -> PlacementFn:
+    """Return a placement_fn assigning one two-orientation fp8 shard per bucket."""
+
+    def fp8_two_orientation_placements(
+        named_params: list[tuple[str, nn.Parameter]],
+        mesh: DeviceMesh,
+    ) -> dict[str, tuple[Placement, ...]]:
+        if len(local_units) != mesh.size():
+            raise ValueError(
+                "Fp8TwoOrientationGroupedRaggedShard local_units length must match mesh "
+                f"size: got {len(local_units)} local units for mesh size {mesh.size()}."
+            )
+        placement = Fp8TwoOrientationGroupedRaggedShard(
+            dims=(0,),
+            local_units=local_units,
+            block_size=block_size,
+            fp8_dtype=fp8_dtype,
+        )
+        return {fqn: (placement,) for fqn, _ in named_params}
+
+    return fp8_two_orientation_placements
+
+
 __all__ = [
     "blockwise_dequant_weight",
     "blockwise_quant_weight",
     "blockwise_transpose",
     "Fp8BlockwiseGroupedRaggedShard",
+    "Fp8TwoOrientationGroupedRaggedShard",
     "make_fp8_blockwise_grouped_ragged_placement_fn",
+    "make_fp8_two_orientation_grouped_ragged_placement_fn",
+    "promote_to_square_block",
 ]

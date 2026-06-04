@@ -19,7 +19,10 @@ from torchtitan.experiments.flex_shard.example.fp8_ragged_shard import (
     blockwise_quant_weight,
     blockwise_transpose,
     Fp8BlockwiseGroupedRaggedShard,
+    Fp8TwoOrientationGroupedRaggedShard,
     make_fp8_blockwise_grouped_ragged_placement_fn,
+    make_fp8_two_orientation_grouped_ragged_placement_fn,
+    promote_to_square_block,
 )
 from torchtitan.experiments.flex_shard.example.ragged_shard import GroupedRaggedShard
 
@@ -155,6 +158,37 @@ class TestFp8AllGatherLayout(TestCase):
         with self.assertRaisesRegex(ValueError, "square"):
             blockwise_transpose(quant, non_square_scale, 4)
 
+    def test_promote_to_square_block(self) -> None:
+        self.assertEqual(promote_to_square_block(1, 128), 128)  # 1x128 -> 128x128
+        self.assertEqual(promote_to_square_block(128, 1), 128)
+        self.assertEqual(promote_to_square_block(64, 128), 128)
+        self.assertEqual(promote_to_square_block(32, 96), 96)
+
+    def test_promote_to_square_enables_transpose(self) -> None:
+        # Solution 1 (promote): a non-square (1x4) quant can't be transposed, but
+        # promoting to the enclosing square block (4x4) makes it transpose-reusable.
+        torch.manual_seed(0)
+        w = torch.randn(16, 8)
+        q_ns, s_ns = blockwise_quant_weight(w, (1, 4))  # non-square scale (16, 2)
+        square = promote_to_square_block(1, 4)  # = 4
+        with self.assertRaisesRegex(ValueError, "square"):
+            blockwise_transpose(q_ns, s_ns, square)
+        q_sq, s_sq = blockwise_quant_weight(w, square)  # square scale (4, 2)
+        q_t, _ = blockwise_transpose(q_sq, s_sq, square)  # no raise
+        self.assertEqual(tuple(q_t.shape), (8, 16))
+
+    def test_rectangular_quant_shapes(self) -> None:
+        w = torch.randn(16, 8)
+        _, s_fwd = blockwise_quant_weight(w, (1, 4))  # group along N (forward K)
+        _, s_bwd = blockwise_quant_weight(w, (4, 1))  # group along M (backward K)
+        self.assertEqual(tuple(s_fwd.shape), (16, 2))
+        self.assertEqual(tuple(s_bwd.shape), (4, 8))
+
+    def test_two_orientation_alignment(self) -> None:
+        fp8 = Fp8TwoOrientationGroupedRaggedShard(local_units=(1, 1), block_size=4)
+        params = [("w", nn.Parameter(torch.zeros(16, 8)))]
+        self.assertEqual(fp8._param_alignment_numel(params), 32)  # block * in
+
 
 class TestFp8AllGather(FSDPTest):
     @property
@@ -285,6 +319,67 @@ class TestFp8AllGather(FSDPTest):
                 torch.equal(data.view(torch.uint8), ref_fp8.view(torch.uint8))
             )
             self.assertTrue(torch.equal(data._blockwise_scale, ref_scale))
+
+    @skip_if_lt_x_gpu(2)
+    def test_two_orientation_gathers_both_buffers(self) -> None:
+        # Solution 2 (non-square): gather two fp8 buffers, one per orientation -- the
+        # forward (1, block) tiling and the backward (block, 1) tiling. Each is
+        # bit-identical to quantizing the full bf16 weight in that tiling, and the
+        # gather moves two fp8 data buffers (~2x the square path).
+        block = 4
+        mesh = self._mesh()
+        torch.manual_seed(0)
+        model = _TwoWeight().to(device=device_type, dtype=torch.bfloat16)
+        reference = copy.deepcopy(model)
+
+        flex_shard(
+            model,
+            mesh,
+            buckets=[
+                BucketSpec(
+                    ["w1", "w2"],
+                    placement_fn=make_fp8_two_orientation_grouped_ragged_placement_fn(
+                        block_size=block, local_units=(1,) * self.world_size
+                    ),
+                    reshard_after_forward=False,
+                )
+            ],
+        )
+
+        storage = model.sharded_bucket_storages[0]
+        infos = list(storage.param_infos.values())
+        placement = infos[0].placement
+        self.assertIsInstance(placement, Fp8TwoOrientationGroupedRaggedShard)
+
+        param_by_fqn = dict(model.named_parameters())
+        tensors = [param_by_fqn[info.fqn] for info in infos]
+        prepared = placement.prepare_unshard_bucket(tensors, infos, mesh, None)
+        placement.run_prepared_unshard(prepared)
+        full_params = placement.finish_prepared_unshard(prepared).full_params
+
+        ref_by_fqn = dict(reference.named_parameters())
+        for info, data in zip(infos, full_params, strict=True):
+            ref_w = ref_by_fqn[info.fqn].detach()
+            ref_fwd, ref_s_fwd = blockwise_quant_weight(ref_w, (1, block))
+            ref_bwd, ref_s_bwd = blockwise_quant_weight(ref_w, (block, 1))
+            # forward buffer (returned param) + backward buffer (attached)
+            self.assertTrue(
+                torch.equal(data.view(torch.uint8), ref_fwd.view(torch.uint8))
+            )
+            self.assertTrue(torch.equal(data._scale_forward, ref_s_fwd))
+            self.assertTrue(
+                torch.equal(
+                    data._fp8_backward.view(torch.uint8), ref_bwd.view(torch.uint8)
+                )
+            )
+            self.assertTrue(torch.equal(data._scale_backward, ref_s_bwd))
+
+        # Two fp8 data buffers were gathered (the ~2x-bandwidth cost of non-square).
+        gathered_fwd = prepared.buffers[4]
+        gathered_bwd = prepared.buffers[5]
+        self.assertEqual(gathered_fwd.element_size(), 1)
+        self.assertEqual(gathered_bwd.element_size(), 1)
+        self.assertEqual(gathered_fwd.numel(), gathered_bwd.numel())
 
 
 if __name__ == "__main__":
