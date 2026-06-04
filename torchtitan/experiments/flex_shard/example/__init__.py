@@ -13,6 +13,7 @@ from .muon import (
 )
 from .owned import (
     assign_layer_owners_lpt,
+    assign_matrix_owners_per_layer_balanced,
     make_owned_placement_fn,
     Owned,
     param_boundary_placements,
@@ -28,6 +29,7 @@ from .shard import per_param_placements, Shard
 
 __all__ = [
     "assign_layer_owners_lpt",
+    "assign_matrix_owners_per_layer_balanced",
     "build_comm_free_muon_optimizers",
     "build_muon_param_groups",
     "CombinedOptimizer",

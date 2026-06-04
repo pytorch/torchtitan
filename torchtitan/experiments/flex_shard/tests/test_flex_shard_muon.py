@@ -33,6 +33,7 @@ from torchtitan.experiments.flex_shard.example.muon import (
 )
 from torchtitan.experiments.flex_shard.example.owned import (
     assign_layer_owners_lpt,
+    assign_matrix_owners_per_layer_balanced,
     make_owned_placement_fn,
     Owned,
 )
@@ -218,6 +219,34 @@ class TestCommFreeMuonHelpers(TestCase):
     def test_assign_layer_owners_lpt_rejects_bad_world_size(self) -> None:
         with self.assertRaisesRegex(ValueError, "world_size"):
             assign_layer_owners_lpt([1, 2], 0)
+
+    def test_assign_matrix_owners_per_layer_balanced(self) -> None:
+        world_size = 4
+        # 8 layers, each the same heterogeneous matrix set (o_proj-like 59 dominates).
+        layer = [59, 19, 11, 8, 4, 15, 15, 15]
+        layers = [list(layer) for _ in range(8)]
+        owners = assign_matrix_owners_per_layer_balanced(layers, world_size)
+
+        self.assertEqual(len(owners), len(layers))
+        largest = max(layer)
+        global_load = [0] * world_size
+        for layer_numels, layer_owners in zip(layers, owners, strict=True):
+            self.assertEqual(len(layer_owners), len(layer_numels))
+            load = [0] * world_size
+            for numel, owner in zip(layer_numels, layer_owners, strict=True):
+                self.assertIn(owner, range(world_size))
+                load[owner] += numel
+                global_load[owner] += numel
+            # per-layer balance: within-layer spread is bounded by the largest matrix
+            self.assertLessEqual(max(load) - min(load), largest)
+        # rotation keeps running totals balanced across layers too
+        self.assertLessEqual(max(global_load) - min(global_load), largest)
+
+    def test_assign_matrix_owners_per_layer_balanced_rejects_bad_world_size(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "world_size"):
+            assign_matrix_owners_per_layer_balanced([[1, 2]], 0)
 
     def test_make_owned_placement_fn_assigns_single_owner(self) -> None:
         placement_fn = make_owned_placement_fn(1)

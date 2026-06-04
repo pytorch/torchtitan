@@ -307,8 +307,53 @@ def assign_layer_owners_lpt(layer_numels: list[int], world_size: int) -> list[in
     return owners
 
 
+def assign_matrix_owners_per_layer_balanced(
+    layer_matrix_numels: list[list[int]], world_size: int
+) -> list[list[int]]:
+    """Assign each layer's matrices to owner ranks, balanced *within every layer*.
+
+    Use this for per-matrix ``Owned`` placement when you want every rank to hold a
+    balanced share of *each* layer's matrices (so a layer's forward issues several
+    smaller broadcasts from several sources, instead of one big single-source
+    broadcast of the whole layer).
+
+    Args:
+        layer_matrix_numels: ``layer_matrix_numels[l]`` is the numels (or bytes) of
+            layer ``l``'s ``Owned`` matrices.
+        world_size: Number of ranks.
+
+    Returns:
+        ``owners`` where ``owners[l][k]`` is the owner rank of layer ``l``'s ``k``-th
+        matrix (same order as the input).
+
+    Within each layer the matrices are balanced across ranks with greedy
+    Longest-Processing-Time; the residual per-rank spread within a layer is bounded
+    by the largest single matrix (which cannot be split without breaking comm-free
+    Muon). The per-layer assignment is then rotated by the layer index -- a
+    bijection on ranks, so it preserves the within-layer balance while spreading the
+    heaviest slot across ranks layer by layer, which also keeps the running totals
+    balanced across layers (exactly so for homogeneous stacks whose layer count is a
+    multiple of ``world_size``).
+    """
+    if world_size <= 0:
+        raise ValueError(f"world_size must be positive, but got {world_size}.")
+    owners: list[list[int]] = []
+    for layer_idx, numels in enumerate(layer_matrix_numels):
+        loads = [(0, vrank) for vrank in range(world_size)]
+        heapq.heapify(loads)
+        layer_owners = [0] * len(numels)
+        for i in sorted(range(len(numels)), key=lambda j: numels[j], reverse=True):
+            load, vrank = heapq.heappop(loads)
+            # Rotate virtual -> real rank so the heaviest slot moves each layer.
+            layer_owners[i] = (vrank + layer_idx) % world_size
+            heapq.heappush(loads, (load + numels[i], vrank))
+        owners.append(layer_owners)
+    return owners
+
+
 __all__ = [
     "assign_layer_owners_lpt",
+    "assign_matrix_owners_per_layer_balanced",
     "make_owned_placement_fn",
     "Owned",
     "param_boundary_placements",
