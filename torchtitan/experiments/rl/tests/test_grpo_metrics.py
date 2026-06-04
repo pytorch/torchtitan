@@ -13,8 +13,9 @@ methods on plain dataclasses.
 
 from __future__ import annotations
 
+import asyncio
 import math
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -140,6 +141,8 @@ def _build_collect_rollouts_inputs(self_obj):
     self_obj.tokenizer = MagicMock()
     self_obj.tokenizer.encode.side_effect = lambda prompt, **_: [ord(prompt)]
     self_obj.generator = MagicMock()
+    # `generate.call` is awaited inside `_collect_rollouts`, so stub it async.
+    self_obj.generator.generate.call = AsyncMock()
     # `_get_rank_0_value` is the layer that strips Monarch's ValueMesh,
     # so just make it return whatever it's handed.
     self_obj._get_rank_0_value = lambda value, has_gpus=True: (completions, [])
@@ -152,15 +155,15 @@ class TestCollectRollouts:
         to ``generator.generate.call``."""
         controller = RLTrainer.__new__(RLTrainer)
         _build_collect_rollouts_inputs(controller)
-        controller._collect_rollouts(num_groups=2, step=0)
+        asyncio.run(controller._collect_rollouts(num_groups=2, step=0))
         # _FakeEnv.prompt == "p"; encode side_effect returns [ord(prompt)] = [112].
         controller.generator.generate.call.assert_called_once_with([[112], [112]])
 
     def test_emits_expected_metric_keys(self) -> None:
         controller = RLTrainer.__new__(RLTrainer)
         completions = _build_collect_rollouts_inputs(controller)
-        trajectories, rollout_metrics = controller._collect_rollouts(
-            num_groups=2, step=0
+        trajectories, rollout_metrics = asyncio.run(
+            controller._collect_rollouts(num_groups=2, step=0)
         )
         assert len(trajectories) == len(completions)
         agg = m.MetricsProcessor._aggregate_metrics(rollout_metrics)
@@ -192,9 +195,12 @@ class TestCollectRollouts:
         controller.tokenizer = MagicMock()
         controller.tokenizer.encode.side_effect = lambda prompt, **_: [ord(prompt)]
         controller.generator = MagicMock()
+        controller.generator.generate.call = AsyncMock()
         controller._get_rank_0_value = lambda value, has_gpus=True: (completions, [])
 
-        _, rollout_metrics = controller._collect_rollouts(num_groups=2, step=0)
+        _, rollout_metrics = asyncio.run(
+            controller._collect_rollouts(num_groups=2, step=0)
+        )
         agg = m.MetricsProcessor._aggregate_metrics(rollout_metrics)
         # 3 of 4 completions hit max_tokens.
         assert agg["rollout/truncation_rate/mean"] == pytest.approx(0.75)
@@ -225,10 +231,11 @@ class TestCollectRollouts:
             prompt.encode()
         )
         controller.generator = MagicMock()
+        controller.generator.generate.call = AsyncMock()
         controller._get_rank_0_value = lambda value, has_gpus=True: (completions, [])
 
-        trajectories, rollout_metrics = controller._collect_rollouts(
-            num_groups=3, step=0
+        trajectories, rollout_metrics = asyncio.run(
+            controller._collect_rollouts(num_groups=3, step=0)
         )
         agg = m.MetricsProcessor._aggregate_metrics(rollout_metrics)
         per_side_max_sum = max(len(t.prompt_token_ids) for t in trajectories) + max(
@@ -245,11 +252,11 @@ class TestCollectRollouts:
         controller = RLTrainer.__new__(RLTrainer)
         _build_collect_rollouts_inputs(controller)
 
-        first_round, _ = controller._collect_rollouts(
-            num_groups=2, step=0, group_offset=0
+        first_round, _ = asyncio.run(
+            controller._collect_rollouts(num_groups=2, step=0, group_offset=0)
         )
-        second_round, _ = controller._collect_rollouts(
-            num_groups=2, step=0, group_offset=2
+        second_round, _ = asyncio.run(
+            controller._collect_rollouts(num_groups=2, step=0, group_offset=2)
         )
 
         assert [t.sample_idx for t in first_round] == [0, 0, 1]
