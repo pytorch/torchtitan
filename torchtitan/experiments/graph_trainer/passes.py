@@ -154,22 +154,31 @@ def compile_time_passes(
         remove_identity_view_pass,
         remove_identity_slice_pass,
         normalize_view_ops_as_reshape,
-        functools.partial(
-            tag_with_memory_policy_pass,
-            config=config,
-        ),
-        functools.partial(
-            apply_cpu_offload_pass,
-            prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
-            defer_n_layers=config.compile.cpu_offload_defer_n_layers,
-        ),
-        selective_activation_remat_pass,
+    ]
+    memory_policy = _graph_activation_checkpointing_memory_policy(config)
+    if memory_policy is not None:
+        passes.extend(
+            [
+                functools.partial(
+                    tag_with_memory_policy_pass,
+                    config=config,
+                    memory_policy=memory_policy,
+                ),
+                functools.partial(
+                    apply_cpu_offload_pass,
+                    prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
+                    defer_n_layers=config.compile.cpu_offload_defer_n_layers,
+                ),
+                selective_activation_remat_pass,
+            ]
+        )
+    passes.append(
         functools.partial(
             joint_transformer_block_bucketing_reordering_pass,
             module_bucket_plans=get_default_transformer_block_buckets(n_layers),
             enable_fsdp_ag_rs_overlap=config.compile.enable_fsdp_ag_rs_overlap,
-        ),
-    ]
+        )
+    )
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
@@ -215,6 +224,45 @@ def compile_time_passes(
         #    hot-reload picking up changes at runtime
         passes.append(custom_codegen_pass)
     return passes
+
+
+def _graph_activation_checkpointing_memory_policy(
+    config: "GraphTrainer.Config",
+) -> str | None:
+    """Map activation_checkpoint.mode onto a graph-trainer memory policy."""
+    ac_config = getattr(config, "activation_checkpoint", None)
+    mode = getattr(ac_config, "mode", "selective")
+    memory_policy = config.compile.memory_policy
+    if mode == "none":
+        if memory_policy != "default":
+            warnings.warn(
+                "--activation_checkpoint.mode=none disables graph_trainer "
+                f"memory policy {memory_policy!r}.",
+                stacklevel=2,
+            )
+        logger.info(
+            "Skipping graph_trainer activation checkpointing because "
+            "activation_checkpoint.mode='none'."
+        )
+        return None
+    if mode == "selective":
+        return memory_policy
+    if mode == "full":
+        raise ValueError(
+            "GraphTrainer aot_fx_trace does not support "
+            "--activation_checkpoint.mode=full. Use "
+            "--activation_checkpoint.mode=selective or none."
+        )
+    if mode == "memory_budget":
+        raise ValueError(
+            "GraphTrainer aot_fx_trace does not support "
+            "--activation_checkpoint.mode=memory_budget. Use "
+            "--activation_checkpoint.mode=selective or none."
+        )
+    else:
+        raise ValueError(
+            f"Unknown activation_checkpoint.mode for GraphTrainer: {mode!r}."
+        )
 
 
 def construct_default_graph_passes(
