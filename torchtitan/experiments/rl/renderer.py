@@ -6,11 +6,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, fields
 
 from renderers import config_from_name, create_renderer, Renderer
 
 from torchtitan.config import Configurable
+
+logger = logging.getLogger(__name__)
 
 # Map a TorchTitan model name to its `renderers` renderer. Models not listed fall
 # back to "auto" (renderers resolves from the tokenizer)
@@ -34,14 +37,17 @@ class RendererConfig(Configurable.Config):
     supported knobs.
 
     Args:
-        name: TorchTitan model name (e.g. `"qwen3"`, `"llama3"`). Mapped to a
-            `renderers` renderer via `_RENDERER_BY_MODEL`; unmapped models use
-            `"auto"` (renderers resolves from the tokenizer).
+        name: TorchTitan model name (e.g. `"qwen3"`, `"llama3"`), mapped to a
+            `renderers` renderer via `_RENDERER_BY_MODEL`. `None` (the default)
+            resolves the renderer from the tokenizer.
         tool_parser: Tool-call parser name, when the renderer supports it.
         reasoning_parser: Reasoning parser name, when the renderer supports it.
         enable_thinking: Let the model emit reasoning, when supported.
         preserve_all_thinking: Keep historical reasoning in future prompts.
         preserve_thinking_between_tool_calls: Keep reasoning during tool loops.
+
+    Every field defaults to `None`; a non-`None` value overrides that knob on the
+    chosen renderer's config, otherwise the renderer keeps its own default.
 
     Example:
 
@@ -51,12 +57,12 @@ class RendererConfig(Configurable.Config):
         )
     """
 
-    name: str = "auto"
+    name: str | None = None
     tool_parser: str | None = None
     reasoning_parser: str | None = None
-    enable_thinking: bool = True
-    preserve_all_thinking: bool = False
-    preserve_thinking_between_tool_calls: bool = False
+    enable_thinking: bool | None = None
+    preserve_all_thinking: bool | None = None
+    preserve_thinking_between_tool_calls: bool | None = None
 
     def build(self, *, tokenizer_path: str) -> Renderer:
         # TODO(renderers#70): use TorchTitan's tokenizer once `renderers` supports
@@ -65,25 +71,23 @@ class RendererConfig(Configurable.Config):
 
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
-        renderer_name = _RENDERER_BY_MODEL.get(self.name)
-
-        # `config_from_name` returns the typed renderers config, or `None` for
-        # "auto" (which makes `create_renderer` resolve from the tokenizer).
-        renderer_config = config_from_name(renderer_name)
+        # `name=None` (or "auto") -> let `create_renderer` resolve from the tokenizer.
+        renderer_name = _RENDERER_BY_MODEL.get(self.name, self.name)
+        renderer_config = config_from_name(renderer_name) if renderer_name else None
         if renderer_config is None:
             return create_renderer(tokenizer, None)
 
-        # Forward our knobs (every field except `name`) that this renderer config
-        # supports. Configs are frozen pydantic models, so update via model_copy.
-        overrides = {}
-        for field in fields(self):
-            if (
-                field.name != "name"
-                and field.name in type(renderer_config).model_fields
-            ):
-                overrides[field.name] = getattr(self, field.name)
-
-        if overrides:
-            renderer_config = renderer_config.model_copy(update=overrides)
-
-        return create_renderer(tokenizer, renderer_config)
+        # Rebuild the typed config and pass parameters
+        # that are not None and are supported
+        config_type = type(renderer_config)
+        args = {
+            field.name: getattr(self, field.name)  # {key: value}
+            for field in fields(self)
+            if field.name != "name"  # Get all self.fields, except name
+            and getattr(self, field.name) is not None  # Only consider provided fields
+            and field.name in config_type.model_fields  # Config supports this field
+        }
+        logger.info(
+            f"Using renderer {renderer_name}, of type {config_type}, with args {args}"
+        )
+        return create_renderer(tokenizer, config_type(**args))
