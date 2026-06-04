@@ -651,6 +651,70 @@ class TestCommFreeMuon(FSDPTest):
         with _assert_no_collectives(self):
             optim.step()
 
+    @skip_if_lt_x_gpu(2)
+    def test_expert_dim_sharding_routes_to_grouped_muon_comm_free(self) -> None:
+        # Expert-parallel layout: shard the grouped-expert tensor along the expert
+        # (leading) dim. Each rank holds whole experts (E/N, m, n), so the param is
+        # routed to GroupedMuon and the step stays communication-free -- no Owned
+        # broadcast of the whole stack, smaller balanced 1/N shards instead.
+        mesh = self._mesh()
+        num_experts, m, n = 8, 64, 48
+
+        class _MoEish(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                # 3D grouped experts -> sharded along the expert dim (Shard(0))
+                self.experts = nn.Parameter(torch.randn(num_experts, m, n))
+                # a 2D attention-like matrix -> whole on one rank (Owned)
+                self.proj = nn.Parameter(torch.randn(m, n))
+
+        torch.manual_seed(0)
+        model = _MoEish().to(device_type)
+        flex_shard(
+            model,
+            mesh,
+            buckets=[
+                BucketSpec(
+                    ["experts"],
+                    placement_fn=per_param_placements,  # Shard(0)
+                    reshard_after_forward=False,
+                ),
+                BucketSpec(
+                    ["proj"],
+                    placement_fn=make_owned_placement_fn(0),  # Owned
+                    reshard_after_forward=False,
+                ),
+            ],
+        )
+
+        experts = dict(model.named_parameters())["experts"]
+        placement = get_placements(experts)[0]
+        self.assertIsInstance(placement, Shard)
+        self.assertEqual(placement.dim, 0)
+        self.assertEqual(experts.dim(), 3)  # local shard keeps whole matrices
+        self.assertEqual(
+            experts.shape[0], num_experts // self.world_size
+        )  # E/N experts
+
+        muon_params, other_params = build_muon_param_groups(model, mesh)
+        # The expert-dim-sharded 3D param is Muon-eligible (-> GroupedMuon), not AdamW.
+        self.assertIn(id(experts), {id(p) for p in muon_params})
+        self.assertNotIn(id(experts), {id(p) for p in other_params})
+
+        optim = build_comm_free_muon_optimizers(
+            model,
+            mesh,
+            muon_kwargs=dict(lr=0.02, momentum=0.9, weight_decay=0.0),
+            adamw_kwargs=dict(lr=0.01, weight_decay=0.0),
+        )
+        self.assertIn("GroupedMuon", {type(o).__name__ for o in optim.optimizers})
+
+        # Dummy grads on each optimized param, then assert the step is collective-free.
+        for p in muon_params + other_params:
+            p.grad = torch.randn_like(p)
+        with _assert_no_collectives(self):
+            optim.step()
+
 
 if __name__ == "__main__":
     run_tests()

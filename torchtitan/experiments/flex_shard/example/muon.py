@@ -49,7 +49,7 @@ from torch.optim._muon import (
 from ..flex_shard.bucket_storage import BucketSpec
 from ..flex_shard.sharded_param import get_global_shape, get_placements
 from .owned import assign_layer_owners_lpt, make_owned_placement_fn, Owned
-from .shard import per_param_placements
+from .shard import per_param_placements, Shard
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -167,21 +167,28 @@ def build_muon_param_groups(
 ) -> tuple[list[nn.Parameter], list[nn.Parameter]]:
     """Partition a FlexSharded model's local params into ``(muon, other)`` groups.
 
-    On each rank the Muon group holds only the **2D matrices this rank owns** via
-    ``Owned`` placement (full, non-empty tensors). Everything else with non-empty
-    local storage -- ``Shard`` embeddings / LM head, owned norms and biases -- goes
-    to the other (AdamW) group. Non-owned ``Owned`` params are empty ``(0, 0)`` on
-    this rank and are skipped; their owner rank optimizes them.
+    A parameter is comm-free Muon-eligible on this rank when its local shard keeps
+    whole matrices, i.e. either:
 
-    Eligibility keys off placement (``Owned``) *and* shape (2D), so parameters
-    deliberately kept on ``Shard`` (embeddings, LM head) never enter the Muon group
-    even though they are 2D -- no FQN exclusion list is needed.
+    * it is ``Owned`` by this rank (the full matrix / stack lives here), or
+    * it is ``Shard(0)`` and ``>= 3D`` -- sharding the leading (expert/batch) dim of
+      a stack keeps every ``(m, n)`` matrix whole on every rank (e.g.
+      expert-parallel MoE experts), so the local ``(E/N, m, n)`` shard is still
+      grouped-Muon-able with no collective.
+
+    Everything else with non-empty local storage goes to the other (AdamW) group:
+    ``Shard`` embeddings / LM head (2D, where sharding would split the matrix),
+    owned norms and biases, etc. Empty local shards (e.g. a non-owned ``Owned``
+    param, or a rank with no experts) are skipped; another rank optimizes them.
+    ``build_comm_free_muon_optimizers`` then sends 2D Muon params to
+    ``torch.optim.Muon`` and ``>= 3D`` ones to ``GroupedMuon``.
 
     Args:
         model: A model already wrapped by ``flex_shard``.
         mesh: The 1D FlexShard mesh, used for this rank's index.
         muon_param_predicate: Optional override ``(fqn, global_shape) -> bool`` for
-            Muon eligibility. Defaults to "is a 2D matrix".
+            Muon eligibility. Defaults to "is a matrix or stack of matrices"
+            (``ndim >= 2``).
 
     Returns:
         ``(muon_params, other_params)`` for this rank.
@@ -192,17 +199,24 @@ def build_muon_param_groups(
     other_params: list[nn.Parameter] = []
     for fqn, param in model.named_parameters():
         if param.numel() == 0:
-            # Non-owned Owned param on this rank: the owner rank optimizes it.
+            # Empty local shard (e.g. non-owned Owned param): another rank owns it.
             continue
         placements = get_placements(param)
         global_shape = get_global_shape(param)
-        owned_here = (
-            placements is not None
-            and len(placements) == 1
-            and isinstance(placements[0], Owned)
-            and placements[0].owner_rank == rank
+        placement = (
+            placements[0] if placements is not None and len(placements) == 1 else None
         )
-        if owned_here and predicate(fqn, global_shape):
+        # Owned: this rank holds the whole matrix / stack -> comm-free Muon.
+        owned_here = isinstance(placement, Owned) and placement.owner_rank == rank
+        # Shard(0) of a >= 3D stack: only the expert/batch dim is split, so the
+        # local shard keeps whole (m, n) matrices -> still comm-free grouped Muon.
+        expert_dim_sharded = (
+            isinstance(placement, Shard)
+            and placement.dim == 0
+            and global_shape is not None
+            and len(global_shape) >= 3
+        )
+        if (owned_here or expert_dim_sharded) and predicate(fqn, global_shape):
             muon_params.append(param)
         else:
             other_params.append(param)
