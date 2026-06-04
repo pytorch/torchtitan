@@ -25,12 +25,6 @@ Reload pattern (backward):
 This module works with the make_fx traced joint fwd+bwd graph, using
 ``meta["custom"]["module_fqn"]`` for layer boundaries and
 ``meta["autograd_backward"]`` to distinguish forward from backward nodes.
-
-NUMA note: On multi-NUMA machines (e.g. GB200 NVLink-C2C), CPU offload
-bandwidth depends on pinned memory landing on the NUMA node local to the
-GPU (~350 GB/s local vs ~120 GB/s cross-NUMA). Trainer automatically
-applies NUMA binding (``AffinityMode.NODE``) on CUDA hardware at init
-(see ``_maybe_apply_numa_binding`` in torchtitan/trainer.py).
 """
 
 import operator

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import torch
 from torch.nn.attention.flex_attention import and_masks
 
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -17,7 +18,7 @@ from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     FlexAttention,
     get_causal_mask_mod,
-    get_document_mask_mod,
+    get_efficient_causal_mask_mod_for_packed_document,
     VarlenAttention,
 )
 from torchtitan.models.common.feed_forward import FeedForward
@@ -248,7 +249,9 @@ class Decoder(BaseModel):
                 B = 1
             case "block_causal":
                 B = positions.shape[0]
-                mask_mods.append(get_document_mask_mod(positions))
+                mask_mods.append(
+                    get_efficient_causal_mask_mod_for_packed_document(positions)
+                )
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {attn_config.mask_type}"
@@ -262,7 +265,14 @@ class Decoder(BaseModel):
             None,
             seq_len,
             seq_len,
+            device=positions.device,
             BLOCK_SIZE=attn_config.inner_attention.block_size,
+            # when separate_full_blocks = True, kernel iterates through
+            # full blocks first (blocks where all elements are unmasked)
+            # but which blocks are "full" vs "partial" changes depending
+            # on the particular batch
+            # for batch invariance, we disable this optimization
+            separate_full_blocks=not is_in_batch_invariant_mode(),
         )
 
     def get_attention_masks(
