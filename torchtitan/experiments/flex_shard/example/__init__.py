@@ -4,6 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from .fp8_ragged_shard import (
+    blockwise_dequant_weight,
+    blockwise_quant_weight,
+    blockwise_transpose,
+    Fp8BlockwiseGroupedRaggedShard,
+    make_fp8_blockwise_grouped_ragged_placement_fn,
+)
 from .muon import (
     build_comm_free_muon_optimizers,
     build_muon_param_groups,
@@ -33,14 +40,19 @@ from .shard import per_param_placements, Shard
 __all__ = [
     "assign_layer_owners_lpt",
     "assign_matrix_owners_per_layer_balanced",
+    "blockwise_dequant_weight",
+    "blockwise_quant_weight",
+    "blockwise_transpose",
     "build_comm_free_muon_optimizers",
     "build_muon_param_groups",
     "build_ragged_shard_muon_optimizers",
     "CombinedOptimizer",
     "comm_free_muon_buckets",
+    "Fp8BlockwiseGroupedRaggedShard",
     "GroupedMuon",
     "GroupedRaggedShard",
     "grouped_ragged_shard_muon_buckets",
+    "make_fp8_blockwise_grouped_ragged_placement_fn",
     "make_grouped_ragged_placement_fn",
     "make_owned_placement_fn",
     "make_ragged_placement_fn",

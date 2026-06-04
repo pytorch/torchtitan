@@ -53,6 +53,39 @@ A 128×128 tile spans 128 rows × 128 cols. Therefore:
   needs), which both adds a collective and **changes numerics**. We **align, not
   reduce.**
 
+## One gather serves forward and backward (square-tile transpose-invariance)
+
+The weight is needed in **both** orientations, yet we all-gather it only **once**:
+
+- **Forward** `y = x @ Wᵀ` → RHS = `Wᵀ` `(in, out)` column-major.
+- **Backward dgrad** `grad_x = grad_output @ W` → RHS = `W` `(out, in)` column-major.
+- (`grad_weight = grad_outputᵀ @ x` does not touch `W`.)
+
+This works because the weight is quantized in **square** `128×128` tiles, which makes
+quantization **commute with transpose**: tile `(i,j)` of `W` and tile `(j,i)` of `Wᵀ`
+are the *same* 128×128 elements transposed, so their `amax` (hence scale) is identical.
+Therefore **`fp8(Wᵀ) = fp8(W)ᵀ`** and **`scale(Wᵀ) = scale(W)ᵀ`**, *exactly*. From the
+single gathered `W` (fp8 `(out, in)` row-major + scale `(out/128, in/128)`):
+
+| pass | RHS data | RHS scale | cost |
+|---|---|---|---|
+| forward (`Wᵀ` col-major) | `gathered.t()` | `scale.t()` | **free** — a row-major `(out,in)` reinterpreted *is* col-major `(in,out)` = `Wᵀ` |
+| backward dgrad (`W` col-major) | `gathered` transpose-copy | `scale` (direct) | one **local fp8 copy** (1 byte/elem) |
+
+No re-quantization, **no second collective** — just a stride reinterpret (forward) and
+a cheap local fp8 transpose (backward dgrad). This is precisely **why the weight recipe
+is square `128×128`** while activations are `1×128`: the weight is the gathered,
+reused-across-passes tensor, so it must be transpose-stable; activations are
+re-quantized per use. torchao's non-all-gather prototype instead re-quantizes the local
+bf16 weight twice (`..._weight_quant_transposed_rhs` for forward, `..._weight_quant_rhs`
+for backward) — with fp8 all-gather we gather once and transpose.
+
+**Guarded in code:** `blockwise_transpose(fp8, scale, block)` returns the transposed
+`(Wᵀ, scale.t())` views and **rejects any non-square tiling** (a `scale` whose shape is
+not `(out/block, in/block)`), because the `fp8(Wᵀ)=fp8(W)ᵀ` identity holds *only* for
+square tiles — a `1×128` (activation) or non-square weight tiling would regroup elements
+under transpose and **silently corrupt numerics**.
+
 ## Design
 
 ### 1. Alignment — the one-line change
@@ -108,11 +141,13 @@ machinery on a second (tiny) bucket. No new collective logic.
 
 ### 5. Consumer — fp8-aware linear / Float8 wrapper
 
-FlexShard's unsharded-param getter hands the module the unsharded weight. Make
-`finish` return a small **Float8 wrapper tensor** carrying `(fp8 data, scale)`
-that a block-wise-fp8 linear (mirroring torchao `Float8BlockwiseLinear` /
-`blockwise_scaled_mm`) consumes without dequant. This is the one place FlexShard
-couples to an fp8 consumer; everything else is placement-internal.
+FlexShard's unsharded-param getter hands the module the unsharded weight (gathered
+`W` fp8 + `_blockwise_scale`). A block-wise-fp8 linear (mirroring torchao
+`Float8BlockwiseLinear` / `blockwise_scaled_mm`) consumes it without dequant, using
+the same gathered tensor for both passes: **forward** RHS = `blockwise_transpose(W,
+scale)` (the free `Wᵀ` col-major view), **backward dgrad** RHS = `W` (one local fp8
+transpose-copy to col-major) — see the square-tile section above. This is the one
+place FlexShard couples to an fp8 consumer; everything else is placement-internal.
 
 ### 6. Backward & reshard-after-forward
 
