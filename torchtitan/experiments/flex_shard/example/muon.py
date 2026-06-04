@@ -48,7 +48,12 @@ from torch.optim._muon import (
 
 from ..flex_shard.bucket_storage import BucketSpec
 from ..flex_shard.sharded_param import get_global_shape, get_placements
-from .owned import assign_layer_owners_lpt, make_owned_placement_fn, Owned
+from .owned import (
+    assign_layer_owners_lpt,
+    assign_matrix_owners_per_layer_balanced,
+    make_owned_placement_fn,
+    Owned,
+)
 from .shard import per_param_placements, Shard
 
 if TYPE_CHECKING:
@@ -75,6 +80,60 @@ _DEFAULT_REST_PATTERNS = [
 ]
 
 
+def _per_matrix_layer_buckets(
+    model: nn.Module,
+    num_layers: int,
+    world_size: int,
+    reshard_after_forward: bool,
+) -> list[BucketSpec]:
+    """One ``Owned`` bucket per 2D matrix (per-layer balanced); non-2D -> ``Shard(0)``.
+
+    Within each layer the 2D matrices (attention / dense FFN / shared experts) get
+    one ``Owned`` bucket each, with owners from
+    :func:`assign_matrix_owners_per_layer_balanced` so every rank holds a balanced
+    share of the layer. Each non-2D param gets its own ``Shard(0)`` bucket: >= 3D
+    grouped experts (-> ``GroupedMuon``) and 1D norms/biases (-> AdamW).
+    """
+    per_layer_matrices: list[list[tuple[str, int]]] = []
+    per_layer_other: list[list[str]] = []
+    for i in range(num_layers):
+        matrices: list[tuple[str, int]] = []
+        other: list[str] = []
+        for name, param in model.layers[i].named_parameters():
+            fqn = f"layers.{i}.{name}"
+            if param.ndim == 2:
+                matrices.append((fqn, param.numel()))
+            else:
+                other.append(fqn)
+        per_layer_matrices.append(matrices)
+        per_layer_other.append(other)
+
+    owners = assign_matrix_owners_per_layer_balanced(
+        [[numel for _, numel in matrices] for matrices in per_layer_matrices],
+        world_size,
+    )
+
+    buckets: list[BucketSpec] = []
+    for i in range(num_layers):
+        for (fqn, _), owner in zip(per_layer_matrices[i], owners[i], strict=True):
+            buckets.append(
+                BucketSpec(
+                    [fqn],
+                    placement_fn=make_owned_placement_fn(owner),
+                    reshard_after_forward=reshard_after_forward,
+                )
+            )
+        for fqn in per_layer_other[i]:
+            buckets.append(
+                BucketSpec(
+                    [fqn],
+                    placement_fn=per_param_placements,  # Shard(0)
+                    reshard_after_forward=reshard_after_forward,
+                )
+            )
+    return buckets
+
+
 def comm_free_muon_buckets(
     model: nn.Module,
     world_size: int,
@@ -85,10 +144,12 @@ def comm_free_muon_buckets(
 ) -> list[BucketSpec]:
     """Build FlexShard buckets for communication-free Muon.
 
-    Each transformer layer (``model.layers[i]``) becomes one ``Owned`` bucket owned
-    by a single rank, so the owner runs Muon on that layer's 2D matrices with no
-    collective in the step. Embeddings, the LM head, and the final norm stay
-    ``Shard(0)`` (FSDP) and go to AdamW on the local shard.
+    With ``balance="lpt"`` / ``"roundrobin"`` each transformer layer
+    (``model.layers[i]``) becomes one ``Owned`` bucket on a single rank; with
+    ``balance="per-matrix"`` each 2D matrix becomes its own ``Owned`` bucket and the
+    layer's experts / norms are ``Shard``ed (see ``balance``). Either way the owner
+    runs Muon locally with no collective in the step, and embeddings, the LM head,
+    and the final norm stay ``Shard(0)`` (FSDP) for AdamW.
 
     Each rest pattern gets its own bucket (not one grouped bucket) so that, with
     ``reshard_after_forward=True``, every bucket maps to a single execution-unit
@@ -104,10 +165,13 @@ def comm_free_muon_buckets(
             them in backward (defaults to ``True``). The ``Owned`` broadcast and the
             ``Shard`` all-gather are both tagged for recompute, so this composes
             with activation checkpointing.
-        balance: ``"lpt"`` (default) balances whole layers across ranks with greedy
-            Longest-Processing-Time; ``"roundrobin"`` assigns layer ``i`` to
-            ``i % world_size`` (optimal only for homogeneous, evenly divisible
-            stacks).
+        balance: how layer parameters are placed. ``"lpt"`` (default) /
+            ``"roundrobin"`` put each *whole layer* on one rank (greedy
+            Longest-Processing-Time, or ``i % world_size``). ``"per-matrix"`` gives
+            every 2D matrix its own ``Owned`` bucket, balanced *within each layer*
+            (:func:`assign_matrix_owners_per_layer_balanced`), and puts each non-2D
+            param in its own ``Shard(0)`` bucket (>= 3D experts -> ``GroupedMuon``,
+            1D norms -> AdamW) -- smaller, balanced per-collective messages.
         rest_patterns: FQN globs for the non-Muon (Shard + AdamW) region; each
             becomes its own bucket. Defaults to embeddings, LM head, and final norm.
 
@@ -115,25 +179,32 @@ def comm_free_muon_buckets(
         A list of ``BucketSpec`` for ``flex_shard(model, mesh, buckets)``.
     """
     num_layers = len(model.layers)
-    if balance == "lpt":
-        layer_numels = [
-            sum(p.numel() for _, p in model.layers[i].named_parameters())
+    if balance == "per-matrix":
+        layer_buckets = _per_matrix_layer_buckets(
+            model, num_layers, world_size, reshard_after_forward
+        )
+    elif balance in ("lpt", "roundrobin"):
+        if balance == "lpt":
+            layer_numels = [
+                sum(p.numel() for _, p in model.layers[i].named_parameters())
+                for i in range(num_layers)
+            ]
+            owners = assign_layer_owners_lpt(layer_numels, world_size)
+        else:
+            owners = [i % world_size for i in range(num_layers)]
+        layer_buckets = [
+            BucketSpec(
+                [f"layers.{i}.*"],
+                placement_fn=make_owned_placement_fn(owners[i]),
+                reshard_after_forward=reshard_after_forward,
+            )
             for i in range(num_layers)
         ]
-        owners = assign_layer_owners_lpt(layer_numels, world_size)
-    elif balance == "roundrobin":
-        owners = [i % world_size for i in range(num_layers)]
     else:
-        raise ValueError(f"balance must be 'lpt' or 'roundrobin', but got {balance!r}.")
-
-    layer_buckets = [
-        BucketSpec(
-            [f"layers.{i}.*"],
-            placement_fn=make_owned_placement_fn(owners[i]),
-            reshard_after_forward=reshard_after_forward,
+        raise ValueError(
+            f"balance must be 'lpt', 'roundrobin', or 'per-matrix', but got {balance!r}."
         )
-        for i in range(num_layers)
-    ]
+
     patterns = _DEFAULT_REST_PATTERNS if rest_patterns is None else rest_patterns
     rest_buckets = [
         BucketSpec(

@@ -67,6 +67,33 @@ def _build_deepseekv3_kimi_model() -> nn.Module:
     return config.build()
 
 
+def _make_per_matrix_moe_model() -> nn.Module:
+    """Tiny MoE-ish model for balance='per-matrix'.
+
+    Each layer has two 2D matrices (`wq`, `wo`), a 3D grouped-expert stack, and a 1D
+    norm; the model has `tok_embeddings` and `output`. Exercises per-matrix Owned (2D)
+    + Shard(0) experts (-> GroupedMuon) + Shard rest.
+    """
+    dim, ffn, num_experts, vocab, n_layers = 32, 64, 8, 128, 4
+
+    class _Block(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.wq = nn.Linear(dim, dim, bias=False)
+            self.wo = nn.Linear(ffn, dim, bias=False)
+            self.experts = nn.Parameter(torch.randn(num_experts, ffn, dim))
+            self.attn_norm = nn.Parameter(torch.ones(dim))
+
+    class _Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tok_embeddings = nn.Embedding(vocab, dim)
+            self.layers = nn.ModuleList([_Block() for _ in range(n_layers)])
+            self.output = nn.Linear(dim, vocab, bias=False)
+
+    return _Model()
+
+
 def _init_params_deterministically(model: nn.Module) -> None:
     with torch.no_grad():
         for idx, param in enumerate(model.parameters()):
@@ -305,6 +332,34 @@ class TestCommFreeMuonHelpers(TestCase):
         _, model = make_transformer_model(n_layers=2)
         with self.assertRaisesRegex(ValueError, "balance"):
             comm_free_muon_buckets(model, 2, balance="bogus")
+
+    def test_comm_free_muon_buckets_per_matrix_structure(self) -> None:
+        model = (
+            _make_per_matrix_moe_model()
+        )  # 4 layers; each: wq, wo (2D), experts(3D), norm(1D)
+        buckets = comm_free_muon_buckets(
+            model,
+            world_size=2,
+            balance="per-matrix",
+            rest_patterns=["tok_embeddings.*", "output.*"],
+        )
+
+        def placement_name(bucket):
+            placements = bucket.placement_fn(
+                [(bucket.patterns[0], nn.Parameter(torch.zeros(1)))], None
+            )
+            return type(next(iter(placements.values()))[0]).__name__
+
+        owned = [b for b in buckets if placement_name(b) == "Owned"]
+        sharded = [b for b in buckets if placement_name(b) == "Shard"]
+        # 4 layers x 2 matrices (wq, wo) -> one Owned bucket each
+        self.assertEqual(len(owned), 4 * 2)
+        self.assertTrue(all(len(b.patterns) == 1 for b in owned))
+        self.assertTrue(
+            all(b.patterns[0].endswith((".wq.weight", ".wo.weight")) for b in owned)
+        )
+        # 4 layers x (experts + norm) + 2 rest -> Shard buckets
+        self.assertEqual(len(sharded), 4 * 2 + 2)
 
     def test_reshard_policy_recomputes_unshard_collectives(self) -> None:
         from torch.utils.checkpoint import CheckpointPolicy
@@ -739,6 +794,70 @@ class TestCommFreeMuon(FSDPTest):
         self.assertIn("GroupedMuon", {type(o).__name__ for o in optim.optimizers})
 
         # Dummy grads on each optimized param, then assert the step is collective-free.
+        for p in muon_params + other_params:
+            p.grad = torch.randn_like(p)
+        with _assert_no_collectives(self):
+            optim.step()
+
+    @skip_if_lt_x_gpu(2)
+    def test_per_matrix_balance_owns_matrices_shards_experts_comm_free(self) -> None:
+        # balance="per-matrix": each non-MoE 2D matrix -> its own Owned bucket
+        # (balanced within the layer); the 3D experts -> Shard(0) -> GroupedMuon;
+        # norms / embeddings / output -> Shard. Verify placements/routing + a
+        # communication-free step.
+        mesh = self._mesh()
+        torch.manual_seed(0)
+        model = _make_per_matrix_moe_model().to(device_type)
+        n_layers = len(model.layers)
+
+        flex_shard(
+            model,
+            mesh,
+            buckets=comm_free_muon_buckets(
+                model,
+                self.world_size,
+                balance="per-matrix",
+                reshard_after_forward=False,
+                rest_patterns=["tok_embeddings.*", "output.*"],
+            ),
+        )
+
+        params = dict(model.named_parameters())
+        for i in range(n_layers):
+            wq = get_placements(params[f"layers.{i}.wq.weight"])[0]
+            wo = get_placements(params[f"layers.{i}.wo.weight"])[0]
+            self.assertIsInstance(wq, Owned)
+            self.assertIsInstance(wo, Owned)
+            # per-layer balance: the layer's 2 matrices land on different ranks (N=2)
+            self.assertNotEqual(wq.owner_rank, wo.owner_rank)
+            # experts and norm are Shard(0)
+            self.assertIsInstance(
+                get_placements(params[f"layers.{i}.experts"])[0], Shard
+            )
+            self.assertIsInstance(
+                get_placements(params[f"layers.{i}.attn_norm"])[0], Shard
+            )
+        self.assertIsInstance(get_placements(params["tok_embeddings.weight"])[0], Shard)
+        self.assertIsInstance(get_placements(params["output.weight"])[0], Shard)
+
+        muon_params, other_params = build_muon_param_groups(model, mesh)
+        # the Shard(0) 3D experts are routed to the Muon group (-> GroupedMuon)
+        muon_ids = {id(p) for p in muon_params}
+        experts_here = [
+            p for n, p in model.named_parameters() if n.endswith(".experts")
+        ]
+        self.assertTrue(experts_here)
+        for e in experts_here:
+            self.assertIn(id(e), muon_ids)
+
+        optim = build_comm_free_muon_optimizers(
+            model,
+            mesh,
+            muon_kwargs=dict(lr=0.02, momentum=0.9, weight_decay=0.0),
+            adamw_kwargs=dict(lr=0.01, weight_decay=0.0),
+        )
+        self.assertIn("GroupedMuon", {type(o).__name__ for o in optim.optimizers})
+
         for p in muon_params + other_params:
             p.grad = torch.randn_like(p)
         with _assert_no_collectives(self):
