@@ -15,13 +15,11 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Iterator
-from contextlib import contextmanager
 from threading import local
 from typing import Any
 
 import spmd_types as spmd
 import torch
-import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
@@ -38,7 +36,6 @@ __all__ = [
     "mesh_size",
     "annotate_input_spmd_types",
     "placement_to_spmd_assert_type",
-    "preserve_buffer_spmd",
     "redistribute_spmd_per_axis",
     "set_current_spmd_mesh",
     "set_spmd_backend",
@@ -226,26 +223,6 @@ def annotate_input_spmd_types(
     assert_type(labels, label_placement)
     if "positions" in extra_kwargs and isinstance(extra_kwargs["positions"], torch.Tensor):
         assert_type(extra_kwargs["positions"], token_placement)
-
-
-@contextmanager
-def preserve_buffer_spmd(model: nn.Module) -> Iterator[None]:
-    """Context manager that saves and restores ``spmd_types`` annotations on buffers.
-
-    ``Module.init_states()`` may replace buffer tensors (e.g. RoPE cache),
-    which drops the ``spmd_types`` local-type metadata attached by
-    ``parallelize()``.  Wrap the init call in this context manager so the
-    annotations survive the replacement.
-    """
-    saved: dict[str, Any] = {}
-    for fqn, buf in model.named_buffers():
-        if spmd.has_local_type(buf):
-            saved[fqn] = dict(spmd.get_local_type(buf))
-    yield
-    for fqn, buf in model.named_buffers():
-        if fqn in saved and not spmd.has_local_type(buf):
-            spmd.assert_type(buf, saved[fqn])
-
 
 def redistribute_spmd_per_axis(
     x: torch.Tensor,

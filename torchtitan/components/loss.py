@@ -14,7 +14,6 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from spmd_types.checker import typecheck
 from spmd_types.runtime import get_partition_spec, has_local_type
 from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
@@ -510,7 +509,12 @@ class ChunkedCELoss(BaseLoss):
         hidden_states: torch.Tensor,
         labels: torch.Tensor,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Chunk hidden states and labels along the local sequence dimension."""
+        """Chunk hidden states and labels along the local sequence dimension.
+
+        Hidden state chunks are detached as leaves so their per-chunk gradients
+        can be collected by GradAccumulator. For DTensor we use local_map;
+        spmd_types backend should already run in local SPMD.
+        """
         num_chunks = self.num_chunks
 
         # Chunking always operates on the *local* view: when ``t`` is a
@@ -520,6 +524,7 @@ class ChunkedCELoss(BaseLoss):
         # local seq=0 and breaking GradAccumulator's slice writes.
         # ``local_map`` runs the chunking body on plain tensors; under the
         # non-DTensor path we call ``_chunk_local`` directly.
+        # ``.contiguous()`` breaks shared storage from ``torch.chunk``.
         def _chunk_local(t):
             return tuple(c.contiguous() for c in torch.chunk(t, num_chunks, dim=1))
 
@@ -543,11 +548,17 @@ class ChunkedCELoss(BaseLoss):
         return h_chunks, label_chunks
 
     def allocate_total_loss(self, reference: torch.Tensor) -> torch.Tensor:
-        """Allocate the scalar loss and annotate SPMD partial data axes."""
+        """Allocate the scalar loss with the expected SPMD output type.
+
+        The chunk loop accumulates a scalar sum over the local batch/sequence
+        shard. Under local SPMD typecheck this is Partial on data axes,
+        invariant on TP, matching the eventual ChunkedCELoss output.
+        """
         total_loss = reference.new_zeros((), dtype=torch.float32)
         mesh = current_mesh()
         if mesh is None or not spmd.is_type_checking():
             return total_loss
+
         for axis_name, dst in {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}.items():
             if mesh_size(axis_name) == 1:
                 continue
@@ -561,10 +572,11 @@ class ChunkedCELoss(BaseLoss):
         return total_loss
 
     def reinterpret_data_axes(self, chunk_loss: torch.Tensor) -> torch.Tensor:
-        """Mark data-axis scalar losses as partial under local SPMD typecheck."""
+        """Mark per-chunk losses as partial on active data axes."""
         mesh = current_mesh()
         if mesh is None or not spmd.is_type_checking():
             return chunk_loss
+
         for axis_name in ("dp", "cp"):
             if mesh_size(axis_name) == 1:
                 continue
@@ -583,7 +595,10 @@ class ChunkedCELoss(BaseLoss):
         total_loss: torch.Tensor,
         grad_buffer: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Validate SPMD output types after leaving the local typecheck region."""
+        """
+        Validate loss and hidden-grad types after the local typecheck region.
+        Loss is P@data axes, I@TP. The hidden state gradient buffer inherits hidden state type.
+        """
         mesh = current_mesh()
         if mesh is None or not spmd.is_type_checking():
             return total_loss, grad_buffer
@@ -611,18 +626,18 @@ class ChunkedCELoss(BaseLoss):
         global_valid_tokens: torch.Tensor | None,
         fsdp_enabled: bool,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Run the chunk loop and return the detached loss plus hidden grad."""
+        """Run the chunked lm_head/CE loop and return loss plus hidden grad.
+
+        This is the memory-saving inner loop. It detaches hidden states, runs
+        lm_head and CE one local sequence chunk at a time, accumulates the
+        detached scalar loss, and records the per-chunk hidden gradients needed
+        to bridge backward into the decoder graph.
+        """
         lm_head = self.lm_head
         assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
 
         requires_grad = hidden_states.requires_grad
-        typecheck_context = (
-            typecheck(local=True)
-            if current_mesh() is not None and spmd.is_type_checking()
-            else contextlib.nullcontext()
-        )
-
-        with typecheck_context:
+        with spmd.local():
             h_detached = hidden_states.detach().requires_grad_(requires_grad)
             h_chunks, label_chunks = self.chunk_states_and_labels(h_detached, labels)
             grad_accumulator = GradAccumulator(
@@ -684,6 +699,12 @@ class ChunkedCELoss(BaseLoss):
                 if requires_grad
                 else None
             )
+
+            if fsdp_enabled:
+                lm_head.set_reshard_after_forward(True)
+                lm_head.set_reshard_after_backward(True)
+                lm_head.set_requires_gradient_sync(True, recurse=False)
+                lm_head.reshard()
 
         if grad_buffer is not None:
             total_loss, grad_buffer = self.out_typecheck(
@@ -775,6 +796,8 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         accumulated_grad: torch.Tensor,
         loss: torch.Tensor,
     ) -> torch.Tensor:
+        # The hidden activation type depends on the model's sharding config;
+        # we'll defer hidden_states typechecking to previous module boundaries.
         result = _DecoderOutputGradientBackProp.apply(
             hidden_states, accumulated_grad, loss
         )
