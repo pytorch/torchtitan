@@ -23,6 +23,7 @@ dependencies = [
     "tyro",
     "tensorboard",
     "wandb",
+    "reporterv2; python_version >= '3.11'",
     "einops",
     "pillow",
 ]
@@ -48,6 +49,9 @@ version = {file = "assets/version.txt"}
 [tool.codespell]
 skip = ["*.json"]
 ignore-words-list = ["assertin", "datas" ,"indx", "inpt", "nd", "socio-economic"]
+
+[tool.uv.sources]
+reporterv2 = { git = "https://github.com/commaai/reporterv2.git", rev = "f0856cd878f58fc648bf92d80aa90a72581af559" }
 
 # ---- Explicit project build information ---- #
 [build-system]
