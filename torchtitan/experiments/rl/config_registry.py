@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import (
     CompileConfig,
     DebugConfig,
@@ -86,7 +86,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
         ),
         trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=2e-6),
+            optimizer=default_adamw(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
@@ -229,7 +229,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
         ),
         trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=2e-6),
+            optimizer=default_adamw(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
@@ -287,7 +287,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
         ),
         trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=1e-6),
+            optimizer=default_adamw(lr=1e-6),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
@@ -348,7 +348,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
         ),
         trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=2e-6),
+            optimizer=default_adamw(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
