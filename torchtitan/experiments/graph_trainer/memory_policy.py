@@ -195,7 +195,7 @@ def tag_sac_policy(
                 break
 
     gm.recompile()
-    logger.info("Applied selective activation checkpointing (SAC) graph pass.")
+    logger.info("Applied activation checkpointing graph pass.")
     if boundary_saves:
         logger.info(f"  Forced {boundary_saves} nodes to MUST_SAVE at layer boundaries")
     for layer_id in sorted(layer_stats):
@@ -257,6 +257,7 @@ def tag_with_memory_policy_pass(
     example_inputs: tuple | None = None,
     *,
     config: "GraphTrainer.Config",
+    memory_policy: str | None = None,
 ) -> torch.fx.GraphModule:
     """Tag forward nodes with MUST_SAVE, PREFER_RECOMPUTE, or MUST_CPU_OFFLOAD.
 
@@ -268,7 +269,7 @@ def tag_with_memory_policy_pass(
     Other memory policies combining SAC and CPU offload can be added
     via ``register_memory_policy`` without modifying this function.
     """
-    memory_policy = config.compile.memory_policy
+    memory_policy = memory_policy or config.compile.memory_policy
     if memory_policy not in MEMORY_POLICY_REGISTRY:
         raise ValueError(
             f"Unknown memory_policy: {memory_policy!r}. "
