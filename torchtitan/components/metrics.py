@@ -108,6 +108,11 @@ class BaseLogger:
     def log(self, metrics: dict[str, Any], step: int) -> None:
         pass
 
+    def write_report(self, html: str, step: int, name: str, output_type: str) -> None:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support write_report"
+        )
+
     def close(self) -> None:
         pass
 
@@ -175,6 +180,57 @@ class WandBLogger(BaseLogger):
             self.wandb.finish()
 
 
+class ReporterV2Logger(BaseLogger):
+    """Logger implementation for ReporterV2 metrics."""
+
+    def __init__(
+        self,
+        *,
+        config_dict: dict[str, Any] | None = None,
+        tag: str | None = None,
+    ):
+        host = os.getenv("REPORTERV2_HOST")
+        if not host:
+            raise ValueError("REPORTERV2_HOST must be set to use ReporterV2 logging")
+        training_id = os.getenv("REPORTERV2_TRAINING_ID")
+        if not training_id:
+            raise ValueError(
+                "REPORTERV2_TRAINING_ID must be set to use ReporterV2 logging"
+            )
+        from reporterv2 import ReporterV2
+
+        reporter_config = dict(config_dict or {})
+        metrics_config = reporter_config.get("metrics", {})
+        if not isinstance(metrics_config, dict):
+            metrics_config = {}
+        self.save_freq = int(metrics_config.get("save_freq", 1))
+        model_spec = reporter_config.get("model_spec", {})
+        model_name = (
+            model_spec.get("name", "torchtitan")
+            if isinstance(model_spec, dict)
+            else "torchtitan"
+        )
+        reporter_config["training_id"] = training_id
+        reporter_config["reporterv2_host"] = host
+        reporter_config.setdefault("trainer", model_name)
+        self.reporter = ReporterV2(reporter_config)
+        self.tag = tag
+        logger.info(f"ReporterV2 logging enabled with training_id={training_id}")
+
+    def log(self, metrics: dict[str, Any], step: int) -> None:
+        if self.tag is not None:
+            metrics = {f"{self.tag}/{key}": value for key, value in metrics.items()}
+        self.reporter.buffer_metrics(step=step, epoch=step, metrics=metrics)
+        if step == 1 or step % self.save_freq == 0:
+            self.reporter.save_metrics()
+
+    def write_report(self, html: str, step: int, name: str, output_type: str) -> None:
+        self.reporter.write_report(html, step=step, name=name, output_type=output_type)
+
+    def close(self) -> None:
+        self.reporter.close()
+
+
 class LoggerContainer(BaseLogger):
     """Container to call all loggers enabled in the job config."""
 
@@ -187,6 +243,16 @@ class LoggerContainer(BaseLogger):
     def log(self, metrics: dict[str, Any], step: int) -> None:
         for logger_instance in self._loggers:
             logger_instance.log(metrics, step)
+
+    def write_report(self, html: str, step: int, name: str, output_type: str) -> None:
+        found_report_logger = False
+        for logger_instance in self._loggers:
+            if type(logger_instance).write_report is BaseLogger.write_report:
+                continue
+            logger_instance.write_report(html, step, name, output_type)
+            found_report_logger = True
+        if not found_report_logger:
+            raise NotImplementedError("No configured logger supports write_report")
 
     @property
     def number_of_loggers(self) -> int:
@@ -262,7 +328,7 @@ class MetricsProcessor(Configurable):
     """Metrics processor to processes the metrics and log metrics.
 
     The current MetricsProcessor log some metrics to STDOUT and some metrics to
-    TensorBoard or WandB.
+    TensorBoard, WandB, or ReporterV2.
 
     Args:
         config (Config): Metrics configuration.
@@ -271,8 +337,9 @@ class MetricsProcessor(Configurable):
         pp_schedule (str): Pipeline parallel schedule name.
         ft_enable (bool): Whether fault tolerance is enabled.
         ft_replica_id (int): Fault tolerance replica ID.
-        config_dict (dict | None): Full job config dict for WandB logging.
-        tag (str | None): Tag to use for TensorBoard or WandB. Defaults to None.
+        config_dict (dict | None): Full job config dict for experiment tracking.
+        tag (str | None): Tag to use for TensorBoard, WandB, or ReporterV2.
+            Defaults to None.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -299,6 +366,9 @@ class MetricsProcessor(Configurable):
 
         enable_wandb: bool = False
         """Whether to log metrics to Weights & Biases"""
+
+        enable_reporterv2: bool = False
+        """Whether to log metrics to ReporterV2"""
 
     config: Config
     logger: BaseLogger
@@ -383,11 +453,16 @@ class MetricsProcessor(Configurable):
         # Log initial config state
         logger.debug(
             f"Building logger with config: wandb={config.enable_wandb}, "
-            f"tensorboard={config.enable_tensorboard}"
+            f"tensorboard={config.enable_tensorboard}, "
+            f"reporterv2={config.enable_reporterv2}"
         )
 
         # Check if any logging backend is enabled
-        has_logging_enabled = config.enable_tensorboard or config.enable_wandb
+        has_logging_enabled = (
+            config.enable_tensorboard
+            or config.enable_wandb
+            or config.enable_reporterv2
+        )
 
         # Determine if this rank should log
         should_log = has_logging_enabled
@@ -441,6 +516,20 @@ class MetricsProcessor(Configurable):
                     )
                 else:
                     logger.error(f"Failed to create WandB logger: {e}")
+
+        if config.enable_reporterv2:
+            logger.debug("Attempting to create ReporterV2 logger")
+            try:
+                reporterv2_logger = ReporterV2Logger(config_dict=config_dict, tag=tag)
+                logger_container.add_logger(reporterv2_logger)
+            except Exception as e:
+                if "No module named 'reporterv2'" in str(e):
+                    logger.error(
+                        "Failed to create ReporterV2 logger: No module named "
+                        "'reporterv2'. Please install project dependencies."
+                    )
+                else:
+                    logger.error(f"Failed to create ReporterV2 logger: {e}")
 
         if config.enable_tensorboard:
             logger.debug("Creating TensorBoard logger")
@@ -577,6 +666,9 @@ class MetricsProcessor(Configurable):
         self.ntokens_since_last_log = 0
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
+
+    def write_report(self, html: str, step: int, name: str, output_type: str) -> None:
+        self.logger.write_report(html, step, name, output_type)
 
     def close(self):
         self.logger.close()

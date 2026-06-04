@@ -33,6 +33,32 @@ COMM_MODE=${COMM_MODE:-""}
 
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
 
+generate_uuid() {
+  if [[ -r /proc/sys/kernel/random/uuid ]]; then
+    tr -d '\n' < /proc/sys/kernel/random/uuid
+  elif command -v uuidgen >/dev/null 2>&1; then
+    uuidgen | tr '[:upper:]' '[:lower:]'
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import uuid; print(uuid.uuid4())'
+  else
+    date +'%s-%N'
+  fi
+}
+
+declare -A env_vars=()
+
+if [[ -z "${env_vars[REPORTERV2_HOST]+set}" ]]; then
+  env_vars["REPORTERV2_HOST"]="${REPORTERV2_HOST:-./logs/}"
+fi
+
+if [[ -z "${env_vars[REPORTERV2_TRAINING_ID]+set}" ]]; then
+  env_vars["REPORTERV2_TRAINING_ID"]="${REPORTERV2_TRAINING_ID:-$(generate_uuid)}"
+fi
+
+for env_var in "${!env_vars[@]}"; do
+  export "${env_var}=${env_vars[$env_var]}"
+done
+
 if [ -n "$COMM_MODE" ]; then
     # Communication mode specified: validate configuration or run in debug mode
     echo "Running with comm_mode=${COMM_MODE}"
