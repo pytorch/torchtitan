@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import copy
 import functools
 import math
 from collections.abc import Callable, Iterator
@@ -37,11 +36,12 @@ class LRSchedulersContainer(Stateful, Configurable):
     signature as ``torch.optim.lr_scheduler.LRScheduler`` class: ``step()``, ``state_dict()``,
     ``load_state_dict()``.
 
-    **Limitations**
-    This class assumes all the lr schedulers are the same. There is no easy way to support
-    resharding for multiple different LRSchedulers because LRScheduler.state_dict() is not
-    resharding friendly. Therefore, the limitation is used to allow TorchTitan to support
-    lr scheduler resharding.
+    **Checkpoint behavior**
+    All schedulers share the same lambda and step together. On save, only
+    ``last_epoch`` is saved. On load, ``last_epoch`` is restored and each
+    scheduler recomputes its lr from its own optimizer's ``base_lrs``. This
+    handles mixed optimizers (different base lrs) and resharding (different
+    number of schedulers between save and load).
 
     Args:
         optimizers (OptimizersContainer): The corresponding optimizers for the lr_schedulers.
@@ -208,21 +208,39 @@ class LRSchedulersContainer(Stateful, Configurable):
     def __len__(self) -> int:
         return len(self.schedulers)
 
+    def get_metrics(self) -> dict[str, float]:
+        """Return per-param-group learning rates keyed for logging."""
+        metrics = {}
+        for scheduler in self.schedulers:
+            opt = scheduler.optimizer
+            opt_name = type(opt).__name__
+            for group, lr_val in zip(opt.param_groups, scheduler.get_last_lr()):
+                metrics[f"lr/{opt_name}_{group['pattern']}"] = float(lr_val)
+        return metrics
+
     def step(self) -> None:
         for scheduler in self.schedulers:
             scheduler.step()
 
     def state_dict(self) -> dict[str, Any]:
-        # While there may be multiple schedulers, we only save the first one because
-        # the state_dict is the same for all. See the limitations section in the
-        # docstring.
-        return self.schedulers[0].state_dict()
+        # Only last_epoch is needed — each scheduler recomputes its lr from
+        # its own optimizer's base_lrs on load. Per-scheduler state (base_lrs,
+        # _last_lr) is not saved because it's reconstructed from the optimizer
+        # config at construction time.
+        return {"last_epoch": self.schedulers[0].last_epoch}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        # Load the same state_dict for all schedulers. The key value we're concerned
-        # within ``LRScheduler.state_dict()`` is ``last_epoch``, which is an integer
-        # that is immutable. As long as ``training.steps`` and ``lr_scheduler.warmup_steps``
-        # in the config remain unchanged when resuming from a checkpoint, this
-        # approach is safe. We call ``copy()`` here to ensure extra safety.
+        # Only restore last_epoch. Each scheduler recomputes _last_lr from its
+        # own optimizer's base_lrs and the shared lambda. This is correct for
+        # mixed optimizers (different base_lrs) and resharding (different number
+        # of schedulers between save and load).
+        #
+        # NOTE: torchtitan's LR schedules are stateless functions
+        # of (last_epoch, base_lr) — LambdaLR with a pure lambda. If a stateful
+        # scheduler (e.g. ReduceLROnPlateau) is added, this method must be updated
+        # to restore additional state.
+        last_epoch = state_dict["last_epoch"]
         for scheduler in self.schedulers:
-            scheduler.load_state_dict(copy.deepcopy(state_dict))
+            scheduler.last_epoch = last_epoch
+            scheduler._step_count = last_epoch + 1
+            scheduler._last_lr = scheduler.get_lr()

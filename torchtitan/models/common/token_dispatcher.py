@@ -283,14 +283,10 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
                     num_global_tokens_per_local_expert_E
                 )
             )
-            # non_blocking=True is safe in eager, but under torch.compile the
-            # async D2H transfer can race with the subsequent .tolist()/.item()
-            # calls, producing stale values and failing unbacked-symint guards.
-            non_blocking = not torch.compiler.is_compiling()
             input_splits = (
                 num_local_tokens_per_expert_E.view(ep_size, -1)
                 .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=non_blocking)
+                .to(torch.device("cpu"), non_blocking=True)
             )
             # NOTE: this would incur a device-to-host sync
             output_splits = (
@@ -356,7 +352,6 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         ep_size = self.ep_mesh.size()
         e = num_global_tokens_per_local_expert_E.shape[0] // ep_size
         device = num_global_tokens_per_local_expert_E.device
-        total = num_global_tokens_per_local_expert_E.sum()
 
         # (EP, e) matrix of token counts per (rank, local_expert)
         t_mat = num_global_tokens_per_local_expert_E.view(ep_size, e)
@@ -377,9 +372,11 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             segment_lens
         )
         output_starts = segment_lens.cumsum(0) - segment_lens
+        # seg_ids.shape[0] == segment_lens.sum(), but reuses the unbacked symint
+        # already created by repeat_interleave above.
         permuted_indices = (
             input_starts[seg_ids]
-            + torch.arange(total, device=device)
+            + torch.arange(seg_ids.shape[0], device=device)
             - output_starts[seg_ids]
         )
 
