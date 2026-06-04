@@ -134,16 +134,19 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             AttentionType.ENCODER,
         ), "Encoder-only attention not supported yet."
 
-        # For decoder and cross-attention, use KV cache as before
-        # This backend inherits vLLM's FlashAttention cache contract, so K/V
-        # must be the leading dimension. Keep this explicit until we know which
-        # vLLM allocation path produced the CI-only layout mismatch.
-        if kv_cache.shape[0] != 2:
+        # vLLM may hand CUSTOM backends either FlashAttention's historical
+        # [2, num_blocks, block_size, num_kv_heads, head_size] layout or the
+        # generic NHD [num_blocks, 2, block_size, num_kv_heads, head_size]
+        # layout used by its cache allocator.
+        if kv_cache.shape[0] == 2:
+            key_cache, value_cache = kv_cache.unbind(0)
+        elif kv_cache.ndim == 5 and kv_cache.shape[1] == 2:
+            key_cache, value_cache = kv_cache.unbind(1)
+        else:
             raise ValueError(
                 "Unexpected KV cache layout for PyTorchVarlenAttentionImpl: "
                 f"shape={tuple(kv_cache.shape)}, stride={tuple(kv_cache.stride())}"
             )
-        key_cache, value_cache = kv_cache.unbind(0)
 
         assert not self.kv_cache_dtype.startswith(
             "fp8"
