@@ -66,8 +66,8 @@ class PreparedReduceGrad:
     """Packed reduce-grad inputs whose collective launch can be deferred."""
 
     prepared: PlacementPreparedReduceGrad
-    copy_in_done: torch.Event
-    device_handle: ModuleType
+    copy_in_done: torch.Event | None
+    device_handle: ModuleType | None
 
 
 def begin_bucket_unshard(
@@ -86,6 +86,11 @@ def begin_bucket_unshard(
                 f"bucket to use the same placement, but {infos[0].fqn!r} uses "
                 f"{placement!r} and {info.fqn!r} uses {info.placement!r}."
             )
+
+    if torch.compiler.is_compiling():
+        prepared = placement.prepare_unshard_bucket(tensors, infos, mesh, debug_fqn)
+        result = _run_and_finish_unshard(prepared)
+        return SyncUnshardResult(result.full_params)
 
     device = tensors[0].device
     device_handle = _get_device_handle(device.type)
@@ -127,6 +132,13 @@ def prepare_reduce_grad(
         debug_fqn,
     )
 
+    if torch.compiler.is_compiling():
+        return PreparedReduceGrad(
+            prepared=placement_prepared,
+            copy_in_done=None,
+            device_handle=None,
+        )
+
     device = placement_prepared.buffers[0].device
     device_handle = _get_device_handle(device.type)
     copy_in_done = device_handle.Event()
@@ -143,6 +155,12 @@ def launch_reduce_grad(
     reduce_grad_stream: torch.Stream,
 ) -> ReduceGradHandle:
     """Launch a previously packed reduce-grad request."""
+    if torch.compiler.is_compiling():
+        result = prepared.prepared.placement.reduce_prepared_grad(prepared.prepared)
+        return SyncReduceGradResult(result.sharded_grads)
+
+    if prepared.device_handle is None or prepared.copy_in_done is None:
+        raise AssertionError("Expected eager reduce-grad launch metadata.")
     with prepared.device_handle.stream(reduce_grad_stream):
         reduce_grad_stream.wait_event(prepared.copy_in_done)
         result = prepared.prepared.placement.reduce_prepared_grad(prepared.prepared)
@@ -166,6 +184,22 @@ def begin_reduce_grad(
     """Begin a bucket reduce-grad and return a handle for local grad shards."""
     prepared = prepare_reduce_grad(tensors, infos, mesh, debug_fqn)
     return launch_reduce_grad(prepared, reduce_grad_stream)
+
+
+@dataclass
+class SyncUnshardResult(UnshardHandle):
+    """Already-finished unshard result used during graph capture."""
+
+    full_params: list[torch.Tensor]
+
+    def finish(self) -> list[torch.Tensor]:
+        return self.full_params
+
+    def wait(self) -> None:
+        return
+
+    def release_buffers(self) -> None:
+        return
 
 
 @dataclass
@@ -209,6 +243,30 @@ class AsyncUnshardResult(UnshardHandle):
         self.buffers.clear()
         for handoff in handoffs:
             handoff.release()
+
+
+@dataclass
+class SyncReduceGradResult(ReduceGradHandle):
+    """Already-finished reduce-grad result used during graph capture."""
+
+    sharded_grads: list[torch.Tensor]
+
+    def finish(self) -> list[torch.Tensor]:
+        return self.sharded_grads
+
+    def wait(self) -> None:
+        return
+
+    def release_buffers(self, release_sharded_grads: bool) -> None:
+        if release_sharded_grads:
+            self.sharded_grads.clear()
+
+    def record_sharded_grads(
+        self,
+        sharded_grads: list[torch.Tensor],
+        stream: torch.Stream,
+    ) -> None:
+        self.sharded_grads = sharded_grads
 
 
 @dataclass

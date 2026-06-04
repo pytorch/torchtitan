@@ -54,8 +54,6 @@ class UnshardedParamSlot:
                 )
             return current
 
-        if _is_graph_capture_active():
-            _raise_graph_capture_unsupported()
         _raise_missing_eager_bucket_unshard(self)
 
 
@@ -120,23 +118,6 @@ def _raise_missing_eager_bucket_unshard(slot: UnshardedParamSlot) -> None:
         "the hooked module forward, or the BucketSpec boundary does not match "
         "the module hook/checkpoint execution unit. Split the bucket to match "
         "forward module boundaries."
-    )
-
-
-def _is_graph_capture_active() -> bool:
-    """Return whether unsupported graph capture is active."""
-    if torch.compiler.is_compiling():
-        return True
-    try:
-        return torch._guards.TracingContext.try_get() is not None
-    except AttributeError:
-        return False
-
-
-def _raise_graph_capture_unsupported() -> None:
-    raise ValueError(
-        "FlexShard currently supports eager execution only; torch.compile and "
-        "graph capture are not supported yet."
     )
 
 
