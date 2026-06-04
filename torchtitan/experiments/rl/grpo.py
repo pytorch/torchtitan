@@ -381,7 +381,12 @@ class RLTrainer(Configurable):
         must be in its engine loop together -- sequential dispatch would deadlock.
         """
         p = self.config.generator.parallelism
-        dp = p.data_parallel_replicate_degree
+        # Number of independent-data groups = dp_replicate * dp_shard. The MoE EP
+        # layout puts DP-attention on dp_shard (dp_replicate=1); the dense DP
+        # layout uses dp_replicate. Both must be sharded across here.
+        dp = max(p.data_parallel_replicate_degree, 1) * max(
+            p.data_parallel_shard_degree, 1
+        )
         tp = p.tensor_parallel_degree
 
         # Strided assignment: replica r owns global indices r, r+dp, r+2dp, ...

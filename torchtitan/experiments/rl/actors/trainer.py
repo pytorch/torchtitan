@@ -472,6 +472,10 @@ class PolicyTrainer(Actor, Configurable):
                 self.config.training.max_norm,
                 foreach=True,
                 pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
+                # With EP, expert params live on the ep mesh and dense params on
+                # the tp mesh; this routes to the multi-mesh-aware grad-norm path
+                # (else torch.stack fails across the two meshes).
+                ep_enabled=self.parallel_dims.ep_enabled,
             )
 
         with sl.log_trace_span("optim"):
