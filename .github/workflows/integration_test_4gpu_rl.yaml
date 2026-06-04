@@ -82,6 +82,8 @@ jobs:
 
         # 4. Install torchtitan in editable mode because integration test spawns
         # python grpo.py as a subprocess
+        # The checkout is mounted from the host and may not be writable by ci-user.
+        sudo chown $(id -u):$(id -g) "$PWD"
         uv pip install -e .
 
         # 5. Download HF model checkpoint for tests
