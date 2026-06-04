@@ -572,9 +572,9 @@ class RLTrainer(Configurable):
 
         # Initial weight sync from trainer to generator
         with sl.log_trace_span("trainer_push_model_state_dict"):
-            self.trainer.push_model_state_dict.call().get()
+            await self.trainer.push_model_state_dict.call()
         with sl.log_trace_span("generator_pull_model_state_dict"):
-            self.generator.pull_model_state_dict.call(0).get()
+            await self.generator.pull_model_state_dict.call(0)
 
     @sl.log_trace_span("_collect_rollouts")
     async def _collect_rollouts(
@@ -1001,11 +1001,6 @@ class RLTrainer(Configurable):
             # Propagate the step counter to actors for structured logging.
             self.trainer.sync_log_step.call(step)
             self.generator.sync_log_step.call(step)
-            # Cancellation point for Ctrl-C (KeyboardInterrupt) handling.
-            # This yields to the event loop to check for cancellation, which
-            # doesn't happen with `.get` calls.
-            # TODO: investigate replacing `.get()` with `await
-            await asyncio.sleep(0)
 
             t_step_start = time.perf_counter()
 
@@ -1066,9 +1061,9 @@ class RLTrainer(Configurable):
             for microbatch in microbatches:
                 with sl.log_trace_span("trainer_forward_backward_call"):
                     mb_metrics = self._get_rank_0_value(
-                        self.trainer.forward_backward.call(
+                        await self.trainer.forward_backward.call(
                             microbatch, num_global_valid_tokens
-                        ).get()
+                        )
                     )
                     for k, v in mb_metrics.items():
                         if k not in fwd_bwd_metrics:
@@ -1079,7 +1074,7 @@ class RLTrainer(Configurable):
                             fwd_bwd_metrics[k] += v
             with sl.log_trace_span("trainer_optim_step_call"):
                 optim_output = self._get_rank_0_value(
-                    self.trainer.optim_step.call().get()
+                    await self.trainer.optim_step.call()
                 )
             trainer_policy_version = optim_output.policy_version
             optimizer_metrics = optim_output.metrics
@@ -1090,10 +1085,10 @@ class RLTrainer(Configurable):
             # instead of having `trainer.optim_step` return it
             t_push_start = time.perf_counter()
             with sl.log_trace_span("trainer_push_model_state_dict"):
-                self.trainer.push_model_state_dict.call().get()
+                await self.trainer.push_model_state_dict.call()
             t_weight_sync_push_s = time.perf_counter() - t_push_start
             with sl.log_trace_span("generator_pull_model_state_dict"):
-                self.generator.pull_model_state_dict.call(trainer_policy_version).get()
+                await self.generator.pull_model_state_dict.call(trainer_policy_version)
             t_weight_sync_total_s = time.perf_counter() - t_push_start
             t_step_s = time.perf_counter() - t_step_start
             # --- divergence check before any logging ---

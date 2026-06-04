@@ -95,8 +95,9 @@ def _generator(outputs):
     generator = VLLMGenerator.__new__(VLLMGenerator)
     generator._engine = _FakeEngine(outputs)
     generator.policy_version = 7
+    generator._stop_token_ids = []
     generator.config = SimpleNamespace(
-        sampling=SamplingConfig(n=1, temperature=0.0, top_p=1.0, max_tokens=4),
+        sampling=SamplingConfig(temperature=0.0, top_p=1.0, max_tokens=4),
         debug=SimpleNamespace(seed=None),
     )
     return generator

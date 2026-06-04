@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -75,6 +76,15 @@ def _make_stub_rl_trainer():
         metrics = m.MetricsProcessor.Config()
         dump_folder = "/tmp/test_rl"
         hf_assets_path = "./tests/assets/tokenizer"
+        # __init__ builds these too; stub them so construction does no real work.
+        renderer = SimpleNamespace(
+            build=lambda *, tokenizer_path: SimpleNamespace(
+                get_stop_token_ids=lambda: [],
+                _tokenizer=SimpleNamespace(eos_token_id=0),
+            )
+        )
+        generator = SimpleNamespace(sampling=SimpleNamespace())
+        rollouter = SimpleNamespace(build=lambda: SimpleNamespace())
 
         def to_dict(self):
             return {}
