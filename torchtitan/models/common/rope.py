@@ -98,6 +98,10 @@ class RoPE(Module):
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:
+            # After ``to_empty()``, the existing cache records the target device.
+            # Recompute there when the caller does not pass an explicit buffer device.
+            buffer_device = self.cache.device
+        if buffer_device.type == "meta":
             self.cache = self._precompute_cache()
         else:
             with torch.device(buffer_device):
