@@ -75,9 +75,9 @@ as new branches in `tag_with_memory_policy_pass`.
 
 **NUMA binding for CPU offload:** On multi-NUMA machines (e.g. GB200
 NVLink-C2C), D2H/H2D bandwidth is ~350 GB/s NUMA-local vs ~120 GB/s
-cross-NUMA. `GraphTrainer` automatically applies NUMA binding
-(`AffinityMode.NODE`) when `sac_and_offload` is active, pinning each
-worker to the NUMA node of its GPU. Falls back gracefully on non-CUDA
+cross-NUMA. `Trainer` automatically applies NUMA binding
+(`AffinityMode.NODE`) on CUDA hardware at init, pinning each worker
+to the NUMA node of its GPU. Falls back gracefully on non-CUDA
 hardware or when `numactl` is unavailable.
 
 **Inspecting tags:** `log_activation_memory_policy` (`log_activation_memory_policy.py`)
