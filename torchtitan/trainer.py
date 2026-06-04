@@ -53,7 +53,6 @@ from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     placement_to_spmd_assert_type,
-    preserve_buffer_spmd,
     set_current_spmd_mesh,
     set_spmd_backend,
 )
@@ -370,14 +369,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 del model
 
                 for m in self.model_parts:
-                    with preserve_buffer_spmd(m):
-                        m.to_empty(device=init_device)
-                        with torch.no_grad():
-                            # TODO: Change this back to init_weights once
-                            # autoparallel contains the wrap_init_states
-                            cast(BaseModel, m).init_weights(
-                                buffer_device=buffer_device
-                            )
+                    m.to_empty(device=init_device)
+                    with torch.no_grad():
+                        # TODO: Change this back to init_weights once
+                        # autoparallel contains the wrap_init_states
+                        cast(BaseModel, m).init_weights(buffer_device=buffer_device)
                     m.train()
 
                 # confirm that user will be able to view loss metrics on the console
@@ -400,12 +396,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
-                with preserve_buffer_spmd(model):
-                    model.to_empty(device=init_device)
-                    with torch.no_grad():
-                        # TODO: Change this back to init_weights once
-                        # autoparallel contains the wrap_init_states
-                        cast(BaseModel, model).init_weights(buffer_device=buffer_device)
+                model.to_empty(device=init_device)
+                with torch.no_grad():
+                    # TODO: Change this back to init_weights once
+                    # autoparallel contains the wrap_init_states
+                    cast(BaseModel, model).init_weights(buffer_device=buffer_device)
                 model.train()
 
                 self.model_parts = [model]
@@ -744,12 +739,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     pred = pred.to_local()
                 loss = self.loss_fn(pred, labels, global_valid_tokens)
                 del pred
-                backward_context = (
-                    spmd.no_typecheck()
-                    if self.config.parallelism.spmd_backend == "spmd_types"
-                    else contextlib.nullcontext()
-                )
-                with backward_context:
+                with spmd.no_typecheck():
                     loss.backward()
 
         # The returned loss here is local SUM loss / global_valid_tokens
