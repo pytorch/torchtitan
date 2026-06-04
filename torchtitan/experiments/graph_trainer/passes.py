@@ -210,7 +210,6 @@ def construct_default_graph_passes(
         passes.append(
             functools.partial(
                 cudagraph_pass,
-                is_forward=True,
                 static_input_indices=static_input_indices,
                 tensor_input_indices=traced_result.tensor_input_indices,
             )
