@@ -40,11 +40,15 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
     _make_full_memory_policy,
     tag_sac_policy,
 )
-from torchtitan.experiments.graph_trainer.passes import (
+from torchtitan.experiments.graph_trainer.passes import selective_activation_remat_pass
+from torchtitan.experiments.graph_trainer.remove_noop_passes import (
+    canonicalize_graph_pass,
+    eliminate_dead_code_pass,
+    normalize_view_ops_as_reshape,
+    remove_b2b_transpose_pass,
     remove_detach_pass,
     remove_identity_slice_pass,
     remove_identity_view_pass,
-    selective_activation_remat_pass,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
 from torchtitan.experiments.graph_trainer.tests.test_cpu_offload import (  # noqa: F401
@@ -566,6 +570,36 @@ class TestApplySACPass(TestCase):
         ]
         self.assertEqual(len(recomputed_nodes), 1)
         self.assertTrue(recomputed_nodes[0].meta["autograd_backward"])
+
+    def test_remat_dup_gets_independent_custom_meta(self):
+        # fx.Graph.node_copy shallow-copies node.meta, so without intervention a
+        # recompute dup shares the SAME nested meta["custom"] dict as its forward
+        # original -- annotating one would silently mutate the other. The pass must
+        # give the dup its own copy (preserving the values).
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        fwd = graph.call_function(torch.ops.aten.add.Tensor, args=(x, x))
+        # A forward consumer keeps the original alive (remat erases originals whose
+        # consumers are all backward) so we can compare it against the dup.
+        fwd_use = graph.call_function(torch.ops.aten.relu.default, args=(fwd,))
+        bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(fwd, 2))
+        graph.output((fwd_use, bwd))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        fwd.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+        fwd.meta["custom"] = {_MODULE_FQN: "layers.0.attention_norm"}
+        bwd.meta["autograd_backward"] = True
+
+        gm = selective_activation_remat_pass(gm)
+
+        fwd_node = next(n for n in gm.graph.nodes if n.name == "add_tensor")
+        dup = next(n for n in gm.graph.nodes if n.name == "add_tensor_recomputed")
+        # Independent dict object, same values preserved.
+        self.assertIsNot(dup.meta["custom"], fwd_node.meta["custom"])
+        self.assertEqual(dup.meta["custom"][_MODULE_FQN], "layers.0.attention_norm")
+        # Mutating the dup's annotation must not leak into the original.
+        dup.meta["custom"]["cudagraph_partition"] = "cudagraph_9"
+        self.assertNotIn("cudagraph_partition", fwd_node.meta["custom"])
 
 
 class TestFullMemoryPolicy(TestCase):
@@ -1209,6 +1243,112 @@ class TestRemoveIdentityViewPass(TestCase):
         self.assertEqual(len(list(result.graph.nodes)), num_nodes_before)
 
 
+class TestRemoveB2BTransposePass(TestCase):
+    """Unit tests for the remove_b2b_transpose_pass graph pass."""
+
+    def _count_t_nodes(self, gm):
+        """Count aten.t.default call_function nodes."""
+        return sum(
+            1
+            for n in gm.graph.nodes
+            if n.op == "call_function" and n.target is torch.ops.aten.t.default
+        )
+
+    def test_b2b_transpose_pair_removed(self):
+        """``t(t(x))`` collapses: both transpose nodes are removed and the
+        consumer reads the original tensor directly."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        t1 = graph.call_function(torch.ops.aten.t.default, args=(x,))
+        t2 = graph.call_function(torch.ops.aten.t.default, args=(t1,))
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(t2,))
+        graph.output(relu)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        self.assertEqual(self._count_t_nodes(gm), 2)
+
+        remove_b2b_transpose_pass(gm)
+
+        self.assertEqual(self._count_t_nodes(gm), 0)
+        # relu now consumes the placeholder directly.
+        relu_node = next(
+            n for n in gm.graph.nodes if n.target is torch.ops.aten.relu.default
+        )
+        self.assertEqual(relu_node.args[0].op, "placeholder")
+
+        # Numerics preserved: relu(t(t(x))) == relu(x).
+        x = torch.randn(3, 4)
+        self.assertEqual(gm(x), torch.relu(x))
+
+    def test_single_transpose_preserved(self):
+        """A lone transpose is not a back-to-back pair and must be kept."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        t = graph.call_function(torch.ops.aten.t.default, args=(x,))
+        graph.output(t)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        remove_b2b_transpose_pass(gm)
+
+        self.assertEqual(self._count_t_nodes(gm), 1)
+        x = torch.randn(3, 4)
+        self.assertEqual(gm(x), x.t())
+
+    def test_inner_transpose_with_other_user_kept(self):
+        """When the inner transpose feeds another consumer, only the outer
+        transpose is removed; the inner one stays for its other user."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        t1 = graph.call_function(torch.ops.aten.t.default, args=(x,))
+        t2 = graph.call_function(torch.ops.aten.t.default, args=(t1,))
+        # t1 also feeds a relu, so it cannot be erased.
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(t1,))
+        graph.output((t2, relu))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        self.assertEqual(self._count_t_nodes(gm), 2)
+
+        remove_b2b_transpose_pass(gm)
+
+        # Outer transpose removed, inner one kept (still used by relu).
+        self.assertEqual(self._count_t_nodes(gm), 1)
+
+        x = torch.randn(3, 4)
+        out_t2, out_relu = gm(x)
+        self.assertEqual(out_t2, x)  # t(t(x)) == x
+        self.assertEqual(out_relu, torch.relu(x.t()))
+
+    def test_chain_of_transposes(self):
+        """An odd-length chain ``t(t(t(x)))`` collapses to a single ``t(x)``."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        t1 = graph.call_function(torch.ops.aten.t.default, args=(x,))
+        t2 = graph.call_function(torch.ops.aten.t.default, args=(t1,))
+        t3 = graph.call_function(torch.ops.aten.t.default, args=(t2,))
+        graph.output(t3)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        self.assertEqual(self._count_t_nodes(gm), 3)
+
+        remove_b2b_transpose_pass(gm)
+
+        self.assertEqual(self._count_t_nodes(gm), 1)
+        x = torch.randn(3, 4)
+        self.assertEqual(gm(x), x.t())
+
+    def test_graph_without_transpose_unchanged(self):
+        """Graphs without transpose nodes are returned unchanged."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+        neg = graph.call_function(torch.ops.aten.neg.default, args=(relu,))
+        graph.output(neg)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        num_nodes_before = len(list(gm.graph.nodes))
+
+        result = remove_b2b_transpose_pass(gm)
+
+        self.assertIs(result, gm)
+        self.assertEqual(len(list(result.graph.nodes)), num_nodes_before)
+
+
 class TestRemoveIdentitySlicePass(TestCase):
     """Unit tests for the remove_identity_slice_pass graph pass."""
 
@@ -1629,10 +1769,6 @@ class TestAnnotateModuleFqns(TestCase):
 
 class TestNormalizeViewOpsAsReshape(TestCase):
     def test_replaces_view_and_unsafe_view(self):
-        from torchtitan.experiments.graph_trainer.passes import (
-            normalize_view_ops_as_reshape,
-        )
-
         aten = torch.ops.aten
         g = torch.fx.Graph()
         x = g.placeholder("x")
@@ -1649,6 +1785,37 @@ class TestNormalizeViewOpsAsReshape(TestCase):
         normalize_view_ops_as_reshape(gm)
         for n in gm.graph.nodes:
             self.assertNotIn(n.target, {aten.view.default, aten._unsafe_view.default})
+
+
+class TestCanonicalizeGraphPass(TestCase):
+    """Unit tests for the combined canonicalize_graph_pass entry."""
+
+    def test_runs_all_subpasses(self):
+        """A single call drops detach + back-to-back transpose nodes and
+        normalizes the surviving view op to reshape."""
+        aten = torch.ops.aten
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        d = graph.call_function(aten.detach.default, args=(x,))
+        t1 = graph.call_function(aten.t.default, args=(d,))
+        t2 = graph.call_function(aten.t.default, args=(t1,))
+        # Non-identity view (shape changes), left without fake meta so the
+        # identity-view removal skips it and only normalization applies.
+        v = graph.call_function(aten.view.default, args=(t2, [2, 8]))
+        graph.output(v)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        canonicalize_graph_pass(gm)
+
+        targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
+        self.assertNotIn(aten.detach.default, targets)
+        self.assertNotIn(aten.t.default, targets)
+        self.assertNotIn(aten.view.default, targets)
+        self.assertIn(aten.reshape.default, targets)
+
+        # Numerics preserved: reshape(t(t(detach(x))), [2, 8]) == x.reshape(2, 8).
+        x = torch.randn(4, 4)
+        self.assertEqual(gm(x), x.reshape(2, 8))
 
 
 class TestAsyncTensorParallelPass(FSDPTest):
@@ -2085,6 +2252,38 @@ class TestSelectiveActivationRematPass(TestCase):
         # middle_bwd still consumes bwd_wait at its original location.
         for inp in middle_bwd.all_input_nodes:
             self.assertIs(inp, bwd_wait)
+
+
+class TestEliminateDeadCodePass(TestCase):
+    """Unit tests for eliminate_dead_code_pass."""
+
+    def test_removes_dead_pure_node_keeps_live(self):
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        live = g.call_function(torch.ops.aten.relu.default, (x,))
+        g.call_function(torch.ops.aten.add.Tensor, (x, x))  # dead: no users
+        g.output(live)
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+
+        eliminate_dead_code_pass(gm)
+        targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
+        self.assertIn(torch.ops.aten.relu.default, targets)
+        self.assertNotIn(torch.ops.aten.add.Tensor, targets)
+
+    def test_keeps_impure_node_with_no_users(self):
+        # copy_ mutates its first arg (impure); DCE must keep it even though its
+        # own result is unused.
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        y = g.placeholder("y")
+        g.call_function(torch.ops.aten.copy_.default, (x, y))  # impure, unused result
+        out = g.call_function(torch.ops.aten.relu.default, (x,))
+        g.output(out)
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+
+        eliminate_dead_code_pass(gm)
+        targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
+        self.assertIn(torch.ops.aten.copy_.default, targets)
 
 
 if __name__ == "__main__":
