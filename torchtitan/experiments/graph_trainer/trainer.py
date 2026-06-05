@@ -33,7 +33,33 @@ from torchtitan.experiments.graph_trainer.registry import (
     POST_INIT_HOOKS,
     PRE_TRAIN_STEP_HOOKS,
 )
+from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
+
+
+def _maybe_apply_numa_binding(gpu_index: int, device_type: str) -> None:
+    """Pin this process to the NUMA node of its GPU for local memory bandwidth.
+
+    On multi-NUMA machines (e.g. GB200 NVLink-C2C), pinned-memory allocations
+    that land on the GPU's local NUMA node get ~350 GB/s D2H bandwidth vs
+    ~120 GB/s cross-NUMA. Must run before any pinned memory is allocated.
+    """
+    if device_type != "cuda":
+        return
+    from torch.numa.binding import (
+        _maybe_apply_numa_binding_to_current_process,
+        AffinityMode,
+        NumaOptions,
+    )
+
+    _maybe_apply_numa_binding_to_current_process(
+        gpu_index=gpu_index,
+        numa_options=NumaOptions(
+            affinity_mode=AffinityMode.NODE,
+            should_fall_back_if_binding_fails=True,
+        ),
+    )
+    logger.info("NUMA binding applied for GPU %d", gpu_index)
 
 
 def make_fwd_bwd_step(model, loss_fn):
@@ -73,6 +99,8 @@ class GraphTrainer(Trainer):
 
     def __init__(self, config):
         super().__init__(config)
+
+        _maybe_apply_numa_binding(self.device.index, self.device.type)
 
         if self.config.compile.mode == "aot_fx_trace" and self.parallel_dims.pp_enabled:
             raise ValueError(
