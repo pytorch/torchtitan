@@ -7,9 +7,9 @@
 
 set -ex
 
-# Same as ec2-user
-echo "ci-user:x:1000:1000::/var/lib/ci-user:" >> /etc/passwd
-echo "ci-user:x:1000:" >> /etc/group
+# 1001 matches the OSDC/ARC runner uid so it can clean up $GITHUB_WORKSPACE
+echo "ci-user:x:1001:1001::/var/lib/ci-user:" >> /etc/passwd
+echo "ci-user:x:1001:" >> /etc/group
 # Needed on Focal or newer
 echo "ci-user:*:19110:0:99999:7:::" >> /etc/shadow
 

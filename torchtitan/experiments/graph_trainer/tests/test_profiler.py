@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import gzip
 import json
 import os
 import tempfile
@@ -23,6 +24,8 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
 )
 from torchtitan.experiments.graph_trainer.cudagraph import (
+    _cg_manager,
+    _cudagraph_annotate_trace_file,
     cudagraph_teardown,
     get_cudagraph_annotations,
 )
@@ -206,8 +209,50 @@ class TestTracePostProcessorConfig(TestCase):
 
         self.assertEqual(len(calls), 1, f"Expected 1 call, got {calls}")
         path, existed = calls[0]
-        self.assertTrue(path.endswith("rank0_trace.json"))
+        # Profiler exports gzip-compressed traces (.json.gz) since #3483.
+        self.assertTrue(path.endswith("rank0_trace.json.gz"))
         self.assertTrue(existed, f"Trace file {path} did not exist when callback ran")
+
+    def test_annotate_post_processor_round_trips_gzip_trace(self):
+        """The cudagraph trace post-processor must read and write the
+        gzip-compressed (.json.gz) traces the Profiler produces since #3483.
+        A plain ``open``/``json.load`` would raise on the gzip bytes."""
+
+        graph_node_id = 42
+        trace = {
+            "traceEvents": [
+                {
+                    "name": "some_kernel",
+                    "tid": 1,
+                    "ts": 100,
+                    "args": {"graph node id": graph_node_id},
+                }
+            ]
+        }
+
+        # Seed annotations so the post-processor does real work instead of
+        # returning early on an empty annotation map.
+        saved_annotations = _cg_manager.all_annotations
+        _cg_manager.all_annotations = {
+            graph_node_id: [{_MODULE_FQN: "layers.0.attention.wq"}]
+        }
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                trace_path = os.path.join(tmp, "rank0_trace.json.gz")
+                with gzip.open(trace_path, "wt") as f:
+                    json.dump(trace, f)
+
+                # Must not raise on the gzip-compressed input.
+                _cudagraph_annotate_trace_file(trace_path)
+
+                # And the written-back trace must remain valid gzip JSON.
+                with gzip.open(trace_path, "rt") as f:
+                    annotated = json.load(f)
+        finally:
+            _cg_manager.all_annotations = saved_annotations
+
+        fqns = {e.get("args", {}).get(_MODULE_FQN) for e in annotated["traceEvents"]}
+        self.assertIn("layers.0.attention.wq", fqns)
 
 
 if __name__ == "__main__":
