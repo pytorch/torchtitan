@@ -12,7 +12,6 @@ from torch.distributed.tensor.placement_types import _StridedShard, Replicate, S
 
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
-
 from torchtitan.tools.logging import logger
 
 

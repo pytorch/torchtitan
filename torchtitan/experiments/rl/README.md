@@ -27,11 +27,12 @@ uv venv --python 3.12 titan-rl
 source titan-rl/bin/activate
 ```
 
-1. Install Monarch and TorchStore from main:
+1. Install Monarch, TorchStore, and Renderers from main:
 ```bash
-uv pip install torchmonarch==0.4.1
+uv pip install torchmonarch
 uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
 uv pip install pygtrie portpicker
+uv pip install "git+https://github.com/PrimeIntellect-ai/renderers.git@main"
 ```
 
 2. Install Flash Attention 3 kernels:
