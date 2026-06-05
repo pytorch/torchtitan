@@ -421,9 +421,9 @@ def apply_cpu_offload_pass(
 
     for node, bwd_users in offloadable:
         val = node.meta.get("val")
-        assert val is not None, (
-            f"Node {node.name} tagged for offload has no 'val' metadata"
-        )
+        assert (
+            val is not None
+        ), f"Node {node.name} tagged for offload has no 'val' metadata"
 
         device = val.device
         # Propagate source node metadata to offload chain nodes so
