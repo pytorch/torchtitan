@@ -117,6 +117,8 @@ class StateDictAdapter(BaseStateDictAdapter):
         *,
         allow_none: bool = False,
     ) -> None:
+        # Llama4 mixes RoPE and NoPE attention layers, so HF loading allows
+        # ``rope=None`` there. TODO: remove ``allow_none`` once Llama4 is deleted.
         for layer in self.model_config.layers:  # pyrefly: ignore [missing-attribute]
             rope = layer.attention.rope
             if rope is None and allow_none:
@@ -153,7 +155,7 @@ class StateDictAdapter(BaseStateDictAdapter):
         wq = w[:, :heads_per_kv, :, :].reshape(n_heads * head_dim, dim)
         wk = w[:, heads_per_kv, :, :].reshape(n_kv_heads * head_dim, dim)
         wv = w[:, heads_per_kv + 1, :, :].reshape(n_kv_heads * head_dim, dim)
-        return wq, wk, wv  # pyrefly: ignore [bad-return]
+        return wq, wk, wv
 
     @staticmethod
     def separate_to_fused_qkv(
@@ -174,6 +176,4 @@ class StateDictAdapter(BaseStateDictAdapter):
         v = wv.view(n_kv_heads, 1, head_dim, dim)
         # [n_kv_heads, R, head_dim, dim]
         fused = torch.cat([q, k, v], dim=1)
-        return fused.reshape(  # pyrefly: ignore [bad-return]
-            n_kv_heads * r_dim * head_dim, dim
-        )
+        return fused.reshape(n_kv_heads * r_dim * head_dim, dim)

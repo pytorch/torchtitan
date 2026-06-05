@@ -142,11 +142,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
 
                     for expert_num in range(0, moe_layer.moe.num_experts):
                         new_key = new_abstract_key.format(layer_num, expert_num)
-                        hf_state_dict[new_key] = (
-                            split_values[  # pyrefly: ignore [unsupported-operation]
-                                expert_num
-                            ].squeeze()
-                        )
+                        hf_state_dict[new_key] = split_values[expert_num].squeeze()
 
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)

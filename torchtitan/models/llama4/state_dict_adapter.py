@@ -151,7 +151,7 @@ class Llama4StateDictAdapter(StateDictAdapter):
                 combine_values.append(tt_fqn_map[tt_key].transpose(-1, -2))
 
             value = torch.cat(combine_values, dim=-1)
-            hf_state_dict[hf_fqn] = value  # pyrefly: ignore [unsupported-operation]
+            hf_state_dict[hf_fqn] = value
 
         return hf_state_dict
 

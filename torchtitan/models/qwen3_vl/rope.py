@@ -59,7 +59,7 @@ class MRoPE(CosSinRoPE):
         pos_local = pos_local.to(device=rope_cache.device)
 
         _maybe_check_max_pos(
-            pos_local,  # pyrefly: ignore [bad-argument-type]
+            pos_local,
             max_valid_pos=rope_cache.shape[0] - 1,
         )
         head_dim = rope_cache.shape[-1] // 2
@@ -83,9 +83,9 @@ class MRoPE(CosSinRoPE):
 
         mrope_cache = torch.cat([mrope_cos, mrope_sin], dim=-1).unsqueeze(2)
         if cache_dtensor is not None:
-            return distribute_tensor(  # pyrefly: ignore [bad-return]
-                mrope_cache,  # pyrefly: ignore [bad-argument-type]
+            return distribute_tensor(
+                mrope_cache,
                 cache_dtensor.device_mesh,
                 list(cache_dtensor.placements),
             )
-        return mrope_cache  # pyrefly: ignore [bad-return]
+        return mrope_cache

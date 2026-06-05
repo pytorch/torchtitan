@@ -112,7 +112,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         bq = b[:, :heads_per_kv, :].reshape(n_heads * head_dim)
         bk = b[:, heads_per_kv, :].reshape(n_kv_heads * head_dim)
         bv = b[:, heads_per_kv + 1, :].reshape(n_kv_heads * head_dim)
-        return bq, bk, bv  # pyrefly: ignore [bad-return]
+        return bq, bk, bv
 
     @staticmethod
     def _separate_to_fused_qkv_bias(
@@ -130,9 +130,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         k = bk.view(n_kv_heads, 1, head_dim)
         v = bv.view(n_kv_heads, 1, head_dim)
         fused = torch.cat([q, k, v], dim=1)
-        return fused.reshape(  # pyrefly: ignore [bad-return]
-            n_kv_heads * r_dim * head_dim
-        )
+        return fused.reshape(n_kv_heads * r_dim * head_dim)
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
