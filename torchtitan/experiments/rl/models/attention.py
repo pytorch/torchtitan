@@ -97,7 +97,7 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
+                [num_blocks, 2, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -135,7 +135,7 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
         ), "Encoder-only attention not supported yet."
 
         # For decoder and cross-attention, use KV cache as before
-        key_cache, value_cache = kv_cache.unbind(0)
+        key_cache, value_cache = kv_cache.unbind(1)
 
         assert not self.kv_cache_dtype.startswith(
             "fp8"
