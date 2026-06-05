@@ -59,13 +59,15 @@ aten = torch.ops.aten
 # ============================================================
 
 
-def _find_tensor_child(node: Node) -> Node | None:
-    """Find a Tensor-producing child of a non-Tensor node (e.g. getitem after sort).
+def _find_last_tensor_consumer(node: Node) -> Node | None:
+    """Return a Tensor-producing node for wait_tensor's last_use_of_storage arg.
 
-    Used to create a data-dependency edge through wait_tensor's
-    last_use_of_storage arg when the actual last consumer produces
-    a non-Tensor value. Returns None if no Tensor child exists.
+    If *node* itself produces a Tensor, return it directly.  Otherwise search
+    its immediate users for a Tensor-producing child (e.g. getitem after sort).
+    Returns None if no Tensor node can be found.
     """
+    if isinstance(node.meta.get("val"), torch.Tensor):
+        return node
     for user in node.users:
         if user.op == "call_function" and isinstance(
             user.meta.get("val"), torch.Tensor
@@ -455,9 +457,7 @@ def apply_cpu_offload_pass(
         # The schema requires Optional[Tensor], so if the last consumer
         # produces a non-Tensor (e.g. sort returns a tuple), find a
         # Tensor-producing child (e.g. getitem) to preserve the edge.
-        last_use_arg = last_consumer
-        if not isinstance(last_consumer.meta.get("val"), torch.Tensor):
-            last_use_arg = _find_tensor_child(last_consumer)
+        last_use_arg = _find_last_tensor_consumer(last_consumer)
 
         with gm.graph.inserting_after(offload_node):
             wait_offload_node = gm.graph.call_function(
