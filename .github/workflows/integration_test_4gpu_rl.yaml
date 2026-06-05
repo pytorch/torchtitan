@@ -28,6 +28,7 @@ permissions:
 jobs:
   # Step 1: Dynamically compute the matrix based on conditions
   set-matrix:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/rl')
     uses: ./.github/workflows/set-matrix.yaml
     with:
       is-experimental: true
@@ -35,7 +36,6 @@ jobs:
   # Step 2: Use the dynamic matrix in the build-test job
   build-test:
     needs: set-matrix
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/rl')
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false
