@@ -75,7 +75,7 @@ class RoPE(Module):
         """
         raise NotImplementedError
 
-    def _prepare_rope_cache(
+    def _reshape_cache(
         self,
         query: torch.Tensor,
         positions: torch.Tensor | None = None,
@@ -118,10 +118,11 @@ class RoPE(Module):
         positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply rotary embeddings to query and key tensors."""
-        rope_cache = self._prepare_rope_cache(query, positions)
-        return self.apply_rotary_emb(query, key, rope_cache)
+        reshaped_cache = self._reshape_cache(query, positions)
+        return self.apply_rotary_emb(query, key, reshaped_cache)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        # TODO: In long-term we need to have buffer abstraction in `Module`` class to infer the buffer_device
         if buffer_device is None:
             # After ``to_empty()``, the existing cache records the target device.
             # Recompute there when the caller does not pass an explicit buffer device.
@@ -218,7 +219,7 @@ class ComplexRoPE(RoPE):
         freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
         return freqs_cis
 
-    def _prepare_rope_cache(
+    def _reshape_cache(
         self,
         query: torch.Tensor,
         positions: torch.Tensor | None = None,
@@ -310,7 +311,7 @@ class CosSinRoPE(RoPE):
         sin = theta.sin() * mscale
         return torch.cat([cos, sin], dim=-1)
 
-    def _prepare_rope_cache(
+    def _reshape_cache(
         self,
         query: torch.Tensor,
         positions: torch.Tensor | None = None,
@@ -357,6 +358,7 @@ def _reshape_for_broadcast(
     ndim = len(query_shape)
     assert ndim > 1
     bsz, seqlen = query_shape[:2]
+    # cache_width is `head_dim * 2` for CosSinRoPE, and `head_dim // 2` for ComplexRoPE
     cache_width = rope_cache.shape[-1]
     if positions is None:
         rope_cache = rope_cache[0:seqlen]

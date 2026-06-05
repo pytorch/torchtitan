@@ -27,7 +27,7 @@ class MRoPE(CosSinRoPE):
             )
         super().__init__(config)
 
-    def _prepare_rope_cache(
+    def _reshape_cache(
         self,
         query: torch.Tensor,
         positions: torch.Tensor | None = None,
@@ -35,7 +35,7 @@ class MRoPE(CosSinRoPE):
         """Build a position-specific cache for 3D MRoPE position IDs."""
         if positions is not None and positions.ndim == 3:
             return self._compute_mrope_cache(positions)
-        return super()._prepare_rope_cache(query, positions)
+        return super()._reshape_cache(query, positions)
 
     def _compute_mrope_cache(self, position_ids: torch.Tensor) -> torch.Tensor:
         cfg = self.config
