@@ -11,23 +11,23 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from spmd_types._checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import (
-    DTensor,
     distribute_tensor,
+    DTensor,
     Partial,
     Replicate,
     Shard,
 )
 from torch.distributed.tensor.parallel import loss_parallel
-from spmd_types.checker import typecheck
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
 from torchtitan.components.loss import (
-    ChunkedCELoss,
     _LossParallelCrossEntropy,
+    ChunkedCELoss,
     cross_entropy_loss,
     GradAccumulator,
     IGNORE_INDEX,
