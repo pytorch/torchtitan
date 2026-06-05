@@ -450,6 +450,29 @@ class TestApplySACPass(TestCase):
         self.assertEqual(len(nodes), 1)
         self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
 
+    def test_sym_size_ops_always_saved(self):
+        """Symbolic size/shape ops are forced MUST_SAVE regardless of policy:
+        recomputing one would pin the parent tensor alive just to read its size."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+        graph.call_function(torch.ops.aten.sym_size.int, args=(relu, 0))
+        graph.output(relu)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        # Even a recompute-everything policy must save sym_size.
+        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+
+        tags = {
+            n.target: n.meta["recompute"]
+            for n in gm.graph.nodes
+            if n.op == "call_function"
+        }
+        self.assertEqual(tags[torch.ops.aten.sym_size.int], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(
+            tags[torch.ops.aten.relu.default], CheckpointPolicy.MUST_RECOMPUTE
+        )
+
     def test_getitem_propagates_parent_tags(self):
         """operator.getitem nodes should inherit the parent's recompute tag."""
         gm = self._build_gm(
@@ -896,6 +919,27 @@ class TestBucketingPrefetchOrder(FSDPTest):
                 f"layer {backward_ids[i]} after layer {backward_ids[i - 1]} "
                 f"(full order: {layer_ids})",
             )
+
+    def test_drops_assert_async_and_dead_chain(self):
+        # _assert_async is side-effectful, so plain DCE keeps it (and its whole
+        # le/all condition chain). The pass erases the assert, then DCE reaps the
+        # now-orphaned chain; unrelated live nodes are untouched.
+        aten = torch.ops.aten
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        le = g.call_function(aten.le.Scalar, (x, 5))
+        reduced = g.call_function(aten.all.default, (le,))
+        g.call_function(aten._assert_async.msg, (reduced, "cond"))  # side-effect
+        out = g.call_function(aten.relu.default, (x,))
+        g.output(out)
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+
+        eliminate_dead_code_pass(gm)
+        targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
+        self.assertNotIn(aten._assert_async.msg, targets)
+        self.assertNotIn(aten.le.Scalar, targets)
+        self.assertNotIn(aten.all.default, targets)
+        self.assertIn(aten.relu.default, targets)
 
 
 class TestRemoveDetachPass(TestCase):
@@ -1818,6 +1862,46 @@ class TestCanonicalizeGraphPass(TestCase):
         # Numerics preserved: reshape(t(t(detach(x))), [2, 8]) == x.reshape(2, 8).
         x = torch.randn(4, 4)
         self.assertEqual(gm(x), x.reshape(2, 8))
+
+    def test_removes_lift_fresh_copy_of_unmutated_constant(self):
+        """lift_fresh_copy of a tensor constant is dropped when the copy is only
+        read (here as the value added to x), so consumers read the constant."""
+        aten = torch.ops.aten
+        m = torch.nn.Module()
+        m._const = torch.tensor(5)
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        const = graph.get_attr("_const")
+        lf = graph.call_function(aten.lift_fresh_copy.default, args=(const,))
+        graph.output(graph.call_function(aten.add.Tensor, args=(x, lf)))
+        gm = torch.fx.GraphModule(m, graph)
+
+        canonicalize_graph_pass(gm)
+
+        targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
+        self.assertNotIn(aten.lift_fresh_copy.default, targets)
+        # Numerics preserved: x + lift_fresh_copy(5) == x + 5.
+        x = torch.randn(4)
+        self.assertEqual(gm(x), x + 5)
+
+    def test_keeps_mutated_lift_fresh_copy(self):
+        """A lift_fresh_copy whose copy is mutated in place is kept -- removing it
+        would clobber the shared constant."""
+        aten = torch.ops.aten
+        m = torch.nn.Module()
+        m._const = torch.tensor([1.0, 2.0])
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        const = graph.get_attr("_const")
+        lf = graph.call_function(aten.lift_fresh_copy.default, args=(const,))
+        graph.call_function(aten.add_.Tensor, args=(lf, x))  # mutates the copy
+        graph.output(lf)
+        gm = torch.fx.GraphModule(m, graph)
+
+        canonicalize_graph_pass(gm)
+
+        targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
+        self.assertIn(aten.lift_fresh_copy.default, targets)
 
 
 class TestAsyncTensorParallelPass(FSDPTest):
