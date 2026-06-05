@@ -9,7 +9,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeAlias
 
+import spmd_types as spmd
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
@@ -34,6 +36,141 @@ def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
         reduction="sum",
         ignore_index=IGNORE_INDEX,
     )
+
+
+@spmd.register_autograd_function
+class _LossParallelCrossEntropy(torch.autograd.Function):
+    """
+    Vocab-parallel cross-entropy on plain (non-DTensor) local tensors.
+
+    Replaces ``torch.distributed.tensor.parallel.loss_parallel()`` with an
+    explicit autograd Function so that SPMD code can operate on local tensors
+    and process groups directly, without the DTensor-based context manager.
+
+    Supports uneven vocab sharding (last TP rank may hold fewer classes) and
+    ``IGNORE_INDEX`` labels.  Forward uses three TP all-reduces (max, sumexp,
+    gather) to aggregate intermediate results in distributed softmax;
+    backward is fused (NLL + log-softmax) with zero collectives.
+
+    All inputs and outputs are plain ``torch.Tensor`` (not DTensor).
+    """
+
+    @staticmethod
+    def typecheck_forward(
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        tp_group: dist.ProcessGroup,
+        global_vocab_size: int,
+    ) -> torch.Tensor:
+        """
+        SPMD type: logits S(-1)@TP, labels I@TP → loss I@TP.
+        Non-TP axes are passed through from logits to the output.
+        """
+        spmd.assert_type(logits, {tp_group: spmd.S(logits.dim() - 1)})
+        spmd.assert_type(labels, {tp_group: spmd.I})
+        result = _LossParallelCrossEntropy.apply(
+            logits,
+            labels,
+            tp_group,
+            global_vocab_size,
+        )
+        output_type = dict(spmd.get_local_type(logits))
+        output_type[tp_group] = spmd.I
+        spmd.assert_type(result, output_type)
+        return result
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def forward(
+        ctx,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        tp_group: dist.ProcessGroup,
+        global_vocab_size: int,
+    ) -> torch.Tensor:
+        """Compute exact CE loss from local vocab shards via TP all-reduces."""
+        logits_shape = logits.shape
+        logits_2d = logits.flatten(0, -2).float()
+        labels_1d = labels.flatten()
+
+        # Compute this rank's vocab shard bounds for the local logits.
+        tp_world_size = dist.get_world_size(tp_group)
+        tp_rank = dist.get_rank(tp_group)
+        chunk_size = (global_vocab_size + tp_world_size - 1) // tp_world_size
+        vocab_start = min(global_vocab_size, chunk_size * tp_rank)
+        vocab_end = min(global_vocab_size, vocab_start + chunk_size)
+        local_vocab_size = max(0, vocab_end - vocab_start)
+        if logits_2d.shape[-1] != local_vocab_size:
+            raise ValueError(
+                "_LossParallelCrossEntropy expected local vocab size "
+                f"{local_vocab_size} for global vocab size {global_vocab_size}, "
+                f"got {logits_2d.shape[-1]}."
+            )
+        if local_vocab_size == 0:
+            raise ValueError(
+                "_LossParallelCrossEntropy does not support empty vocab shards."
+            )
+
+        # All-reduce max for numerically stable distributed log-softmax.
+        local_max = torch.amax(logits_2d, dim=-1, keepdim=True)
+        dist.all_reduce(local_max, op=dist.ReduceOp.MAX, group=tp_group)
+
+        # All-reduce sum over shifted logits for the global softmax denominator.
+        shifted = logits_2d - local_max
+        shifted_sumexp = torch.sum(torch.exp(shifted), dim=-1, keepdim=True)
+        dist.all_reduce(shifted_sumexp, op=dist.ReduceOp.SUM, group=tp_group)
+        log_probs = shifted - torch.log(shifted_sumexp)
+
+        # Mask labels outside this vocab shard; the TP all-reduce below selects
+        # the owner rank's log probability for each target token.
+        safe_labels = torch.where(labels_1d != IGNORE_INDEX, labels_1d, 0)
+        out_of_range = (safe_labels < vocab_start) | (
+            safe_labels >= vocab_start + local_vocab_size
+        )
+        local_labels = safe_labels - vocab_start
+        local_labels[out_of_range] = 0
+
+        local_result = torch.gather(log_probs, -1, local_labels.unsqueeze(-1))
+        local_result[out_of_range.unsqueeze(-1)] = 0
+        dist.all_reduce(local_result, op=dist.ReduceOp.SUM, group=tp_group)
+
+        # Compute summed NLL loss, dropping ignored labels.
+        result = -local_result.squeeze(-1)
+        result = torch.where(labels_1d != IGNORE_INDEX, result, 0)
+        loss = result.sum()
+
+        # Save local-shard log probabilities for the fused CE backward.
+        ctx.save_for_backward(log_probs, labels_1d)
+        ctx.logits_shape = logits_shape
+        ctx.logits_dtype = logits.dtype
+        ctx.vocab_start = vocab_start
+        ctx.local_vocab_size = local_vocab_size
+        return loss
+
+    @staticmethod
+    def backward(  # pyrefly: ignore[bad-override]
+        ctx,
+        grad_output: torch.Tensor,
+    ) -> tuple[torch.Tensor, None, None, None]:
+        log_probs, labels_1d = ctx.saved_tensors
+        safe_labels = torch.where(labels_1d != IGNORE_INDEX, labels_1d, 0)
+        out_of_range = (safe_labels < ctx.vocab_start) | (
+            safe_labels >= ctx.vocab_start + ctx.local_vocab_size
+        )
+        local_labels = safe_labels - ctx.vocab_start
+        local_labels[out_of_range] = 0
+
+        grad_input = torch.zeros_like(log_probs)
+        row_idx = torch.arange(local_labels.shape[0], device=local_labels.device)
+        grad_update = out_of_range.to(grad_input.dtype) - 1.0
+        grad_input[row_idx, local_labels] = grad_update
+
+        grad_output = torch.where(
+            (labels_1d != IGNORE_INDEX).unsqueeze(-1), grad_output, 0
+        )
+        grad_logits = (grad_input + torch.exp(log_probs)) * grad_output
+        grad_logits = grad_logits.reshape(ctx.logits_shape).to(ctx.logits_dtype)
+        return grad_logits, None, None, None
 
 
 def _cross_entropy_via_local_map(pred: DTensor, labels: DTensor) -> torch.Tensor:
