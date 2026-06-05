@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+from torch._prims_common import make_contiguous_strides_for
 
 from torch.distributed._tensor import (
     distribute_tensor,
@@ -22,6 +23,7 @@ from torch.distributed._tensor import (
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
+from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
 
 from torchtitan.protocols.module import Module
@@ -201,8 +203,18 @@ class ReplicateComputation(Module):
             dp_mesh = self.device_mesh
             # re-wrap 2D DTensor to 1D DTensor on dp_mesh for efficient FSDP all-gather
             sharded_local_tensor = x.to_local()
+            non_dp_placements = tuple(x._spec.placements[-non_dp_mesh_dims:])
+            dp_global_shape, _ = compute_local_shape_and_global_offset(
+                x._spec.tensor_meta.shape,
+                x._spec.mesh,
+                [Replicate()] * dp_mesh.ndim + list(non_dp_placements),
+            )
             sharded_dtensor = DTensor.from_local(
-                sharded_local_tensor, dp_mesh, self.param_sharding
+                sharded_local_tensor,
+                dp_mesh,
+                self.param_sharding,
+                shape=torch.Size(dp_global_shape),
+                stride=make_contiguous_strides_for(dp_global_shape),
             )
 
             # the actual FSDP's fwd all-gather & bwd reduce-scatter
@@ -219,7 +231,6 @@ class ReplicateComputation(Module):
                 grad_placements=self.grad_placements
             )
 
-            non_dp_placements = tuple(x._spec.placements[-non_dp_mesh_dims:])
             non_dp_mesh_dim_names = tuple(
                 x._spec.mesh.mesh_dim_names[-non_dp_mesh_dims:]
             )
