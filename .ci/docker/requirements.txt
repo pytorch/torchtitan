@@ -2,6 +2,8 @@ torchdata >= 0.8.0
 datasets >= 3.6.0, < 4.8.0
 tensorboard
 wandb
+gigashuffle @ git+https://github.com/commaai/gigashuffle.git@acc32e91e6c3247a169b425e3e4adfb08b20261a ; python_version >= "3.12"
+onnxscript
 fsspec
 tyro >= 1.0.5
 tokenizers >= 0.15.0

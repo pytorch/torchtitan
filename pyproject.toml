@@ -23,6 +23,8 @@ dependencies = [
     "tyro",
     "tensorboard",
     "wandb",
+    "gigashuffle; python_version >= '3.12'",
+    "onnxscript",
     "reporterv2; python_version >= '3.11'",
     "einops",
     "pillow",
@@ -51,6 +53,7 @@ skip = ["*.json"]
 ignore-words-list = ["assertin", "datas" ,"indx", "inpt", "nd", "socio-economic"]
 
 [tool.uv.sources]
+gigashuffle = { git = "https://github.com/commaai/gigashuffle.git", rev = "acc32e91e6c3247a169b425e3e4adfb08b20261a" }
 reporterv2 = { git = "https://github.com/commaai/reporterv2.git", rev = "f0856cd878f58fc648bf92d80aa90a72581af559" }
 
 # ---- Explicit project build information ---- #
