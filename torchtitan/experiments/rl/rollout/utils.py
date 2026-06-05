@@ -17,7 +17,7 @@ def last_completion_text(rollout: Rollout) -> str:
     """Return the completion message text from the last turn, or `""`."""
     if not rollout.turns:
         return ""
-    msg = rollout.turns[-1].parsed_completion_message
+    msg = rollout.turns[-1].completion_message
     return (msg.get("content") or "") if msg else ""
 
 

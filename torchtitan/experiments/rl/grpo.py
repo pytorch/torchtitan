@@ -211,7 +211,7 @@ class _RolloutGroupState:
     """A prompt group's working state across one rollout collection call."""
 
     group_id: str
-    example: object
+    sample: object
     envs: list[TokenEnv]  # [group_size]
     env_init_outputs: list[TokenEnvOutput] = field(default_factory=list)
     completions: list[Completion] | None = None
@@ -613,29 +613,28 @@ class RLTrainer(Configurable):
         instead of batching one `generate` over all prompts at once.
         """
 
-        rollouter: Rollouter = self._rollouter
         generation_metrics_prefix = (
             "validation_generator" if is_validation else "generator"
         )
         rollout_metrics_prefix = "validation" if is_validation else "rollout"
 
-        # 1. Sample one example per group from the train / validation dataset;
-        # 2. create N envs per example.
+        # 1. Get one sample per group from the train / validation dataset;
+        # 2. create N envs per sample.
         group_states: list[_RolloutGroupState] = []
         for group_idx in range(num_groups):
-            example = (
-                rollouter.sample_validation_example()
+            sample = (
+                self._rollouter.get_validation_sample()
                 if is_validation
-                else rollouter.sample_train_example()
+                else self._rollouter.get_train_sample()
             )
             group_id = f"step={step}/group={group_offset + group_idx}"
-            envs = rollouter.make_env_group(
-                example=example, group_size=group_size, renderer=self.renderer
+            envs = self._rollouter.make_env_group(
+                sample=sample, group_size=group_size, renderer=self.renderer
             )
             group_states.append(
                 _RolloutGroupState(
                     group_id=group_id,
-                    example=example,
+                    sample=sample,
                     envs=envs,
                 )
             )
@@ -679,6 +678,8 @@ class RLTrainer(Configurable):
         for group_state in valid_group_states:
             for sample_idx, env_init_output in enumerate(group_state.env_init_outputs):
                 prompt_token_ids.append(env_init_output.next_prompt_token_ids or [])
+                # TODO(multi-turn): make request_id unique per turn (append a turn index). Today it is
+                # per-sample, so multiple generate calls within one multi-turn rollout would reuse the id.
                 request_ids.append(_sample_id(group_state.group_id, sample_idx))
 
         # 5. Run one batched generate over valid group states (n=1; pre-expanded).
@@ -704,6 +705,8 @@ class RLTrainer(Configurable):
         # 6. After the batch-level generate returns, finish each group state
         # independently: step generated rollouts, score the group, and append
         # the result.
+        # TODO(continuous-batching): group completions by group_id parsed from request_id instead of
+        # relying on returned order; under CB completions won't come back in request order.
         completion_offset = 0
         for group_state in valid_group_states:
             next_completion_offset = completion_offset + len(
@@ -718,7 +721,6 @@ class RLTrainer(Configurable):
             *(
                 self._run_group_rollout(
                     group_state=group_state,
-                    rollouter=rollouter,
                 )
                 for group_state in valid_group_states
             )
@@ -756,13 +758,11 @@ class RLTrainer(Configurable):
         self,
         *,
         group_state: _RolloutGroupState,
-        rollouter: Rollouter,
     ) -> RolloutGroup | None:
         """Step generated rollouts, score the group, and return it.
 
         Args:
             group_state: One prompt group's envs, prompt steps, and rollout slots.
-            rollouter: `Rollouter` for this group, containing the scoring function.
 
         Returns:
             Scored rollout group, or `None` if this group failed and should be dropped.
@@ -791,7 +791,7 @@ class RLTrainer(Configurable):
                 )
             )
 
-            outputs = await rollouter.score_group(rollouts, group_state.example)
+            outputs = await self._rollouter.score_group(rollouts, group_state.sample)
             for rollout, output in zip(rollouts, outputs, strict=True):
                 rollout.reward = output.reward
                 rollout.reward_breakdown = output.reward_breakdown
@@ -844,7 +844,7 @@ class RLTrainer(Configurable):
                     completion_token_ids=completion.token_ids,
                     completion_logprobs=completion.token_logprobs,
                     policy_version=completion.policy_version,
-                    parsed_completion_message=env_output.parsed_completion_message,
+                    completion_message=env_output.completion_message,
                     env_messages=env_output.env_messages,
                     env_rewards=env_output.env_rewards,
                 )

@@ -12,8 +12,8 @@ from renderers import Message
 
 from torchtitan.experiments.rl.environment import (
     MessageEnv,
-    MessageInitOutput,
-    MessageStepOutput,
+    MessageEnvInitOutput,
+    MessageEnvStepOutput,
 )
 from torchtitan.experiments.rl.examples.sum_digits.data import SumDigitsExample
 
@@ -40,16 +40,16 @@ class SumDigitsEnv(MessageEnv):
     def __init__(self, config: Config, *, env_input: SumDigitsExample) -> None:
         self._numbers = env_input.numbers
 
-    async def init(self) -> MessageInitOutput:
+    async def init(self) -> MessageEnvInitOutput:
         """Return the system prompt and one SumDigits user question."""
         question = f"What is the total digit sum of {self._numbers}?"
-        return MessageInitOutput(
+        return MessageEnvInitOutput(
             init_prompt_messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": question},
             ]
         )
 
-    async def step(self, parsed_completion_message: Message) -> MessageStepOutput:
+    async def step(self, completion_message: Message) -> MessageEnvStepOutput:
         # Single-turn env: end after the first completion.
-        return MessageStepOutput(done=True)
+        return MessageEnvStepOutput(done=True)

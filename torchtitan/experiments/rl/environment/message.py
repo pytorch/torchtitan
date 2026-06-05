@@ -15,18 +15,18 @@ from torchtitan.config import Configurable
 
 
 @dataclass(kw_only=True, slots=True)
-class MessageInitOutput:
+class MessageEnvInitOutput:
     """Initial messages + tool specs from `MessageEnv.init`."""
 
     init_prompt_messages: list[Message]  # [num_prompt_messages]
-    """The opening messages (e.g. [system, user])."""
+    """The opening messages (e.g. [system, user]); may include few-shot assistant turns."""
 
     tools: list[ToolSpec] = field(default_factory=list)  # [num_tools]
     """Tool schemas exposed to the assistant. Empty for tool-less envs."""
 
 
 @dataclass(kw_only=True, slots=True)
-class MessageStepOutput:
+class MessageEnvStepOutput:
     """The env's reply to the assistant's turn."""
 
     env_messages: list[Message] = field(default_factory=list)  # [num_env_messages]
@@ -44,7 +44,7 @@ class MessageStepOutput:
         # env replies are tool/user turns; the assistant turn comes from the generator
         if any(m.get("role") == "assistant" for m in self.env_messages):
             raise ValueError(
-                "MessageStepOutput.env_messages may not contain assistant messages"
+                "MessageEnvStepOutput.env_messages may not contain assistant messages"
             )
 
 
@@ -65,18 +65,18 @@ class MessageEnv(Configurable, abc.ABC):
             def __init__(self, config: Config, *, env_input: CalculatorExample) -> None:
                 self._expression = env_input.expression
 
-            async def init(self) -> MessageInitOutput:
-                return MessageInitOutput(
+            async def init(self) -> MessageEnvInitOutput:
+                return MessageEnvInitOutput(
                     init_prompt_messages=[{"role": "user", "content": f"What is {self._expression}?"}],
                     tools=[CALCULATOR_TOOL],
                 )
 
-            async def step(self, parsed_completion_message: Message) -> MessageStepOutput:
-                tool_calls = parsed_completion_message.get("tool_calls")
+            async def step(self, completion_message: Message) -> MessageEnvStepOutput:
+                tool_calls = completion_message.get("tool_calls")
                 if not tool_calls:
-                    return MessageStepOutput(done=True)  # assistant gave its final answer
+                    return MessageEnvStepOutput(done=True)  # assistant gave its final answer
                 result = run_calculator(tool_calls[0])
-                return MessageStepOutput(
+                return MessageEnvStepOutput(
                     env_messages=[{"role": "tool", "content": result}]
                 )
     """
@@ -86,11 +86,11 @@ class MessageEnv(Configurable, abc.ABC):
         """Static env params; the per-rollout example is passed to `build(env_input=...)`."""
 
     @abc.abstractmethod
-    async def init(self) -> MessageInitOutput:
+    async def init(self) -> MessageEnvInitOutput:
         """Return the initial conversation + tools for prompt rendering."""
 
     @abc.abstractmethod
-    async def step(self, parsed_completion_message: Message) -> MessageStepOutput:
+    async def step(self, completion_message: Message) -> MessageEnvStepOutput:
         """Advance the env one turn given the completion message.
 
         `TokenEnv` parses the completion and handles
@@ -98,10 +98,10 @@ class MessageEnv(Configurable, abc.ABC):
         so the env only sees a well-formed completion message.
 
         Args:
-            parsed_completion_message: the completion as a parsed message.
+            completion_message: the completion decoded into a message.
 
         Returns:
-            `MessageStepOutput` with the env's reply messages.
+            `MessageEnvStepOutput` with the env's reply messages.
         """
 
     async def close(self) -> None:

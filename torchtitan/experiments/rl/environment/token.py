@@ -9,23 +9,22 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 from renderers import Message, Renderer, ToolSpec
 
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.environment.message import MessageEnv
 from torchtitan.experiments.rl.rollout.types import RolloutStatus
-
-if TYPE_CHECKING:
-    from torchtitan.experiments.rl.actors.generator import Completion
+from torchtitan.experiments.rl.types import Completion
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(kw_only=True, slots=True)
 class TokenEnvOutput:
-    """What `TokenEnv.init`/`.step` return"""
+    """What `TokenEnv` produced this turn. Output only — it does not carry the prompt that was fed
+    in or generator metadata (logprobs, policy_version). The rollout loop folds it together
+    with those inputs into a durable `RolloutTurn`."""
 
     next_prompt_token_ids: list[int] | None  # [num_prompt_tokens] or None
     """Tokens for the next `generate` call. `None` once no further prompt is
@@ -37,8 +36,9 @@ class TokenEnvOutput:
     status: RolloutStatus
     """`ONGOING` while the rollout runs; a terminal `RolloutStatus` otherwise."""
 
-    parsed_completion_message: Message | None = None
-    """This turn's parsed completion message. `None` on init and on parse failure."""
+    completion_message: Message | None = None
+    """This turn's completion decoded from the generator's tokens into a message by the renderer
+    (this is the TokenEnv's parse, not the raw generator output). `None` on init and on parse failure."""
 
     env_messages: list[Message] = field(default_factory=list)  # [num_env_messages]
     """The env's reply on this step (tool / user). Empty on init and on terminals
@@ -114,7 +114,7 @@ class TokenEnv(Configurable):
         """Render the initial conversation into the first generator prompt."""
         env_init_output = await self._message_env.init()
 
-        # Copy our running conversation so we avoid mutating previous states
+        # Copy our running conversation (messages) so we avoid mutating previous states
         self._messages = list(env_init_output.init_prompt_messages)
 
         # Render messages into tokens
@@ -141,7 +141,7 @@ class TokenEnv(Configurable):
             ),
         )
 
-    async def step(self, completion: "Completion") -> TokenEnvOutput:
+    async def step(self, completion: Completion) -> TokenEnvOutput:
         """Advance the env by one sampled completion from the generator.
 
         Args:
@@ -169,14 +169,14 @@ class TokenEnv(Configurable):
                 status=RolloutStatus.ERROR_PARSE,
             )
 
-        parsed_completion_message: Message = {
+        completion_message: Message = {
             "role": "assistant",
             "content": parsed.content,
         }
         if parsed.reasoning_content:
-            parsed_completion_message["reasoning_content"] = parsed.reasoning_content
+            completion_message["reasoning_content"] = parsed.reasoning_content
         if parsed.tool_calls:
-            parsed_completion_message["tool_calls"] = parsed.tool_calls
+            completion_message["tool_calls"] = parsed.tool_calls
 
         # Truncated / aborted: the response is final and partial. Keep it for
         # partial-reward grading and debugging; don't step the env on it.
@@ -186,24 +186,24 @@ class TokenEnv(Configurable):
                 next_prompt_token_ids=None,
                 next_prompt_messages=None,
                 status=RolloutStatus.TRUNCATED_LENGTH,
-                parsed_completion_message=parsed_completion_message,
+                completion_message=completion_message,
             )
         if completion.finish_reason == "abort":
             return TokenEnvOutput(
                 next_prompt_token_ids=None,
                 next_prompt_messages=None,
                 status=RolloutStatus.ERROR_ABORT,
-                parsed_completion_message=parsed_completion_message,
+                completion_message=completion_message,
             )
 
         # Apply the user's env step under a timeout
         timeout = self._config.step_timeout_s
         try:
             if timeout is None:
-                step_output = await self._message_env.step(parsed_completion_message)
+                step_output = await self._message_env.step(completion_message)
             else:
                 step_output = await asyncio.wait_for(
-                    self._message_env.step(parsed_completion_message), timeout=timeout
+                    self._message_env.step(completion_message), timeout=timeout
                 )
         except TimeoutError:
             logger.warning("step timed out after %ss; -> ERROR_TIMEOUT", timeout)
@@ -211,12 +211,15 @@ class TokenEnv(Configurable):
                 next_prompt_token_ids=None,
                 next_prompt_messages=None,
                 status=RolloutStatus.ERROR_TIMEOUT,
-                parsed_completion_message=parsed_completion_message,
+                completion_message=completion_message,
             )
 
+        # TODO(history-edit): let MessageEnv edit history here (e.g. compaction). Needs (a) per-turn
+        # token count signaled to the env, (b) env returns the full new history, (c) a post-proc to
+        # branch the rollout before/after compaction.
         # Create a new list to avoid mutating previous states
         self._messages = (
-            self._messages + [parsed_completion_message] + step_output.env_messages
+            self._messages + [completion_message] + step_output.env_messages
         )
 
         if step_output.done:
@@ -224,7 +227,7 @@ class TokenEnv(Configurable):
                 next_prompt_token_ids=None,
                 next_prompt_messages=None,
                 status=RolloutStatus.COMPLETED,
-                parsed_completion_message=parsed_completion_message,
+                completion_message=completion_message,
                 env_messages=step_output.env_messages,
                 env_rewards=step_output.env_rewards,
             )
@@ -255,7 +258,7 @@ class TokenEnv(Configurable):
                 next_prompt_token_ids=None,
                 next_prompt_messages=None,
                 status=RolloutStatus.TRUNCATED_PROMPT_TOO_LONG,
-                parsed_completion_message=parsed_completion_message,
+                completion_message=completion_message,
                 env_messages=step_output.env_messages,
                 env_rewards=step_output.env_rewards,
             )
@@ -265,7 +268,7 @@ class TokenEnv(Configurable):
             next_prompt_token_ids=next_prompt_token_ids,
             next_prompt_messages=self._messages,
             status=RolloutStatus.ONGOING,
-            parsed_completion_message=parsed_completion_message,
+            completion_message=completion_message,
             env_messages=step_output.env_messages,
             env_rewards=step_output.env_rewards,
         )

@@ -6,15 +6,15 @@
 
 from torchtitan.experiments.rl.environment.message import (
     MessageEnv,
-    MessageInitOutput,
-    MessageStepOutput,
+    MessageEnvInitOutput,
+    MessageEnvStepOutput,
 )
 from torchtitan.experiments.rl.environment.token import TokenEnv, TokenEnvOutput
 
 __all__ = [
     "MessageEnv",
-    "MessageInitOutput",
-    "MessageStepOutput",
+    "MessageEnvInitOutput",
+    "MessageEnvStepOutput",
     "TokenEnv",
     "TokenEnvOutput",
 ]

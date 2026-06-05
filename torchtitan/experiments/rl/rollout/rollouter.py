@@ -32,10 +32,10 @@ class Rollouter(Configurable):
 
     The flow for one prompt group:
 
-        example = rollouter.sample_train_example()  # one env input from the dataset
-        envs = rollouter.make_env_group(example=example, group_size=N, renderer=renderer)
+        sample = rollouter.get_train_sample()  # one sample from the dataset
+        envs = rollouter.make_env_group(sample=sample, group_size=N, renderer=renderer)
         ...  # the controller runs the rollout loop
-        outputs = rollouter.score_group(rollouts, example)  # the Rubric scores them
+        outputs = rollouter.score_group(rollouts, sample)  # the Rubric scores them
 
     `MessageEnv` works in messages; `TokenEnv` (what `make_env_group` returns)
     adds the message <-> token plumbing.
@@ -63,28 +63,25 @@ class Rollouter(Configurable):
         """Reward functions + weights used by `score_group`."""
 
         message_env: MessageEnv.Config
-        """The env to build per example; `make_env_group` calls `build(env_input=example)`."""
+        """The env to build per sample; `make_env_group` calls `build(env_input=sample)`."""
 
         token_env: TokenEnv.Config = field(default_factory=TokenEnv.Config)
         """`TokenEnv` limits (e.g. `max_rollout_tokens`) passed to `make_env_group`."""
 
-    rubric: Rubric
-    """Built from `config.rubric` by `__init__`; used by `score_group`."""
-
     def __init__(self, config: Config) -> None:
         self._train_dataset = config.train_dataset.build()
         self._validation_dataset = config.validation_dataset.build()
-        self.rubric = config.rubric.build()
+        self.rubric: Rubric = config.rubric.build()
         self._message_env_config = config.message_env
         self._token_env_config = config.token_env
 
     # TODO: revisit this abstraction: should it return a sample or a dataset or an iterator?
-    def sample_train_example(self) -> object:
-        """Sample one training example (the env input) from the train dataset."""
+    def get_train_sample(self) -> object:
+        """Get one training sample (the env input) from the train dataset."""
         return next(self._train_dataset)
 
-    def sample_validation_example(self) -> object:
-        """Sample one validation example (the env input) from the validation dataset."""
+    def get_validation_sample(self) -> object:
+        """Get one validation sample (the env input) from the validation dataset."""
         return next(self._validation_dataset)
 
     # TODO: revisit the Renderer being injected into `make_env_group` once we
@@ -92,14 +89,14 @@ class Rollouter(Configurable):
     def make_env_group(
         self,
         *,
-        example: object,
+        sample: object,
         group_size: int,
         renderer: Renderer,
     ) -> list[TokenEnv]:
-        """Construct `group_size` single-use envs from one dataset example.
+        """Construct `group_size` single-use envs from one dataset sample.
 
         Args:
-            example: the env input from `sample_train_example` / `sample_validation_example`.
+            sample: the dataset sample (the env input) from `get_train_sample` / `get_validation_sample`.
             group_size: number of sibling envs for this prompt group.
             renderer: Renderer shared by the rollout controller.
 
@@ -108,7 +105,7 @@ class Rollouter(Configurable):
         """
         return [
             self._token_env_config.build(
-                message_env=self._message_env_config.build(env_input=example),
+                message_env=self._message_env_config.build(env_input=sample),
                 renderer=renderer,
             )
             for _ in range(group_size)
