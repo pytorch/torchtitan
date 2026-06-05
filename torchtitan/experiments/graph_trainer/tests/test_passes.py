@@ -6,6 +6,7 @@
 
 import operator
 import sys
+import unittest
 from unittest.mock import patch
 
 import torch
@@ -27,6 +28,9 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
 )
 from torchtitan.experiments.graph_trainer.cudagraph import (
+    _fqn_in_tainted_subtree,
+    cudagraph_pass,
+    CUDAGraphWrapper,
     insert_kernel_annotations_pass,
     is_cudagraphable,
     is_full_cudagraphable,
@@ -940,6 +944,38 @@ class TestBucketingPrefetchOrder(FSDPTest):
         self.assertNotIn(aten.le.Scalar, targets)
         self.assertNotIn(aten.all.default, targets)
         self.assertIn(aten.relu.default, targets)
+
+
+class TestEliminateDeadCodePass(TestCase):
+    """Unit tests for eliminate_dead_code_pass."""
+
+    def test_removes_dead_pure_node_keeps_live(self):
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        live = g.call_function(torch.ops.aten.relu.default, (x,))
+        g.call_function(torch.ops.aten.add.Tensor, (x, x))  # dead: no users
+        g.output(live)
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+
+        eliminate_dead_code_pass(gm)
+        targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
+        self.assertIn(torch.ops.aten.relu.default, targets)
+        self.assertNotIn(torch.ops.aten.add.Tensor, targets)
+
+    def test_keeps_impure_node_with_no_users(self):
+        # copy_ mutates its first arg (impure); DCE must keep it even though its
+        # own result is unused.
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        y = g.placeholder("y")
+        g.call_function(torch.ops.aten.copy_.default, (x, y))  # impure, unused result
+        out = g.call_function(torch.ops.aten.relu.default, (x,))
+        g.output(out)
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+
+        eliminate_dead_code_pass(gm)
+        targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
+        self.assertIn(torch.ops.aten.copy_.default, targets)
 
 
 class TestRemoveDetachPass(TestCase):
@@ -2340,36 +2376,247 @@ class TestSelectiveActivationRematPass(TestCase):
             self.assertIs(inp, bwd_wait)
 
 
-class TestEliminateDeadCodePass(TestCase):
-    """Unit tests for eliminate_dead_code_pass."""
+@unittest.skipUnless(torch.cuda.is_available(), "piecewise cudagraph requires CUDA")
+class TestPiecewiseCudagraphPass(TestCase):
+    """cudagraph_pass must split a graph at cudagraph-unsafe ops (here CPU<->CUDA
+    copies, which are unsafe on any device), wrap each capture-safe region in its
+    own CUDA graph, leave the unsafe ops eager, and replay bitwise-identically to
+    eager across capture and several steps. ``require_full`` (cudagraph_mode=full)
+    must instead raise when the graph is not one capturable subgraph."""
 
-    def test_removes_dead_pure_node_keeps_live(self):
-        g = torch.fx.Graph()
-        x = g.placeholder("x")
-        live = g.call_function(torch.ops.aten.relu.default, (x,))
-        g.call_function(torch.ops.aten.add.Tensor, (x, x))  # dead: no users
-        g.output(live)
-        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+    def tearDown(self):
+        # Free captured graphs/private pools and reset the global manager so
+        # other tests can still register cudagraph wrappers in this process.
+        from torchtitan.experiments.graph_trainer import cudagraph as cg
 
-        eliminate_dead_code_pass(gm)
-        targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
-        self.assertIn(torch.ops.aten.relu.default, targets)
-        self.assertNotIn(torch.ops.aten.add.Tensor, targets)
+        cg.cudagraph_teardown()
+        cg._cg_manager = cg._CUDAGraphManager()
+        super().tearDown()
 
-    def test_keeps_impure_node_with_no_users(self):
-        # copy_ mutates its first arg (impure); DCE must keep it even though its
-        # own result is unused.
-        g = torch.fx.Graph()
-        x = g.placeholder("x")
-        y = g.placeholder("y")
-        g.call_function(torch.ops.aten.copy_.default, (x, y))  # impure, unused result
-        out = g.call_function(torch.ops.aten.relu.default, (x,))
-        g.output(out)
-        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+    @staticmethod
+    def _wrapped_submodules(split_gm):
+        return [
+            m
+            for _, m in split_gm.named_children()
+            if isinstance(m, torch.fx.GraphModule)
+            and isinstance(getattr(m, "forward", None), CUDAGraphWrapper)
+        ]
 
-        eliminate_dead_code_pass(gm)
-        targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
-        self.assertIn(torch.ops.aten.copy_.default, targets)
+    def test_split_and_replay_matches_eager(self):
+        device = "cuda"
+        dim, batch = 8, 4
+
+        def fn(w1, w2, x):
+            h = torch.relu(x @ w1)  # safe subgraph (CUDA only)
+            # Unsafe: cuda->cpu then cpu->cuda round trip (two _to_copy ops).
+            s = h.sum().to("cpu").to(device)
+            return torch.relu((h + s) @ w2)  # safe subgraph (CUDA only)
+
+        w1 = torch.randn(dim, dim, device=device)
+        w2 = torch.randn(dim, dim, device=device)
+        x = torch.randn(batch, dim, device=device)
+        gm = make_fx(fn, tracing_mode="fake")(w1, w2, x)
+
+        # Indices 0,1 (w1,w2) are params (stable addresses); index 2 (x) is a
+        # user input that must be copied in each step.
+        split_gm = cudagraph_pass(
+            gm, (), static_input_indices=[0, 1], tensor_input_indices=[0, 1, 2]
+        )
+
+        # require_full=True on this (incompatible) graph must raise — full is the
+        # one-subgraph special case and this graph is not one subgraph.
+        gm_full = make_fx(fn, tracing_mode="fake")(w1, w2, x)
+        with self.assertRaises(ValueError):
+            cudagraph_pass(
+                gm_full,
+                (),
+                require_full=True,
+                static_input_indices=[0, 1],
+                tensor_input_indices=[0, 1, 2],
+            )
+
+        # Two CUDA-only safe regions captured; the unsafe ops stay eager.
+        self.assertEqual(len(self._wrapped_submodules(split_gm)), 2)
+
+        # Capture + replay must match eager over several steps with a fresh x
+        # each step (exercises copy-in for the user input and the eager-produced
+        # scalar, and cross-subgraph static reuse of the first region's output).
+        for _ in range(4):
+            x = torch.randn(batch, dim, device=device)
+            torch.testing.assert_close(split_gm(w1, w2, x), fn(w1, w2, x))
+
+    def test_min_capture_size_demotes_small_subgraphs(self):
+        # Same graph as above: two ~3-op capturable regions around an eager copy.
+        device = "cuda"
+        dim, batch = 8, 4
+
+        def fn(w1, w2, x):
+            h = torch.relu(x @ w1)
+            s = h.sum().to("cpu").to(device)
+            return torch.relu((h + s) @ w2)
+
+        w1 = torch.randn(dim, dim, device=device)
+        w2 = torch.randn(dim, dim, device=device)
+        x = torch.randn(batch, dim, device=device)
+
+        # min_capture_size larger than every capturable region -> all demoted to
+        # eager -> nothing captured, original graph returned un-wrapped.
+        gm = make_fx(fn, tracing_mode="fake")(w1, w2, x)
+        out = cudagraph_pass(
+            gm,
+            (),
+            static_input_indices=[0, 1],
+            tensor_input_indices=[0, 1, 2],
+            min_capture_size=1000,
+        )
+        self.assertEqual(len(self._wrapped_submodules(out)), 0)
+        for _ in range(3):
+            x = torch.randn(batch, dim, device=device)
+            torch.testing.assert_close(out(w1, w2, x), fn(w1, w2, x))
+
+    def test_min_capture_size_partial_demotion(self):
+        # A large capturable region, then an eager CPU<->CUDA copy, then a tiny
+        # (1-op) capturable region. With a threshold between the two, only the small
+        # trailing region is demoted: the big one stays captured. Exercises the
+        # demotion interacting with contiguity/subgraph-id reassignment (not the
+        # all-or-nothing extremes the other tests cover), plus replay correctness.
+        device = "cuda"
+        dim, batch = 8, 4
+
+        def fn(w1, x):
+            h = x @ w1
+            for _ in range(8):
+                h = torch.relu(h)  # big capturable region (mm + 8 relu + sum)
+            s = h.sum().to("cpu").to(device)  # eager: CPU<->CUDA round trip
+            return h + s  # tiny trailing capturable region (1 op) -> demoted
+
+        w1 = torch.randn(dim, dim, device=device)
+        x = torch.randn(batch, dim, device=device)
+        gm = make_fx(fn, tracing_mode="fake")(w1, x)
+
+        split_gm = cudagraph_pass(
+            gm,
+            (),
+            static_input_indices=[0],
+            tensor_input_indices=[0, 1],
+            min_capture_size=4,
+        )
+        # Exactly the big region is captured; the 1-op trailing region runs eager.
+        self.assertEqual(len(self._wrapped_submodules(split_gm)), 1)
+        for _ in range(4):
+            x = torch.randn(batch, dim, device=device)
+            torch.testing.assert_close(split_gm(w1, x), fn(w1, x))
+
+    def test_no_unsafe_ops_falls_back_to_whole_graph(self):
+        device = "cuda"
+        dim, batch = 8, 4
+
+        def fn(w1, x):
+            return torch.relu(x @ w1)
+
+        w1 = torch.randn(dim, dim, device=device)
+        x = torch.randn(batch, dim, device=device)
+        gm = make_fx(fn, tracing_mode="fake")(w1, x)
+
+        out_gm = cudagraph_pass(
+            gm, (), static_input_indices=[0], tensor_input_indices=[0, 1]
+        )
+
+        # No unsafe ops -> full (single-subgraph) cudagraph: the top-level forward is
+        # wrapped and no child submodules are created.
+        self.assertIsInstance(out_gm.forward, CUDAGraphWrapper)
+        self.assertEqual(len(self._wrapped_submodules(out_gm)), 0)
+        for _ in range(4):
+            x = torch.randn(batch, dim, device=device)
+            torch.testing.assert_close(out_gm(w1, x), fn(w1, x))
+
+    @staticmethod
+    def _clean_gm():
+        return make_fx(lambda w, x: torch.relu(x @ w), tracing_mode="fake")(
+            torch.randn(8, 8, device="cuda"), torch.randn(4, 8, device="cuda")
+        )
+
+    @staticmethod
+    def _unsafe_gm():
+        def fn(w, x):  # CPU<->CUDA copy makes it not one subgraph
+            h = torch.relu(x @ w)
+            return h + h.sum().to("cpu").to("cuda")
+
+        return make_fx(fn, tracing_mode="fake")(
+            torch.randn(8, 8, device="cuda"), torch.randn(4, 8, device="cuda")
+        )
+
+    def test_is_full_cudagraphable(self):
+        self.assertTrue(is_full_cudagraphable(self._clean_gm()))
+        self.assertFalse(is_full_cudagraphable(self._unsafe_gm()))
+
+    def test_resolve_cudagraph_kind(self):
+        from types import SimpleNamespace
+
+        from torchtitan.experiments.graph_trainer.passes import _resolve_cudagraph_kind
+
+        def cfg(mode, inductor="regional", disable=()):
+            return SimpleNamespace(
+                compile=SimpleNamespace(
+                    cudagraph_mode=mode,
+                    inductor_compilation=inductor,
+                    disable_passes=list(disable),
+                )
+            )
+
+        clean = SimpleNamespace(gm=self._clean_gm())
+        unsafe = SimpleNamespace(gm=self._unsafe_gm())
+        self.assertEqual(_resolve_cudagraph_kind(clean, cfg("off")), "off")
+        self.assertEqual(_resolve_cudagraph_kind(clean, cfg("full")), "full")
+        # auto: one subgraph -> full; not one subgraph -> piecewise.
+        self.assertEqual(_resolve_cudagraph_kind(clean, cfg("auto")), "full")
+        self.assertEqual(_resolve_cudagraph_kind(unsafe, cfg("auto")), "piecewise")
+        # inductor_compilation=full delegates to Inductor -> our kind is off.
+        self.assertEqual(
+            _resolve_cudagraph_kind(clean, cfg("auto", inductor="full")), "off"
+        )
+        # disable_passes is an escape hatch.
+        self.assertEqual(
+            _resolve_cudagraph_kind(clean, cfg("auto", disable=["cudagraph_pass"])),
+            "off",
+        )
+
+    def test_nothing_capturable_returns_unwrapped(self):
+        # Only a CPU<->CUDA copy, no capturable CUDA compute -> 0 captured ->
+        # the original graph is returned un-wrapped (no cudagraph).
+        gm = make_fx(lambda x: x.to("cpu"), tracing_mode="fake")(
+            torch.randn(4, device="cuda")
+        )
+        out = cudagraph_pass(gm, (), static_input_indices=[], tensor_input_indices=[0])
+        self.assertIs(out, gm)
+        self.assertNotIsInstance(out.forward, CUDAGraphWrapper)
+        self.assertEqual(len(self._wrapped_submodules(out)), 0)
+
+
+class TestFqnInTaintedSubtree(TestCase):
+    """Pure-logic tests for the module-subtree carve-out membership: a node is
+    eager if its FQN is a tainted module or a descendant of one. The granularity
+    is whatever the unsafe nodes' own ``module_fqn`` annotations give -- no
+    hardcoded names, no fixed FQN-depth truncation."""
+
+    def test_subtree_membership(self):
+        tainted = {"layers.1.moe.experts", "layers.3.moe.experts"}
+        # The tainted module itself, and any descendant, are in the subtree.
+        self.assertTrue(_fqn_in_tainted_subtree("layers.1.moe.experts", tainted))
+        self.assertTrue(_fqn_in_tainted_subtree("layers.1.moe.experts.w1", tainted))
+        # Sibling dense modules are NOT carved out (the whole point of the refinement).
+        self.assertFalse(
+            _fqn_in_tainted_subtree("layers.1.moe.shared_experts", tainted)
+        )
+        self.assertFalse(_fqn_in_tainted_subtree("layers.1.moe.router.gate", tainted))
+        self.assertFalse(_fqn_in_tainted_subtree("layers.1.moe", tainted))
+        self.assertFalse(_fqn_in_tainted_subtree("layers.1.attention.wq", tainted))
+        # A prefix that only shares a string fragment (not a dotted ancestor) is out.
+        self.assertFalse(_fqn_in_tainted_subtree("layers.1.moe.experts_extra", tainted))
+        # Unannotated / empty FQN and empty taint set are never in a subtree.
+        self.assertFalse(_fqn_in_tainted_subtree(None, tainted))
+        self.assertFalse(_fqn_in_tainted_subtree("", tainted))
+        self.assertFalse(_fqn_in_tainted_subtree("layers.1.moe.experts", set()))
 
 
 class TestIsFullCudagraphable(TestCase):
@@ -2387,7 +2634,7 @@ class TestIsFullCudagraphable(TestCase):
 
     def test_local_scalar_dense_is_unsafe(self):
         # _local_scalar_dense (.item()/.tolist()) extracts a host scalar a CUDA
-        # graph replay can't reproduce -> unsafe, so the graph is not one piece.
+        # graph replay can't reproduce -> unsafe, so the graph is not one subgraph.
         g = torch.fx.Graph()
         x = g.placeholder("x")
         s = g.call_function(torch.ops.aten._local_scalar_dense.default, (x,))
