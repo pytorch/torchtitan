@@ -554,11 +554,11 @@ class FusedGroupedExperts(GroupedExperts):
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
 
         w13_E_D_2F = w13.bfloat16().reshape(E, F * 2, D).transpose(-2, -1)
-        gate_up_R2F = torch._grouped_mm(x_RD.bfloat16(), w13_E_D_2F, offs=offsets_E)
+        gate_up_R2F = self._grouped_mm(x_RD.bfloat16(), w13_E_D_2F, offsets_E)
         gate_RF, up_RF = gate_up_R2F.reshape(-1, F, 2).unbind(-1)
         h_RF = silu_and_mul_op(gate_RF, up_RF, offsets_E)
-        return torch._grouped_mm(
-            h_RF, w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
+        return self._grouped_mm(
+            h_RF, w2_EDF.bfloat16().transpose(-2, -1), offsets_E
         ).type_as(x_RD)
 
     @staticmethod

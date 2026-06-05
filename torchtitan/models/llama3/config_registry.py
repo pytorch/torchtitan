@@ -9,7 +9,10 @@ from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
-from torchtitan.components.quantization import Float8LinearConverter
+from torchtitan.components.quantization import (
+    Float8LinearConverter,
+    MXFP8LinearConverter,
+)
 from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
@@ -145,6 +148,21 @@ def llama3_8b() -> Trainer.Config:
             steps=1200,
         ),
     )
+
+
+def llama3_8b_mxfp8() -> Trainer.Config:
+    config = llama3_8b()
+    # Swap dense Linear layers for MXFP8Linear. compile is enabled so the
+    # converter's compile requirement is satisfied. This is the regular-Trainer
+    # (torch.compile) baseline counterpart to graph_trainer_llama3_8b_mxfp8.
+    config.compile = CompileConfig(enable=True, components=["model"])
+    config.model_spec = model_registry(
+        "8B",
+        converters=[
+            MXFP8LinearConverter.Config(model_compile_enabled=True),
+        ],
+    )
+    return config
 
 
 def llama3_70b() -> Trainer.Config:
