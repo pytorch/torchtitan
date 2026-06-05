@@ -59,7 +59,7 @@ uv pip install torch vllm torchcomms  --pre \
 **NOTE:** The pre-built vLLM wheels are only compatible with CUDA 13.0, though they should work with most older CUDA versions. Alternatively, you can install the corresponding vLLM pre-built wheels directly from https://download.pytorch.org/whl/nightly/cu130, for example: `uv pip install vllm-1.0.0.dev20260219+cu130-<suffix>.whl`. Ensure the build version number (e.g., `dev20260219`) matches your PyTorch nightly installation.
 
 
-5. Make the TorchTitan checkout importable:
+5. From the TorchTitan repository root, add the checkout to `PYTHONPATH`. Monarch-spawned RL worker processes inherit this environment variable, so they can import the local `torchtitan` package:
 ```bash
 export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 ```
