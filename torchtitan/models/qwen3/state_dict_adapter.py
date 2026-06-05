@@ -59,11 +59,16 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             # Transformer layer
             "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
-            # MoE
-            "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.experts.w1",
-            "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.experts.w3",
-            "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.experts.w2",
+            # MoE. The _EFD / _EDF suffixes are torchtitan's shape-suffix
+            # convention (E=experts, F=ffn, D=hidden) added in PR #3425.
+            "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.experts.w1_EFD",
+            "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.experts.w3_EFD",
+            "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.experts.w2_EDF",
             "model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
+            # HF transformers' Qwen3 MoE router has no equivalent persisted
+            # load-balancing buffer, so to_hf drops this key and from_hf
+            # reinitializes it to zeros.
+            None: "layers.{}.moe.expert_bias_E",
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "lm_head.weight",
         }
@@ -161,6 +166,8 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                 if abstract_key not in to_hf_map:
                     continue
                 new_key = to_hf_map[abstract_key]
+                if new_key is None:
+                    continue
                 new_key = new_key.format(layer_num)
                 hf_state_dict[new_key] = value
 
@@ -180,6 +187,14 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
         1. Convert between the HF shape and the torchtitan shape.
         2. Concate separate expert's wegiht into GroupedExperts' weight.
         """
+
+        # Shallow-copy the input so we never mutate the caller's dict. The
+        # weight-tying restore below adds `lm_head.weight` to whichever dict
+        # we iterate; without this copy it leaks back into the caller and
+        # corrupts any later use of the HF dict (notably, makes the dict
+        # unserializable via safetensors because `lm_head.weight` and
+        # `model.embed_tokens.weight` would share storage).
+        hf_state_dict = dict(hf_state_dict)
 
         state_dict = {}
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
@@ -280,5 +295,19 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             raise ValueError(
                 f"Incomplete Q/K/V projections for layers: {list(pending_qkv.keys())}"
             )
+
+        # Restore expert_bias_E (zeros) for every MoE layer. The HF format
+        # does not have a key for this auxiliary-loss-free load-balancing bias,
+        # so to_hf drops it; we reinitialize it to zeros so the native key set
+        # stays complete.
+        for layer_idx, layer_cfg in enumerate(self.model_config.layers):
+            if (
+                getattr(layer_cfg, "moe", None) is not None
+                and layer_cfg.moe.load_balance_coeff is not None
+            ):
+                state_dict[f"layers.{layer_idx}.moe.expert_bias_E"] = torch.zeros(
+                    layer_cfg.moe.num_experts,
+                    dtype=torch.float32,
+                )
 
         return state_dict

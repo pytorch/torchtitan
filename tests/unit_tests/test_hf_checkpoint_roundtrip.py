@@ -68,6 +68,14 @@ _MODEL_FLAVORS = [
     # MoE models here: HF DeepSeek has e_score_correction_bias as a real
     # buffer, so expert_bias_E genuinely round-trips (no exclusion needed).
     ("deepseek_v3", "debugmodel"),
+    # qwen3: weight-tied lm_head + GQA. Exercises the from_hf input-copy
+    # contract and the tying-restore path.
+    ("qwen3", "debugmodel"),
+    # qwen3: fused-QKV variant of the above.
+    ("qwen3", "debugmodel_fused_qkv"),
+    # qwen3: MoE variant, exercises shape-suffix MoE keys
+    # (w1_EFD / w2_EDF / w3_EFD).
+    ("qwen3", "debugmodel_moe"),
 ]
 
 # Native-side keys (or regex patterns) excluded from the bitwise comparison,
@@ -89,11 +97,14 @@ _NATIVE_EXCLUSIONS: dict[tuple[str, str], list[str]] = {
     # router has no equivalent buffer, so the round-trip resets the bias to
     # zeros by design.
     ("gpt_oss", "debugmodel"): [r".*\.moe\.expert_bias_E$"],
+    # qwen3 MoE: same missing-HF-buffer story as llama4/gpt_oss.
+    ("qwen3", "debugmodel_moe"): [r".*\.moe\.expert_bias_E$"],
 }
 
 _MOE_LOAD_BALANCE_OPTIONAL_FLAVORS = [
     ("llama4", "debugmodel"),
     ("gpt_oss", "debugmodel"),
+    ("qwen3", "debugmodel_moe"),
 ]
 
 
