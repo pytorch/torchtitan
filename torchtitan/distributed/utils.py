@@ -321,6 +321,7 @@ class TrainContext(Protocol):
 def get_train_context(
     *,
     enable_loss_parallel: bool,
+    spmd_backend: str = "default",
     spmd_typechecking: bool = False,
 ) -> TrainContext:
     @contextlib.contextmanager
@@ -328,8 +329,9 @@ def get_train_context(
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
-            if spmd_typechecking:
+            if spmd_backend == "spmd_types":
                 stack.enter_context(torch.autograd.set_multithreading_enabled(False))
+            if spmd_typechecking:
                 stack.enter_context(spmd.typecheck(local=False))
 
             yield
