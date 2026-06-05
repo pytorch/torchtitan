@@ -507,7 +507,7 @@ def apply_cpu_offload_pass(
 
     # 5. Per-group backward reload prefetch.
     if prefetch_lookahead > 0:
-        prefetched = prefetch_reloads(gm, prefetch_lookahead)
+        prefetch_reloads(gm, prefetch_lookahead)
 
     gm.graph.lint()
     gm.recompile()

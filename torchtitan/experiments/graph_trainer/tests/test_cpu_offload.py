@@ -307,7 +307,6 @@ class TestCpuOffloadPass(TestCase):
     def test_prefetch_moves_reloads_earlier(self):
         """Prefetch should move ao.reload N layers earlier in backward."""
         from torchtitan.experiments.graph_trainer.cpu_offload import (
-            _get_reload_layer,
             apply_cpu_offload_pass,
             prefetch_reloads,
             tag_all_offloadable_activations,
@@ -343,7 +342,6 @@ class TestCpuOffloadPass(TestCase):
             self.assertLess(nodes.index(node), nodes.index(wait_node))
 
             # Check that moved reloads are now earlier than before
-            layer_id = _get_reload_layer(node)
             if node in reload_positions_before:
                 new_pos = nodes.index(node)
                 old_pos = reload_positions_before[node]
