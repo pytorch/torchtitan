@@ -59,9 +59,9 @@ uv pip install torch vllm torchcomms  --pre \
 **NOTE:** The pre-built vLLM wheels are only compatible with CUDA 13.0, though they should work with most older CUDA versions. Alternatively, you can install the corresponding vLLM pre-built wheels directly from https://download.pytorch.org/whl/nightly/cu130, for example: `uv pip install vllm-1.0.0.dev20260219+cu130-<suffix>.whl`. Ensure the build version number (e.g., `dev20260219`) matches your PyTorch nightly installation.
 
 
-5. Install TorchTitan in editable mode:
+5. Make the TorchTitan checkout importable:
 ```bash
-uv pip install -e .
+export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 ```
 
 6. Download `Qwen/Qwen3-0.6B` (or `Qwen/Qwen3-1.7B`) checkpoint from HuggingFace to `torchtitan/experiments/rl/example_checkpoint` folder.
