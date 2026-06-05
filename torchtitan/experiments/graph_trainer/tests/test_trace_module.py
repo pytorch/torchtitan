@@ -668,13 +668,23 @@ class TestReparametrizeOptimizer(unittest.TestCase):
     DTYPE = torch.float32
 
     def test_titan_optimizers_container(self):
-        from torchtitan.components.optimizer import OptimizersContainer
+        from torchtitan.components.optimizer import (
+            OptimizersContainer,
+            ParamGroupConfig,
+        )
 
         torch.manual_seed(0)
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         container = OptimizersContainer(
             OptimizersContainer.Config(
-                name="AdamW", lr=1e-3, implementation="for-loop"
+                param_groups=[
+                    ParamGroupConfig(
+                        pattern=r".*",
+                        optimizer_name="AdamW",
+                        optimizer_kwargs={"lr": 1e-3},
+                    )
+                ],
+                implementation="for-loop",
             ),
             model_parts=[model],
         )
