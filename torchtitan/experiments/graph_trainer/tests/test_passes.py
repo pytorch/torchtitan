@@ -450,6 +450,29 @@ class TestApplySACPass(TestCase):
         self.assertEqual(len(nodes), 1)
         self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
 
+    def test_sym_size_ops_always_saved(self):
+        """Symbolic size/shape ops are forced MUST_SAVE regardless of policy:
+        recomputing one would pin the parent tensor alive just to read its size."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+        graph.call_function(torch.ops.aten.sym_size.int, args=(relu, 0))
+        graph.output(relu)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        # Even a recompute-everything policy must save sym_size.
+        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+
+        tags = {
+            n.target: n.meta["recompute"]
+            for n in gm.graph.nodes
+            if n.op == "call_function"
+        }
+        self.assertEqual(tags[torch.ops.aten.sym_size.int], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(
+            tags[torch.ops.aten.relu.default], CheckpointPolicy.MUST_RECOMPUTE
+        )
+
     def test_getitem_propagates_parent_tags(self):
         """operator.getitem nodes should inherit the parent's recompute tag."""
         gm = self._build_gm(
