@@ -30,12 +30,14 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from typing import Annotated
 
 # must run before torch import
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 import torchstore as ts
+import tyro
 from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
 
@@ -237,7 +239,7 @@ class RLTrainer(Configurable):
     class Config(Configurable.Config):
         """Top-level config for RL training."""
 
-        model_spec: ModelSpec | None = None
+        model_spec: Annotated[ModelSpec | None, tyro.conf.Suppress] = None
         """Model specification shared by trainer and generator.
         Set programmatically via config_registry (not from CLI)."""
 

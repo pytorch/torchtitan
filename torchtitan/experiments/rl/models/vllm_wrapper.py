@@ -124,10 +124,13 @@ class VLLMModelWrapper(Module):
 
         assert vllm_config is not None, "vllm_config is required"
 
-        # PP and CP are not supported on this inference path. User-facing
         # validation lives in Generator.Config.__post_init__; these are
         # internal invariants — by the time we get here, parallelism has
         # already been validated.
+        assert parallelism.data_parallel_shard_degree == 1, (
+            "vLLM wrapper requires data_parallel_shard_degree=1, "
+            f"got {parallelism.data_parallel_shard_degree}"
+        )
         assert parallelism.pipeline_parallel_degree == 1, (
             "vLLM wrapper requires pipeline_parallel_degree=1, "
             f"got {parallelism.pipeline_parallel_degree}"
@@ -173,10 +176,10 @@ class VLLMModelWrapper(Module):
         # controller's source of truth) rather than vLLM's parallel_config.
         self.parallel_dims = ParallelDims(
             dp_replicate=parallelism.data_parallel_replicate_degree,
-            dp_shard=1,
-            cp=1,
+            dp_shard=parallelism.data_parallel_shard_degree,
+            cp=parallelism.context_parallel_degree,
             tp=parallelism.tensor_parallel_degree,
-            pp=1,
+            pp=parallelism.pipeline_parallel_degree,
             ep=parallelism.expert_parallel_degree,
             world_size=dist.get_world_size(),
         )
@@ -193,8 +196,9 @@ class VLLMModelWrapper(Module):
 
         self.config.update_from_config(config=_InferenceConfig(parallelism=parallelism))
 
-        # TODO: Check if it's possible to apply meta init
-        self.model = self.config.build()
+        # Build model on meta device to avoid allocating full model on every GPU
+        with torch.device("meta"):
+            self.model = self.config.build()
 
         # With TP, collectives may return AsyncCollectiveTensor (overlap
         # path) or plain Tensor (sync path) depending on timing.  Dynamo
@@ -218,7 +222,12 @@ class VLLMModelWrapper(Module):
 
         # Load initial weights based on checkpoint config.
         self._checkpoint_config = checkpoint_config
+
+        # Materialize model on GPU — only allocates local shards (not full
+        # model) thanks to EP/TP DTensor sharding applied above.
+        self.model.to_empty(device=vllm_config.device_config.device)
         self._maybe_initial_load_weights()
+
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """vLLM required API.
@@ -304,6 +313,7 @@ class VLLMModelWrapper(Module):
         logits = self.model.lm_head(hidden_states)
 
         # Full DTensor path returns logits as DTensor; vLLM expects plain tensors.
+        # disable_loss_parallel=True already makes lm_head output Replicate 
         if isinstance(logits, DTensor):
             logits = logits.to_local()
 

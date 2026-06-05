@@ -67,6 +67,27 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             "rl_grpo_tp2_compile",
             ngpu=4,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module rl",
+                    "--config rl_grpo_qwen3_moe_debug_ep",
+                    "--hf_assets_path tests/assets/tokenizer",
+                    "--trainer.parallelism.tensor_parallel_degree 4",
+                    "--trainer.parallelism.expert_parallel_degree 4",
+                    "--generator.parallelism.tensor_parallel_degree 4",
+                    "--generator.parallelism.expert_parallel_degree 4",
+                    "--trainer.checkpoint.no-enable",  # use random-init weights
+                    "--generator.checkpoint.no-enable",
+                    "--trainer.compile.no-enable",
+                    "--generator.compile.backend none",
+                    "--generator.compile.cudagraph_mode none",
+                ],
+            ],
+            "RL GRPO MoE TP=4 EP=4",
+            "rl_grpo_moe_debug_tp4_ep4",
+            ngpu=8,
+        ),
     ]
 
 
@@ -84,6 +105,20 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
             "RL GRPO TP=2 batch-invariant + deterministic",
             "rl_grpo_tp2_batch_invariant",
             ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module rl",
+                    "--config rl_grpo_qwen3_moe_debug_ep_batch_invariant",
+                    "--hf_assets_path tests/assets/tokenizer",
+                    "--trainer.checkpoint.no-enable",   # use random-init weights
+                    "--generator.checkpoint.no-enable",
+                ],
+            ],
+            "RL GRPO MoE TP=4 EP=4 batch-invariant",
+            "rl_grpo_moe_debug_tp4_ep4_batch_invariant",
+            ngpu=8,
         ),
     ]
 

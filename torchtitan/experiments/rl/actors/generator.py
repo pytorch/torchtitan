@@ -303,6 +303,7 @@ class VLLMGenerator(Actor, Configurable):
         self.model_path = model_path
 
         # Build vLLM engine
+        enable_ep = config.parallelism.expert_parallel_degree > 1
         engine_kwargs = dict(
             # ``model`` is the path to the HF checkpoint directory. The
             # config is sourced from torchtitan's ModelSpec via
@@ -317,6 +318,12 @@ class VLLMGenerator(Actor, Configurable):
             config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
+            # NOTE: Monarch launches the generator workers and sets the torch
+            # elastic distributed env; with external_launcher, vLLM uses that
+            # world to build its process groups. vLLM does not take an
+            # explicit EP degree: when this boolean is set, it converts all
+            # DP * TP ranks into the expert-parallel group for MoE layers.
+            enable_expert_parallel=enable_ep,
             # Monarch already spawned TP workers via proc mesh. "external_launcher"
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",
