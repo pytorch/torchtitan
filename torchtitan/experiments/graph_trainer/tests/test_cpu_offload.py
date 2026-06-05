@@ -307,7 +307,6 @@ class TestCpuOffloadPass(TestCase):
     def test_prefetch_moves_reloads_earlier(self):
         """Prefetch should move ao.reload N layers earlier in backward."""
         from torchtitan.experiments.graph_trainer.cpu_offload import (
-            _get_reload_layer,
             apply_cpu_offload_pass,
             prefetch_reloads,
             tag_all_offloadable_activations,
@@ -343,7 +342,6 @@ class TestCpuOffloadPass(TestCase):
             self.assertLess(nodes.index(node), nodes.index(wait_node))
 
             # Check that moved reloads are now earlier than before
-            layer_id = _get_reload_layer(node)
             if node in reload_positions_before:
                 new_pos = nodes.index(node)
                 old_pos = reload_positions_before[node]
@@ -645,6 +643,82 @@ class TestCpuOffloadPass(TestCase):
             dep.target,
             torch.ops.aten.relu.default,
             "dep should follow view chain to the last consumer of the storage",
+        )
+
+    def test_wait_dep_non_tensor_consumer(self):
+        """When the last consumer produces a non-Tensor (e.g. sort -> tuple),
+        dep should use a Tensor-producing child (getitem) to preserve the
+        topo edge in wait_tensor."""
+        import operator
+
+        from torchtitan.experiments.graph_trainer.cpu_offload import (
+            apply_cpu_offload_pass,
+        )
+
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        x.meta["val"] = self._make_fake_val()
+
+        # Layer 0: mm (tagged for offload)
+        mm = graph.call_function(torch.ops.aten.mm.default, args=(x, x))
+        mm.meta["autograd_backward"] = False
+        mm.meta["custom"] = {"module_fqn": "layers.0.block"}
+        mm.meta["val"] = self._make_fake_val()
+        mm.meta["recompute"] = CheckpointPolicy.MUST_CPU_OFFLOAD
+
+        # Layer 1: sort consumes mm's output, returns tuple (non-Tensor val)
+        sort = graph.call_function(torch.ops.aten.sort.default, args=(mm,))
+        sort.meta["autograd_backward"] = False
+        sort.meta["custom"] = {"module_fqn": "layers.1.block"}
+        sort.meta["val"] = (self._make_fake_val(), self._make_fake_val())
+
+        # getitem extracts a Tensor from sort's tuple output
+        getitem = graph.call_function(operator.getitem, args=(sort, 0))
+        getitem.meta["autograd_backward"] = False
+        getitem.meta["custom"] = {"module_fqn": "layers.1.block"}
+        getitem.meta["val"] = self._make_fake_val()
+
+        # Layer 2
+        mm2 = graph.call_function(torch.ops.aten.mm.default, args=(getitem, getitem))
+        mm2.meta["autograd_backward"] = False
+        mm2.meta["custom"] = {"module_fqn": "layers.2.block"}
+        mm2.meta["val"] = self._make_fake_val()
+
+        # Backward: uses mm directly
+        bwd = graph.call_function(torch.ops.aten.mm.default, args=(mm2, mm))
+        bwd.meta["autograd_backward"] = True
+        bwd.meta["custom"] = {"module_fqn": "layers.0.block"}
+        bwd.meta["val"] = self._make_fake_val()
+
+        graph.output(bwd)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        apply_cpu_offload_pass(gm, defer_n_layers=1, prefetch_lookahead=0)
+
+        # Find the forward wait for mm's offload
+        fwd_waits = [
+            n
+            for n in gm.graph.nodes
+            if n.op == "call_function"
+            and n.target is torch.ops.ao.wait_tensor.default
+            and not n.meta.get("autograd_backward")
+        ]
+        self.assertEqual(len(fwd_waits), 1)
+        wait = fwd_waits[0]
+
+        # dep (args[2]) should be the getitem (Tensor child of sort),
+        # not None, preserving the topo edge through sort.
+        dep = wait.args[2]
+        self.assertIsNotNone(dep, "dep should not be None for non-Tensor consumer")
+        self.assertIs(
+            dep.target,
+            operator.getitem,
+            "dep should be getitem (Tensor child of the non-Tensor sort node)",
+        )
+        self.assertIsInstance(
+            dep.meta.get("val"),
+            torch.Tensor,
+            "dep must produce a Tensor to satisfy wait_tensor schema",
         )
 
     def test_single_layer_tagged(self):
