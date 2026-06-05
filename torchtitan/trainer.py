@@ -500,6 +500,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         self.train_context = dist_utils.get_train_context(
             enable_loss_parallel=loss_parallel_enabled,
+            spmd_backend=config.parallelism.spmd_backend,
             spmd_typechecking=(
                 config.parallelism.spmd_backend == "spmd_types"
                 and config.debug.spmd_typechecking
