@@ -30,7 +30,6 @@ import warnings
 from collections.abc import Callable
 
 import torch
-from torch._logging import trace_structured
 
 from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_pass
 from torchtitan.experiments.graph_trainer.cudagraph import (
@@ -40,6 +39,7 @@ from torchtitan.experiments.graph_trainer.cudagraph import (
 from torchtitan.experiments.graph_trainer.debug_utils import (
     log_graph_diff,
     snapshot_graph,
+    tlparse_log_graph_pass,
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     joint_transformer_block_bucketing_reordering_pass,
@@ -291,49 +291,4 @@ def apply_graph_passes(
             log_graph_diff(before_snapshot, after_snapshot, pass_name)
     all_passes_elapsed = time.perf_counter() - all_passes_start
     logger.info(f"All {len(passes)} graph passes took {all_passes_elapsed:.3f}s")
-    return gm
-
-
-def tlparse_log_graph_pass(
-    gm: torch.fx.GraphModule,
-    example_inputs: tuple | None = None,
-    *,
-    graph_name: str,
-    debug: bool = False,
-) -> torch.fx.GraphModule:
-    """Log the transformed graph to tlparse via trace_structured.
-
-    This pass should be added as the last transform in fwd/bwd_transforms
-    so that the logged graph reflects all prior transformations.
-
-    Args:
-        gm: The graph module to log.
-        example_inputs: The example inputs (unused, required by protocol).
-        graph_name: The name for this graph artifact
-            (e.g. "aot_forward_graph_transformed").
-        debug: When True, include additional metadata in the printed nodes.
-
-    Returns:
-        The graph module unchanged.
-    """
-    additional_meta = ["autograd_backward"]
-    if debug:
-        additional_meta.append("seq_nr")
-
-    trace_structured(
-        "artifact",
-        metadata_fn=lambda: {
-            "name": graph_name,
-            "encoding": "string",
-        },
-        payload_fn=lambda: gm.print_readable(
-            print_output=False,
-            include_stride=True,
-            include_device=True,
-            expanded_def=True,
-            additional_meta=additional_meta,
-        ),
-        expect_trace_id=False,
-    )
-
     return gm
