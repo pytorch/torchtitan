@@ -30,10 +30,7 @@ from torch.nn.attention.varlen import varlen_attn
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
-from torchtitan.models.common.rope import (
-    apply_rotary_emb_complex,
-    apply_rotary_emb_cos_sin,
-)
+from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import round_up
 
@@ -675,10 +672,9 @@ class GQAttention(BaseAttention):
         qk_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
-        use_rope: bool = True
         inner_attention: Module.Config
         mask_type: str = "causal"
-        rope_backend: str = "complex"  # "complex" or "cos_sin"
+        rope: RoPE.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -692,8 +688,7 @@ class GQAttention(BaseAttention):
             else config.dim // config.n_heads
         )
         self.enable_gqa = self.n_heads > self.n_kv_heads
-        self.use_rope = config.use_rope
-        self.rope_backend = config.rope_backend
+        self.rope = config.rope.build() if config.rope is not None else None
 
         # Pluggable QKV projection
         self.qkv_linear = config.qkv_linear.build()
@@ -713,7 +708,6 @@ class GQAttention(BaseAttention):
     def forward(
         self,
         x: torch.Tensor,
-        rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -727,17 +721,12 @@ class GQAttention(BaseAttention):
             xk = self.k_norm(xk)
 
         # Apply rotary embeddings
-        if self.use_rope:
-            if self.rope_backend == "cos_sin":
-                xq, xk = apply_rotary_emb_cos_sin(xq, xk, rope_cache, positions)
-            else:
-                xq, xk = apply_rotary_emb_complex(
-                    xq, xk, freqs_cis=rope_cache, positions=positions
-                )
+        if self.rope is not None:
+            xq, xk = self.rope(xq, xk, positions)
 
         # Handle iRoPE dict masks (Llama4)
         if isinstance(attention_masks, dict):
-            mask_key = "rope" if self.use_rope else "nope"
+            mask_key = "rope" if self.rope is not None else "nope"
             attention_masks = attention_masks[mask_key]
 
         output = self.inner_attention(

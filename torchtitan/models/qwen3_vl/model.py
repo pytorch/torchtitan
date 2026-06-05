@@ -5,15 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 from torch import nn
-from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.rope import _maybe_check_max_pos
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 
@@ -43,21 +41,17 @@ class Qwen3VLModel(Qwen3Model):
           │    ├─ _compute_vision_positions             → locate vision regions in text sequence
           │    └─ _scatter_vision_embeds                → copy vision into text at placeholder positions
           │
-          ├─ _compute_mrope_freqs                      → build 3D position IDs, interleave into freqs_cis
+          ├─ _compute_mrope_position_ids              → build 3D MRoPE position IDs
           │
           └─ transformer layers
                └─ for each layer:
-                    ├─ layer(hidden_states, freqs_cis, masks, positions)
+                    ├─ layer(hidden_states, masks, positions)
                     └─ _deepstack_process: add intermediate ViT features at vision positions (early layers only)
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Qwen3Model.Config):
         vision_encoder: Qwen3VLVisionEncoder.Config
-
-        # MRoPE section sizes for interleaved multi-dimensional RoPE
-        # [temporal, height, width] - controls how position dimensions are interleaved
-        mrope_section: list[int] = field(default_factory=lambda: [24, 20, 20])
 
         def update_from_config(
             self,
@@ -94,13 +88,12 @@ class Qwen3VLModel(Qwen3Model):
 
         self.vision_encoder = config.vision_encoder.build()
 
-        self.mrope_section = config.mrope_section
         self.spatial_merge_size = config.vision_encoder.spatial_merge_size
 
         # Number of early LLM layers that receive DeepStack visual features
         self.num_deepstack_layers = len(config.vision_encoder.deepstack_visual_indices)
 
-    def _compute_mrope_freqs(
+    def _compute_mrope_position_ids(
         self,
         tokens: torch.Tensor,
         *,
@@ -109,11 +102,13 @@ class Qwen3VLModel(Qwen3Model):
         special_tokens: dict[str, int],
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Build 3D position IDs and compute interleaved MRoPE cos/sin frequencies.
+        """Build 3D position IDs for Qwen3-VL MRoPE.
 
-        Constructs (temporal, height, width) position IDs for each token, then
-        looks up cos/sin from the 1D RoPE table and overwrites H/W-assigned dims
-        with their own position lookups.
+        Constructs temporal/height/width position IDs for each token. The RoPE
+        module consumes these IDs and computes the interleaved cos/sin cache.
+        Text tokens use the same position value across all three axes. Vision
+        tokens use temporal, height, and width positions derived from their
+        patch grid.
 
         Args:
             tokens: (batch, seq_len) token IDs
@@ -126,7 +121,7 @@ class Qwen3VLModel(Qwen3Model):
                 pos_id_offset resets to 0 at each boundary
 
         Returns:
-            (batch, seq_len, 1, head_dim * 2) pre-computed MRoPE cos/sin
+            (3, batch, seq_len) MRoPE position IDs
         """
         # --- Build 3D position IDs ---
 
@@ -285,33 +280,7 @@ class Qwen3VLModel(Qwen3Model):
             llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
             position_ids[:, sample_i, :] = llm_positions.to(position_ids.device)
 
-        # --- Compute interleaved MRoPE cos/sin from position IDs ---
-
-        freqs_cis = self.freqs_cis
-        if isinstance(freqs_cis, DTensor):
-            freqs_cis = freqs_cis.to_local()
-        _maybe_check_max_pos(position_ids, max_valid_pos=freqs_cis.shape[0] - 1)
-        head_dim = freqs_cis.shape[-1] // 2
-        cos_cache = freqs_cis[:, :head_dim]
-        sin_cache = freqs_cis[:, head_dim:]
-
-        # Initialize with temporal positions, then overwrite H/W slices
-        t_pos = position_ids[0].long()
-        mrope_cos = cos_cache[t_pos]
-        mrope_sin = sin_cache[t_pos]
-
-        # Overwrite H and W slices with their own position lookups
-        # Both halves of head_dim must be updated (head_dim = cat([freqs, freqs]))
-        half = head_dim // 2
-        for dim, offset in enumerate((1, 2), start=1):  # H, W
-            length = self.mrope_section[dim] * 3
-            low = torch.arange(offset, length, 3, device=freqs_cis.device)
-            col_indices = torch.cat([low, low + half])
-            dim_pos = position_ids[dim].long()  # (batch, seq_len)
-            mrope_cos[..., col_indices] = cos_cache[:, col_indices][dim_pos]
-            mrope_sin[..., col_indices] = sin_cache[:, col_indices][dim_pos]
-
-        return torch.cat([mrope_cos, mrope_sin], dim=-1).unsqueeze(2)
+        return position_ids
 
     def _compute_vision_positions(
         self,
@@ -554,24 +523,20 @@ class Qwen3VLModel(Qwen3Model):
             special_tokens=special_tokens,
         )
 
-        # Compute MRoPE freqs when vision inputs are present
+        # Compute MRoPE position IDs when vision inputs are present.
         if grid_thw is not None or grid_thw_videos is not None:
-            # Per-position freqs_cis with 3D (T, H, W) positions baked in
-            freqs_cis = self._compute_mrope_freqs(
+            positions = self._compute_mrope_position_ids(
                 tokens,
                 grid_thw=grid_thw,
                 grid_thw_videos=grid_thw_videos,
                 special_tokens=special_tokens,
                 positions=positions,
             )
-        else:
-            # Standard freqs_cis indexed by positions in each layer
-            freqs_cis = self.freqs_cis
 
         # Apply transformer layers with DeepStack
         hidden_states = inputs_embeds
         for layer_idx, layer in self.layers.items():
-            hidden_states = layer(hidden_states, freqs_cis, attention_masks, positions)
+            hidden_states = layer(hidden_states, attention_masks, positions)
 
             # Apply DeepStack: add visual features to early layer hidden states
             layer_idx_int = int(layer_idx)

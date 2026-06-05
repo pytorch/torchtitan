@@ -28,8 +28,8 @@ import torch
 
 from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
-
 from .model import Qwen3VLModel
+from .rope import MRoPE
 
 
 class Qwen3VLStateDictAdapter(StateDictAdapter):
@@ -114,18 +114,20 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
 
     def _get_attention_dims(self) -> tuple[int, int, int]:
         """Return (n_heads, n_kv_heads, head_dim) from model config."""
+        # pyrefly: ignore [missing-attribute]
         attn = self.model_config.layers[0].attention
         n_heads = attn.n_heads
         n_kv_heads = attn.n_kv_heads if attn.n_kv_heads is not None else n_heads
         head_dim = (
             attn.head_dim
             if attn.head_dim is not None
-            else self.model_config.dim // n_heads
+            else self.model_config.dim // n_heads  # pyrefly: ignore [missing-attribute]
         )
         return n_heads, n_kv_heads, head_dim
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert torchtitan state dict to HuggingFace Qwen3-VL format."""
+
         if self.fuse_qkv:
             to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
             n_heads, n_kv_heads, head_dim = self._get_attention_dims()
@@ -199,13 +201,17 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
             else:
                 if tt_key not in to_hf_map:
                     continue
-                if tt_key == "lm_head.weight" and self.model_config.enable_weight_tying:
+                if (
+                    tt_key == "lm_head.weight"
+                    and self.model_config.enable_weight_tying  # pyrefly: ignore [missing-attribute]
+                ):
                     continue
                 hf_key = to_hf_map[tt_key]
                 hf_value = value
                 # Linear weight (out, C*T*H*W) -> Conv3d weight (out, C, T, H, W)
                 # Plain reshape since both use channel-first (c pt ph pw) layout.
                 if tt_key == "vision_encoder.patch_embed.proj.weight":
+                    # pyrefly: ignore [missing-attribute]
                     patch_embed = self.model_config.vision_encoder.patch_embed
                     hf_value = value.reshape(
                         value.shape[0],
@@ -229,6 +235,7 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert HuggingFace Qwen3-VL state dict to torchtitan format."""
+        self._validate_hf_rope_config(MRoPE.Config)
         tt_state_dict = {}
         # Collect Q/K/V per layer for fusing (only used when fuse_qkv=True)
         pending_qkv: dict[str, dict[str, torch.Tensor]] = {}
