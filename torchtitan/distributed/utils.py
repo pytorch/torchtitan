@@ -7,6 +7,7 @@
 import contextlib
 import math
 import os
+import subprocess
 from abc import abstractmethod
 from collections.abc import Iterable
 from datetime import timedelta
@@ -384,6 +385,23 @@ def init_distributed(
                 f"ENV[{env}] = {os.environ[env]} will be overridden to {val} based on job config"
             )
         os.environ[env] = val
+
+    if "GLOO_SOCKET_IFNAME" not in os.environ:
+        try:
+            route = subprocess.check_output(
+                ["ip", "route", "get", "1.1.1.1"],
+                text=True,
+            ).split()
+            route_ifname = route[route.index("dev") + 1]
+        except (
+            FileNotFoundError,
+            IndexError,
+            subprocess.CalledProcessError,
+            ValueError,
+        ) as e:
+            logger.warning("Could not infer GLOO_SOCKET_IFNAME: %s", e)
+        else:
+            _warn_overwrite_env("GLOO_SOCKET_IFNAME", route_ifname)
 
     def _get_distributed_backend(enable_cpu_backend):
         backend = "nccl"
