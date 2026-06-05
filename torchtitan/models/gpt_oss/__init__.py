@@ -11,7 +11,14 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.models.common import CosSinRoPE, Embedding, Linear, RMSNorm, RoPE
+from torchtitan.models.common import (
+    CosSinRoPE,
+    Embedding,
+    Linear,
+    RMSNorm,
+    RoPE,
+    TransformerBlock,
+)
 from torchtitan.models.common.attention import FusedQKVLinear, QKVLinear
 from torchtitan.models.common.config_utils import make_token_dispatcher_config
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
@@ -165,7 +172,7 @@ def _build_gptoss_layers(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     rope: RoPE.Config,
-) -> list[GptOssTransformerBlock.Config]:
+) -> list[TransformerBlock.Config]:
     """Build per-layer configs for GPT-OSS.
 
     Even-indexed layers (0, 2, 4, ...) use sliding window attention.

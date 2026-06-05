@@ -61,13 +61,14 @@ class Llama4StateDictAdapter(StateDictAdapter):
 
     def _get_attention_dims(self) -> tuple[int, int, int]:
         """Return (n_heads, n_kv_heads, head_dim) from model config."""
+        # pyrefly: ignore [missing-attribute]
         attn = self.model_config.layers[0].attention
         n_heads = attn.n_heads
         n_kv_heads = attn.n_kv_heads if attn.n_kv_heads is not None else n_heads
         head_dim = (
             attn.head_dim
             if attn.head_dim is not None
-            else self.model_config.dim // n_heads
+            else self.model_config.dim // n_heads  # pyrefly: ignore [missing-attribute]
         )
         return n_heads, n_kv_heads, head_dim
 
@@ -150,7 +151,7 @@ class Llama4StateDictAdapter(StateDictAdapter):
                 combine_values.append(tt_fqn_map[tt_key].transpose(-1, -2))
 
             value = torch.cat(combine_values, dim=-1)
-            hf_state_dict[hf_fqn] = value
+            hf_state_dict[hf_fqn] = value  # pyrefly: ignore [unsupported-operation]
 
         return hf_state_dict
 

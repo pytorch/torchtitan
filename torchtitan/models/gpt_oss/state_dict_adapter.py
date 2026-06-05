@@ -87,13 +87,14 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
 
     def _get_attention_dims(self) -> tuple[int, int, int]:
         """Return (n_heads, n_kv_heads, head_dim) from model config."""
+        # pyrefly: ignore [missing-attribute]
         attn = self.model_config.layers[0].attention
         n_heads = attn.n_heads
         n_kv_heads = attn.n_kv_heads if attn.n_kv_heads is not None else n_heads
         head_dim = (
             attn.head_dim
             if attn.head_dim is not None
-            else self.model_config.dim // n_heads
+            else self.model_config.dim // n_heads  # pyrefly: ignore [missing-attribute]
         )
         return n_heads, n_kv_heads, head_dim
 
@@ -111,7 +112,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         bq = b[:, :heads_per_kv, :].reshape(n_heads * head_dim)
         bk = b[:, heads_per_kv, :].reshape(n_kv_heads * head_dim)
         bv = b[:, heads_per_kv + 1, :].reshape(n_kv_heads * head_dim)
-        return bq, bk, bv
+        return bq, bk, bv  # pyrefly: ignore [bad-return]
 
     @staticmethod
     def _separate_to_fused_qkv_bias(
@@ -129,7 +130,9 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         k = bk.view(n_kv_heads, 1, head_dim)
         v = bv.view(n_kv_heads, 1, head_dim)
         fused = torch.cat([q, k, v], dim=1)
-        return fused.reshape(n_kv_heads * r_dim * head_dim)
+        return fused.reshape(  # pyrefly: ignore [bad-return]
+            n_kv_heads * r_dim * head_dim
+        )
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """

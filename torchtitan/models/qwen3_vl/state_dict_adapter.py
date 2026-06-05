@@ -114,13 +114,14 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
 
     def _get_attention_dims(self) -> tuple[int, int, int]:
         """Return (n_heads, n_kv_heads, head_dim) from model config."""
+        # pyrefly: ignore [missing-attribute]
         attn = self.model_config.layers[0].attention
         n_heads = attn.n_heads
         n_kv_heads = attn.n_kv_heads if attn.n_kv_heads is not None else n_heads
         head_dim = (
             attn.head_dim
             if attn.head_dim is not None
-            else self.model_config.dim // n_heads
+            else self.model_config.dim // n_heads  # pyrefly: ignore [missing-attribute]
         )
         return n_heads, n_kv_heads, head_dim
 
@@ -200,13 +201,17 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
             else:
                 if tt_key not in to_hf_map:
                     continue
-                if tt_key == "lm_head.weight" and self.model_config.enable_weight_tying:
+                if (
+                    tt_key == "lm_head.weight"
+                    and self.model_config.enable_weight_tying  # pyrefly: ignore [missing-attribute]
+                ):
                     continue
                 hf_key = to_hf_map[tt_key]
                 hf_value = value
                 # Linear weight (out, C*T*H*W) -> Conv3d weight (out, C, T, H, W)
                 # Plain reshape since both use channel-first (c pt ph pw) layout.
                 if tt_key == "vision_encoder.patch_embed.proj.weight":
+                    # pyrefly: ignore [missing-attribute]
                     patch_embed = self.model_config.vision_encoder.patch_embed
                     hf_value = value.reshape(
                         value.shape[0],
