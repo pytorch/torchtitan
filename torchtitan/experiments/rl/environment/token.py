@@ -214,9 +214,10 @@ class TokenEnv(Configurable):
                 completion_message=completion_message,
             )
 
-        # TODO(history-edit): let MessageEnv edit history here (e.g. compaction). Needs (a) per-turn
-        # token count signaled to the env, (b) env returns the full new history, (c) a post-proc to
-        # branch the rollout before/after compaction.
+        # TODO(history-edit): We hard-code the logic to only append new messages.
+        # This may not satisfy all uses cases, such as compacting the history.
+        # Update this when such cases arise.
+
         # Create a new list to avoid mutating previous states
         self._messages = (
             self._messages + [completion_message] + step_output.env_messages
