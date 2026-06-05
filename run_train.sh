@@ -7,6 +7,9 @@
 
 set -ex
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+cd "$SCRIPT_DIR"
+
 # use envs as local overwrites for convenience
 # e.g.
 # LOG_RANK=0,1 NGPU=4 ./run_train.sh
@@ -27,9 +30,29 @@ set -ex
 
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
+export NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
+export NCCL_SHM_LOCALITY=${NCCL_SHM_LOCALITY:-1}
 MODULE=${MODULE:-"llama3"}
 CONFIG=${CONFIG:-"llama3_debugmodel"}
 COMM_MODE=${COMM_MODE:-""}
+NNODES=${NNODES:-${SLURM_JOB_NUM_NODES:-1}}
+NODE_RANK=${NODE_RANK:-${SLURM_NODEID:-0}}
+
+# xx injects these
+TORCHTITAN_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    codedir=*) ;;
+    master_addr=*) MASTER_ADDR="${arg#master_addr=}" ;;
+    master_port=*) MASTER_PORT="${arg#master_port=}" ;;
+    --metrics.enable_reporterv2=) TORCHTITAN_ARGS+=("--metrics.enable_reporterv2") ;;
+    *) TORCHTITAN_ARGS+=("$arg") ;;
+  esac
+done
+set -- "${TORCHTITAN_ARGS[@]}"
+
+MASTER_PORT=${MASTER_PORT:-12355}
 
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
 
@@ -48,7 +71,7 @@ generate_uuid() {
 declare -A env_vars=()
 
 if [[ -z "${env_vars[REPORTERV2_HOST]+set}" ]]; then
-  env_vars["REPORTERV2_HOST"]="${REPORTERV2_HOST:-./logs/}"
+  env_vars["REPORTERV2_HOST"]="${REPORTERV2_HOST:-mkv://data-gen.comma.life:3080/reporterv2}"
 fi
 
 if [[ -z "${env_vars[REPORTERV2_TRAINING_ID]+set}" ]]; then
@@ -64,10 +87,18 @@ if [ -n "$COMM_MODE" ]; then
     echo "Running with comm_mode=${COMM_MODE}"
     NGPU="${NGPU}" LOCAL_RANK=0 python3 -m torchtitan.train --module ${MODULE} --config ${CONFIG} "$@" --comm.mode=${COMM_MODE} --training.steps 1
 else
+    if [[ -n "${MASTER_ADDR:-}" ]]; then
+        RDZV_ENDPOINT="${MASTER_ADDR}:${MASTER_PORT}"
+    else
+        RDZV_ENDPOINT="localhost:0"
+    fi
+
     # Normal training with torchrun
     PYTORCH_ALLOC_CONF="expandable_segments:True" \
     TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE} \
-    torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
+    torchrun --nnodes=${NNODES} --node_rank=${NODE_RANK} --nproc_per_node=${NGPU} \
+    --rdzv_id=${RDZV_ID:-${SLURM_JOB_ID:-$(generate_uuid)}} --rdzv_backend c10d \
+    --rdzv_endpoint="${RDZV_ENDPOINT}" \
     --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
     -m torchtitan.train --module ${MODULE} --config ${CONFIG} "$@"
 fi
