@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import dataclasses
 import json
 import os
@@ -13,6 +14,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any, cast
 
+import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
 import tyro
@@ -48,6 +50,13 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.distributed.spmd_types import (
+    annotate_input_spmd_types,
+    placement_to_spmd_assert_type,
+    set_current_spmd_mesh,
+    set_spmd_backend,
+)
+from torchtitan.protocols.types import MeshAxisName, NamedPlacement
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
@@ -116,6 +125,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     raise NotImplementedError(
                         "Optimizers in backward is not supported with Pipeline Parallel."
                     )
+            if (
+                self.parallelism.spmd_backend == "spmd_types"
+                and self.debug.spmd_typechecking
+                and self.parallelism.pipeline_parallel_degree > 1
+            ):
+                # TODO(sanketpurandare): Enable SPMD typechecking under PP.
+                raise ValueError(
+                    "SPMD typechecking is not supported with pipeline parallelism. "
+                    "Validate the same config without PP "
+                    "(--parallelism.pipeline_parallel_degree 1)."
+                )
 
         def to_dict(self) -> dict[str, Any]:
             d = {}
@@ -207,6 +227,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
+        # TODO(pianpwk): Transitional until the local-SPMD and full-DTensor
+        # backends share one runtime mesh/type mechanism.
+        set_spmd_backend(config.parallelism.spmd_backend)
 
         # Logging needs to happen after distributed initialized
         config.maybe_log()
@@ -471,7 +494,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         loss_parallel_enabled = (
             parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
         )
-        self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
+        self.train_context = dist_utils.get_train_context(
+            enable_loss_parallel=loss_parallel_enabled,
+            spmd_backend=config.parallelism.spmd_backend,
+            spmd_typechecking=(
+                config.parallelism.spmd_backend == "spmd_types"
+                and config.debug.spmd_typechecking
+            ),
+        )
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -640,6 +670,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
+        elif self.config.parallelism.spmd_backend == "spmd_types":
+            annotate_input_spmd_types(inputs, labels, extra_kwargs)
 
         return inputs, labels, extra_inputs, extra_kwargs
 
@@ -708,7 +740,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     pred = pred.to_local()
                 loss = self.loss_fn(pred, labels, global_valid_tokens)
                 del pred
-                loss.backward()
+                with spmd.no_typecheck():
+                    loss.backward()
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
@@ -737,28 +770,61 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # All-reduce to get global token count across DP ranks
         # Move to GPU for distributed communication
         local_valid_tokens = local_valid_tokens.to(self.device)
-        if parallel_dims.dp_enabled:
-            batch_mesh = parallel_dims.get_mesh("batch")
-            global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
-        else:
-            global_valid_tokens = local_valid_tokens.float()
 
-        # Process each microbatch: move to GPU, forward/backward, then free
-        accumulated_losses = []
-        for input_dict, labels in microbatches:
-            # Move tensors to GPU
-            for k, v in input_dict.items():
-                if isinstance(v, torch.Tensor):
-                    input_dict[k] = v.to(self.device)
-            labels = labels.to(self.device)
-
-            loss = self.forward_backward_step(
-                input_dict=input_dict,
-                labels=labels,
-                # pyrefly: ignore [bad-argument-type]
-                global_valid_tokens=global_valid_tokens,
+        spmd_mesh_context = (
+            set_current_spmd_mesh(
+                self.parallel_dims._global_meshes["spmd_dense"]
             )
-            accumulated_losses.append(loss.detach())
+            if self.config.parallelism.spmd_backend == "spmd_types"
+            else contextlib.nullcontext()
+        )
+        accumulated_losses = []
+        with spmd_mesh_context:
+            if parallel_dims.dp_enabled:
+                batch_mesh = parallel_dims.get_mesh("batch")
+                global_valid_tokens = dist_utils.dist_sum(
+                    local_valid_tokens, batch_mesh
+                )
+            else:
+                global_valid_tokens = local_valid_tokens.float()
+
+            # Stamp for SPMD type checking: replicated after all-reduce
+            if self.config.parallelism.spmd_backend == "spmd_types":
+                if not isinstance(global_valid_tokens, torch.Tensor):
+                    global_valid_tokens = torch.tensor(
+                        global_valid_tokens,
+                        dtype=torch.float,
+                        device=self.device,
+                    )
+                local_type, partition_spec = placement_to_spmd_assert_type(
+                    NamedPlacement(
+                        {
+                            MeshAxisName.DP: spmd.R,
+                            MeshAxisName.CP: spmd.R,
+                            MeshAxisName.TP: spmd.I,
+                        }
+                    )
+                )
+                spmd.assert_type(
+                    global_valid_tokens,
+                    local_type,
+                    partition_spec=partition_spec,
+                )
+
+            for input_dict, labels in microbatches:
+                # Move tensors to GPU
+                for k, v in input_dict.items():
+                    if isinstance(v, torch.Tensor):
+                        input_dict[k] = v.to(self.device)
+                labels = labels.to(self.device)
+
+                loss = self.forward_backward_step(
+                    input_dict=input_dict,
+                    labels=labels,
+                    # pyrefly: ignore [bad-argument-type]
+                    global_valid_tokens=global_valid_tokens,
+                )
+                accumulated_losses.append(loss.detach())
 
         with sl.log_trace_span("optim"):
             grad_norm = dist_utils.clip_grad_norm_(
@@ -780,7 +846,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             return
 
         with sl.log_trace_span("collect_dist_metrics"):
-
             sl.log_trace_scalar({"global_valid_tokens": int(global_valid_tokens)})
 
             if parallel_dims.dp_cp_enabled:

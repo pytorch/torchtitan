@@ -13,10 +13,10 @@ meshes.
 """
 
 from dataclasses import dataclass, field
-
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Placement, Replicate, Shard
 
+from torchtitan.distributed.spmd_types import spmd_to_dtensor_placement
 from torchtitan.protocols.types import MeshAxisName, NamedPlacement
 
 
@@ -26,12 +26,6 @@ __all__ = [
     "ShardingConfig",
     "resolve_placements",
 ]
-
-# Shard order: we implicitly assume the trivial outer -> inner order matching
-# the mesh axis order. The only non-trivial case is FSDP + TP both sharding on
-# tensor dim 0, but it doesn't need to be annotated today.
-# TODO: integrate with global spmd types (e.g., ``TP: V`` + ``PartitionSpec``
-# carrying explicit shard-order info) once that lands.
 
 
 @dataclass(kw_only=True, slots=True)
@@ -120,7 +114,7 @@ class ShardingConfig:
 
 
 def resolve_placements(
-    named: NamedPlacement,
+    placement: NamedPlacement,
     mesh: DeviceMesh,
 ) -> tuple[Placement, ...]:
     """Resolve NamedPlacement against a mesh in axis order.
@@ -137,6 +131,9 @@ def resolve_placements(
     """
     # TODO(fegin): remove the ``Shard(d)`` on a size-1 mesh to ``Replicate()``
     # conversion once FlexShard replaces ``fully_shard``.
+    # TODO(pianpwk): remove spmd_to_dtensor_placement after full_dtensor is deleted.
+    named = spmd_to_dtensor_placement(placement)
+
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
     result = []
     for i, axis_name in enumerate(mesh.mesh_dim_names):
