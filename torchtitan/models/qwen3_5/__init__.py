@@ -229,7 +229,7 @@ def _qwen35_deltanet_config(
     layer_id: int,
     conv_kernel_size: int = 4,
     fla_backend: Literal[
-        "fla_chunked", "fla_fused_recurrent", "torch_naive"
+        "fla_chunked", "fla_fused_recurrent", "torch_native"
     ] = "fla_chunked",
 ) -> GatedDeltaNet.Config:
     """Build a fully-specified GatedDeltaNet.Config."""
@@ -296,7 +296,7 @@ def _build_qwen35_layers(
     full_attention_interval: int = 4,
     attn_backend: str,
     fla_backend: Literal[
-        "fla_chunked", "fla_fused_recurrent", "torch_naive"
+        "fla_chunked", "fla_fused_recurrent", "torch_native"
     ] = "fla_chunked",
 ) -> list[Qwen35TransformerBlock.Config]:
     """Build per-layer configs for dense Qwen3.5 models."""
@@ -367,7 +367,7 @@ def _build_qwen35_moe_layers(
     full_attention_interval: int = 4,
     attn_backend: str,
     fla_backend: Literal[
-        "fla_chunked", "fla_fused_recurrent", "torch_naive"
+        "fla_chunked", "fla_fused_recurrent", "torch_native"
     ] = "fla_chunked",
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
@@ -1088,15 +1088,12 @@ def model_registry(
         for c in converters:
             c.build().convert(config)
 
-    # Detect MoE: check if any layer has moe config
-    has_moe = any(getattr(layer, "moe", None) is not None for layer in config.layers)
-
     return ModelSpec(
         name="qwen3_5",
         flavor=flavor,
         model=config,
         parallelize_fn=parallelize_qwen3_5,
         pipelining_fn=pipeline_qwen3_5,
-        post_optimizer_build_fn=(register_moe_load_balancing_hook if has_moe else None),
+        post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=Qwen35StateDictAdapter,
     )

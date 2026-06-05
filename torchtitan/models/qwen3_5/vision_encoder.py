@@ -90,8 +90,7 @@ def _compute_learned_pos_embeds(
     for (h, w), indices in hw_to_indices.items():
         pos_hw = F.interpolate(
             pos_grid,
-            # pyrefly: ignore [bad-argument-type]
-            size=(h, w),
+            size=[h, w],
             mode="bilinear",
             align_corners=True,
         )

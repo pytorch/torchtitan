@@ -151,7 +151,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             ],
             "Qwen3.5 MoE FSDP+TP+EP+PP",
             "qwen3_5_moe_fsdp+tp+ep+pp",
-            ngpu=32,
+            ngpu=8,
         ),
         # Integration Test Cases for gpt-oss
         # TODO: re-enable compile after fixing

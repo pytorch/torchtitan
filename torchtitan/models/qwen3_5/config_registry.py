@@ -8,7 +8,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.tokenizer import MultiModalTokenizer
 
 from torchtitan.config import (
@@ -45,7 +45,7 @@ def qwen35_debugmodel() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel"),
         dataloader=_dataloader("cc12m-test"),
-        optimizer=OptimizersContainer.Config(lr=5e-3),
+        optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -75,7 +75,7 @@ def qwen35_debugmodel_moe() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel_moe", moe_comm_backend="standard"),
         dataloader=_dataloader("cc12m-test"),
-        optimizer=OptimizersContainer.Config(lr=5e-3),
+        optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
             local_batch_size=2,
@@ -105,7 +105,7 @@ def qwen35_0_8b() -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_registry("0.8B"),
         dataloader=_dataloader("cc12m"),
-        optimizer=OptimizersContainer.Config(lr=5e-3),
+        optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
             local_batch_size=4,
@@ -132,7 +132,7 @@ def qwen35_2b() -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_registry("2B"),
         dataloader=_dataloader("cc12m"),
-        optimizer=OptimizersContainer.Config(lr=5e-3),
+        optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
             local_batch_size=4,
@@ -159,7 +159,7 @@ def qwen35_4b() -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_registry("4B"),
         dataloader=_dataloader("cc12m"),
-        optimizer=OptimizersContainer.Config(lr=5e-4),
+        optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
             local_batch_size=4,
@@ -185,7 +185,7 @@ def qwen35_9b() -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_registry("9B"),
         dataloader=_dataloader("cc12m"),
-        optimizer=OptimizersContainer.Config(lr=5e-4),
+        optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
             local_batch_size=4,
@@ -213,7 +213,7 @@ def qwen35_27b() -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_registry("27B"),
         dataloader=_dataloader("cc12m"),
-        optimizer=OptimizersContainer.Config(lr=5e-4),
+        optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
             local_batch_size=4,
@@ -241,7 +241,7 @@ def qwen35_35b_a3b() -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_registry("35B-A3B", moe_comm_backend="standard"),
         dataloader=_dataloader("cc12m"),
-        optimizer=OptimizersContainer.Config(lr=5e-4),
+        optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
             local_batch_size=4,
@@ -270,7 +270,7 @@ def qwen35_122b_a10b() -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_registry("122B-A10B", moe_comm_backend="standard"),
         dataloader=_dataloader("cc12m"),
-        optimizer=OptimizersContainer.Config(lr=5e-4),
+        optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
             local_batch_size=4,
@@ -299,7 +299,7 @@ def qwen35_397b_a17b() -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_registry("397B-A17B", moe_comm_backend="standard"),
         dataloader=_dataloader("cc12m"),
-        optimizer=OptimizersContainer.Config(lr=5e-4),
+        optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
             local_batch_size=4,

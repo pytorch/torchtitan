@@ -41,7 +41,7 @@ def _l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
     return x * torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
 
 
-def _torch_naive_gated_delta(
+def _torch_native_gated_delta(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -154,9 +154,9 @@ class GatedDeltaKernel(Module):
     class Config(Module.Config):
         # "fla_chunked": parallel within chunks, fast for training (default)
         # "fla_fused_recurrent": token-by-token, lower memory for long sequences
-        # "torch_naive": pure-Python reference, for numerical testing only
+        # "torch_native": pure-Python reference, for numerical testing only
         backend: Literal[
-            "fla_chunked", "fla_fused_recurrent", "torch_naive"
+            "fla_chunked", "fla_fused_recurrent", "torch_native"
         ] = "fla_chunked"
 
     def __init__(self, config: Config):
@@ -178,8 +178,8 @@ class GatedDeltaKernel(Module):
             q = q.repeat_interleave(repeat, dim=2)
             k = k.repeat_interleave(repeat, dim=2)
 
-        if self.backend == "torch_naive":
-            return _torch_naive_gated_delta(q, k, v, g, beta)
+        if self.backend == "torch_native":
+            return _torch_native_gated_delta(q, k, v, g, beta)
 
         if not _HAS_FLA:
             raise RuntimeError(
@@ -208,7 +208,7 @@ class GatedDeltaKernel(Module):
         else:
             raise ValueError(
                 f"Unknown fla_backend '{self.backend}'. "
-                "Valid: 'fla_chunked', 'fla_fused_recurrent', 'torch_naive'."
+                "Valid: 'fla_chunked', 'fla_fused_recurrent', 'torch_native'."
             )
 
         # FLA kernels return (output, final_state); we only need output
@@ -271,8 +271,7 @@ class GatedDeltaNet(Module):
         self.out_proj = config.out_proj.build()
 
     def _causal_conv(self, x: torch.Tensor, conv: nn.Module) -> torch.Tensor:
-        # pyrefly: ignore [bad-argument-type]
-        x = F.pad(x.transpose(1, 2), (self.conv_kernel_size - 1, 0))
+        x = F.pad(x.transpose(1, 2), [self.conv_kernel_size - 1, 0])
         if isinstance(x, DTensor):
             # TODO: Remove once the DTensor Conv1d dispatch fix for sharded
             # groups lands in a released torch. local_map runs the conv on
@@ -302,7 +301,7 @@ class GatedDeltaNet(Module):
                 in_grad_placements=(x_plc, w_plc),
                 device_mesh=x.device_mesh,
             )
-            x = conv_dt(x, w)  # pyrefly: ignore [bad-argument-count]
+            x = conv_dt(x, w)  # pyrefly: ignore
         else:
             x = conv(x)
         return F.silu(x).transpose(1, 2)
