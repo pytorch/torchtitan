@@ -13,6 +13,7 @@ during compilation.
 
 import gzip
 import json
+import operator
 import warnings
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -315,6 +316,15 @@ def _has_dynamic_shape(val: Any) -> bool:
     return False
 
 
+def _iter_tensors(val: Any) -> list[torch.Tensor]:
+    """Flatten ``val`` (tensor / list / tuple) to the tensors it contains."""
+    if isinstance(val, torch.Tensor):
+        return [val]
+    if isinstance(val, (list, tuple)):
+        return [t for v in val for t in _iter_tensors(v)]
+    return []
+
+
 def is_cudagraphable(
     node: torch.fx.Node, dyn_map: dict[torch.fx.Node, bool] | None = None
 ) -> bool:
@@ -330,6 +340,13 @@ def is_cudagraphable(
     """
     if node.op != "call_function":
         return True
+
+    # getitem only indexes a multi-output op's result, so it inherits its parent's
+    # cudagraph-ability rather than being judged on its own tensors (e.g. a getitem
+    # of an eager dynamic-shape/CPU op must also be eager).
+    if node.target is operator.getitem:
+        parent = node.args[0]
+        return not isinstance(parent, torch.fx.Node) or is_cudagraphable(parent)
 
     # Cross-device copy from/to unpinned CPU memory: cudagraph requires the CPU
     # side to be pinned for the async H2D/D2H copy.
@@ -366,6 +383,16 @@ def is_cudagraphable(
         return _has_dynamic_shape(n.meta.get("val"))
 
     if _dyn(node) or any(_dyn(inp) for inp in node.all_input_nodes):
+        return False
+
+    # Pure-CPU op: every tensor in its inputs and output lives on CPU. A CUDA graph
+    # only captures CUDA kernels -- a CPU op would run on the host at capture time
+    # and replay stale (e.g. the .tolist() unbind/getitem on EP token-routing split
+    # sizes). Run it eager.
+    tensors = _iter_tensors(node.meta.get("val"))
+    for inp in node.all_input_nodes:
+        tensors += _iter_tensors(inp.meta.get("val"))
+    if tensors and all(t.device.type == "cpu" for t in tensors):
         return False
 
     return True
