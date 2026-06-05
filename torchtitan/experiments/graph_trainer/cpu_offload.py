@@ -25,6 +25,12 @@ Reload pattern (backward):
 This module works with the make_fx traced joint fwd+bwd graph, using
 ``meta["custom"]["module_fqn"]`` for layer boundaries and
 ``meta["autograd_backward"]`` to distinguish forward from backward nodes.
+
+NUMA note: On multi-NUMA machines (e.g. GB200 NVLink-C2C), CPU offload
+bandwidth depends on pinned memory landing on the NUMA node local to the
+GPU (~350 GB/s local vs ~120 GB/s cross-NUMA). Trainer automatically
+applies NUMA binding (``AffinityMode.NODE``) on CUDA hardware at init
+(see ``_maybe_apply_numa_binding`` in torchtitan/trainer.py).
 """
 
 import operator
@@ -46,6 +52,28 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.tools.logging import logger
 
 aten = torch.ops.aten
+
+
+# ============================================================
+# Helpers
+# ============================================================
+
+
+def _find_last_tensor_consumer(node: Node) -> Node | None:
+    """Return a Tensor-producing node for wait_tensor's last_use_of_storage arg.
+
+    If *node* itself produces a Tensor, return it directly.  Otherwise search
+    its immediate users for a Tensor-producing child (e.g. getitem after sort).
+    Returns None if no Tensor node can be found.
+    """
+    if isinstance(node.meta.get("val"), torch.Tensor):
+        return node
+    for user in node.users:
+        if user.op == "call_function" and isinstance(
+            user.meta.get("val"), torch.Tensor
+        ):
+            return user
+    return None
 
 
 # ============================================================
@@ -412,7 +440,7 @@ def apply_cpu_offload_pass(
             offload_node.meta["val"] = val.to(torch.device("cpu"))
 
         # Find the last forward consumer of this node's storage (including
-        # through views) so the wait_tensor encodes the dependency directly.
+        # through views) so the defer pass knows the earliest safe point.
         chain_nodes, _ = _get_storage_chain(node)
         last_consumer = node
         last_consumer_pos = node_to_index[node]
@@ -424,10 +452,17 @@ def apply_cpu_offload_pass(
                 last_consumer = c
                 last_consumer_pos = c_pos
 
+        # ao::wait_tensor's last_use_of_storage arg enforces a topo edge
+        # so GPU storage stays alive until the last consumer finishes.
+        # The schema requires Optional[Tensor], so if the last consumer
+        # produces a non-Tensor (e.g. sort returns a tuple), find a
+        # Tensor-producing child (e.g. getitem) to preserve the edge.
+        last_use_arg = _find_last_tensor_consumer(last_consumer)
+
         with gm.graph.inserting_after(offload_node):
             wait_offload_node = gm.graph.call_function(
                 torch.ops.ao.wait_tensor.default,
-                args=(offload_node, node, last_consumer),
+                args=(offload_node, node, last_use_arg),
             )
             wait_offload_node.meta.update(src_meta)
             wait_offload_node.meta["val"] = offload_node.meta["val"]
@@ -472,7 +507,7 @@ def apply_cpu_offload_pass(
 
     # 5. Per-group backward reload prefetch.
     if prefetch_lookahead > 0:
-        prefetched = prefetch_reloads(gm, prefetch_lookahead)
+        prefetch_reloads(gm, prefetch_lookahead)
 
     gm.graph.lint()
     gm.recompile()

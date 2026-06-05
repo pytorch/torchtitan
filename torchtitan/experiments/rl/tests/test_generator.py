@@ -95,17 +95,20 @@ def _generator(outputs):
     generator = VLLMGenerator.__new__(VLLMGenerator)
     generator._engine = _FakeEngine(outputs)
     generator.policy_version = 7
+    generator._stop_token_ids = []
     generator.config = SimpleNamespace(
-        sampling=SamplingConfig(n=1, temperature=0.0, top_p=1.0, max_tokens=4),
+        sampling=SamplingConfig(temperature=0.0, top_p=1.0, max_tokens=4),
         debug=SimpleNamespace(seed=None),
     )
     return generator
 
 
-def _run_generate(generator, tokenized_prompts, **kwargs):
+def _run_generate(generator, tokenized_prompts, *, request_ids=None, **kwargs):
+    if request_ids is None:
+        request_ids = [str(i) for i in range(len(tokenized_prompts))]
     return asyncio.run(
         VLLMGenerator.generate._method(
-            generator, tokenized_prompts, **kwargs
+            generator, tokenized_prompts, request_ids=request_ids, **kwargs
         )  # noqa: SLF001
     )
 

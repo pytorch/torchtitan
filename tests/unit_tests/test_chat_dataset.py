@@ -11,6 +11,7 @@ from copy import deepcopy
 
 import torch
 from datasets import Dataset
+from torch.nn.attention.flex_attention import and_masks
 
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
@@ -20,7 +21,14 @@ from torchtitan.hf_datasets.text_datasets import (
     ChatDataSource,
     InterleavedChatDataLoader,
 )
-from torchtitan.models.common.attention import get_document_mask_mod
+from torchtitan.models.common.attention import (
+    BaseAttention,
+    FlexAttention,
+    get_causal_mask_mod,
+    get_document_mask_mod,
+    get_efficient_causal_mask_mod_for_packed_document,
+)
+from torchtitan.models.common.decoder import Decoder
 
 
 # Path to the test tokenizer and fixture data
@@ -490,6 +498,56 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
                 b, h, torch.tensor(len(packed) - 1), torch.tensor(boundary)
             ).item(),
         )
+
+    def test_packed_document_mask_composes_with_causal_mask(self):
+        for positions in (
+            torch.tensor([[0, 1, 2, 0, 1, 0, 1, 2]]),
+            torch.tensor(
+                [
+                    [0, 1, 2, 0, 1, 0, 1, 2],
+                    [0, 1, 0, 1, 2, 3, 0, 1],
+                ]
+            ),
+        ):
+            causal_mask = get_causal_mask_mod()
+            document_mask = get_document_mask_mod(positions)
+            packed_mask = and_masks(
+                causal_mask,
+                get_efficient_causal_mask_mod_for_packed_document(positions),
+            )
+            h = torch.tensor(0)
+
+            for b in range(positions.shape[0]):
+                b_tensor = torch.tensor(b)
+                for q_idx in range(positions.shape[1]):
+                    q_tensor = torch.tensor(q_idx)
+                    for kv_idx in range(positions.shape[1]):
+                        kv_tensor = torch.tensor(kv_idx)
+                        expected = causal_mask(
+                            b_tensor, h, q_tensor, kv_tensor
+                        ) & document_mask(b_tensor, h, q_tensor, kv_tensor)
+                        self.assertEqual(
+                            packed_mask(b_tensor, h, q_tensor, kv_tensor).item(),
+                            expected.item(),
+                        )
+
+    def test_decoder_block_causal_flex_mask_supports_multiple_samples(self):
+        positions = torch.tensor(
+            [
+                [0, 1, 2, 0, 1, 0, 1, 2],
+                [0, 1, 0, 1, 2, 3, 0, 1],
+            ],
+            dtype=torch.int32,
+        )
+        attn_config = BaseAttention.Config(
+            n_heads=1,
+            inner_attention=FlexAttention.Config(block_size=4),
+            mask_type="block_causal",
+        )
+
+        mask = Decoder._get_flex_attention_masks(None, positions, attn_config)
+
+        self.assertEqual(mask.shape, (positions.shape[0], 1, 8, 8))
 
 
 class TestInterleavedChatDataLoader(unittest.TestCase):
