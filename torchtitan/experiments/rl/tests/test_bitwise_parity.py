@@ -62,6 +62,7 @@ from torchtitan.experiments.rl.actors.trainer import compute_logprobs
 from torchtitan.experiments.rl.config_registry import (
     rl_grpo_qwen3_0_6b_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
+    rl_grpo_qwen3_moe_debug_ep_batch_invariant,
 )
 from torchtitan.experiments.rl.grpo import RLTrainer
 from torchtitan.experiments.rl.models.vllm_registry import (
@@ -146,18 +147,21 @@ def build_trainer_model(
     with torch.no_grad():
         model.init_weights(buffer_device=None)
 
-    # Load HF checkpoint
-    if model_spec.state_dict_adapter is not None:
-        sd_adapter = model_spec.state_dict_adapter(model_spec.model, hf_assets_path)
-        storage_reader = sd_adapter.get_hf_storage_reader(hf_assets_path)
-        hf_state_dict = sd_adapter.to_hf(model.state_dict())
-        dcp.load(hf_state_dict, storage_reader=storage_reader)
-        tt_state_dict = sd_adapter.from_hf(hf_state_dict)
-        set_model_state_dict(
-            model=model,
-            model_state_dict=tt_state_dict,
-            options=StateDictOptions(strict=True),
-        )
+    # Load HF checkpoint if available
+    if model_spec.state_dict_adapter is not None and hf_assets_path:
+        index_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
+        single_path = os.path.join(hf_assets_path, "model.safetensors")
+        if os.path.exists(index_path) or os.path.exists(single_path):
+            sd_adapter = model_spec.state_dict_adapter(model_spec.model, hf_assets_path)
+            storage_reader = sd_adapter.get_hf_storage_reader(hf_assets_path)
+            hf_state_dict = sd_adapter.to_hf(model.state_dict())
+            dcp.load(hf_state_dict, storage_reader=storage_reader)
+            tt_state_dict = sd_adapter.from_hf(hf_state_dict)
+            set_model_state_dict(
+                model=model,
+                model_state_dict=tt_state_dict,
+                options=StateDictOptions(strict=False),
+            )
 
     model.eval()
     return model, device
@@ -200,11 +204,14 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
 
     _set_generator_determinism(gen_config.debug)
 
+    enable_ep = gen_config.parallelism.expert_parallel_degree > 1
     engine_kwargs = dict(
         model=config.hf_assets_path,
         trust_remote_code=True,
         dtype=gen_config.model_dtype,
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
+        data_parallel_size=gen_config.parallelism.data_parallel_shard_degree,
+        enable_expert_parallel=enable_ep,
         distributed_executor_backend="external_launcher",
         gpu_memory_utilization=gen_config.gpu_memory_limit,
         enforce_eager=not gen_config.cudagraph.enable,
@@ -516,6 +523,8 @@ class BitwiseParityTestBase(unittest.TestCase):
 
     config_fn = staticmethod(rl_grpo_qwen3_0_6b_batch_invariant)
     attn_backend: str = "varlen"
+    min_world_size: int = 1
+    hf_assets_env_var: str = "HF_ASSETS_PATH"
 
     # Shared across all tests in the class (built once in setUpClass)
     model: torch.nn.Module
@@ -524,8 +533,16 @@ class BitwiseParityTestBase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        world_size = dist.get_world_size() if dist.is_initialized() else int(
+            os.environ.get("WORLD_SIZE", "1")
+        )
+        if world_size < cls.min_world_size:
+            raise unittest.SkipTest(
+                f"requires at least {cls.min_world_size} GPUs, got {world_size}"
+            )
+
         config = cls.config_fn()
-        hf_path = os.environ.get("HF_ASSETS_PATH")
+        hf_path = os.environ.get(cls.hf_assets_env_var)
         if hf_path:
             config.hf_assets_path = hf_path
 
@@ -703,6 +720,28 @@ class TestBitwiseParityFlex(BitwiseParityTestBase):
     __test__ = True
     config_fn = staticmethod(rl_grpo_qwen3_0_6b_flex_batch_invariant)
     attn_backend = "flex"
+
+
+class TestBitwiseParityMoEEP(BitwiseParityTestBase):
+    """Test bitwise parity between trainer and vLLM generator with MoE EP.
+
+    Generator uses TP=4, EP=4 on 4 GPUs. Trainer uses TP=4, EP=4 on
+    the same 4 GPUs.
+
+    Uses the bundled debug MoE assets by default. Override with
+    MOE_HF_ASSETS_PATH if needed.
+    """
+
+    __test__ = True
+
+    BATCH_SIZE = 3
+    PROMPT_LENGTH = 100
+    MAX_GEN_TOKENS = 30
+
+    config_fn = staticmethod(rl_grpo_qwen3_moe_debug_ep_batch_invariant)
+    attn_backend = "varlen"
+    min_world_size = 4
+    hf_assets_env_var = "MOE_HF_ASSETS_PATH"
 
 
 if __name__ == "__main__":

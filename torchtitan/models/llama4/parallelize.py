@@ -279,7 +279,7 @@ def apply_fsdp(
                         return ShardPlacementResult(
                             placement=_expert_placement, mesh_info=_edp_mesh_info
                         )
-                    else:
+                    else:  # moe.router / moe.shared_experts, apply dense dp shard
                         return ShardPlacementResult(
                             placement=Shard(0), mesh_info=_dp_mesh_info
                         )
