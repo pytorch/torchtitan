@@ -38,17 +38,6 @@ def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     )
 
 
-def _vocab_shard_size_and_offset(
-    global_vocab_size: int,
-    num_chunks: int,
-    rank: int,
-) -> tuple[int, int]:
-    chunk_size = (global_vocab_size + num_chunks - 1) // num_chunks
-    vocab_start = min(global_vocab_size, chunk_size * rank)
-    vocab_end = min(global_vocab_size, vocab_start + chunk_size)
-    return max(0, vocab_end - vocab_start), vocab_start
-
-
 @spmd.register_autograd_function
 class _LossParallelCrossEntropy(torch.autograd.Function):
     """
@@ -60,7 +49,8 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
 
     Supports uneven vocab sharding (last TP rank may hold fewer classes) and
     ``IGNORE_INDEX`` labels.  Forward uses three TP all-reduces (max, sumexp,
-    gather); backward is fused (NLL + log-softmax) with zero collectives.
+    gather) to aggregate intermediate results in distributed softmax;
+    backward is fused (NLL + log-softmax) with zero collectives.
 
     All inputs and outputs are plain ``torch.Tensor`` (not DTensor).
     """
@@ -102,11 +92,14 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         logits_shape = logits.shape
         logits_2d = logits.flatten(0, -2).float()
         labels_1d = labels.flatten()
-        local_vocab_size, vocab_start = _vocab_shard_size_and_offset(
-            global_vocab_size,
-            dist.get_world_size(tp_group),
-            dist.get_rank(tp_group),
-        )
+
+        # Compute this rank's vocab shard bounds for the local logits.
+        tp_world_size = dist.get_world_size(tp_group)
+        tp_rank = dist.get_rank(tp_group)
+        chunk_size = (global_vocab_size + tp_world_size - 1) // tp_world_size
+        vocab_start = min(global_vocab_size, chunk_size * tp_rank)
+        vocab_end = min(global_vocab_size, vocab_start + chunk_size)
+        local_vocab_size = max(0, vocab_end - vocab_start)
         if logits_2d.shape[-1] != local_vocab_size:
             raise ValueError(
                 "_LossParallelCrossEntropy expected local vocab size "
@@ -135,11 +128,9 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
             safe_labels >= vocab_start + local_vocab_size
         )
         local_labels = safe_labels - vocab_start
-        local_labels = local_labels.clone()
         local_labels[out_of_range] = 0
 
         local_result = torch.gather(log_probs, -1, local_labels.unsqueeze(-1))
-        local_result = local_result.clone()
         local_result[out_of_range.unsqueeze(-1)] = 0
         dist.all_reduce(local_result, op=dist.ReduceOp.SUM, group=tp_group)
 
@@ -167,7 +158,6 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
             safe_labels >= ctx.vocab_start + ctx.local_vocab_size
         )
         local_labels = safe_labels - ctx.vocab_start
-        local_labels = local_labels.clone()
         local_labels[out_of_range] = 0
 
         grad_input = torch.zeros_like(log_probs)
