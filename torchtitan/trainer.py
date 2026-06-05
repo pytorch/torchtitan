@@ -678,28 +678,95 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         else:
             # Non-PP forward / backward
             assert len(model_parts) == 1
-            with self.train_context():
-                pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                # Under non-full_dtensor, labels stay as plain tensors. See
-                # ``cross_entropy_loss`` for why pred must also be plain.
-                # Remove once non-full_dtensor is no longer supported.
-                if (
-                    isinstance(pred, DTensor)
-                    and self.config.parallelism.spmd_backend != "full_dtensor"
-                    and self.config.parallelism.disable_loss_parallel
-                ):
-                    pred = pred.to_local()
-                loss = self.loss_fn(pred, labels, global_valid_tokens)
-                del pred
-                loss.backward()
+
+            if self.config.training.enable_cuda_graphs:
+                loss = self._cuda_graph_fwd_bwd(
+                    inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs
+                )
+            else:
+                with self.train_context():
+                    pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                    # Under non-full_dtensor, labels stay as plain tensors. See
+                    # ``cross_entropy_loss`` for why pred must also be plain.
+                    # Remove once non-full_dtensor is no longer supported.
+                    if (
+                        isinstance(pred, DTensor)
+                        and self.config.parallelism.spmd_backend != "full_dtensor"
+                        and self.config.parallelism.disable_loss_parallel
+                    ):
+                        pred = pred.to_local()
+                    loss = self.loss_fn(pred, labels, global_valid_tokens)
+                    del pred
+                    loss.backward()
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
 
+    def _cuda_graph_fwd_bwd(
+        self,
+        inputs: torch.Tensor,
+        labels: torch.Tensor,
+        global_valid_tokens: torch.Tensor,
+        extra_inputs: dict[str, torch.Tensor],
+        extra_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        """Forward+backward wrapped with CUDA graph capture/replay."""
+        from torchtitan.distributed.cudagraph import CUDAGraphWrapper
+
+        if not hasattr(self, "_cg_wrapper"):
+            model = self.model_parts[0]
+            train_context = self.train_context
+            loss_fn = self.loss_fn
+            full_dtensor_enabled = (
+                self.config.parallelism.spmd_backend == "full_dtensor"
+            )
+            disable_loss_parallel = self.config.parallelism.disable_loss_parallel
+
+            def _step(inp, lab, gvt, *extra_flat):
+                with train_context():
+                    pred = model(inp, **extra_inputs, **extra_kwargs)
+                    if (
+                        isinstance(pred, DTensor)
+                        and not full_dtensor_enabled
+                        and disable_loss_parallel
+                    ):
+                        pred = pred.to_local()
+                    loss = loss_fn(pred, lab, gvt)
+                    del pred
+                    loss.backward()
+                return loss
+
+            extra_flat = []
+            for v in extra_inputs.values():
+                if isinstance(v, torch.Tensor):
+                    extra_flat.append(v)
+            for v in extra_kwargs.values():
+                if isinstance(v, torch.Tensor):
+                    extra_flat.append(v)
+
+            example_inputs = [inputs, labels, global_valid_tokens] + extra_flat
+            static_indices = tuple(range(3, len(example_inputs)))
+            self._cg_wrapper = CUDAGraphWrapper(
+                _step, example_inputs, static_input_indices=static_indices
+            )
+            self._cg_extra_flat_count = len(extra_flat)
+
+        extra_flat = []
+        for v in extra_inputs.values():
+            if isinstance(v, torch.Tensor):
+                extra_flat.append(v)
+        for v in extra_kwargs.values():
+            if isinstance(v, torch.Tensor):
+                extra_flat.append(v)
+
+        return self._cg_wrapper(inputs, labels, global_valid_tokens, *extra_flat)
+
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
-        self.optimizers.zero_grad()
+        self.optimizers.zero_grad(
+            set_to_none=not self.config.training.enable_cuda_graphs
+        )
         # Save per-optimizer-group learning rates for logging
         lr_metrics = self.lr_schedulers.get_metrics()
 
@@ -880,6 +947,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.ntokens_seen = state_dict["ntokens_seen"]
 
     def close(self) -> None:
+        if hasattr(self, "_cg_wrapper"):
+            from torchtitan.distributed.cudagraph import cudagraph_teardown
+
+            cudagraph_teardown()
         if hasattr(self, "checkpointer") and self.checkpointer:
             self.checkpointer.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:

@@ -134,6 +134,7 @@ class Decoder(BaseModel):
                 if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
                     from torchtitan.models.common.token_dispatcher import (
                         DeepEPTokenDispatcher,
+                        MinimalAsyncEPTokenDispatcher,
                         HybridEPTokenDispatcher,
                     )
 
@@ -143,6 +144,7 @@ class Decoder(BaseModel):
                             token_dispatcher_cfg,
                             (
                                 DeepEPTokenDispatcher.Config,
+                                MinimalAsyncEPTokenDispatcher.Config,
                                 HybridEPTokenDispatcher.Config,
                             ),
                         )

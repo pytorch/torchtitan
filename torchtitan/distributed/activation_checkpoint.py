@@ -63,6 +63,11 @@ def _get_save_ops() -> set:
         # HybridEP (available when hybridep is installed)
         (torch.ops, "hybridep.dispatch.default"),
         (torch.ops, "hybridep.combine.default"),
+        # MinimalAsyncEP (available when the MinimalAsyncEP dispatcher is used)
+        (torch.ops, "minimal_async_ep.dispatch.default"),
+        (torch.ops, "minimal_async_ep.combine.default"),
+        (torch.ops, "minimal_async_ep.expert_counting_sort.default"),
+        (torch.ops, "minimal_async_ep.invert_flat_indices.default"),
     ]
 
     def _resolve_ops(op_specs: list) -> dict:
