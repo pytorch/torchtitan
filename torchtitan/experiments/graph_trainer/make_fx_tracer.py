@@ -155,62 +155,6 @@ def _wrap_subclasses(
     return wrapped
 
 
-def _remove_cpu_shadow_chains(gm: torch.fx.GraphModule) -> None:
-    """Remove dead CPU tensor chains left by DTensor's shadow-op bookkeeping.
-
-    DTensor keeps CPU "shadow" copies of tensor metadata (size, stride) as
-    regular aten ops.  After make_fx tracing these ops end up in the graph but
-    never feed a real GPU computation, so they are pure overhead.  This pass
-    finds every chain rooted at a CPU ``empty_strided`` whose outputs never
-    reach a GPU node with downstream users, and erases the whole chain.
-
-    TODO: figure out a way to avoid tracing them into graph in the first place.
-    """
-    to_remove: set[torch.fx.Node] = set()
-
-    for node in gm.graph.nodes:
-        if node in to_remove:
-            continue
-
-        if not (
-            node.op == "call_function"
-            and node.target == torch.ops.aten.empty_strided.default
-        ):
-            continue
-        device = node.kwargs.get("device")
-        if device is None or device.type != "cpu":
-            continue
-
-        chain: set[torch.fx.Node] = set()
-        queue = [node]
-        feeds_gpu = False
-
-        while queue and not feeds_gpu:
-            current = queue.pop()
-            if current in chain:
-                continue
-            chain.add(current)
-            for user in current.users:
-                val = user.meta.get("val")
-                if isinstance(val, torch.Tensor) and val.device.type != "cpu":
-                    if user.users:
-                        feeds_gpu = True
-                        break
-                    chain.add(user)
-                    continue
-                queue.append(user)
-
-        if not feeds_gpu:
-            to_remove |= chain
-
-    for node in reversed(list(gm.graph.nodes)):
-        if node in to_remove:
-            gm.graph.erase_node(node)
-
-    gm.graph.lint()
-    gm.recompile()
-
-
 def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
     """Copy forward metadata to backward nodes across all nested FX subgraphs.
 
@@ -561,10 +505,8 @@ def minimal_fx_tracer(
             )(*fake_args)
 
         # Copy forward annotations to backward nodes.
-        # Must run before DCE so that forward nodes used for matching aren't removed.
         _copy_fwd_metadata_to_bw_nodes(traced)
 
-        _remove_cpu_shadow_chains(traced)
         if _insert_runtime_asserts:
             _insert_runtime_asserts_pass(traced, fake_mode)
 

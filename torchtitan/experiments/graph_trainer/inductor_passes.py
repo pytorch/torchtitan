@@ -239,7 +239,9 @@ def full_inductor_compilation_pass(
 
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
-    pre_collapse_cudagraph_compatible = is_cudagraph_compatible(gm)
+    pre_collapse_cudagraph_compatible = is_cudagraph_compatible(
+        gm, skip_flex_attention_check=True
+    )
 
     _migrate_cpu_get_attrs_to_cuda(gm)
     for module in gm.modules():
