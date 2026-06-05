@@ -13,14 +13,13 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-
 from torchtitan.models.llama4.model import compute_moe_hidden_dim, Llama4Model
 from torchtitan.models.llama4.parallelize import apply_fsdp
 
 
 def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
     """Build a tiny Llama4Model with a configurable number of experts."""
-    from torchtitan.models.common import compute_ffn_hidden_dim
+    from torchtitan.models.common import ComplexRoPE, compute_ffn_hidden_dim
 
     # Use the standard debugmodel config but override num_experts.
     # Rebuild layers with the requested num_experts.
@@ -31,10 +30,7 @@ def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
     n_layers = 4
     moe_hidden_dim = compute_moe_hidden_dim(dim)
 
-    from torchtitan.models.common.embedding import Embedding
-    from torchtitan.models.common.linear import Linear
-    from torchtitan.models.common.rmsnorm import RMSNorm
-    from torchtitan.models.common.rope import RoPE
+    from torchtitan.models.common.nn_modules import Embedding, Linear, RMSNorm
 
     config = Llama4Model.Config(
         dim=dim,
@@ -42,19 +38,11 @@ def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
         tok_embeddings=Embedding.Config(num_embeddings=2048, embedding_dim=dim),
         norm=RMSNorm.Config(normalized_shape=dim),
         lm_head=Linear.Config(in_features=dim, out_features=2048),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=2048,
-            theta=500000,
-            backend="complex",
-            scaling="llama",
-            scaling_factor=16.0,
-            high_freq_factor=1.0,
-        ),
         layers=_build_llama4_layers(
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
+            n_kv_heads=None,
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
             moe_hidden_dim=moe_hidden_dim,
             num_experts=num_experts,
@@ -62,7 +50,17 @@ def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
             interleave_moe_layer_step=1,
             fixed_attn_block_size=256,
             attn_backend="flex",
+            shared_experts_hidden_dim=None,
             moe_comm_backend="standard",
+            non_blocking_capacity_factor=None,
+            rope=ComplexRoPE.Config(
+                dim=dim // n_heads,
+                max_seq_len=2048,
+                theta=500000,
+                scaling="llama",
+                scaling_factor=16.0,
+                high_freq_factor=1.0,
+            ),
         ),
     )
     return Llama4Model(config)

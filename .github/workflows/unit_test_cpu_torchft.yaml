@@ -15,6 +15,9 @@ concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   build-test:
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
@@ -34,6 +37,5 @@ jobs:
         pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cpu
 
         USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cpu
-        python -m pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 
         pytest torchtitan/experiments/ft/tests/test_ft_checkpoint.py -v

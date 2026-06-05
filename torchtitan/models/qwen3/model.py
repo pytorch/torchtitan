@@ -6,7 +6,6 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-import dataclasses
 from dataclasses import dataclass
 
 import torch
@@ -19,7 +18,6 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
-from torchtitan.tools.logging import logger
 
 
 class Qwen3TransformerBlock(TransformerBlock):
@@ -56,13 +54,10 @@ class Qwen3TransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
-        x = x + self.attention(
-            self.attention_norm(x), freqs_cis, attention_masks, positions
-        )
+        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
 
         if self.moe_enabled:
             x = x + self.moe(self.ffn_norm(x))
@@ -88,37 +83,11 @@ class Qwen3Model(Decoder):
         def update_from_config(
             self,
             *,
-            trainer_config,
+            config,
             **kwargs,
         ) -> None:
-
-            parallelism = trainer_config.parallelism
-            # ``training`` and ``debug`` are optional: the RL vLLM generator
-            # passes a minimal trainer_config containing only ``parallelism``
-            # (no RoPE cache extension at this stage; no MoE force-load-balance
-            # at inference time).
-
-            # TODO: This method is used by more than just training. We should
-            # refactor this method such that the logic and naming are meaningful
-            # for both training and RL use cases.
-            training = getattr(trainer_config, "training", None)
-            debug = getattr(trainer_config, "debug", None)
-
-            if training is not None:
-                seq_len = training.seq_len
-                if seq_len > self.rope.max_seq_len:
-                    logger.warning(
-                        f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
-                    )
-                # Sync rope max_seq_len
-                self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
-
-            if debug is not None:
-                for layer_cfg in self.layers:
-                    if layer_cfg.moe is not None:
-                        layer_cfg.moe.router._debug_force_load_balance = (
-                            debug.moe_force_load_balance
-                        )
+            Decoder.Config.update_from_config(self, config=config, **kwargs)
+            parallelism = config.parallelism
 
             if parallelism.context_parallel_degree > 1 and isinstance(
                 self.layers[0].attention.inner_attention, VarlenAttention.Config
@@ -133,25 +102,13 @@ class Qwen3Model(Decoder):
                     "Weight tying is not supported with Pipeline Parallel."
                 )
 
-            tp = parallelism.tensor_parallel_degree
-            if tp > 1:
-                n_heads = self.layers[0].attention.n_heads
-                n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
-                if n_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
-                    )
-                if n_kv_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
-                    )
-
             from torchtitan.models.qwen3.sharding import set_qwen3_sharding_config
 
             set_qwen3_sharding_config(
                 self,
                 loss_parallel=not parallelism.disable_loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
         def get_nparams_and_flops(

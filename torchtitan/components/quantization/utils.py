@@ -4,11 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
-    DeepEPTokenDispatcher,
+    HybridEPTokenDispatcher,
     TorchAOTokenDispatcher,
 )
 
@@ -36,35 +36,28 @@ def swap_token_dispatcher(config, pad_multiple: int) -> None:
     Requires a dispatcher that handles padding (TorchAOTokenDispatcher or
     DeepEP hybridep). Raises ValueError if the dispatcher doesn't support it.
     """
-    td = config.token_dispatcher
-    if isinstance(td, AllToAllTokenDispatcher.Config) and not isinstance(
-        td, TorchAOTokenDispatcher.Config
-    ):
+    if isinstance(
+        config.token_dispatcher, AllToAllTokenDispatcher.Config
+    ) and not isinstance(config.token_dispatcher, TorchAOTokenDispatcher.Config):
         config.token_dispatcher = TorchAOTokenDispatcher.Config(
-            num_experts=td.num_experts,
-            top_k=td.top_k,
-            score_before_experts=td.score_before_experts,
+            num_experts=config.token_dispatcher.num_experts,
+            top_k=config.token_dispatcher.top_k,
+            score_before_experts=config.token_dispatcher.score_before_experts,
             pad_multiple=pad_multiple,
         )
-    elif isinstance(td, DeepEPTokenDispatcher.Config):
-        if td.comm_backend == "deepep":
-            raise ValueError(
-                "DeepEP does not support pad_multiple. "
-                "Use hybridep or standard comm backend instead."
-            )
-        config.token_dispatcher = DeepEPTokenDispatcher.Config(
-            num_experts=td.num_experts,
-            top_k=td.top_k,
-            score_before_experts=td.score_before_experts,
-            comm_backend=td.comm_backend,
-            non_blocking_capacity_factor=td.non_blocking_capacity_factor,
+    elif isinstance(config.token_dispatcher, HybridEPTokenDispatcher.Config):
+        config.token_dispatcher = HybridEPTokenDispatcher.Config(
+            num_experts=config.token_dispatcher.num_experts,
+            top_k=config.token_dispatcher.top_k,
+            score_before_experts=config.token_dispatcher.score_before_experts,
+            non_blocking_capacity_factor=config.token_dispatcher.non_blocking_capacity_factor,
             pad_multiple=pad_multiple,
         )
     else:
         raise ValueError(
-            "MoE quantization requires a token dispatcher that handles "
-            "padding (TorchAOTokenDispatcher or hybridep). "
-            "Enable expert parallelism or use a compatible comm backend."
+            f"MoE quantization requires a token dispatcher that supports "
+            f"padding (TorchAOTokenDispatcher or HybridEPTokenDispatcher), "
+            f"got {type(config.token_dispatcher).__name__}."
         )
 
 
@@ -76,16 +69,15 @@ def has_quantization(model_config) -> bool:
     )
     from torchtitan.components.quantization.mx import _mxfp8_experts_cache, MXFP8Linear
 
-    has_quant_linear = (
-        any(
-            isinstance(config, (Float8Linear.Config, MXFP8Linear.Config))
-            for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config)
-        )
-        if Float8Linear is not None
-        else any(
-            isinstance(config, MXFP8Linear.Config)
-            for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config)
-        )
+    quant_linear_types: list[type] = []
+    if Float8Linear is not None:
+        quant_linear_types.append(Float8Linear.Config)
+    if MXFP8Linear is not None:
+        quant_linear_types.append(MXFP8Linear.Config)
+
+    has_quant_linear = bool(quant_linear_types) and any(
+        isinstance(config, tuple(quant_linear_types))
+        for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config)
     )
     quant_experts_types = tuple(
         cls.Config  # type: ignore[attr-defined]

@@ -27,9 +27,12 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+from torchtitan.distributed.fsdp import (
+    disable_fsdp_gradient_division,
+    enable_fsdp_symm_mem,
+    get_fsdp_reshard_after_forward_policy,
+)
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
-from torchtitan.models.llama3.parallelize import disable_fsdp_gradient_division
 from torchtitan.tools.logging import logger
 
 
@@ -90,6 +93,7 @@ def parallelize_hf_transformers(
         pp_enabled=parallel_dims.pp_enabled,
         cpu_offload=training.enable_cpu_offload,
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+        enable_symm_mem=parallelism.enable_fsdp_symm_mem,
     )
 
     logger.info("Applied fully_shard to the model")
@@ -120,9 +124,7 @@ def apply_non_moe_tp(
 
     if hasattr(model, "tok_embeddings"):
         if isinstance(model.tok_embeddings, nn.Identity):
-            root_plan["tok_embeddings"] = NoParallel(
-                local_output_grad_placements=(Replicate(),),
-            )
+            root_plan["tok_embeddings"] = NoParallel(use_local_output=True)
         else:
             root_plan["tok_embeddings"] = RowwiseParallel(
                 input_layouts=Replicate(),
@@ -131,17 +133,13 @@ def apply_non_moe_tp(
 
     if hasattr(model, "norm"):
         if isinstance(model.norm, nn.Identity):
-            root_plan["norm"] = NoParallel(
-                local_output_grad_placements=(Replicate(),),
-            )
+            root_plan["norm"] = NoParallel(use_local_output=True)
         else:
             root_plan["norm"] = SequenceParallel()
 
     if hasattr(model, "lm_head"):
         if isinstance(model.lm_head, nn.Identity):
-            root_plan["lm_head"] = NoParallel(
-                local_output_grad_placements=(Replicate(),),
-            )
+            root_plan["lm_head"] = NoParallel(use_local_output=True)
         else:
             root_plan["lm_head"] = ColwiseParallel(
                 input_layouts=Shard(1),
@@ -173,19 +171,11 @@ def apply_non_moe_tp(
         else:
             layer_plan.update(
                 {
-                    "self_attn.q_a_proj": NoParallel(
-                        local_output_grad_placements=(Replicate(),),
-                    ),
-                    "self_attn.q_a_layernorm": NoParallel(
-                        local_output_grad_placements=(Replicate(),),
-                    ),
+                    "self_attn.q_a_proj": NoParallel(use_local_output=True),
+                    "self_attn.q_a_layernorm": NoParallel(use_local_output=True),
                     "self_attn.q_b_proj": ColwiseParallel(),
-                    "self_attn.kv_a_proj_with_mqa": NoParallel(
-                        local_output_grad_placements=(Replicate(),),
-                    ),
-                    "self_attn.kv_a_layernorm": NoParallel(
-                        local_output_grad_placements=(Replicate(),),
-                    ),
+                    "self_attn.kv_a_proj_with_mqa": NoParallel(use_local_output=True),
+                    "self_attn.kv_a_layernorm": NoParallel(use_local_output=True),
                     "self_attn.kv_b_proj": ColwiseParallel(),
                 }
             )
@@ -254,6 +244,7 @@ def apply_fsdp(
     ep_degree: int = 1,
     dp_mod_ep_mesh: DeviceMesh | None = None,
     gradient_divide_factor: int | None = None,
+    enable_symm_mem: bool = False,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -338,6 +329,9 @@ def apply_fsdp(
         )
 
     fully_shard(model, **fsdp_config)
+
+    if enable_symm_mem:
+        enable_fsdp_symm_mem(model)
 
     # Disable FSDP's automatic gradient division for all FSDP modules
     disable_fsdp_gradient_division(model)

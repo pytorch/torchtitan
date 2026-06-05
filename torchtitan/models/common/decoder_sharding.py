@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torch.distributed.tensor import Placement, Replicate, Shard
+from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
 from torchtitan.protocols.sharding import LocalMapConfig, NamedPlacement, ShardingConfig
@@ -124,8 +124,8 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     """Standard GQA attention (``qkv_linear``/``wo``) TP sharding.
 
     Shared by llama3, qwen3, and llama4 -- all three have a GQA block whose
-    ``forward(x, rope_cache, ...)`` takes ``x`` (per-SP layout, gathered to
-    Replicate internally) and a plain ``rope_cache`` (annotated Replicate).
+    ``forward(x, ...)`` takes ``x`` (per-SP layout, gathered to Replicate
+    internally) and uses the attention layer's local RoPE cache.
 
     Callers that have additional attention sub-state (e.g. ``qk_norm``,
     ``sinks``) set those after calling this helper.
@@ -138,13 +138,15 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={
             "x": dense_activation_placement(tp=attn_x_placement),
-            "rope_cache": dense_param_placement(tp=Replicate()),
         },
         in_dst_shardings={
             "x": dense_activation_placement(tp=Replicate()),
-            "rope_cache": dense_param_placement(tp=Replicate()),
         },
     )
+    if attention_cfg.rope is not None:
+        attention_cfg.rope.sharding_config = ShardingConfig(
+            state_shardings={"cache": dense_param_placement(tp=Replicate())},
+        )
     set_qkv_linear_sharding(attention_cfg.qkv_linear)
     attention_cfg.wo.sharding_config = rowwise_config(output_sp=enable_sp)
 
@@ -158,17 +160,41 @@ def set_gqa_inner_attention_local_map(
     TP-sharded (``Shard(2)``), regardless of SP. ``local_map`` converts them
     to local tensors before the kernel runs, then wraps outputs back.
 
+    Declares placements over the full dense SPMD axis set (DP/CP/TP) so
+    the LocalMap composes under ``full_dtensor`` (where the surrounding
+    mesh is multi-axis); under non-full_dtensor, the (tp,)-only mesh only
+    consumes the ``TP`` placement and the rest are ignored.
+
+    Under ``full_dtensor`` + CP, q stays seq-sharded on the CP axis
+    (``Shard(1)``) while k/v are ``Replicate`` on CP -- DTensor all-gathers
+    k/v at the local_map boundary so the kernel sees full-length keys
+    (matching the BlockMask's kv dimension). Q's local grad is naturally
+    seq-sharded; k/v's local grads accumulate as ``Partial`` on CP and
+    DTensor reduces them on the way out.
+
     ``return_lse=True`` is for kernels that return ``(output, lse)`` (e.g.,
     GPT-OSS's flash attention with ``return_lse=True``); both outputs share
     the same heads-sharded placement.
     """
-    qkv_placements: NamedPlacement = {TP: Shard(2)}
-    num_outputs = 2 if return_lse else 1
+    q_placements: NamedPlacement = dense_activation_placement(tp=Shard(2))
+    kv_placements: NamedPlacement = dense_activation_placement(
+        tp=Shard(2), cp=Replicate()
+    )
+    kv_grad_placements: NamedPlacement = dense_activation_placement(
+        tp=Shard(2), cp=Partial()
+    )
+    out_src: NamedPlacement | tuple[NamedPlacement, ...] = (
+        (q_placements, q_placements) if return_lse else q_placements
+    )
     inner_attention_cfg.sharding_config = ShardingConfig(
+        in_dst_shardings={
+            "q": q_placements,
+            "k": kv_placements,
+            "v": kv_placements,
+        },
+        out_src_shardings=out_src,
         local_map=LocalMapConfig(
-            in_placements=(qkv_placements, qkv_placements, qkv_placements),
-            out_placements=(qkv_placements,) * num_outputs,
-            in_grad_placements=(qkv_placements, qkv_placements, qkv_placements),
+            in_grad_placements=(q_placements, kv_grad_placements, kv_grad_placements),
         ),
     )
 
@@ -198,7 +224,7 @@ def set_decoder_sharding_config(
     config, *, loss_parallel: bool, enable_sp: bool
 ) -> None:
     """Set sharding on root-level configs only: ``tok_embeddings``, ``norm``,
-    ``output``, and the root ``freqs_cis`` buffer.
+    and ``output``.
 
     Per-layer sharding (attention, feed_forward, per-layer norms) is the
     caller's responsibility — this helper does not walk ``config.layers``.
@@ -211,10 +237,6 @@ def set_decoder_sharding_config(
     activation_tp: Placement = Shard(1) if enable_sp else Replicate()
     loss_tp: Placement = Shard(-1) if loss_parallel else Replicate()
 
-    # freqs_cis buffer on the decoder root: Replicate on all axes.
-    config.sharding_config = ShardingConfig(
-        state_shardings={"freqs_cis": dense_param_placement(tp=Replicate())},
-    )
     config.tok_embeddings.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=Shard(0))},
         in_src_shardings={"input": dense_activation_placement(tp=Replicate())},

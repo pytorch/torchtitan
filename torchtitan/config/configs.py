@@ -21,6 +21,8 @@ live here.
 from dataclasses import dataclass, field
 from typing import Literal
 
+import torch
+
 
 @dataclass(kw_only=True, slots=True)
 class TrainingConfig:
@@ -119,6 +121,12 @@ class ParallelismConfig:
     - "never" will disable `reshard_after_forward` for all forward passes.
     """
 
+    enable_fsdp_symm_mem: bool = False
+    """
+    Whether to enable FSDP2 symmetric-memory communication optimizations for
+    all FSDP modules after `fully_shard` has been applied.
+    """
+
     tensor_parallel_degree: int = 1
     """Tensor Parallelism degree. 1 means disabled."""
 
@@ -130,6 +138,9 @@ class ParallelismConfig:
 
     enable_sequence_parallel: bool = True
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
+
+    full_dtensor: bool = False
+    """Whether to use full DTensor mode."""
 
     pipeline_parallel_degree: int = 1
     """
@@ -207,6 +218,17 @@ class ParallelismConfig:
             raise ValueError(
                 "context_parallel_load_balancer cannot be an empty string. "
                 "Use None to disable load balancing."
+            )
+        if self.enable_fsdp_symm_mem and (
+            not torch.cuda.is_available()
+            or (
+                torch.version.hip is None
+                and torch.cuda.get_device_capability() < (9, 0)
+            )
+        ):
+            raise ValueError(
+                "For NVIDIA GPUs, parallelism.enable_fsdp_symm_mem is only supported "
+                "for compute capability 9.0 or newer."
             )
 
     context_parallel_rotate_method: Literal["allgather", "alltoall"] = "allgather"

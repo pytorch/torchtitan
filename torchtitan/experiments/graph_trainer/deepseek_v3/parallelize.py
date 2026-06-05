@@ -13,6 +13,7 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
     apply_cp_to_attention,
@@ -22,7 +23,6 @@ from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
     GraphTrainerDeepSeekV3Model,
 )
-from torchtitan.models.deepseek_v3.parallelize import apply_moe_ep_tp
 from torchtitan.tools.logging import logger
 
 
@@ -75,30 +75,23 @@ def parallelize_deepseekv3(
 
     annotate_deepseekv3(model)
 
-    if parallel_dims.tp_enabled:
-        tp_mesh = parallel_dims.get_mesh("tp")
-        # Config-based sharding: ShardingConfig is populated on the model
-        # config in Trainer.Config.__post_init__; Module.parallelize applies it.
-        model.parallelize(tp_mesh)
-
     # Read comm_backend from the model's token dispatcher config
     # (set by moe_comm_backend in model_registry / config factories).
+    from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
+
     moe_config = next((l.moe for l in model.config.layers if l.moe is not None), None)
-    comm_backend = (
-        getattr(moe_config.experts.token_dispatcher, "comm_backend", "standard")
-        if moe_config is not None
-        else "standard"
+    is_hybridep = moe_config is not None and isinstance(
+        moe_config.experts.token_dispatcher,
+        HybridEPTokenDispatcher.Config,
     )
-    if comm_backend == "hybridep":
+    if is_hybridep:
         from torchtitan.distributed.deepep import hybridep  # noqa: F401
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        apply_moe_ep_tp(
-            model,
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            enable_sp=parallelism.enable_sequence_parallel,
-        )
+        model.parallelize(parallel_dims)
+
+    if parallel_dims.tp_enabled:
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
     # real backend (see ParallelDims._mesh_exist), even at degree 1, so that
@@ -107,7 +100,7 @@ def parallelize_deepseekv3(
 
     # TODO: HybridEP applies to other sparse models (e.g. Qwen3). Refactor
     # the common HybridEP buffer init into a shared utility.
-    if comm_backend == "hybridep" and parallel_dims.ep_enabled:
+    if is_hybridep and parallel_dims.ep_enabled:
         from torchtitan.distributed.deepep.hybridep import get_buffer
 
         ep_group = parallel_dims.get_mesh("ep").get_group()

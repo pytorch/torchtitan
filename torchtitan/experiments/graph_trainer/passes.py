@@ -14,7 +14,8 @@ in order, and the pass registries.  Individual passes live in dedicated modules:
 - ``inductor_passes.py`` — regional and full Inductor compilation
 - ``cudagraph.py`` — cudagraph wrapping and kernel annotations
 - ``fsdp_passes.py`` — FSDP bucketing and resharding
-- ``remove_noop_passes.py`` — no-op removal (detach, identity view/slice)
+- ``remove_noop_passes.py`` — graph cleanup bundled as ``canonicalize_graph_pass``
+  (detach, identity view/slice, back-to-back transpose, view→reshape normalization)
 - ``performance_passes.py`` — opt-in numerics-changing optimizations
 - ``selective_activation_remat.py`` — activation rematerialization
 - ``cpu_offload.py`` — CPU offload insertion
@@ -43,7 +44,6 @@ from torchtitan.experiments.graph_trainer.debug_utils import (
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     joint_transformer_block_bucketing_reordering_pass,
-    overlap_fsdp_ag_rs_pass,
 )
 from torchtitan.experiments.graph_trainer.inductor_passes import (
     annotate_flex_attention_for_regional_inductor_pass,
@@ -55,34 +55,15 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
     tag_with_memory_policy_pass,
 )
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
-    remove_detach_pass,
-    remove_identity_slice_pass,
-    remove_identity_view_pass,
+    canonicalize_graph_pass,
+    eliminate_dead_code_pass,
 )
 from torchtitan.experiments.graph_trainer.selective_activation_remat import (
     selective_activation_remat_pass,
 )
 from torchtitan.tools.logging import logger
 
-aten = torch.ops.aten
 c10d = torch.ops._c10d_functional
-
-
-def normalize_view_ops_as_reshape(
-    gm: torch.fx.GraphModule,
-    example_inputs=None,
-) -> torch.fx.GraphModule:
-    """Replace aten.view and aten._unsafe_view with aten.reshape.
-
-    Downstream passes expect aten.reshape.default for pattern matching.
-    """
-    view_targets = {aten.view.default, aten._unsafe_view.default}
-    for node in gm.graph.nodes:
-        if node.op == "call_function" and node.target in view_targets:
-            node.target = aten.reshape.default
-    gm.graph.lint()
-    gm.recompile()
-    return gm
 
 
 def async_tensor_parallel_pass(
@@ -138,11 +119,11 @@ def compile_time_passes(
     cudagraph is excluded because it needs to re-capture the graph into
     an in-memory CUDA graph at runtime.
 
-    ``overlap_fsdp_ag_rs_pass`` runs immediately before
-    ``joint_transformer_block_bucketing_reordering_pass`` so that
-    forward+backward all-gathers end up on a separate CUDA stream from
-    reduce-scatters (enabling AG/RS overlap in backward). It is a no-op
-    when the graph contains no FSDP all-gathers.
+    ``joint_transformer_block_bucketing_reordering_pass`` optionally runs
+    ``overlap_fsdp_ag_rs_pass`` first (gated by
+    ``compile.enable_fsdp_ag_rs_overlap``) so that forward+backward
+    all-gathers end up on a separate CUDA stream from reduce-scatters
+    (enabling AG/RS overlap in backward).
     """
     from torchtitan.experiments.graph_trainer.common_utils import (
         get_default_transformer_block_buckets,
@@ -151,10 +132,8 @@ def compile_time_passes(
 
     n_layers = len(config.model_spec.model.layers)
     passes: list[Callable] = [
-        remove_detach_pass,
-        remove_identity_view_pass,
-        remove_identity_slice_pass,
-        normalize_view_ops_as_reshape,
+        eliminate_dead_code_pass,
+        canonicalize_graph_pass,
         functools.partial(
             tag_with_memory_policy_pass,
             config=config,
@@ -165,10 +144,10 @@ def compile_time_passes(
             defer_n_layers=config.compile.cpu_offload_defer_n_layers,
         ),
         selective_activation_remat_pass,
-        overlap_fsdp_ag_rs_pass,
         functools.partial(
             joint_transformer_block_bucketing_reordering_pass,
             module_bucket_plans=get_default_transformer_block_buckets(n_layers),
+            enable_fsdp_ag_rs_overlap=config.compile.enable_fsdp_ag_rs_overlap,
         ),
     ]
     if config.parallelism.enable_async_tensor_parallel:
@@ -230,21 +209,17 @@ def construct_default_graph_passes(
     When ``precompile_artifact_dir`` is set, the artifact has graph
     transformed during precompile phase, so only cudagraph is returned.
     """
-    from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
-
-    cudagraph_disabled = "cudagraph_pass" in config.compile.disable_passes
-    use_cudagraph = not cudagraph_disabled and is_cudagraph_compatible(traced_result.gm)
+    want_cudagraph = "cudagraph_pass" not in config.compile.disable_passes
 
     has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
 
     passes: list[Callable] = []
     if not has_precompile_artifact:
         passes.extend(
-            compile_time_passes(traced_result, config, use_cudagraph=use_cudagraph)
+            compile_time_passes(traced_result, config, use_cudagraph=want_cudagraph)
         )
 
-    # cudagraph should be the last pass.
-    if use_cudagraph:
+    if want_cudagraph:
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
             functools.partial(

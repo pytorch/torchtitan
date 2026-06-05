@@ -6,6 +6,7 @@
 
 import unittest
 from collections import Counter
+from copy import deepcopy
 
 import torch
 import torch.nn as nn
@@ -15,7 +16,6 @@ from torch.testing._internal.common_fsdp import FSDPTest
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedCELossWithParamGrads,
 )
-
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
@@ -667,13 +667,23 @@ class TestReparametrizeOptimizer(unittest.TestCase):
     DTYPE = torch.float32
 
     def test_titan_optimizers_container(self):
-        from torchtitan.components.optimizer import OptimizersContainer
+        from torchtitan.components.optimizer import (
+            OptimizersContainer,
+            ParamGroupConfig,
+        )
 
         torch.manual_seed(0)
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         container = OptimizersContainer(
             OptimizersContainer.Config(
-                name="AdamW", lr=1e-3, implementation="for-loop"
+                param_groups=[
+                    ParamGroupConfig(
+                        pattern=r".*",
+                        optimizer_name="AdamW",
+                        optimizer_kwargs={"lr": 1e-3},
+                    )
+                ],
+                implementation="for-loop",
             ),
             model_parts=[model],
         )
@@ -724,6 +734,43 @@ class TestReparametrizeOptimizer(unittest.TestCase):
         self.assertEqual(list(inner.state.keys()), original_state_keys)
         for orig_ids, group in zip(original_param_ids, inner.param_groups, strict=True):
             self.assertEqual([id(p) for p in group["params"]], orig_ids)
+
+    def test_minimal_fx_tracer_with_bucketed_optimizer(self):
+        torch.manual_seed(0)
+        module = nn.Sequential(nn.Linear(3, 5), nn.ReLU(), nn.Linear(5, 7))
+        weights = [p for n, p in module.named_parameters() if n.endswith("weight")]
+        biases = [p for n, p in module.named_parameters() if n.endswith("bias")]
+        optimizer = torch.optim.AdamW(
+            [{"params": weights, "lr": 0.1}, {"params": biases, "lr": 0.01}]
+        )
+
+        x = torch.randn(2, 3)
+        module(x).sum().backward()
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+
+        def train_step(x):
+            optimizer.zero_grad(set_to_none=True)
+            module(x).sum().backward()
+            optimizer.step()
+            return torch.stack([p.detach().sum() for p in module.parameters()])
+
+        traced = minimal_fx_tracer(train_step, module=module, optimizer=optimizer)(x)
+
+        model_sd = deepcopy(module.state_dict())
+        optim_sd = deepcopy(optimizer.state_dict())
+
+        eager_out = train_step(x)
+        eager_params = [p.detach().clone() for p in module.parameters()]
+
+        module.load_state_dict(model_sd)
+        optimizer.load_state_dict(optim_sd)
+        traced_out = run_traced(traced, module=module, optimizer=optimizer)(x)
+        traced_params = [p.detach().clone() for p in module.parameters()]
+
+        self.assertTrue(torch.equal(eager_out, traced_out))
+        for ep, tp in zip(eager_params, traced_params, strict=True):
+            self.assertTrue(torch.equal(ep, tp))
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -839,6 +886,76 @@ class TestTraceDTensor(unittest.TestCase):
         self.assertTrue(torch.equal(loss_ref.full_tensor(), loss_tr.full_tensor()))
         for gr, gt in zip(grads_ref, grads_tr, strict=True):
             self.assertTrue(torch.equal(gr.full_tensor(), gt.full_tensor()))
+
+    def test_full_inductor_pass_on_collective(self):
+        # ``make_fx`` traces ``dist.*`` collectives as raw ``c10d.{op}_``
+        # inplace ops with a torchbind ``ProcessGroup`` baked in as a graph
+        # attr. ``full_inductor_compilation_pass`` must functionalize the
+        # collective and unbox the PG before ``compile_fx_inner`` — otherwise
+        # the cache key calls ``__eq__`` on the torchbind and crashes.
+        import torch.distributed as dist
+
+        from torchtitan.experiments.graph_trainer.inductor_passes import (
+            full_inductor_compilation_pass,
+        )
+
+        def f(_state, t):
+            t = t.clone()
+            dist.all_reduce(t)
+            return t + 1
+
+        traced = minimal_fx_tracer(f)({}, torch.ones(4, device=self.DEVICE))
+        compiled_gm = full_inductor_compilation_pass(traced.gm, traced.example_inputs)
+
+        real_input = torch.ones(4, device=self.DEVICE)
+        expected = f({}, real_input.clone())
+        actual = compiled_gm(real_input.clone())
+        if isinstance(actual, (list, tuple)):
+            actual = actual[0]
+        torch.testing.assert_close(actual, expected)
+
+    def test_full_inductor_pass_migrates_cpu_attrs(self):
+        from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_pass
+        from torchtitan.experiments.graph_trainer.inductor_passes import (
+            full_inductor_compilation_pass,
+        )
+
+        def f(_state, x):
+            pad = torch.tensor(-1, dtype=torch.int64)
+            fill = torch.tensor(0, dtype=torch.bfloat16)
+            scale = torch.tensor(1.0, dtype=torch.float32)
+            return x + pad.to(x.dtype) + fill.to(x.dtype) + scale.to(x.dtype)
+
+        traced = minimal_fx_tracer(f)(
+            {}, torch.zeros(4, dtype=torch.float32, device=self.DEVICE)
+        )
+
+        cpu_attr_names = [
+            n.target
+            for n in traced.gm.graph.find_nodes(op="get_attr")
+            if isinstance(getattr(traced.gm, n.target, None), torch.Tensor)
+            and getattr(traced.gm, n.target).device.type == "cpu"
+        ]
+
+        gm = full_inductor_compilation_pass(traced.gm, traced.example_inputs)
+
+        for name in cpu_attr_names:
+            attr = getattr(traced.gm, name, None)
+            self.assertIsInstance(attr, torch.Tensor)
+            self.assertEqual(
+                attr.device.type,
+                "cuda",
+                f"{name} should have been migrated to CUDA",
+            )
+
+        gm = cudagraph_pass(gm, traced.example_inputs, is_forward=True)
+        real_x = torch.zeros(4, dtype=torch.float32, device=self.DEVICE)
+        expected = f({}, real_x.clone())
+        for _ in range(3):
+            actual = gm(real_x.clone())
+            if isinstance(actual, (list, tuple)):
+                actual = actual[0]
+            torch.testing.assert_close(actual, expected)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -1131,9 +1248,8 @@ class TestTraceModels(unittest.TestCase):
             get_causal_mask_mod,
             get_document_mask_mod,
         )
-        from torchtitan.models.common.linear import Linear
-        from torchtitan.models.common.rmsnorm import RMSNorm
-        from torchtitan.models.common.rope import RoPE
+        from torchtitan.models.common.nn_modules import Linear, RMSNorm
+        from torchtitan.models.common.rope import ComplexRoPE
         from torchtitan.models.deepseek_v3.model import Attention as DSAttention
 
         dim = 64
@@ -1160,6 +1276,11 @@ class TestTraceModels(unittest.TestCase):
                         qk_nope_head_dim=qk_nope_head_dim,
                         qk_rope_head_dim=rope_dim,
                         v_head_dim=v_head_dim,
+                        rope=ComplexRoPE.Config(
+                            dim=rope_dim,
+                            max_seq_len=seq_len,
+                            scaling="none",
+                        ),
                         q_norm=RMSNorm.Config(normalized_shape=1),
                         kv_norm=RMSNorm.Config(normalized_shape=kv_lora_rank),
                         inner_attention=FlexAttention.Config(),
@@ -1182,24 +1303,16 @@ class TestTraceModels(unittest.TestCase):
                         ),
                     ),
                 )
-                self.rope = RoPE(
-                    RoPE.Config(
-                        dim=rope_dim,
-                        max_seq_len=seq_len,
-                        backend="complex",
-                        scaling="none",
-                    )
-                )
                 self.proj = nn.Linear(dim, vocab_size)
 
             def init_states(self, buffer_device=None):
-                self.rope._init_self_buffers(
+                self.attn.rope._init_self_buffers(
                     buffer_device=buffer_device or torch.device("cuda")
                 )
 
             def forward(self, tokens, block_mask):
                 x = self.embed(tokens)
-                x = self.attn(x, self.rope.cache, block_mask)
+                x = self.attn(x, block_mask)
                 return self.proj(x)
 
         model = TinyFlexMLA().to(device=self.DEVICE, dtype=self.DTYPE)

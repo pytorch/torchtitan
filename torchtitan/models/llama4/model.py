@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import dataclasses
 from dataclasses import dataclass
 
 import torch
@@ -20,7 +19,6 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
-from torchtitan.tools.logging import logger
 
 
 def compute_moe_hidden_dim(
@@ -89,13 +87,10 @@ class Llama4TransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
-        h = x + self.attention(
-            self.attention_norm(x), freqs_cis, attention_masks, positions
-        )
+        h = x + self.attention(self.attention_norm(x), attention_masks, positions)
         if self.moe_enabled:
             out = h + self.moe(self.ffn_norm(h))
         else:
@@ -119,39 +114,11 @@ class Llama4Model(Decoder):
         def update_from_config(
             self,
             *,
-            trainer_config,
+            config,
             **kwargs,
         ) -> None:
-
-            training = trainer_config.training
-            parallelism = trainer_config.parallelism
-            debug = trainer_config.debug
-            seq_len = training.seq_len
-            if seq_len > self.rope.max_seq_len:
-                logger.warning(
-                    f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
-                )
-            # Sync rope max_seq_len
-            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
-
-            for layer_cfg in self.layers:
-                if layer_cfg.moe is not None:
-                    layer_cfg.moe.router._debug_force_load_balance = (
-                        debug.moe_force_load_balance
-                    )
-                    comm_backend = getattr(
-                        layer_cfg.moe.experts.token_dispatcher,
-                        "comm_backend",
-                        "standard",
-                    )
-                    if (
-                        comm_backend in ("deepep", "hybridep")
-                        and parallelism.expert_parallel_degree == 1
-                    ):
-                        raise ValueError(
-                            f"{comm_backend.upper()} requires expert parallelism "
-                            "(expert_parallel_degree > 1)."
-                        )
+            Decoder.Config.update_from_config(self, config=config, **kwargs)
+            parallelism = config.parallelism
 
             if parallelism.context_parallel_degree > 1:
                 raise NotImplementedError(
@@ -159,25 +126,13 @@ class Llama4Model(Decoder):
                     "(Llama4 requires FlexAttention, which is not supported with CP)."
                 )
 
-            tp = parallelism.tensor_parallel_degree
-            if tp > 1:
-                n_heads = self.layers[0].attention.n_heads
-                n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
-                if n_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
-                    )
-                if n_kv_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
-                    )
-
             from torchtitan.models.llama4.sharding import set_llama4_sharding_config
 
             set_llama4_sharding_config(
                 self,
                 loss_parallel=not parallelism.disable_loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
         def get_nparams_and_flops(

@@ -17,16 +17,14 @@ import torch
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
-from torchtitan.components.optimizer import (
-    OptimizersContainer,
-    OptimizersInBackwardContainer,
-)
+from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
@@ -39,7 +37,7 @@ from torchtitan.config.configs import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
@@ -106,15 +104,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise ValueError(
                     "Batch-invariant mode is not supported in pre-training."
                 )
-            if isinstance(self.optimizer, OptimizersInBackwardContainer.Config):
-                if self.parallelism.expert_parallel_degree > 1:
-                    raise NotImplementedError(
-                        "Optimizers in backward is not supported with Expert Parallel."
-                    )
-                if self.parallelism.pipeline_parallel_degree > 1:
-                    raise NotImplementedError(
-                        "Optimizers in backward is not supported with Pipeline Parallel."
-                    )
 
         def to_dict(self) -> dict[str, Any]:
             d = {}
@@ -229,23 +218,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.debug,
             distinct_seed_mesh_dims=["pp"],
         )
-        # build tokenizer
-        self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
-
-        # build dataloader
-        self.dataloader = config.dataloader.build(
-            dp_world_size=batch_degree,
-            dp_rank=batch_rank,
-            tokenizer=self.tokenizer,
-            seq_len=config.training.seq_len,
-            local_batch_size=config.training.local_batch_size,
-        )
 
         # build model (using meta init)
         model_config = model_spec.model
         # set the model args from training job configs
         model_config.update_from_config(
-            trainer_config=config,
+            config=config,
         )
         self.model_config = model_config
 
@@ -446,6 +424,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.step = 0
         self.ntokens_seen = 0
 
+        # build tokenizer
+        self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+
+        # build dataloader
+        self.dataloader = config.dataloader.build(
+            dp_world_size=batch_degree,
+            dp_rank=batch_rank,
+            tokenizer=self.tokenizer,
+            seq_len=config.training.seq_len,
+            local_batch_size=config.training.local_batch_size,
+            snapshot_every_n_steps=(
+                config.checkpoint.interval * self.gradient_accumulation_steps
+                if config.checkpoint.enable
+                else None
+            ),
+        )
+
+        # build checkpointer
         self.checkpointer = config.checkpoint.build(
             dataloader=self.dataloader,
             model_parts=self.model_parts,
@@ -628,6 +624,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # unique tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += labels.numel()
 
+        if self.config.parallelism.full_dtensor:
+            inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
+                self.parallel_dims, inputs, labels, extra_kwargs
+            )
+
         return inputs, labels, extra_inputs, extra_kwargs
 
     @sl.log_trace_span("fwd_bwd")
@@ -684,6 +685,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             assert len(model_parts) == 1
             with self.train_context():
                 pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                # Under non-full_dtensor, labels stay as plain tensors. See
+                # ``cross_entropy_loss`` for why pred must also be plain.
+                # Remove once non-full_dtensor is no longer supported.
+                if (
+                    isinstance(pred, DTensor)
+                    and not self.config.parallelism.full_dtensor
+                    and self.config.parallelism.disable_loss_parallel
+                ):
+                    pred = pred.to_local()
                 loss = self.loss_fn(pred, labels, global_valid_tokens)
                 del pred
                 loss.backward()
@@ -695,8 +705,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
         self.optimizers.zero_grad()
-        # Save the current step learning rate for logging
-        lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
+        # Save per-optimizer-group learning rates for logging
+        lr_metrics = self.lr_schedulers.get_metrics()
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -791,7 +801,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
-            "lr": lr,
+            **lr_metrics,
         }
         self.metrics_processor.log(
             self.step,
