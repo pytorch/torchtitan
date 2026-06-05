@@ -52,13 +52,22 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             # Transformer layer
             "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
-            # MoE
-            "model.layers.{}.mlp.experts.gate_up_proj_blocks": "layers.{}.moe.experts.mlp1_weight",
-            "model.layers.{}.mlp.experts.gate_up_proj_bias": "layers.{}.moe.experts.mlp1_bias",
-            "model.layers.{}.mlp.experts.down_proj_blocks": "layers.{}.moe.experts.mlp2_weight",
-            "model.layers.{}.mlp.experts.down_proj_bias": "layers.{}.moe.experts.mlp2_bias",
+            # MoE. The _EGD / _EG / _EDF / _ED suffixes are torchtitan's
+            # shape-suffix convention (E=experts, G=gate, F=ffn, D=hidden)
+            # added in PR #3425.
+            "model.layers.{}.mlp.experts.gate_up_proj_blocks": "layers.{}.moe.experts.mlp1_weight_EGD",
+            "model.layers.{}.mlp.experts.gate_up_proj_bias": "layers.{}.moe.experts.mlp1_bias_EG",
+            "model.layers.{}.mlp.experts.down_proj_blocks": "layers.{}.moe.experts.mlp2_weight_EDF",
+            "model.layers.{}.mlp.experts.down_proj_bias": "layers.{}.moe.experts.mlp2_bias_ED",
             "model.layers.{}.mlp.router.weight": "layers.{}.moe.router.gate.weight",
             "model.layers.{}.mlp.router.bias": "layers.{}.moe.router.gate.bias",
+            # expert_bias_E is auxiliary-loss-free load-balancing state (DeepSeek
+            # paper, adapted for Qwen/Mixtral-style routers including gpt_oss).
+            # HF transformers' gpt_oss router has no equivalent buffer, so to_hf
+            # drops this key and from_hf reinitializes it to zeros. See
+            # test_hf_checkpoint_roundtrip exclusion for the matching test
+            # contract.
+            None: "layers.{}.moe.expert_bias_E",
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "lm_head.weight",
         }
@@ -188,12 +197,17 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                 if abstract_key not in to_hf_map:
                     continue
                 hf_key = to_hf_map[abstract_key]
+                if hf_key is None:
+                    # Intentionally dropped (e.g. expert_bias_E — see from_hf_map comment).
+                    continue
                 hf_key = hf_key.format(layer_num)
                 hf_state_dict[hf_key] = value
             else:
                 if key not in to_hf_map:
                     continue
                 hf_key = to_hf_map[key]
+                if hf_key is None:
+                    continue
                 hf_state_dict[hf_key] = value
 
         return hf_state_dict
@@ -277,5 +291,21 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             raise ValueError(
                 f"Incomplete Q/K/V bias projections for layers: {list(pending_qkv_bias.keys())}"
             )
+
+        # Restore expert_bias_E (zeros) for every MoE layer. The HF format
+        # doesn't have a key for this auxiliary-loss-free load-balancing bias,
+        # so to_hf drops it; we reinitialize it to zeros so the native key set
+        # stays complete. The bias gets recomputed by the optimizer pre-hook
+        # during training; resuming from an HF checkpoint loses any
+        # accumulated bias state.
+        for layer_idx, layer_cfg in enumerate(self.model_config.layers):
+            if (
+                getattr(layer_cfg, "moe", None) is not None
+                and layer_cfg.moe.load_balance_coeff is not None
+            ):
+                state_dict[f"layers.{layer_idx}.moe.expert_bias_E"] = torch.zeros(
+                    layer_cfg.moe.num_experts,
+                    dtype=torch.float32,
+                )
 
         return state_dict

@@ -60,6 +60,10 @@ _MODEL_FLAVORS = [
     # (w1_EFD / w2_EDF / w3_EFD), dense FF mappings on non-MoE layers, and
     # expert_bias_E reinit (see _NATIVE_EXCLUSIONS).
     ("llama4", "debugmodel"),
+    # gpt_oss: gated MoE with gate_up_proj fused into a single mlp1 weight.
+    # Different shape-suffix naming (mlp1_*_EGD/EG, mlp2_*_EDF/ED) but same
+    # expert_bias_E semantics as llama4.
+    ("gpt_oss", "debugmodel"),
 ]
 
 # Native-side keys (or regex patterns) excluded from the bitwise comparison,
@@ -77,10 +81,15 @@ _NATIVE_EXCLUSIONS: dict[tuple[str, str], list[str]] = {
     # round-trip by design; the optimizer pre-hook recomputes it during
     # training. Resuming from an HF checkpoint loses any accumulated bias.
     ("llama4", "debugmodel"): [r".*\.moe\.expert_bias_E$"],
+    # gpt_oss: same expert_bias_E story as llama4 — HF transformers' gpt_oss
+    # router has no equivalent buffer, so the round-trip resets the bias to
+    # zeros by design.
+    ("gpt_oss", "debugmodel"): [r".*\.moe\.expert_bias_E$"],
 }
 
 _MOE_LOAD_BALANCE_OPTIONAL_FLAVORS = [
     ("llama4", "debugmodel"),
+    ("gpt_oss", "debugmodel"),
 ]
 
 
