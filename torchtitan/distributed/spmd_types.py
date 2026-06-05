@@ -20,6 +20,7 @@ from typing import Any
 
 import spmd_types as spmd
 import torch
+import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
@@ -36,6 +37,7 @@ __all__ = [
     "mesh_size",
     "annotate_input_spmd_types",
     "placement_to_spmd_assert_type",
+    "preserve_buffers_spmd",
     "redistribute_spmd_per_axis",
     "set_current_spmd_mesh",
     "set_spmd_backend",
@@ -83,6 +85,33 @@ def mesh_size(axis_name: str) -> int:
     if axis_name not in names:
         return 1
     return mesh.size(names.index(axis_name))
+
+
+@contextlib.contextmanager
+def preserve_buffers_spmd(model: nn.Module) -> Iterator[None]:
+    """
+    Preserve local SPMD annotations on buffers across reinitialization.
+
+    Previously we could have read types off self.freqs_cis, but after
+    https://github.com/pytorch/torchtitan/pull/3458 changed to per-layer cache,
+    the types disappear across to_empty() + _init_self_buffers().
+    Implement it as a general context for all buffers in case other modules suffer from this.
+    """
+    if _spmd_backend != "spmd_types":
+        yield
+        return
+
+    saved = {
+        fqn: dict(spmd.get_local_type(buf))
+        for fqn, buf in model.named_buffers()
+        if spmd.has_local_type(buf)
+    }
+    try:
+        yield
+    finally:
+        for fqn, buf in model.named_buffers():
+            if fqn in saved and not spmd.has_local_type(buf):
+                spmd.assert_type(buf, saved[fqn])
 
 
 @contextlib.contextmanager

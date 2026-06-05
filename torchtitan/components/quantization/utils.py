@@ -69,16 +69,15 @@ def has_quantization(model_config) -> bool:
     )
     from torchtitan.components.quantization.mx import _mxfp8_experts_cache, MXFP8Linear
 
-    has_quant_linear = (
-        any(
-            isinstance(config, (Float8Linear.Config, MXFP8Linear.Config))
-            for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config)
-        )
-        if Float8Linear is not None
-        else any(
-            isinstance(config, MXFP8Linear.Config)
-            for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config)
-        )
+    quant_linear_types: list[type] = []
+    if Float8Linear is not None:
+        quant_linear_types.append(Float8Linear.Config)
+    if MXFP8Linear is not None:
+        quant_linear_types.append(MXFP8Linear.Config)
+
+    has_quant_linear = bool(quant_linear_types) and any(
+        isinstance(config, tuple(quant_linear_types))
+        for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config)
     )
     quant_experts_types = tuple(
         cls.Config  # type: ignore[attr-defined]
