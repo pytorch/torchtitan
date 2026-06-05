@@ -232,6 +232,7 @@ def qwen3_14b() -> Trainer.Config:
         ),
     )
 
+
 def qwen3_30b_a3b() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
@@ -262,6 +263,7 @@ def qwen3_30b_a3b() -> Trainer.Config:
             mode="full",
         ),
     )
+
 
 def qwen3_32b() -> Trainer.Config:
     return Trainer.Config(
