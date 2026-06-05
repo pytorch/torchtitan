@@ -7,6 +7,7 @@
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
+from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.validate import Validator
 from torchtitan.config import ActivationCheckpointConfig, CommConfig, TrainingConfig
 from torchtitan.experiments.ft.checkpoint import FTCheckpointManager
@@ -31,7 +32,9 @@ def llama3_ft_debugmodel() -> FaultTolerantTrainer.Config:
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel"),
-        optimizer=FTOptimizersContainer.Config(lr=8e-4),
+        optimizer=FTOptimizersContainer.Config(
+            param_groups=default_adamw(lr=8e-4).param_groups
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
