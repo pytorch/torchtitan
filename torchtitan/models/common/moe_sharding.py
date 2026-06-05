@@ -36,11 +36,13 @@ def expert_param_placement_sparse() -> NamedPlacement:
     EP always shards on dim 0 (the expert dim of ``(num_experts, *, *)``
     weights).
     """
-    return {
-        DP_REPLICATE: Replicate(),
-        EFSDP: Replicate(),
-        EP: Shard(0),
-    }
+    return NamedPlacement(
+        {
+            DP_REPLICATE: Replicate(),
+            EFSDP: Replicate(),
+            EP: Shard(0),
+        }
+    )
 
 
 def expert_param_placement_dense(*, tp_placement: Placement) -> NamedPlacement:
@@ -53,12 +55,14 @@ def expert_param_placement_dense(*, tp_placement: Placement) -> NamedPlacement:
     placement on the TP axis: ``Shard(1)`` for colwise, ``Shard(2)`` for
     rowwise, ``Replicate()`` for replicated bias.
     """
-    return {
-        DP_REPLICATE: Replicate(),
-        DP_SHARD: Replicate(),
-        CP: Replicate(),
-        TP: tp_placement,
-    }
+    return NamedPlacement(
+        {
+            DP_REPLICATE: Replicate(),
+            DP_SHARD: Replicate(),
+            CP: Replicate(),
+            TP: tp_placement,
+        }
+    )
 
 
 def _shared_expert_colwise_config(enable_ep: bool, enable_sp: bool) -> ShardingConfig:
@@ -134,12 +138,14 @@ def _tokens_per_expert_placement(*, enable_ep: bool) -> NamedPlacement:
     enabled (TP axis doubles as SP, each rank sees different tokens) or
     ``Replicate`` when EP is disabled (all TP ranks see the same tokens).
     """
-    return {
-        DP_REPLICATE: Partial(),
-        DP_SHARD: Partial(),
-        CP: Partial(),
-        TP: Partial() if enable_ep else Replicate(),
-    }
+    return NamedPlacement(
+        {
+            DP_REPLICATE: Partial(),
+            DP_SHARD: Partial(),
+            CP: Partial(),
+            TP: Partial() if enable_ep else Replicate(),
+        }
+    )
 
 
 def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:

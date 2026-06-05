@@ -7,6 +7,7 @@
 import dataclasses
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 from torch.nn.attention.flex_attention import and_masks
 
@@ -21,8 +22,9 @@ from torchtitan.models.common.attention import (
     VarlenAttention,
 )
 from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.nn_modules import Embedding, Linear, RMSNorm
+from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
@@ -205,14 +207,18 @@ class Decoder(BaseModel):
             f"buffer_device must not be meta, got {buffer_device}. "
             f"Buffers should be initialized on a real device after to_empty()."
         )
+        old_freqs_cis = self.freqs_cis
         if self.rope is not None:
             # RoPE's _init_self_buffers was already called by auto-recursion
-            self.freqs_cis = self.rope.cache
+            freqs_cis = self.rope.cache
         else:
             # PP case: rope module was pruned, rebuild to get freqs_cis
             rope = self.config.rope.build()
             rope._init_self_buffers(buffer_device=buffer_device)
-            self.freqs_cis = rope.cache
+            freqs_cis = rope.cache
+        if spmd.has_local_type(old_freqs_cis):
+            spmd.assert_type(freqs_cis, dict(spmd.get_local_type(old_freqs_cis)))
+        self.freqs_cis = freqs_cis
 
     def forward(
         self,
