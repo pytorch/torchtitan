@@ -26,10 +26,7 @@ from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhausted
 from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
-from torchtitan.components.optimizer import (
-    OptimizersContainer,
-    OptimizersInBackwardContainer,
-)
+from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
@@ -53,6 +50,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     placement_to_spmd_assert_type,
+    preserve_buffers_spmd,
     set_current_spmd_mesh,
     set_spmd_backend,
 )
@@ -116,15 +114,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise ValueError(
                     "Batch-invariant mode is not supported in pre-training."
                 )
-            if isinstance(self.optimizer, OptimizersInBackwardContainer.Config):
-                if self.parallelism.expert_parallel_degree > 1:
-                    raise NotImplementedError(
-                        "Optimizers in backward is not supported with Expert Parallel."
-                    )
-                if self.parallelism.pipeline_parallel_degree > 1:
-                    raise NotImplementedError(
-                        "Optimizers in backward is not supported with Pipeline Parallel."
-                    )
             if (
                 self.parallelism.spmd_backend == "spmd_types"
                 and self.debug.spmd_typechecking
@@ -369,11 +358,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 del model
 
                 for m in self.model_parts:
-                    m.to_empty(device=init_device)
-                    with torch.no_grad():
-                        # TODO: Change this back to init_weights once
-                        # autoparallel contains the wrap_init_states
-                        cast(BaseModel, m).init_weights(buffer_device=buffer_device)
+                    with preserve_buffers_spmd(m):
+                        m.to_empty(device=init_device)
+                        with torch.no_grad():
+                            # TODO: Change this back to init_weights once
+                            # autoparallel contains the wrap_init_states
+                            cast(BaseModel, m).init_weights(
+                                buffer_device=buffer_device
+                            )
                     m.train()
 
                 # confirm that user will be able to view loss metrics on the console
@@ -396,11 +388,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
-                model.to_empty(device=init_device)
-                with torch.no_grad():
-                    # TODO: Change this back to init_weights once
-                    # autoparallel contains the wrap_init_states
-                    cast(BaseModel, model).init_weights(buffer_device=buffer_device)
+                with preserve_buffers_spmd(model):
+                    model.to_empty(device=init_device)
+                    with torch.no_grad():
+                        # TODO: Change this back to init_weights once
+                        # autoparallel contains the wrap_init_states
+                        cast(BaseModel, model).init_weights(buffer_device=buffer_device)
                 model.train()
 
                 self.model_parts = [model]
@@ -750,8 +743,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
         self.optimizers.zero_grad()
-        # Save the current step learning rate for logging
-        lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
+        # Save per-optimizer-group learning rates for logging
+        lr_metrics = self.lr_schedulers.get_metrics()
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -878,7 +871,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
-            "lr": lr,
+            **lr_metrics,
         }
         self.metrics_processor.log(
             self.step,

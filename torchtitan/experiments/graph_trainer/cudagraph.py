@@ -11,6 +11,7 @@ This module provides a cudagraph pass that can be applied to graph modules
 during compilation.
 """
 
+import gzip
 import json
 import warnings
 from collections.abc import Callable, Sequence
@@ -144,12 +145,17 @@ def _cudagraph_annotate_trace_file(trace_path: str) -> None:
         )
         return
 
-    with open(trace_path) as f:
+    # Profiler.export_chrome_trace gzip-compresses when the path ends in
+    # ".gz" (the default PROFILE_FILE since #3483), so read/write the trace
+    # through gzip for those paths and fall back to plain text otherwise.
+    open_trace = gzip.open if trace_path.endswith(".gz") else open
+
+    with open_trace(trace_path, "rt") as f:
         trace = json.load(f)
 
     count = annotate_trace(trace, annotations)
     if count > 0:
-        with open(trace_path, "w") as f:
+        with open_trace(trace_path, "wt") as f:
             json.dump(trace, f)
         logger.info(f"Annotated {count} CUDAGraph kernel event(s) in profiler trace")
 
@@ -305,7 +311,11 @@ _FLEX_ATTENTION_OPS = {
 }
 
 
-def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
+def is_cudagraph_compatible(
+    gm: torch.fx.GraphModule,
+    *,
+    skip_flex_attention_check: bool = False,
+) -> bool:
     """Check whether the graph can be safely captured by CUDA graph.
 
     Returns False (with a warning) when the graph contains patterns
@@ -325,6 +335,12 @@ def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
       Math implementation that is incompatible with CUDA graph capture.
       The expected workflow is to apply regional_inductor first to compile
       flex_attention regions, then apply cudagraph.
+
+    Args:
+        gm: The graph module to check.
+        skip_flex_attention_check: When True, skip the flex_attention HOP
+            check. Used by ``full_inductor_compilation_pass`` which always
+            compiles flex_attention HOPs away during the collapse.
     """
     # ``full_inductor_compilation_pass`` collapses the FX graph into one
     # opaque ``standalone_compile_inner`` node, hiding ops the per-node
@@ -378,14 +394,15 @@ def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
                 )
                 return False
 
-    for node in gm.graph.nodes:
-        if node.op == "call_function" and node.target in _FLEX_ATTENTION_OPS:
-            logger.warning(
-                "Skipping cudagraph: graph contains flex_attention higher-order "
-                "ops that require regional_inductor to compile before cudagraph "
-                "can capture"
-            )
-            return False
+    if not skip_flex_attention_check:
+        for node in gm.graph.nodes:
+            if node.op == "call_function" and node.target in _FLEX_ATTENTION_OPS:
+                logger.warning(
+                    "Skipping cudagraph: graph contains flex_attention higher-order "
+                    "ops that require regional_inductor to compile before cudagraph "
+                    "can capture"
+                )
+                return False
 
     return True
 
