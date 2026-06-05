@@ -6,6 +6,7 @@
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -30,8 +31,9 @@ class Embedding(nn.Embedding, Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Runs vocab-parallel embedding when the current mesh has a TP axis."""
         weight = self.weight
+        mesh = current_mesh()
         tp_size = mesh_size("tp")
-        if tp_size == 1 or isinstance(weight, DTensor):
+        if tp_size == 1 or mesh is None:
             return F.embedding(
                 input,
                 weight,
@@ -42,23 +44,24 @@ class Embedding(nn.Embedding, Module):
                 self.sparse,
             )
 
-        mesh = current_mesh()
-        assert mesh is not None
         tp_pg = mesh.get_group("tp")
+        if isinstance(weight, DTensor):
+            weight = weight.to_local()
         chunk_size = (self.num_embeddings + tp_size - 1) // tp_size
         offset = dist.get_rank(tp_pg) * chunk_size
-        mask = (input >= offset) & (input < offset + weight.shape[0])
-        local_input = (input - offset).clamp(0, weight.shape[0] - 1)
-        out = F.embedding(
-            local_input,
-            weight,
-            self.padding_idx,
-            self.max_norm,
-            self.norm_type,
-            self.scale_grad_by_freq,
-            self.sparse,
-        )
-        return out * mask.unsqueeze(-1).to(out.dtype)
+        with spmd.no_typecheck():
+            mask = (input >= offset) & (input < offset + weight.shape[0])
+            local_input = (input - offset).clamp(0, weight.shape[0] - 1)
+            out = F.embedding(
+                local_input,
+                weight,
+                self.padding_idx,
+                self.max_norm,
+                self.norm_type,
+                self.scale_grad_by_freq,
+                self.sparse,
+            )
+            return out * mask.unsqueeze(-1).to(out.dtype)
 
 
 __all__ = ["Embedding"]
