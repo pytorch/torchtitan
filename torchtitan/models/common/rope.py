@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
+import spmd_types as spmd
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
 from torchtitan.protocols.module import Module
@@ -21,6 +22,7 @@ __all__ = [
 ]
 
 
+@spmd.no_typecheck()
 def _maybe_check_max_pos(positions: torch.Tensor, *, max_valid_pos: int) -> None:
     """Async bounds check: verify all position values <= max_valid_pos.
 
