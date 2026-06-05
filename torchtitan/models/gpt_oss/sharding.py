@@ -77,18 +77,19 @@ def _set_gpt_oss_layer_sharding(
     layer_cfg.ffn_norm.sharding_config = norm
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
 
-    # Attention: input x gathered to Replicate, freqs_cis always Replicate.
+    # Attention: input x gathered to Replicate.
     # sinks parameter is sharded across heads via state_shardings.
     attention.sharding_config = ShardingConfig(
         state_shardings={"sinks": dense_param_placement(tp=Shard(0))},
         in_src_shardings={
             "x": dense_activation_placement(tp=attn_x_placement),
-            "freqs_cis": dense_param_placement(tp=Replicate()),
         },
         in_dst_shardings={
             "x": dense_activation_placement(tp=Replicate()),
-            "freqs_cis": dense_param_placement(tp=Replicate()),
         },
+    )
+    attention.rope.sharding_config = ShardingConfig(
+        state_shardings={"cache": dense_param_placement(tp=Replicate())},
     )
     set_qkv_linear_sharding(attention.qkv_linear)
     attention.wo.sharding_config = rowwise_config(output_sp=enable_sp)

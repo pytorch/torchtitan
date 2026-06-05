@@ -23,8 +23,8 @@ defaults:
     shell: bash -l -eo pipefail {0}
 
 permissions:
-      id-token: write
-      contents: read
+  id-token: write
+  contents: read
 
 jobs:
   # Step 1: Dynamically compute the matrix based on conditions
@@ -32,12 +32,12 @@ jobs:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8')
     uses: ./.github/workflows/set-matrix.yaml
     with:
-      runner-cuda: linux.aws.h100.8
+      runner-cuda: mt-l-bx86iamx-176-1800-h100-8
 
   # Step 2: Use the dynamic matrix in the build-test job
   build-test:
     needs: set-matrix
-    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
@@ -45,7 +45,8 @@ jobs:
       runner: ${{ matrix.runner }}
       gpu-arch-type: ${{ matrix.gpu-arch-type }}
       gpu-arch-version: ${{ matrix.gpu-arch-version }}
-      docker-image: ${{ matrix.docker-image }}
+      # Private-ECR image, tagged with the .ci/docker hash from set-matrix.yaml.
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.docker-image }}:${{ needs.set-matrix.outputs.docker-hash }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
       timeout: 45
@@ -66,22 +67,27 @@ jobs:
         if [ -n "${{ matrix.torch-version }}" ]; then
           TORCH_SPEC="torch==${{ matrix.torch-version }}"
         fi
-        python -m pip install --force-reinstall --pre \
-          "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
+
+        # Pre-install torch's pure-python deps from the in-cluster pypi-cache for speed.
+        python -m pip install filelock typing-extensions "setuptools<82" sympy networkx jinja2 fsspec numpy
+        # Clear PIP_EXTRA_INDEX_URL so the default cpu index can't supply a +cpu torch.
+        PIP_EXTRA_INDEX_URL= python -m pip install --force-reinstall --pre "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
 
         if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
           export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
           echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
         fi
 
-        USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
-        python -m pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
+        USE_CPP=0 PIP_EXTRA_INDEX_URL= python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
-        sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
-        sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
+        mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+        # Install DeepEP for HybridEP integration test
+        bash /install_deepep.sh
 
         # Enable CPP stacktraces for debugging symmetric memory initialization errors.
         # Disable Nvlink Sharp. The CI machine seems to be unstable state to support
         # NLVS according to several CI runs.
-        NCCL_NVLS_ENABLE=0 TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests --test_suite h100 $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+        # DeepEP needs CUDA_HOME specified to JIT kernels.
+        CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests --test_suite h100 $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint

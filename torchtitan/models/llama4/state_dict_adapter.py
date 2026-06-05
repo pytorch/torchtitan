@@ -14,6 +14,7 @@ import torch
 logger = logging.getLogger()
 
 from torchtitan.models.common.attention import FusedQKVLinear
+from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 from .model import Llama4Model
 
@@ -60,17 +61,19 @@ class Llama4StateDictAdapter(StateDictAdapter):
 
     def _get_attention_dims(self) -> tuple[int, int, int]:
         """Return (n_heads, n_kv_heads, head_dim) from model config."""
+        # pyrefly: ignore [missing-attribute]
         attn = self.model_config.layers[0].attention
         n_heads = attn.n_heads
         n_kv_heads = attn.n_kv_heads if attn.n_kv_heads is not None else n_heads
         head_dim = (
             attn.head_dim
             if attn.head_dim is not None
-            else self.model_config.dim // n_heads
+            else self.model_config.dim // n_heads  # pyrefly: ignore [missing-attribute]
         )
         return n_heads, n_kv_heads, head_dim
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+
         if self.fuse_qkv:
             to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
             n_heads, n_kv_heads, head_dim = self._get_attention_dims()
@@ -153,6 +156,7 @@ class Llama4StateDictAdapter(StateDictAdapter):
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+        self._validate_hf_rope_config(ComplexRoPE.Config, allow_none=True)
         state_dict = {}
         # Collect Q/K/V per layer for fusing (only used when fuse_qkv=True)
         pending_qkv: dict[str, dict[str, torch.Tensor]] = {}

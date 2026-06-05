@@ -14,7 +14,7 @@ from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
-from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
+from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList
 
 _compiled_create_block_mask = torch.compile(create_block_mask)
@@ -130,7 +130,7 @@ def _compute_2d_rope_cache(
 
     Builds row and col indices in block order (matching the patch layout from
     the collator), looks up separate frequency sets for each dimension, and
-    concatenates them into a rope_cache for apply_rotary_emb_cos_sin.
+    concatenates them into a rope_cache for VisionAttention.
 
     Args:
         freq_table: (max_hw, head_dim//4) precomputed RoPE frequencies
@@ -141,7 +141,7 @@ def _compute_2d_rope_cache(
 
     Returns:
         rope_cache: (num_vision, max_num_patch, 1, head_dim*2) float32 for
-            apply_rotary_emb_cos_sin
+            VisionAttention
     """
     num_vision = grid_thw.shape[0]
     device = grid_thw.device
@@ -402,7 +402,9 @@ class VisionAttention(Module):
         )
         # Each: (num_vision, max_num_patch, n_heads, head_dim)
         q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(0)
-        q, k = apply_rotary_emb_cos_sin(q, k, rope_cache)
+        # Vision RoPE cache is already position-specific from grid_thw, so
+        # apply the prepared cache directly without a RoPE module instance.
+        q, k = CosSinRoPE.apply_rotary_emb(q, k, rope_cache)
         attn_output = self.flex_attention(q, k, v, attention_masks=attention_mask)
         attn_output = attn_output.reshape(num_vision, max_num_patch, -1)
         return self.proj(attn_output)
@@ -541,7 +543,7 @@ class Qwen3VLVisionEncoder(Module):
         Returns:
             learned_pos: (num_vision, max_num_patch, dim) learnable position embeddings
             rope_cache: (num_vision, max_num_patch, 1, head_dim*2) RoPE cache for
-                apply_rotary_emb_cos_sin
+                VisionAttention
         """
         head_dim = self.config.dim // self.config.n_heads
 

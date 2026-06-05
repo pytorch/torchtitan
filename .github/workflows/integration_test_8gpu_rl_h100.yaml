@@ -22,18 +22,31 @@ defaults:
     shell: bash -l -eo pipefail {0}
 
 permissions:
-      id-token: write
-      contents: read
+  id-token: write
+  contents: read
 
 jobs:
-  build-test:
+  # Step 1: Dynamically compute the matrix based on conditions
+  set-matrix:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/rl')
-    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    uses: ./.github/workflows/set-matrix.yaml
     with:
-      runner: linux.aws.h100.8
-      gpu-arch-type: cuda
-      gpu-arch-version: "13.0"
-      docker-image: torchtitan-ubuntu-22.04-clang12
+      runner-cuda: mt-l-bx86iamx-176-1800-h100-8
+      is-experimental: true
+
+  # Step 2: Use the dynamic matrix in the build-test job
+  build-test:
+    needs: set-matrix
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      # Private-ECR image, tagged with the .ci/docker hash from set-matrix.yaml.
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.docker-image }}:${{ needs.set-matrix.outputs.docker-hash }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
       timeout: 45
@@ -53,10 +66,11 @@ jobs:
         # Install uv for faster dependency resolution
         pip install uv
 
-        # 1. Install Monarch and TorchStore
-        uv pip install torchmonarch==0.3.0
+        # 1. Install Monarch, TorchStore, and Renderers
+        uv pip install torchmonarch
         uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
         uv pip install pygtrie portpicker
+        uv pip install "git+https://github.com/PrimeIntellect-ai/renderers.git@main"
 
         # 2. Install batch-invariant ops
         uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
@@ -68,10 +82,10 @@ jobs:
 
         # torchvision must be installed from the nightly channel alongside torch
         # so its C++ extensions (e.g. torchvision::nms) match the torch ABI.
-        uv pip install torch torchvision vllm xformers --pre \
-          --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
+        # Clear PIP_EXTRA_INDEX_URL so the default cpu index can't supply a +cpu torch.
+        PIP_EXTRA_INDEX_URL= uv pip install torch torchvision vllm xformers --pre \
+          --extra-index-url ${{ matrix.index-url }} \
           --index-strategy unsafe-best-match
-        uv pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 
         # 5. Install torchtitan in editable mode because integration test spawns
         # python grpo.py as a subprocess
@@ -80,8 +94,7 @@ jobs:
         # 6. Download HF model checkpoint for tests
         MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
 
-        sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
-        sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
+        mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
         # Install nvcc so FlashInfer can JIT compile its CUDA kernels.
         # vLLM uses FlashInfer sampler by default (vllm-project/vllm#40376)

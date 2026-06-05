@@ -9,7 +9,7 @@ from functools import partial
 
 import torch
 import torch.nn as nn
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.llama3 import model_registry, parallelize_llama
@@ -108,12 +108,18 @@ class TestModelSpec:
 
         # Build optimizers directly and apply post-build hook
         optimizers = OptimizersContainer.Config(
-            name="Adam",
-            lr=0.1,
-            beta1=0.9,
-            beta2=0.95,
-            weight_decay=0.1,
             implementation="fused",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="Adam",
+                    optimizer_kwargs={
+                        "lr": 0.1,
+                        "betas": (0.9, 0.95),
+                        "weight_decay": 0.1,
+                    },
+                ),
+            ],
         ).build(model_parts=model_parts)
         spec.post_optimizer_build_fn(optimizers, model_parts, None, my_hook)
 

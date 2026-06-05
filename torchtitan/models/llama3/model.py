@@ -42,13 +42,10 @@ class Llama3TransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
-        h = x + self.attention(
-            self.attention_norm(x), freqs_cis, attention_masks, positions
-        )
+        h = x + self.attention(self.attention_norm(x), attention_masks, positions)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
