@@ -12,13 +12,14 @@ import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 
-from torchtitan.models.common import Embedding, Linear, RoPE  # noqa: F401
+from torchtitan.models.common import Conv1d, Embedding, Linear, RoPE  # noqa: F401
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_experts_config,
     make_ffn_config,
     make_moe_config,
     make_router_config,
+    make_shared_experts_config,
 )
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
@@ -226,6 +227,7 @@ def _qwen35_deltanet_config(
     key_head_dim: int,
     value_head_dim: int,
     layer_id: int,
+    conv_kernel_size: int = 4,
     fla_backend: Literal[
         "fla_chunked", "fla_fused_recurrent", "torch_naive"
     ] = "fla_chunked",
@@ -239,15 +241,31 @@ def _qwen35_deltanet_config(
             in_features=in_f, out_features=out_f, bias=False, param_init=init
         )
 
+    def _conv(channels: int) -> Conv1d.Config:
+        # Depthwise causal conv (groups == channels). Causal left-padding is
+        # applied in the forward, so padding=0 here.
+        return Conv1d.Config(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=conv_kernel_size,
+            groups=channels,
+            padding=0,
+            bias=False,
+        )
+
     return GatedDeltaNet.Config(
         key_head_dim=key_head_dim,
         value_head_dim=value_head_dim,
+        conv_kernel_size=conv_kernel_size,
         in_proj_q=_proj(dim, key_dim, _LINEAR_INIT),
         in_proj_k=_proj(dim, key_dim, _LINEAR_INIT),
         in_proj_v=_proj(dim, value_dim, _LINEAR_INIT),
         in_proj_z=_proj(dim, value_dim, _LINEAR_INIT),
         in_proj_a=_proj(dim, n_value_heads, _LINEAR_INIT),
         in_proj_b=_proj(dim, n_value_heads, _LINEAR_INIT),
+        conv_q=_conv(key_dim),
+        conv_k=_conv(key_dim),
+        conv_v=_conv(value_dim),
         kernel=GatedDeltaKernel.Config(backend=fla_backend),
         norm=RMSNormGated.Config(
             dim=value_head_dim,
@@ -410,16 +428,12 @@ def _build_qwen35_moe_layers(
                         comm_backend=moe_comm_backend,
                         non_blocking_capacity_factor=non_blocking_capacity_factor,
                     ),
-                    shared_experts=make_ffn_config(
+                    shared_experts=make_shared_experts_config(
                         dim=dim,
                         hidden_dim=shared_expert_hidden_dim,
                         w1_param_init=_LINEAR_INIT,
                         w2w3_param_init=_depth_init(layer_id),
-                    ),
-                    shared_expert_gate=Linear.Config(
-                        in_features=dim,
-                        out_features=1,
-                        param_init=_LINEAR_INIT,
+                        gate_param_init=_LINEAR_INIT,
                     ),
                 ),
                 attention_norm=_offset_norm(dim),

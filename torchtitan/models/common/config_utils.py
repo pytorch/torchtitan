@@ -22,7 +22,12 @@ from torchtitan.models.common.attention import (
     VarlenAttention,
 )
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import (
+    GroupedExperts,
+    MoE,
+    SharedExperts,
+    TokenChoiceTopKRouter,
+)
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.common.token_dispatcher import (
@@ -151,13 +156,40 @@ def make_ffn_config(
     )
 
 
+def make_shared_experts_config(
+    *,
+    dim: int,
+    hidden_dim: int,
+    w1_param_init: dict[str, Callable],
+    w2w3_param_init: dict[str, Callable],
+    gate_param_init: dict[str, Callable] | None = None,
+) -> SharedExperts.Config:
+    """Build a SharedExperts.Config (SwiGLU FFN with optional sigmoid gate).
+
+    When ``gate_param_init`` is given, the shared expert applies a per-token
+    sigmoid gate (``sigmoid(gate(x)) * ffn(x)``), e.g. the Qwen3.5 shared
+    expert. Otherwise it is a plain SwiGLU FFN.
+    """
+    ffn = make_ffn_config(
+        dim=dim,
+        hidden_dim=hidden_dim,
+        w1_param_init=w1_param_init,
+        w2w3_param_init=w2w3_param_init,
+    )
+    gate = (
+        Linear.Config(in_features=dim, out_features=1, param_init=gate_param_init)
+        if gate_param_init is not None
+        else None
+    )
+    return SharedExperts.Config(w1=ffn.w1, w2=ffn.w2, w3=ffn.w3, gate=gate)
+
+
 def make_moe_config(
     *,
     num_experts: int = 8,
     router: TokenChoiceTopKRouter.Config,
     experts: GroupedExperts.Config,
-    shared_experts: FeedForward.Config | None = None,
-    shared_expert_gate: Module.Config | None = None,
+    shared_experts: SharedExperts.Config | None = None,
     load_balance_coeff: float | None = 1e-3,
 ) -> MoE.Config:
     """Build a fully-specified MoE.Config."""
@@ -167,7 +199,6 @@ def make_moe_config(
         router=router,
         experts=experts,
         shared_experts=shared_experts,
-        shared_expert_gate=shared_expert_gate,
     )
 
 

@@ -203,8 +203,8 @@ def _set_deltanet_sharding(deltanet_cfg) -> None:
     out_proj is RowwiseParallel (reduce-scatter back to Shard(1)).
 
     A_log and dt_bias are per-head parameters, Shard(0) on TP.
-    Conv1d sharding is set on built modules by
-    ``set_deltanet_sub_module_sharding`` (Conv1d doesn't have Config).
+    Conv1d weights are Shard(0) (out-channels); the DTensor->local conversion
+    for the depthwise conv is handled in the model's ``_causal_conv``.
     """
     # ColwiseParallel on all input projections
     for name in (
@@ -216,6 +216,14 @@ def _set_deltanet_sharding(deltanet_cfg) -> None:
         "in_proj_b",
     ):
         getattr(deltanet_cfg, name).sharding_config = colwise_config()
+
+    # Depthwise Conv1d weights: Shard(0) on out-channels (head-sharded).
+    _conv_shard = ShardingConfig(
+        state_shardings={"weight": dense_param_placement(tp=Shard(0))},
+    )
+    deltanet_cfg.conv_q.sharding_config = _conv_shard
+    deltanet_cfg.conv_k.sharding_config = _conv_shard
+    deltanet_cfg.conv_v.sharding_config = _conv_shard
 
     # RowwiseParallel on output projection (reduce-scatter to SP)
     deltanet_cfg.out_proj.sharding_config = rowwise_config(output_sp=True)
@@ -254,19 +262,3 @@ def _set_deltanet_sharding(deltanet_cfg) -> None:
         in_dst_shardings={"x": dense_activation_placement(tp=Replicate())},
         out_dst_shardings=dense_activation_placement(tp=Shard(1)),
     )
-
-
-def set_deltanet_conv1d_sharding(deltanet_module) -> None:
-    """Set sharding on GatedDeltaNet sub-modules built inline.
-
-    Conv1d modules don't have Config fields, so their sharding must be
-    set on the built modules. DTensor→local conversion for Conv1d is
-    handled in the model's _causal_conv (same pattern as GroupedExperts).
-
-    Must be called after model build but before model.parallelize().
-    """
-    _conv_shard = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=Shard(0))},
-    )
-    for name in ("conv_q", "conv_k", "conv_v"):
-        getattr(deltanet_module, name)._sharding_config = _conv_shard

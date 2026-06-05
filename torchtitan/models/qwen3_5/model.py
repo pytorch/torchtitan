@@ -12,8 +12,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.experimental import local_map
 
-from torchtitan.models.common import Linear
+from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import AttentionMasksType, BaseAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
@@ -22,10 +23,6 @@ from torchtitan.protocols.module import Module
 
 from .sharding import set_qwen35_sharding_config
 from .vision_encoder import Qwen35VisionEncoder
-
-
-class _Conv1d(nn.Conv1d, Module):
-    pass
 
 
 try:
@@ -239,6 +236,9 @@ class GatedDeltaNet(Module):
         in_proj_z: Linear.Config
         in_proj_a: Linear.Config
         in_proj_b: Linear.Config
+        conv_q: Conv1d.Config
+        conv_k: Conv1d.Config
+        conv_v: Conv1d.Config
         kernel: GatedDeltaKernel.Config
         norm: RMSNormGated.Config
         out_proj: Linear.Config
@@ -249,7 +249,6 @@ class GatedDeltaNet(Module):
         self.value_head_dim = config.value_head_dim
         self.conv_kernel_size = config.conv_kernel_size
 
-        key_dim = config.in_proj_q.out_features
         value_dim = config.in_proj_v.out_features
 
         self.in_proj_q = config.in_proj_q.build()
@@ -259,30 +258,9 @@ class GatedDeltaNet(Module):
         self.in_proj_a = config.in_proj_a.build()
         self.in_proj_b = config.in_proj_b.build()
 
-        self.conv_q = _Conv1d(
-            in_channels=key_dim,
-            out_channels=key_dim,
-            bias=False,
-            kernel_size=config.conv_kernel_size,
-            groups=key_dim,
-            padding=0,
-        )
-        self.conv_k = _Conv1d(
-            in_channels=key_dim,
-            out_channels=key_dim,
-            bias=False,
-            kernel_size=config.conv_kernel_size,
-            groups=key_dim,
-            padding=0,
-        )
-        self.conv_v = _Conv1d(
-            in_channels=value_dim,
-            out_channels=value_dim,
-            bias=False,
-            kernel_size=config.conv_kernel_size,
-            groups=value_dim,
-            padding=0,
-        )
+        self.conv_q = config.conv_q.build()
+        self.conv_k = config.conv_k.build()
+        self.conv_v = config.conv_v.build()
 
         n_value_heads = value_dim // config.value_head_dim
         self.A_log = nn.Parameter(torch.empty(n_value_heads))
@@ -296,23 +274,35 @@ class GatedDeltaNet(Module):
         # pyrefly: ignore [bad-argument-type]
         x = F.pad(x.transpose(1, 2), (self.conv_kernel_size - 1, 0))
         if isinstance(x, DTensor):
-            # TODO: Remove once DTensor Conv1d dispatch handles sharded groups.
-            mesh, plc = x.device_mesh, x.placements
-            w: torch.Tensor = conv.weight  # pyrefly: ignore [bad-assignment]
-            if isinstance(w, DTensor):
-                w = w.to_local()
-            local_groups = w.size(0)
-            # pyrefly: ignore [no-matching-overload]
-            out = F.conv1d(
-                x.to_local(),
-                w,
-                None,
-                conv.stride,
-                conv.padding,
-                conv.dilation,
-                local_groups,
+            # TODO: Remove once the DTensor Conv1d dispatch fix for sharded
+            # groups lands in a released torch. local_map runs the conv on
+            # local shards (channel-sharded input + Shard(0) weight) and
+            # restores DTensor-ness, with explicit gradient placements.
+            x_plc = x.placements
+            w = conv.weight
+            w_plc = w.placements  # pyrefly: ignore [missing-attribute]
+
+            def _conv(x_local: torch.Tensor, w_local: torch.Tensor) -> torch.Tensor:
+                # groups == local out-channels (depthwise, channel-sharded)
+                # pyrefly: ignore [no-matching-overload]
+                return F.conv1d(
+                    x_local,
+                    w_local,
+                    None,
+                    conv.stride,
+                    conv.padding,
+                    conv.dilation,
+                    w_local.size(0),
+                )
+
+            conv_dt = local_map(
+                _conv,
+                out_placements=(x_plc,),
+                in_placements=(x_plc, w_plc),
+                in_grad_placements=(x_plc, w_plc),
+                device_mesh=x.device_mesh,
             )
-            x = DTensor.from_local(out, mesh, plc, run_check=False)
+            x = conv_dt(x, w)  # pyrefly: ignore [bad-argument-count]
         else:
             x = conv(x)
         return F.silu(x).transpose(1, 2)
@@ -546,18 +536,6 @@ class Qwen35Model(Decoder):
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
-                attn_cfg = next(
-                    (l.attention for l in self.layers if l.attention is not None),
-                    None,
-                )
-                if attn_cfg is not None and (
-                    attn_cfg.n_heads % tp != 0 or attn_cfg.n_kv_heads % tp != 0
-                ):
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide "
-                        f"n_heads ({attn_cfg.n_heads}) and "
-                        f"n_kv_heads ({attn_cfg.n_kv_heads})."
-                    )
                 dn_cfg = next(
                     (l.delta_net for l in self.layers if l.delta_net is not None),
                     None,
@@ -583,10 +561,7 @@ class Qwen35Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            attn_cfg = next(
-                (l.attention for l in self.layers if l.attention is not None),
-                None,
-            )
+            attn_cfg = self.first_attn_config
             # pyrefly: ignore [missing-attribute]
             n_heads = attn_cfg.n_heads
             # pyrefly: ignore [missing-attribute]

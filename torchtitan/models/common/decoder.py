@@ -79,7 +79,14 @@ class Decoder(BaseModel):
 
         @property
         def max_seq_len(self) -> int:
-            return self.layers[0].attention.rope.max_seq_len
+            # Llama4/iRoPE can have NoPE layers with ``rope=None``; use the
+            # first layer that carries RoPE to expose the model context length.
+            for layer_cfg in self.layers:
+                attention_cfg = getattr(layer_cfg, "attention", None)
+                rope_cfg = getattr(attention_cfg, "rope", None)
+                if rope_cfg is not None:
+                    return rope_cfg.max_seq_len
+            raise ValueError("Decoder config does not define RoPE max_seq_len.")
 
         def update_from_config(
             self,
@@ -116,14 +123,7 @@ class Decoder(BaseModel):
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
-                attention = next(
-                    (
-                        l.attention
-                        for l in self.layers
-                        if getattr(l, "attention", None) is not None
-                    ),
-                    None,
-                )
+                attention = self.first_attn_config
                 if attention is None:
                     raise ValueError(
                         "No layer with attention config found for TP validation."
@@ -142,7 +142,7 @@ class Decoder(BaseModel):
                     )
 
             for layer_cfg in self.layers:
-                if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
+                if layer_cfg.moe is not None:
                     from torchtitan.models.common.token_dispatcher import (
                         DeepEPTokenDispatcher,
                         HybridEPTokenDispatcher,
@@ -285,7 +285,10 @@ class Decoder(BaseModel):
         self,
         positions: torch.Tensor,
     ) -> AttentionMasksType:
-        attn_config = self.config.layers[0].attention
+        attn_config = self.config.first_attn_config
+        assert (
+            attn_config is not None
+        ), "get_attention_masks requires an attention layer"
         inner_attn = attn_config.inner_attention
         if isinstance(inner_attn, FlexAttention.Config):
             return self._create_flex_attention_mask_for_document(positions, attn_config)

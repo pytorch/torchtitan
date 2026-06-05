@@ -230,24 +230,38 @@ def set_moe_sharding_config(
     # Router gate: dense-family TP plan with Partial output grad.
     moe_cfg.router.gate.sharding_config = _router_gate_config(enable_ep=enable_ep)
 
-    # Shared experts: optional. Use Partial-flow variants so the
-    # Partial->sp_layout reduce only happens once at the MoE boundary.
-    if getattr(moe_cfg, "shared_experts", None) is not None:
-        moe_cfg.shared_experts.w1.sharding_config = _shared_expert_colwise_config(
+    # Shared experts: optional SharedExperts (SwiGLU FFN + optional gate).
+    # Gather x to Replicate ONCE at the module boundary so w1/w3/gate all share
+    # it (their per-linear input redistributions become no-ops). w2 (rowwise)
+    # keeps the output Partial; the Partial->sp_layout reduce happens once at
+    # the MoE boundary.
+    shared = moe_cfg.shared_experts
+    if shared is not None:
+        sp_layout = Shard(1) if enable_sp else Replicate()
+        shared_input_layout = Replicate() if not enable_ep else sp_layout
+        shared.sharding_config = ShardingConfig(
+            in_src_shardings={"x": dense_activation_placement(tp=shared_input_layout)},
+            in_dst_shardings={"x": dense_activation_placement(tp=Replicate())},
+        )
+
+        shared.w1.sharding_config = _shared_expert_colwise_config(
             enable_ep=enable_ep, enable_sp=enable_sp
         )
-        moe_cfg.shared_experts.w2.sharding_config = _shared_expert_rowwise_config()
-        moe_cfg.shared_experts.w3.sharding_config = _shared_expert_colwise_config(
+        shared.w2.sharding_config = _shared_expert_rowwise_config()
+        shared.w3.sharding_config = _shared_expert_colwise_config(
             enable_ep=enable_ep, enable_sp=enable_sp
         )
 
-    if getattr(moe_cfg, "shared_expert_gate", None) is not None:
-        moe_cfg.shared_expert_gate.sharding_config = ShardingConfig(
-            state_shardings={
-                "weight": dense_param_placement(tp=Replicate()),
-                "bias": dense_param_placement(tp=Replicate()),
-            }
-        )
+        if shared.gate is not None:
+            # Gate output is Replicate, so `gate * ffn` is
+            # `Replicate * Partial = Partial` with no extra collective.
+            shared.gate.sharding_config = ShardingConfig(
+                state_shardings={
+                    "weight": dense_param_placement(tp=Replicate()),
+                    "bias": dense_param_placement(tp=Replicate()),
+                },
+                out_dst_shardings=dense_activation_placement(tp=Replicate()),
+            )
 
     # Routed experts: local_map converts DTensor inputs to local for
     # dispatch/compute/combine, then wraps local output as DTensor(Partial).

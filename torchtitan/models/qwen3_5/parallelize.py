@@ -31,7 +31,6 @@ from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama4.parallelize import apply_fsdp
-from torchtitan.models.qwen3_5.sharding import set_deltanet_conv1d_sharding
 from torchtitan.tools.logging import logger
 
 
@@ -96,13 +95,6 @@ def parallelize_qwen3_5(
         if parallelism.enable_async_tensor_parallel and not model_compile_enabled:
             raise RuntimeError("Async TP requires torch.compile")
 
-        # Conv1d modules don't have Config fields, set sharding on built modules.
-        # pyrefly: ignore [not-callable]
-        for block in model.layers.values():
-            # pyrefly: ignore [missing-attribute]
-            if not block.full_attn:
-                # pyrefly: ignore [missing-attribute]
-                set_deltanet_conv1d_sharding(block.attn)
         # pyrefly: ignore [not-callable]
         model.parallelize(parallel_dims)
 

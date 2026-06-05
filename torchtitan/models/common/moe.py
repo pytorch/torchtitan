@@ -295,6 +295,30 @@ class TokenChoiceTopKRouter(Module):
         )
 
 
+class SharedExperts(FeedForward):
+    """Shared expert: SwiGLU FFN with an optional per-token sigmoid gate.
+
+    When ``gate`` is set, the output is ``sigmoid(gate(x)) * ffn(x)``;
+    otherwise it is a plain SwiGLU FFN. Inherits ``w1/w2/w3`` from
+    FeedForward so weight FQNs are unchanged.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(FeedForward.Config):
+        gate: Linear.Config | None = None
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.gate = config.gate.build() if config.gate is not None else None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = super().forward(x)
+        if self.gate is not None:
+            # TODO: make the gate activation configurable (e.g. softmax, silu)
+            out = torch.sigmoid(self.gate(x)) * out
+        return out
+
+
 class MoE(Module):
     """Mixture of Experts layer.
 
@@ -322,8 +346,7 @@ class MoE(Module):
         experts: GroupedExperts.Config
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
-        shared_experts: FeedForward.Config | None = None
-        shared_expert_gate: Module.Config | None = None
+        shared_experts: SharedExperts.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -333,11 +356,6 @@ class MoE(Module):
         self.router = config.router.build()
         self.shared_experts = (
             config.shared_experts.build() if config.shared_experts is not None else None
-        )
-        self.shared_expert_gate = (
-            config.shared_expert_gate.build()
-            if config.shared_expert_gate is not None
-            else None
         )
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
@@ -453,10 +471,6 @@ class MoE(Module):
             sync_combine()
 
         if shared_out_BLD is not None:
-            if self.shared_expert_gate is not None:
-                shared_out_BLD = (
-                    torch.sigmoid(self.shared_expert_gate(x_BLD)) * shared_out_BLD
-                )
             out_BLD = out_BLD + shared_out_BLD
         return out_BLD
 
