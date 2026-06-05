@@ -329,6 +329,7 @@ def get_train_context(
             if enable_loss_parallel:
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
             if spmd_typechecking:
+                stack.enter_context(torch.autograd.set_multithreading_enabled(False))
                 stack.enter_context(spmd.typecheck(local=False))
 
             yield
