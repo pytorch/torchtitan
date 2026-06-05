@@ -15,6 +15,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
+from torchtitan.models.common.moe import configure_moe_aux_loss_reduction
 from torchtitan.models.gpt_oss.model import GptOssModel
 from torchtitan.models.llama4.parallelize import apply_fsdp
 from torchtitan.tools.logging import logger
@@ -56,6 +57,8 @@ def parallelize_gptoss(
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         model.parallelize(parallel_dims)
+
+    configure_moe_aux_loss_reduction(model, parallel_dims)
 
     if ac_config.mode != "none":
         apply_ac(

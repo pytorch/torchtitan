@@ -8,8 +8,10 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
@@ -292,6 +294,268 @@ class TokenChoiceTopKRouter(Module):
         )
 
 
+def _sequence_wise_load_balance_loss(
+    scores_BLE: torch.Tensor,
+    topk_expert_ids_BLK: torch.Tensor,
+    top_k: int,
+    aux_loss_coeff: float,
+    *,
+    cp_mesh: DeviceMesh | None = None,
+    tp_mesh: DeviceMesh | None = None,
+) -> torch.Tensor:
+    """Sequence-wise auxiliary load-balance loss (DeepSeek-V3 Eqs 17-20).
+
+    For each sequence, compute f_i * p_i across that sequence's expert
+    probability scores, then average the resulting load-balance losses over the
+    batch.
+
+    With sequence partitioning, counts_BE starts as per-batch,
+    per-sequence-shard expert counts and is all-reduced across sequence-shard
+    groups (CP, and TP when EP enables sequence parallelism) to get full-sequence
+    expert counts.
+    """
+    B, L, num_experts = scores_BLE.shape
+    denom = scores_BLE.sum(dim=-1, keepdim=True) + 1e-20
+    probs_BLE = scores_BLE / denom
+    prob_sums_BE = probs_BLE.sum(dim=1)
+    indices_BN = topk_expert_ids_BLK.reshape(B, -1)
+    offset = torch.arange(B, device=indices_BN.device).unsqueeze(1) * num_experts
+    flat_indices = (indices_BN + offset).reshape(-1)
+    counts = torch.bincount(flat_indices.long(), minlength=B * num_experts)
+    counts_BE = counts.reshape(B, num_experts).to(dtype=scores_BLE.dtype)
+
+    counts_BE = _all_reduce_expert_counts(
+        counts_BE,
+        reduction="sequence",
+        dp_mesh=None,
+        cp_mesh=cp_mesh,
+        tp_mesh=tp_mesh,
+    )
+    num_tokens_B = counts_BE.sum(dim=1) / top_k
+
+    p_BE = prob_sums_BE / num_tokens_B.unsqueeze(1)
+    f_BE = counts_BE * (num_experts / (top_k * num_tokens_B.unsqueeze(1)))
+    return (f_BE * p_BE).sum(dim=1).mean() * aux_loss_coeff
+
+
+def _batch_wise_load_balance_loss(
+    scores_BLE: torch.Tensor,
+    topk_expert_ids_BLK: torch.Tensor,
+    top_k: int,
+    aux_loss_coeff: float,
+    *,
+    dp_mesh: DeviceMesh | None = None,
+    cp_mesh: DeviceMesh | None = None,
+    tp_mesh: DeviceMesh | None = None,
+) -> torch.Tensor:
+    """Batch-wise auxiliary load-balance loss.
+
+    Computes f_i * p_i using expert frequency across the global batch. Counts
+    start as an [E] per-expert count for the local batch and sequence shard, then
+    are all-reduced across DP and sequence-shard groups (CP, and TP when EP
+    enables sequence parallelism) to get global-batch expert counts.
+    """
+    B, L, num_experts = scores_BLE.shape
+    num_tokens_per_expert = torch.histc(
+        topk_expert_ids_BLK.reshape(-1).float(),
+        bins=num_experts,
+        min=0,
+        max=num_experts,
+    )
+    probs_BLE = scores_BLE / (scores_BLE.sum(dim=-1, keepdim=True) + 1e-20)
+    prob_sums_E = probs_BLE.sum(dim=(0, 1))
+
+    num_tokens_per_expert = num_tokens_per_expert.to(scores_BLE.dtype)
+    global_num_tokens_per_expert = _all_reduce_expert_counts(
+        num_tokens_per_expert,
+        reduction="batch",
+        dp_mesh=dp_mesh,
+        cp_mesh=cp_mesh,
+        tp_mesh=tp_mesh,
+    )
+    global_tokens = global_num_tokens_per_expert.sum() / top_k
+
+    # DP contributes through summed gradients and scaled_coeff, so p_i uses the
+    # non-DP token count for this local batch contribution.
+    dp_degree = dp_mesh.size() if dp_mesh is not None else 1
+    local_non_dp_tokens = global_tokens / dp_degree
+    p_i = prob_sums_E / local_non_dp_tokens
+    f_i = global_num_tokens_per_expert * (
+        num_experts / (top_k * global_tokens)
+    )
+    return (f_i * p_i).sum() * aux_loss_coeff
+
+
+def _all_reduce_expert_counts(
+    counts: torch.Tensor,
+    *,
+    reduction: Literal["batch", "sequence"],
+    dp_mesh: DeviceMesh | None,
+    cp_mesh: DeviceMesh | None,
+    tp_mesh: DeviceMesh | None,
+) -> torch.Tensor:
+    """Sum non-differentiable expert counts over token-partition mesh axes.
+
+    The tensor shape is preserved. For batch-wise loss this is ``[E]``; for
+    sequence-wise loss this is ``[B, E]`` so the per-sequence objective never
+    reduces across the batch dimension.
+    """
+    assert not counts.requires_grad, "MoE load-balance counts should not require grad"
+    if reduction == "batch":
+        assert counts.ndim == 1, (
+            f"batch-wise expert counts must be 1D, got {counts.shape}"
+        )
+        reduce_meshes = (tp_mesh, dp_mesh, cp_mesh)
+    else:
+        assert reduction == "sequence"
+        assert counts.ndim == 2, (
+            f"sequence-wise expert counts must be 2D, got {counts.shape}"
+        )
+        assert dp_mesh is None, "sequence-wise expert counts must not reduce over DP"
+        reduce_meshes = (tp_mesh, cp_mesh)
+
+    with torch.no_grad():
+        for reduce_mesh in reduce_meshes:
+            if reduce_mesh is None:
+                continue
+            dist.all_reduce(
+                counts, group=reduce_mesh.get_group(), op=dist.ReduceOp.SUM
+            )
+    return counts
+
+class _AuxLossAutograd(torch.autograd.Function):
+    """Injects an auxiliary loss gradient without changing the forward value."""
+
+    @staticmethod
+    def forward(  # pyrefly: ignore [bad-override]
+        ctx: torch.autograd.function.FunctionCtx,
+        topk_scores_BLK: torch.Tensor,
+        aux_loss: torch.Tensor,
+    ) -> torch.Tensor:
+        ctx.save_for_backward(aux_loss)
+        return topk_scores_BLK
+
+    @staticmethod
+    def backward(  # pyrefly: ignore [bad-override]
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_topk_scores_BLK: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        (aux_loss,) = ctx.saved_tensors
+        return grad_topk_scores_BLK, torch.ones_like(aux_loss)
+
+
+class MoELoadBalanceAuxLoss(Module):
+    """MoE auxiliary load-balance loss.
+
+    Injects aux loss gradients into router scores without changing the model
+    output (PP-safe). Call instance with router outputs to apply.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        type: Literal["sequence_wise", "batch_wise"]
+        """Loss variant. sequence_wise (DeepSeek-V3 Eqs 17-20) computes
+        per-sequence then averages; batch_wise averages over all tokens."""
+        coeff: float
+        """Coefficient for the auxiliary load-balance loss. Set moe.aux_loss to
+        None to disable aux loss entirely."""
+        top_k: int
+        """Number of experts per token. Must match the router's top_k."""
+        global_batch_size: int | None = None
+        """Global batch size to normalize aux loss across all batches/microbatches.
+        Torchtitan generally uses sum aggregation & global_bs division.
+        Because batch_wise aux loss doesn't commute over microbatches, we ban
+        batch_wise + PP usage in any case."""
+
+    def __init__(self, config: Config):
+        super().__init__()
+        if config.coeff <= 0:
+            raise ValueError(
+                f"aux_loss.coeff must be > 0, got {config.coeff}. "
+                "Set moe.aux_loss to None to disable aux loss."
+            )
+        if config.type not in ("sequence_wise", "batch_wise"):
+            raise ValueError(
+                f"Unknown aux loss type '{config.type}', "
+                f"expected one of ('sequence_wise', 'batch_wise')"
+            )
+        self.type = config.type
+        self.coeff = config.coeff
+        self.global_batch_size = config.global_batch_size
+        self.top_k = config.top_k
+        self.dp_mesh: DeviceMesh | None = None
+        self.cp_mesh: DeviceMesh | None = None
+        self.tp_mesh: DeviceMesh | None = None
+
+    def set_meshes(
+        self,
+        *,
+        dp_mesh: DeviceMesh | None,
+        cp_mesh: DeviceMesh | None,
+        tp_mesh: DeviceMesh | None,
+    ) -> None:
+        self.dp_mesh = dp_mesh
+        self.cp_mesh = cp_mesh
+        self.tp_mesh = tp_mesh
+
+    def forward(
+        self,
+        topk_scores_BLK: torch.Tensor,
+        scores_BLE: torch.Tensor,
+        topk_expert_ids_BLK: torch.Tensor,
+    ) -> torch.Tensor:
+        B = scores_BLE.size(0)
+        global_batch_size = self.global_batch_size or B
+        scaled_coeff = self.coeff * B / global_batch_size
+        if self.type == "sequence_wise":
+            aux_loss = _sequence_wise_load_balance_loss(
+                scores_BLE,
+                topk_expert_ids_BLK,
+                self.top_k,
+                scaled_coeff,
+                cp_mesh=self.cp_mesh,
+                tp_mesh=self.tp_mesh,
+            )
+        else:
+            aux_loss = _batch_wise_load_balance_loss(
+                scores_BLE,
+                topk_expert_ids_BLK,
+                self.top_k,
+                scaled_coeff,
+                dp_mesh=self.dp_mesh,
+                cp_mesh=self.cp_mesh,
+                tp_mesh=self.tp_mesh,
+            )
+        return _AuxLossAutograd.apply(topk_scores_BLK, aux_loss)
+
+
+def configure_moe_aux_loss_reduction(model: nn.Module, parallel_dims) -> None:
+    """Wire process meshes used to reduce MoE auxiliary-loss counts.
+
+    The loss functions choose which meshes they need from these handles:
+    batch-wise reduces ``[E]`` counts over DP, CP, and TP when applicable.
+    Sequence-wise reduces ``[B, E]`` counts over TP (when applicable) and CP
+    only, preserving per-sequence counts and avoiding DP.
+
+    In the current MoE sharding, TP only splits router/count tokens when EP is
+    enabled: the TP axis doubles as a sequence-parallel split for routing. When
+    EP is disabled, router counts are replicated over TP and must not be
+    all-reduced on the TP mesh.
+    """
+    dp_mesh = parallel_dims.get_optional_mesh("batch")
+    cp_mesh = parallel_dims.get_optional_mesh("cp")
+    tp_mesh = (
+        parallel_dims.get_optional_mesh("tp") if parallel_dims.ep_enabled else None
+    )
+    for module in model.modules():
+        if isinstance(module, MoE) and module.aux_loss is not None:
+            module.aux_loss.set_meshes(
+                dp_mesh=dp_mesh,
+                cp_mesh=cp_mesh,
+                tp_mesh=tp_mesh,
+            )
+
+
 class MoE(Module):
     """Mixture of Experts layer.
 
@@ -320,6 +584,7 @@ class MoE(Module):
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None
+        aux_loss: MoELoadBalanceAuxLoss.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -330,6 +595,7 @@ class MoE(Module):
         self.shared_experts = (
             config.shared_experts.build() if config.shared_experts is not None else None
         )
+        self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
         # NOTE: tokens_per_expert_E is accumulated in the model forward pass.
@@ -376,6 +642,11 @@ class MoE(Module):
             topk_expert_ids_BLK,
             scores_BLE,
         ) = self.router(x_BLD, self.expert_bias_E)
+
+        if self.training and self.aux_loss is not None:
+            topk_scores_BLK = self.aux_loss(
+                topk_scores_BLK, scores_BLE, topk_expert_ids_BLK
+            )
 
         # Build routing map with scatter. scatter_ does not support mixed
         # local Tensor / DTensor arguments, so run the scatter on local tensors

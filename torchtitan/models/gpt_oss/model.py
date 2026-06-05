@@ -22,6 +22,7 @@ from torchtitan.models.common.attention import (
     get_document_mask_mod,
     get_sliding_window_mask_mod,
 )
+from torchtitan.models.common.config_utils import update_moe_aux_loss_configs
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.common.rope import RoPE
@@ -188,6 +189,13 @@ class GptOssModel(Decoder):
         ) -> None:
             Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
+
+            update_moe_aux_loss_configs(
+                self.layers,
+                pp_enabled=parallelism.pipeline_parallel_degree > 1,
+                local_global_batch_size=kwargs["local_global_batch_size"],
+                global_batch_size=kwargs["global_batch_size"],
+            )
 
             from torchtitan.models.gpt_oss.sharding import set_gpt_oss_sharding_config
 

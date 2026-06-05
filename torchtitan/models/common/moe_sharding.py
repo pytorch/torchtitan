@@ -126,6 +126,36 @@ def _router_gate_config(*, enable_ep: bool) -> ShardingConfig:
         )
 
 
+def _aux_loss_config(*, enable_ep: bool) -> ShardingConfig:
+    """Aux loss runs locally on router outputs, then returns top-k scores.
+
+    The router output placement is ``Replicate`` when EP is off and
+    ``Shard(1)`` when EP is on. Keep aux-loss local computation aligned with
+    that placement, and use explicit count all-reduces inside the aux-loss
+    implementation for DP/CP/TP aggregation.
+    """
+    router_output_layout = dense_activation_placement(
+        tp=Shard(1) if enable_ep else Replicate()
+    )
+    return ShardingConfig(
+        in_dst_shardings={
+            "topk_scores_BLK": router_output_layout,
+            "scores_BLE": router_output_layout,
+            "topk_expert_ids_BLK": router_output_layout,
+        },
+        out_src_shardings=router_output_layout,
+        local_map=LocalMapConfig(
+            in_grad_placements=(
+                router_output_layout,
+                router_output_layout,
+                # topk_expert_ids_BLK is routing metadata, but it is still a
+                # DTensor input to local_map and must have placements.
+                router_output_layout,
+            ),
+        ),
+    )
+
+
 def _tokens_per_expert_placement(*, enable_ep: bool) -> NamedPlacement:
     """Placement for the ``tokens_per_expert_E`` buffer.
 
@@ -213,6 +243,8 @@ def set_moe_sharding_config(
 
     # Router gate: dense-family TP plan with Partial output grad.
     moe_cfg.router.gate.sharding_config = _router_gate_config(enable_ep=enable_ep)
+    if getattr(moe_cfg, "aux_loss", None) is not None:
+        moe_cfg.aux_loss.sharding_config = _aux_loss_config(enable_ep=enable_ep)
 
     # Shared experts: optional. Use Partial-flow variants so the
     # Partial->sp_layout reduce only happens once at the MoE boundary.
