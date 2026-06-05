@@ -2290,7 +2290,7 @@ class TestEliminateDeadCodePass(TestCase):
 
 
 class TestCUDAGraphWrapper(TestCase):
-    """CUDAGraphWrapper captures into its own private pool, stages non-static
+    """CUDAGraphWrapper captures into the shared graph pool, stages non-static
     inputs, and replays bitwise-identically to eager."""
 
     def tearDown(self):
@@ -2300,7 +2300,7 @@ class TestCUDAGraphWrapper(TestCase):
         cg._cg_manager = cg._CUDAGraphManager()
         super().tearDown()
 
-    def test_private_pool_capture_replay_matches_eager(self):
+    def test_capture_replay_matches_eager(self):
         device = "cuda"
         weight = torch.randn(8, 8, device=device)  # static input (stable address)
 
@@ -2319,6 +2319,50 @@ class TestCUDAGraphWrapper(TestCase):
         for _ in range(4):
             x = torch.randn(4, 8, device=device)
             torch.testing.assert_close(wrapper(weight, x), fn(weight, x))
+
+    def test_shared_pool_preserves_earlier_wrapper_live_output(self):
+        """Two wrappers share the one graph pool. An earlier wrapper's output is
+        held live (mimicking a forward activation saved for a later/backward
+        segment) while a second wrapper captures and replays from the same pool.
+        The caching allocator must not hand the live output's block to the second
+        wrapper, so the live output must survive intact."""
+        from torchtitan.experiments.graph_trainer import cudagraph as cg
+
+        device = "cuda"
+        wa = torch.randn(8, 8, device=device)
+        wb = torch.randn(8, 8, device=device)
+
+        def fa(w, x):
+            return torch.relu(x @ w)
+
+        def fb(w, y):
+            return (y @ w) + 1.0
+
+        a = CUDAGraphWrapper(
+            fa,
+            (wa, torch.randn(4, 8, device=device)),
+            static_input_indices=(0,),
+            tensor_input_indices=[0, 1],
+        )
+        b = CUDAGraphWrapper(
+            fb,
+            (wb, torch.randn(4, 8, device=device)),
+            static_input_indices=(0,),
+            tensor_input_indices=[0, 1],
+        )
+        # Both wrappers must capture into the one shared pool (the property under
+        # test); a per-segment private pool would give distinct handles.
+        self.assertEqual(a._pool, cg._cg_manager.graph_pool)
+        self.assertEqual(b._pool, cg._cg_manager.graph_pool)
+
+        for _ in range(4):
+            x = torch.randn(4, 8, device=device)
+            out_a = a(wa, x)  # a's live output, kept referenced across b below
+            out_b = b(wb, out_a)
+            # a's output must be intact after b captured/replayed into the same
+            # pool, and both must match eager.
+            torch.testing.assert_close(out_a, fa(wa, x))
+            torch.testing.assert_close(out_b, fb(wb, fa(wa, x)))
 
 
 class TestIsFullCudagraphable(TestCase):
