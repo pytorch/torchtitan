@@ -22,7 +22,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel_ep",
+                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
                     "--compile.enable",
@@ -35,7 +35,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel_ep",
+                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.data_parallel_shard_degree 2",
@@ -50,7 +50,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel_ep",
+                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
                     "--parallelism.data_parallel_replicate_degree 2",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.expert_parallel_degree 2",
@@ -79,7 +79,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module qwen3 --config qwen3_debugmodel_param_groups",
+                    "--module qwen3 --config qwen3_debugmodel_moe_param_groups",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                 ],

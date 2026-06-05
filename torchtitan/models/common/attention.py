@@ -31,11 +31,9 @@ import spmd_types as spmd
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
-from torchtitan.models.common.rope import (
-    apply_rotary_emb_complex,
-    apply_rotary_emb_cos_sin,
-)
+from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
+from torchtitan.tools.utils import round_up
 
 
 __all__ = [
@@ -51,6 +49,7 @@ __all__ = [
     "create_varlen_metadata_for_document",
     "get_causal_mask_mod",
     "get_document_mask_mod",
+    "get_efficient_causal_mask_mod_for_packed_document",
     "get_fixed_block_mask_mod",
     "get_sliding_window_mask_mod",
 ]
@@ -367,6 +366,82 @@ def get_document_mask_mod(positions: torch.Tensor) -> _mask_mod_signature:
     return document_mask
 
 
+def get_efficient_causal_mask_mod_for_packed_document(
+    positions: torch.Tensor,
+) -> _mask_mod_signature:
+    """Creates an efficient document mask to compose with a causal mask.
+
+    This uses the same convention as get_document_mask_mod: per-token positions
+    reset to 0 at each packed document boundary and then increase by 1 within the
+    document. It is a manually tuned FlexAttention/FlexFlash fast path for
+    causal packed-document masking, which is why it coexists with the generic
+    document-id mask.
+
+    For ``batch_size == 1``, the causal mask supplies the upper bound,
+    ``kv_idx <= q_idx``, and this mask supplies the lower bound,
+    ``doc_start[q_idx] <= kv_idx``. For ``batch_size > 1``, the causal mask
+    supplies the lower bound, ``kv_idx <= q_idx``, and this mask supplies the
+    upper bound, ``q_idx <= doc_end[kv_idx]``. A query in the next document
+    cannot attend to a key in the previous document because that key's
+    ``doc_end`` is before the query.
+
+    The result is same-document causal masking. This mask is not intended for
+    non-causal use.
+    """
+    batch_size, seq_len = positions.shape
+    if batch_size == 1:
+        document_starts = positions[0] == 0
+        document_id = torch.cumsum(document_starts.int(), dim=0).to(torch.int32) - 1
+        token_idx = torch.arange(seq_len, device=positions.device, dtype=torch.int32)
+        offsets = torch.full(
+            (round_up(seq_len + 1, 128),),
+            seq_len,
+            device=positions.device,
+            dtype=torch.int32,
+        )
+        offsets.scatter_(
+            0,
+            torch.where(
+                document_starts, document_id, torch.full_like(document_id, seq_len)
+            ).to(torch.int64),
+            torch.where(
+                document_starts, token_idx, torch.full_like(token_idx, seq_len)
+            ),
+        )
+
+        def packed_document_mask(
+            b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+        ) -> torch.Tensor:
+            return kv_idx >= offsets[document_id[q_idx]]
+
+        return packed_document_mask
+
+    document_starts = positions == 0
+    document_id = torch.cumsum(document_starts.int(), dim=1).to(torch.int32) - 1
+    token_idx = torch.arange(
+        seq_len, device=positions.device, dtype=torch.int32
+    ).expand_as(positions)
+    next_doc_start = torch.full(
+        (batch_size, seq_len), seq_len, device=positions.device, dtype=torch.int32
+    )
+    next_doc = document_starts & (document_id > 0)
+    next_doc_start.scatter_(
+        1,
+        torch.where(
+            next_doc, document_id - 1, torch.full_like(document_id, seq_len - 1)
+        ).to(torch.int64),
+        torch.where(next_doc, token_idx, torch.full_like(token_idx, seq_len)),
+    )
+    doc_end_by_token = next_doc_start.gather(1, document_id.to(torch.int64)) - 1
+
+    def packed_document_mask(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        return q_idx <= doc_end_by_token[b, kv_idx]
+
+    return packed_document_mask
+
+
 def get_fixed_block_mask_mod(fixed_block_size: int) -> _mask_mod_signature:
     """
     Divide the input sequence into blocks and only allow attention within the same block.
@@ -627,10 +702,9 @@ class GQAttention(BaseAttention):
         qk_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
-        use_rope: bool = True
         inner_attention: Module.Config
         mask_type: str = "causal"
-        rope_backend: str = "complex"  # "complex" or "cos_sin"
+        rope: RoPE.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -644,8 +718,7 @@ class GQAttention(BaseAttention):
             else config.dim // config.n_heads
         )
         self.enable_gqa = self.n_heads > self.n_kv_heads
-        self.use_rope = config.use_rope
-        self.rope_backend = config.rope_backend
+        self.rope = config.rope.build() if config.rope is not None else None
 
         # Pluggable QKV projection
         self.qkv_linear = config.qkv_linear.build()
@@ -665,7 +738,6 @@ class GQAttention(BaseAttention):
     def forward(
         self,
         x: torch.Tensor,
-        rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -679,17 +751,12 @@ class GQAttention(BaseAttention):
             xk = self.k_norm(xk)
 
         # Apply rotary embeddings
-        if self.use_rope:
-            if self.rope_backend == "cos_sin":
-                xq, xk = apply_rotary_emb_cos_sin(xq, xk, rope_cache, positions)
-            else:
-                xq, xk = apply_rotary_emb_complex(
-                    xq, xk, freqs_cis=rope_cache, positions=positions
-                )
+        if self.rope is not None:
+            xq, xk = self.rope(xq, xk, positions)
 
         # Handle iRoPE dict masks (Llama4)
         if isinstance(attention_masks, dict):
-            mask_key = "rope" if self.use_rope else "nope"
+            mask_key = "rope" if self.rope is not None else "nope"
             attention_masks = attention_masks[mask_key]
 
         output = self.inner_attention(
