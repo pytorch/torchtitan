@@ -35,6 +35,7 @@ from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_p
 from torchtitan.experiments.graph_trainer.cudagraph import (
     cudagraph_pass,
     insert_kernel_annotations_pass,
+    is_full_cudagraphable,
 )
 from torchtitan.experiments.graph_trainer.debug_utils import (
     log_graph_diff,
@@ -103,11 +104,42 @@ def async_tensor_parallel_pass(
     return gm
 
 
+def _resolve_cudagraph_kind(
+    traced_result: "TracedResult", config: "GraphTrainer.Config"
+) -> str:
+    """Resolve the CUDA graph kind from config + the traced graph.
+
+    Returns the internal kind ``"off"``, ``"full"``, or ``"piecewise"``. (The
+    user-facing ``cudagraph_mode`` is ``off``/``auto``/``full``; ``piecewise`` is
+    only reached internally, as the fallback ``auto`` chooses.) It is the same
+    single engine either way (full == the one-piece special case of piecewise);
+    the kind only selects how the *pipeline* prepares the graph: ``piecewise``
+    skips bucketing/kernel-annotations (they conflict with
+    submodule splitting), while ``full`` keeps them. ``cudagraph_mode='auto'`` is
+    resolved to full vs piecewise via :func:`is_full_cudagraphable`.
+
+    Returns ``"off"`` when cudagraph is disabled, or when
+    ``inductor_compilation='full'`` — that path delegates CUDA graphs to Inductor
+    (there is no FX graph left for us to wrap/partition), so ``cudagraph_mode``
+    does not apply.
+    """
+    cc = config.compile
+    if cc.inductor_compilation == "full":
+        return "off"
+    if cc.cudagraph_mode == "off" or "cudagraph_pass" in cc.disable_passes:
+        return "off"
+    if cc.cudagraph_mode == "full":
+        return "full"
+    # auto: best-effort. full (one piece) if the graph has no cudagraph-unsafe op,
+    # else piecewise. (flex is excluded -- regional_inductor compiles it first.)
+    if is_full_cudagraphable(traced_result.gm):
+        return "full"
+    return "piecewise"
+
+
 def compile_time_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
-    *,
-    use_cudagraph: bool = False,
 ) -> list[Callable]:
     """Cleanup, FlexAttention annotation, and regional_inductor passes.
 
@@ -115,8 +147,10 @@ def compile_time_passes(
     that compiled Triton kernels are baked into the artifact. Otherwise
     they run at trace time via ``construct_default_graph_passes``.
 
-    cudagraph is excluded because it needs to re-capture the graph into
-    an in-memory CUDA graph at runtime.
+    The cudagraph wrapping itself is excluded (it must re-capture at runtime), but
+    cudagraph mode does affect this list: ``piecewise`` skips bucketing and
+    kernel-annotations (they conflict with submodule splitting), while ``full``
+    keeps bucketing and adds kernel-annotations.
 
     ``joint_transformer_block_bucketing_reordering_pass`` optionally runs
     ``overlap_fsdp_ag_rs_pass`` first (gated by
@@ -130,6 +164,8 @@ def compile_time_passes(
     from torchtitan.models.common.attention import FlexAttention
 
     n_layers = len(config.model_spec.model.layers)
+    cudagraph_kind = _resolve_cudagraph_kind(traced_result, config)
+    piecewise = cudagraph_kind == "piecewise"
     passes: list[Callable] = [
         eliminate_dead_code_pass,
         canonicalize_graph_pass,
@@ -143,20 +179,36 @@ def compile_time_passes(
             defer_n_layers=config.compile.cpu_offload_defer_n_layers,
         ),
         selective_activation_remat_pass,
-        functools.partial(
-            joint_transformer_block_bucketing_reordering_pass,
-            module_bucket_plans=get_default_transformer_block_buckets(n_layers),
-            enable_fsdp_ag_rs_overlap=config.compile.enable_fsdp_ag_rs_overlap,
-        ),
     ]
+    if not piecewise:
+        # Bucketing fuses FSDP collectives into ``bucketing._pre_bucket_*`` custom
+        # ops and reorders AG/RS prefetch *across* transformer blocks. It does not
+        # compose with piecewise cudagraph (verified on DSv3 FSDP+TP+EP):
+        #   1. A bucketing custom op lands in a captured segment and fails capture
+        #      with ``CUDA error: invalid argument``.
+        #   2. The cross-block prefetch reordering shatters the partition (64 vs 31
+        #      captured segments; eager op count explodes) because hoisted
+        #      collectives no longer line up with the per-block carve-out.
+        # Skip it in piecewise so captured segments contain only plain functional
+        # collectives (all_gather/reduce_scatter/all_reduce + wait), which capture
+        # fine. Trade-off: no collective bucketing/overlap in piecewise. TODO: a
+        # carve-out-aware bucketing that prefetches within (not across) captured
+        # regions and emits capture-safe ops.
+        passes.append(
+            functools.partial(
+                joint_transformer_block_bucketing_reordering_pass,
+                module_bucket_plans=get_default_transformer_block_buckets(n_layers),
+                enable_fsdp_ag_rs_overlap=config.compile.enable_fsdp_ag_rs_overlap,
+            )
+        )
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
     inductor_compilation = config.compile.inductor_compilation
     if inductor_compilation == "full":
-        # Compile the entire graph into optimized Triton kernels. Must
-        # be terminal — the FX graph is no longer authoritative after
-        # this pass, so insert_kernel_annotations_pass cannot follow.
+        # Compile the entire graph into optimized Triton kernels. Must be
+        # terminal — the FX graph is no longer authoritative after this pass, so
+        # insert_kernel_annotations_pass cannot follow.
         passes.append(full_inductor_compilation_pass)
     if inductor_compilation == "regional":
         # FlexAttention HOPs must be compiled (via regional_inductor) to
@@ -177,7 +229,11 @@ def compile_time_passes(
 
             passes.append(annotate_rmsnorm_for_regional_inductor_pass)
         passes.append(regional_inductor_pass)
-        if use_cudagraph:
+        # Piecewise cudagraph splits the graph into submodules and wraps each
+        # capture-safe submodule's forward(); insert_kernel_annotations_pass also
+        # rebinds forward, which would clobber the cudagraph wrappers, so skip it in
+        # piecewise mode. Per-submodule annotation is a follow-up.
+        if cudagraph_kind == "full":
             # Must run before cudagraph_pass (which replaces forward()).
             passes.append(insert_kernel_annotations_pass)
     return passes
@@ -194,24 +250,37 @@ def construct_default_graph_passes(
 
     When ``precompile_artifact_dir`` is set, the artifact has graph
     transformed during precompile phase, so only cudagraph is returned.
-    """
-    want_cudagraph = "cudagraph_pass" not in config.compile.disable_passes
 
+    CUDA graph capture is controlled by ``compile.cudagraph_mode``
+    (off/auto/full/piecewise) and is delegated to Inductor when
+    ``inductor_compilation='full'``; see :func:`_resolve_cudagraph_kind`.
+    """
     has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
 
     passes: list[Callable] = []
     if not has_precompile_artifact:
-        passes.extend(
-            compile_time_passes(traced_result, config, use_cudagraph=want_cudagraph)
-        )
+        passes.extend(compile_time_passes(traced_result, config))
 
-    if want_cudagraph:
+    cudagraph_kind = _resolve_cudagraph_kind(traced_result, config)
+    if cudagraph_kind != "off":
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
             functools.partial(
                 cudagraph_pass,
+                # 'full' (explicit or auto-resolved) is strict: the engine must
+                # capture one piece, else raise. The kind was resolved from the
+                # PRE-inductor graph (is_full_cudagraphable); requiring full here
+                # makes the engine re-check the POST-inductor graph and fail loudly
+                # if they disagree, instead of silently splitting a graph the
+                # pipeline already prepared for a single capture (bucketing kept).
+                # In normal operation the predictor is exact, so this never fires
+                # for auto. 'piecewise' is not strict.
+                require_full=(cudagraph_kind == "full"),
                 static_input_indices=static_input_indices,
                 tensor_input_indices=traced_result.tensor_input_indices,
+                # Demote tiny capturable regions (e.g. a lone op between eager MoE
+                # blocks) to eager -- not worth a private pool + copy-in.
+                min_capture_size=config.compile.cudagraph_min_capture_size,
             )
         )
     return passes
