@@ -233,6 +233,38 @@ def qwen3_14b() -> Trainer.Config:
     )
 
 
+def qwen3_30b_a3b() -> Trainer.Config:
+    return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
+        hf_assets_path="./assets/hf/Qwen3-30B-A3B",
+        model_spec=model_registry("30B-A3B"),
+        dataloader=HuggingFaceTextDataLoader.Config(
+            dataset="c4",
+        ),
+        optimizer=default_adamw(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
+        training=TrainingConfig(
+            local_batch_size=2,
+            seq_len=4096,
+            steps=3000,
+        ),
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=-1,
+            tensor_parallel_degree=1,
+            context_parallel_degree=1,
+            pipeline_parallel_degree=1,
+        ),
+        checkpoint=CheckpointManager.Config(
+            interval=500,
+            last_save_model_only=False,
+            export_dtype="float16",
+        ),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="full",
+        ),
+    )
+
+
 def qwen3_32b() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
