@@ -488,7 +488,7 @@ def _active_swiglu_fake(
     active_rows: torch.Tensor,
 ) -> torch.Tensor:
     del up, active_rows
-    return gate.new_empty(gate.shape)
+    return torch.empty_like(gate)
 
 
 @torch.library.custom_op(
@@ -770,9 +770,199 @@ def _combine_fake(
     )
 
 
+@torch.library.custom_op(
+    "minimal_async_ep::active_swiglu_backward",
+    mutates_args=(),
+    device_types="cuda",
+)
+def _active_swiglu_backward_impl(
+    grad_out: torch.Tensor,
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    active_rows: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return active_swiglu_backward(grad_out, gate, up, active_rows)
+
+
+@_active_swiglu_backward_impl.register_fake
+def _active_swiglu_backward_fake(
+    grad_out: torch.Tensor,
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    active_rows: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    del grad_out, active_rows
+    return torch.empty_like(gate), torch.empty_like(up)
+
+
+@torch.library.custom_op(
+    "minimal_async_ep::dispatch_backward",
+    mutates_args=(),
+    device_types="cuda",
+)
+def _dispatch_backward_impl(
+    grad_hidden: torch.Tensor,
+    combine_dst_ranks: torch.Tensor,
+    combine_dst_rows: torch.Tensor,
+    combine_num_valid_rows: torch.Tensor,
+    slot_to_row_N: torch.Tensor,  # noqa: N803
+    num_routed_tokens: int,
+    num_tokens: int,
+    top_k: int,
+    input_is_token_ordered: bool,
+) -> torch.Tensor:
+    grad_routed_input = _combine_to_origin(
+        grad_hidden,
+        combine_dst_ranks,
+        combine_dst_rows,
+        combine_num_valid_rows,
+        num_routed_tokens,
+    )
+    if input_is_token_ordered:
+        return reduce_topk_slots(
+            grad_routed_input,
+            slot_to_row_N,
+            None,
+            num_tokens=num_tokens,
+            top_k=top_k,
+        )
+    return grad_routed_input
+
+
+@_dispatch_backward_impl.register_fake
+def _dispatch_backward_fake(
+    grad_hidden: torch.Tensor,
+    combine_dst_ranks: torch.Tensor,
+    combine_dst_rows: torch.Tensor,
+    combine_num_valid_rows: torch.Tensor,
+    slot_to_row_N: torch.Tensor,  # noqa: N803
+    num_routed_tokens: int,
+    num_tokens: int,
+    top_k: int,
+    input_is_token_ordered: bool,
+) -> torch.Tensor:
+    del (
+        combine_dst_ranks,
+        combine_dst_rows,
+        combine_num_valid_rows,
+        slot_to_row_N,
+        top_k,
+    )
+    rows = num_tokens if input_is_token_ordered else num_routed_tokens
+    return grad_hidden.new_empty(rows, grad_hidden.shape[1])
+
+
+@torch.library.custom_op(
+    "minimal_async_ep::combine_backward",
+    mutates_args=(),
+    device_types="cuda",
+)
+def _combine_backward_impl(
+    grad_out: torch.Tensor,
+    grad_routed_output_extra: torch.Tensor,
+    dispatch_dst_ranks: torch.Tensor,
+    dispatch_dst_rows: torch.Tensor,
+    flat_token_indices_N: torch.Tensor,  # noqa: N803
+    routed_scores_N: torch.Tensor,  # noqa: N803
+    saved_routed_output_ND: torch.Tensor,  # noqa: N803
+    has_grad_out: bool,
+    has_grad_routed_output_extra: bool,
+    has_scores: bool,
+    scores_are_slot_ordered: bool,
+    routed_scores_requires_grad: bool,
+    top_k: int,
+    receive_capacity: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    grad_routed_output = None
+    grad_scores = routed_scores_N.new_empty(0)
+
+    if has_grad_out:
+        grad_routed_output = expand_topk_grad(
+            grad_out,
+            flat_token_indices_N,
+            routed_scores_N if has_scores else None,
+            top_k=top_k,
+            dtype=grad_out.dtype,
+            scores_are_slot_ordered=scores_are_slot_ordered,
+        )
+        if has_scores and routed_scores_requires_grad:
+            grad_scores = topk_scores_grad(
+                saved_routed_output_ND,
+                grad_out,
+                flat_token_indices_N,
+                top_k=top_k,
+                dtype=routed_scores_N.dtype,
+                scores_are_slot_ordered=scores_are_slot_ordered,
+            )
+
+    if has_grad_routed_output_extra:
+        grad_routed_output = (
+            grad_routed_output_extra
+            if grad_routed_output is None
+            else grad_routed_output + grad_routed_output_extra
+        )
+
+    if grad_routed_output is None:
+        raise RuntimeError("combine backward custom op requires a non-empty gradient.")
+
+    grad_x = _dispatch_to_experts(
+        grad_routed_output,
+        dispatch_dst_ranks,
+        dispatch_dst_rows,
+        flat_token_indices_N.numel(),
+        receive_capacity,
+    )
+    return grad_x, grad_scores
+
+
+@_combine_backward_impl.register_fake
+def _combine_backward_fake(
+    grad_out: torch.Tensor,
+    grad_routed_output_extra: torch.Tensor,
+    dispatch_dst_ranks: torch.Tensor,
+    dispatch_dst_rows: torch.Tensor,
+    flat_token_indices_N: torch.Tensor,  # noqa: N803
+    routed_scores_N: torch.Tensor,  # noqa: N803
+    saved_routed_output_ND: torch.Tensor,  # noqa: N803
+    has_grad_out: bool,
+    has_grad_routed_output_extra: bool,
+    has_scores: bool,
+    scores_are_slot_ordered: bool,
+    routed_scores_requires_grad: bool,
+    top_k: int,
+    receive_capacity: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    del (
+        grad_routed_output_extra,
+        dispatch_dst_ranks,
+        dispatch_dst_rows,
+        flat_token_indices_N,
+        saved_routed_output_ND,
+        has_grad_routed_output_extra,
+        scores_are_slot_ordered,
+        top_k,
+    )
+    grad_scores_shape = (
+        routed_scores_N.shape
+        if has_grad_out and has_scores and routed_scores_requires_grad
+        else (0,)
+    )
+    return (
+        grad_out.new_empty(receive_capacity, grad_out.shape[1]),
+        routed_scores_N.new_empty(grad_scores_shape),
+    )
+
+
 def _active_swiglu_backward(ctx, grad_out):
+    if grad_out is None:
+        return None, None, None
     gate, up, active_rows = ctx.saved_tensors
-    grad_gate, grad_up = active_swiglu_backward(grad_out, gate, up, active_rows)
+    grad_gate, grad_up = torch.ops.minimal_async_ep.active_swiglu_backward(
+        grad_out,
+        gate,
+        up,
+        active_rows,
+    )
     return grad_gate, grad_up, None
 
 
@@ -809,23 +999,17 @@ def _dispatch_backward(
 
     grad_input = None
     if grad_hidden is not None:
-        grad_routed_input = _combine_to_origin(
+        grad_input = torch.ops.minimal_async_ep.dispatch_backward(
             grad_hidden,
             combine_dst_ranks,
             combine_dst_rows,
             combine_num_valid_rows,
+            slot_to_row_N,
             ctx.num_routed_tokens,
+            ctx.num_tokens,
+            ctx.top_k,
+            ctx.input_is_token_ordered,
         )
-        if ctx.input_is_token_ordered:
-            grad_input = reduce_topk_slots(
-                grad_routed_input,
-                slot_to_row_N,
-                None,
-                num_tokens=ctx.num_tokens,
-                top_k=ctx.top_k,
-            )
-        else:
-            grad_input = grad_routed_input
 
     return grad_input, None, None, None, None, None, None, None
 
@@ -870,45 +1054,34 @@ def _combine_backward(ctx, grad_out, grad_routed_output_extra):
         routed_scores_N,
         saved_routed_output_ND,
     ) = ctx.saved_tensors
-    scores = routed_scores_N if ctx.has_scores else None
-    grad_routed_output = None
     grad_scores = None
-
-    if grad_out is not None:
-        grad_routed_output = expand_topk_grad(
-            grad_out,
-            flat_token_indices_N,
-            scores,
-            top_k=ctx.top_k,
-            dtype=ctx.hidden_states_dtype,
-            scores_are_slot_ordered=ctx.scores_are_slot_ordered,
-        )
-        if ctx.has_scores and ctx.routed_scores_requires_grad:
-            grad_scores = topk_scores_grad(
-                saved_routed_output_ND,
-                grad_out,
-                flat_token_indices_N,
-                top_k=ctx.top_k,
-                dtype=routed_scores_N.dtype,
-                scores_are_slot_ordered=ctx.scores_are_slot_ordered,
-            )
-
-    if grad_routed_output_extra is not None:
-        grad_routed_output = (
-            grad_routed_output_extra
-            if grad_routed_output is None
-            else grad_routed_output + grad_routed_output_extra
-        )
-
     grad_x = None
-    if grad_routed_output is not None:
-        grad_x = _dispatch_to_experts(
-            grad_routed_output,
+    if grad_out is not None or grad_routed_output_extra is not None:
+        grad_out_arg = grad_out if grad_out is not None else grad_routed_output_extra
+        assert grad_out_arg is not None
+        grad_routed_output_extra_arg = (
+            grad_routed_output_extra
+            if grad_routed_output_extra is not None
+            else grad_out_arg.new_empty(0)
+        )
+        grad_x, grad_scores_tensor = torch.ops.minimal_async_ep.combine_backward(
+            grad_out_arg,
+            grad_routed_output_extra_arg,
             dispatch_dst_ranks,
             dispatch_dst_rows,
-            flat_token_indices_N.numel(),
+            flat_token_indices_N,
+            routed_scores_N,
+            saved_routed_output_ND,
+            grad_out is not None,
+            grad_routed_output_extra is not None,
+            ctx.has_scores,
+            ctx.scores_are_slot_ordered,
+            ctx.routed_scores_requires_grad,
+            ctx.top_k,
             ctx.receive_capacity,
         )
+        if grad_out is not None and ctx.has_scores and ctx.routed_scores_requires_grad:
+            grad_scores = grad_scores_tensor
 
     return (
         grad_x,
@@ -947,7 +1120,6 @@ def _combine_setup_context(ctx, inputs, output):
     ctx.has_scores = has_scores
     ctx.scores_are_slot_ordered = scores_are_slot_ordered
     ctx.top_k = top_k
-    ctx.hidden_states_dtype = x.dtype
     ctx.receive_capacity = x.shape[0]
     ctx.routed_scores_requires_grad = routed_scores_N.requires_grad
     saved_routed_output_ND = (  # noqa: N806
