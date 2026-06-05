@@ -80,7 +80,7 @@ jobs:
           EOF
           )"
 
-          # Define ROCm matrix. Today, is-experimental means the workflow has
+          # Define ROCm matrix. ``is-experiment`` means the workflow has
           # not opted into ROCm validation, so keep these jobs CUDA-only.
           if [[ "${{ inputs.is-experimental }}" == "true" ]]; then
             ROCM_MATRIX=""
@@ -109,7 +109,6 @@ jobs:
 
           # Decide which matrix entries to include based on event type
           # Runs ROCm only for push tag OR when PR label gets triggered.
-          # Experimental workflows do not define ROCm entries, so use CUDA instead (else branch).
           if [[ ( "$IS_8GPU_TAG" == "true" || "$TRIGGERED_8GPU_LABEL" == "true" ) && -n "$ROCM_MATRIX" ]]; then
             cat > matrix.json <<JSON
           {"include": [$ROCM_MATRIX]}
