@@ -4,14 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from collections.abc import Callable
 from functools import partial
-from typing import Literal
 
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.models.common import CosSinRoPE, Embedding, Linear, RMSNorm
+from torchtitan.models.common import CosSinRoPE, Embedding, Linear, RMSNorm, RoPE
 from torchtitan.models.common.attention import FusedQKVLinear, QKVLinear
 from torchtitan.models.common.config_utils import make_token_dispatcher_config
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
@@ -59,13 +59,7 @@ def _make_gptoss_attn_config(
     head_dim: int = 64,
     sliding_window_size: int = 128,
     fuse_qkv: bool = False,
-    rope_max_seq_len: int,
-    rope_theta: float,
-    rope_scaling: Literal["llama", "none", "yarn"],
-    rope_factor: float,
-    rope_beta_slow: float,
-    rope_beta_fast: float,
-    rope_original_seq_len: int,
+    rope: RoPE.Config,
 ) -> Attention.Config:
     """Build a fully-specified GPT-OSS Attention.Config for a single layer.
 
@@ -120,16 +114,7 @@ def _make_gptoss_attn_config(
         ),
         sliding_window_size=sliding_window_size,
         param_init=sinks_init,
-        rope=CosSinRoPE.Config(
-            dim=head_dim,
-            max_seq_len=rope_max_seq_len,
-            theta=rope_theta,
-            scaling=rope_scaling,
-            rope_factor=rope_factor,
-            beta_slow=rope_beta_slow,
-            beta_fast=rope_beta_fast,
-            original_seq_len=rope_original_seq_len,
-        ),
+        rope=dataclasses.replace(rope),
     )
 
 
@@ -179,13 +164,7 @@ def _build_gptoss_layers(
     fuse_qkv: bool = False,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
-    rope_max_seq_len: int,
-    rope_theta: float,
-    rope_scaling: Literal["llama", "none", "yarn"],
-    rope_factor: float,
-    rope_beta_slow: float,
-    rope_beta_fast: float,
-    rope_original_seq_len: int,
+    rope: RoPE.Config,
 ) -> list[GptOssTransformerBlock.Config]:
     """Build per-layer configs for GPT-OSS.
 
@@ -198,13 +177,7 @@ def _build_gptoss_layers(
             dim=dim,
             layer_id=layer_id,
             fuse_qkv=fuse_qkv,
-            rope_max_seq_len=rope_max_seq_len,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
-            rope_factor=rope_factor,
-            rope_beta_slow=rope_beta_slow,
-            rope_beta_fast=rope_beta_fast,
-            rope_original_seq_len=rope_original_seq_len,
+            rope=rope,
         )
         experts_cfg = _make_gptoss_experts_config(
             dim=dim,
@@ -271,13 +244,16 @@ def _debugmodel(
             score_before_experts=False,
             load_balance_coeff=1e-3,
             moe_comm_backend=moe_comm_backend,
-            rope_max_seq_len=131072,
-            rope_theta=150000.0,
-            rope_scaling="yarn",
-            rope_factor=32,
-            rope_beta_slow=32.0,
-            rope_beta_fast=1.0,
-            rope_original_seq_len=4096,
+            rope=CosSinRoPE.Config(
+                dim=dim // 64,
+                max_seq_len=131072,
+                theta=150000.0,
+                scaling="yarn",
+                rope_factor=32,
+                beta_slow=32.0,
+                beta_fast=1.0,
+                original_seq_len=4096,
+            ),
         ),
     )
 
@@ -309,13 +285,16 @@ def _20b(
             score_before_experts=False,
             load_balance_coeff=1e-3,
             moe_comm_backend=moe_comm_backend,
-            rope_max_seq_len=131072,
-            rope_theta=150000.0,
-            rope_scaling="yarn",
-            rope_factor=32,
-            rope_beta_slow=32.0,
-            rope_beta_fast=1.0,
-            rope_original_seq_len=4096,
+            rope=CosSinRoPE.Config(
+                dim=dim // 64,
+                max_seq_len=131072,
+                theta=150000.0,
+                scaling="yarn",
+                rope_factor=32,
+                beta_slow=32.0,
+                beta_fast=1.0,
+                original_seq_len=4096,
+            ),
         ),
     )
 
@@ -347,13 +326,16 @@ def _120b(
             score_before_experts=False,
             load_balance_coeff=1e-3,
             moe_comm_backend=moe_comm_backend,
-            rope_max_seq_len=131072,
-            rope_theta=150000.0,
-            rope_scaling="yarn",
-            rope_factor=32,
-            rope_beta_slow=32.0,
-            rope_beta_fast=1.0,
-            rope_original_seq_len=4096,
+            rope=CosSinRoPE.Config(
+                dim=dim // 64,
+                max_seq_len=131072,
+                theta=150000.0,
+                scaling="yarn",
+                rope_factor=32,
+                beta_slow=32.0,
+                beta_fast=1.0,
+                original_seq_len=4096,
+            ),
         ),
     )
 

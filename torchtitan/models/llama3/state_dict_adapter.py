@@ -14,9 +14,7 @@ logger = logging.getLogger()
 
 from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.common.rope import ComplexRoPE
-
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
-
 from .model import Llama3Model
 
 
@@ -66,15 +64,6 @@ class Llama3StateDictAdapter(StateDictAdapter):
                 "model.norm.weight": "norm.weight",
                 "lm_head.weight": "lm_head.weight",
             }
-
-    def _validate_hf_rope_config(self) -> None:
-        for layer in self.model_config.layers:
-            rope = layer.attention.rope
-            if not isinstance(rope, ComplexRoPE.Config):
-                raise ValueError(
-                    "Llama3 HF checkpoint conversion assumes ComplexRoPE.Config; "
-                    f"got {type(rope).__name__}."
-                )
 
     # HuggingFace permutation function (exact copy from their conversion script)
     def _permute(self, w, n_heads_arg, dim1=None, dim2=None):
@@ -169,7 +158,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
-        self._validate_hf_rope_config()
+        self._validate_hf_rope_config(ComplexRoPE.Config)
         if (
             self.model_config.enable_weight_tying
             and "lm_head.weight" not in hf_state_dict

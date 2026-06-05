@@ -64,15 +64,6 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             "lm_head.weight": "lm_head.weight",
         }
 
-    def _validate_hf_rope_config(self) -> None:
-        for layer in self.model_config.layers:
-            rope = layer.attention.rope
-            if not isinstance(rope, CosSinRoPE.Config):
-                raise ValueError(
-                    "GPT-OSS HF checkpoint conversion assumes CosSinRoPE.Config; "
-                    f"got {type(rope).__name__}."
-                )
-
     def get_hf_storage_reader(
         self, path: str, from_quantized: bool = False
     ) -> HuggingFaceStorageReader:
@@ -213,7 +204,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         """
         Convert from hf format state dict to tt model state dict.
         """
-        self._validate_hf_rope_config()
+        self._validate_hf_rope_config(CosSinRoPE.Config)
 
         state_dict = {}
         # Collect Q/K/V per layer for fusing (only used when fuse_qkv=True)

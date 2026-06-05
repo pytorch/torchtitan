@@ -91,8 +91,8 @@ class RoPE(Module):
         """
         raise NotImplementedError
 
+    @staticmethod
     def apply_rotary_emb(
-        self,
         query: torch.Tensor,
         key: torch.Tensor,
         rope_cache: torch.Tensor,
@@ -231,11 +231,13 @@ class ComplexRoPE(RoPE):
         positions = _maybe_wrap_positions(positions, query)
         if positions is not None:
             _maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
-        xq_ = torch.view_as_complex(query.float().reshape(*query.shape[:-1], -1, 2))
-        return _reshape_for_broadcast(self.cache, xq_, positions)
+        # Complex RoPE cache has width dim / 2 because each complex value
+        # represents a pair of real dimensions.
+        complex_query_shape = (*query.shape[:-1], query.shape[-1] // 2)
+        return _reshape_for_broadcast(self.cache, complex_query_shape, positions)
 
+    @staticmethod
     def apply_rotary_emb(
-        self,
         query: torch.Tensor,
         key: torch.Tensor,
         rope_cache: torch.Tensor,
@@ -321,26 +323,22 @@ class CosSinRoPE(RoPE):
         positions = _maybe_wrap_positions(positions, query)
         if positions is not None:
             _maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
-        return _reshape_for_broadcast(self.cache, query, positions)
+        return _reshape_for_broadcast(self.cache, query.shape, positions)
 
+    @staticmethod
     def apply_rotary_emb(
-        self,
         query: torch.Tensor,
         key: torch.Tensor,
         rope_cache: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply cos/sin RoPE using the rotate-half convention."""
-        if rope_cache.ndim != 4:
-            raise ValueError(
-                f"CosSinRoPE expects a prepared 4D RoPE cache, got {rope_cache.ndim}D."
-            )
         head_dim = query.shape[-1]
         cos = rope_cache[..., :head_dim].to(device=query.device)
         sin = rope_cache[..., head_dim:].to(device=query.device)
         query_f = query.float()
         key_f = key.float()
-        xq_out = (query_f * cos) + (self._rotate_half(query_f) * sin)
-        xk_out = (key_f * cos) + (self._rotate_half(key_f) * sin)
+        xq_out = (query_f * cos) + (CosSinRoPE._rotate_half(query_f) * sin)
+        xk_out = (key_f * cos) + (CosSinRoPE._rotate_half(key_f) * sin)
         return xq_out.type_as(query), xk_out.type_as(key)
 
     @staticmethod
@@ -352,20 +350,20 @@ class CosSinRoPE(RoPE):
 
 def _reshape_for_broadcast(
     rope_cache: torch.Tensor,
-    x: torch.Tensor,
+    query_shape: torch.Size | tuple[int, ...],
     positions: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Reshape a RoPE cache for broadcasting with query/key tensors."""
-    ndim = x.ndim
+    ndim = len(query_shape)
     assert ndim > 1
-    bsz, seqlen = x.shape[:2]
+    bsz, seqlen = query_shape[:2]
     cache_width = rope_cache.shape[-1]
     if positions is None:
         rope_cache = rope_cache[0:seqlen]
         assert rope_cache.shape == (seqlen, cache_width)
         shape = [
             d if i == 1 else cache_width if i == ndim - 1 else 1
-            for i, d in enumerate(x.shape)
+            for i, d in enumerate(query_shape)
         ]
         return rope_cache.view(*shape)
     elif positions.size(0) == 1:
@@ -374,7 +372,7 @@ def _reshape_for_broadcast(
         assert rope_cache.shape == (seqlen, cache_width)
         shape = [
             d if i == 1 else cache_width if i == ndim - 1 else 1
-            for i, d in enumerate(x.shape)
+            for i, d in enumerate(query_shape)
         ]
         return rope_cache.view(*shape)
     else:

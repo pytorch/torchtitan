@@ -9,13 +9,7 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.models.common import (
-    CosSinRoPE,
-    Embedding,
-    Linear,
-    RoPE,
-    TransformerBlock,
-)
+from torchtitan.models.common import Embedding, Linear, RoPE, TransformerBlock
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_experts_config,
@@ -28,10 +22,8 @@ from torchtitan.models.common.nn_modules import LayerNorm, RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.qwen3.model import Qwen3TransformerBlock
 from torchtitan.models.utils import validate_converter_order
-
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
-
 from .model import Qwen3VLModel
 from .parallelize import parallelize_qwen3_vl
 from .rope import MRoPE
@@ -123,7 +115,6 @@ def _build_qwen3_vl_vision_block(
             n_heads=n_heads,
             qkv=_vl_linear(dim, dim * 3),
             proj=_vl_linear(dim, dim),
-            rope=CosSinRoPE.Config(dim=dim // n_heads, max_seq_len=1),
         ),
         mlp=VisionMLP.Config(
             fc1=_vl_linear(dim, ffn_dim),

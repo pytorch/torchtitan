@@ -12,6 +12,7 @@ This can enable us to do a parity test with the HF implementation and make sure 
 aligned with the HF implementation.
 
 """
+
 import re
 from typing import Any
 
@@ -69,15 +70,6 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             "lm_head.weight": "lm_head.weight",
         }
 
-    def _validate_hf_rope_config(self) -> None:
-        for layer in self.model_config.layers:
-            rope = layer.attention.rope
-            if not isinstance(rope, CosSinRoPE.Config):
-                raise ValueError(
-                    "Qwen3 HF checkpoint conversion assumes CosSinRoPE.Config; "
-                    f"got {type(rope).__name__}."
-                )
-
     def _get_attention_dims(self) -> tuple[int, int, int]:
         """Return (n_heads, n_kv_heads, head_dim) from model config."""
         attn = self.model_config.layers[0].attention
@@ -114,9 +106,9 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
 
                 # Store the GroupedExperts Weight metadata for from_hf()
                 if isinstance(value, DTensor):
-                    self.grouped_expert_weight_placements[
-                        abstract_key
-                    ] = value.placements
+                    self.grouped_expert_weight_placements[abstract_key] = (
+                        value.placements
+                    )
                     self.grouped_expert_weight_shape[abstract_key] = value.shape
                     self.grouped_expert_weight_mesh[abstract_key] = value.device_mesh
 
@@ -191,7 +183,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
         1. Convert between the HF shape and the torchtitan shape.
         2. Concate separate expert's wegiht into GroupedExperts' weight.
         """
-        self._validate_hf_rope_config()
+        self._validate_hf_rope_config(CosSinRoPE.Config)
 
         state_dict = {}
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}

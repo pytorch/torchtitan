@@ -14,7 +14,6 @@ import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
 from torchtitan.tools.logging import logger
-
 from .model import BaseModel
 
 
@@ -87,6 +86,7 @@ class StateDictAdapter(BaseStateDictAdapter):
         model_config: BaseModel.Config,
         hf_assets_path: str | None,
     ):
+        self.model_config = model_config
         self.hf_assets_path = hf_assets_path
         if hf_assets_path:
             mapping_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
@@ -110,6 +110,23 @@ class StateDictAdapter(BaseStateDictAdapter):
                 self.fqn_to_index_mapping = None
         else:
             self.fqn_to_index_mapping = None
+
+    def _validate_hf_rope_config(
+        self,
+        expected_rope_cls: type,
+        *,
+        allow_none: bool = False,
+    ) -> None:
+        for layer in self.model_config.layers:  # pyrefly: ignore [missing-attribute]
+            rope = layer.attention.rope
+            if rope is None and allow_none:
+                continue
+            if not isinstance(rope, expected_rope_cls):
+                expected_name = expected_rope_cls.__qualname__
+                message = f"HF checkpoint conversion assumes {expected_name}"
+                if allow_none:
+                    message += " for RoPE layers"
+                raise ValueError(f"{message}; got {type(rope).__name__}.")
 
     def get_hf_storage_reader(
         self, path: str, from_quantized: bool = False
@@ -136,7 +153,7 @@ class StateDictAdapter(BaseStateDictAdapter):
         wq = w[:, :heads_per_kv, :, :].reshape(n_heads * head_dim, dim)
         wk = w[:, heads_per_kv, :, :].reshape(n_kv_heads * head_dim, dim)
         wv = w[:, heads_per_kv + 1, :, :].reshape(n_kv_heads * head_dim, dim)
-        return wq, wk, wv
+        return wq, wk, wv  # pyrefly: ignore [bad-return]
 
     @staticmethod
     def separate_to_fused_qkv(
@@ -157,4 +174,6 @@ class StateDictAdapter(BaseStateDictAdapter):
         v = wv.view(n_kv_heads, 1, head_dim, dim)
         # [n_kv_heads, R, head_dim, dim]
         fused = torch.cat([q, k, v], dim=1)
-        return fused.reshape(n_kv_heads * r_dim * head_dim, dim)
+        return fused.reshape(  # pyrefly: ignore [bad-return]
+            n_kv_heads * r_dim * head_dim, dim
+        )
