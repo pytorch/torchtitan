@@ -376,21 +376,19 @@ def rl_grpo_qwen3_moe_debug_ep_batch_invariant() -> RLTrainer.Config:
 
     Trainer: TP=4, EP=4 (4 GPUs). Generator: TP=4, EP=4 (4 GPUs).
 
-    Uses the bundled bootstrap directory ``tests/assets/qwen3_moe_debug``
-    (config.json + Qwen3 tokenizer files, no weights) together with
-    ``debug.skip_rl_trainer_initial_hf_weight_load=True`` so no checkpoint
-    is needed.
+    Uses the bundled Qwen3 tokenizer assets without weights. vLLM reads the
+    model config through TorchTitan's custom config parser, and trainer
+    checkpointing stays disabled, so no checkpoint is needed.
     """
     debug_config = DebugConfig(
         batch_invariant=True,
         deterministic=True,
-        skip_rl_trainer_initial_hf_weight_load=True,
     )
     return RLTrainer.Config(
         model_spec=model_registry(
             "debugmodel_moe", attn_backend="varlen", moe_comm_backend="standard"
         ),
-        hf_assets_path="tests/assets/qwen3_moe_debug",
+        hf_assets_path="tests/assets/tokenizer",
         num_steps=5,
         # MoE EP all-to-all path issues unpinned D2H copies that block
         # torch.compile and CUDA graph capture; disable both.

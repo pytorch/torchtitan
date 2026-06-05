@@ -7,10 +7,7 @@
 from dataclasses import dataclass
 
 import torch
-from torch.distributed._functional_collectives import (
-    all_to_all_single,
-    all_to_all_single_autograd,
-)
+from torch.distributed._functional_collectives import all_to_all_single
 from torch.distributed.tensor import DeviceMesh
 
 from torchtitan.config import Configurable
@@ -205,12 +202,6 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         # rank-agnostic. Defaults are the TP=1 values.
         self.sp_size: int = 1
         self.sp_rank: int | torch.SymInt = 0
-        # Use the non-autograd all-to-all variant. Set to True for inference
-        # paths (e.g. vLLM under torch.inference_mode), where the autograd
-        # functional ops don't dispatch correctly without an active autograd
-        # context. Read at trace time, so it's a Python bool — not a runtime
-        # call to is_inference_mode_enabled() (which Dynamo cannot trace).
-        self.use_inference_a2a: bool = False
 
     def wire_meshes(
         self,
@@ -304,14 +295,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             output_splits_list = output_splits.tolist()
 
         # All-to-all dispatch tokens to EP ranks.
-        # Use the non-autograd version under inference (vLLM), since
-        # _c10d_functional_autograd ops don't dispatch correctly without
-        # an active autograd context. Gated by a Python bool so the choice
-        # is stable at trace time.
-        a2a_fn = (
-            all_to_all_single if self.use_inference_a2a else all_to_all_single_autograd
-        )
-        routed_input = a2a_fn(
+        routed_input = all_to_all_single(
             routed_input,
             output_splits_list,
             input_splits_list,
@@ -439,10 +423,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
         # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
         # on the NCCL stream and won't block until the tensor is accessed.
-        a2a_fn = (
-            all_to_all_single if self.use_inference_a2a else all_to_all_single_autograd
-        )
-        routed_output = a2a_fn(
+        routed_output = all_to_all_single(
             routed_output,
             metadata.input_splits,
             metadata.output_splits,
