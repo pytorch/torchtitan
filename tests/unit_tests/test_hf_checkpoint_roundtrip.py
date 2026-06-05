@@ -64,6 +64,10 @@ _MODEL_FLAVORS = [
     # Different shape-suffix naming (mlp1_*_EGD/EG, mlp2_*_EDF/ED) but same
     # expert_bias_E semantics as llama4.
     ("gpt_oss", "debugmodel"),
+    # deepseek_v3: MLA attention + MoE with per-expert HF keys. Unique among
+    # MoE models here: HF DeepSeek has e_score_correction_bias as a real
+    # buffer, so expert_bias_E genuinely round-trips (no exclusion needed).
+    ("deepseek_v3", "debugmodel"),
 ]
 
 # Native-side keys (or regex patterns) excluded from the bitwise comparison,
