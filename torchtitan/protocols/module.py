@@ -15,6 +15,7 @@ from typing import Any, TYPE_CHECKING
 import spmd_types as spmd
 import torch
 import torch.nn as nn
+from spmd_types.runtime import get_partition_spec
 from torch.distributed.tensor import distribute_tensor, DTensor
 from torch.distributed.tensor.experimental import local_map
 from torch.distributed.tensor.placement_types import Placement
@@ -105,6 +106,13 @@ class Module(nn.Module, Configurable):
             for name, buf in self._buffers.items()
             if isinstance(buf, DTensor)
         }
+        spmd_meta = {
+            name: (dict(spmd.get_local_type(buf)), get_partition_spec(buf))
+            for name, buf in self._buffers.items()
+            if isinstance(buf, torch.Tensor)
+            and not isinstance(buf, DTensor)
+            and spmd.has_local_type(buf)
+        }
         self._init_self_buffers(buffer_device=buffer_device)
         for name, (mesh, placements) in dtensor_meta.items():
             new_buf = self._buffers.get(name)
@@ -115,6 +123,15 @@ class Module(nn.Module, Configurable):
                 name,
                 distribute_tensor(new_buf, mesh, list(placements)),
                 persistent=persistent,
+            )
+        for name, (local_type, partition_spec) in spmd_meta.items():
+            new_buf = self._buffers.get(name)
+            if new_buf is None or not isinstance(new_buf, torch.Tensor):
+                continue
+            spmd.assert_type(
+                new_buf,
+                local_type,
+                partition_spec=partition_spec,
             )
 
     def _init_self_parameters(self) -> None:
@@ -260,7 +277,20 @@ class Module(nn.Module, Configurable):
         *,
         is_param: bool,
     ) -> None:
-        mesh = parallel_dims._global_meshes["spmd_dense"]
+        from torchtitan.protocols.types import MeshAxisName
+
+        sparse_axes = {
+            MeshAxisName.DP_REPLICATE,
+            MeshAxisName.EFSDP,
+            MeshAxisName.EP,
+        }
+        if any(axis in sparse_axes for axis in placement.axes()):
+            parallel_dims.world_mesh
+            mesh = parallel_dims._global_meshes["sparse"][
+                "dp_replicate", "efsdp", "ep"
+            ]
+        else:
+            mesh = parallel_dims._global_meshes["spmd_dense"]
 
         with set_current_spmd_mesh(mesh):
             for axis_name, axis_type in placement.placements.items():
