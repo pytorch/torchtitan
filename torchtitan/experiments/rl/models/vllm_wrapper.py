@@ -124,7 +124,13 @@ class VLLMModelWrapper(Module):
 
         assert vllm_config is not None, "vllm_config is required"
 
-        # PP and CP are not supported on this inference path.
+        # validation lives in Generator.Config.__post_init__; these are
+        # internal invariants — by the time we get here, parallelism has
+        # already been validated.
+        assert parallelism.data_parallel_shard_degree == 1, (
+            "vLLM wrapper requires data_parallel_shard_degree=1, "
+            f"got {parallelism.data_parallel_shard_degree}"
+        )
         assert parallelism.pipeline_parallel_degree == 1, (
             "vLLM wrapper requires pipeline_parallel_degree=1, "
             f"got {parallelism.pipeline_parallel_degree}"
@@ -170,10 +176,10 @@ class VLLMModelWrapper(Module):
         # controller's source of truth) rather than vLLM's parallel_config.
         self.parallel_dims = ParallelDims(
             dp_replicate=parallelism.data_parallel_replicate_degree,
-            dp_shard=1,
-            cp=1,
+            dp_shard=parallelism.data_parallel_shard_degree,
+            cp=parallelism.context_parallel_degree,
             tp=parallelism.tensor_parallel_degree,
-            pp=1,
+            pp=parallelism.pipeline_parallel_degree,
             ep=parallelism.expert_parallel_degree,
             world_size=dist.get_world_size(),
         )
@@ -190,11 +196,7 @@ class VLLMModelWrapper(Module):
 
         self.config.update_from_config(config=_InferenceConfig(parallelism=parallelism))
 
-        # Build model on meta device to avoid allocating full model on every
-        # GPU. This is critical for large MoE models where replicating all
-        # experts would OOM. After parallelization (which sets up EP/TP
-        # sharding on meta tensors), to_empty() allocates only the local
-        # shards on the actual device.
+        # Build model on meta device to avoid allocating full model on every GPU
         with torch.device("meta"):
             self.model = self.config.build()
 
@@ -221,23 +223,9 @@ class VLLMModelWrapper(Module):
         # Load initial weights based on checkpoint config.
         self._checkpoint_config = checkpoint_config
 
-        # vLLM runs under torch.inference_mode(); the autograd functional
-        # collectives don't dispatch correctly there. Flip MoE token
-        # dispatchers to the non-autograd a2a path. Read at trace time.
-        from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
-
-        for layer in self.model.layers.values():
-            moe = getattr(layer, "moe", None)
-            if moe is None:
-                continue
-            dispatcher = getattr(moe.experts, "token_dispatcher", None)
-            if isinstance(dispatcher, AllToAllTokenDispatcher):
-                dispatcher.use_inference_a2a = True
-
         # Materialize model on GPU — only allocates local shards (not full
         # model) thanks to EP/TP DTensor sharding applied above.
-        device_type = vllm_config.device_config.device.type
-        self.model.to_empty(device=device_type)
+        self.model.to_empty(device=vllm_config.device_config.device)
         self._maybe_initial_load_weights()
 
 
@@ -324,10 +312,10 @@ class VLLMModelWrapper(Module):
 
         logits = self.model.lm_head(hidden_states)
 
-        # vLLM's sampling expects full plain tensors. full_tensor() handles both
-        # Replicate (no-op) and Shard(-1) (all-gather) lm_head output placements.
+        # Full DTensor path returns logits as DTensor; vLLM expects plain tensors.
+        # disable_loss_parallel=True already makes lm_head output Replicate 
         if isinstance(logits, DTensor):
-            logits = logits.full_tensor()
+            logits = logits.to_local()
 
         return logits
 
