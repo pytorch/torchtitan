@@ -12,6 +12,7 @@ This can enable us to do a parity test with the HF implementation and make sure 
 aligned with the HF implementation.
 
 """
+
 import re
 from typing import Any
 
@@ -19,6 +20,7 @@ import torch
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.attention import FusedQKVLinear
+from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.utils import MoEStateDictAdapter
 from .model import Qwen3Model
 
@@ -70,13 +72,14 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
 
     def _get_attention_dims(self) -> tuple[int, int, int]:
         """Return (n_heads, n_kv_heads, head_dim) from model config."""
+        # pyrefly: ignore [missing-attribute]
         attn = self.model_config.layers[0].attention
         n_heads = attn.n_heads
         n_kv_heads = attn.n_kv_heads if attn.n_kv_heads is not None else n_heads
         head_dim = (
             attn.head_dim
             if attn.head_dim is not None
-            else self.model_config.dim // n_heads
+            else self.model_config.dim // n_heads  # pyrefly: ignore [missing-attribute]
         )
         return n_heads, n_kv_heads, head_dim
 
@@ -85,6 +88,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
         1. Convert between the HF shape and the torchtitan shape.
         2. Split the GroupedExperts' weight into separate expert's wegiht.
         """
+
         if self.fuse_qkv:
             to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
             n_heads, n_kv_heads, head_dim = self._get_attention_dims()
@@ -121,7 +125,9 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                 else:
                     # keep this path for offline conversion
                     moe_layer = next(
-                        l for l in self.model_config.layers if l.moe is not None
+                        l
+                        for l in self.model_config.layers  # pyrefly: ignore [missing-attribute]
+                        if l.moe is not None
                     )
                     split_values = self._split_experts_weights(
                         value,
@@ -180,6 +186,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
         1. Convert between the HF shape and the torchtitan shape.
         2. Concate separate expert's wegiht into GroupedExperts' weight.
         """
+        self._validate_hf_rope_config(CosSinRoPE.Config)
 
         state_dict = {}
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
@@ -228,7 +235,9 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                         titan_abstract_key,
                         layer_num,
                         next(
-                            l for l in self.model_config.layers if l.moe is not None
+                            l
+                            for l in self.model_config.layers  # pyrefly: ignore [missing-attribute]
+                            if l.moe is not None
                         ).moe.num_experts,
                     )
 

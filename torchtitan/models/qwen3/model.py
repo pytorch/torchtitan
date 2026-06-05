@@ -54,13 +54,10 @@ class Qwen3TransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
-        x = x + self.attention(
-            self.attention_norm(x), freqs_cis, attention_masks, positions
-        )
+        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
 
         if self.moe_enabled:
             x = x + self.moe(self.ffn_norm(x))
