@@ -42,6 +42,17 @@ from torchtitan.experiments.graph_trainer.registry import (
 )
 from torchtitan.tools.logging import logger
 
+# Symbolic size/shape-extraction ops always SAVE rather than recompute: each
+# returns a SymInt (free to keep), while recomputing it would pin the parent
+# tensor alive in backward just to read its size/stride/numel. Matched by overload
+# packet so every overload (e.g. sym_size.int) is covered.
+_ALWAYS_SAVE_OP_PACKETS = {
+    torch.ops.aten.sym_size,
+    torch.ops.aten.sym_numel,
+    torch.ops.aten.sym_stride,
+    torch.ops.aten.sym_storage_offset,
+}
+
 
 def _make_default_memory_policy(
     save_ops: set | None = None,
@@ -178,6 +189,14 @@ def tag_sac_policy(
             parent = node.args[0]
             if isinstance(parent, torch.fx.Node) and "recompute" in parent.meta:
                 node.meta["recompute"] = parent.meta["recompute"]
+            continue
+
+        # Symbolic size/shape extraction always saves: the SymInt result is free
+        # to keep, while recomputing it would pin the parent tensor alive in
+        # backward just to read its size (e.g. recomputing
+        # sym_size.int(all_to_all_single, 0) keeps the whole all-to-all output).
+        if getattr(node.target, "overloadpacket", None) in _ALWAYS_SAVE_OP_PACKETS:
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
             continue
 
         # NOTE: The eager SAC policy (activation_checkpoint.py) alternates
