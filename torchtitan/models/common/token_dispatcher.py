@@ -38,6 +38,11 @@ class AllToAllDispatchMetadata(LocalDispatchMetadata):
 class LocalTokenDispatcher(Configurable):
     """Token dispatcher for EP=1. Handles local token reordering only.
 
+    Also serves as the base class for EP dispatchers (AllToAllTokenDispatcher,
+    DeepEPTokenDispatcher, HybridEPTokenDispatcher,
+    MinimalAsyncEPTokenDispatcher)
+    which override dispatch() and combine().
+
     Not an nn.Module — dispatchers have no learnable parameters or buffers.
     """
 
@@ -66,7 +71,15 @@ class LocalTokenDispatcher(Configurable):
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        *,
+        return_flat_indices: bool = False,
+        return_sorted_scores: bool = True,
+        return_routed_input: bool = True,
+        use_counting_sort: bool = False,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    ):
         """Reorder tokens by expert assignment for local expert computation.
 
         Groups tokens by expert index via argsort and optionally applies
@@ -76,22 +89,57 @@ class LocalTokenDispatcher(Configurable):
             x_TD: ``(T, D)`` input tokens
             topk_scores_TK: ``(T, K)`` routing scores
             topk_expert_ids_TK: ``(T, K)`` expert indices
+            return_flat_indices: Return original flat ``T*K`` top-k positions.
+            return_sorted_scores: Gather scores in expert-sorted order. Set this
+                false when the caller consumes scores in original top-k slot order.
+            return_routed_input: Gather and return tokens in expert-sorted order.
+                Set this false when the caller can consume token indices directly.
+            use_counting_sort: Use the MinimalAsyncEP counting-sort helper instead of
+                ``argsort``. Ordering within an expert segment is unspecified.
 
         Returns:
             routed_input_ND: ``(N, D)`` where N = T*K. Tokens in expert-sorted
                 order, score-weighted if ``score_before_experts``.
             token_indices_experts_sorted_N: ``(N,)`` token-to-original mapping
             topk_scores_experts_sorted_N: ``(N,)`` scores in expert-sorted order
+            flat_indices_experts_sorted_N: Optional original ``T*K`` flat
+                top-k positions in expert-sorted order, returned only when
+                ``return_flat_indices`` is true.
         """
-        # Reorder the token indices to match the order of the experts where N = T*K
-        token_indices_experts_sorted_N = torch.argsort(
-            topk_expert_ids_TK.view(-1), stable=True
+        if self.score_before_experts and not return_routed_input:
+            raise ValueError(
+                "return_routed_input=False is incompatible with score_before_experts."
+            )
+        if use_counting_sort:
+            from torchtitan.distributed.minimal_async_ep import (
+                expert_counting_sort,
+            )
+
+            (
+                _num_tokens_per_expert_E,
+                token_indices_experts_sorted_N,
+                flat_indices_experts_sorted_N,
+            ) = expert_counting_sort(
+                topk_expert_ids_TK,
+                num_experts=self.num_experts,
+            )
+        else:
+            # Reorder the token indices to match the order of the experts where N = T*K
+            flat_indices_experts_sorted_N = torch.argsort(
+                topk_expert_ids_TK.view(-1), stable=True
+            )
+            token_indices_experts_sorted_N = (
+                flat_indices_experts_sorted_N // self.top_k
+            )
+        if self.score_before_experts or return_sorted_scores:
+            topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[
+                flat_indices_experts_sorted_N
+            ]
+        else:
+            topk_scores_experts_sorted_N = topk_scores_TK.new_empty(0)
+        routed_input_ND = (
+            x_TD[token_indices_experts_sorted_N] if return_routed_input else x_TD
         )
-        topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[
-            token_indices_experts_sorted_N
-        ]
-        token_indices_experts_sorted_N = token_indices_experts_sorted_N // self.top_k
-        routed_input_ND = x_TD[token_indices_experts_sorted_N]
 
         # Apply scores before expert computation if configured
         if self.score_before_experts:
@@ -99,6 +147,14 @@ class LocalTokenDispatcher(Configurable):
                 routed_input_ND.to(torch.float32)
                 * topk_scores_experts_sorted_N.reshape(-1, 1)
             ).to(x_TD.dtype)
+
+        if return_flat_indices:
+            return (
+                routed_input_ND,
+                token_indices_experts_sorted_N,
+                topk_scores_experts_sorted_N,
+                flat_indices_experts_sorted_N,
+            )
 
         return (
             routed_input_ND,
@@ -390,6 +446,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         ep_size = self.ep_mesh.size()
         e = num_global_tokens_per_local_expert_E.shape[0] // ep_size
         device = num_global_tokens_per_local_expert_E.device
+        total = routed_input_RD.shape[0]
 
         # (EP, e) matrix of token counts per (rank, local_expert)
         t_mat = num_global_tokens_per_local_expert_E.view(ep_size, e)
@@ -407,7 +464,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         # For each output position, find its input position:
         #   output[p] = input[input_starts[seg] + (p - output_starts[seg])]
         seg_ids = torch.arange(segment_lens.shape[0], device=device).repeat_interleave(
-            segment_lens
+            segment_lens, output_size=total
         )
         output_starts = segment_lens.cumsum(0) - segment_lens
         # seg_ids.shape[0] == segment_lens.sum(), but reuses the unbacked symint
@@ -600,9 +657,9 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
 
 @dataclass(frozen=True, kw_only=True)
 class DeepEPDispatchMetadata:
-    """Metadata for DeepEP and HybridEP token dispatch."""
+    """Metadata for DeepEP, HybridEP, and MinimalAsyncEP token dispatch."""
 
-    state: object  # deepep.DispatchState or hybridep.DispatchState
+    state: object  # Backend-specific dispatch state.
 
 
 class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
@@ -825,3 +882,112 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
             return out_TD
 
         return combined_TD
+
+
+class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
+    """Token dispatcher using MinimalAsyncEP for constrained EP communication.
+
+    This first integration supports EP with ``sp_size == 1`` only. TP/SP, CP,
+    PP, padding, and async combine overlap are intentionally out of scope.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(LocalTokenDispatcher.Config):
+        pass
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.ep_mesh: DeviceMesh | None = None
+        self.sp_size: int = 1
+
+        # Import to register custom ops so SAC saves communication outputs
+        # instead of recomputing them. This must happen before apply_ac.
+        from torchtitan.distributed import minimal_async_ep  # noqa: F401
+
+    def wire_meshes(
+        self,
+        *,
+        ep_mesh: DeviceMesh | None,
+        tp_mesh: DeviceMesh | None,
+    ) -> None:
+        """Install the EP mesh used by MinimalAsyncEP dispatch / combine."""
+        self.ep_mesh = ep_mesh
+        if tp_mesh is not None and tp_mesh.size() > 1:
+            raise ValueError(
+                "MinimalAsyncEPTokenDispatcher does not support tensor or sequence "
+                "parallelism."
+            )
+        self.sp_size = 1
+
+    # pyrefly: ignore [bad-override]
+    def dispatch(
+        self,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
+        if self.ep_mesh is None:
+            raise ValueError(
+                "MinimalAsyncEPTokenDispatcher requires expert parallelism "
+                "(ep_mesh must be set)."
+            )
+        if self.sp_size != 1:
+            raise ValueError("MinimalAsyncEPTokenDispatcher requires sp_size == 1.")
+
+        ep_group = self.ep_mesh.get_group()
+        num_local_experts = self.num_experts // ep_group.size()
+        input_is_token_ordered = not self.score_before_experts
+
+        (
+            dispatch_input,
+            token_indices_experts_sorted_N,
+            _topk_scores_experts_sorted_N,
+            flat_indices_experts_sorted_N,
+        ) = self._local_reorder(
+            x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            return_flat_indices=True,
+            return_sorted_scores=self.score_before_experts,
+            return_routed_input=not input_is_token_ordered,
+            use_counting_sort=True,
+        )
+        routed_scores_N = (
+            None if self.score_before_experts else topk_scores_TK.view(-1)
+        )
+
+        from torchtitan.distributed.minimal_async_ep import dispatch_tokens
+
+        hidden_states_RD, tokens_per_expert_E, state = dispatch_tokens(
+            dispatch_input,
+            num_local_tokens_per_expert_E,
+            token_indices_experts_sorted_N,
+            flat_indices_experts_sorted_N,
+            routed_scores_N,
+            x_TD.shape[0],
+            num_local_experts,
+            ep_group,
+            input_is_token_ordered=input_is_token_ordered,
+            routed_scores_are_slot_ordered=routed_scores_N is not None,
+        )
+
+        metadata = DeepEPDispatchMetadata(state=state)
+        return hidden_states_RD, tokens_per_expert_E, metadata
+
+    # pyrefly: ignore [bad-override]
+    def combine(
+        self,
+        routed_output_RD: torch.Tensor,
+        metadata: DeepEPDispatchMetadata,
+        x_TD: torch.Tensor,
+    ) -> torch.Tensor:
+        """Combine tokens via MinimalAsyncEP."""
+        del x_TD
+        if self.sp_size != 1:
+            raise ValueError("MinimalAsyncEPTokenDispatcher requires sp_size == 1.")
+
+        from torchtitan.distributed.minimal_async_ep import combine_tokens
+
+        # pyrefly: ignore [bad-argument-type]
+        return combine_tokens(routed_output_RD, metadata.state)
