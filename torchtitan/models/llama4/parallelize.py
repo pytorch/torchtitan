@@ -9,7 +9,12 @@ from typing import Any
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+from torch.distributed.fsdp import (
+    CPUOffloadPolicy,
+    DataParallelMeshDims,
+    fully_shard,
+    MixedPrecisionPolicy,
+)
 from torch.distributed.tensor import Shard
 
 from torchtitan.config import (
@@ -28,6 +33,7 @@ from torchtitan.distributed.fsdp import (
     enable_fsdp_symm_mem,
     get_fsdp_reshard_after_forward_policy,
 )
+from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama4.model import Llama4Model
 from torchtitan.tools.logging import logger
@@ -90,12 +96,20 @@ def parallelize_llama(
     if model_compile_enabled:
         apply_compile(model, compile_config)
 
-    dp_mesh_names = (
-        ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-    )
-    dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+    if parallelism.spmd_backend == "spmd_types":
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+    else:
+        dp_mesh_names = (
+            ["dp_replicate", "fsdp"]
+            if parallel_dims.dp_replicate_enabled
+            else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+        dp_mesh_dims = None
 
     edp_mesh = None
+    edp_mesh_dims = None
+    edp_spmd_mesh = None
     if parallel_dims.ep_enabled:
         edp_mesh_names = (
             ["dp_replicate", "efsdp"]
@@ -103,6 +117,17 @@ def parallelize_llama(
             else ["efsdp"]
         )
         edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+        if parallelism.spmd_backend == "spmd_types":
+            parallel_dims.world_mesh
+            edp_spmd_mesh = parallel_dims._global_meshes["sparse"][
+                "dp_replicate", "efsdp", "ep"
+            ]
+            edp_mesh_dims = DataParallelMeshDims(
+                shard="efsdp",
+                replicate=(
+                    "dp_replicate" if parallel_dims.dp_replicate_enabled else None
+                ),
+            )
 
     apply_fsdp(
         model,
@@ -114,6 +139,9 @@ def parallelize_llama(
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
+        dp_mesh_dims=dp_mesh_dims,
+        edp_mesh_dims=edp_mesh_dims,
+        edp_spmd_mesh=edp_spmd_mesh,
         enable_symm_mem=parallelism.enable_fsdp_symm_mem,
     )
 
@@ -135,6 +163,9 @@ def apply_fsdp(
     reshard_after_forward_policy: str = "default",
     ep_degree: int = 1,
     edp_mesh: DeviceMesh | None = None,
+    dp_mesh_dims: DataParallelMeshDims | None = None,
+    edp_mesh_dims: DataParallelMeshDims | None = None,
+    edp_spmd_mesh: DeviceMesh | None = None,
     enable_symm_mem: bool = False,
 ):
     """
@@ -160,6 +191,8 @@ def apply_fsdp(
         cast_forward_inputs=False,
     )
     fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if dp_mesh_dims is not None:
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
@@ -251,10 +284,18 @@ def apply_fsdp(
                     HSDPMeshInfo,
                     ShardPlacementResult,
                 )
+                from torch.distributed.fsdp._fully_shard._fsdp_init import (
+                    _get_mesh_info,
+                )
 
                 assert edp_mesh is not None
 
-                def _get_fsdp_mesh_info(mesh: DeviceMesh) -> FSDPMeshInfo:
+                def _get_fsdp_mesh_info(
+                    mesh: DeviceMesh,
+                    dp_mesh_dims: DataParallelMeshDims | None = None,
+                ) -> FSDPMeshInfo:
+                    if dp_mesh_dims is not None:
+                        return _get_mesh_info(mesh, dp_mesh_dims)
                     if mesh.ndim == 1:
                         return FSDPMeshInfo(mesh=mesh, shard_mesh_dim=0)
                     if mesh.ndim == 2:
@@ -265,8 +306,11 @@ def apply_fsdp(
                         f"Expected 1D or 2D FSDP mesh, got {mesh.ndim}D mesh."
                     )
 
-                edp_mesh_info = _get_fsdp_mesh_info(edp_mesh)
-                dp_mesh_info = _get_fsdp_mesh_info(dp_mesh)
+                edp_mesh_info = _get_fsdp_mesh_info(
+                    edp_spmd_mesh if edp_spmd_mesh is not None else edp_mesh,
+                    edp_mesh_dims,
+                )
+                dp_mesh_info = _get_fsdp_mesh_info(dp_mesh, dp_mesh_dims)
 
                 def _shard_placement_fn(
                     param: nn.Parameter,

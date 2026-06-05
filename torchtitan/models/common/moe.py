@@ -4,9 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Literal
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -110,22 +113,56 @@ class GroupedExperts(Module):
             num_tokens_per_expert_E,
             metadata,
         ) = self.token_dispatcher.dispatch(x_TD, topk_scores_TK, topk_expert_ids_TK)
-        routed_output_RD = self._experts_forward(
-            routed_input_RD, num_tokens_per_expert_E
+        with self._expert_spmd_mesh():
+            if spmd.is_type_checking() and not spmd.has_local_type(routed_input_RD):
+                mesh_axis_names = spmd.current_mesh_names() or {}
+                local_type = {axis: spmd.V for axis in mesh_axis_names.values()}
+                if "ep" in mesh_axis_names:
+                    local_type[mesh_axis_names["ep"]] = spmd.S(0)
+                spmd.assert_type(routed_input_RD, local_type)
+            if spmd.is_type_checking() and not spmd.has_local_type(
+                num_tokens_per_expert_E
+            ):
+                mesh_axis_names = spmd.current_mesh_names() or {}
+                local_type = {axis: spmd.R for axis in mesh_axis_names.values()}
+                if "ep" in mesh_axis_names:
+                    local_type[mesh_axis_names["ep"]] = spmd.S(0)
+                spmd.assert_type(num_tokens_per_expert_E, local_type)
+            routed_output_RD = self._experts_forward(
+                routed_input_RD, num_tokens_per_expert_E
+            )
+        out_TD = self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        return out_TD.view(B, -1, D)
+
+    def _expert_spmd_mesh(self) -> Iterator[None]:
+        ep_mesh = self.token_dispatcher.ep_mesh
+        if not spmd.is_type_checking() or ep_mesh is None:
+            return contextlib.nullcontext()
+
+        mesh_axis_names = ep_mesh.mesh_dim_names or ()
+        ep_group = (
+            ep_mesh.get_group("ep")
+            if "ep" in mesh_axis_names
+            else ep_mesh.get_group()
         )
-        return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        ep_axis = spmd.MeshAxis.of(ep_group)
+        axes = {"ep": ep_axis}
+        if spmd.has_local_type(self.w1_EFD):
+            for index, axis in enumerate(spmd.get_local_type(self.w1_EFD)):
+                if axis != ep_axis:
+                    axes[f"param_{index}"] = axis
+        return spmd.set_current_mesh(axes)
 
     def parallelize(self, parallel_dims) -> None:
-        """Parallelize expert weights, then wire EP/TP meshes on the dispatcher
-        so dispatch/combine see the right meshes at runtime."""
+        """Parallelize expert weights and install meshes used by dispatch."""
         super().parallelize(parallel_dims)
-        # TODO(@pianpwk): With spmd_types and set_current_mesh, replace wire_meshes
-        # with current_mesh calls inside AllToAllTokenDispatcher and
-        # DeepEPTokenDispatcher.
-        self.token_dispatcher.wire_meshes(
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-        )
+        if parallel_dims.ep_enabled:
+            self.token_dispatcher.ep_mesh = parallel_dims.get_mesh("ep")
+
+        tp_mesh = parallel_dims.get_optional_mesh("tp")
+        if tp_mesh is not None:
+            self.token_dispatcher.sp_size = tp_mesh.size()
+            self.token_dispatcher.sp_rank = tp_mesh._sym_get_coordinate(0)
 
 
 class TokenChoiceTopKRouter(Module):
@@ -246,6 +283,16 @@ class TokenChoiceTopKRouter(Module):
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
+        if (
+            expert_bias_E is not None
+            and spmd.is_type_checking()
+            and spmd.has_local_type(scores_BLE)
+            and not spmd.has_local_type(expert_bias_E)
+        ):
+            spmd.assert_type(
+                expert_bias_E,
+                {axis: spmd.R for axis in spmd.get_local_type(scores_BLE)},
+            )
         scores_for_choice_BLE = (
             scores_BLE if expert_bias_E is None else scores_BLE + expert_bias_E
         )
@@ -275,12 +322,23 @@ class TokenChoiceTopKRouter(Module):
         topk_scores_BLK = topk_scores_BLK * self.route_scale
 
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert_E = torch.histc(
-            topk_expert_ids_BLK.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
-        )
+        with spmd.no_typecheck():
+            num_tokens_per_expert_E = torch.histc(
+                topk_expert_ids_BLK,
+                bins=self.num_experts,
+                min=0,
+                max=self.num_experts,
+            )
+        if spmd.is_type_checking() and spmd.has_local_type(topk_expert_ids_BLK):
+            spmd.assert_type(
+                num_tokens_per_expert_E,
+                {
+                    axis: spmd.R if axis_type in (spmd.R, spmd.I) else spmd.P
+                    for axis, axis_type in spmd.get_local_type(
+                        topk_expert_ids_BLK
+                    ).items()
+                },
+            )
 
         return topk_scores_BLK, topk_expert_ids_BLK, num_tokens_per_expert_E
 
@@ -360,8 +418,6 @@ class MoE(Module):
         operates on DTensors — the DTensor→local conversion happens at
         the GroupedExperts boundary.
         """
-        B, L, D = x_BLD.shape
-
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # num_tokens_per_expert_E shape (E,)
         (
@@ -376,9 +432,18 @@ class MoE(Module):
         #       first in the forward pass, and then in the backward pass. However, this has no
         #       effect on the expert bias update thanks to the torch.sign() operator.
         with torch.no_grad():
+            if (
+                spmd.is_type_checking()
+                and spmd.has_local_type(num_tokens_per_expert_E)
+                and not spmd.has_local_type(self.tokens_per_expert_E)
+            ):
+                spmd.assert_type(
+                    self.tokens_per_expert_E,
+                    dict(spmd.get_local_type(num_tokens_per_expert_E)),
+                )
             self.tokens_per_expert_E.add_(num_tokens_per_expert_E)
 
-        out_TD = self.experts(x_BLD, topk_scores_BLK, topk_expert_ids_BLK)
+        out_BLD = self.experts(x_BLD, topk_scores_BLK, topk_expert_ids_BLK)
 
         # shared_experts runs in parallel with deepep combine communication.
         shared_out_BLD = (
@@ -396,7 +461,6 @@ class MoE(Module):
 
             sync_combine()
 
-        out_BLD = out_TD.view(B, L, D)
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD
         return out_BLD

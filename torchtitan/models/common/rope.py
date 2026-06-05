@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
-import spmd_types as spmd
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
 from torchtitan.protocols.module import Module
@@ -20,23 +19,6 @@ __all__ = [
     "apply_rotary_emb_cos_sin",
     "apply_rotary_emb_single_complex",
 ]
-
-
-@spmd.no_typecheck()
-def _maybe_check_max_pos(positions: torch.Tensor, *, max_valid_pos: int) -> None:
-    """Async bounds check: verify all position values <= max_valid_pos.
-
-    Uses ``torch._assert_async`` to avoid a device-host sync while still
-    catching out-of-bounds positions (the assertion failure surfaces at a
-    later kernel launch).  Skipped entirely under ``torch.compile``.
-    """
-    if torch.compiler.is_compiling():
-        return
-    pos_local = positions.to_local() if isinstance(positions, DTensor) else positions
-    torch._assert_async(
-        torch.all(pos_local <= max_valid_pos),
-        f"position_ids exceed {max_valid_pos=}",
-    )
 
 
 class RoPE(Module):
@@ -245,14 +227,7 @@ def _reshape_for_broadcast_complex(
         assert freqs_cis.shape == (seqlen, x.shape[-1])
         shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
         return freqs_cis.view(*shape)
-    elif positions.size(0) == 1:
-        assert positions.shape == (1, seqlen)
-        freqs_cis = freqs_cis[positions.squeeze(0)]
-        assert freqs_cis.shape == (seqlen, x.shape[-1])
-        shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-        return freqs_cis.view(*shape)
-    else:
-        assert positions.shape == (x.shape[0], seqlen)
+    elif positions.shape == (x.shape[0], seqlen):
         freqs_cis_expanded = freqs_cis[None, :, None, :].expand(x.shape[0], -1, -1, -1)
         freqs_cis = torch.gather(
             freqs_cis_expanded,
@@ -262,6 +237,12 @@ def _reshape_for_broadcast_complex(
             ),
         )
         return freqs_cis
+    else:
+        assert positions.shape == (1, seqlen)
+        freqs_cis = freqs_cis[positions.squeeze(0)]
+        assert freqs_cis.shape == (seqlen, x.shape[-1])
+        shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+        return freqs_cis.view(*shape)
 
 
 def _reshape_for_broadcast_cos_sin(
@@ -282,14 +263,7 @@ def _reshape_for_broadcast_cos_sin(
         assert rope_cache.shape == (seqlen, head_dim * 2)
         shape = [-1, seqlen, 1, head_dim * 2]
         return rope_cache.view(*shape)
-    elif positions.size(0) == 1:
-        assert positions.shape == (1, seqlen)
-        rope_cache = rope_cache[positions.squeeze(0)]
-        assert rope_cache.shape == (seqlen, head_dim * 2)
-        shape = [-1, seqlen, 1, head_dim * 2]
-        return rope_cache.view(*shape)
-    else:
-        assert positions.shape == (bz, seqlen)
+    elif positions.shape == (bz, seqlen):
         rope_cache_expanded = rope_cache[None, :, None, :].expand(bz, -1, -1, -1)
         rope_cache = torch.gather(
             rope_cache_expanded,
@@ -298,6 +272,12 @@ def _reshape_for_broadcast_cos_sin(
         )
         assert rope_cache.shape == (bz, seqlen, 1, head_dim * 2)
         return rope_cache
+    else:
+        assert positions.shape == (1, seqlen)
+        rope_cache = rope_cache[positions.squeeze(0)]
+        assert rope_cache.shape == (seqlen, head_dim * 2)
+        shape = [-1, seqlen, 1, head_dim * 2]
+        return rope_cache.view(*shape)
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -360,8 +340,6 @@ def apply_rotary_emb_complex(
         positions: optional position indices
     """
     positions = _maybe_wrap_positions(positions, xq)
-    if positions is not None:
-        _maybe_check_max_pos(positions, max_valid_pos=freqs_cis.shape[0] - 1)
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
     freqs_cis = _reshape_for_broadcast_complex(freqs_cis, xq_, positions)
@@ -383,8 +361,6 @@ def apply_rotary_emb_single_complex(
         positions: optional position indices
     """
     positions = _maybe_wrap_positions(positions, x)
-    if positions is not None:
-        _maybe_check_max_pos(positions, max_valid_pos=freqs_cis.shape[0] - 1)
     dtype = x.dtype
     x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
     freqs_cis = _reshape_for_broadcast_complex(freqs_cis, x, positions)
@@ -410,13 +386,12 @@ def apply_rotary_emb_cos_sin(
     positions = _maybe_wrap_positions(positions, xq)
     head_dim = xq.shape[-1]
     if rope_cache.ndim != 4:
-        # Qwen3-VL MRoPE validates position IDs before building its 4D cache.
-        # Here shape[0] is max sequence length only for non-4D indexed caches.
-        if positions is not None:
-            _maybe_check_max_pos(positions, max_valid_pos=rope_cache.shape[0] - 1)
         rope_cache = _reshape_for_broadcast_cos_sin(rope_cache, xq, positions)
-    cos = rope_cache[..., :head_dim].to(device=xq.device)
-    sin = rope_cache[..., head_dim:].to(device=xq.device)
+    cos = rope_cache[..., :head_dim]
+    sin = rope_cache[..., head_dim:]
+    if cos.device != xq.device:
+        cos = cos.to(device=xq.device)
+        sin = sin.to(device=xq.device)
     xq_f = xq.float()
     xk_f = xk.float()
     xq_out = (xq_f * cos) + (_rotate_half(xq_f) * sin)

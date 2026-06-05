@@ -88,6 +88,7 @@ def _shared_expert_colwise_config(enable_ep: bool, enable_sp: bool) -> ShardingC
         },
         in_src_shardings={"input": input_layout},
         in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
+        out_src_shardings=dense_activation_placement(tp=spmd.S(2)),
         out_dst_shardings=dense_activation_placement(tp=spmd.S(2)),
     )
 
@@ -261,6 +262,11 @@ def set_moe_sharding_config(
         }
         experts_in_layout = dense_sequence_parallel_placement()
         experts_in_grad_layout = experts_in_layout
+        experts_x_src_layout = (
+            experts_in_layout
+            if enable_sp
+            else dense_activation_placement(tp=spmd.I)
+        )
     else:
         state_shardings = {
             name: expert_param_placement_dense(tp_placement=placement)
@@ -268,11 +274,14 @@ def set_moe_sharding_config(
         }
         experts_in_layout = dense_activation_placement(tp=spmd.R)
         experts_in_grad_layout = dense_activation_placement(tp=spmd.P)
+        experts_x_src_layout = dense_activation_placement(
+            tp=spmd.R if enable_sp else spmd.I
+        )
 
     moe_cfg.experts.sharding_config = ShardingConfig(
         state_shardings=state_shardings,
         in_src_shardings={
-            "x_BLD": dense_activation_placement(tp=spmd.R if enable_sp else spmd.I),
+            "x_BLD": experts_x_src_layout,
             "topk_scores_BLK": experts_in_layout,
             "topk_expert_ids_BLK": experts_in_layout,
         },
