@@ -4,21 +4,37 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
+import functools
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 from torch.distributed.tensor import distribute_tensor, DTensor
 from torch.distributed.tensor.experimental import local_map
 from torch.distributed.tensor.placement_types import Placement
+from torch.utils._pytree import tree_map
 
 from torchtitan.config import Configurable
-from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
-from torchtitan.protocols.types import NamedPlacement
+from torchtitan.distributed.spmd_types import (
+    mesh_size as spmd_mesh_size,
+    placement_to_spmd_assert_type,
+    redistribute_spmd_per_axis,
+)
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+from torchtitan.protocols.sharding import (
+    NamedPlacement,
+    resolve_placements,
+    ShardingConfig,
+)
+
+if TYPE_CHECKING:
+    from torchtitan.distributed.parallel_dims import ParallelDims
 
 
 class Module(nn.Module, Configurable):
@@ -235,6 +251,88 @@ class Module(nn.Module, Configurable):
 
         self.forward = forward_with_redistribution
 
+    def _register_spmd_state(
+        self,
+        parallel_dims: ParallelDims,
+        name: str,
+        tensor: torch.Tensor,
+        placement: NamedPlacement,
+        *,
+        is_param: bool,
+    ) -> None:
+        mesh = parallel_dims._global_meshes["spmd_dense"]
+
+        with set_current_spmd_mesh(mesh):
+            for axis_name, axis_type in placement.placements.items():
+                if isinstance(axis_type, spmd.Shard) and spmd_mesh_size(axis_name) > 1:
+                    tensor = spmd.shard(
+                        tensor,
+                        mesh.get_group(axis_name),
+                        src=spmd.I,
+                        dst=axis_type,
+                    )
+
+            if is_param:
+                self.register_parameter(name, nn.Parameter(tensor))
+                registered = self._parameters[name]
+            else:
+                persistent = name not in self._non_persistent_buffers_set
+                self.register_buffer(name, tensor, persistent=persistent)
+                registered = self._buffers[name]
+
+            local_type, partition_spec = placement_to_spmd_assert_type(placement)
+            spmd.assert_type(
+                registered,
+                local_type,
+                partition_spec=partition_spec,
+            )
+
+    def _maybe_wrap_with_local_spmd(self, fn: Callable) -> Callable:
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
+        in_dst = sharding_config.in_dst_shardings or {}
+        out_src = sharding_config.out_src_shardings
+        if sharding_config.local_map is None:
+            return fn
+        if not in_dst:
+            raise ValueError(
+                f"{type(self).__name__}: local SPMD requires in_dst_shardings."
+            )
+        if out_src is None:
+            raise ValueError(
+                f"{type(self).__name__}: local SPMD requires out_src_shardings."
+            )
+
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            if not spmd.is_type_checking():
+                return fn(*args, **kwargs)
+
+            sig = inspect.signature(fn)
+            bound = sig.bind_partial(*args, **kwargs)
+            checked_names = [name for name in bound.arguments if name in in_dst]
+            checked_values = tuple(bound.arguments[name] for name in checked_names)
+            in_types = tuple(
+                placement_to_spmd_assert_type(in_dst[name]) for name in checked_names
+            )
+            out_types = tree_map(
+                placement_to_spmd_assert_type,
+                out_src,
+                is_leaf=lambda x: isinstance(x, NamedPlacement),
+            )
+
+            def local_map_call(*checked_args: Any) -> Any:
+                for name, value in zip(checked_names, checked_args):
+                    bound.arguments[name] = value
+                return fn(*bound.args, **bound.kwargs)
+
+            return spmd.local_map(
+                in_types=in_types,
+                out_types=out_types,
+            )(local_map_call)(*checked_values)
+
+        return wrapper
+
     def _shard_states(self, parallel_dims: ParallelDims) -> None:
         """Distribute params and buffers per ``state_shardings``.
 
@@ -253,7 +351,16 @@ class Module(nn.Module, Configurable):
                     f"{type(self).__name__}.{name} has no placement declared "
                     "in sharding_config.state_shardings."
                 )
-            axes = named_placements.keys()
+            if parallel_dims.spmd_backend == "spmd_types":
+                self._register_spmd_state(
+                    parallel_dims,
+                    name,
+                    param,
+                    named_placements,
+                    is_param=True,
+                )
+                continue
+            axes = named_placements.axes()
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
                 continue
@@ -287,7 +394,16 @@ class Module(nn.Module, Configurable):
                 # ``register_buffer(name, None)`` reserves a slot to be filled
                 # by ``init_states`` later; nothing to distribute yet.
                 continue
-            axes = named_placements.keys()
+            if parallel_dims.spmd_backend == "spmd_types":
+                self._register_spmd_state(
+                    parallel_dims,
+                    name,
+                    buffer,
+                    named_placements,
+                    is_param=False,
+                )
+                continue
+            axes = named_placements.axes()
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
                 continue
@@ -314,6 +430,9 @@ class Module(nn.Module, Configurable):
         """
         sharding_config = self._sharding_config
         assert sharding_config is not None
+        if parallel_dims.spmd_backend == "spmd_types":
+            return self._maybe_wrap_with_local_spmd(fn)
+
         if sharding_config.local_map is None:
             return fn
 
@@ -400,13 +519,48 @@ class Module(nn.Module, Configurable):
                 continue
             src_named_placements = in_src_shardings.get(name)
             dst_named_placements = in_dst_shardings.get(name)
+
+            if parallel_dims.spmd_backend == "spmd_types":
+                if src_named_placements is None:
+                    if dst_named_placements is not None:
+                        raise ValueError(
+                            f"{type(self).__name__}.{name}: SPMD input "
+                            "redistribution requires explicit in_src_shardings."
+                        )
+                    continue
+
+                # SPMD source placements are part of the config contract: assert
+                # before redistributing so typechecking catches boundary drift.
+                local_type, partition_spec = placement_to_spmd_assert_type(
+                    src_named_placements
+                )
+                spmd.assert_type(
+                    value,
+                    local_type,
+                    partition_spec=partition_spec,
+                )
+
+                if dst_named_placements is None:
+                    new_kwargs[name] = value
+                    continue
+                value = redistribute_spmd_per_axis(
+                    value,
+                    src_named_placements.placements,
+                    dst_named_placements.placements,
+                )
+                new_kwargs[name] = value
+                continue
+
             mesh = parallel_dims.resolve_shared_mesh(
                 [src_named_placements, dst_named_placements]
             )
             if mesh is None:
                 continue
 
-            if not isinstance(value, DTensor) and parallel_dims.full_dtensor:
+            if (
+                not isinstance(value, DTensor)
+                and parallel_dims.spmd_backend == "full_dtensor"
+            ):
                 raise ValueError("Got a plain Tensor under the full_dtensor mode.")
 
             if not isinstance(value, DTensor) and src_named_placements is not None:
@@ -439,6 +593,36 @@ class Module(nn.Module, Configurable):
         """
         sharding_config = self._sharding_config
         assert sharding_config is not None
+
+        if parallel_dims.spmd_backend == "spmd_types":
+            if not isinstance(outputs, torch.Tensor):
+                return outputs
+
+            out_src = sharding_config.out_src_shardings
+            if out_src is None:
+                if sharding_config.out_dst_shardings is not None:
+                    raise ValueError(
+                        f"{type(self).__name__}: SPMD output redistribution "
+                        "requires explicit out_src_shardings."
+                    )
+                return outputs
+            # SPMD source placements are part of the config contract: assert
+            # before redistributing so typechecking catches boundary drift.
+            local_type, partition_spec = placement_to_spmd_assert_type(out_src)
+            spmd.assert_type(
+                outputs,
+                local_type,
+                partition_spec=partition_spec,
+            )
+
+            out_dst = sharding_config.out_dst_shardings
+            if out_dst is None:
+                return outputs
+            return redistribute_spmd_per_axis(
+                outputs,
+                out_src.placements,
+                out_dst.placements,
+            )
 
         out_named_placements = sharding_config.out_dst_shardings
         mesh = parallel_dims.resolve_shared_mesh([out_named_placements])

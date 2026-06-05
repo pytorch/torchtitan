@@ -89,12 +89,26 @@ class Llama3Model(Decoder):
                     "Weight tying is not supported with Pipeline Parallel."
                 )
 
+            from torchtitan.components.loss import ChunkedCELoss
             from torchtitan.models.llama3.sharding import set_llama3_sharding_config
 
+            chunked_loss = isinstance(config.loss, ChunkedCELoss.Config)
+            loss_parallel = not parallelism.disable_loss_parallel
+            if (
+                parallelism.spmd_backend == "spmd_types"
+                and loss_parallel
+                and not chunked_loss
+            ):
+                raise ValueError(
+                    "Llama3 local SPMD loss parallel requires ChunkedCELoss. "
+                    "Use ChunkedCELoss or set parallelism.disable_loss_parallel=True."
+                )
             set_llama3_sharding_config(
                 self,
-                loss_parallel=not parallelism.disable_loss_parallel,
+                loss_parallel=loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
+                spmd_backend=parallelism.spmd_backend,
+                chunked_loss=chunked_loss,
             )
 
         def get_nparams_and_flops(
