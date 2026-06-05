@@ -14,7 +14,8 @@ in order, and the pass registries.  Individual passes live in dedicated modules:
 - ``inductor_passes.py`` — regional and full Inductor compilation
 - ``cudagraph.py`` — cudagraph wrapping and kernel annotations
 - ``fsdp_passes.py`` — FSDP bucketing and resharding
-- ``remove_noop_passes.py`` — no-op removal (detach, identity view/slice)
+- ``remove_noop_passes.py`` — graph cleanup bundled as ``canonicalize_graph_pass``
+  (detach, identity view/slice, back-to-back transpose, view→reshape normalization)
 - ``performance_passes.py`` — opt-in numerics-changing optimizations
 - ``selective_activation_remat.py`` — activation rematerialization
 - ``cpu_offload.py`` — CPU offload insertion
@@ -54,34 +55,15 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
     tag_with_memory_policy_pass,
 )
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
-    remove_detach_pass,
-    remove_identity_slice_pass,
-    remove_identity_view_pass,
+    canonicalize_graph_pass,
+    eliminate_dead_code_pass,
 )
 from torchtitan.experiments.graph_trainer.selective_activation_remat import (
     selective_activation_remat_pass,
 )
 from torchtitan.tools.logging import logger
 
-aten = torch.ops.aten
 c10d = torch.ops._c10d_functional
-
-
-def normalize_view_ops_as_reshape(
-    gm: torch.fx.GraphModule,
-    example_inputs=None,
-) -> torch.fx.GraphModule:
-    """Replace aten.view and aten._unsafe_view with aten.reshape.
-
-    Downstream passes expect aten.reshape.default for pattern matching.
-    """
-    view_targets = {aten.view.default, aten._unsafe_view.default}
-    for node in gm.graph.nodes:
-        if node.op == "call_function" and node.target in view_targets:
-            node.target = aten.reshape.default
-    gm.graph.lint()
-    gm.recompile()
-    return gm
 
 
 def async_tensor_parallel_pass(
@@ -150,10 +132,8 @@ def compile_time_passes(
 
     n_layers = len(config.model_spec.model.layers)
     passes: list[Callable] = [
-        remove_detach_pass,
-        remove_identity_view_pass,
-        remove_identity_slice_pass,
-        normalize_view_ops_as_reshape,
+        eliminate_dead_code_pass,
+        canonicalize_graph_pass,
         functools.partial(
             tag_with_memory_policy_pass,
             config=config,

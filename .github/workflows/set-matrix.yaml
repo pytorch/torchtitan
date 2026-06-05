@@ -20,6 +20,9 @@ on:
       matrix:
         description: dynamically set matrix
         value: ${{ jobs.set.outputs.matrix }}
+      docker-hash:
+        description: Git tree hash of .ci/docker, used to build the OSDC image tag
+        value: ${{ jobs.set.outputs.docker-hash }}
 
 jobs:
   set:
@@ -27,6 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
+      docker-hash: ${{ steps.set.outputs.docker-hash }}
     env:
       # Event flags evaluated by github actions before the step runs:
       IS_MAIN_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -43,9 +47,15 @@ jobs:
       CUDA_RUNNER_INPUT: ${{ inputs.runner-cuda }}
 
     steps:
+      - uses: actions/checkout@v6
+
       - id: set
         run: |
           set -euo pipefail
+
+          # .ci/docker tree hash, used to build the OSDC image tag.
+          DOCKER_HASH=$(git rev-parse HEAD:.ci/docker)
+          echo "docker-hash=${DOCKER_HASH}" >> "$GITHUB_OUTPUT"
 
           # Select runner if provided, else use default value
           ROCM_RUNNER="${ROCM_RUNNER_INPUT:-$DEFAULT_ROCM_RUNNER}"

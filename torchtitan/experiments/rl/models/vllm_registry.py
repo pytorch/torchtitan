@@ -91,14 +91,14 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
         "num_attention_heads": n_heads,  # TP divisibility + FA3 num_heads_q
         "num_key_value_heads": n_kv_heads,  # DCP divisibility + FA3 num_heads_kv
         "head_dim": head_dim,  # FA3 scheduler headdim
-        "max_position_embeddings": cfg.rope.max_seq_len,  # caps max_model_len
+        "max_position_embeddings": attn.rope.max_seq_len,  # caps max_model_len
         # Presence required
         "model_type": "torchtitan",  # any non-empty string
         "num_hidden_layers": len(
             cfg.layers
         ),  # positive int; only PP/KV-transfer read magnitude
         # Unused
-        "rope_theta": cfg.rope.theta,  # only used for non-default rope_type; wrapper builds RoPE
+        "rope_theta": attn.rope.theta,  # only used for non-default rope_type; wrapper builds RoPE
         "rms_norm_eps": cfg.norm.eps,  # only minimax-qk-norm fusion reads it; wrapper builds RMSNorm
         "tie_word_embeddings": getattr(
             cfg, "enable_weight_tying", False
