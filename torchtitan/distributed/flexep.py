@@ -11,14 +11,12 @@ EP process group is the data-parallel group and TP/CP/PP/SP are disabled.
 The symmetric-memory allocation is explicit and must happen before dispatch.
 """
 
-import os
 from dataclasses import dataclass
 from typing import Any
 
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
-from torch._library.opaque_object import OpaqueBase, register_opaque_type
 from torch.utils._python_dispatch import _disable_current_modes
 
 from torchtitan.distributed.flexep_kernels import (
@@ -56,25 +54,9 @@ _top_k: int = 0
 
 _HIDDEN_READY_CHANNEL = 0
 _COUNTS_READY_CHANNEL = 0
-_FLEX_EP_ENV = "FLEX_EP"
-_FLEX_EP_OP = "op"
-_FLEX_EP_AUTOGRAD_FUNCTION = "autograd_function"
-_FLEX_EP_DEFAULT = _FLEX_EP_AUTOGRAD_FUNCTION
 
 
-def _use_autograd_function_path() -> bool:
-    value = os.environ.get(_FLEX_EP_ENV, _FLEX_EP_DEFAULT)
-    if value == _FLEX_EP_AUTOGRAD_FUNCTION:
-        return True
-    if value == _FLEX_EP_OP:
-        return False
-    raise ValueError(
-        f"{_FLEX_EP_ENV} must be either {_FLEX_EP_OP!r} or "
-        f"{_FLEX_EP_AUTOGRAD_FUNCTION!r}, got {value!r}."
-    )
-
-
-class DispatchHandle(OpaqueBase):
+class DispatchHandle:
     """Opaque wrapper for FlexEP dispatch metadata."""
 
     def __init__(self, value=None):
@@ -92,12 +74,6 @@ class DispatchHandle(OpaqueBase):
             return hash(self.value)
         except TypeError:
             return id(self.value)
-
-    def __fx_repr__(self):
-        return "DispatchHandle()", {"DispatchHandle": DispatchHandle}
-
-
-register_opaque_type(DispatchHandle, typ="reference")
 
 
 @dataclass(frozen=True)
@@ -649,135 +625,6 @@ class FlexEPDispatch(torch.autograd.Function):
         return grad_input, None, None, None, None, None, None, None
 
 
-@torch.library.custom_op("flexep::dispatch", mutates_args=(), device_types="cuda")
-def _dispatch_impl(
-    dispatch_input: torch.Tensor,
-    num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
-    source_token_indices_N: torch.Tensor,  # noqa: N803
-    slot_to_row_N: torch.Tensor,  # noqa: N803
-    num_tokens: int,
-    ep_size: int,
-    group_name: str,
-    input_is_token_ordered: bool,
-) -> tuple[torch.Tensor, torch.Tensor, DispatchHandle]:
-    """Dispatch tokens to local experts through the EP process group."""
-    _require_initialized(group_name, dispatch_input)
-    num_experts = num_local_tokens_per_expert_E.numel()
-    if num_experts % ep_size != 0:
-        raise ValueError(
-            f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size})."
-        )
-
-    num_local_tokens_per_expert_E = num_local_tokens_per_expert_E.to(
-        torch.int64
-    ).contiguous()
-    if num_tokens <= 0:
-        raise ValueError(f"num_tokens must be positive, got {num_tokens}.")
-    num_routed_tokens = source_token_indices_N.numel()
-    if num_routed_tokens % num_tokens != 0:
-        raise ValueError(
-            "routed input rows must be divisible by num_tokens. Got "
-            f"{num_routed_tokens} rows and {num_tokens} tokens."
-        )
-    if slot_to_row_N.numel() != num_routed_tokens:
-        raise ValueError(
-            "slot_to_row length must match routed rows. Got "
-            f"{slot_to_row_N.numel()} and {num_routed_tokens}."
-        )
-    if source_token_indices_N.dtype != torch.int64:
-        raise ValueError("source_token_indices_N must be int64.")
-    if source_token_indices_N.device != dispatch_input.device:
-        raise ValueError("source_token_indices_N must match dispatch input device.")
-    if slot_to_row_N.device != dispatch_input.device:
-        raise ValueError("slot_to_row_N must match dispatch input device.")
-    top_k = num_routed_tokens // num_tokens
-    if input_is_token_ordered:
-        if dispatch_input.shape[0] != num_tokens:
-            raise ValueError(
-                "token-ordered dispatch input rows must match num_tokens. Got "
-                f"{dispatch_input.shape[0]} and {num_tokens}."
-            )
-    elif dispatch_input.shape[0] != num_routed_tokens:
-        raise ValueError(
-            "routed dispatch input rows must match routed rows. Got "
-            f"{dispatch_input.shape[0]} and {num_routed_tokens}."
-        )
-    slot_size = num_tokens * min(top_k, num_experts // ep_size)
-    receive_capacity = ep_size * slot_size
-    if receive_capacity > _max_routed_tokens:
-        raise RuntimeError(
-            f"FlexEP receive buffer capacity ({_max_routed_tokens}) is smaller "
-            f"than required receive capacity ({receive_capacity})."
-        )
-
-    all_tokens_per_expert_RE = _copy_all_counts_to_peers_cuda(  # noqa: N806
-        num_local_tokens_per_expert_E,
-        ep_size,
-    )
-    _wait_counts_ready()
-    (
-        dispatch_dst_ranks,
-        dispatch_dst_rows,
-        combine_dst_ranks,
-        combine_dst_rows,
-        combine_num_valid_rows,
-        tokens_per_expert_e,
-    ) = _compute_direct_metadata(
-        num_local_tokens_per_expert_E,
-        all_tokens_per_expert_RE,
-        num_routed_tokens,
-        receive_capacity,
-        ep_size,
-    )
-    hidden_recv_buffer, _ = _copy_rows_to_peers_cuda(
-        dispatch_input,
-        dispatch_dst_ranks,
-        dispatch_dst_rows,
-        None,
-        num_routed_tokens,
-        block_m=4,
-        num_warps=8,
-        src_rows=source_token_indices_N if input_is_token_ordered else None,
-    )
-    hidden_RD = hidden_recv_buffer[:receive_capacity, : dispatch_input.shape[1]]
-    state = _DispatchRuntimeState(
-        num_routed_tokens=num_routed_tokens,
-        receive_capacity=receive_capacity,
-        dispatch_dst_ranks=dispatch_dst_ranks,
-        dispatch_dst_rows=dispatch_dst_rows,
-        combine_dst_ranks=combine_dst_ranks,
-        combine_dst_rows=combine_dst_rows,
-        combine_num_valid_rows=combine_num_valid_rows,
-        slot_to_row=slot_to_row_N,
-        input_is_token_ordered=input_is_token_ordered,
-        num_tokens=num_tokens,
-        top_k=top_k,
-    )
-    return hidden_RD, tokens_per_expert_e, DispatchHandle(value=state)
-
-
-@_dispatch_impl.register_fake
-def _dispatch_fake(
-    dispatch_input: torch.Tensor,
-    num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
-    source_token_indices_N: torch.Tensor,  # noqa: N803
-    slot_to_row_N: torch.Tensor,  # noqa: N803
-    num_tokens: int,
-    ep_size: int,
-    group_name: str,
-    input_is_token_ordered: bool,
-) -> tuple[torch.Tensor, torch.Tensor, DispatchHandle]:
-    del group_name, slot_to_row_N, input_is_token_ordered
-    num_local_experts = num_local_tokens_per_expert_E.shape[0] // ep_size
-    top_k = source_token_indices_N.numel() // num_tokens
-    out_tokens = num_tokens * ep_size * torch.sym_min(top_k, num_local_experts)
-    hidden = dispatch_input.new_empty(  # pyrefly: ignore[no-matching-overload]
-        (out_tokens, dispatch_input.shape[1])
-    )
-    tokens_per_expert = dispatch_input.new_empty(num_local_experts, dtype=torch.int64)
-    return hidden, tokens_per_expert, DispatchHandle()
-
-
 class FlexEPCombine(torch.autograd.Function):
     @staticmethod
     # pyrefly: ignore [bad-override]
@@ -806,179 +653,73 @@ class FlexEPCombine(torch.autograd.Function):
         return grad_x, None, None
 
 
-@torch.library.custom_op("flexep::combine", mutates_args=(), device_types="cuda")
-def _combine_impl(
-    x: torch.Tensor,
-    handle: DispatchHandle,
-    num_routed_tokens: int,
-) -> torch.Tensor:
-    """Move expert outputs back to the origin rank's routed-token order."""
-    if _hidden_recv_buffers is None:
-        raise RuntimeError("FlexEP buffer not initialized.")
-    state = handle.value
-    assert isinstance(state, _DispatchRuntimeState)
-    assert state.num_routed_tokens == num_routed_tokens
-
-    return _combine_to_origin(x, state)
-
-
-@_combine_impl.register_fake
-def _combine_fake(
-    x: torch.Tensor,
-    handle: DispatchHandle,
-    num_routed_tokens: int,
-) -> torch.Tensor:
-    del handle
-    return x.new_empty(num_routed_tokens, x.shape[1])
-
-
-def _dispatch_backward(ctx, grad_hidden, grad_tpe, grad_handle):
-    del grad_tpe, grad_handle
-    state = ctx.dispatch_handle.value
-    assert isinstance(state, _DispatchRuntimeState)
-
-    grad_input = None
-    if grad_hidden is not None:
-        grad_routed_input = _combine_to_origin(grad_hidden, state)
-        if state.input_is_token_ordered:
-            grad_input = reduce_topk_slots(
-                grad_routed_input,
-                state.slot_to_row,
-                None,
-                num_tokens=state.num_tokens,
-                top_k=state.top_k,
-            )
-        else:
-            grad_input = grad_routed_input
-
-    return grad_input, None, None, None, None, None, None, None
-
-
-def _dispatch_setup_context(ctx, inputs, output):
-    del inputs
-    *_, dispatch_handle = output
-    ctx.dispatch_handle = dispatch_handle
-
-
-def _combine_backward(ctx, grad_combined):
-    state = ctx.dispatch_handle.value
-    assert isinstance(state, _DispatchRuntimeState)
-    grad_x = _dispatch_to_experts(grad_combined, state)
-    return grad_x, None, None
-
-
-def _combine_setup_context(ctx, inputs, output):
-    del output
-    _, dispatch_handle, _ = inputs
-    ctx.dispatch_handle = dispatch_handle
-
-
-_dispatch_impl.register_autograd(
-    _dispatch_backward, setup_context=_dispatch_setup_context
-)
-_combine_impl.register_autograd(_combine_backward, setup_context=_combine_setup_context)
-
-
-@torch.library.custom_op("flexep::reduce_topk", mutates_args=(), device_types="cuda")
-def _reduce_topk_impl(
-    routed_output_ND: torch.Tensor,  # noqa: N803
-    slot_to_row_N: torch.Tensor,  # noqa: N803
-    flat_token_indices_N: torch.Tensor,  # noqa: N803
-    routed_scores_N: torch.Tensor,  # noqa: N803
-    has_scores: bool,
-    scores_are_slot_ordered: bool,
-    num_tokens: int,
-    top_k: int,
-) -> torch.Tensor:
-    """Reduce routed top-k rows back to token order."""
-    del flat_token_indices_N
-    return reduce_topk_slots(
-        routed_output_ND,
-        slot_to_row_N,
-        routed_scores_N if has_scores else None,
-        num_tokens=num_tokens,
-        top_k=top_k,
-        scores_are_slot_ordered=scores_are_slot_ordered,
-    )
-
-
-@_reduce_topk_impl.register_fake
-def _reduce_topk_fake(
-    routed_output_ND: torch.Tensor,  # noqa: N803
-    slot_to_row_N: torch.Tensor,  # noqa: N803
-    flat_token_indices_N: torch.Tensor,  # noqa: N803
-    routed_scores_N: torch.Tensor,  # noqa: N803
-    has_scores: bool,
-    scores_are_slot_ordered: bool,
-    num_tokens: int,
-    top_k: int,
-) -> torch.Tensor:
-    del slot_to_row_N
-    del flat_token_indices_N
-    del routed_scores_N
-    del has_scores
-    del scores_are_slot_ordered
-    del top_k
-    return routed_output_ND.new_empty(num_tokens, routed_output_ND.shape[1])
-
-
-def _reduce_topk_backward(ctx, grad_out):
-    flat_token_indices_N, routed_scores_N, routed_output_ND = ctx.saved_tensors  # noqa: N806
-    scores = routed_scores_N if ctx.has_scores else None
-    grad_routed_output = expand_topk_grad(
-        grad_out,
-        flat_token_indices_N,
-        scores,
-        top_k=ctx.top_k,
-        dtype=ctx.hidden_states_dtype,
-        scores_are_slot_ordered=ctx.scores_are_slot_ordered,
-    )
-    grad_scores = None
-    if ctx.has_scores and ctx.routed_scores_requires_grad:
-        grad_scores = topk_scores_grad(
-            routed_output_ND,
-            grad_out,
+class FlexEPReduceTopK(torch.autograd.Function):
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def forward(
+        ctx,
+        routed_output_ND: torch.Tensor,  # noqa: N803
+        slot_to_row_N: torch.Tensor,  # noqa: N803
+        flat_token_indices_N: torch.Tensor,  # noqa: N803
+        routed_scores_N: torch.Tensor,  # noqa: N803
+        has_scores: bool,
+        scores_are_slot_ordered: bool,
+        num_tokens: int,
+        top_k: int,
+    ) -> torch.Tensor:
+        """Reduce routed top-k rows back to token order."""
+        ctx.has_scores = has_scores
+        ctx.scores_are_slot_ordered = scores_are_slot_ordered
+        ctx.top_k = top_k
+        ctx.hidden_states_dtype = routed_output_ND.dtype
+        ctx.routed_scores_requires_grad = routed_scores_N.requires_grad
+        saved_routed_output_ND = (  # noqa: N806
+            routed_output_ND
+            if has_scores and routed_scores_N.requires_grad
+            else routed_output_ND.new_empty(0)
+        )
+        ctx.save_for_backward(
             flat_token_indices_N,
-            top_k=ctx.top_k,
-            dtype=routed_scores_N.dtype,
-            scores_are_slot_ordered=ctx.scores_are_slot_ordered,
+            routed_scores_N,
+            saved_routed_output_ND,
         )
 
-    return grad_routed_output, None, None, grad_scores, None, None, None, None
+        return reduce_topk_slots(
+            routed_output_ND,
+            slot_to_row_N,
+            routed_scores_N if has_scores else None,
+            num_tokens=num_tokens,
+            top_k=top_k,
+            scores_are_slot_ordered=scores_are_slot_ordered,
+        )
 
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def backward(ctx, grad_out):
+        flat_token_indices_N, routed_scores_N, routed_output_ND = (  # noqa: N806
+            ctx.saved_tensors
+        )
+        scores = routed_scores_N if ctx.has_scores else None
+        grad_routed_output = expand_topk_grad(
+            grad_out,
+            flat_token_indices_N,
+            scores,
+            top_k=ctx.top_k,
+            dtype=ctx.hidden_states_dtype,
+            scores_are_slot_ordered=ctx.scores_are_slot_ordered,
+        )
+        grad_scores = None
+        if ctx.has_scores and ctx.routed_scores_requires_grad:
+            grad_scores = topk_scores_grad(
+                routed_output_ND,
+                grad_out,
+                flat_token_indices_N,
+                top_k=ctx.top_k,
+                dtype=routed_scores_N.dtype,
+                scores_are_slot_ordered=ctx.scores_are_slot_ordered,
+            )
 
-def _reduce_topk_setup_context(ctx, inputs, output):
-    del output
-    (
-        routed_output_ND,
-        _slot_to_row_N,
-        flat_token_indices_N,
-        routed_scores_N,
-        has_scores,
-        scores_are_slot_ordered,
-        _num_tokens,
-        top_k,
-    ) = inputs
-    ctx.has_scores = has_scores
-    ctx.scores_are_slot_ordered = scores_are_slot_ordered
-    ctx.top_k = top_k
-    ctx.hidden_states_dtype = routed_output_ND.dtype
-    ctx.routed_scores_requires_grad = routed_scores_N.requires_grad
-    saved_routed_output_ND = (  # noqa: N806
-        routed_output_ND
-        if has_scores and routed_scores_N.requires_grad
-        else routed_output_ND.new_empty(0)
-    )
-    ctx.save_for_backward(
-        flat_token_indices_N,
-        routed_scores_N,
-        saved_routed_output_ND,
-    )
-
-
-_reduce_topk_impl.register_autograd(
-    _reduce_topk_backward, setup_context=_reduce_topk_setup_context
-)
+        return grad_routed_output, None, None, grad_scores, None, None, None, None
 
 
 def dispatch_tokens(
@@ -1033,7 +774,7 @@ def dispatch_tokens(
         num_rows=flat_token_indices_N.numel(),
     )
 
-    dispatch_args = (
+    hidden, tokens_per_expert, dispatch_handle = FlexEPDispatch.apply(
         dispatch_input,
         num_local_tokens_per_expert_E,
         source_token_indices_N,
@@ -1043,14 +784,6 @@ def dispatch_tokens(
         group.group_name,
         input_is_token_ordered,
     )
-    if _use_autograd_function_path():
-        hidden, tokens_per_expert, dispatch_handle = FlexEPDispatch.apply(
-            *dispatch_args
-        )
-    else:
-        hidden, tokens_per_expert, dispatch_handle = torch.ops.flexep.dispatch(
-            *dispatch_args
-        )
 
     state = FlexEPDispatchState(
         handle=dispatch_handle,
@@ -1077,16 +810,12 @@ def combine_tokens(
         if state.routed_scores is not None
         else hidden_states.new_empty(0)
     )
-    combine_args = (
+    routed_output_ND = FlexEPCombine.apply(  # noqa: N806
         hidden_states,
         state.handle,
         state.flat_token_indices.numel(),
     )
-    if _use_autograd_function_path():
-        routed_output_ND = FlexEPCombine.apply(*combine_args)  # noqa: N806
-    else:
-        routed_output_ND = torch.ops.flexep.combine(*combine_args)  # noqa: N806
-    return torch.ops.flexep.reduce_topk(
+    return FlexEPReduceTopK.apply(
         routed_output_ND,
         state.slot_to_row,
         state.flat_token_indices,
