@@ -36,6 +36,15 @@ def eliminate_dead_code_pass(
     policy, bucketing, cudagraph partitioning), and removes orphaned subtrees left
     by tracing so they don't get scheduled or counted.
 
+    As an exception, this pass also drops ``aten._assert_async`` runtime asserts
+    (``.msg`` / ``.default``). They are registered side-effectful, so
+    ``eliminate_dead_code`` would otherwise keep them *and* their entire condition
+    chain (the ``le``/``all`` that compute the asserted predicate) despite the
+    assert's result being unused. The asserts are pure runtime guards with no
+    bearing on numerics (and the device->host check is awkward for cudagraph
+    capture), so we erase them first; the ``eliminate_dead_code`` below then reaps
+    the now-orphaned condition chain.
+
     Keeping a side-effecting custom op alive: a custom op with a real side effect
     but no users (e.g. a debug/log op, a barrier, an in-place buffer write) is
     *dead* to FX and will be dropped here unless it declares itself impure.
@@ -67,10 +76,28 @@ def eliminate_dead_code_pass(
     Returns:
         The graph module with dead code removed.
     """
-    if gm.graph.eliminate_dead_code():
+    assert_targets = {
+        torch.ops.aten._assert_async.msg,
+        torch.ops.aten._assert_async.default,
+    }
+    num_asserts = 0
+    for node in list(gm.graph.nodes):
+        if (
+            node.op == "call_function"
+            and node.target in assert_targets
+            and not node.users
+        ):
+            gm.graph.erase_node(node)
+            num_asserts += 1
+
+    changed = gm.graph.eliminate_dead_code()
+    if num_asserts or changed:
         gm.graph.lint()
         gm.recompile()
-        logger.info("Eliminated dead code from the graph")
+        msg = "Eliminated dead code from the graph"
+        if num_asserts:
+            msg += f" ({num_asserts} runtime assert(s) dropped)"
+        logger.info(msg)
     return gm
 
 
