@@ -79,7 +79,7 @@ def generate():
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
         attention_backend="CUSTOM",
     )
-    max_num_seqs = config.num_prompts_per_step * gen_config.sampling.n
+    max_num_seqs = config.num_groups_per_rollout_batch * config.group_size
     engine_kwargs["max_num_seqs"] = max_num_seqs
     vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
