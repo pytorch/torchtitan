@@ -46,7 +46,7 @@ class LocalMapConfig:
             ordered by ``forward`` args).
     """
 
-    in_grad_placements: tuple[NamedPlacement, ...]
+    in_grad_placements: tuple[NamedPlacement | None, ...]
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}
