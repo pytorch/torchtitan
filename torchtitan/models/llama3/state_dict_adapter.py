@@ -13,9 +13,8 @@ import torch
 logger = logging.getLogger()
 
 from torchtitan.models.common.attention import FusedQKVLinear
-
+from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
-
 from .model import Llama3Model
 
 
@@ -91,13 +90,12 @@ class Llama3StateDictAdapter(StateDictAdapter):
         )
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        n_heads = self.model_config.layers[0].attention.n_heads
-        n_kv_heads = (
-            self.model_config.layers[0].attention.n_kv_heads
-            if self.model_config.layers[0].attention.n_kv_heads is not None
-            else n_heads
-        )
-        dim = self.model_config.dim
+
+        # pyrefly: ignore [missing-attribute]
+        attn = self.model_config.layers[0].attention
+        n_heads = attn.n_heads
+        n_kv_heads = attn.n_kv_heads if attn.n_kv_heads is not None else n_heads
+        dim = self.model_config.dim  # pyrefly: ignore [missing-attribute]
         head_dim = dim // n_heads
         hf_state_dict = {}
 
@@ -149,7 +147,10 @@ class Llama3StateDictAdapter(StateDictAdapter):
 
                 new_key = new_key.format(layer_num)
             else:
-                if self.model_config.enable_weight_tying and key == "lm_head.weight":
+                if (
+                    self.model_config.enable_weight_tying  # pyrefly: ignore [missing-attribute]
+                    and key == "lm_head.weight"
+                ):
                     continue
                 new_key = to_hf_map[key]
 
@@ -158,20 +159,19 @@ class Llama3StateDictAdapter(StateDictAdapter):
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+        self._validate_hf_rope_config(ComplexRoPE.Config)
         if (
-            self.model_config.enable_weight_tying
+            self.model_config.enable_weight_tying  # pyrefly: ignore [missing-attribute]
             and "lm_head.weight" not in hf_state_dict
         ):
             assert "model.embed_tokens.weight" in hf_state_dict
             hf_state_dict["lm_head.weight"] = hf_state_dict["model.embed_tokens.weight"]
 
-        n_heads = self.model_config.layers[0].attention.n_heads
-        n_kv_heads = (
-            self.model_config.layers[0].attention.n_kv_heads
-            if self.model_config.layers[0].attention.n_kv_heads is not None
-            else n_heads
-        )
-        dim = self.model_config.dim
+        # pyrefly: ignore [missing-attribute]
+        attn = self.model_config.layers[0].attention
+        n_heads = attn.n_heads
+        n_kv_heads = attn.n_kv_heads if attn.n_kv_heads is not None else n_heads
+        dim = self.model_config.dim  # pyrefly: ignore [missing-attribute]
         head_dim = dim // n_heads
         state_dict = {}
 

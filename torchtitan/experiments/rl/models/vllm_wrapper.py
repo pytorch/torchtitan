@@ -263,12 +263,11 @@ class VLLMModelWrapper(Module):
         # Get embeddings
         h = self.model.tok_embeddings(tokens_2d)
 
-        rope_cache = self.model.freqs_cis
         positions = positions.unsqueeze(0)
 
         # Pass through transformer layers
         for layer in self.model.layers.values():
-            h = layer(h, rope_cache, attention_masks=None, positions=positions)
+            h = layer(h, attention_masks=None, positions=positions)
 
         h = self.model.norm(h)
         # When parallelism is applied, get full tensor before return to vLLM Engine
