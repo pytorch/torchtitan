@@ -253,7 +253,7 @@ class Module(nn.Module, Configurable):
                     f"{type(self).__name__}.{name} has no placement declared "
                     "in sharding_config.state_shardings."
                 )
-            axes = named_placements.keys()
+            axes = named_placements.axes()
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
                 continue
@@ -287,7 +287,7 @@ class Module(nn.Module, Configurable):
                 # ``register_buffer(name, None)`` reserves a slot to be filled
                 # by ``init_states`` later; nothing to distribute yet.
                 continue
-            axes = named_placements.keys()
+            axes = named_placements.axes()
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
                 continue
