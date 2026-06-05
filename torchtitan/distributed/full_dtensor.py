@@ -66,9 +66,10 @@ def _get_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
     even at size 1) so FSDP can pick the DP submesh out of the multi-axis
     storage mesh inside ``DeviceMesh._concatenate([dp_mesh, tp_mesh])``.
     """
-    assert parallel_dims.spmd_backend in ("full_dtensor", "spmd_types"), (
-        "_get_dp_mesh_axes is only meaningful under full_dtensor or spmd_types"
-    )
+    assert parallel_dims.spmd_backend in (
+        "full_dtensor",
+        "spmd_types",
+    ), "_get_dp_mesh_axes is only meaningful under full_dtensor or spmd_types"
     shard_axes: list[str] = ["dp_shard"]
     if parallel_dims.cp_enabled:
         shard_axes.append("cp")
@@ -92,9 +93,10 @@ def resolve_fsdp_mesh(
     parallel_dims: ParallelDims,
 ) -> tuple[DeviceMesh, DataParallelMeshDims]:
     """Select the dense storage mesh and DataParallelMeshDims."""
-    assert parallel_dims.spmd_backend in ("full_dtensor", "spmd_types"), (
-        "resolve_fsdp_mesh is only meaningful under full_dtensor or spmd_types"
-    )
+    assert parallel_dims.spmd_backend in (
+        "full_dtensor",
+        "spmd_types",
+    ), "resolve_fsdp_mesh is only meaningful under full_dtensor or spmd_types"
     storage_mesh = parallel_dims.get_activated_mesh(_DENSE_STORAGE_AXES)
     assert storage_mesh is not None
     return storage_mesh, _get_dp_mesh_axes(parallel_dims)
