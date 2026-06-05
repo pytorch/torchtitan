@@ -24,6 +24,56 @@ import torch
 from torchtitan.tools.logging import logger
 
 
+def eliminate_dead_code_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Remove dead nodes -- no users and no side effects -- from the graph.
+
+    Delegates to FX's ``Graph.eliminate_dead_code``, which preserves *impure*
+    nodes (in-place mutations, ``copy_``, collectives -- anything for which
+    ``node.is_impure()`` is True), so only genuinely unused pure computation is
+    dropped. Running it first shrinks the graph for every downstream pass (memory
+    policy, bucketing, cudagraph partitioning), and removes orphaned subtrees left
+    by tracing so they don't get scheduled or counted.
+
+    Keeping a side-effecting custom op alive: a custom op with a real side effect
+    but no users (e.g. a debug/log op, a barrier, an in-place buffer write) is
+    *dead* to FX and will be dropped here unless it declares itself impure.
+    ``node.is_impure()`` (``torch._library.utils.is_impure``) treats an op's
+    ``call_function`` node as impure when any of:
+
+    * Its schema mutates an input -- the natural choice when the op really writes
+      a tensor. Declare it via
+      ``torch.library.custom_op(..., mutates_args={"buf"})`` (or
+      ``mutates_args="unknown"`` as a catch-all), which makes the arg ``Tensor(a!)``
+      so ``schema.is_mutable`` is True.
+    * It is registered as effectful -- the right choice for a pure side effect with
+      no tensor to mutate:
+      ``torch.library._register_effectful_op(op, EffectType.ORDERED)`` (from
+      ``torch._library.effects``). This also keeps the op *ordered* (token-threaded)
+      in functionalized/export graphs, not just un-DCE'd.
+    * It is in ``torch.fx.node._side_effectful_functions`` -- the private set used
+      by aten asserts / ``record_function``; direct but lowest-level, and gives
+      none of the functionalization/ordering guarantees of the above.
+
+    Random ops are also kept (``op._nondeterministic_seeded``). Note that marking
+    an op impure also blocks reordering/CSE on it, which is usually the intent for
+    a side effect.
+
+    Args:
+        gm: The traced graph module.
+        example_inputs: Unused, accepted for pass interface compatibility.
+
+    Returns:
+        The graph module with dead code removed.
+    """
+    if gm.graph.eliminate_dead_code():
+        gm.graph.lint()
+        gm.recompile()
+        logger.info("Eliminated dead code from the graph")
+    return gm
+
+
 def remove_detach_pass(
     gm: torch.fx.GraphModule, example_inputs=None
 ) -> torch.fx.GraphModule:
