@@ -71,19 +71,9 @@ def dense_sequence_parallel_placement() -> NamedPlacement:
 def lm_head_sharding_config(
     *,
     loss_parallel: bool,
-    enable_sp: bool,
-    chunked_loss: bool = True,
 ) -> ShardingConfig:
-    """
-    Sharding for the decoder lm_head projection.
-    ChunkedCELoss manually writes the S(1)->R allgather before chunking.
-    Normal decoder forward needs lm_head boundary to perform it.
-    TODO(pianpwk): maybe move to pre-lm-head norm w/ ChunkedCELoss refactor.
-    """
-    if enable_sp and not chunked_loss:
-        in_src = dense_sequence_parallel_placement()
-    else:
-        in_src = dense_activation_placement(tp=spmd.R)
+    """Sharding for the decoder lm_head projection."""
+    in_src = dense_activation_placement(tp=spmd.R)
     in_dst = dense_activation_placement(tp=spmd.R)
 
     out_src = dense_activation_placement(tp=spmd.S(-1))
@@ -144,6 +134,30 @@ def norm_config(*, enable_sp: bool) -> ShardingConfig:
         state_shardings=state,
         in_src_shardings={"input": activation},
         out_src_shardings=activation,
+    )
+
+
+def pre_lm_head_norm_config(*, enable_sp: bool) -> ShardingConfig:
+    """Root decoder norm sharding before ``lm_head`` / chunked CE loss.
+
+    With sequence parallelism, decoder blocks emit sequence-sharded hidden
+    states. ``ChunkedCELoss`` chunks those hidden states and applies
+    ``lm_head`` inside the loss, so this root norm is the last clean module
+    boundary to all-gather the TP sequence shard back to replicated hidden
+    states before chunking starts.
+    """
+    activation = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I)
+    )
+    return ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.R if enable_sp else spmd.I)
+        },
+        in_src_shardings={"input": activation},
+        out_src_shardings=activation,
+        out_dst_shardings=dense_activation_placement(tp=spmd.R),
     )
 
 
@@ -318,10 +332,8 @@ def set_decoder_sharding_config(
         if spmd_backend == "spmd_types"
         else None,
     )
-    config.norm.sharding_config = norm_config(enable_sp=enable_sp)
+    config.norm.sharding_config = pre_lm_head_norm_config(enable_sp=enable_sp)
 
     config.lm_head.sharding_config = lm_head_sharding_config(
         loss_parallel=loss_parallel,
-        enable_sp=enable_sp,
-        chunked_loss=chunked_loss,
     )

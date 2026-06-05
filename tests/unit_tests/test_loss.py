@@ -32,6 +32,7 @@ from torchtitan.components.loss import (
     GradAccumulator,
     IGNORE_INDEX,
 )
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_backend
 
 
 class TestLoss(unittest.TestCase):
@@ -399,31 +400,13 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                     )
 
 
-class _FakeDecoder(nn.Module):
-    """Minimal Decoder-like model for testing ChunkedCELoss."""
-
-    def __init__(self, dim: int, vocab_size: int):
-        super().__init__()
-        self.output = nn.Linear(dim, vocab_size, bias=False)
-        # Make it look like a Decoder to ChunkedCELoss
-        self.layers = nn.ModuleDict()
-        self.tok_embeddings = None
-        self.norm = None
-
-    def forward(self, tokens, skip_lm_head=False):
-        if skip_lm_head:
-            return tokens  # return hidden states directly
-        return self.output(tokens)
-
-
 class TestChunkedCELoss(unittest.TestCase):
-    def _make_model_and_loss(self, dim=32, vocab_size=64, num_chunks=4):
-        """Create a fake Decoder and ChunkedCELoss for testing."""
-        model = _FakeDecoder(dim, vocab_size)
+    def _make_lm_head_and_loss(self, dim=32, vocab_size=64, num_chunks=4):
+        """Create an lm_head and ChunkedCELoss for testing."""
+        lm_head = nn.Linear(dim, vocab_size, bias=False)
         chunked_loss = ChunkedCELoss(ChunkedCELoss.Config(num_chunks=num_chunks))
-        # Bypass isinstance(model, Decoder) check for unit testing
-        chunked_loss.lm_head = model.output
-        return model, chunked_loss
+        chunked_loss.lm_head = lm_head
+        return lm_head, chunked_loss
 
     def test_numerical_equivalence(self):
         """ChunkedCELoss must produce the same loss and gradients as the standard path."""
@@ -431,11 +414,11 @@ class TestChunkedCELoss(unittest.TestCase):
         B, L, D, V = 2, 8, 32, 64
         num_chunks = 4
 
-        model_std, _ = self._make_model_and_loss(D, V, num_chunks)
-        model_chunked, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
+        lm_head_std, _ = self._make_lm_head_and_loss(D, V, num_chunks)
+        lm_head_chunked, chunked_loss = self._make_lm_head_and_loss(D, V, num_chunks)
 
         # Share the same lm_head weights
-        model_chunked.output.load_state_dict(model_std.output.state_dict())
+        lm_head_chunked.load_state_dict(lm_head_std.state_dict())
 
         hidden_states = torch.randn(B, L, D, requires_grad=True)
         labels = torch.randint(0, V, (B, L))
@@ -445,12 +428,12 @@ class TestChunkedCELoss(unittest.TestCase):
 
         # Standard path: lm_head + ce_loss + backward
         hidden_std = hidden_states.detach().requires_grad_(True)
-        logits_std = model_std.output(hidden_std)
+        logits_std = lm_head_std(hidden_std)
         loss_std = cross_entropy_loss(logits_std, labels)
         scaled_loss_std = loss_std / global_valid_tokens
         scaled_loss_std.backward()
         grad_std = hidden_std.grad.clone()
-        lm_head_grad_std = model_std.output.weight.grad.clone()
+        lm_head_grad_std = lm_head_std.weight.grad.clone()
 
         # Chunked path
         hidden_chunked = hidden_states.detach().requires_grad_(True)
@@ -458,7 +441,7 @@ class TestChunkedCELoss(unittest.TestCase):
         loss_chunked = chunked_loss(hidden_chunked, labels, global_valid_tokens)
         loss_chunked.backward()
         grad_chunked = hidden_chunked.grad.clone()
-        lm_head_grad_chunked = model_chunked.output.weight.grad.clone()
+        lm_head_grad_chunked = lm_head_chunked.weight.grad.clone()
 
         # Verify loss values match
         torch.testing.assert_close(
@@ -497,12 +480,12 @@ class TestChunkedCELoss(unittest.TestCase):
 
         losses = []
         for num_chunks in [1, 2, 4, 8]:
-            model, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
+            lm_head, chunked_loss = self._make_lm_head_and_loss(D, V, num_chunks)
             # Use same lm_head weights
             if losses:
-                model.output.load_state_dict(ref_state_dict)
+                lm_head.load_state_dict(ref_state_dict)
             else:
-                ref_state_dict = model.output.state_dict()
+                ref_state_dict = lm_head.state_dict()
 
             h = hidden_states.detach().requires_grad_(True)
 
@@ -517,6 +500,149 @@ class TestChunkedCELoss(unittest.TestCase):
                 places=5,
                 msg=f"Loss with {2**i} chunks should match loss with 1 chunk",
             )
+
+
+class TestChunkedCELossSPMD(DTensorTestBase):
+    def init_pg(self, eager_init, backend=None):
+        super().init_pg(eager_init, backend)
+        set_spmd_backend("spmd_types")
+
+    def destroy_pg(self, device_id=None):
+        super().destroy_pg(device_id)
+        set_spmd_backend("default")
+
+    @property
+    def world_size(self):
+        return 2
+
+    @property
+    def device_type(self):
+        return "cpu"
+
+    def _make_loss(
+        self,
+        lm_head: nn.Module,
+        *,
+        num_chunks=4,
+        loss_parallel=False,
+    ):
+        """Create the ChunkedCELoss variant under SPMD typecheck."""
+        chunked_loss = ChunkedCELoss(ChunkedCELoss.Config(num_chunks=num_chunks))
+        chunked_loss.lm_head = lm_head
+        chunked_loss.loss_parallel = loss_parallel
+        return chunked_loss
+
+    def _make_vocab_parallel_lm_head(
+        self,
+        dim: int,
+        global_vocab_size: int,
+        tp_group: dist.ProcessGroup,
+        *,
+        loss_parallel: bool,
+    ):
+        """Mimic TorchTitan's TP-vocab-parallel lm_head for ChunkedCELoss.
+
+        Each rank owns only its local vocab rows.  With loss parallel enabled,
+        ChunkedCELoss consumes those sharded logits directly; otherwise the
+        lm_head gathers logits back to TP-invariant form before CE.
+        """
+        tp_degree = dist.get_world_size(tp_group)
+        lm_head = nn.Linear(dim, global_vocab_size // tp_degree, bias=False)
+        lm_head.out_features = global_vocab_size
+        if loss_parallel:
+            return lm_head
+
+        def forward(input: torch.Tensor) -> torch.Tensor:
+            logits = F.linear(input, lm_head.weight)
+            return spmd.redistribute(
+                logits,
+                tp_group,
+                src=spmd.S(logits.dim() - 1),
+                dst=spmd.I,
+                backward_options={"op_dtype": logits.dtype},
+            )
+
+        lm_head.forward = forward
+        return lm_head
+
+    @with_comms
+    def test_spmd_matches_eager_and_types(self):
+        """Validate ChunkedCELoss on local tensors with a TP-sharded lm_head.
+
+        The eager oracle is a normal full-vocab lm_head followed by plain
+        cross_entropy_loss. The SPMD path uses ChunkedCELoss with a local
+        TP-vocab-sharded lm_head. This covers both chunked CE paths:
+        loss-parallel CE over vocab-sharded logits and the non-loss-parallel
+        path that gathers logits back to TP-invariant form before CE. In both
+        cases, strict typechecking should accept the boundary types and the
+        result should match the eager oracle for loss and hidden-state gradients.
+        """
+        # Build one global batch/vocab problem, then compare the TP-local SPMD
+        # chunked loss against the eager full-vocab cross_entropy_loss.
+        torch.manual_seed(42)
+        B, L, D, V = 2, 8, 32, 64
+        num_chunks = 2
+        mesh = init_device_mesh(
+            self.device_type,
+            (2,),
+            mesh_dim_names=("tp",),
+        )
+        (tp_rank,) = mesh.get_coordinate()
+        (tp_degree,) = mesh.shape
+
+        # init states, labels, test IGNORE_INDEX
+        hidden_states = torch.randn(B, L, D, device=self.device_type)
+        labels = torch.randint(0, V, (B, L), device=self.device_type)
+        labels[0, 1] = IGNORE_INDEX
+        labels[1, 3] = IGNORE_INDEX
+
+        tp_group = mesh.get_group("tp")
+        for enable_loss_parallel in (False, True):
+            with self.subTest(loss_parallel=enable_loss_parallel):
+                lm_head_ref = nn.Linear(D, V, bias=False).to(self.device_type)
+                lm_head_spmd = self._make_vocab_parallel_lm_head(
+                    D,
+                    V,
+                    tp_group,
+                    loss_parallel=enable_loss_parallel,
+                ).to(self.device_type)
+                loss_spmd_fn = self._make_loss(
+                    lm_head_spmd,
+                    num_chunks=num_chunks,
+                    loss_parallel=enable_loss_parallel,
+                )
+                # Copy over lm_head weight shard
+                vocab_start = tp_rank * (V // tp_degree)
+                vocab_end = vocab_start + (V // tp_degree)
+                lm_head_spmd.weight.data.copy_(
+                    lm_head_ref.weight.data[vocab_start:vocab_end]
+                )
+
+                # Run standard cross_entropy_loss
+                h_ref = hidden_states.clone().detach().requires_grad_(True)
+                loss_ref = cross_entropy_loss(lm_head_ref(h_ref), labels)
+                loss_ref.backward()
+                h_grad_ref = h_ref.grad.clone()
+
+                # Run SPMD backend ChunkedCELoss
+                h_spmd = hidden_states.clone().detach().requires_grad_(True)
+                with set_current_spmd_mesh(mesh):
+                    spmd.assert_type(h_spmd, {tp_group: spmd.R})
+                    spmd.assert_type(labels, {tp_group: spmd.I})
+                    spmd.assert_type(lm_head_spmd.weight, {tp_group: spmd.S(0)})
+                    with typecheck(strict_mode="strict"):
+                        loss_spmd = loss_spmd_fn(h_spmd, labels)
+                    self.assertIs(
+                        spmd.get_axis_local_type(loss_spmd, tp_group),
+                        spmd.I,
+                    )
+
+                # Compare output, gradient numerics
+                loss_spmd.backward()
+                torch.testing.assert_close(loss_spmd, loss_ref)
+                h_grad_spmd = h_spmd.grad.clone()
+                dist.all_reduce(h_grad_spmd, group=tp_group)
+                torch.testing.assert_close(h_grad_spmd, h_grad_ref)
 
 
 if __name__ == "__main__":
