@@ -26,6 +26,9 @@ def rollout_to_episode(rollout: Rollout) -> Episode:
     that holds only the information needed for training.
     """
     # TODO: support multi-turn rollout flattening.
+    # TODO(branching): when a turn's prompt history diverges from the previous turn's
+    #       (e.g. the env edited/compacted history), the turns no longer share a prefix
+    #       and must be split into separate training sequences instead of one flat episode.
     # TODO: rename Episode -> TrainingSample / rollout_to_episode ->
     #       rollout_to_training_sample (consistent with TrainingBatch).
     if len(rollout.turns) != 1:
