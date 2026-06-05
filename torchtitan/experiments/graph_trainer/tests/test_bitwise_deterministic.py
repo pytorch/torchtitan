@@ -85,6 +85,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
     # determinism — without FlexAttention's unpicklable, non-tensor BlockMask).
     # The *FlexAttn subclasses override this to "flex".
     attn_backend: str = "sdpa"
+    # cudagraph mode for the traced runs; subclasses override (Llama3 -> "full").
+    cudagraph_mode: str = "auto"
 
     def setUp(self):
         # Disable max_autotune for FlexAttention to ensure bitwise-identical
@@ -148,8 +150,11 @@ class BitwiseDeterministicBase(unittest.TestCase):
         *,
         enable_passes: bool = True,
         numerics_changing_optim: bool = False,
+        cudagraph_mode: str | None = None,
     ) -> tuple[torch.Tensor, str, str]:
         """Run forward-backward-optimizer steps using the given trainer class."""
+        if cudagraph_mode is None:
+            cudagraph_mode = self.cudagraph_mode
         # Annotate after deepcopy: annotate_fn wrappers capture bound methods
         # that don't rebind correctly through copy.deepcopy.
         self.annotate_model(model)
@@ -159,6 +164,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
             trainer_cls,
             compile_enable_passes=enable_passes,
             compile_numerics_changing_optim=numerics_changing_optim,
+            compile_cudagraph_mode=cudagraph_mode,
             tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
         )
         global_valid_tokens = torch.tensor(
@@ -178,7 +184,11 @@ class BitwiseDeterministicBase(unittest.TestCase):
         return loss.detach().clone(), hash_model(model), hash_gradient(model)
 
     def _run_steps_with_precompile(
-        self, model: nn.Module, *, enable_passes: bool = True
+        self,
+        model: nn.Module,
+        *,
+        enable_passes: bool = True,
+        cudagraph_mode: str | None = None,
     ) -> tuple[torch.Tensor, str, str]:
         """Run steps using the precompile save/load path.
 
@@ -187,6 +197,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
         the loaded artifact — identical to what happens during
         torchrun training with --compile.precompile_artifact_dir.
         """
+        if cudagraph_mode is None:
+            cudagraph_mode = self.cudagraph_mode
         from torchtitan.experiments.graph_trainer.make_fx_tracer import (
             minimal_fx_tracer,
             run_traced,
@@ -234,6 +246,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 compile=SimpleNamespace(
                     memory_policy="default",
                     inductor_compilation="regional",
+                    cudagraph_mode=cudagraph_mode,
+                    disable_passes=[],
                     numerics_changing_optim=False,
                     cpu_offload_prefetch_n_layers=1,
                     cpu_offload_defer_n_layers=1,
@@ -266,7 +280,10 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 compile=SimpleNamespace(
                     precompile_artifact_dir="precompiled",
                     inductor_compilation="regional",
+                    cudagraph_mode=cudagraph_mode,
+                    cudagraph_min_capture_size=1,
                     disable_passes=[],
+                    debug_graph_passes=False,
                 ),
             )
             passes = construct_default_graph_passes(loaded_result, load_config)
@@ -325,6 +342,8 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
     model_registry = staticmethod(llama3_model_registry)
     model_flavor = "debugmodel"
     annotate_model = staticmethod(annotate_llama)
+    # Llama3 is dense/fully cudagraph-capturable: exercise the full-capture path.
+    cudagraph_mode = "full"
 
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
@@ -456,6 +475,8 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     model_flavor = "debugmodel"
     attn_backend = "flex"
     annotate_model = staticmethod(annotate_llama)
+    # Llama3 is dense/fully cudagraph-capturable: exercise the full-capture path.
+    cudagraph_mode = "full"
 
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"

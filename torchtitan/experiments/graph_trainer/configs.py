@@ -62,13 +62,51 @@ class GraphTrainerCompileConfig(CompileConfig):
 
     inductor_compilation: Literal["regional", "full"] = "regional"
     """
-    Inductor compilation strategy. Mutually exclusive options:
+    Inductor compilation strategy — how ops are *code-generated* (orthogonal to
+    ``cudagraph_mode``, which controls how the result is *captured* for replay):
         regional: compile tagged regions (e.g. FlexAttention HOPs) with
-            regional_inductor while leaving the rest interpreted.
-        full: compile the entire graph with inductor into optimized
-            Triton kernels. Provides better performance but may change
-            bitwise numerics compared to regional/interpreted execution.
+            regional_inductor while leaving the rest interpreted. The FX graph
+            stays partitionable, so all ``cudagraph_mode`` options apply.
+        full: compile the entire graph with inductor into optimized Triton
+            kernels (one opaque program). Better performance but may change
+            bitwise numerics. CUDA graphs for this path are handled by **Inductor
+            internally** (it has its own cudagraph support), so ``cudagraph_mode``
+            is ignored here — there is no FX graph left for us to wrap or
+            partition.
     """
+
+    cudagraph_mode: Literal["off", "auto", "full"] = "auto"
+    """
+    CUDA graph capture strategy for the ``inductor_compilation=regional`` path
+    (ignored when ``inductor_compilation=full``, which uses Inductor's own
+    cudagraphs):
+        off: no CUDA graph.
+        auto (default): best-effort. Capture the whole joint graph as one CUDA
+            graph if it is cudagraph-compatible; otherwise partition it and capture
+            the compatible regions (running incompatible regions such as the MoE
+            block eagerly between replays); if nothing is capturable, run without
+            CUDA graph. This is what enables CUDA graph for DeepSeek-V3 on H100
+            (the MoE block is captured piecewise). Note: ``auto`` does not silently
+            fall back to eager if a region deemed capturable nonetheless fails to
+            capture at runtime (a gap in the compatibility checks) — that surfaces
+            as an error; fix the check or use ``off``.
+        full: capture the entire joint fwd+bwd graph as one CUDA graph. **Raises**
+            if the graph is not fully cudagraph-compatible (e.g. MoE _grouped_mm on
+            sm_90 / H100, EP token-routing splits, unpinned CPU<->CUDA copies,
+            data-dependent shapes). Use this to assert/require a single full
+            capture.
+
+    Mental model: a full CUDA graph is just the special case where the whole graph
+    is one capturable piece; ``auto`` produces that when possible and otherwise
+    falls back to capturing the safe pieces.
+    """
+
+    cudagraph_min_capture_size: int = 8
+    """Piecewise cudagraph only: a capturable region with fewer than this many ops
+    runs eager instead of being captured. A standalone CUDA graph (private memory
+    pool + per-step input copy-in) is not worth it for a handful of ops -- e.g. a
+    lone op stranded between two eager MoE blocks. Raising it captures fewer, larger
+    regions (less per-segment overhead/memory); 1 captures every safe region."""
 
     numerics_changing_optim: bool = False
     """Enable passes that improve performance but may change numerics

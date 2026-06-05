@@ -308,17 +308,6 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
 class TestCudagraphPass(unittest.TestCase):
     """Test cudagraph_pass behavior."""
 
-    def test_non_graphmodule_raises(self):
-        """cudagraph_pass rejects non-GraphModule callables (e.g.
-        OutputCode from full_inductor_compilation)."""
-        from torchtitan.experiments.graph_trainer.passes import cudagraph_pass
-
-        def plain_fn(*args):
-            return args
-
-        with self.assertRaisesRegex(TypeError, "requires a GraphModule"):
-            cudagraph_pass(plain_fn, (torch.zeros(4),), static_input_indices=[0])
-
     def test_graphmodule_wraps_forward(self):
         """cudagraph_pass wraps gm.forward with CUDAGraphWrapper."""
         from torchtitan.experiments.graph_trainer.passes import cudagraph_pass

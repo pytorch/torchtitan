@@ -6,6 +6,7 @@
 
 import operator
 import sys
+import unittest
 from unittest.mock import patch
 
 import torch
@@ -28,6 +29,12 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
 )
 from torchtitan.experiments.graph_trainer.cudagraph import (
+    _ALL_GATHER_PACKETS,
+    _collective_chain_nodes,
+    _is_carved_out,
+    _REDUCE_SCATTER_PACKETS,
+    cudagraph_pass,
+    CUDAGraphWrapper,
     insert_kernel_annotations_pass,
     is_cudagraphable,
     is_full_cudagraphable,
@@ -2347,6 +2354,327 @@ class TestEliminateDeadCodePass(TestCase):
         self.assertIn(torch.ops.aten.copy_.default, targets)
 
 
+@unittest.skipUnless(torch.cuda.is_available(), "piecewise cudagraph requires CUDA")
+class TestPiecewiseCudagraphPass(TestCase):
+    """cudagraph_pass must split a graph at the carved-out (``.moe``) module
+    boundary, wrap each capturable region in its own CUDA graph, leave the carved-out
+    region eager, and replay bitwise-identically to eager across capture and several
+    steps. ``require_full`` (cudagraph_mode=full) must instead raise when the graph
+    is not one capturable subgraph."""
+
+    def tearDown(self):
+        # Free captured graphs/private pools and reset the global manager so
+        # other tests can still register cudagraph wrappers in this process.
+        from torchtitan.experiments.graph_trainer import cudagraph as cg
+
+        cg.cudagraph_teardown()
+        cg._cg_manager = cg._CUDAGraphManager()
+        super().tearDown()
+
+    @staticmethod
+    def _wrapped_submodules(split_gm):
+        return [
+            m
+            for _, m in split_gm.named_children()
+            if isinstance(m, torch.fx.GraphModule)
+            and isinstance(getattr(m, "forward", None), CUDAGraphWrapper)
+        ]
+
+    @staticmethod
+    def _carve_out(gm, targets):
+        """Tag call_function nodes whose target is in ``targets`` with a ``.moe``
+        module_fqn so :func:`_compute_partition` carves them into an eager region."""
+        for node in gm.graph.nodes:
+            if node.op == "call_function" and node.target in targets:
+                node.meta.setdefault("custom", {})[_MODULE_FQN] = "layers.0.moe.experts"
+
+    def test_split_and_replay_matches_eager(self):
+        device = "cuda"
+        dim, batch = 8, 4
+        aten = torch.ops.aten
+
+        def fn(w1, w2, x):
+            h = torch.relu(x @ w1)  # capture A
+            s = torch.sigmoid(h)  # carved-out MoE region -> eager
+            return torch.relu((h + s) @ w2)  # capture B
+
+        w1 = torch.randn(dim, dim, device=device)
+        w2 = torch.randn(dim, dim, device=device)
+        x = torch.randn(batch, dim, device=device)
+        gm = make_fx(fn, tracing_mode="fake")(w1, w2, x)
+        self._carve_out(gm, {aten.sigmoid.default})
+
+        # Indices 0,1 (w1,w2) are params (stable addresses); index 2 (x) is a
+        # user input that must be copied in each step.
+        split_gm = cudagraph_pass(
+            gm, (), static_input_indices=[0, 1], tensor_input_indices=[0, 1, 2]
+        )
+
+        # require_full=True on a graph with a carved-out (eager) region must raise --
+        # full is the one-subgraph special case and this graph is not one subgraph.
+        gm_full = make_fx(fn, tracing_mode="fake")(w1, w2, x)
+        self._carve_out(gm_full, {aten.sigmoid.default})
+        with self.assertRaises(ValueError):
+            cudagraph_pass(
+                gm_full,
+                (),
+                require_full=True,
+                static_input_indices=[0, 1],
+                tensor_input_indices=[0, 1, 2],
+            )
+
+        # Two capturable regions flank the eager MoE region.
+        self.assertEqual(len(self._wrapped_submodules(split_gm)), 2)
+
+        # Capture + replay must match eager over several steps with a fresh x
+        # each step (exercises copy-in for the user input and the eager-produced
+        # value, and cross-subgraph static reuse of the first region's output).
+        for _ in range(4):
+            x = torch.randn(batch, dim, device=device)
+            torch.testing.assert_close(split_gm(w1, w2, x), fn(w1, w2, x))
+
+    def test_min_capture_size_demotes_small_subgraphs(self):
+        # Same graph as above: two small capturable regions around an eager MoE op.
+        device = "cuda"
+        dim, batch = 8, 4
+        aten = torch.ops.aten
+
+        def fn(w1, w2, x):
+            h = torch.relu(x @ w1)
+            s = torch.sigmoid(h)  # carved-out MoE region -> eager
+            return torch.relu((h + s) @ w2)
+
+        w1 = torch.randn(dim, dim, device=device)
+        w2 = torch.randn(dim, dim, device=device)
+        x = torch.randn(batch, dim, device=device)
+
+        # min_capture_size larger than every capturable region -> all demoted to
+        # eager -> nothing captured, original graph returned un-wrapped.
+        gm = make_fx(fn, tracing_mode="fake")(w1, w2, x)
+        self._carve_out(gm, {aten.sigmoid.default})
+        out = cudagraph_pass(
+            gm,
+            (),
+            static_input_indices=[0, 1],
+            tensor_input_indices=[0, 1, 2],
+            min_capture_size=1000,
+        )
+        self.assertEqual(len(self._wrapped_submodules(out)), 0)
+        for _ in range(3):
+            x = torch.randn(batch, dim, device=device)
+            torch.testing.assert_close(out(w1, w2, x), fn(w1, w2, x))
+
+    def test_min_capture_size_partial_demotion(self):
+        # A large capturable region, then an eager (carved-out) MoE op, then a tiny
+        # (1-op) capturable region. With a threshold between the two, only the small
+        # trailing region is demoted: the big one stays captured. Exercises the
+        # demotion interacting with contiguity/subgraph-id reassignment (not the
+        # all-or-nothing extremes the other tests cover), plus replay correctness.
+        device = "cuda"
+        dim, batch = 8, 4
+        aten = torch.ops.aten
+
+        def fn(w1, x):
+            h = x @ w1
+            for _ in range(8):
+                h = torch.relu(h)  # big capturable region (mm + 8 relu)
+            m = torch.sigmoid(h)  # carved-out MoE region -> eager
+            return h + m  # tiny trailing capturable region (1 op) -> demoted
+
+        w1 = torch.randn(dim, dim, device=device)
+        x = torch.randn(batch, dim, device=device)
+        gm = make_fx(fn, tracing_mode="fake")(w1, x)
+        self._carve_out(gm, {aten.sigmoid.default})
+
+        split_gm = cudagraph_pass(
+            gm,
+            (),
+            static_input_indices=[0],
+            tensor_input_indices=[0, 1],
+            min_capture_size=4,
+        )
+        # Exactly the big region is captured; the 1-op trailing region runs eager.
+        self.assertEqual(len(self._wrapped_submodules(split_gm)), 1)
+        for _ in range(4):
+            x = torch.randn(batch, dim, device=device)
+            torch.testing.assert_close(split_gm(w1, x), fn(w1, x))
+
+    def test_no_carve_out_falls_back_to_whole_graph(self):
+        device = "cuda"
+        dim, batch = 8, 4
+
+        def fn(w1, x):
+            return torch.relu(x @ w1)
+
+        w1 = torch.randn(dim, dim, device=device)
+        x = torch.randn(batch, dim, device=device)
+        # No carved-out (.moe) module -> nothing eager.
+        gm = make_fx(fn, tracing_mode="fake")(w1, x)
+
+        out_gm = cudagraph_pass(
+            gm, (), static_input_indices=[0], tensor_input_indices=[0, 1]
+        )
+
+        # Nothing carved out -> full (single-subgraph) cudagraph: the top-level
+        # forward is wrapped and no child submodules are created.
+        self.assertIsInstance(out_gm.forward, CUDAGraphWrapper)
+        self.assertEqual(len(self._wrapped_submodules(out_gm)), 0)
+        for _ in range(4):
+            x = torch.randn(batch, dim, device=device)
+            torch.testing.assert_close(out_gm(w1, x), fn(w1, x))
+
+    @staticmethod
+    def _clean_gm():
+        return make_fx(lambda w, x: torch.relu(x @ w), tracing_mode="fake")(
+            torch.randn(8, 8, device="cuda"), torch.randn(4, 8, device="cuda")
+        )
+
+    @staticmethod
+    def _unsafe_gm():
+        def fn(w, x):  # CPU<->CUDA copy makes it not one subgraph
+            h = torch.relu(x @ w)
+            return h + h.sum().to("cpu").to("cuda")
+
+        return make_fx(fn, tracing_mode="fake")(
+            torch.randn(8, 8, device="cuda"), torch.randn(4, 8, device="cuda")
+        )
+
+    def test_is_full_cudagraphable(self):
+        self.assertTrue(is_full_cudagraphable(self._clean_gm()))
+        self.assertFalse(is_full_cudagraphable(self._unsafe_gm()))
+
+    def test_resolve_cudagraph_kind(self):
+        from types import SimpleNamespace
+
+        from torchtitan.experiments.graph_trainer.passes import _resolve_cudagraph_kind
+
+        def cfg(mode, inductor="regional", disable=()):
+            return SimpleNamespace(
+                compile=SimpleNamespace(
+                    cudagraph_mode=mode,
+                    inductor_compilation=inductor,
+                    disable_passes=list(disable),
+                )
+            )
+
+        clean = SimpleNamespace(gm=self._clean_gm())
+        unsafe = SimpleNamespace(gm=self._unsafe_gm())
+        self.assertEqual(_resolve_cudagraph_kind(clean, cfg("off")), "off")
+        self.assertEqual(_resolve_cudagraph_kind(clean, cfg("full")), "full")
+        # auto: one subgraph -> full; not one subgraph -> piecewise.
+        self.assertEqual(_resolve_cudagraph_kind(clean, cfg("auto")), "full")
+        self.assertEqual(_resolve_cudagraph_kind(unsafe, cfg("auto")), "piecewise")
+        # inductor_compilation=full delegates to Inductor -> our kind is off.
+        self.assertEqual(
+            _resolve_cudagraph_kind(clean, cfg("auto", inductor="full")), "off"
+        )
+        # disable_passes is an escape hatch.
+        self.assertEqual(
+            _resolve_cudagraph_kind(clean, cfg("auto", disable=["cudagraph_pass"])),
+            "off",
+        )
+
+    def test_nothing_capturable_returns_unwrapped(self):
+        # The whole graph is carved out (.moe) -> nothing capturable -> the original
+        # graph is returned un-wrapped (no cudagraph).
+        aten = torch.ops.aten
+        gm = make_fx(lambda x: torch.relu(x), tracing_mode="fake")(
+            torch.randn(4, device="cuda")
+        )
+        self._carve_out(gm, {aten.relu.default})
+        out = cudagraph_pass(gm, (), static_input_indices=[], tensor_input_indices=[0])
+        self.assertIs(out, gm)
+        self.assertNotIsInstance(out.forward, CUDAGraphWrapper)
+        self.assertEqual(len(self._wrapped_submodules(out)), 0)
+
+
+class TestIsCarvedOut(TestCase):
+    """Pure-logic tests for the DSv3 ``module_fqn`` carve-out: a node runs eager iff
+    its FQN has ``moe`` immediately followed by ``experts`` (the routed-experts
+    subtree); the rest of the MoE block (router, shared_experts) is captured."""
+
+    def test_carve_out_membership(self):
+        # The routed-experts subtree is carved out (eager).
+        self.assertTrue(_is_carved_out("layers.1.moe.experts"))
+        self.assertTrue(_is_carved_out("layers.1.moe.experts.w1"))
+        # The rest of the MoE block is NOT carved out -- it captures fine.
+        self.assertFalse(_is_carved_out("layers.1.moe"))
+        self.assertFalse(_is_carved_out("layers.1.moe.shared_experts"))
+        self.assertFalse(_is_carved_out("layers.1.moe.router.gate"))
+        # Non-MoE modules are captured.
+        self.assertFalse(_is_carved_out("layers.1.attention.wq"))
+        self.assertFalse(_is_carved_out("norm"))
+        self.assertFalse(_is_carved_out("lm_head"))
+        # "experts" not immediately preceded by "moe" does not match.
+        self.assertFalse(_is_carved_out("layers.1.experts"))
+        self.assertFalse(_is_carved_out("layers.1.moe.shared.experts"))
+        # Unannotated / empty FQN is never carved out.
+        self.assertFalse(_is_carved_out(None))
+        self.assertFalse(_is_carved_out(""))
+
+
+class TestCollectiveChainNodes(TestCase):
+    """Pure-logic tests for :func:`_collective_chain_nodes`: the FSDP collective chain
+    for a given direction (all-gather / reduce-scatter) is the collective + its wait +
+    the bucket prep that exists solely to feed it, while surrounding carved experts
+    compute is excluded."""
+
+    def test_all_gather_chain_is_collected(self):
+        c10d = torch.ops._c10d_functional
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        # Carved experts compute that does NOT feed the collective -> excluded.
+        compute = g.call_function(torch.ops.aten.relu.default, (x,))
+        # Bucket prep that feeds only the collective -> in the chain.
+        prep = g.call_function(torch.ops.aten.cat.default, ([x, x],))
+        coll = g.call_function(c10d.all_gather_into_tensor.default, (prep, 2, "0"))
+        wait = g.call_function(c10d.wait_tensor.default, (coll,))
+        # Consumer of the gathered tensor (carved experts compute) -> excluded.
+        consumer = g.call_function(torch.ops.aten.relu.default, (wait,))
+        g.output((compute, consumer))
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+
+        chain = _collective_chain_nodes(gm, _ALL_GATHER_PACKETS)
+        targets = {n.target for n in chain}
+        # Collective + wait + prep are in the chain.
+        self.assertIn(c10d.all_gather_into_tensor.default, targets)
+        self.assertIn(c10d.wait_tensor.default, targets)
+        self.assertIn(torch.ops.aten.cat.default, targets)
+        # Experts compute (not solely feeding the collective) is excluded.
+        self.assertNotIn(compute, chain)
+        self.assertNotIn(consumer, chain)
+        # A reduce-scatter query finds nothing in this all-gather-only graph.
+        self.assertEqual(_collective_chain_nodes(gm, _REDUCE_SCATTER_PACKETS), set())
+
+    def test_reduce_scatter_chain_is_collected(self):
+        c10d = torch.ops._c10d_functional
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        prep = g.call_function(torch.ops.aten.cat.default, ([x, x],))
+        coll = g.call_function(
+            c10d.reduce_scatter_tensor.default, (prep, "sum", 2, "0")
+        )
+        wait = g.call_function(c10d.wait_tensor.default, (coll,))
+        g.output((wait,))
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+
+        chain = _collective_chain_nodes(gm, _REDUCE_SCATTER_PACKETS)
+        targets = {n.target for n in chain}
+        self.assertIn(c10d.reduce_scatter_tensor.default, targets)
+        self.assertIn(c10d.wait_tensor.default, targets)
+        self.assertIn(torch.ops.aten.cat.default, targets)
+        # An all-gather query finds nothing in this reduce-scatter-only graph.
+        self.assertEqual(_collective_chain_nodes(gm, _ALL_GATHER_PACKETS), set())
+
+    def test_no_collectives_is_empty(self):
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        r = g.call_function(torch.ops.aten.relu.default, (x,))
+        g.output(r)
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+        self.assertEqual(_collective_chain_nodes(gm, _ALL_GATHER_PACKETS), set())
+
+
 class TestIsFullCudagraphable(TestCase):
     """Pure-CPU tests for the per-node cudagraph-safety predicate and the
     whole-graph gate built on it."""
@@ -2362,7 +2690,7 @@ class TestIsFullCudagraphable(TestCase):
 
     def test_local_scalar_dense_is_unsafe(self):
         # _local_scalar_dense (.item()/.tolist()) extracts a host scalar a CUDA
-        # graph replay can't reproduce -> unsafe, so the graph is not one piece.
+        # graph replay can't reproduce -> unsafe, so the graph is not one subgraph.
         g = torch.fx.Graph()
         x = g.placeholder("x")
         s = g.call_function(torch.ops.aten._local_scalar_dense.default, (x,))

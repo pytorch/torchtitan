@@ -25,6 +25,7 @@ def build_minimal_trainer(
     compile_enable_passes: bool = True,
     compile_passes: list[str] | None = None,
     compile_numerics_changing_optim: bool = False,
+    compile_cudagraph_mode: str = "auto",
     tokenizer=None,
     fsdp_reshard_after_forward: str = "default",
 ) -> Trainer:
@@ -49,6 +50,8 @@ def build_minimal_trainer(
                 memory_policy="default",
                 pass_pipeline="default",
                 inductor_compilation="regional",
+                cudagraph_mode=compile_cudagraph_mode,
+                cudagraph_min_capture_size=1,
                 numerics_changing_optim=compile_numerics_changing_optim,
                 disable_passes=[],
                 debug_graph_passes=False,

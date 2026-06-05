@@ -305,8 +305,9 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
         # === aot_fx_trace mode tests ===
-        # Note: cudagraph is auto-skipped for DSv3 because MoE load-balancing
-        # introduces CUDA→CPU transfers incompatible with CUDA graph capture.
+        # Note: cudagraph_mode defaults to 'auto', which for DSv3 resolves to
+        # *piecewise* — the MoE block (grouped_mm / EP all-to-all / data-dependent
+        # shapes) runs eager while the dense/attention regions are captured.
         #
         # TODO: FSDP+TP+CP+EP is disabled: tracing fails with "aten.add.Tensor
         # got mixed torch.Tensor and DTensor" — a separate CP+EP issue,
@@ -341,6 +342,24 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             ],
             "aot_fx_trace deepseek_v3 FSDP+TP+EP",
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep",
+            ngpu=8,
+        ),
+        # Piecewise CUDA graph (cudagraph_mode=auto -> piecewise): the MoE block
+        # runs eager, the dense/attention regions are captured. Guards the
+        # distributed piecewise capture path for DSv3 + EP.
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel_ep",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 4",
+                ],
+            ],
+            "aot_fx_trace deepseek_v3 FSDP+TP+EP (piecewise cudagraph)",
+            "aot_fx_trace_deepseek_v3_fsdp_tp_ep_piecewise",
             ngpu=8,
         ),
         OverrideDefinitions(
