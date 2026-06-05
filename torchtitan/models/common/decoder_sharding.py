@@ -304,14 +304,19 @@ def set_decoder_sharding_config(
         if enable_sp
         else dense_activation_placement(tp=spmd.I)
     )
+    embed_src = dense_activation_placement(tp=spmd.P)
     config.tok_embeddings.sharding_config = ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.S(0)),
         },
         in_src_shardings={"input": embed_input},
         in_dst_shardings={"input": embed_input},
-        out_src_shardings=embed_out,
+        out_src_shardings=embed_src,
         out_dst_shardings=embed_out,
+        # spmd_types backend relies on local SPMD + manual vocab-parallel embedding impl.
+        local_map=LocalMapConfig(in_grad_placements=(None,))
+        if spmd_backend == "spmd_types"
+        else None,
     )
     config.norm.sharding_config = norm_config(enable_sp=enable_sp)
 
