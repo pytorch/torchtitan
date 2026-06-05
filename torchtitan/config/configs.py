@@ -232,12 +232,14 @@ class ParallelismConfig:
             )
         if self.enable_fsdp_symm_mem and (
             not torch.cuda.is_available()
-            or torch.version.hip is not None
-            or torch.cuda.get_device_capability() < (9, 0)
+            or (
+                torch.version.hip is None
+                and torch.cuda.get_device_capability() < (9, 0)
+            )
         ):
             raise ValueError(
-                "parallelism.enable_fsdp_symm_mem is only supported on NVIDIA "
-                "GPUs with compute capability 9.0 or newer."
+                "For NVIDIA GPUs, parallelism.enable_fsdp_symm_mem is only supported "
+                "for compute capability 9.0 or newer."
             )
 
     context_parallel_rotate_method: Literal["allgather", "alltoall"] = "allgather"

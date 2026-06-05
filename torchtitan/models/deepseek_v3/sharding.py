@@ -84,16 +84,18 @@ def _set_deepseek_v3_layer_sharding(
     layer_cfg.ffn_norm.sharding_config = norm
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
 
-    # MLA attention input: x is gathered to Replicate; freqs_cis always Replicate.
+    # MLA attention input: x is gathered to Replicate. RoPE is read from the
+    # attention layer's local cache.
     attention.sharding_config = ShardingConfig(
         in_src_shardings={
             "x": dense_activation_placement(tp=attn_x_placement),
-            "freqs_cis": dense_param_placement(tp=Replicate()),
         },
         in_dst_shardings={
             "x": dense_activation_placement(tp=Replicate()),
-            "freqs_cis": dense_param_placement(tp=Replicate()),
         },
+    )
+    attention.rope.sharding_config = ShardingConfig(
+        state_shardings={"cache": dense_param_placement(tp=Replicate())},
     )
     # Low-rank projections and norms keep Replicate weights on TP. We still
     # distribute them (Replicate DTensor) so DTensor activations flow through

@@ -8,7 +8,11 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
+from torchtitan.components.optimizer import (
+    default_adamw,
+    OptimizersContainer,
+    ParamGroupConfig,
+)
 from torchtitan.config import (
     ActivationCheckpointConfig,
     ParallelismConfig,
@@ -30,7 +34,7 @@ def qwen3_debugmodel() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -52,22 +56,34 @@ def qwen3_debugmodel() -> Trainer.Config:
     )
 
 
-def qwen3_debugmodel_param_groups() -> Trainer.Config:
-    config = qwen3_debugmodel()
+def qwen3_debugmodel_moe_param_groups() -> Trainer.Config:
+    config = qwen3_moe_debug()
     config.optimizer = OptimizersContainer.Config(
-        lr=8e-4,
         param_groups=[
             ParamGroupConfig(
-                pattern=r"tok_embeddings\.",
-                weight_decay_multiplier=0.0,
+                pattern=r"(?:tok_embeddings|output)\.",
+                optimizer_name="AdamW",
+                optimizer_kwargs={
+                    "lr": 8e-4,
+                    "betas": (0.9, 0.95),
+                    "eps": 1e-8,
+                    "weight_decay": 0.0,
+                },
             ),
             ParamGroupConfig(
-                pattern=r"\.bias$",
-                weight_decay_multiplier=0.0,
+                pattern=r"\.router\.gate\.",
+                optimizer_name="Adam",
+                optimizer_kwargs={"lr": 1e-4, "betas": (0.9, 0.95), "eps": 1e-8},
             ),
             ParamGroupConfig(
-                pattern=r"(?:attention_norm|ffn_norm|norm)\.",
-                weight_decay_multiplier=0.0,
+                pattern=r".*",
+                optimizer_name="AdamW",
+                optimizer_kwargs={
+                    "lr": 8e-4,
+                    "betas": (0.9, 0.95),
+                    "eps": 1e-8,
+                    "weight_decay": 0.1,
+                },
             ),
         ],
     )
@@ -81,7 +97,7 @@ def qwen3_debugmodel_flex() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel", attn_backend="flex"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -110,7 +126,7 @@ def qwen3_debugmodel_flex_flash() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel", attn_backend="flex_flash"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -141,7 +157,7 @@ def qwen3_0_6b() -> Trainer.Config:
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
-        optimizer=OptimizersContainer.Config(lr=3e-4),
+        optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
             local_batch_size=4,
@@ -167,7 +183,7 @@ def qwen3_1_7b() -> Trainer.Config:
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
             local_batch_size=4,
@@ -193,10 +209,42 @@ def qwen3_14b() -> Trainer.Config:
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
             local_batch_size=4,
+            seq_len=4096,
+            steps=3000,
+        ),
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=-1,
+            tensor_parallel_degree=1,
+            context_parallel_degree=1,
+            pipeline_parallel_degree=1,
+        ),
+        checkpoint=CheckpointManager.Config(
+            interval=500,
+            last_save_model_only=False,
+            export_dtype="float16",
+        ),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="full",
+        ),
+    )
+
+
+def qwen3_30b_a3b() -> Trainer.Config:
+    return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
+        hf_assets_path="./assets/hf/Qwen3-30B-A3B",
+        model_spec=model_registry("30B-A3B"),
+        dataloader=HuggingFaceTextDataLoader.Config(
+            dataset="c4",
+        ),
+        optimizer=default_adamw(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
+        training=TrainingConfig(
+            local_batch_size=2,
             seq_len=4096,
             steps=3000,
         ),
@@ -225,7 +273,7 @@ def qwen3_32b() -> Trainer.Config:
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
             local_batch_size=2,
@@ -256,7 +304,7 @@ def qwen3_debugmodel_fused_qkv() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel_fused_qkv"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -287,7 +335,7 @@ def qwen3_moe_debug() -> Trainer.Config:
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4_test",
         ),
-        optimizer=OptimizersContainer.Config(lr=3e-4),
+        optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
             local_batch_size=4,
@@ -334,7 +382,7 @@ def sft_qwen3_8b_math() -> Trainer.Config:
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Qwen3-8B",
         model_spec=model_spec,
-        optimizer=OptimizersContainer.Config(lr=2e-5),
+        optimizer=default_adamw(lr=2e-5),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=15,
             decay_ratio=0.9,

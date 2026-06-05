@@ -10,6 +10,7 @@ These helpers construct fully-specified sub-configs with all dimensional
 fields set at config creation time.
 """
 
+import dataclasses
 from collections.abc import Callable
 from typing import Literal
 
@@ -24,6 +25,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
+from torchtitan.models.common.rope import RoPE
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
@@ -67,17 +69,17 @@ def make_gqa_config(
     wqkv_param_init: dict[str, Callable],
     wo_param_init: dict[str, Callable],
     inner_attention: Module.Config,
+    rope: RoPE.Config | None,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
     fuse_qkv: bool = False,
-    use_rope: bool = True,
     mask_type: str = "causal",
-    rope_backend: str = "complex",
     qk_norm: RMSNorm.Config | None = None,
 ) -> GQAttention.Config:
     """Build a fully-specified GQAttention.Config."""
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
+    rope = dataclasses.replace(rope) if rope is not None else None
 
     if fuse_qkv:
         qkv = FusedQKVLinear.Config(
@@ -117,10 +119,9 @@ def make_gqa_config(
             param_init=wo_param_init,
         ),
         qk_norm=qk_norm,
-        use_rope=use_rope,
         inner_attention=inner_attention,
         mask_type=mask_type,
-        rope_backend=rope_backend,
+        rope=rope,
     )
 
 
