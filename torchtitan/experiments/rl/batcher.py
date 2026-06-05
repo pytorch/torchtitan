@@ -230,11 +230,11 @@ class Batcher(Configurable):
         def _iterate_samples() -> Iterator[dict]:
             for ep in episodes:
                 prompt_len = len(ep.prompt_token_ids)
-                response_len = len(ep.token_ids)
-                raw_ids = ep.prompt_token_ids + ep.token_ids
-                gen_lp = [0.0] * prompt_len + ep.token_logprobs
-                loss_mask = [False] * prompt_len + [True] * response_len
-                advantages = [0.0] * prompt_len + [ep.advantage] * response_len
+                completion_len = len(ep.completion_token_ids)
+                raw_ids = ep.prompt_token_ids + ep.completion_token_ids
+                gen_lp = [0.0] * prompt_len + ep.completion_logprobs
+                loss_mask = [False] * prompt_len + [True] * completion_len
+                advantages = [0.0] * prompt_len + [ep.advantage] * completion_len
                 sample = {
                     "input_ids": raw_ids[:-1],
                     "labels": raw_ids[1:],
