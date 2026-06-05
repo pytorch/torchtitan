@@ -241,7 +241,7 @@ def qwen3_30b_a3b() -> Trainer.Config:
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
             local_batch_size=2,
