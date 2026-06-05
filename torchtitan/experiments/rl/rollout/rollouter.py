@@ -32,7 +32,7 @@ class Rollouter(Configurable):
 
     The flow for one prompt group:
 
-        sample = rollouter.get_train_sample()  # one sample from the dataset
+        sample = rollouter.get_training_sample()  # one sample from the dataset
         envs = rollouter.make_env_group(sample=sample, group_size=N, renderer=renderer)
         ...  # the controller runs the rollout loop
         outputs = rollouter.score_group(rollouts, sample)  # the Rubric scores them
@@ -76,8 +76,8 @@ class Rollouter(Configurable):
         self._token_env_config = config.token_env
 
     # TODO: revisit this abstraction: should it return a sample or a dataset or an iterator?
-    def get_train_sample(self) -> object:
-        """Get one training sample (the env input) from the train dataset."""
+    def get_training_sample(self) -> object:
+        """Get one training sample (the env input) from the training dataset."""
         return next(self._train_dataset)
 
     def get_validation_sample(self) -> object:
@@ -96,7 +96,7 @@ class Rollouter(Configurable):
         """Construct `group_size` single-use envs from one dataset sample.
 
         Args:
-            sample: the dataset sample (the env input) from `get_train_sample` / `get_validation_sample`.
+            sample: the dataset sample (the env input) from `get_training_sample` / `get_validation_sample`.
             group_size: number of sibling envs for this prompt group.
             renderer: Renderer shared by the rollout controller.
 

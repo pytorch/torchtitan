@@ -625,7 +625,7 @@ class RLTrainer(Configurable):
             sample = (
                 self._rollouter.get_validation_sample()
                 if is_validation
-                else self._rollouter.get_train_sample()
+                else self._rollouter.get_training_sample()
             )
             group_id = f"step={step}/group={group_offset + group_idx}"
             envs = self._rollouter.make_env_group(
