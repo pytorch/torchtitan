@@ -128,10 +128,10 @@ class GptOssGroupedExperts(Module):
         ).long()
 
         # G = gate+up dimension (2*F)
-        h_RG = torch._grouped_mm(
+        h_RG = self._grouped_mm(
             x_RD.bfloat16(),
             mlp1_weight_EGD.transpose(-2, -1).bfloat16(),
-            offs=offsets_E,
+            offsets_E,
         )
 
         b1 = torch.cat(
@@ -143,8 +143,8 @@ class GptOssGroupedExperts(Module):
         h_RG = h_RG + b1_RG.to(h_RG.dtype)
 
         h_RF = swiglu(h_RG, limit=self.swiglu_limit)
-        h_RD = torch._grouped_mm(
-            h_RF, mlp2_weight_EDF.transpose(-2, -1).bfloat16(), offs=offsets_E
+        h_RD = self._grouped_mm(
+            h_RF, mlp2_weight_EDF.transpose(-2, -1).bfloat16(), offsets_E
         )
 
         # Apply custom autograd function to scale bias in forward but not in backward
@@ -156,6 +156,19 @@ class GptOssGroupedExperts(Module):
         )
         b2_RD = ScaleBiasForward.apply(b2_RD, tp_degree)
         return h_RD + b2_RD.to(h_RD.dtype)
+
+    def _grouped_mm(
+        self, A: torch.Tensor, B_t: torch.Tensor, offs: torch.Tensor
+    ) -> torch.Tensor:
+        """Grouped matmul of ``A @ B_t`` with per-expert token offsets.
+
+        Overridable seam for low-precision variants (e.g. the MXFP8 converter
+        swaps this for a dynamically-quantized scaled grouped GEMM). Keeping the
+        op here — rather than behind a tensor-subclass ``__torch_function__`` —
+        means it is captured by FX tracers such as graph_trainer's make_fx path.
+        Bias is added by the caller outside this op, so it is not handled here.
+        """
+        return torch._grouped_mm(A, B_t, offs=offs)
 
     def forward(
         self,

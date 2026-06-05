@@ -12,6 +12,7 @@ from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.quantization import (
     Float8GroupedExpertsConverter,
     Float8LinearConverter,
+    MXFP8GroupedExpertsConverter,
 )
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -55,6 +56,26 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
             mode="selective",
         ),
     )
+
+
+def deepseek_v3_debugmodel_mxfp8() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    # Quantize the MoE expert grouped GEMMs to MXFP8. compile is enabled so the
+    # converter's compile requirement is satisfied. pad_multiple=128 is required
+    # by the CuTeDSL quantization kernel on sm_100 (e.g. B200); the default of 32
+    # only suffices on older architectures.
+    compile_config = CompileConfig(enable=True, components=["model"])
+    config.compile = compile_config
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            MXFP8GroupedExpertsConverter.Config(
+                model_compile_enabled=True,
+                pad_multiple=128,
+            ),
+        ],
+    )
+    return config
 
 
 def deepseek_v3_debugmodel_hybridep() -> Trainer.Config:

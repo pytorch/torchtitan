@@ -4,11 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torchtitan.components.quantization import MXFP8LinearConverter
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.models.llama3 import model_registry as llama3_model_registry
 from torchtitan.models.llama3.config_registry import (
     llama3_405b,
     llama3_70b,
@@ -57,6 +59,20 @@ def graph_trainer_llama3_debugmodel_sdpa_eager() -> GraphTrainer.Config:
 
 def graph_trainer_llama3_8b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_8b(), model_registry)
+    config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
+
+
+def graph_trainer_llama3_8b_mxfp8() -> GraphTrainer.Config:
+    base = llama3_8b()
+    # Swap dense Linear layers for MXFP8Linear before wrapping in the
+    # graph_trainer config. graph_trainer always compiles the model, so the
+    # MXFP8 converter's compile requirement is satisfied.
+    base.model_spec = llama3_model_registry(
+        "8B",
+        converters=[MXFP8LinearConverter.Config(model_compile_enabled=True)],
+    )
+    config = to_graph_trainer_config(base, model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 
