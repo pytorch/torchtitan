@@ -23,15 +23,12 @@ from torch.utils._pytree import tree_map
 from torchtitan.config import Configurable
 from torchtitan.distributed.spmd_types import (
     mesh_size as spmd_mesh_size,
-    placement_to_spmd_assert_type,
     redistribute_spmd_per_axis,
+    set_current_spmd_mesh,
+    spmd_layout_to_assert_type,
 )
-from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.protocols.sharding import (
-    NamedPlacement,
-    resolve_placements,
-    ShardingConfig,
-)
+from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
+from torchtitan.protocols.types import SpmdLayout
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
@@ -256,18 +253,21 @@ class Module(nn.Module, Configurable):
         parallel_dims: ParallelDims,
         name: str,
         tensor: torch.Tensor,
-        placement: NamedPlacement,
+        layout: SpmdLayout,
         *,
         is_param: bool,
     ) -> None:
         mesh = parallel_dims._global_meshes["spmd_dense"]
 
         with set_current_spmd_mesh(mesh):
-            for axis_name, axis_type in placement.placements.items():
-                if isinstance(axis_type, spmd.Shard) and spmd_mesh_size(axis_name) > 1:
+            for axis_name, axis_type in layout.shard_types().items():
+                if (
+                    isinstance(axis_type, spmd.Shard)
+                    and spmd_mesh_size(axis_name.value) > 1
+                ):
                     tensor = spmd.shard(
                         tensor,
-                        mesh.get_group(axis_name),
+                        mesh.get_group(axis_name.value),
                         src=spmd.I,
                         dst=axis_type,
                     )
@@ -280,7 +280,7 @@ class Module(nn.Module, Configurable):
                 self.register_buffer(name, tensor, persistent=persistent)
                 registered = self._buffers[name]
 
-            local_type, partition_spec = placement_to_spmd_assert_type(placement)
+            local_type, partition_spec = spmd_layout_to_assert_type(layout)
             spmd.assert_type(
                 registered,
                 local_type,
@@ -313,12 +313,12 @@ class Module(nn.Module, Configurable):
             checked_names = [name for name in bound.arguments if name in in_dst]
             checked_values = tuple(bound.arguments[name] for name in checked_names)
             in_types = tuple(
-                placement_to_spmd_assert_type(in_dst[name]) for name in checked_names
+                spmd_layout_to_assert_type(in_dst[name]) for name in checked_names
             )
             out_types = tree_map(
-                placement_to_spmd_assert_type,
+                spmd_layout_to_assert_type,
                 out_src,
-                is_leaf=lambda x: isinstance(x, NamedPlacement),
+                is_leaf=lambda x: isinstance(x, SpmdLayout),
             )
 
             def local_map_call(*checked_args: Any) -> Any:
@@ -426,7 +426,7 @@ class Module(nn.Module, Configurable):
         ``_redistribute_inputs`` uses to pre-align inputs); output placements
         from ``out_src_shardings``; only ``in_grad_placements`` lives on
         ``LocalMapConfig``. ``local_map`` takes a single ``device_mesh``, so
-        all NamedPlacements must resolve to the same mesh.
+        all SpmdLayouts must resolve to the same mesh.
         """
         sharding_config = self._sharding_config
         assert sharding_config is not None
@@ -446,7 +446,7 @@ class Module(nn.Module, Configurable):
                 "out_src_shardings is None."
             )
         if isinstance(out_src, tuple):
-            out_src_list: list[NamedPlacement] = [p for p in out_src if p is not None]
+            out_src_list: list[SpmdLayout] = [p for p in out_src if p is not None]
         else:
             out_src_list = [out_src]
 
@@ -456,11 +456,11 @@ class Module(nn.Module, Configurable):
                 f"{type(self).__name__}: local_map is set but in_dst_shardings "
                 f"is missing entries for: {missing_in}"
             )
-        in_named: list[NamedPlacement] = [in_dst[name] for name in pos_args]
-        out_named: list[NamedPlacement] = out_src_list
+        in_named: list[SpmdLayout] = [in_dst[name] for name in pos_args]
+        out_named: list[SpmdLayout] = out_src_list
         # in_grad_placements may contain None for non-tensor args; filter
         # them out for mesh resolution -- local_map passes None through.
-        grad_named: list[NamedPlacement | None] = list(lm.in_grad_placements)
+        grad_named: list[SpmdLayout | None] = list(lm.in_grad_placements)
 
         resolved_mesh = parallel_dims.resolve_shared_mesh(
             in_named + out_named + grad_named
@@ -491,7 +491,7 @@ class Module(nn.Module, Configurable):
         """Redistribute inputs to desired placements.
 
         Per input present in ``in_src_shardings`` / ``in_dst_shardings``:
-        resolve a mesh from that input's NamedPlacements, then:
+        resolve a mesh from that input's SpmdLayouts, then:
         1. If plain tensor and ``in_src_shardings`` declared, wrap as
            DTensor via ``DTensor.from_local`` on that mesh.
         2. If ``in_dst_shardings`` declared, redistribute on the same mesh.
@@ -531,7 +531,7 @@ class Module(nn.Module, Configurable):
 
                 # SPMD source placements are part of the config contract: assert
                 # before redistributing so typechecking catches boundary drift.
-                local_type, partition_spec = placement_to_spmd_assert_type(
+                local_type, partition_spec = spmd_layout_to_assert_type(
                     src_named_placements
                 )
                 spmd.assert_type(
@@ -545,8 +545,8 @@ class Module(nn.Module, Configurable):
                     continue
                 value = redistribute_spmd_per_axis(
                     value,
-                    src_named_placements.placements,
-                    dst_named_placements.placements,
+                    src_named_placements.shard_types(),
+                    dst_named_placements.shard_types(),
                 )
                 new_kwargs[name] = value
                 continue
@@ -608,7 +608,7 @@ class Module(nn.Module, Configurable):
                 return outputs
             # SPMD source placements are part of the config contract: assert
             # before redistributing so typechecking catches boundary drift.
-            local_type, partition_spec = placement_to_spmd_assert_type(out_src)
+            local_type, partition_spec = spmd_layout_to_assert_type(out_src)
             spmd.assert_type(
                 outputs,
                 local_type,
@@ -620,8 +620,8 @@ class Module(nn.Module, Configurable):
                 return outputs
             return redistribute_spmd_per_axis(
                 outputs,
-                out_src.placements,
-                out_dst.placements,
+                out_src.shard_types(),
+                out_dst.shard_types(),
             )
 
         out_named_placements = sharding_config.out_dst_shardings
