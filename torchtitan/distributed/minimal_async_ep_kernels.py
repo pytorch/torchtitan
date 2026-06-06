@@ -601,10 +601,6 @@ def expert_counting_sort(
     num_ids = topk_expert_ids.numel()
     top_k = topk_expert_ids.shape[1]
     flat_expert_ids = topk_expert_ids.reshape(-1)
-    if not topk_expert_ids.is_cuda:
-        flat_indices = torch.argsort(flat_expert_ids, stable=True)
-        counts = torch.bincount(flat_expert_ids, minlength=num_experts).to(torch.int64)
-        return counts, flat_indices // top_k, flat_indices
 
     counts = torch.zeros(
         num_experts,
@@ -679,11 +675,6 @@ def copy_full_counts_to_peers(
                 "copy_full_counts_to_peers dst_ptrs must match counts device."
             )
 
-    if not counts.is_cuda:
-        for dst in dsts:
-            dst[rank, :num_experts].copy_(counts[:num_experts])
-        return
-
     use_pointer_table = ep_size > _POINTER_TABLE_EP_THRESHOLD
     if dst_ptrs is None and use_pointer_table:
         dst_ptrs = torch.tensor(
@@ -749,9 +740,6 @@ def active_swiglu_forward(
     """
     _validate_active_swiglu_args(gate, up, active_rows)
     out = torch.empty_like(gate)
-    if not gate.is_cuda:
-        out.copy_(torch.nn.functional.silu(gate) * up)
-        return out
 
     block_m = 4
     block_n = min(2048, triton.next_power_of_2(gate.shape[1]))
@@ -792,17 +780,6 @@ def active_swiglu_backward(
 
     grad_gate = torch.empty_like(gate)
     grad_up = torch.empty_like(up)
-    if not gate.is_cuda:
-        with torch.enable_grad():
-            gate_ref = gate.detach().requires_grad_(True)
-            up_ref = up.detach().requires_grad_(True)
-            out = torch.nn.functional.silu(gate_ref) * up_ref
-            out.backward(grad_out)
-        assert gate_ref.grad is not None
-        assert up_ref.grad is not None
-        grad_gate.copy_(gate_ref.grad)
-        grad_up.copy_(up_ref.grad)
-        return grad_gate, grad_up
 
     block_m = 4
     block_n = min(2048, triton.next_power_of_2(gate.shape[1]))
@@ -905,26 +882,6 @@ def copy_rows_to_peers(
     if src_rows is not None and src_rows.numel() < num_rows:
         raise ValueError("copy_rows_to_peers src_rows tensor is too small.")
 
-    if not src.is_cuda:
-        row_limit = (
-            num_rows
-            if num_valid_rows is None
-            else min(num_rows, int(num_valid_rows.item()))
-        )
-        valid = (
-            torch.arange(num_rows) < row_limit
-            if valid_rows is None
-            else valid_rows[:num_rows].to(torch.bool).cpu()
-        )
-        for row in range(num_rows):
-            if not bool(valid[row]):
-                continue
-            src_row = row if src_rows is None else int(src_rows[row])
-            dsts[int(dst_ranks[row])][int(dst_rows[row]), :num_cols].copy_(
-                src[src_row, :num_cols]
-            )
-        return
-
     use_pointer_table = ep_size > _POINTER_TABLE_EP_THRESHOLD
     if dst_ptrs is None and use_pointer_table:
         dst_ptrs = torch.tensor(
@@ -992,17 +949,6 @@ def fill_dispatch_metadata(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if counts.ndim != 1 or local_dest_offsets.ndim != 1 or local_count_starts.ndim != 1:
         raise ValueError("fill_dispatch_metadata expects 1D input tensors.")
-    if not counts.is_cuda:
-        positions = torch.arange(num_routed_tokens, device=counts.device)
-        local_count_ends = local_count_starts + counts
-        experts = torch.searchsorted(local_count_ends, positions, right=True)
-        experts = experts.clamp(max=counts.numel() - 1)
-        return (
-            (experts // num_local_experts).to(torch.int64),
-            (local_dest_offsets[experts] + positions - local_count_starts[experts]).to(
-                torch.int64
-            ),
-        )
 
     dst_ranks = torch.empty(
         num_routed_tokens,
@@ -1045,23 +991,6 @@ def fill_combine_metadata(
         raise ValueError("fill_combine_metadata expects 1D segment tensors.")
     if source_input_starts.ndim != 2:
         raise ValueError("fill_combine_metadata expects 2D source_input_starts.")
-    if not segment_lens.is_cuda:
-        receive_positions = torch.arange(receive_capacity, device=segment_lens.device)
-        output_ends = output_starts + segment_lens
-        segment_ids = torch.searchsorted(output_ends, receive_positions, right=True)
-        segment_ids = segment_ids.clamp(max=segment_lens.numel() - 1)
-        dst_ranks = segment_ids % ep_size
-        local_experts = segment_ids // ep_size
-        within_segment = receive_positions - output_starts[segment_ids]
-        global_experts = ep_rank * num_local_experts + local_experts
-        dst_rows = (
-            source_input_starts[dst_ranks, global_experts] + within_segment
-        )
-        return (
-            dst_ranks.to(torch.int64),
-            dst_rows.to(torch.int64),
-            output_ends[-1:].to(torch.int64),
-        )
 
     dst_ranks = torch.empty(
         receive_capacity,
@@ -1106,13 +1035,6 @@ def invert_flat_indices(
         raise ValueError("invert_flat_indices expects int64 indices.")
 
     slot_to_row = torch.empty_like(flat_indices)
-    if not flat_indices.is_cuda:
-        slot_to_row[flat_indices] = torch.arange(
-            num_rows,
-            device=flat_indices.device,
-            dtype=flat_indices.dtype,
-        )
-        return slot_to_row
 
     block_size = 1024
     _invert_flat_indices_kernel[(triton.cdiv(num_rows, block_size),)](
@@ -1158,15 +1080,6 @@ def reduce_topk_slots(
             raise ValueError("scores length must match routed rows.")
         if scores.device != routed_output.device:
             raise ValueError("scores must be on the routed_output device.")
-
-    if not routed_output.is_cuda:
-        values = routed_output[slot_to_row].reshape(num_tokens, top_k, num_cols)
-        if scores is not None:
-            if scores_are_slot_ordered:
-                values = values * scores.reshape(num_tokens, top_k, 1)
-            else:
-                values = values * scores[slot_to_row].reshape(num_tokens, top_k, 1)
-        return values.sum(dim=1)
 
     out = torch.empty(
         num_tokens,
@@ -1219,12 +1132,6 @@ def expand_topk_grad(
 
     num_rows = flat_indices.numel()
     num_cols = grad_out.shape[1]
-    if not grad_out.is_cuda:
-        grad_routed = grad_out[flat_indices // top_k].to(dtype)
-        if scores is not None:
-            score_values = scores[flat_indices] if scores_are_slot_ordered else scores
-            grad_routed = grad_routed * score_values.reshape(-1, 1)
-        return grad_routed
 
     grad_routed = torch.empty(
         num_rows,
@@ -1275,18 +1182,6 @@ def topk_scores_grad(
         raise ValueError("flat_indices must be on the routed_output device.")
     if grad_out.device != routed_output.device:
         raise ValueError("grad_out must be on the routed_output device.")
-
-    if not routed_output.is_cuda:
-        grad_scores_by_row = (
-            routed_output.to(torch.float32)
-            * grad_out[flat_indices // top_k].to(torch.float32)
-        ).sum(dim=1)
-        if not scores_are_slot_ordered:
-            return grad_scores_by_row.to(dtype)
-
-        grad_scores = torch.empty_like(flat_indices, dtype=dtype)
-        grad_scores[flat_indices] = grad_scores_by_row.to(dtype)
-        return grad_scores
 
     num_rows, num_cols = routed_output.shape
     grad_scores = torch.empty(
