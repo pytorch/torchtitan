@@ -52,9 +52,7 @@ from torchtitan.distributed.spmd_types import (
     preserve_buffers_spmd,
     set_current_spmd_mesh,
     set_spmd_backend,
-    spmd_layout_to_assert_type,
 )
-from torchtitan.protocols.types import MeshAxisName, SpmdLayout
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
@@ -570,7 +568,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
     @sl.log_trace_span("post_dataloading_process")
     def post_dataloading_process(
-        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+        self,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        global_valid_tokens: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
         """
         Post-processing hook after data loading and before model forward pass.
@@ -658,7 +659,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
         elif self.config.parallelism.spmd_backend == "spmd_types":
-            annotate_input_spmd_types(inputs, labels, extra_kwargs)
+            assert global_valid_tokens is not None
+            annotate_input_spmd_types(
+                inputs,
+                labels,
+                extra_kwargs,
+                global_valid_tokens,
+            )
 
         return inputs, labels, extra_inputs, extra_kwargs
 
@@ -674,7 +681,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         parallel_dims = self.parallel_dims
 
         inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
-            input_dict, labels
+            input_dict, labels, global_valid_tokens
         )
 
         if parallel_dims.pp_enabled:
@@ -759,7 +766,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         local_valid_tokens = local_valid_tokens.to(self.device)
 
         spmd_mesh_context = (
-            set_current_spmd_mesh(self.parallel_dims._global_meshes["spmd_dense"])
+            set_current_spmd_mesh(
+                self.parallel_dims._global_meshes["spmd_dense_for_fwdbwd"]
+            )
             if self.config.parallelism.spmd_backend == "spmd_types"
             else contextlib.nullcontext()
         )
@@ -773,7 +782,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             else:
                 global_valid_tokens = local_valid_tokens.float()
 
-            # Stamp for SPMD type checking: replicated after all-reduce
             if self.config.parallelism.spmd_backend == "spmd_types":
                 if not isinstance(global_valid_tokens, torch.Tensor):
                     global_valid_tokens = torch.tensor(
@@ -781,20 +789,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dtype=torch.float,
                         device=self.device,
                     )
-                local_type, partition_spec = spmd_layout_to_assert_type(
-                    SpmdLayout(
-                        {
-                            MeshAxisName.DP: spmd.R,
-                            MeshAxisName.CP: spmd.R,
-                            MeshAxisName.TP: spmd.I,
-                        }
-                    )
-                )
-                spmd.assert_type(
-                    global_valid_tokens,
-                    local_type,
-                    partition_spec=partition_spec,
-                )
 
             for input_dict, labels in microbatches:
                 # Move tensors to GPU

@@ -82,7 +82,7 @@ def mesh_size(axis_name: str) -> int:
 @contextlib.contextmanager
 def preserve_buffers_spmd(model: nn.Module) -> Iterator[None]:
     """
-    Preserve local SPMD annotations on buffers across reinitialization.
+    Preserve spmd types annotations on buffers across reinitialization.
 
     Previously we could have read types off self.freqs_cis, but after
     https://github.com/pytorch/torchtitan/pull/3458 changed to per-layer cache,
@@ -160,7 +160,7 @@ def spmd_layout_to_dtensor_placements(
 def spmd_layout_to_assert_type(
     layout: "SpmdLayout",
 ) -> tuple[spmd.PerMeshAxisSpmdTypes, spmd.PartitionSpec | None]:
-    """Resolve a layout to ``assert_type`` args for local SPMD typechecking."""
+    """Resolve a layout to ``assert_type`` args for SPMD typechecking."""
     local_type = dict(layout.axis_types)
     if layout.partition_spec is None:
         return local_type, None
@@ -175,41 +175,42 @@ def annotate_input_spmd_types(
     inputs: torch.Tensor,
     labels: torch.Tensor,
     extra_kwargs: dict[str, Any],
+    global_valid_tokens: torch.Tensor,
 ) -> None:
-    """Annotate decoder inputs/labels with local SPMD types.
+    """Annotate decoder inputs/labels/loss denominator with SPMD types.
 
     Hardcodes the standard decoder convention: inputs and positions are
     ``S(0)@DP, S(1)@CP, R@TP``; labels are ``S(0)@DP, S(1)@CP, I@TP``.
+    ``global_valid_tokens`` is replicated after the DP/CP all-reduce and
+    invariant across TP.
     Analogous to ``full_dtensor.parallelize_inputs()`` but for the
     ``spmd_types`` path.
     """
-    from torchtitan.protocols.types import MeshAxisName, SpmdLayout
+    from torchtitan.protocols.types import MeshAxisName
 
-    token_layout = SpmdLayout(
-        {
-            MeshAxisName.DP: spmd.S(0),
-            MeshAxisName.CP: spmd.S(1),
-            MeshAxisName.TP: spmd.R,
-        }
-    )
-    label_layout = SpmdLayout(
-        {
-            MeshAxisName.DP: spmd.S(0),
-            MeshAxisName.CP: spmd.S(1),
-            MeshAxisName.TP: spmd.I,
-        }
-    )
+    token_type = {
+        MeshAxisName.DP: spmd.S(0),
+        MeshAxisName.CP: spmd.S(1),
+        MeshAxisName.TP: spmd.R,
+    }
+    label_type = {
+        MeshAxisName.DP: spmd.S(0),
+        MeshAxisName.CP: spmd.S(1),
+        MeshAxisName.TP: spmd.I,
+    }
+    global_valid_tokens_type = {
+        MeshAxisName.DP: spmd.R,
+        MeshAxisName.CP: spmd.R,
+        MeshAxisName.TP: spmd.I,
+    }
 
-    def assert_type(tensor: torch.Tensor, layout: SpmdLayout) -> None:
-        local_type, partition_spec = spmd_layout_to_assert_type(layout)
-        spmd.assert_type(tensor, local_type, partition_spec=partition_spec)
-
-    assert_type(inputs, token_layout)
-    assert_type(labels, label_layout)
+    spmd.assert_type(inputs, token_type)
+    spmd.assert_type(labels, label_type)
+    spmd.assert_type(global_valid_tokens, global_valid_tokens_type)
     if "positions" in extra_kwargs and isinstance(
         extra_kwargs["positions"], torch.Tensor
     ):
-        assert_type(extra_kwargs["positions"], token_layout)
+        spmd.assert_type(extra_kwargs["positions"], token_type)
 
 
 def redistribute_spmd_per_axis(
