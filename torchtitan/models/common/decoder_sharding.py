@@ -5,14 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import spmd_types as spmd
-from torch.distributed.tensor import Placement
 
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
-from torchtitan.protocols.sharding import (
-    LocalMapConfig,
-    NamedPlacement,
-    ShardingConfig,
-)
+from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 from torchtitan.protocols.types import MeshAxisName
 
 DP = MeshAxisName.DP
@@ -20,15 +15,13 @@ CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 
-def dense_param_placement(
-    *, tp: Placement | spmd.PerMeshAxisSpmdType
-) -> NamedPlacement:
+def dense_param_placement(*, tp: spmd.PerMeshAxisSpmdType) -> SpmdLayout:
     """Placement for dense-path params/buffers.
 
     DP/CP axes are replicated. TP placement is caller-specified.
     DTensor backend unfolds the DP axis to shard/replicate DTensor storage axes.
     """
-    return NamedPlacement(
+    return SpmdLayout(
         {
             DP: spmd.R,
             CP: spmd.R,
@@ -39,15 +32,15 @@ def dense_param_placement(
 
 def dense_activation_placement(
     *,
-    tp: Placement | spmd.PerMeshAxisSpmdType,
-    cp: Placement | spmd.PerMeshAxisSpmdType = spmd.S(1),
-) -> NamedPlacement:
+    tp: spmd.PerMeshAxisSpmdType,
+    cp: spmd.PerMeshAxisSpmdType = spmd.S(1),
+) -> SpmdLayout:
     """Placement for dense-path activations.
 
     DP is batch-sharded. CP defaults to seq-sharded S(1); override to R/I
     for K/V after all-gather. TP placement is caller-specified.
     """
-    return NamedPlacement(
+    return SpmdLayout(
         {
             DP: spmd.S(0),
             CP: cp,
@@ -56,9 +49,9 @@ def dense_activation_placement(
     )
 
 
-def dense_sequence_parallel_placement() -> NamedPlacement:
+def dense_sequence_parallel_placement() -> SpmdLayout:
     """SP activations with CP-TP shard ordering on sequence dimension."""
-    return NamedPlacement(
+    return SpmdLayout(
         {
             DP: spmd.S(0),
             CP: spmd.S(1),
@@ -132,9 +125,7 @@ def norm_config(*, enable_sp: bool) -> ShardingConfig:
     Norm sharding.
     Weight is unsharded@TP: R if SP (pending BWD AR handled by FSDP), else I.
     """
-    state = {
-        "weight": dense_param_placement(tp=spmd.R if enable_sp else spmd.I)
-    }
+    state = {"weight": dense_param_placement(tp=spmd.R if enable_sp else spmd.I)}
     activation = (
         dense_sequence_parallel_placement()
         if enable_sp
@@ -230,7 +221,7 @@ def set_gqa_inner_attention_local_map(
     kv_src_placements = dense_activation_placement(tp=spmd.S(2))
     kv_placements = dense_activation_placement(tp=spmd.S(2), cp=spmd.R)
     kv_grad_placements = dense_activation_placement(tp=spmd.S(2), cp=spmd.P)
-    out_src: NamedPlacement | tuple[NamedPlacement, ...] = (
+    out_src: SpmdLayout | tuple[SpmdLayout, ...] = (
         (q_placements, q_placements) if return_lse else q_placements
     )
     inner_attention_cfg.sharding_config = ShardingConfig(
@@ -254,7 +245,7 @@ def set_gqa_inner_attention_local_map(
 def set_dense_ffn_sharding(
     feed_forward_cfg,
     *,
-    attn_x_placement: Placement | spmd.PerMeshAxisSpmdType,
+    attn_x_placement: spmd.PerMeshAxisSpmdType,
     enable_sp: bool,
 ) -> None:
     """Standard dense FFN (``w1``/``w2``/``w3``) TP sharding.
