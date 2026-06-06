@@ -1151,8 +1151,6 @@ def active_swiglu(
     active_rows: torch.Tensor,
 ) -> torch.Tensor:
     """Compute ``silu(gate) * up`` while skipping padded MinimalAsyncEP rows."""
-    if not gate.is_cuda:
-        return torch.nn.functional.silu(gate) * up
     return torch.ops.minimal_async_ep.active_swiglu(gate, up, active_rows)
 
 
@@ -1162,8 +1160,6 @@ def expert_counting_sort(
     num_experts: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Group flattened top-k slots by expert id without exposing raw Triton calls."""
-    if not topk_expert_ids.is_cuda:
-        return _expert_counting_sort(topk_expert_ids, num_experts=num_experts)
     return torch.ops.minimal_async_ep.expert_counting_sort(
         topk_expert_ids,
         num_experts,
@@ -1176,8 +1172,6 @@ def invert_flat_indices(
     num_rows: int,
 ) -> torch.Tensor:
     """Invert flat top-k slot indices without exposing raw Triton calls."""
-    if not flat_indices.is_cuda:
-        return _invert_flat_indices(flat_indices, num_rows=num_rows)
     return torch.ops.minimal_async_ep.invert_flat_indices(flat_indices, num_rows)
 
 
