@@ -37,6 +37,9 @@ jobs:
 
   build-test:
     needs: set-matrix
+    # Skip cleanly when the matrix is empty (e.g. CUDA on a label-triggered,
+    # ROCm-only run); an empty matrix would otherwise error at evaluation.
+    if: ${{ needs.set-matrix.outputs.matrix != '' && fromJSON(needs.set-matrix.outputs.matrix).include[0] != null }}
     uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
     strategy:
       fail-fast: false
@@ -68,6 +71,9 @@ jobs:
 
   build-test-rocm:
     needs: set-matrix-rocm
+    # Skip cleanly when the matrix is empty (e.g. ROCm on an ordinary
+    # synchronize push); an empty matrix would otherwise error at evaluation.
+    if: ${{ needs.set-matrix-rocm.outputs.matrix != '' && fromJSON(needs.set-matrix-rocm.outputs.matrix).include[0] != null }}
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false
