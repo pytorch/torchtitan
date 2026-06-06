@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import Literal, TYPE_CHECKING
 
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
@@ -32,7 +32,7 @@ class ParallelDims:
     pp: int
     ep: int
     world_size: int
-    full_dtensor: bool = False
+    spmd_backend: Literal["default", "full_dtensor", "spmd_types"] = "default"
     # Cache by axis name(s); DeviceMesh equality is by identity, so reuse
     # is required for ``mesh in spmd_meshes()`` checks.
     _single_axis_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
@@ -52,7 +52,7 @@ class ParallelDims:
             pp=parallelism_config.pipeline_parallel_degree,
             ep=parallelism_config.expert_parallel_degree,
             world_size=world_size,
-            full_dtensor=parallelism_config.full_dtensor,
+            spmd_backend=parallelism_config.spmd_backend,
         )
 
     def __post_init__(self):
@@ -69,7 +69,6 @@ class ParallelDims:
         )
         for d in (dp_replicate, cp, tp, pp, ep):
             assert d >= 1, "Parallelism degree should be >= 1, except for dp_shard"
-
         assert dp_shard == -1 or dp_shard >= 1, "dp_shard must -1 or >=1."
         if dp_shard < 0:
             self.dp_shard = dp_shard = self.world_size // (dp_replicate * cp * tp * pp)
@@ -85,7 +84,7 @@ class ParallelDims:
             # Always keep fsdp mesh with real backend so fully_shard()
             # can apply MixedPrecisionPolicy even at degree 1.
             return True
-        if name == "dp_shard" and self.full_dtensor:
+        if name == "dp_shard" and self.spmd_backend == "full_dtensor":
             # Under full_dtensor ``dp_shard`` is the DP storage axis (no
             # flattened ``fsdp``); keep alive at size 1 so ``fully_shard``
             # can install MixedPrecisionPolicy and FSDP can discriminate
@@ -177,7 +176,7 @@ class ParallelDims:
             (self.pp, batch, self.cp, self.tp),
         )
         loss_mesh = dataloading_mesh["batch", "cp"]._flatten("loss_mesh")
-        if self.full_dtensor:
+        if self.spmd_backend == "full_dtensor":
             # Under full_dtensor, ``dp_shard`` and ``cp`` cannot be folded
             # together: activations carry a ``cp`` dimension, so parameters
             # need a ``cp`` axis as well. ``fully_shard`` folds ``dp_shard``
@@ -220,7 +219,7 @@ class ParallelDims:
             "ep": full_sparse_mesh["ep"],
             "efsdp": full_sparse_mesh["efsdp"],
         }
-        if self.full_dtensor:
+        if self.spmd_backend == "full_dtensor":
             self._single_axis_meshes["dp_shard"] = full_dense_mesh["dp_shard"]
         else:
             self._single_axis_meshes["fsdp"] = full_dense_mesh["fsdp"]
@@ -255,7 +254,7 @@ class ParallelDims:
             "ep": self.ep,
             "efsdp": self.dp_shard * self.cp * self.tp // self.ep,
         }
-        if self.full_dtensor:
+        if self.spmd_backend == "full_dtensor":
             expected_sizes["dp_shard"] = self.dp_shard
         else:
             expected_sizes["fsdp"] = self.dp_shard * self.cp
@@ -393,14 +392,14 @@ class ParallelDims:
         not one of ``parallel_dims.spmd_meshes()``.
         """
         axes_list = list(axes)
-        if not self.full_dtensor:
+        if self.spmd_backend == "default":
             in_band = ("tp", "ep")
             axes_list = [axis for axis in axes_list if axis in in_band]
         mesh = self.get_activated_mesh(axes_list)
         if mesh is None:
             return None
         assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
-        if self.full_dtensor and mesh not in self.spmd_meshes():
+        if self.spmd_backend == "full_dtensor" and mesh not in self.spmd_meshes():
             raise ValueError(
                 f"Resolved mesh {list(mesh.mesh_dim_names)} does not match any "
                 f"SPMD mesh. Valid meshes: "
@@ -459,7 +458,7 @@ class ParallelDims:
             dict_keys(['dp_replicate', 'fsdp', 'tp', 'batch', 'loss', 'efsdp'])
 
         Note:
-            Under ``full_dtensor=True`` the dense shard axis appears as
+            Under ``spmd_backend="full_dtensor"`` the dense shard axis appears as
             ``'dp_shard'`` instead of the pre-flattened ``'fsdp'``.
         """
         if not self._single_axis_meshes:
