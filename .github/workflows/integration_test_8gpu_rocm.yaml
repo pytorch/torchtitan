@@ -33,17 +33,19 @@ jobs:
   set-matrix:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8')
     uses: ./.github/workflows/set-matrix.yaml
+    with:
+      gpu-arch: rocm
 
   # Step 2: ROCm runner uses linux_job_v2. The bare image name lets v2 resolve
   # and authenticate against the private ECR (unlike the full path used by v3,
   # which fails the ROCm pull with "no basic auth credentials").
   build-test:
     needs: set-matrix
-    if: needs.set-matrix.outputs.has-rocm == 'true'
+    if: needs.set-matrix.outputs.has-entries == 'true'
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix-rocm) }}
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
     with:
       runner: ${{ matrix.runner }}
       gpu-arch-type: ${{ matrix.gpu-arch-type }}

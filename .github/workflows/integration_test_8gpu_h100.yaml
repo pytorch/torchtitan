@@ -35,15 +35,16 @@ jobs:
     uses: ./.github/workflows/set-matrix.yaml
     with:
       runner-cuda: mt-l-bx86iamx-176-1800-h100-8
+      gpu-arch: cuda
 
   # Step 2: H100 CUDA runner uses linux_job_v3.
   build-test:
     needs: set-matrix
-    if: needs.set-matrix.outputs.has-cuda == 'true'
+    if: needs.set-matrix.outputs.has-entries == 'true'
     uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix-cuda) }}
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
     with:
       runner: ${{ matrix.runner }}
       gpu-arch-type: ${{ matrix.gpu-arch-type }}

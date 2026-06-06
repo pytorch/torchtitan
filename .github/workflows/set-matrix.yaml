@@ -11,6 +11,11 @@ on:
         description: 'Override default (linux.g5.48xlarge.nvidia.gpu) CUDA runner label'
         required: false
         type: string
+      gpu-arch:
+        description: "Restrict the matrix to a single GPU arch ('cuda' or 'rocm'); 'all' (default) keeps both."
+        required: false
+        type: string
+        default: all
       is-experimental:
         description: 'Check if the workflow is experimental'
         required: false
@@ -18,20 +23,11 @@ on:
         default: false
     outputs:
       matrix:
-        description: dynamically set matrix (all included entries, both CUDA and ROCm)
+        description: dynamically set matrix, narrowed to the gpu-arch input (both CUDA and ROCm when 'all')
         value: ${{ jobs.set.outputs.matrix }}
-      matrix-cuda:
-        description: The CUDA-only subset of matrix (empty when CUDA is not included for this trigger)
-        value: ${{ jobs.set.outputs.matrix-cuda }}
-      matrix-rocm:
-        description: The ROCm-only subset of matrix (empty when ROCm is not included for this trigger)
-        value: ${{ jobs.set.outputs.matrix-rocm }}
-      has-cuda:
-        description: Whether matrix-cuda has at least one entry ('true' or 'false')
-        value: ${{ jobs.set.outputs.has-cuda }}
-      has-rocm:
-        description: Whether matrix-rocm has at least one entry ('true' or 'false')
-        value: ${{ jobs.set.outputs.has-rocm }}
+      has-entries:
+        description: Whether matrix has at least one entry ('true' or 'false'); gate the build job on this
+        value: ${{ jobs.set.outputs.has-entries }}
       docker-hash:
         description: Git tree hash of .ci/docker, used to build the OSDC image tag
         value: ${{ jobs.set.outputs.docker-hash }}
@@ -42,10 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
-      matrix-cuda: ${{ steps.set.outputs.matrix-cuda }}
-      matrix-rocm: ${{ steps.set.outputs.matrix-rocm }}
-      has-cuda: ${{ steps.set.outputs.has-cuda }}
-      has-rocm: ${{ steps.set.outputs.has-rocm }}
+      has-entries: ${{ steps.set.outputs.has-entries }}
       docker-hash: ${{ steps.set.outputs.docker-hash }}
     env:
       # Event flags evaluated by github actions before the step runs:
@@ -135,13 +128,24 @@ jobs:
           JSON
           fi
 
-          # Split the matrix by GPU arch so each workflow can pick its own
-          # reusable workflow: the H100 CUDA workflow runs on linux_job_v3,
-          # while the ROCm workflow runs on linux_job_v2. ROCm must stay on v2
-          # because v3 does not authenticate ROCm runners to the private ECR
-          # (the image pull fails with "no basic auth credentials").
-          MATRIX_CUDA=$(jq -c '{include: [.include[] | select(.["gpu-arch-type"] == "cuda")]}' matrix.json)
-          MATRIX_ROCM=$(jq -c '{include: [.include[] | select(.["gpu-arch-type"] == "rocm")]}' matrix.json)
+          # Optionally narrow the matrix to a single GPU arch. Each consuming
+          # workflow runs one arch on its own reusable workflow (the H100 CUDA
+          # workflow on linux_job_v3, the ROCm workflow on linux_job_v2 -- ROCm
+          # must stay on v2 because v3 does not authenticate ROCm runners to the
+          # private ECR). 'all' (the default) keeps both for the workflows that
+          # run a single combined linux_job_v2 job.
+          GPU_ARCH="${{ inputs.gpu-arch }}"
+          case "${GPU_ARCH:-all}" in
+            all) ;;
+            cuda|rocm)
+              jq -c --arg arch "$GPU_ARCH" '{include: [.include[] | select(.["gpu-arch-type"] == $arch)]}' matrix.json > matrix.filtered.json
+              mv matrix.filtered.json matrix.json
+              ;;
+            *)
+              echo "::error::Invalid gpu-arch '${GPU_ARCH}'. Expected one of: all, cuda, rocm." >&2
+              exit 1
+              ;;
+          esac
 
           # Export matrix to job outputs
           {
@@ -149,7 +153,4 @@ jobs:
             cat matrix.json
             echo 'EOF'
           } >> $GITHUB_OUTPUT
-          echo "matrix-cuda=${MATRIX_CUDA}" >> "$GITHUB_OUTPUT"
-          echo "matrix-rocm=${MATRIX_ROCM}" >> "$GITHUB_OUTPUT"
-          echo "has-cuda=$(echo "$MATRIX_CUDA" | jq -c '.include | length > 0')" >> "$GITHUB_OUTPUT"
-          echo "has-rocm=$(echo "$MATRIX_ROCM" | jq -c '.include | length > 0')" >> "$GITHUB_OUTPUT"
+          echo "has-entries=$(jq -c '.include | length > 0' matrix.json)" >> "$GITHUB_OUTPUT"
