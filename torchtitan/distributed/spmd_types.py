@@ -6,9 +6,8 @@
 
 """SPMD type helpers for the local-tensor parallelization path.
 
-Bridges torchtitan's ``NamedPlacement`` sharding annotations with
-``spmd_types`` runtime APIs (``assert_type``, ``redistribute``,
-``PartitionSpec``).
+Bridges TorchTitan's ``SpmdLayout`` sharding annotations with ``spmd_types``
+runtime APIs (``assert_type``, ``redistribute``, ``PartitionSpec``).
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Iterator
 from threading import local
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
@@ -24,29 +23,22 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
-# Avoid circular import — MeshAxisName and NamedPlacement live in protocols.*,
-# whose __init__ imports module.py which imports us.
-# Use TYPE_CHECKING for annotations; import at use-site for runtime.
-from typing import TYPE_CHECKING
-
+# Avoid circular import: protocols.__init__ imports module.py, which imports us.
 if TYPE_CHECKING:
-    from torchtitan.protocols.types import NamedPlacement
+    from torchtitan.protocols.types import MeshAxisName, SpmdLayout
 
 __all__ = [
+    "annotate_input_spmd_types",
     "current_mesh",
     "mesh_size",
-    "annotate_input_spmd_types",
-    "placement_to_spmd_assert_type",
     "preserve_buffers_spmd",
     "redistribute_spmd_per_axis",
     "set_current_spmd_mesh",
     "set_spmd_backend",
+    "spmd_layout_to_assert_type",
+    "spmd_layout_to_dtensor_placements",
 ]
 
-
-# ---------------------------------------------------------------------------
-# Mesh context TLS — manages the current SPMD mesh for the local-tensor path
-# ---------------------------------------------------------------------------
 
 _MESH_TLS = local()
 _spmd_backend = "default"
@@ -139,29 +131,15 @@ def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
             assert popped is mesh
 
 
-def spmd_to_dtensor_placement(placement: NamedPlacement) -> NamedPlacement:
-    """Convert a placement with SPMD axis types to DTensor placements.
+def spmd_layout_to_dtensor_placements(
+    layout: "SpmdLayout",
+) -> dict["MeshAxisName", Placement]:
+    """Convert an SPMD layout to DTensor placements keyed by mesh axis name."""
+    from torchtitan.protocols.types import MeshAxisName
 
-    Conversion rules:
-    - ``I`` / ``R`` → ``Replicate()`` (DTensor has no Invariant concept)
-    - ``S(dim)`` → ``Shard(dim)``
-    - ``P`` → ``Partial()``
-    - ``DP`` axis → expanded to both ``DP_REPLICATE`` and ``DP_SHARD``
-      (the SPMD path uses one logical DP axis, while the full-DTensor
-      storage mesh still spells it as two)
-
-    TODO(pianpwk): Remove after the full_dtensor path is deleted. Only
-    exists to translate SPMD placements into DTensor placements so that
-    ``resolve_placements`` can serve both backends while sharding configs
-    are written in spmd_types.
-    """
-    from torchtitan.protocols.types import MeshAxisName, NamedPlacement
-
-    result = {}
-    for axis_name, axis_type in placement.placements.items():
-        if isinstance(axis_type, Placement):
-            dtensor_placement = axis_type
-        elif axis_type == spmd.I or axis_type == spmd.R:
+    result: dict[MeshAxisName, Placement] = {}
+    for axis_name, axis_type in layout.shard_types().items():
+        if axis_type == spmd.R or axis_type == spmd.I or axis_type == spmd.V:
             dtensor_placement: Placement = Replicate()
         elif axis_type == spmd.P:
             dtensor_placement = Partial()
@@ -169,46 +147,28 @@ def spmd_to_dtensor_placement(placement: NamedPlacement) -> NamedPlacement:
             dtensor_placement = Shard(axis_type.dim)
         else:
             raise ValueError(
-                f"Unsupported placement for axis {axis_name!r}: {axis_type!r}."
+                f"Unsupported SPMD type for axis {axis_name.value!r}: {axis_type!r}."
             )
-        # unfold DP axis
         if axis_name == MeshAxisName.DP:
             result[MeshAxisName.DP_REPLICATE] = dtensor_placement
             result[MeshAxisName.DP_SHARD] = dtensor_placement
         else:
             result[axis_name] = dtensor_placement
-    return NamedPlacement(result)
+    return result
 
 
-def placement_to_spmd_assert_type(
-    placement: NamedPlacement,
+def spmd_layout_to_assert_type(
+    layout: "SpmdLayout",
 ) -> tuple[spmd.PerMeshAxisSpmdTypes, spmd.PartitionSpec | None]:
-    """Resolve a placement to ``assert_type`` args for local SPMD typechecking.
-
-    If a ``NamedPlacement`` carries an explicit ``PartitionSpec``, shard
-    entries are omitted from the per-axis type dict. ``spmd.assert_type``
-    infers ``V`` for axes referenced by the normalized ``PartitionSpec``.
-    Singleton axes are intentionally left in the returned values:
-    ``spmd_types`` resolves names through ``current_mesh_all_names()`` and
-    drops size-1 axes during normalization.
-    """
-    if not placement.is_spmd():
-        raise ValueError(
-            "SPMD backend requires SPMD placements. "
-            f"Got DTensor placement: {placement!r}."
-        )
-    local_type = dict(placement.placements)
-    if placement.partition_spec is None:
+    """Resolve a layout to ``assert_type`` args for local SPMD typechecking."""
+    local_type = dict(layout.axis_types)
+    if layout.partition_spec is None:
         return local_type, None
-
-    partition_spec = spmd.normalize_partition_spec(
-        spmd.PartitionSpec(*placement.partition_spec)
-    )
     return {
-        axis_name: value
-        for axis_name, value in local_type.items()
-        if not isinstance(value, spmd.Shard)
-    }, partition_spec
+        axis_name: axis_type
+        for axis_name, axis_type in local_type.items()
+        if not isinstance(axis_type, spmd.Shard)
+    }, layout.partition_spec
 
 
 def annotate_input_spmd_types(
@@ -223,35 +183,34 @@ def annotate_input_spmd_types(
     Analogous to ``full_dtensor.parallelize_inputs()`` but for the
     ``spmd_types`` path.
     """
-    from torchtitan.protocols.types import MeshAxisName, NamedPlacement
+    from torchtitan.protocols.types import MeshAxisName, SpmdLayout
 
-    DP = MeshAxisName.DP
-    CP = MeshAxisName.CP
-    TP = MeshAxisName.TP
-
-    token_placement = NamedPlacement(
+    token_layout = SpmdLayout(
         {
-            DP: spmd.S(0),
-            CP: spmd.S(1),
-            TP: spmd.R,
+            MeshAxisName.DP: spmd.S(0),
+            MeshAxisName.CP: spmd.S(1),
+            MeshAxisName.TP: spmd.R,
         }
     )
-    label_placement = NamedPlacement(
+    label_layout = SpmdLayout(
         {
-            DP: spmd.S(0),
-            CP: spmd.S(1),
-            TP: spmd.I,
+            MeshAxisName.DP: spmd.S(0),
+            MeshAxisName.CP: spmd.S(1),
+            MeshAxisName.TP: spmd.I,
         }
     )
 
-    def assert_type(tensor: torch.Tensor, placement: NamedPlacement) -> None:
-        local_type, partition_spec = placement_to_spmd_assert_type(placement)
+    def assert_type(tensor: torch.Tensor, layout: SpmdLayout) -> None:
+        local_type, partition_spec = spmd_layout_to_assert_type(layout)
         spmd.assert_type(tensor, local_type, partition_spec=partition_spec)
 
-    assert_type(inputs, token_placement)
-    assert_type(labels, label_placement)
-    if "positions" in extra_kwargs and isinstance(extra_kwargs["positions"], torch.Tensor):
-        assert_type(extra_kwargs["positions"], token_placement)
+    assert_type(inputs, token_layout)
+    assert_type(labels, label_layout)
+    if "positions" in extra_kwargs and isinstance(
+        extra_kwargs["positions"], torch.Tensor
+    ):
+        assert_type(extra_kwargs["positions"], token_layout)
+
 
 def redistribute_spmd_per_axis(
     x: torch.Tensor,
@@ -282,11 +241,11 @@ def redistribute_spmd_per_axis(
 
     for axis_name, dst_t in dst_types.items():
         src_t = src_types.get(axis_name)
-        if src_t is None or src_t == dst_t or mesh_size(axis_name) == 1:
+        if src_t is None or src_t == dst_t or mesh_size(axis_name.value) == 1:
             continue
         x = spmd.redistribute(
             x,
-            mesh.get_group(axis_name),
+            mesh.get_group(axis_name.value),
             src=src_t,
             dst=dst_t,
             backward_options={"op_dtype": x.dtype},
