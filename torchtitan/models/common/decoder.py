@@ -7,7 +7,6 @@
 import dataclasses
 from dataclasses import dataclass
 
-import spmd_types as spmd
 import torch
 from torch.nn.attention.flex_attention import and_masks
 
