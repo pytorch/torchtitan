@@ -14,7 +14,7 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from spmd_types.runtime import get_partition_spec, has_local_type
+from spmd_types.runtime import has_local_type
 from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
@@ -579,35 +579,6 @@ class ChunkedCELoss(BaseLoss):
             )
         return chunk_loss
 
-    def out_typecheck(
-        self,
-        h_detached: torch.Tensor,
-        total_loss: torch.Tensor,
-        grad_buffer: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Validate loss and hidden-grad types after the local typecheck region.
-        Loss is P@data axes, I@TP. The hidden state gradient buffer inherits hidden state type.
-        """
-        mesh = current_mesh()
-        if mesh is None or not spmd.is_type_checking():
-            return total_loss, grad_buffer
-        loss_type = {
-            mesh.get_group(axis_name): spmd.P
-            for axis_name in ("dp", "cp")
-            if mesh_size(axis_name) > 1
-        }
-        if mesh_size("tp") > 1:
-            loss_type[mesh.get_group("tp")] = spmd.I
-
-        spmd.assert_type(total_loss, loss_type)
-        spmd.assert_type(
-            grad_buffer,
-            dict(spmd.get_local_type(h_detached)),
-            partition_spec=get_partition_spec(h_detached),
-        )
-        return total_loss, grad_buffer
-
     def chunked_loss_and_grad(
         self,
         hidden_states: torch.Tensor,
@@ -696,12 +667,8 @@ class ChunkedCELoss(BaseLoss):
                 lm_head.set_requires_gradient_sync(True, recurse=False)
                 lm_head.reshard()
 
-        if grad_buffer is not None:
-            total_loss, grad_buffer = self.out_typecheck(
-                h_detached,
-                total_loss,
-                grad_buffer,
-            )
+        if grad_buffer is not None and has_local_type(h_detached):
+            spmd.assert_type_like(grad_buffer, h_detached)
         return total_loss, grad_buffer
 
     def __call__(
