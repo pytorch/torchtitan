@@ -27,6 +27,11 @@ from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
 
 
+def _disable_autograd_multithreading() -> None:
+    """Run backward on the training thread instead of autograd worker threads."""
+    torch.autograd.set_multithreading_enabled(False)
+
+
 def _dist_reduce(
     x: torch.Tensor,
     reduceOp: str,
@@ -416,6 +421,9 @@ def init_distributed(
         prefix = comm_config.save_traces_file_prefix
         os.makedirs(dump_dir, exist_ok=True)
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/{prefix}")
+
+    # experimental: set to enable TLS DeviceMesh stack for spmd_types backend
+    _disable_autograd_multithreading()
 
     device_id: torch.device | None = None
     if comm_config.mode == "torchcomms":
