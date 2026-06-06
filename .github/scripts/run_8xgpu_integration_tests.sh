@@ -5,10 +5,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# Shared setup + run for the H100 integration test suite. Both the CUDA
-# (integration_test_8gpu_h100.yaml, linux_job_v3) and ROCm
-# (integration_test_8gpu_rocm.yaml, linux_job_v2) workflows call this; the only
-# arch-specific step is the ROCm HIPBLASLT export below, a no-op on CUDA.
+# Shared setup + run for the H100 integration test suite. Both jobs in
+# integration_test_8gpu_h100.yaml call this -- the CUDA build-test on
+# linux_job_v3 and the ROCm build-test-rocm on linux_job_v2 -- with GPU_ARCH_TYPE
+# set accordingly. The only arch-specific step is the ROCm HIPBLASLT export
+# below, a no-op on CUDA.
 #
 # The calling workflow passes the matrix values as env vars:
 #   INDEX_URL      torch/torchao --index-url (required)
