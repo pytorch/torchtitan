@@ -18,7 +18,7 @@ from torch.distributed.tensor.placement_types import Placement
 from torchtitan.config import Configurable
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
-from torchtitan.protocols.types import NamedPlacement
+from torchtitan.protocols.types import SpmdLayout
 
 
 class Module(nn.Module, Configurable):
@@ -310,7 +310,7 @@ class Module(nn.Module, Configurable):
         ``_redistribute_inputs`` uses to pre-align inputs); output placements
         from ``out_src_shardings``; only ``in_grad_placements`` lives on
         ``LocalMapConfig``. ``local_map`` takes a single ``device_mesh``, so
-        all NamedPlacements must resolve to the same mesh.
+        all SpmdLayouts must resolve to the same mesh.
         """
         sharding_config = self._sharding_config
         assert sharding_config is not None
@@ -327,7 +327,7 @@ class Module(nn.Module, Configurable):
                 "out_src_shardings is None."
             )
         if isinstance(out_src, tuple):
-            out_src_list: list[NamedPlacement] = [p for p in out_src if p is not None]
+            out_src_list: list[SpmdLayout] = [p for p in out_src if p is not None]
         else:
             out_src_list = [out_src]
 
@@ -337,11 +337,11 @@ class Module(nn.Module, Configurable):
                 f"{type(self).__name__}: local_map is set but in_dst_shardings "
                 f"is missing entries for: {missing_in}"
             )
-        in_named: list[NamedPlacement] = [in_dst[name] for name in pos_args]
-        out_named: list[NamedPlacement] = out_src_list
+        in_named: list[SpmdLayout] = [in_dst[name] for name in pos_args]
+        out_named: list[SpmdLayout] = out_src_list
         # in_grad_placements may contain None for non-tensor args; filter
         # them out for mesh resolution -- local_map passes None through.
-        grad_named: list[NamedPlacement | None] = list(lm.in_grad_placements)
+        grad_named: list[SpmdLayout | None] = list(lm.in_grad_placements)
 
         resolved_mesh = parallel_dims.resolve_shared_mesh(
             in_named + out_named + grad_named
@@ -372,7 +372,7 @@ class Module(nn.Module, Configurable):
         """Redistribute inputs to desired placements.
 
         Per input present in ``in_src_shardings`` / ``in_dst_shardings``:
-        resolve a mesh from that input's NamedPlacements, then:
+        resolve a mesh from that input's SpmdLayouts, then:
         1. If plain tensor and ``in_src_shardings`` declared, wrap as
            DTensor via ``DTensor.from_local`` on that mesh.
         2. If ``in_dst_shardings`` declared, redistribute on the same mesh.
