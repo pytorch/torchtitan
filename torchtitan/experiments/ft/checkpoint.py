@@ -173,7 +173,7 @@ class FTCheckpointManager(CheckpointManager):
             states.pop(DATALOADER, None)
         return states
 
-    def _async_wait(self) -> None:
+    def maybe_wait_for_saving(self) -> None:
         # _ft_save() always uses AsyncMode.ASYNC (regardless of self.async_mode),
         # so save_future can exist even when self.async_mode is DISABLED. The base
         # class would incorrectly raise in that case, so we override to handle it.
@@ -198,7 +198,7 @@ class FTCheckpointManager(CheckpointManager):
 
     def _ft_save(self, step: int) -> None:
         begin = time.monotonic()
-        self._async_wait()
+        self.maybe_wait_for_saving()
         checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
         self.save_future = self.dcp_save(
             self.ft_states, checkpoint_id=checkpoint_id, async_mode=AsyncMode.ASYNC
