@@ -25,9 +25,6 @@ on:
       matrix:
         description: dynamically set matrix, narrowed to the gpu-arch input (both CUDA and ROCm when 'all')
         value: ${{ jobs.set.outputs.matrix }}
-      has-entries:
-        description: Whether matrix has at least one entry ('true' or 'false'); gate the build job on this
-        value: ${{ jobs.set.outputs.has-entries }}
       docker-hash:
         description: Git tree hash of .ci/docker, used to build the OSDC image tag
         value: ${{ jobs.set.outputs.docker-hash }}
@@ -38,7 +35,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
-      has-entries: ${{ steps.set.outputs.has-entries }}
       docker-hash: ${{ steps.set.outputs.docker-hash }}
     env:
       # Event flags evaluated by github actions before the step runs:
@@ -153,4 +149,3 @@ jobs:
             cat matrix.json
             echo 'EOF'
           } >> $GITHUB_OUTPUT
-          echo "has-entries=$(jq -c '.include | length > 0' matrix.json)" >> "$GITHUB_OUTPUT"

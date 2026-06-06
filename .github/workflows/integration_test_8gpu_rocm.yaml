@@ -41,7 +41,6 @@ jobs:
   # which fails the ROCm pull with "no basic auth credentials").
   build-test:
     needs: set-matrix
-    if: needs.set-matrix.outputs.has-entries == 'true'
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false

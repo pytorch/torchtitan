@@ -40,7 +40,6 @@ jobs:
   # Step 2: H100 CUDA runner uses linux_job_v3.
   build-test:
     needs: set-matrix
-    if: needs.set-matrix.outputs.has-entries == 'true'
     uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
     strategy:
       fail-fast: false
