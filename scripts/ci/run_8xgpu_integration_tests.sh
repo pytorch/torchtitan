@@ -55,10 +55,21 @@ fi
 
 USE_CPP=0 PIP_EXTRA_INDEX_URL= python -m pip install --pre torchao --index-url "${INDEX_URL}"
 
-mkdir -p "${ARTIFACTS}"
+# RUNNER_TEMP is owned by the host uid. The v2 ROCm runner's container user
+# can't write it, so create + chown via sudo (as the other ROCm workflows do);
+# the v3 CUDA runner can create it directly.
+if [[ "${GPU_ARCH_TYPE}" == "rocm" ]]; then
+  sudo mkdir -p "${ARTIFACTS}"
+  sudo chown -R "$(id -u):$(id -g)" "${ARTIFACTS}"
+else
+  mkdir -p "${ARTIFACTS}"
+fi
 
-# Install DeepEP for HybridEP integration test
-bash /install_deepep.sh
+# Install DeepEP for the HybridEP integration test. DeepEP (NVSHMEM) is
+# CUDA-only, so skip it on ROCm.
+if [[ "${GPU_ARCH_TYPE}" != "rocm" ]]; then
+  bash /install_deepep.sh
+fi
 
 # Enable CPP stacktraces for debugging symmetric memory initialization errors.
 # Disable Nvlink Sharp. The CI machine seems to be unstable state to support
