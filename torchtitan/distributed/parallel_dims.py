@@ -189,14 +189,14 @@ class ParallelDims:
             (self.pp, batch, self.cp, self.tp),
         )
         loss_mesh = dataloading_mesh["batch", "cp"]._flatten("loss_mesh")
-        spmd_dense_mesh = None
+        spmd_dense_mesh_for_fwdbwd = None
         if self.spmd_backend == "full_dtensor":
             # Under full_dtensor, ``dp_shard`` and ``cp`` cannot be folded
             # together: activations carry a ``cp`` dimension, so parameters
             # need a ``cp`` axis as well. ``fully_shard`` folds ``dp_shard``
             # and ``cp`` internally at initialization time.
             candidate_spmd_dense_axes = ["dp_replicate", "dp_shard", "cp", "tp"]
-            full_dense_mesh = unflatten_mesh(
+            full_dense_mesh_for_fsdp = unflatten_mesh(
                 self._world_mesh,
                 tuple(["pp"] + candidate_spmd_dense_axes),
                 (self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp),
@@ -204,15 +204,18 @@ class ParallelDims:
         elif self.spmd_backend == "spmd_types":
             # Two mesh views over the same devices:
             #
-            # full_dense_mesh (dp_replicate, dp_shard, cp, tp) -- passed to
+            # full_dense_mesh_for_fsdp (dp_replicate, dp_shard, cp, tp) -- passed to
             #   fully_shard() so FSDP can shard parameters along dp_shard.
             #   The SPMD type system never sees these axes, but they are passed
             #   to fully_shard() via DataParallelMeshDims to specify shard/replicate axes.
             #
-            # spmd_dense_mesh (dp, cp, tp) -- the mesh the SPMD type system uses for typechecking.
+            # spmd_dense_mesh_for_fwdbwd (dp, cp, tp) -- the mesh the SPMD type
+            # system uses for forward/backward typechecking.
             # dp folds dp_replicate * dp_shard into one logical axis.
+            # TODO(pianpwk): Clean up mesh construction once SPMD no longer
+            # shares codepaths with DTensor/default backends.
             candidate_spmd_dense_axes = ["dp", "cp", "tp"]
-            full_dense_mesh = unflatten_mesh(
+            full_dense_mesh_for_fsdp = unflatten_mesh(
                 self._world_mesh,
                 ("pp", "dp_replicate", "dp_shard", "cp", "tp"),
                 (self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp),
@@ -222,11 +225,11 @@ class ParallelDims:
                 tuple(["pp"] + candidate_spmd_dense_axes),
                 (self.pp, batch, self.cp, self.tp),
             )
-            spmd_dense_mesh = spmd_dense_parent_mesh["dp", "cp", "tp"]
+            spmd_dense_mesh_for_fwdbwd = spmd_dense_parent_mesh["dp", "cp", "tp"]
         else:
             # Legacy path folds ``dp_shard`` and ``cp`` into ``fsdp``.
             candidate_spmd_dense_axes = ["dp_replicate", "fsdp", "tp"]
-            full_dense_mesh = unflatten_mesh(
+            full_dense_mesh_for_fsdp = unflatten_mesh(
                 self._world_mesh,
                 ("pp", "dp_replicate", "fsdp", "tp"),
                 (self.pp, self.dp_replicate, fsdp, self.tp),
@@ -241,29 +244,33 @@ class ParallelDims:
         self._global_meshes = {
             "dataloading": dataloading_mesh,
             "loss": loss_mesh,
-            "dense": full_dense_mesh,
+            "dense": full_dense_mesh_for_fsdp,
             "sparse": full_sparse_mesh,
         }
-        if spmd_dense_mesh is not None:
-            self._global_meshes["spmd_dense"] = spmd_dense_mesh
+        if spmd_dense_mesh_for_fwdbwd is not None:
+            self._global_meshes["spmd_dense_for_fwdbwd"] = spmd_dense_mesh_for_fwdbwd
         self._single_axis_meshes = {
             "pp": dataloading_mesh["pp"],
             "batch": dataloading_mesh["batch"],
             "loss": loss_mesh,
-            "dp_replicate": full_dense_mesh["dp_replicate"],
+            "dp_replicate": full_dense_mesh_for_fsdp["dp_replicate"],
             "cp": dataloading_mesh["cp"],
             "tp": dataloading_mesh["tp"],
             "ep": full_sparse_mesh["ep"],
             "efsdp": full_sparse_mesh["efsdp"],
         }
         if self.spmd_backend == "full_dtensor":
-            self._single_axis_meshes["dp_shard"] = full_dense_mesh["dp_shard"]
+            self._single_axis_meshes["dp_shard"] = full_dense_mesh_for_fsdp[
+                "dp_shard"
+            ]
         elif self.spmd_backend == "spmd_types":
-            assert spmd_dense_mesh is not None
-            self._single_axis_meshes["dp"] = spmd_dense_mesh["dp"]
-            self._single_axis_meshes["dp_shard"] = full_dense_mesh["dp_shard"]
+            assert spmd_dense_mesh_for_fwdbwd is not None
+            self._single_axis_meshes["dp"] = spmd_dense_mesh_for_fwdbwd["dp"]
+            self._single_axis_meshes["dp_shard"] = full_dense_mesh_for_fsdp[
+                "dp_shard"
+            ]
         else:
-            self._single_axis_meshes["fsdp"] = full_dense_mesh["fsdp"]
+            self._single_axis_meshes["fsdp"] = full_dense_mesh_for_fsdp["fsdp"]
 
         self._validate_meshes()
 
