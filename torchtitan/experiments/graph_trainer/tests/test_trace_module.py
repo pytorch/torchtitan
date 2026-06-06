@@ -16,7 +16,6 @@ from torch.testing._internal.common_fsdp import FSDPTest
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedCELossWithParamGrads,
 )
-
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
@@ -1250,7 +1249,7 @@ class TestTraceModels(unittest.TestCase):
             get_document_mask_mod,
         )
         from torchtitan.models.common.nn_modules import Linear, RMSNorm
-        from torchtitan.models.common.rope import RoPE
+        from torchtitan.models.common.rope import ComplexRoPE
         from torchtitan.models.deepseek_v3.model import Attention as DSAttention
 
         dim = 64
@@ -1277,6 +1276,11 @@ class TestTraceModels(unittest.TestCase):
                         qk_nope_head_dim=qk_nope_head_dim,
                         qk_rope_head_dim=rope_dim,
                         v_head_dim=v_head_dim,
+                        rope=ComplexRoPE.Config(
+                            dim=rope_dim,
+                            max_seq_len=seq_len,
+                            scaling="none",
+                        ),
                         q_norm=RMSNorm.Config(normalized_shape=1),
                         kv_norm=RMSNorm.Config(normalized_shape=kv_lora_rank),
                         inner_attention=FlexAttention.Config(),
@@ -1299,24 +1303,16 @@ class TestTraceModels(unittest.TestCase):
                         ),
                     ),
                 )
-                self.rope = RoPE(
-                    RoPE.Config(
-                        dim=rope_dim,
-                        max_seq_len=seq_len,
-                        backend="complex",
-                        scaling="none",
-                    )
-                )
                 self.proj = nn.Linear(dim, vocab_size)
 
             def init_states(self, buffer_device=None):
-                self.rope._init_self_buffers(
+                self.attn.rope._init_self_buffers(
                     buffer_device=buffer_device or torch.device("cuda")
                 )
 
             def forward(self, tokens, block_mask):
                 x = self.embed(tokens)
-                x = self.attn(x, self.rope.cache, block_mask)
+                x = self.attn(x, block_mask)
                 return self.proj(x)
 
         model = TinyFlexMLA().to(device=self.DEVICE, dtype=self.DTYPE)

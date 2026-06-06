@@ -456,7 +456,7 @@ class PolicyTrainer(Actor, Configurable):
     async def optim_step(self) -> OptimStepOutput:
         """Clip gradients, step optimizer + LR scheduler, return updated state."""
         # TODO: Accept optional optimizer params (e.g. learning rate)
-        # to allow controller-owned schedules (see Tinker API).
+        # to allow controller-owned schedules.
 
         # capture LR before step
         current_lrs = self.lr_schedulers.schedulers[0].get_last_lr()

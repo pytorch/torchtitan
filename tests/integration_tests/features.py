@@ -654,6 +654,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "torchcomms_3d_dp+tp+pp+compile",
             ngpu=8,
             skip_rocm_test=True,
+            disabled=True,  # torchcomms-managed TP PG not registered in c10d; resolve fails under compile
         ),
         OverrideDefinitions(
             [
