@@ -17,7 +17,7 @@ from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 
 if TYPE_CHECKING:
-    from torchtitan.protocols.types import MeshAxisName, NamedPlacement
+    from torchtitan.protocols.types import MeshAxisName, SpmdLayout
 
 
 __all__ = ["ParallelDims"]
@@ -457,9 +457,9 @@ class ParallelDims:
         return mesh
 
     def resolve_shared_mesh(
-        self, placements: Iterable["NamedPlacement | None"]
+        self, placements: Iterable["SpmdLayout | None"]
     ) -> DeviceMesh | None:
-        """Resolve the mesh shared by a list of NamedPlacements.
+        """Resolve the mesh shared by a list of SpmdLayouts.
 
         All non-``None`` entries must reference the same axis keys (placement
         values may differ -- "redistribute on the same mesh" is exactly the
