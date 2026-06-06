@@ -43,6 +43,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_trace
 from torchtitan.experiments.graph_trainer.memory_policy import (
     _make_default_memory_policy,
     _make_full_memory_policy,
+    _make_none_memory_policy,
     tag_sac_policy,
 )
 from torchtitan.experiments.graph_trainer.passes import selective_activation_remat_pass
@@ -748,6 +749,52 @@ class TestFullMemoryPolicy(TestCase):
                 CheckpointPolicy.MUST_RECOMPUTE,
                 f"node {node.name} in single layer should be MUST_RECOMPUTE",
             )
+
+
+class TestNoneMemoryPolicy(TestCase):
+    """Unit tests for the no-recompute memory policy."""
+
+    def _build_gm(self, op_targets):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        y = graph.placeholder("y")
+        last = x
+        for target in op_targets:
+            last = graph.call_function(target, args=(last, y))
+        graph.output(last)
+        return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    def _get_call_function_nodes(self, gm):
+        return [n for n in gm.graph.nodes if n.op == "call_function"]
+
+    def test_all_ops_marked_must_save(self):
+        gm = self._build_gm(
+            [
+                torch.ops.aten.mm.default,
+                torch.ops.aten.add.Tensor,
+                torch.ops.aten.relu.default,
+            ]
+        )
+        tag_sac_policy(gm, policy_fn=_make_none_memory_policy())
+
+        for node in self._get_call_function_nodes(gm):
+            self.assertEqual(
+                node.meta["recompute"],
+                CheckpointPolicy.MUST_SAVE,
+                f"node {node.name} should be MUST_SAVE",
+            )
+
+    def test_rng_and_higher_order_ops_marked_must_save(self):
+        policy_fn = _make_none_memory_policy()
+        gm = self._build_gm(
+            [
+                torch.ops.aten.native_dropout.default,
+                torch.ops.higher_order.flex_attention,
+            ]
+        )
+
+        for node in self._get_call_function_nodes(gm):
+            self.assertEqual(policy_fn(node), CheckpointPolicy.MUST_SAVE)
 
 
 class TestBucketingPrefetchOrder(FSDPTest):
