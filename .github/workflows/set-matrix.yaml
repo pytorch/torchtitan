@@ -11,11 +11,6 @@ on:
         description: 'Override default (linux.g5.48xlarge.nvidia.gpu) CUDA runner label'
         required: false
         type: string
-      cuda-linux-job-v3:
-        description: 'Run the CUDA matrix entry on linux_job_v3 instead of the default linux_job_v2 (used by H100 workflows). ROCm always stays on linux_job_v2.'
-        required: false
-        type: boolean
-        default: false
       is-experimental:
         description: 'Check if the workflow is experimental'
         required: false
@@ -23,20 +18,20 @@ on:
         default: false
     outputs:
       matrix:
-        description: dynamically set matrix (all entries, regardless of reusable workflow version)
+        description: dynamically set matrix (all included entries, both CUDA and ROCm)
         value: ${{ jobs.set.outputs.matrix }}
-      matrix-v2:
-        description: Matrix entries to run on linux_job_v2 (the default; always includes ROCm)
-        value: ${{ jobs.set.outputs.matrix-v2 }}
-      matrix-v3:
-        description: Matrix entries to run on linux_job_v3 (the CUDA entry when cuda-linux-job-v3 is true)
-        value: ${{ jobs.set.outputs.matrix-v3 }}
-      has-v2:
-        description: Whether matrix-v2 has at least one entry ('true' or 'false')
-        value: ${{ jobs.set.outputs.has-v2 }}
-      has-v3:
-        description: Whether matrix-v3 has at least one entry ('true' or 'false')
-        value: ${{ jobs.set.outputs.has-v3 }}
+      matrix-cuda:
+        description: The CUDA-only subset of matrix (empty when CUDA is not included for this trigger)
+        value: ${{ jobs.set.outputs.matrix-cuda }}
+      matrix-rocm:
+        description: The ROCm-only subset of matrix (empty when ROCm is not included for this trigger)
+        value: ${{ jobs.set.outputs.matrix-rocm }}
+      has-cuda:
+        description: Whether matrix-cuda has at least one entry ('true' or 'false')
+        value: ${{ jobs.set.outputs.has-cuda }}
+      has-rocm:
+        description: Whether matrix-rocm has at least one entry ('true' or 'false')
+        value: ${{ jobs.set.outputs.has-rocm }}
       docker-hash:
         description: Git tree hash of .ci/docker, used to build the OSDC image tag
         value: ${{ jobs.set.outputs.docker-hash }}
@@ -47,10 +42,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
-      matrix-v2: ${{ steps.set.outputs.matrix-v2 }}
-      matrix-v3: ${{ steps.set.outputs.matrix-v3 }}
-      has-v2: ${{ steps.set.outputs.has-v2 }}
-      has-v3: ${{ steps.set.outputs.has-v3 }}
+      matrix-cuda: ${{ steps.set.outputs.matrix-cuda }}
+      matrix-rocm: ${{ steps.set.outputs.matrix-rocm }}
+      has-cuda: ${{ steps.set.outputs.has-cuda }}
+      has-rocm: ${{ steps.set.outputs.has-rocm }}
       docker-hash: ${{ steps.set.outputs.docker-hash }}
     env:
       # Event flags evaluated by github actions before the step runs:
@@ -140,20 +135,13 @@ jobs:
           JSON
           fi
 
-          # Pick the reusable workflow for each entry. linux_job_v2 is the
-          # default. The CUDA entry moves to linux_job_v3 when the caller opts
-          # in (H100 workflows). ROCm always stays on v2 because v3 does not
-          # authenticate ROCm runners to the private ECR (the image pull fails
-          # with "no basic auth credentials").
-          USE_V3="${{ inputs.cuda-linux-job-v3 }}"
-          USE_V3="${USE_V3:-false}"
-          if [[ "$USE_V3" == "true" ]]; then
-            MATRIX_V3=$(jq -c '{include: [.include[] | select(.["gpu-arch-type"] == "cuda")]}' matrix.json)
-            MATRIX_V2=$(jq -c '{include: [.include[] | select(.["gpu-arch-type"] != "cuda")]}' matrix.json)
-          else
-            MATRIX_V3='{"include":[]}'
-            MATRIX_V2=$(jq -c '.' matrix.json)
-          fi
+          # Split the matrix by GPU arch so each workflow can pick its own
+          # reusable workflow: the H100 CUDA workflow runs on linux_job_v3,
+          # while the ROCm workflow runs on linux_job_v2. ROCm must stay on v2
+          # because v3 does not authenticate ROCm runners to the private ECR
+          # (the image pull fails with "no basic auth credentials").
+          MATRIX_CUDA=$(jq -c '{include: [.include[] | select(.["gpu-arch-type"] == "cuda")]}' matrix.json)
+          MATRIX_ROCM=$(jq -c '{include: [.include[] | select(.["gpu-arch-type"] == "rocm")]}' matrix.json)
 
           # Export matrix to job outputs
           {
@@ -161,7 +149,7 @@ jobs:
             cat matrix.json
             echo 'EOF'
           } >> $GITHUB_OUTPUT
-          echo "matrix-v2=${MATRIX_V2}" >> "$GITHUB_OUTPUT"
-          echo "matrix-v3=${MATRIX_V3}" >> "$GITHUB_OUTPUT"
-          echo "has-v2=$(echo "$MATRIX_V2" | jq -c '.include | length > 0')" >> "$GITHUB_OUTPUT"
-          echo "has-v3=$(echo "$MATRIX_V3" | jq -c '.include | length > 0')" >> "$GITHUB_OUTPUT"
+          echo "matrix-cuda=${MATRIX_CUDA}" >> "$GITHUB_OUTPUT"
+          echo "matrix-rocm=${MATRIX_ROCM}" >> "$GITHUB_OUTPUT"
+          echo "has-cuda=$(echo "$MATRIX_CUDA" | jq -c '.include | length > 0')" >> "$GITHUB_OUTPUT"
+          echo "has-rocm=$(echo "$MATRIX_ROCM" | jq -c '.include | length > 0')" >> "$GITHUB_OUTPUT"

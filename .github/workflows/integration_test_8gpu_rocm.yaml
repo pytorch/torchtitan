@@ -1,4 +1,4 @@
-name: 8 GPU Integration Test on H100
+name: 8 GPU Integration Test on ROCm
 
 on:
   push:
@@ -28,28 +28,27 @@ permissions:
 
 jobs:
   # Step 1: Dynamically compute the matrix based on conditions. This workflow
-  # only runs the CUDA (H100) entry; the ROCm entry of the same test suite runs
-  # in integration_test_8gpu_rocm.yaml on linux_job_v2.
+  # only runs the ROCm entry; the CUDA (H100) entry of the same test suite runs
+  # in integration_test_8gpu_h100.yaml on linux_job_v3.
   set-matrix:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8')
     uses: ./.github/workflows/set-matrix.yaml
-    with:
-      runner-cuda: mt-l-bx86iamx-176-1800-h100-8
 
-  # Step 2: H100 CUDA runner uses linux_job_v3.
+  # Step 2: ROCm runner uses linux_job_v2. The bare image name lets v2 resolve
+  # and authenticate against the private ECR (unlike the full path used by v3,
+  # which fails the ROCm pull with "no basic auth credentials").
   build-test:
     needs: set-matrix
-    if: needs.set-matrix.outputs.has-cuda == 'true'
-    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
+    if: needs.set-matrix.outputs.has-rocm == 'true'
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix-cuda) }}
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix-rocm) }}
     with:
       runner: ${{ matrix.runner }}
       gpu-arch-type: ${{ matrix.gpu-arch-type }}
       gpu-arch-version: ${{ matrix.gpu-arch-version }}
-      # Private-ECR image, tagged with the .ci/docker hash from set-matrix.yaml.
-      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.docker-image }}:${{ needs.set-matrix.outputs.docker-hash }}
+      docker-image: ${{ matrix.docker-image }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
       timeout: 45
@@ -75,6 +74,11 @@ jobs:
         python -m pip install filelock typing-extensions "setuptools<82" sympy networkx jinja2 fsspec numpy
         # Clear PIP_EXTRA_INDEX_URL so the default cpu index can't supply a +cpu torch.
         PIP_EXTRA_INDEX_URL= python -m pip install --force-reinstall --pre "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
+
+        if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
+          export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
+          echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
+        fi
 
         USE_CPP=0 PIP_EXTRA_INDEX_URL= python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
