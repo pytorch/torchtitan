@@ -14,7 +14,7 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from spmd_types.runtime import has_local_type
+from spmd_types.runtime import get_partition_spec, has_local_type
 from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
@@ -667,8 +667,12 @@ class ChunkedCELoss(BaseLoss):
                 lm_head.set_requires_gradient_sync(True, recurse=False)
                 lm_head.reshard()
 
-        if grad_buffer is not None and has_local_type(h_detached):
-            spmd.assert_type_like(grad_buffer, h_detached)
+        if grad_buffer is not None:
+            spmd.assert_type(
+                grad_buffer,
+                dict(spmd.get_local_type(h_detached)),
+                partition_spec=get_partition_spec(h_detached),
+            )
         return total_loss, grad_buffer
 
     def __call__(
