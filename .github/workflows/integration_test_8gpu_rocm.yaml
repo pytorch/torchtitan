@@ -75,7 +75,7 @@ jobs:
         # Pre-install torch's pure-python deps from the in-cluster pypi-cache for speed.
         python -m pip install filelock typing-extensions "setuptools<82" sympy networkx jinja2 fsspec numpy
         # Clear PIP_EXTRA_INDEX_URL so the default cpu index can't supply a +cpu torch.
-        PIP_EXTRA_INDEX_URL= python -m pip install --force-reinstall --pre "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
+        PIP_EXTRA_INDEX_URL= python -m pip install --pre "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
 
         if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
           export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
