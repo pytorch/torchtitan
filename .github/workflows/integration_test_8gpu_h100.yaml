@@ -27,9 +27,7 @@ permissions:
   contents: read
 
 jobs:
-  # Step 1: Dynamically compute the matrix based on conditions. This workflow
-  # only runs the CUDA (H100) entry; the ROCm entry of the same test suite runs
-  # in integration_test_8gpu_rocm.yaml on linux_job_v2.
+  # CUDA: run the suite on an H100 runner via linux_job_v3.
   set-matrix:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8')
     uses: ./.github/workflows/set-matrix.yaml
@@ -37,7 +35,6 @@ jobs:
       runner-cuda: mt-l-bx86iamx-176-1800-h100-8
       gpu-arch: cuda
 
-  # Step 2: H100 CUDA runner uses linux_job_v3.
   build-test:
     needs: set-matrix
     uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
@@ -50,6 +47,36 @@ jobs:
       gpu-arch-version: ${{ matrix.gpu-arch-version }}
       # Private-ECR image, tagged with the .ci/docker hash from set-matrix.yaml.
       docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.docker-image }}:${{ needs.set-matrix.outputs.docker-hash }}
+      repository: pytorch/torchtitan
+      upload-artifact: outputs
+      timeout: 45
+      script: |
+        TORCH_VERSION="${{ matrix.torch-version }}" \
+        INDEX_URL="${{ matrix.index-url }}" \
+        GPU_ARCH_TYPE="${{ matrix.gpu-arch-type }}" \
+        bash .github/scripts/run_8xgpu_integration_tests.sh
+
+  # ROCm: run the same suite on a ROCm runner via linux_job_v2. v2 is required
+  # because linux_job_v3 does not authenticate ROCm runners to the private ECR
+  # (the pull fails with "no basic auth credentials"); the bare image name lets
+  # v2 resolve and authenticate against ECR.
+  set-matrix-rocm:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8')
+    uses: ./.github/workflows/set-matrix.yaml
+    with:
+      gpu-arch: rocm
+
+  build-test-rocm:
+    needs: set-matrix-rocm
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix-rocm.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: ${{ matrix.docker-image }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
       timeout: 45
