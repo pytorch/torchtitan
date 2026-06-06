@@ -15,7 +15,6 @@ from enum import Enum
 from typing import Any
 
 import spmd_types as spmd
-from torch.distributed.tensor import Placement
 
 
 class StrEnum(str, Enum):
@@ -49,43 +48,55 @@ class MeshAxisName(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class NamedPlacement:
-    """Placement annotations keyed by logical mesh axis name.
+class SpmdLayout:
+    """Temporary SPMD layout annotations keyed by logical mesh axis name.
 
-    ``placements`` may contain DTensor ``Placement`` values or local-SPMD
-    per-axis types. ``partition_spec`` is only used by local-SPMD typechecking
-    to disambiguate multi-axis sharding of one tensor dimension.
+    TODO(pianpwk): Replace this with ``spmd_types.SpmdLayout`` once that API is
+    available in TorchTitan's minimum ``spmd_types`` version.
     """
 
-    placements: dict[MeshAxisName, Placement | spmd.PerMeshAxisSpmdType]
+    axis_types: dict[MeshAxisName, spmd.PerMeshAxisSpmdType]
     partition_spec: spmd.PartitionSpec | tuple[Any, ...] | None = None
 
     def __post_init__(self) -> None:
-        if not self.placements:
-            raise ValueError("NamedPlacement requires at least one mesh axis.")
+        if not self.axis_types:
+            raise ValueError("SpmdLayout requires at least one mesh axis.")
         if self.partition_spec is not None and not isinstance(
             self.partition_spec, tuple
         ):
             raise TypeError(
-                f"Expected partition_spec to be a tuple, got "
-                f"{self.partition_spec!r}."
+                f"Expected partition_spec to be a tuple, got {self.partition_spec!r}."
             )
-        for axis_name, axis_type in self.placements.items():
+        for axis_name, axis_type in self.axis_types.items():
             if not isinstance(axis_name, MeshAxisName):
                 raise TypeError(f"Expected MeshAxisName key, got {axis_name!r}.")
-            if not isinstance(axis_type, Placement) and not isinstance(
-                axis_type, spmd.PerMeshAxisSpmdType
-            ):
+            if not isinstance(axis_type, spmd.PerMeshAxisSpmdType):
                 raise TypeError(
-                    f"Expected DTensor Placement or SPMD axis type for "
+                    f"Expected SPMD axis type for "
                     f"{axis_name.value!r}, got {axis_type!r}."
                 )
 
     def axes(self) -> tuple[MeshAxisName, ...]:
-        return tuple(self.placements)
+        return tuple(self.axis_types)
 
-    def is_spmd(self) -> bool:
-        return all(
-            isinstance(axis_type, spmd.PerMeshAxisSpmdType)
-            for axis_type in self.placements.values()
-        )
+    def shard_types(self) -> dict[MeshAxisName, spmd.PerMeshAxisSpmdType]:
+        """Return per-axis types with PartitionSpec sharding represented as S(i).
+
+        This manually handles ``MeshAxisName`` because
+        ``partition_spec_to_shard_types`` expects resolved ``MeshAxis`` values
+        and treats ``MeshAxisName`` as unresolved string axes.
+        """
+        result = dict(self.axis_types)
+        if self.partition_spec is not None:
+            for dim, entry in enumerate(self.partition_spec):
+                if entry is None:
+                    continue
+                axes = entry if isinstance(entry, tuple) else (entry,)
+                for axis_name in axes:
+                    if not isinstance(axis_name, MeshAxisName):
+                        raise TypeError(
+                            f"Expected MeshAxisName in partition_spec, "
+                            f"got {axis_name!r}."
+                        )
+                    result[axis_name] = spmd.S(dim)
+        return result

@@ -49,12 +49,12 @@ from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
-    placement_to_spmd_assert_type,
     preserve_buffers_spmd,
     set_current_spmd_mesh,
     set_spmd_backend,
+    spmd_layout_to_assert_type,
 )
-from torchtitan.protocols.types import MeshAxisName, NamedPlacement
+from torchtitan.protocols.types import MeshAxisName, SpmdLayout
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
@@ -203,9 +203,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         torch._C._log_api_usage_once("torchtitan.train")
 
         self.config = config
-        assert (
-            config.model_spec is not None
-        ), "model_spec must be set before creating Trainer"
+        assert config.model_spec is not None, (
+            "model_spec must be set before creating Trainer"
+        )
         model_spec = config.model_spec
 
         device_module, device_type = utils.device_module, utils.device_type
@@ -363,9 +363,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         with torch.no_grad():
                             # TODO: Change this back to init_weights once
                             # autoparallel contains the wrap_init_states
-                            cast(BaseModel, m).init_weights(
-                                buffer_device=buffer_device
-                            )
+                            cast(BaseModel, m).init_weights(buffer_device=buffer_device)
                     m.train()
 
                 # confirm that user will be able to view loss metrics on the console
@@ -409,23 +407,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             if parallel_dims.pp_enabled:
                 if self.pp_has_last_stage:
                     lm_head = self.model_parts[-1].lm_head
-                    assert (
-                        lm_head is not None
-                    ), "Last PP stage must have lm_head for ChunkedCELoss"
+                    assert lm_head is not None, (
+                        "Last PP stage must have lm_head for ChunkedCELoss"
+                    )
                     self.loss_fn.set_lm_head(
                         lm_head  # pyrefly: ignore[bad-argument-type]
                     )
-                    self.model_parts[
-                        -1
-                    ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+                    self.model_parts[-1]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
             else:
                 assert len(self.model_parts) == 1
                 lm_head = self.model_parts[0].lm_head
                 assert lm_head is not None, "Model must have lm_head for ChunkedCELoss"
                 self.loss_fn.set_lm_head(lm_head)  # pyrefly: ignore[bad-argument-type]
-                self.model_parts[
-                    0
-                ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+                self.model_parts[0]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -631,9 +625,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             inner_attention = attn_config.inner_attention
 
             if attn_config.mask_type == "block_causal":
-                assert (
-                    positions is not None
-                ), "block_causal mask requires per-document positions from the dataloader"
+                assert positions is not None, (
+                    "block_causal mask requires per-document positions from the dataloader"
+                )
             else:
                 positions = torch.arange(
                     inputs.shape[1], dtype=torch.int32, device=inputs.device
@@ -770,9 +764,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         local_valid_tokens = local_valid_tokens.to(self.device)
 
         spmd_mesh_context = (
-            set_current_spmd_mesh(
-                self.parallel_dims._global_meshes["spmd_dense"]
-            )
+            set_current_spmd_mesh(self.parallel_dims._global_meshes["spmd_dense"])
             if self.config.parallelism.spmd_backend == "spmd_types"
             else contextlib.nullcontext()
         )
@@ -794,8 +786,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dtype=torch.float,
                         device=self.device,
                     )
-                local_type, partition_spec = placement_to_spmd_assert_type(
-                    NamedPlacement(
+                local_type, partition_spec = spmd_layout_to_assert_type(
+                    SpmdLayout(
                         {
                             MeshAxisName.DP: spmd.R,
                             MeshAxisName.CP: spmd.R,
