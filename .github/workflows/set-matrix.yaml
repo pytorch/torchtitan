@@ -66,8 +66,11 @@ jobs:
           ROCM_RUNNER="${ROCM_RUNNER_INPUT:-$DEFAULT_ROCM_RUNNER}"
           CUDA_RUNNER="${CUDA_RUNNER_INPUT:-$DEFAULT_CUDA_RUNNER}"
 
-          # Define ROCm matrix
-          ROCM_MATRIX="$(cat <<EOF
+          # Define ROCm matrix (empty for experimental workflows)
+          if [[ "${{ inputs.is-experimental }}" == "true" ]]; then
+            ROCM_MATRIX=""
+          else
+            ROCM_MATRIX="$(cat <<EOF
           {
             "name": "rocm",
             "runner": "${ROCM_RUNNER}",
@@ -79,6 +82,7 @@ jobs:
           }
           EOF
           )"
+          fi
 
           # Define CUDA matrix
           CUDA_MATRIX="$(cat <<EOF
@@ -100,44 +104,44 @@ jobs:
           IS_8GPU_TAG="${IS_8GPU_TAG:-false}"
           TRIGGERED_8GPU_LABEL="${TRIGGERED_8GPU_LABEL:-false}"
 
-          # Decide which arches are eligible for this triggering event:
-          # ROCm only for a push tag or when a PR label is added; CUDA + ROCm
-          # for pushes to main and the cron schedule; CUDA only otherwise.
+          # Decide which matrix entries to include based on event type
+          # Runs ROCm only for push tag OR when PR label gets triggered
           if [[ "$IS_8GPU_TAG" == "true" || "$TRIGGERED_8GPU_LABEL" == "true" ]]; then
-            INCLUDE_CUDA=false; INCLUDE_ROCM=true
-          elif [[ "$IS_MAIN_PUSH" == "true" || "$IS_SCHEDULE" == "true" ]]; then
-            INCLUDE_CUDA=true;  INCLUDE_ROCM=true
+            cat > matrix.json <<JSON
+          {"include": [$ROCM_MATRIX]}
+          JSON
+
+          # Runs CUDA and ROCm for normal PR (if PR label is present) OR for push to main, cron schedule
+          elif [[ ("$IS_MAIN_PUSH" == "true" || "$IS_SCHEDULE" == "true") ]]; then
+            cat > matrix.json <<JSON
+          {"include": [$CUDA_MATRIX,$ROCM_MATRIX]}
+          JSON
+
+          # Runs CUDA only as default (includes normal PR, if PR label is NOT present)
           else
-            INCLUDE_CUDA=true;  INCLUDE_ROCM=false
+            cat > matrix.json <<JSON
+          {"include": [$CUDA_MATRIX]}
+          JSON
           fi
 
-          # Narrow to the single arch the calling workflow asked for, if any.
-          # The H100 CUDA workflow runs on linux_job_v3, the ROCm workflow on
-          # linux_job_v2 (ROCm must stay on v2 because v3 does not authenticate
-          # ROCm runners to the private ECR). 'all' (the default) keeps both.
-          case "${{ inputs.gpu-arch }}" in
+          # Optionally narrow the matrix to a single GPU arch. Each consuming
+          # workflow runs one arch on its own reusable workflow (the H100 CUDA
+          # workflow on linux_job_v3, the ROCm workflow on linux_job_v2 -- ROCm
+          # must stay on v2 because v3 does not authenticate ROCm runners to the
+          # private ECR). 'all' (the default) keeps both for the workflows that
+          # run a single combined linux_job_v2 job.
+          GPU_ARCH="${{ inputs.gpu-arch }}"
+          case "${GPU_ARCH:-all}" in
             all) ;;
-            cuda) INCLUDE_ROCM=false ;;
-            rocm) INCLUDE_CUDA=false ;;
+            cuda|rocm)
+              jq -c --arg arch "$GPU_ARCH" '{include: [.include[] | select(.["gpu-arch-type"] == $arch)]}' matrix.json > matrix.filtered.json
+              mv matrix.filtered.json matrix.json
+              ;;
             *)
-              echo "::error::Invalid gpu-arch '${{ inputs.gpu-arch }}'. Expected one of: all, cuda, rocm." >&2
+              echo "::error::Invalid gpu-arch '${GPU_ARCH}'. Expected one of: all, cuda, rocm." >&2
               exit 1
               ;;
           esac
-
-          # Experimental workflows never run ROCm.
-          if [[ "${{ inputs.is-experimental }}" == "true" ]]; then
-            INCLUDE_ROCM=false
-          fi
-
-          # Assemble the include list from the eligible entries only, so we
-          # never emit an entry we'd just filter back out.
-          ENTRIES=()
-          [[ "$INCLUDE_CUDA" == "true" ]] && ENTRIES+=("$CUDA_MATRIX")
-          [[ "$INCLUDE_ROCM" == "true" ]] && ENTRIES+=("$ROCM_MATRIX")
-          IFS=','
-          echo "{\"include\": [${ENTRIES[*]}]}" | jq -c . > matrix.json
-          unset IFS
 
           # Export matrix to job outputs
           {
