@@ -110,6 +110,17 @@ def deepseek_v3_16b() -> Trainer.Config:
     )
 
 
+def deepseek_v3_16b_hybridep() -> Trainer.Config:
+    config = deepseek_v3_16b()
+    config.model_spec = model_registry(
+        "16B",
+        attn_backend="flex",
+        moe_comm_backend="hybridep",
+        non_blocking_capacity_factor=1.0,
+    )
+    return config
+
+
 def deepseek_v3_671b() -> Trainer.Config:
     compile_config = CompileConfig(enable=True, components=["loss"])
     model_compile_enabled = (
