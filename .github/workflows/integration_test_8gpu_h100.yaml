@@ -57,4 +57,4 @@ jobs:
         TORCH_VERSION="${{ matrix.torch-version }}" \
         INDEX_URL="${{ matrix.index-url }}" \
         GPU_ARCH_TYPE="${{ matrix.gpu-arch-type }}" \
-        bash scripts/ci/run_8xgpu_integration_tests.sh
+        bash .github/scripts/run_8xgpu_integration_tests.sh
