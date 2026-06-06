@@ -383,7 +383,8 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                     self.assertTrue(torch.equal(local_loss, wrapper_loss.to_local()))
 
                     # compare grad_logits; easier to wrap DTensor -> full_tensor for check.
-                    wrapper_loss.backward()
+                    with loss_parallel():
+                        wrapper_loss.backward()
                     local_loss.backward()
                     local_grad_dtensor = DTensor.from_local(
                         local_logits.grad,
