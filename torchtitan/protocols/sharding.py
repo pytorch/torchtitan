@@ -28,6 +28,12 @@ __all__ = [
     "resolve_placements",
 ]
 
+# Shard order: we implicitly assume the trivial outer -> inner order matching
+# the mesh axis order. The only non-trivial case is FSDP + TP both sharding on
+# tensor dim 0, but it doesn't need to be annotated today.
+# TODO: integrate with global spmd types (e.g., ``TP: V`` + ``PartitionSpec``
+# carrying explicit shard-order info) once that lands.
+
 
 @dataclass(kw_only=True, slots=True)
 class LocalMapConfig:
