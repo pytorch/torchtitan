@@ -22,7 +22,6 @@ from torch.utils._pytree import tree_map
 
 from torchtitan.config import Configurable
 from torchtitan.distributed.spmd_types import (
-    mesh_size as spmd_mesh_size,
     redistribute_spmd_per_axis,
     set_current_spmd_mesh,
     spmd_layout_to_assert_type,
@@ -257,29 +256,35 @@ class Module(nn.Module, Configurable):
         *,
         is_param: bool,
     ) -> None:
-        mesh = parallel_dims._global_meshes["spmd_dense"]
+        mesh = parallel_dims._global_meshes["spmd_dense_for_fwdbwd"]
+        assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
 
+        for axis_name, axis_type in layout.shard_types().items():
+            axis = axis_name.value
+            axis_size = (
+                mesh.size(mesh.mesh_dim_names.index(axis))
+                if axis in mesh.mesh_dim_names
+                else 1
+            )
+            if isinstance(axis_type, spmd.Shard) and axis_size > 1:
+                tensor = spmd.shard(
+                    tensor,
+                    mesh.get_group(axis),
+                    src=spmd.I,
+                    dst=axis_type,
+                )
+
+        if is_param:
+            self.register_parameter(name, nn.Parameter(tensor))
+            registered = self._parameters[name]
+        else:
+            persistent = name not in self._non_persistent_buffers_set
+            self.register_buffer(name, tensor, persistent=persistent)
+            registered = self._buffers[name]
+
+        # assert_type resolves SpmdLayout's string mesh axis names to concrete
+        # MeshAxis types, so a mesh context is required here.
         with set_current_spmd_mesh(mesh):
-            for axis_name, axis_type in layout.shard_types().items():
-                if (
-                    isinstance(axis_type, spmd.Shard)
-                    and spmd_mesh_size(axis_name.value) > 1
-                ):
-                    tensor = spmd.shard(
-                        tensor,
-                        mesh.get_group(axis_name.value),
-                        src=spmd.I,
-                        dst=axis_type,
-                    )
-
-            if is_param:
-                self.register_parameter(name, nn.Parameter(tensor))
-                registered = self._parameters[name]
-            else:
-                persistent = name not in self._non_persistent_buffers_set
-                self.register_buffer(name, tensor, persistent=persistent)
-                registered = self._buffers[name]
-
             local_type, partition_spec = spmd_layout_to_assert_type(layout)
             spmd.assert_type(
                 registered,
