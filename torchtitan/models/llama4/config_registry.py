@@ -8,7 +8,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.quantization import Float8GroupedExpertsConverter
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -31,7 +31,7 @@ def llama4_debugmodel() -> Trainer.Config:
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4_test",
         ),
-        optimizer=OptimizersContainer.Config(lr=4e-3, eps=1e-15),
+        optimizer=default_adamw(lr=4e-3, eps=1e-15),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -81,7 +81,7 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4_test",
         ),
-        optimizer=OptimizersContainer.Config(lr=4e-3, eps=1e-15),
+        optimizer=default_adamw(lr=4e-3, eps=1e-15),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -115,7 +115,7 @@ def llama4_17bx128e() -> Trainer.Config:
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
-        optimizer=OptimizersContainer.Config(lr=4e-3, eps=1e-15),
+        optimizer=default_adamw(lr=4e-3, eps=1e-15),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=600,
             min_lr_factor=0.1,
@@ -143,7 +143,7 @@ def llama4_17bx16e() -> Trainer.Config:
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
-        optimizer=OptimizersContainer.Config(lr=4e-3, eps=1e-15),
+        optimizer=default_adamw(lr=4e-3, eps=1e-15),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=600,
             min_lr_factor=0.1,

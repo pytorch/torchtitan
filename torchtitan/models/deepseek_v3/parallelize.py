@@ -39,7 +39,7 @@ def parallelize_deepseekv3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    if parallelism.full_dtensor:
+    if parallelism.spmd_backend == "full_dtensor":
         raise NotImplementedError("full_dtensor is not supported yet.")
 
     # CP: wrap inner attention forward BEFORE parallelize() so CP logic

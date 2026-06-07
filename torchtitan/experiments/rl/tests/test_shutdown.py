@@ -5,29 +5,24 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from torchtitan.experiments.rl import grpo
 from torchtitan.experiments.rl.actors.generator import VLLMGenerator
-
-
-class _FakeConfigManager:
-    config = object()
-
-    def parse_args(self):
-        return self.config
+from torchtitan.experiments.rl.batcher import Batcher
 
 
 class _FakeRLTrainer:
     instances = []
 
-    def __init__(self, config):
+    def __init__(self, config=None):
         self.config = config
         self.events = []
         self.instances.append(self)
 
-    async def setup(self):
+    async def setup_async(self):
         self.events.append("setup")
         if getattr(self.config, "fail_setup", False):
             raise RuntimeError("setup failed")
@@ -43,11 +38,64 @@ class _FakeRLTrainer:
         self.events.append("close")
 
 
+class _FakeDebug:
+    enable_structured_logging = False
+
+
+class _FakeTrainerConfig:
+    debug = _FakeDebug()
+
+
+class _FakeConfig:
+    """Fake config whose build() returns a _FakeRLTrainer."""
+
+    dump_folder = "/tmp/test_rl"
+    trainer = _FakeTrainerConfig()
+
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+    def build(self):
+        return _FakeRLTrainer(config=self)
+
+
+class _FakeConfigManager:
+    config = _FakeConfig()
+
+    def parse_args(self):
+        return self.config
+
+
+def _make_stub_rl_trainer():
+    """Create an RLTrainer with a minimal stub config (no VLLMGenerator validation)."""
+    from torchtitan.experiments.rl.observability import metrics as m
+
+    class _StubConfig:
+        batcher = Batcher.Config()
+        metrics = m.MetricsProcessor.Config()
+        dump_folder = "/tmp/test_rl"
+        hf_assets_path = "./tests/assets/tokenizer"
+        # __init__ builds these too; stub them so construction does no real work.
+        renderer = SimpleNamespace(
+            build=lambda *, tokenizer_path: SimpleNamespace(
+                get_stop_token_ids=lambda: [],
+                _tokenizer=SimpleNamespace(eos_token_id=0),
+            )
+        )
+        generator = SimpleNamespace(sampling=SimpleNamespace())
+        rollouter = SimpleNamespace(build=lambda: SimpleNamespace())
+
+        def to_dict(self):
+            return {}
+
+    return grpo.RLTrainer(_StubConfig())
+
+
 def test_main_shuts_down_after_success(monkeypatch):
-    _FakeConfigManager.config = object()
+    _FakeConfigManager.config = _FakeConfig()
     _FakeRLTrainer.instances = []
     monkeypatch.setattr(grpo, "ConfigManager", _FakeConfigManager)
-    monkeypatch.setattr(grpo, "RLTrainer", _FakeRLTrainer)
 
     asyncio.run(grpo.main())
 
@@ -55,13 +103,9 @@ def test_main_shuts_down_after_success(monkeypatch):
 
 
 def test_main_shuts_down_after_train_failure(monkeypatch):
-    class FailingConfig:
-        fail_train = True
-
-    _FakeConfigManager.config = FailingConfig()
+    _FakeConfigManager.config = _FakeConfig(fail_train=True)
     _FakeRLTrainer.instances = []
     monkeypatch.setattr(grpo, "ConfigManager", _FakeConfigManager)
-    monkeypatch.setattr(grpo, "RLTrainer", _FakeRLTrainer)
 
     with pytest.raises(RuntimeError, match="train failed"):
         asyncio.run(grpo.main())
@@ -70,13 +114,9 @@ def test_main_shuts_down_after_train_failure(monkeypatch):
 
 
 def test_main_shuts_down_after_setup_failure(monkeypatch):
-    class FailingConfig:
-        fail_setup = True
-
-    _FakeConfigManager.config = FailingConfig()
+    _FakeConfigManager.config = _FakeConfig(fail_setup=True)
     _FakeRLTrainer.instances = []
     monkeypatch.setattr(grpo, "ConfigManager", _FakeConfigManager)
-    monkeypatch.setattr(grpo, "RLTrainer", _FakeRLTrainer)
 
     with pytest.raises(RuntimeError, match="setup failed"):
         asyncio.run(grpo.main())
@@ -85,7 +125,7 @@ def test_main_shuts_down_after_setup_failure(monkeypatch):
 
 
 def test_rl_trainer_shutdown_is_noop_before_meshes_spawn():
-    trainer = grpo.RLTrainer(object())
+    trainer = _make_stub_rl_trainer()
 
     asyncio.run(trainer.close())
 
@@ -99,14 +139,9 @@ def test_main_swallows_cancellation_after_shutdown(monkeypatch):
     running task; ``main`` runs ``close`` in ``finally`` and the explicit
     ``except`` clause swallows the interrupt so the process exits 0
     without a traceback."""
-
-    class CancelledConfig:
-        cancel_train = True
-
-    _FakeConfigManager.config = CancelledConfig()
+    _FakeConfigManager.config = _FakeConfig(cancel_train=True)
     _FakeRLTrainer.instances = []
     monkeypatch.setattr(grpo, "ConfigManager", _FakeConfigManager)
-    monkeypatch.setattr(grpo, "RLTrainer", _FakeRLTrainer)
 
     # No exception escapes; close still ran.
     asyncio.run(grpo.main())
@@ -146,7 +181,7 @@ class _StubMesh:
 
 def test_shutdown_calls_actor_close_before_mesh_stop():
     events: list[str] = []
-    rl_trainer = grpo.RLTrainer(object())
+    rl_trainer = _make_stub_rl_trainer()
     rl_trainer.trainer = _StubActor("trainer.close", events)
     rl_trainer.generator = _StubActor("generator.close", events)
     rl_trainer._proc_meshes = [
@@ -167,7 +202,7 @@ def test_shutdown_calls_actor_close_before_mesh_stop():
 
 def test_shutdown_continues_after_actor_close_failure():
     events: list[str] = []
-    rl_trainer = grpo.RLTrainer(object())
+    rl_trainer = _make_stub_rl_trainer()
     rl_trainer.trainer = _StubActor("trainer.close", events, raises=True)
     rl_trainer.generator = _StubActor("generator.close", events)
     rl_trainer._proc_meshes = [_StubMesh("mesh.stop[0]", events)]

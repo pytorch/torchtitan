@@ -124,8 +124,8 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     """Standard GQA attention (``qkv_linear``/``wo``) TP sharding.
 
     Shared by llama3, qwen3, and llama4 -- all three have a GQA block whose
-    ``forward(x, rope_cache, ...)`` takes ``x`` (per-SP layout, gathered to
-    Replicate internally) and a plain ``rope_cache`` (annotated Replicate).
+    ``forward(x, ...)`` takes ``x`` (per-SP layout, gathered to Replicate
+    internally) and uses the attention layer's local RoPE cache.
 
     Callers that have additional attention sub-state (e.g. ``qk_norm``,
     ``sinks``) set those after calling this helper.
@@ -138,13 +138,15 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={
             "x": dense_activation_placement(tp=attn_x_placement),
-            "rope_cache": dense_param_placement(tp=Replicate()),
         },
         in_dst_shardings={
             "x": dense_activation_placement(tp=Replicate()),
-            "rope_cache": dense_param_placement(tp=Replicate()),
         },
     )
+    if attention_cfg.rope is not None:
+        attention_cfg.rope.sharding_config = ShardingConfig(
+            state_shardings={"cache": dense_param_placement(tp=Replicate())},
+        )
     set_qkv_linear_sharding(attention_cfg.qkv_linear)
     attention_cfg.wo.sharding_config = rowwise_config(output_sp=enable_sp)
 
@@ -222,7 +224,7 @@ def set_decoder_sharding_config(
     config, *, loss_parallel: bool, enable_sp: bool
 ) -> None:
     """Set sharding on root-level configs only: ``tok_embeddings``, ``norm``,
-    ``output``, and the root ``freqs_cis`` buffer.
+    and ``output``.
 
     Per-layer sharding (attention, feed_forward, per-layer norms) is the
     caller's responsibility — this helper does not walk ``config.layers``.
@@ -235,10 +237,6 @@ def set_decoder_sharding_config(
     activation_tp: Placement = Shard(1) if enable_sp else Replicate()
     loss_tp: Placement = Shard(-1) if loss_parallel else Replicate()
 
-    # freqs_cis buffer on the decoder root: Replicate on all axes.
-    config.sharding_config = ShardingConfig(
-        state_shardings={"freqs_cis": dense_param_placement(tp=Replicate())},
-    )
     config.tok_embeddings.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=Shard(0))},
         in_src_shardings={"input": dense_activation_placement(tp=Replicate())},

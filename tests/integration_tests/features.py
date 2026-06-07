@@ -50,7 +50,7 @@ def _is_pp_only(variant: tuple[str, ...], ngpu: int) -> bool:
 
 
 def _enable_full_dtensor(t: OverrideDefinitions) -> OverrideDefinitions:
-    """Inject ``--parallelism.full_dtensor`` into every variant.
+    """Inject ``--parallelism.spmd_backend full_dtensor`` into every variant.
 
     All features.py tests run under full_dtensor except PP-only variants
     (see ``_is_pp_only``) and CP + compile variants (upstream symint
@@ -64,7 +64,7 @@ def _enable_full_dtensor(t: OverrideDefinitions) -> OverrideDefinitions:
         has_cp = any("context_parallel_degree" in arg for arg in variant)
         has_compile = any("compile.enable" in arg for arg in variant)
         if not _is_pp_only(variant, t.ngpu) and not (has_cp and has_compile):
-            prefix.append("--parallelism.full_dtensor")
+            prefix.append("--parallelism.spmd_backend full_dtensor")
         if has_cp:
             prefix.append("--module llama3 --config llama3_debugmodel_flex_attn")
         new_args.append(tuple(prefix) + tuple(variant))
@@ -369,7 +369,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--optimizer.name AdamW --optimizer.implementation foreach",
+                    "--optimizer.implementation foreach",
                 ]
             ],
             "Foreach Optimizer Test",
@@ -379,7 +379,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--optimizer.name AdamW --optimizer.implementation fused_opt_states_bf16",
+                    "--optimizer.implementation fused_opt_states_bf16",
                 ]
             ],
             "BF16 Optimizer States Test",
@@ -614,28 +614,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=4,
             skip_rocm_test=True,
         ),
-        # NOTE: temporarily disable due to test hanging in CI
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--module llama3 --config llama3_debugmodel_opt_in_bwd",
-        #             "--checkpoint.enable",
-        #             "--parallelism.tensor_parallel_degree=2",
-        #             "--parallelism.context_parallel_degree=2",
-        #             "--training.enable_cpu_offload",
-        #         ],
-        #         [
-        #             "--module llama3 --config llama3_debugmodel_opt_in_bwd",
-        #             "--parallelism.tensor_parallel_degree=2",
-        #             "--parallelism.context_parallel_degree=2",
-        #             "--parallelism.data_parallel_replicate_degree=2",
-        #             "--training.enable_cpu_offload",
-        #         ],
-        #     ],
-        #     "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
-        #     "cpu_offload+opt_in_bwd+TP+DP+CP",
-        #     ngpu=8,
-        # ),
         OverrideDefinitions(
             [
                 [
@@ -676,6 +654,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "torchcomms_3d_dp+tp+pp+compile",
             ngpu=8,
             skip_rocm_test=True,
+            disabled=True,  # torchcomms-managed TP PG not registered in c10d; resolve fails under compile
         ),
         OverrideDefinitions(
             [
