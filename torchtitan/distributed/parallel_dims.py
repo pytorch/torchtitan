@@ -96,7 +96,7 @@ class ParallelDims:
             # can apply MixedPrecisionPolicy even at degree 1.
             return True
         if name == "dp_shard" and self.spmd_backend in ("full_dtensor", "spmd_types"):
-            # Under full_dtensor/local-SPMD, ``dp_shard`` is the DP storage axis
+            # Under full_dtensor/spmd_types, ``dp_shard`` is the DP storage axis
             # (no flattened ``fsdp``); keep alive at size 1 so ``fully_shard``
             # can install MixedPrecisionPolicy and FSDP can discriminate the DP
             # submesh on TP/DDP/PP-only.
@@ -220,12 +220,12 @@ class ParallelDims:
                 ("pp", "dp_replicate", "dp_shard", "cp", "tp"),
                 (self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp),
             )
-            spmd_dense_parent_mesh = unflatten_mesh(
+            full_dense_mesh_for_fwdbwd = unflatten_mesh(
                 self._world_mesh,
                 tuple(["pp"] + candidate_spmd_dense_axes),
                 (self.pp, batch, self.cp, self.tp),
             )
-            spmd_dense_mesh_for_fwdbwd = spmd_dense_parent_mesh["dp", "cp", "tp"]
+            spmd_dense_mesh_for_fwdbwd = full_dense_mesh_for_fwdbwd["dp", "cp", "tp"]
         else:
             # Legacy path folds ``dp_shard`` and ``cp`` into ``fsdp``.
             candidate_spmd_dense_axes = ["dp_replicate", "fsdp", "tp"]
