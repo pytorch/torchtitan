@@ -193,7 +193,7 @@ class MoEStateDictAdapter(StateDictAdapter):
 
         This method handles various sharding strategies for expert weights:
         - FSDP + EP: StridedShard(0)Shard(0) or Shard(0)
-        - FSDP + ETP + EP: StridedShard(0)Shard(0)Shard(1/2) or StridedShard(1)Shard(0)Shard(1/2)
+        - FSDP + EP: StridedShard(0)Shard(0)Shard(1/2) or StridedShard(1)Shard(0)Shard(1/2)
 
         Args:
             abstract_key: HuggingFace templage key with {} placeholders for layer and expert IDs
