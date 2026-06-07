@@ -35,7 +35,6 @@ __all__ = [
     "redistribute_spmd_per_axis",
     "set_current_spmd_mesh",
     "set_spmd_backend",
-    "spmd_layout_to_assert_type",
     "spmd_layout_to_dtensor_placements",
 ]
 
@@ -157,26 +156,12 @@ def spmd_layout_to_dtensor_placements(
     return result
 
 
-def spmd_layout_to_assert_type(
-    layout: "SpmdLayout",
-) -> tuple[spmd.PerMeshAxisSpmdTypes, spmd.PartitionSpec | None]:
-    """Resolve a layout to ``assert_type`` args for SPMD typechecking."""
-    local_type = dict(layout.axis_types)
-    if layout.partition_spec is None:
-        return local_type, None
-    return {
-        axis_name: axis_type
-        for axis_name, axis_type in local_type.items()
-        if not isinstance(axis_type, spmd.Shard)
-    }, layout.partition_spec
-
-
 def annotate_input_spmd_types(
     inputs: torch.Tensor,
     labels: torch.Tensor,
     extra_kwargs: dict[str, Any],
-    global_valid_tokens: torch.Tensor,
-) -> None:
+    global_valid_tokens: torch.Tensor | float,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], torch.Tensor | spmd.Scalar]:
     """Annotate decoder inputs/labels/loss denominator with SPMD types.
 
     Hardcodes the standard decoder convention: inputs and positions are
@@ -206,11 +191,17 @@ def annotate_input_spmd_types(
 
     spmd.assert_type(inputs, token_type)
     spmd.assert_type(labels, label_type)
-    spmd.assert_type(global_valid_tokens, global_valid_tokens_type)
+    if isinstance(global_valid_tokens, torch.Tensor):
+        spmd.assert_type(global_valid_tokens, global_valid_tokens_type)
+    else:
+        global_valid_tokens = spmd.Scalar(
+            global_valid_tokens, global_valid_tokens_type
+        )
     if "positions" in extra_kwargs and isinstance(
         extra_kwargs["positions"], torch.Tensor
     ):
         spmd.assert_type(extra_kwargs["positions"], token_type)
+    return inputs, labels, extra_kwargs, global_valid_tokens
 
 
 def redistribute_spmd_per_axis(
