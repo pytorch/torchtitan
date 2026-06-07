@@ -58,6 +58,25 @@ class SpmdLayout:
     axis_types: dict[MeshAxisName, spmd.PerMeshAxisSpmdType]
     partition_spec: spmd.PartitionSpec | tuple[Any, ...] | None = None
 
+    def __post_init__(self) -> None:
+        sharded_dims: dict[int, MeshAxisName] = {}
+        for axis_name, axis_type in self.axis_types.items():
+            if not isinstance(axis_type, spmd.Shard):
+                continue
+            if self.partition_spec is not None:
+                raise ValueError(
+                    "SpmdLayout with PartitionSpec should use spmd.V instead "
+                    "of spmd.S(dim) in per-axis-types, and express tensor dim "
+                    "sharding in the provided PartitionSpec."
+                )
+            if axis_type.dim in sharded_dims:
+                raise ValueError(
+                    "SpmdLayout has multiple mesh axes sharding tensor dim "
+                    f"{axis_type.dim}; provide partition_spec to make shard "
+                    "ordering explicit."
+                )
+            sharded_dims[axis_type.dim] = axis_name
+
     def axes(self) -> tuple[MeshAxisName, ...]:
         return tuple(self.axis_types)
 
