@@ -98,7 +98,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
             else n_heads
         )
         dim = self.model_config.dim
-        head_dim = dim // n_heads
+        head_dim = self.model_config.layers[0].attention.head_dim or dim // n_heads
         hf_state_dict = {}
 
         if self.fuse_qkv:
@@ -172,7 +172,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
             else n_heads
         )
         dim = self.model_config.dim
-        head_dim = dim // n_heads
+        head_dim = self.model_config.layers[0].attention.head_dim or dim // n_heads
         state_dict = {}
 
         # Collect Q/K/V per layer, then fuse (only used when fuse_qkv=True)
