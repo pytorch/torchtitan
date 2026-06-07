@@ -283,7 +283,7 @@ class Module(nn.Module, Configurable):
             registered = self._buffers[name]
 
         # assert_type resolves SpmdLayout's string mesh axis names to concrete
-        # MeshAxis types, so a mesh context is required here.
+        # runtime mesh-axis objects, so a mesh context is required here.
         with set_current_spmd_mesh(mesh):
             local_type, partition_spec = spmd_layout_to_assert_type(layout)
             spmd.assert_type(
@@ -350,8 +350,8 @@ class Module(nn.Module, Configurable):
         assert sharding_config is not None
 
         for name, param in self.named_parameters(recurse=False):
-            named_placements = sharding_config.state_shardings.get(name)
-            if named_placements is None:
+            spmd_layout = sharding_config.state_shardings.get(name)
+            if spmd_layout is None:
                 raise ValueError(
                     f"{type(self).__name__}.{name} has no placement declared "
                     "in sharding_config.state_shardings."
@@ -361,15 +361,15 @@ class Module(nn.Module, Configurable):
                     parallel_dims,
                     name,
                     param,
-                    named_placements,
+                    spmd_layout,
                     is_param=True,
                 )
                 continue
-            axes = named_placements.axes()
+            axes = spmd_layout.axes()
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
                 continue
-            placements = resolve_placements(named_placements, mesh)
+            placements = resolve_placements(spmd_layout, mesh)
             if isinstance(param, DTensor):
                 if tuple(param.placements) != tuple(placements):
                     raise ValueError(
@@ -389,8 +389,8 @@ class Module(nn.Module, Configurable):
             )
 
         for name, buffer in self.named_buffers(recurse=False):
-            named_placements = sharding_config.state_shardings.get(name)
-            if named_placements is None:
+            spmd_layout = sharding_config.state_shardings.get(name)
+            if spmd_layout is None:
                 raise ValueError(
                     f"{type(self).__name__}.{name} (buffer) has no placement "
                     "declared in sharding_config.state_shardings."
@@ -404,15 +404,15 @@ class Module(nn.Module, Configurable):
                     parallel_dims,
                     name,
                     buffer,
-                    named_placements,
+                    spmd_layout,
                     is_param=False,
                 )
                 continue
-            axes = named_placements.axes()
+            axes = spmd_layout.axes()
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
                 continue
-            placements = resolve_placements(named_placements, mesh)
+            placements = resolve_placements(spmd_layout, mesh)
             persistent = name not in self._non_persistent_buffers_set
             self.register_buffer(
                 name,
@@ -522,12 +522,12 @@ class Module(nn.Module, Configurable):
         for name, value in new_kwargs.items():
             if not isinstance(value, torch.Tensor):
                 continue
-            src_named_placements = in_src_shardings.get(name)
-            dst_named_placements = in_dst_shardings.get(name)
+            src_spmd_layout = in_src_shardings.get(name)
+            dst_spmd_layout = in_dst_shardings.get(name)
 
             if parallel_dims.spmd_backend == "spmd_types":
-                if src_named_placements is None:
-                    if dst_named_placements is not None:
+                if src_spmd_layout is None:
+                    if dst_spmd_layout is not None:
                         raise ValueError(
                             f"{type(self).__name__}.{name}: SPMD input "
                             "redistribution requires explicit in_src_shardings."
@@ -537,7 +537,7 @@ class Module(nn.Module, Configurable):
                 # SPMD source placements are part of the config contract: assert
                 # before redistributing so typechecking catches boundary drift.
                 local_type, partition_spec = spmd_layout_to_assert_type(
-                    src_named_placements
+                    src_spmd_layout
                 )
                 spmd.assert_type(
                     value,
@@ -545,19 +545,19 @@ class Module(nn.Module, Configurable):
                     partition_spec=partition_spec,
                 )
 
-                if dst_named_placements is None:
+                if dst_spmd_layout is None:
                     new_kwargs[name] = value
                     continue
                 value = redistribute_spmd_per_axis(
                     value,
-                    src_named_placements.shard_types(),
-                    dst_named_placements.shard_types(),
+                    src_spmd_layout.shard_types(),
+                    dst_spmd_layout.shard_types(),
                 )
                 new_kwargs[name] = value
                 continue
 
             mesh = parallel_dims.resolve_shared_mesh(
-                [src_named_placements, dst_named_placements]
+                [src_spmd_layout, dst_spmd_layout]
             )
             if mesh is None:
                 continue
@@ -568,8 +568,8 @@ class Module(nn.Module, Configurable):
             ):
                 raise ValueError("Got a plain Tensor under the full_dtensor mode.")
 
-            if not isinstance(value, DTensor) and src_named_placements is not None:
-                layout = resolve_placements(src_named_placements, mesh)
+            if not isinstance(value, DTensor) and src_spmd_layout is not None:
+                layout = resolve_placements(src_spmd_layout, mesh)
                 value = DTensor.from_local(
                     value,
                     mesh,
@@ -577,8 +577,8 @@ class Module(nn.Module, Configurable):
                     run_check=False,
                 )
 
-            if dst_named_placements is not None and isinstance(value, DTensor):
-                desired = resolve_placements(dst_named_placements, mesh)
+            if dst_spmd_layout is not None and isinstance(value, DTensor):
+                desired = resolve_placements(dst_spmd_layout, mesh)
                 if value.placements != desired:
                     value = value.redistribute(placements=desired, async_op=True)
 
@@ -599,6 +599,7 @@ class Module(nn.Module, Configurable):
         sharding_config = self._sharding_config
         assert sharding_config is not None
 
+        out_spmd_layout = sharding_config.out_dst_shardings
         if parallel_dims.spmd_backend == "spmd_types":
             if not isinstance(outputs, torch.Tensor):
                 return outputs
@@ -629,13 +630,12 @@ class Module(nn.Module, Configurable):
                 out_dst.shard_types(),
             )
 
-        out_named_placements = sharding_config.out_dst_shardings
-        mesh = parallel_dims.resolve_shared_mesh([out_named_placements])
+        mesh = parallel_dims.resolve_shared_mesh([out_spmd_layout])
         if mesh is None:
             return outputs
 
-        if out_named_placements is not None:
-            desired = resolve_placements(out_named_placements, mesh)
+        if out_spmd_layout is not None:
+            desired = resolve_placements(out_spmd_layout, mesh)
             if isinstance(outputs, DTensor) and outputs.placements != desired:
                 outputs = outputs.redistribute(placements=desired, async_op=True)
 
