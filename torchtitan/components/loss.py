@@ -287,7 +287,7 @@ class BaseLoss(ABC, Configurable):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor | float | spmd.Scalar | None = None,
+        global_valid_tokens: torch.Tensor | float | None = None,
     ) -> torch.Tensor:
         loss = self.fn(pred, labels)
         if global_valid_tokens is not None:
@@ -667,7 +667,7 @@ class ChunkedCELoss(BaseLoss):
                 lm_head.set_requires_gradient_sync(True, recurse=False)
                 lm_head.reshard()
 
-        if grad_buffer is not None:
+        if grad_buffer is not None and current_mesh() is not None:
             spmd.assert_type(
                 grad_buffer,
                 dict(spmd.get_local_type(h_detached)),
@@ -679,7 +679,7 @@ class ChunkedCELoss(BaseLoss):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor | float | spmd.Scalar | None = None,
+        global_valid_tokens: torch.Tensor | float | None = None,
     ) -> torch.Tensor:
         """Compute chunked cross-entropy loss.
 

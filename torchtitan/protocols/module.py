@@ -255,7 +255,10 @@ class Module(nn.Module, Configurable):
         *,
         is_param: bool,
     ) -> None:
-        mesh = parallel_dims._global_meshes["spmd_dense_for_fwdbwd"]
+        mesh = parallel_dims.get_optional_mesh(
+            layout.axes(), include_single_axes=True
+        )
+        assert mesh is not None
         assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
 
         for axis_name, axis_type in layout.shard_types().items():

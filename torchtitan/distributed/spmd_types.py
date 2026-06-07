@@ -161,7 +161,7 @@ def annotate_input_spmd_types(
     labels: torch.Tensor,
     extra_kwargs: dict[str, Any],
     global_valid_tokens: torch.Tensor | float,
-) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], torch.Tensor | spmd.Scalar]:
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], torch.Tensor | float]:
     """Annotate decoder inputs/labels/loss denominator with SPMD types.
 
     Hardcodes the standard decoder convention: inputs and positions are
@@ -193,10 +193,6 @@ def annotate_input_spmd_types(
     spmd.assert_type(labels, label_type)
     if isinstance(global_valid_tokens, torch.Tensor):
         spmd.assert_type(global_valid_tokens, global_valid_tokens_type)
-    else:
-        global_valid_tokens = spmd.Scalar(
-            global_valid_tokens, global_valid_tokens_type
-        )
     if "positions" in extra_kwargs and isinstance(
         extra_kwargs["positions"], torch.Tensor
     ):

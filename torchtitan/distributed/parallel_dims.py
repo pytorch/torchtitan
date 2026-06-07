@@ -317,13 +317,21 @@ class ParallelDims:
                 f"expected {expected_size}, got {actual_size}"
             )
 
-    def get_optional_mesh(self, dims: str | list[str]) -> DeviceMesh | None:
+    def get_optional_mesh(
+        self,
+        dims: str | list[str],
+        *,
+        include_single_axes: bool = False,
+    ) -> DeviceMesh | None:
         """Get a device mesh by dimension name(s), returning None if not enabled.
 
         Args:
             dims: Names of the mesh dimension. Valid options include:
                  'pp', 'batch', 'loss', 'dp_replicate', 'fsdp',
                  'cp', 'tp', 'ep', 'efsdp'.
+            include_single_axes: Include axes with size 1 in the returned
+                 submesh. Currently used for spmd_types backend, so no titan-side
+                 active axis filtering is required for typechecking.
 
         Returns:
             DeviceMesh for the requested dimension(s), or None if:
@@ -348,7 +356,7 @@ class ParallelDims:
                     f"Valid dimensions are: {list(self._single_axis_meshes.keys())}"
                 )
 
-        if any(
+        if not include_single_axes and any(
             not self._mesh_exist(dim, self._single_axis_meshes[dim].size())
             for dim in dims
         ):
