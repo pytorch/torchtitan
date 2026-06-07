@@ -53,9 +53,9 @@ def dense_sequence_parallel_placement() -> SpmdLayout:
     """SP activations with CP-TP shard ordering on sequence dimension."""
     return SpmdLayout(
         {
-            DP: spmd.S(0),
-            CP: spmd.S(1),
-            TP: spmd.S(1),
+            DP: spmd.V,
+            CP: spmd.V,
+            TP: spmd.V,
         },
         partition_spec=(DP, (CP, TP), None),
     )
@@ -109,14 +109,18 @@ def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     RowwiseParallel: weight S(1), bias R (no-op if bias absent).
     Output redistributes to S(1) (reduce-scatter) if SP on, else I (all-reduce).
     """
-    out_tp = spmd.S(1) if output_sp else spmd.I
+    out_dst = (
+        dense_sequence_parallel_placement()
+        if output_sp
+        else dense_activation_placement(tp=spmd.I)
+    )
     return ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.S(1)),
             "bias": dense_param_placement(tp=spmd.R),
         },
         out_src_shardings=dense_activation_placement(tp=spmd.P),
-        out_dst_shardings=dense_activation_placement(tp=out_tp),
+        out_dst_shardings=out_dst,
     )
 
 
