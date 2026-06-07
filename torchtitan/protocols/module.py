@@ -24,7 +24,6 @@ from torchtitan.config import Configurable
 from torchtitan.distributed.spmd_types import (
     redistribute_spmd_per_axis,
     set_current_spmd_mesh,
-    spmd_layout_to_assert_type,
 )
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
 from torchtitan.protocols.types import SpmdLayout
@@ -285,11 +284,10 @@ class Module(nn.Module, Configurable):
         # assert_type resolves SpmdLayout's string mesh axis names to concrete
         # runtime mesh-axis objects, so a mesh context is required here.
         with set_current_spmd_mesh(mesh):
-            local_type, partition_spec = spmd_layout_to_assert_type(layout)
             spmd.assert_type(
                 registered,
-                local_type,
-                partition_spec=partition_spec,
+                layout.axis_types,
+                layout.partition_spec,
             )
 
     def _maybe_wrap_with_local_spmd(self, fn: Callable) -> Callable:
@@ -318,10 +316,11 @@ class Module(nn.Module, Configurable):
             checked_names = [name for name in bound.arguments if name in in_dst]
             checked_values = tuple(bound.arguments[name] for name in checked_names)
             in_types = tuple(
-                spmd_layout_to_assert_type(in_dst[name]) for name in checked_names
+                (in_dst[name].axis_types, in_dst[name].partition_spec)
+                for name in checked_names
             )
             out_types = tree_map(
-                spmd_layout_to_assert_type,
+                lambda layout: (layout.axis_types, layout.partition_spec),
                 out_src,
                 is_leaf=lambda x: isinstance(x, SpmdLayout),
             )
@@ -536,13 +535,10 @@ class Module(nn.Module, Configurable):
 
                 # SPMD source placements are part of the config contract: assert
                 # before redistributing so typechecking catches boundary drift.
-                local_type, partition_spec = spmd_layout_to_assert_type(
-                    src_spmd_layout
-                )
                 spmd.assert_type(
                     value,
-                    local_type,
-                    partition_spec=partition_spec,
+                    src_spmd_layout.axis_types,
+                    src_spmd_layout.partition_spec,
                 )
 
                 if dst_spmd_layout is None:
@@ -614,11 +610,10 @@ class Module(nn.Module, Configurable):
                 return outputs
             # SPMD source placements are part of the config contract: assert
             # before redistributing so typechecking catches boundary drift.
-            local_type, partition_spec = spmd_layout_to_assert_type(out_src)
             spmd.assert_type(
                 outputs,
-                local_type,
-                partition_spec=partition_spec,
+                out_src.axis_types,
+                out_src.partition_spec,
             )
 
             out_dst = sharding_config.out_dst_shardings
