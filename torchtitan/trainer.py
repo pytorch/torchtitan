@@ -571,8 +571,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self,
         input_dict: dict[str, torch.Tensor],
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
+        global_valid_tokens: torch.Tensor | float,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        dict[str, torch.Tensor],
+        dict[str, Any],
+        torch.Tensor | float | spmd.Scalar,
+    ]:
         """
         Post-processing hook after data loading and before model forward pass.
 
@@ -591,7 +597,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             labels: Target labels for the batch.
 
         Returns:
-            A tuple of (inputs, labels, extra_inputs, extra_kwargs) where:
+            A tuple of
+            (inputs, labels, extra_inputs, extra_kwargs, global_valid_tokens)
+            where:
                 - inputs: Main input tensor extracted from input_dict["input"].
                 - labels: Target labels (unchanged from input parameter).
                 - extra_inputs: Dict of auxiliary input tensors from input_dict
@@ -601,6 +609,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 - extra_kwargs: Dict of additional keyword arguments for model
                     forward (positions, attention_masks). These ARE forwarded
                     across all pipeline parallel stages.
+                - global_valid_tokens: Loss denominator, possibly annotated for
+                    SPMD typechecking.
 
         Note:
             The distinction between extra_inputs and extra_kwargs is important for
@@ -659,15 +669,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
         elif self.config.parallelism.spmd_backend == "spmd_types":
-            assert global_valid_tokens is not None
-            annotate_input_spmd_types(
+            inputs, labels, extra_kwargs, global_valid_tokens = annotate_input_spmd_types(
                 inputs,
                 labels,
                 extra_kwargs,
                 global_valid_tokens,
             )
 
-        return inputs, labels, extra_inputs, extra_kwargs
+        return inputs, labels, extra_inputs, extra_kwargs, global_valid_tokens
 
     @sl.log_trace_span("fwd_bwd")
     def forward_backward_step(
@@ -675,14 +684,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         *,
         input_dict: dict[str, torch.Tensor],
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor,
+        global_valid_tokens: torch.Tensor | float,
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
-        inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
-            input_dict, labels, global_valid_tokens
-        )
+        (
+            inputs,
+            labels,
+            extra_inputs,
+            extra_kwargs,
+            global_valid_tokens,
+        ) = self.post_dataloading_process(input_dict, labels, global_valid_tokens)
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
@@ -765,45 +778,35 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # Move to GPU for distributed communication
         local_valid_tokens = local_valid_tokens.to(self.device)
 
-        spmd_mesh_context = (
-            set_current_spmd_mesh(
-                self.parallel_dims._global_meshes["spmd_dense_for_fwdbwd"]
-            )
-            if self.config.parallelism.spmd_backend == "spmd_types"
-            else contextlib.nullcontext()
-        )
         accumulated_losses = []
-        with spmd_mesh_context:
-            if parallel_dims.dp_enabled:
-                batch_mesh = parallel_dims.get_mesh("batch")
-                global_valid_tokens = dist_utils.dist_sum(
-                    local_valid_tokens, batch_mesh
+        if parallel_dims.dp_enabled:
+            batch_mesh = parallel_dims.get_mesh("batch")
+            global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
+        else:
+            global_valid_tokens = local_valid_tokens.float()
+
+        for input_dict, labels in microbatches:
+            # Move tensors to GPU
+            for k, v in input_dict.items():
+                if isinstance(v, torch.Tensor):
+                    input_dict[k] = v.to(self.device)
+            labels = labels.to(self.device)
+
+            spmd_mesh_context = (
+                set_current_spmd_mesh(
+                    self.parallel_dims._global_meshes["spmd_dense_for_fwdbwd"]
                 )
-            else:
-                global_valid_tokens = local_valid_tokens.float()
-
-            if self.config.parallelism.spmd_backend == "spmd_types":
-                if not isinstance(global_valid_tokens, torch.Tensor):
-                    global_valid_tokens = torch.tensor(
-                        global_valid_tokens,
-                        dtype=torch.float,
-                        device=self.device,
-                    )
-
-            for input_dict, labels in microbatches:
-                # Move tensors to GPU
-                for k, v in input_dict.items():
-                    if isinstance(v, torch.Tensor):
-                        input_dict[k] = v.to(self.device)
-                labels = labels.to(self.device)
-
+                if self.config.parallelism.spmd_backend == "spmd_types"
+                else contextlib.nullcontext()
+            )
+            with spmd_mesh_context:
                 loss = self.forward_backward_step(
                     input_dict=input_dict,
                     labels=labels,
                     # pyrefly: ignore [bad-argument-type]
                     global_valid_tokens=global_valid_tokens,
                 )
-                accumulated_losses.append(loss.detach())
+            accumulated_losses.append(loss.detach())
 
         with sl.log_trace_span("optim"):
             grad_norm = dist_utils.clip_grad_norm_(
