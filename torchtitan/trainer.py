@@ -577,7 +577,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         torch.Tensor,
         dict[str, torch.Tensor],
         dict[str, Any],
-        torch.Tensor | float | spmd.Scalar,
+        torch.Tensor | float,
     ]:
         """
         Post-processing hook after data loading and before model forward pass.
