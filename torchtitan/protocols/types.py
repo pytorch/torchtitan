@@ -58,33 +58,21 @@ class SpmdLayout:
     axis_types: dict[MeshAxisName, spmd.PerMeshAxisSpmdType]
     partition_spec: spmd.PartitionSpec | tuple[Any, ...] | None = None
 
-    def __post_init__(self) -> None:
-        if not self.axis_types:
-            raise ValueError("SpmdLayout requires at least one mesh axis.")
-        if self.partition_spec is not None and not isinstance(
-            self.partition_spec, tuple
-        ):
-            raise TypeError(
-                f"Expected partition_spec to be a tuple, got {self.partition_spec!r}."
-            )
-        for axis_name, axis_type in self.axis_types.items():
-            if not isinstance(axis_name, MeshAxisName):
-                raise TypeError(f"Expected MeshAxisName key, got {axis_name!r}.")
-            if not isinstance(axis_type, spmd.PerMeshAxisSpmdType):
-                raise TypeError(
-                    f"Expected SPMD axis type for "
-                    f"{axis_name.value!r}, got {axis_type!r}."
-                )
-
     def axes(self) -> tuple[MeshAxisName, ...]:
         return tuple(self.axis_types)
 
     def shard_types(self) -> dict[MeshAxisName, spmd.PerMeshAxisSpmdType]:
-        """Return per-axis types with PartitionSpec sharding represented as S(i).
+        """
+        Return per-axis types with PartitionSpec sharding represented as S(i).
+        e.g. {DP: R, CP: V} + PartitionSpec(None, CP) -> {DP: R, CP: S(1)}
 
-        This manually handles ``MeshAxisName`` because
-        ``partition_spec_to_shard_types`` expects resolved ``MeshAxis`` values
-        and treats ``MeshAxisName`` as unresolved string axes.
+        This is not meant as a minimal description of the SPMD layout; shard order
+        cannot be expressed carefully. This is a helper for calling spmd.redistribute,
+        which takes per-axis types (e.g. redistribute(S(1) -> R)).
+
+        This manually handles ``MeshAxisName``, because spmd_types normalization
+        functions often attempt to resolve to concrete runtime mesh axes, even
+        without a set current mesh.
         """
         result = dict(self.axis_types)
         if self.partition_spec is not None:
