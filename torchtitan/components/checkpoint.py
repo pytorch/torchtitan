@@ -1079,7 +1079,7 @@ class CheckpointManager(Configurable):
     def _should_purge(self) -> bool:
         """Whether this rank should purge stale checkpoints.
 
-        Extracted so subclasses (e.g. FTCheckpointManager) can add
+        Extracted so subclasses (e.g. TorchFTCheckpointManager) can add
         additional guards (like participating_rank) without duplicating
         the purge loop in _purge_stale_checkpoints.
         """

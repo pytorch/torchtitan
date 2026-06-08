@@ -12,7 +12,7 @@ _supported_experiments = frozenset(
         "transformers_modeling_backend",
         "autoparallel.llama3",
         "autoparallel.local_map_deepseek_v3",
-        "ft.llama3",
+        "torchft.llama3",
         "rl",
     ]
 )
