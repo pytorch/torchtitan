@@ -22,12 +22,11 @@ from torchtitan.models.common.nn_modules import LayerNorm, RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.qwen3.model import Qwen3TransformerBlock
 from torchtitan.models.utils import validate_converter_order
-
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
-
 from .model import Qwen3VLModel
 from .parallelize import parallelize_qwen3_vl
+from .rope import MRoPE
 from .state_dict_adapter import Qwen3VLStateDictAdapter
 from .vision_encoder import (
     PatchEmbed,
@@ -207,6 +206,7 @@ def _build_qwen3_vl_layers(
     head_dim: int,
     hidden_dim: int,
     attn_backend: str,
+    rope: RoPE.Config,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for dense Qwen3-VL models with depth-scaled inits."""
     inner_attention, mask_type = get_attention_config(attn_backend)
@@ -225,7 +225,7 @@ def _build_qwen3_vl_layers(
                     wo_param_init=_depth_init(layer_id),
                     inner_attention=inner_attention,
                     mask_type=mask_type,
-                    rope_backend="cos_sin",
+                    rope=rope,
                     qk_norm=_qwen3_vl_norm(head_dim),
                 ),
                 feed_forward=make_ffn_config(
@@ -252,6 +252,7 @@ def _build_qwen3_vl_moe_layers(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    rope: RoPE.Config,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for MoE Qwen3-VL models with depth-scaled inits."""
     inner_attention, mask_type = get_attention_config(attn_backend)
@@ -270,7 +271,7 @@ def _build_qwen3_vl_moe_layers(
                     wo_param_init=_depth_init(layer_id),
                     inner_attention=inner_attention,
                     mask_type=mask_type,
-                    rope_backend="cos_sin",
+                    rope=rope,
                     qk_norm=_qwen3_vl_norm(head_dim),
                 ),
                 moe=make_moe_config(
@@ -318,12 +319,6 @@ def _debugmodel(attn_backend: str) -> Qwen3VLModel.Config:
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=head_dim,
-            max_seq_len=4096,
-            theta=1000000.0,
-            backend="cos_sin",
-        ),
         layers=_build_qwen3_vl_layers(
             attn_backend=attn_backend,
             n_layers=n_layers,
@@ -332,6 +327,12 @@ def _debugmodel(attn_backend: str) -> Qwen3VLModel.Config:
             n_kv_heads=2,
             head_dim=head_dim,
             hidden_dim=512,
+            rope=MRoPE.Config(
+                dim=head_dim,
+                max_seq_len=4096,
+                theta=1000000.0,
+                mrope_section=[8, 8, 8],
+            ),
         ),
         vision_encoder=_vl_vision_encoder_config(
             dim=256,
@@ -345,7 +346,6 @@ def _debugmodel(attn_backend: str) -> Qwen3VLModel.Config:
             num_position_embeddings=1024,
             deepstack_visual_indices=[1, 2, 3],
         ),
-        mrope_section=[8, 8, 8],
     )
 
 
@@ -371,12 +371,6 @@ def _debugmodel_moe(
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=head_dim,
-            max_seq_len=4096,
-            theta=1000000.0,
-            backend="cos_sin",
-        ),
         layers=_build_qwen3_vl_moe_layers(
             attn_backend=attn_backend,
             n_layers=n_layers,
@@ -388,6 +382,12 @@ def _debugmodel_moe(
             num_experts=8,
             top_k=4,
             moe_comm_backend=moe_comm_backend,
+            rope=MRoPE.Config(
+                dim=head_dim,
+                max_seq_len=4096,
+                theta=1000000.0,
+                mrope_section=[8, 8, 8],
+            ),
         ),
         vision_encoder=_vl_vision_encoder_config(
             dim=256,
@@ -401,7 +401,6 @@ def _debugmodel_moe(
             num_position_embeddings=1024,
             deepstack_visual_indices=[1, 2, 3],
         ),
-        mrope_section=[8, 8, 8],
     )
 
 
@@ -425,12 +424,6 @@ def _2b(attn_backend: str) -> Qwen3VLModel.Config:
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=head_dim,
-            max_seq_len=32768,
-            theta=5000000.0,
-            backend="cos_sin",
-        ),
         layers=_build_qwen3_vl_layers(
             attn_backend=attn_backend,
             n_layers=n_layers,
@@ -439,6 +432,12 @@ def _2b(attn_backend: str) -> Qwen3VLModel.Config:
             n_kv_heads=8,
             head_dim=head_dim,
             hidden_dim=6144,
+            rope=MRoPE.Config(
+                dim=head_dim,
+                max_seq_len=32768,
+                theta=5000000.0,
+                mrope_section=[24, 20, 20],
+            ),
         ),
         vision_encoder=_vl_vision_encoder_config(
             dim=1024,
@@ -452,7 +451,6 @@ def _2b(attn_backend: str) -> Qwen3VLModel.Config:
             num_position_embeddings=2304,
             deepstack_visual_indices=[5, 11, 17],
         ),
-        mrope_section=[24, 20, 20],
     )
 
 
@@ -475,12 +473,6 @@ def _8b(attn_backend: str) -> Qwen3VLModel.Config:
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=head_dim,
-            max_seq_len=32768,
-            theta=5000000.0,
-            backend="cos_sin",
-        ),
         layers=_build_qwen3_vl_layers(
             attn_backend=attn_backend,
             n_layers=n_layers,
@@ -489,6 +481,12 @@ def _8b(attn_backend: str) -> Qwen3VLModel.Config:
             n_kv_heads=8,
             head_dim=head_dim,
             hidden_dim=12288,
+            rope=MRoPE.Config(
+                dim=head_dim,
+                max_seq_len=32768,
+                theta=5000000.0,
+                mrope_section=[24, 20, 20],
+            ),
         ),
         vision_encoder=_vl_vision_encoder_config(
             dim=1152,
@@ -502,7 +500,6 @@ def _8b(attn_backend: str) -> Qwen3VLModel.Config:
             num_position_embeddings=2304,
             deepstack_visual_indices=[8, 16, 24],
         ),
-        mrope_section=[24, 20, 20],
     )
 
 
@@ -531,12 +528,6 @@ def _30b_a3b(
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=head_dim,
-            max_seq_len=32768,
-            theta=5000000.0,
-            backend="cos_sin",
-        ),
         layers=_build_qwen3_vl_moe_layers(
             attn_backend=attn_backend,
             n_layers=n_layers,
@@ -548,6 +539,12 @@ def _30b_a3b(
             num_experts=128,
             top_k=8,
             moe_comm_backend=moe_comm_backend,
+            rope=MRoPE.Config(
+                dim=head_dim,
+                max_seq_len=32768,
+                theta=5000000.0,
+                mrope_section=[24, 20, 20],
+            ),
         ),
         vision_encoder=_vl_vision_encoder_config(
             dim=1152,
@@ -561,7 +558,6 @@ def _30b_a3b(
             num_position_embeddings=2304,
             deepstack_visual_indices=[8, 16, 24],
         ),
-        mrope_section=[24, 20, 20],
     )
 
 
@@ -587,12 +583,6 @@ def _235b_a22b(
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=head_dim,
-            max_seq_len=32768,
-            theta=5000000.0,
-            backend="cos_sin",
-        ),
         layers=_build_qwen3_vl_moe_layers(
             attn_backend=attn_backend,
             n_layers=n_layers,
@@ -604,6 +594,12 @@ def _235b_a22b(
             num_experts=128,
             top_k=8,
             moe_comm_backend=moe_comm_backend,
+            rope=MRoPE.Config(
+                dim=head_dim,
+                max_seq_len=32768,
+                theta=5000000.0,
+                mrope_section=[24, 20, 20],
+            ),
         ),
         vision_encoder=_vl_vision_encoder_config(
             dim=1152,
@@ -617,7 +613,6 @@ def _235b_a22b(
             num_position_embeddings=2304,
             deepstack_visual_indices=[8, 16, 24],
         ),
-        mrope_section=[24, 20, 20],
     )
 
 
