@@ -8,13 +8,14 @@
 
 import spmd_types as spmd
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
+
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
 )
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
-from torchtitan.distributed.parallel_dims import MeshAxisName
 
 
 DP = MeshAxisName.DP
