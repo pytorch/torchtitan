@@ -7,10 +7,10 @@
 import math
 from dataclasses import dataclass, fields
 
+import spmd_types as spmd
+
 import torch
 import torch.nn as nn
-
-import spmd_types as spmd
 
 from torchtitan.config import Configurable
 from torchtitan.models.common.decoder_sharding import dense_param_placement
