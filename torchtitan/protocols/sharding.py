@@ -18,7 +18,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.distributed.spmd_types import spmd_layout_to_dtensor_placements
-from torchtitan.protocols.types import MeshAxisName, SpmdLayout
+from torchtitan.distributed.parallel_dims import MeshAxisName, SpmdLayout
 
 
 __all__ = [
