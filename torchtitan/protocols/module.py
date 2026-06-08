@@ -399,9 +399,7 @@ class Module(nn.Module, Configurable):
                 continue
             src_spmd_layout = in_src_shardings.get(name)
             dst_spmd_layout = in_dst_shardings.get(name)
-            mesh = parallel_dims.resolve_shared_mesh(
-                [src_spmd_layout, dst_spmd_layout]
-            )
+            mesh = parallel_dims.resolve_shared_mesh([src_spmd_layout, dst_spmd_layout])
             if mesh is None:
                 continue
 
