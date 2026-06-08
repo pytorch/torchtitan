@@ -96,7 +96,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
         n_heads = attn.n_heads
         n_kv_heads = attn.n_kv_heads if attn.n_kv_heads is not None else n_heads
         dim = self.model_config.dim  # pyrefly: ignore [missing-attribute]
-        head_dim = self.model_config.layers[0].attention.head_dim or dim // n_heads
+        head_dim = attn.head_dim or dim // n_heads
         hf_state_dict = {}
 
         if self.fuse_qkv:
@@ -172,7 +172,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
         n_heads = attn.n_heads
         n_kv_heads = attn.n_kv_heads if attn.n_kv_heads is not None else n_heads
         dim = self.model_config.dim  # pyrefly: ignore [missing-attribute]
-        head_dim = self.model_config.layers[0].attention.head_dim or dim // n_heads
+        head_dim = attn.head_dim or dim // n_heads
         state_dict = {}
 
         # Collect Q/K/V per layer, then fuse (only used when fuse_qkv=True)
