@@ -4,14 +4,23 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
+
+from torchtitan.experiments.rl.observability import metrics as m
 
 
 @dataclass(kw_only=True, slots=True)
 class Completion:
-    """A single generated sequence from the generator."""
+    """A single generated sequence from the generator.
+
+    Example:
+
+        Completion(policy_version=7, request_id="r0", token_ids=[12, 9],
+                   token_logprobs=[-0.2, -1.1], finish_reason="stop",
+                   metrics=[Metric("generator/output_tokens", ...)])
+    """
 
     policy_version: int
     request_id: str
@@ -22,13 +31,20 @@ class Completion:
     finish_reason: str | None = None
     """vLLM `CompletionOutput.finish_reason` ("stop" | "length" | "abort")"""
 
+    metrics: list[m.Metric] = field(default_factory=list)
+    """Per-generation metrics measured by the generator (latencies, output tokens); the
+    controller attaches them to the rollout turn."""
+
 
 # TODO: rename `Episode` -> `TrainingSample`
 # and `rollout_to_episode` -> `rollout_to_training_sample`
 @dataclass(kw_only=True, slots=True)
 class Episode:
-    """Training sample: flattened Rollout turns + GRPO advantage,
-    ready for collation into a batch."""
+    """Training sample: a flattened Rollout + GRPO advantage, ready for collation into a batch.
+
+    An Episode is a single (prompt, completion) pair. One Rollout currently yields one Episode
+    (its last completion); see `rollout_to_episode`'s TODO for proper multi-turn packing.
+    """
 
     policy_version: int
     sample_id: str

@@ -4,30 +4,32 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for ``VLLMGenerator.generate``.
+"""Unit tests for the `VLLMGenerator` continuous-batching mechanics.
 
-Exercises the endpoint in isolation by swapping in a fake vLLM engine —
-no Monarch, no GPU, no real model. Covers the token-in / token-out
-contract, the metric payload (timing math, edge cases, prefix override),
-and the completion/metrics separation.
+Exercises the per-request pieces in isolation with a fake vLLM engine — no Monarch,
+no GPU, no real model, and no broadcast (the engine loop's broadcast/step is a TP
+collective, tested separately in `test_engine_loop.py`). Covers admission (token-in),
+completion (token-out + the metrics that ride with it),
+the SamplingParams contract, and the vLLM metric timing math.
 """
 
 import asyncio
 from types import SimpleNamespace
 
 import pytest
+from vllm.sampling_params import RequestOutputKind
 
-from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
+from torchtitan.experiments.rl.actors.generator import (
+    _InflightRequest,
+    _prepare_generation_request_metrics,
+    SamplingConfig,
+    VLLMGenerator,
+)
 from torchtitan.experiments.rl.observability import metrics as m
 
 
 class _FakeRenderer:
-    """Stub for vLLM's Renderer.render_cmpl.
-
-    Mirrors the real shape: takes a list of ``{"prompt_token_ids": ids}``
-    dicts and returns a list of typed ``TokensInput`` EngineInputs with
-    ``type="token"`` plus a stamped ``arrival_time``.
-    """
+    """Stub for vLLM's Renderer.render_cmpl: token-id dicts in, typed EngineInputs out."""
 
     def render_cmpl(self, prompts):
         return [
@@ -41,43 +43,25 @@ class _FakeRenderer:
 
 
 class _FakeEngine:
-    def __init__(self, outputs):
-        self.outputs = outputs
+    def __init__(self):
         self.add_requests = []
-        self._stepped = False
         self.renderer = _FakeRenderer()
 
     def add_request(self, *args, **kwargs):
         self.add_requests.append((args, kwargs))
 
-    def has_unfinished_requests(self):
-        return not self._stepped
 
-    def step(self):
-        self._stepped = True
-        return self.outputs
-
-
-def _sample(*, index=0, token_ids=(10, 11), finish_reason="stop"):
+def _sample(*, token_ids=(10, 11), finish_reason="stop"):
     return SimpleNamespace(
-        index=index,
-        text="ok",
         token_ids=list(token_ids),
         logprobs=[{tok: SimpleNamespace(logprob=-0.1)} for tok in token_ids],
         finish_reason=finish_reason,
     )
 
 
-def _request_output(
-    *,
-    request_id="0",
-    prompt_token_ids=(1, 2),
-    outputs=None,
-    num_generation_tokens=4,
-):
+def _request_output(*, request_id="r0", outputs=None, num_generation_tokens=4):
     return SimpleNamespace(
         request_id=request_id,
-        prompt_token_ids=list(prompt_token_ids),
         num_cached_tokens=0,
         metrics=SimpleNamespace(
             first_token_latency=0.012,
@@ -91,11 +75,14 @@ def _request_output(
     )
 
 
-def _generator(outputs):
+def _generator():
+    """A bare generator (no __init__ / engine build) with just the CB state set."""
     generator = VLLMGenerator.__new__(VLLMGenerator)
-    generator._engine = _FakeEngine(outputs)
+    generator._engine = _FakeEngine()
+    generator._tp_rank = 0
     generator.policy_version = 7
     generator._stop_token_ids = []
+    generator._inflight_requests = {}
     generator.config = SimpleNamespace(
         sampling=SamplingConfig(temperature=0.0, top_p=1.0, max_tokens=4),
         debug=SimpleNamespace(seed=None),
@@ -103,91 +90,92 @@ def _generator(outputs):
     return generator
 
 
-def _run_generate(generator, tokenized_prompts, *, request_ids=None, **kwargs):
-    if request_ids is None:
-        request_ids = [str(i) for i in range(len(tokenized_prompts))]
-    return asyncio.run(
-        VLLMGenerator.generate._method(
-            generator, tokenized_prompts, request_ids=request_ids, **kwargs
-        )  # noqa: SLF001
+# --- completion (token-out) ---
+
+
+def test_complete_finished_requests_resolves_future_with_completion():
+    async def main():
+        generator = _generator()
+        future = asyncio.get_running_loop().create_future()
+        generator._inflight_requests = {
+            "r0": _InflightRequest(future=future, metrics_prefix="generator")
+        }
+
+        generator._complete_finished_requests(
+            [
+                _request_output(
+                    outputs=[_sample(token_ids=(10, 11), finish_reason="length")]
+                )
+            ]
+        )
+
+        completion = await future
+        assert completion.request_id == "r0"
+        assert completion.token_ids == [10, 11]
+        assert completion.token_logprobs == [-0.1, -0.1]
+        assert completion.finish_reason == "length"
+        assert completion.policy_version == 7
+        # The request is popped from the in-flight map.
+        assert generator._inflight_requests == {}
+        # The per-generation metrics ride on the completion (output_tokens among them).
+        assert (
+            m.MetricsProcessor._aggregate_metrics(completion.metrics)[
+                "generator/output_tokens/sum"
+            ]
+            == 2
+        )
+
+    asyncio.run(main())
+
+
+def test_complete_finished_requests_noop_on_followers():
+    # Followers hold no futures, so completion is a no-op (it returns before touching outputs).
+    generator = _generator()
+    generator._tp_rank = 1
+    generator._complete_finished_requests([_request_output(request_id="r0")])
+    assert generator._inflight_requests == {}
+
+
+# --- SamplingParams contract (must match the batched path exactly) ---
+
+
+def test_build_sampling_params_matches_contract():
+    generator = _generator()
+    generator._stop_token_ids = [99]
+    params = generator._build_sampling_params(
+        SamplingConfig(temperature=0.3, top_p=0.9, max_tokens=64)
     )
+    assert params.temperature == 0.3 and params.top_p == 0.9
+    assert params.max_tokens == 64
+    assert params.n == 1
+    assert params.logprobs == 1
+    assert params.output_kind == RequestOutputKind.FINAL_ONLY
+    assert params.stop_token_ids == [99]
 
 
-def test_generate_passes_token_prompt_to_vllm():
-    generator = _generator([_request_output(prompt_token_ids=[1, 2, 3])])
-
-    _run_generate(generator, [[1, 2, 3]])
-
-    # add_request is invoked entirely with kwargs. The ``prompt`` kwarg
-    # carries the renderer's output: a typed EngineInput (``type="token"``)
-    # with the prompt token IDs and a stamped ``arrival_time`` — keeping us
-    # off vLLM's deprecated raw-prompt path.
-    (_args, kwargs) = generator._engine.add_requests[0]
-    assert kwargs["request_id"] == "0"
-    assert kwargs["prompt"]["type"] == "token"
-    assert kwargs["prompt"]["prompt_token_ids"] == [1, 2, 3]
-    assert "arrival_time" in kwargs["prompt"]
+# --- vLLM metric timing math (the `_prepare_generation_request_metrics` helper) ---
 
 
-def test_generate_carries_finish_reason_and_metrics():
-    output = _request_output(
-        outputs=[
-            _sample(index=0, token_ids=(10, 11), finish_reason="length"),
-            _sample(index=1, token_ids=(12,), finish_reason="stop"),
-        ]
+def test_metric_timing_math_and_prefix_override():
+    metrics = _prepare_generation_request_metrics(
+        _request_output(), prefix="validation_generator"
     )
-    generator = _generator([output])
-
-    completions, generation_metrics = _run_generate(generator, [[1, 2]])
-
-    assert [c.finish_reason for c in completions] == ["length", "stop"]
-    assert not hasattr(completions[0], "metrics")
-    aggregate = m.MetricsProcessor._aggregate_metrics(generation_metrics)
-    assert aggregate["generator/output_tokens/sum"] == 3
-    assert aggregate["generator/num_cached_tokens/mean"] == 0
-    assert aggregate["generator/num_cached_tokens/max"] == 0
-    assert aggregate["generator/time_to_first_token_ms/mean"] == 12
-    assert aggregate["generator/time_to_first_token_ms/max"] == 12
-    assert aggregate["generator/queue_time_ms/mean"] == pytest.approx(5)
-    assert aggregate["generator/queue_time_ms/max"] == pytest.approx(5)
-    assert aggregate["generator/prefill_time_ms/mean"] == pytest.approx(12)
-    assert aggregate["generator/prefill_time_ms/max"] == pytest.approx(12)
-    assert aggregate["generator/decode_time_ms/mean"] == pytest.approx(30)
-    assert aggregate["generator/decode_time_ms/max"] == pytest.approx(30)
-    assert aggregate["generator/inter_token_latency_ms/mean"] == pytest.approx(10)
-    assert aggregate["generator/inter_token_latency_ms/max"] == pytest.approx(10)
-    assert "generator/e2e_latency_ms/mean" not in aggregate
+    aggregate = m.MetricsProcessor._aggregate_metrics(metrics)
+    assert all(key.startswith("validation_generator/") for key in aggregate)
+    assert aggregate["validation_generator/queue_time_ms/mean"] == pytest.approx(5)
+    assert aggregate["validation_generator/time_to_first_token_ms/mean"] == 12
+    assert aggregate["validation_generator/prefill_time_ms/mean"] == pytest.approx(12)
+    assert aggregate["validation_generator/decode_time_ms/mean"] == pytest.approx(30)
+    assert aggregate[
+        "validation_generator/inter_token_latency_ms/mean"
+    ] == pytest.approx(10)
 
 
-def test_generate_metrics_prefix_override_namespaces_keys():
-    output = _request_output(
-        outputs=[_sample(index=0, token_ids=(10, 11))],
+def test_decode_metrics_absent_for_single_generated_token():
+    metrics = _prepare_generation_request_metrics(
+        _request_output(num_generation_tokens=1), prefix="generator"
     )
-    generator = _generator([output])
-
-    _, generation_metrics = _run_generate(
-        generator, [[1, 2]], metrics_prefix="validation/generator"
-    )
-
-    metric_keys = {metric.key for metric in generation_metrics}
-    assert "validation/generator/output_tokens" in metric_keys
-    assert "validation/generator/queue_time_ms" in metric_keys
-    assert all(key.startswith("validation/generator/") for key in metric_keys)
-
-
-def test_decode_metrics_are_absent_for_single_generated_token():
-    generator = _generator(
-        [
-            _request_output(
-                outputs=[_sample(index=0, token_ids=(10,))],
-                num_generation_tokens=1,
-            )
-        ]
-    )
-
-    _, generation_metrics = _run_generate(generator, [[1, 2]])
-
-    metric_keys = {metric.key for metric in generation_metrics}
-    assert "generator/prefill_time_ms" in metric_keys
-    assert "generator/decode_time_ms" not in metric_keys
-    assert "generator/inter_token_latency_ms" not in metric_keys
+    keys = {metric.key for metric in metrics}
+    assert "generator/prefill_time_ms" in keys
+    assert "generator/decode_time_ms" not in keys
+    assert "generator/inter_token_latency_ms" not in keys

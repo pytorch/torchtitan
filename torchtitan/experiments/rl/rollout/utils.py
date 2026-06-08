@@ -9,42 +9,55 @@ from __future__ import annotations
 from collections import defaultdict
 
 from torchtitan.experiments.rl.observability import metrics as m
-from torchtitan.experiments.rl.rollout.types import Rollout
+from torchtitan.experiments.rl.rollout.types import Rollout, RolloutTurn
 from torchtitan.experiments.rl.types import Episode
 
 
-def last_completion_text(rollout: Rollout) -> str:
-    """Return the completion message text from the last turn, or `""`."""
-    if not rollout.turns:
-        return ""
-    msg = rollout.turns[-1].completion_message
+def completion_text(turn: RolloutTurn) -> str:
+    """The turn's completion message text, or `""`."""
+    msg = turn.completion_message
     return (msg.get("content") or "") if msg else ""
 
 
+def last_completion_text(rollout: Rollout) -> str:
+    """The completion text of the rollout's last turn, or `""`."""
+    return completion_text(rollout.turns[-1]) if rollout.turns else ""
+
+
 def rollout_to_episode(rollout: Rollout) -> Episode:
-    """Flatten a scored single-turn `Rollout` into an `Episode`, a class
-    that holds only the information needed for training.
+    """Flatten a scored `Rollout` into ONE training `Episode`.
+
+    Trains on the rollout's last turn that produced a completion — whose prompt already holds
+    the full conversation history — with the rollout's trajectory reward/advantage. A single-turn
+    rollout yields the obvious `(prompt, completion)` pair.
+
+    Example:
+
+        rollout_to_episode(rollout)
+        # -> Episode(prompt_token_ids=last_turn_prompt, completion_token_ids=last_turn_completion,
+        #            reward=1.0, advantage=0.3, ...)
     """
-    # TODO: support multi-turn rollout flattening.
-    # TODO(branching): when a turn's prompt history diverges from the previous turn's
-    #       (e.g. the env edited/compacted history), the turns no longer share a prefix
-    #       and must be split into separate training sequences instead of one flat episode.
-    # TODO: rename Episode -> TrainingSample / rollout_to_episode ->
-    #       rollout_to_training_sample (consistent with TrainingBatch).
-    if len(rollout.turns) != 1:
-        raise ValueError(
-            f"rollout_to_episode expects exactly one turn; got {len(rollout.turns)}."
-        )
-    turn = rollout.turns[0]
+    # TODO(prefix-matching): a multi-turn rollout's turns share a growing prefix, so the whole
+    #   trajectory should pack into ONE sequence (loss-masking each assistant turn) rather than
+    #   training only the last turn. Branch into multiple Episodes only where a turn's prompt
+    #   diverges from the previous turn's prompt+completion (e.g. the env edited/compacted
+    #   history), since those turns no longer share a prefix.
+    trainable_turns = [
+        rollout_turn
+        for rollout_turn in rollout.turns
+        if rollout_turn.completion_token_ids
+    ]
+    last_turn = trainable_turns[-1]
+    advantage = rollout.advantage if rollout.advantage is not None else 0.0
     return Episode(
-        policy_version=turn.policy_version,
+        policy_version=last_turn.policy_version,
         sample_id=rollout.sample_id,
-        prompt_token_ids=turn.prompt_token_ids,
-        completion_text=last_completion_text(rollout),
-        completion_token_ids=turn.completion_token_ids,
-        completion_logprobs=turn.completion_logprobs,
+        prompt_token_ids=last_turn.prompt_token_ids,
+        completion_text=completion_text(last_turn),
+        completion_token_ids=last_turn.completion_token_ids,
+        completion_logprobs=last_turn.completion_logprobs,
         reward=rollout.reward,
-        advantage=rollout.advantage if rollout.advantage is not None else 0.0,
+        advantage=advantage,
     )
 
 

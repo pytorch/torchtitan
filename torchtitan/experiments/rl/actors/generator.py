@@ -4,14 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
+import asyncio
+import enum
+import gc
 import logging
 import math
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 import torch
+import torch.distributed as dist
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
+from monarch.rdma import is_rdma_available
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import (
     CompileConfig,
@@ -41,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 
 def _prepare_generation_request_metrics(
-    output: RequestOutput, *, prefix: str
+    request_output: RequestOutput, *, prefix: str
 ) -> list[m.Metric]:
     """Prepare vLLM metrics from a RequestOutput.
 
@@ -66,10 +74,10 @@ def _prepare_generation_request_metrics(
     # LLMEngine.from_engine_args(..., stat_loggers=[...]).
 
     metric_values: dict[str, float] = {}
-    if output.num_cached_tokens is not None:
-        metric_values[f"{prefix}/num_cached_tokens"] = output.num_cached_tokens
+    if request_output.num_cached_tokens is not None:
+        metric_values[f"{prefix}/num_cached_tokens"] = request_output.num_cached_tokens
 
-    stats = output.metrics
+    stats = request_output.metrics
     if stats is not None:
         metric_values[f"{prefix}/queue_time_ms"] = (
             stats.scheduled_ts - stats.queued_ts
@@ -163,12 +171,43 @@ class SamplingConfig:
 
 
 class VLLMGenerator(Actor, Configurable):
-    """
-    Generates rollouts using vLLM engine.
+    """vLLM engine driving many concurrent `generate` calls through one SPMD engine loop.
 
-    Maintains a vLLM engine synchronized with the Trainer via weight
-    sync. ``generate()`` produces a flat list of Completions; reward
-    and advantage computation live in the controller.
+    The controller fires many independent `generate(prompt)` calls. Each call enqueues its prompt and
+    awaits a future; one background `_engine_loop` per TP rank drives the vLLM engine and resolves each
+    future when its request finishes. Generation and request-intake are decoupled, so a new request
+    joins mid-flight instead of waiting for the current batch to drain.
+
+    vLLM's `engine.step()` is a TP collective: every rank must step on the SAME request set in the SAME
+    order. So only RANK 0 holds the queue + futures; each tick it decides what to do and BROADCASTS that
+    decision, and every rank applies it in lockstep.
+
+    One tick, TP=2, after the controller fired generate(p0) and generate(p1):
+
+        # request intake in `generate` takes a prompt, puts in a queue, releases control back to the controller
+        generate(p0): enqueue p0, await future0   ┐ rank 0 owns the queue + futures
+        generate(p1): enqueue p1, await future1   ┘ (other ranks are no-op)
+
+        # meanwhile, in the engine-loop, which is its own coroutine, continuously running.
+        rank 0   _decide_next_action -> LoopDecision(STEP, [p0, p1]) ─┐ broadcast_object_list (gloo)
+        rank 1   (blocked inside the broadcast) ──────────────────────┘ decision from rank0 is broadcast
+
+        # We add a batch of collected requests and loop N engine steps; then we check again
+        # _decide_next_action, which may be STEP again (also keeps ongoing requests moving),
+        # PULL_WEIGHTS, or CLOSE.
+
+        ALL      add_request(p0), add_request(p1)
+        ALL      engine.step() * max_steps_per_iteration # step burst
+
+        # resolve the future, waking up `generate` so it returns the result to the controller.
+        # Note that p0 can be done before p1. The result is per request, not per batch.
+        rank 0   _complete_finished_requests -> p0 done? future0.set_result(Completion)
+        rank 1   _complete_finished_requests -> no-op (holds no futures)
+
+    A weight sync rides the same loop: `pull_model_state_dict` queues a `LoopAction.PULL_WEIGHTS` applied
+    between step bursts. The engine does NOT drain in-flight requests first ("hotswap"), so to keep one
+    request on a single policy version the controller holds off new `generate` calls until the queue
+    drains, then pulls.
 
     Args:
         config: Generator-specific configuration.
@@ -176,6 +215,9 @@ class VLLMGenerator(Actor, Configurable):
         model_path: Path to the HF model checkpoint.
         compile_config: Per-layer torch.compile config shared with the
             trainer so both sides compile identically.
+        max_num_seqs: vLLM's max concurrent sequences (KV budget + CUDA-graph sizes).
+        output_dir: Structured-logger output directory.
+        stop_token_ids: Renderer role-boundary stop tokens injected by the controller.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -208,6 +250,12 @@ class VLLMGenerator(Actor, Configurable):
 
         debug: DebugConfig = field(default_factory=DebugConfig)
         """Debug and determinism settings."""
+
+        max_steps_per_iteration: int = 16
+        """Engine steps the loop runs between admits. With =1 the loop re-admits every step, so
+        each newly-arrived request triggers its own prefill; >1 buffers arrivals over the burst
+        so several admit (and prefill) together. Higher also amortizes the per-burst broadcast,
+        at the cost of a new request waiting a few more steps before it is admitted."""
 
         def __post_init__(self):
             # VLLMGenerator only supports TP. vLLM handles its own parallelism;
@@ -334,6 +382,9 @@ class VLLMGenerator(Actor, Configurable):
         )
         engine_kwargs["max_model_len"] = model_spec.model.max_seq_len
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
+        # Continuous batching requires FCFS scheduling: admission order must equal the
+        # broadcast order on every rank
+        engine_kwargs["scheduling_policy"] = "fcfs"
         # FA2 requires block_size to be a multiple of 256
         if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
@@ -352,6 +403,27 @@ class VLLMGenerator(Actor, Configurable):
             logger.info("vLLM rollout engine initialized")
 
         self.policy_version = 0
+
+        # --- Continuous-batching state (see the class docstring) ---
+        self._tp_rank = dist.get_rank()
+        self._broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
+        self._condition = asyncio.Condition()  # Signals to wake up when there is work
+
+        # Rank 0 adds requests to this queue on `generate` calls.
+        self._queued_requests: list[PendingRequest] = []
+
+        # Rank 0 uses it as a placeholder for engine_loop futures
+        self._inflight_requests: dict[str, _InflightRequest] = {}
+
+        # Rank 0 changes the state of these variables on weighsync pull calls
+        # and on close (shutdown) calls, which signals the engine_loop to act.
+        self._pending_pull: PendingPull | None = None
+        self._close_requested = False
+
+        # Task to hold the running engine_loop
+        self._engine_loop_task: asyncio.Task | None = (
+            None  # the single background driver
+        )
 
         logger.info("Generator initialized with vLLM engine")
 
@@ -385,139 +457,294 @@ class VLLMGenerator(Actor, Configurable):
         sl.set_step(step, relative_step=relative_step)
 
     @endpoint
-    @sl.log_trace_span("generate")
     async def generate(
         self,
-        tokenized_prompts: list[list[int]],
+        prompt_token_ids: list[int],
         *,
-        request_ids: list[str],
+        request_id: str,
         sampling_config: SamplingConfig | None = None,
         metrics_prefix: str = "generator",
-    ) -> tuple[list[Completion], list[m.Metric]]:
-        """Generate completions and generator metrics for tokenized prompts.
+    ) -> Completion | None:
+        """Generates one completion for one prompt.
 
-        Takes ``tokenized_prompts`` as ``[num_prompts][prompt_tokens]``.
-        Returns completions in the same order as ``request_ids`` plus generator
-        metrics.
+        Returns the `Completion` on rank 0 and `None` on followers. The completion carries its
+        own per-generation metrics (`Completion.metrics`), which the controller attaches to the
+        rollout turn.
 
         Args:
-            tokenized_prompts: Tokenized prompts shaped ``[num_prompts][prompt_tokens]``.
-            request_ids: One id per prompt echoed on each ``Completion.request_id``.
+            prompt_token_ids: One tokenized prompt `[token_ids]`.
+            request_id: Unique id for this request, echoed on the `Completion`.
             sampling_config: Optional per-call override for the generator's
-                default SamplingConfig. ``seed`` always comes from
-                ``config.debug.seed`` (not part of SamplingConfig).
-            metrics_prefix: Namespace prepended to every returned metric key
-                (default ``"generator"``). Callers that need to keep streams
+                default SamplingConfig.
+            metrics_prefix: Namespace prepended to every metric key on the returned
+                `Completion` (default ``"generator"``). Callers that need to keep streams
                 separate, e.g. ``"validation/generator"``, can override it.
+
+        Example:
+
+            completion = await generator.generate.call(
+                [1, 2, 3], request_id="step=3/group=0/sample=0/turn=0",
+            )
+            # rank 0 -> Completion(token_ids=[...], metrics=[Metric("generator/output_tokens", ...)]);
+            # followers -> None
         """
-        _sampling_config = (
+
+        # Start the engine loop lazily (not in __init__): `create_task` needs a running event
+        # loop, but __init__ runs synchronously at construction. Idempotent + runs on every rank.
+        await self._ensure_engine_loop()
+
+        # Only rank 0 owns the queue + futures moving forward.
+        if self._tp_rank != 0:
+            return None
+
+        sampling = (
             sampling_config if sampling_config is not None else self.config.sampling
         )
 
-        logger.debug(
-            f"{os.getpid()=} Generating start generate (policy v{self.policy_version})..."
-        )
+        # A placeholder the engine loop resolves with this request's Completion.
+        future: asyncio.Future[Completion] = asyncio.get_running_loop().create_future()
 
-        with torch.no_grad():
-            sampling_params = SamplingParams(
-                temperature=_sampling_config.temperature,
-                top_p=_sampling_config.top_p,
-                max_tokens=_sampling_config.max_tokens,
-                n=1,  # group_size pre-expands prompts; the RL loop always samples n=1
-                stop_token_ids=self._stop_token_ids or None,
-                seed=self.config.debug.seed,
-                logprobs=1,
-                output_kind=RequestOutputKind.FINAL_ONLY,
+        # `condition` wakes the engine loop when a new request is added.
+        async with self._condition:
+            if request_id in self._inflight_requests:
+                raise ValueError(f"request_id {request_id!r} is already in flight")
+
+            # Register the future before enqueueing; the engine loop resolves it.
+            self._inflight_requests[request_id] = _InflightRequest(
+                future=future, metrics_prefix=metrics_prefix
             )
 
-            if len(request_ids) != len(tokenized_prompts):
-                raise ValueError(
-                    f"got {len(request_ids)} request_ids for {len(tokenized_prompts)} prompts"
-                )
-            if len(set(request_ids)) != len(request_ids):
-                raise ValueError(f"request_ids must be unique; got {request_ids}")
-
-            # render_cmpl is vLLM's input-pipeline entry.
-            # The tokenize step is a no-op for already-tokenized prompts. The
-            # lower-level alternative is vllm.inputs.tokens_input; we use the
-            # high-level API to stay resilient to vLLM internal changes.
-            engine_inputs = self._engine.renderer.render_cmpl(
-                [{"prompt_token_ids": ids} for ids in tokenized_prompts]
-            )
-            for engine_input, request_id in zip(
-                engine_inputs, request_ids, strict=True
-            ):
-                self._engine.add_request(
+            # Add the request to the queue; the engine loop will admit + process it.
+            self._queued_requests.append(
+                PendingRequest(
                     request_id=request_id,
-                    prompt=engine_input,
-                    params=sampling_params,
+                    prompt_token_ids=prompt_token_ids,
+                    sampling=sampling,
+                )
+            )
+            # Wakes the engine loop only if it is idle in `_decide_next_action`.
+            self._condition.notify_all()
+
+        # Await OUTSIDE the lock so other `generate` calls can acquire `condition` meanwhile.
+        # `await` unwraps the engine loop's result, so this returns the `Completion` value, not a
+        # future. (The controller still awaits Monarch's own RPC future from `generate.call(...)`.)
+        return await future
+
+    async def _ensure_engine_loop(self) -> None:
+        """Start the single background engine loop on first use (idempotent); runs until `close()`."""
+        if self._engine_loop_task is None:
+            self._engine_loop_task = asyncio.create_task(self._engine_loop())
+
+    @sl.log_trace_span("engine_loop")
+    async def _engine_loop(self) -> None:
+        """Non-stop loop running on all ranks to produce new tokens.
+
+        Rank 0 decides a `LoopDecision` and broadcasts it; ALL ranks apply it in TP
+        lockstep until CLOSE. On crash, fail every outstanding future so callers don't hang.
+
+        `_decide_next_action` is consulted once every `max_steps_per_iteration` steps (a burst),
+        so new requests buffer and prefill together instead of on every step.
+
+        Example:
+            max_steps_per_iteration = 16
+            check `_decide_next_action` --> "STEP"         --> run engine.step 16 times
+            check `_decide_next_action` --> "PULL_WEIGHTS" --> run `_pull_weights`
+            check `_decide_next_action` --> "STEP"         --> run engine.step 16 times
+            check `_decide_next_action` --> "CLOSE"        --> stop
+        """
+        try:
+            while True:
+                # Rank 0 decides (sleeping until there is work); followers pass None and learn
+                # the decision from the broadcast.
+                decision = (
+                    await self._decide_next_action() if self._tp_rank == 0 else None
                 )
 
-            all_outputs = []
-            with sl.log_trace_span("engine_steps"):
-                while self._engine.has_unfinished_requests():
-                    all_outputs.extend(self._engine.step())
-
-            # Return completions in caller input order; the controller maps positionally.
-            request_order = {request_id: i for i, request_id in enumerate(request_ids)}
-            all_outputs.sort(key=lambda output: request_order[output.request_id])
-
-            completions: list[Completion] = []
-            generation_metrics: list[m.Metric] = []
-            output_token_counts: list[int] = []
-            for output in all_outputs:
-                generation_metrics.extend(
-                    _prepare_generation_request_metrics(output, prefix=metrics_prefix)
+                # Barrier 1 (gloo, CPU): ship rank 0's decision to every rank, off the NCCL
+                # stream. broadcast_object_list blocks, so to_thread keeps the event loop free.
+                decision_box = [decision] if self._tp_rank == 0 else [None]
+                await asyncio.to_thread(
+                    dist.broadcast_object_list,
+                    decision_box,
+                    src=0,
+                    group=self._broadcast_group,
+                    device=torch.device("cpu"),
                 )
-                for sample in output.outputs:
-                    per_token_logprobs = [
-                        list(logprob_dict.values())[0].logprob
-                        for logprob_dict in sample.logprobs
-                    ]
-                    output_token_counts.append(len(sample.token_ids))
-                    completions.append(
-                        Completion(
-                            policy_version=self.policy_version,
-                            request_id=output.request_id,
-                            token_ids=sample.token_ids,
-                            token_logprobs=per_token_logprobs,
-                            finish_reason=sample.finish_reason,
+                decision = decision_box[0]
+
+                if decision.action is LoopAction.CLOSE:
+                    return
+
+                if decision.action is LoopAction.PULL_WEIGHTS:
+                    await self._pull_weights(decision.pull_version)
+                    continue  # back to the start for the next decision
+
+                # STEP: all ranks add the identical request set.
+                if decision.action is LoopAction.STEP:
+                    if decision.requests:  # holds the new requests
+                        engine_inputs = self._engine.renderer.render_cmpl(
+                            [
+                                {"prompt_token_ids": request.prompt_token_ids}
+                                for request in decision.requests
+                            ]
                         )
-                    )
-            generation_metrics.append(
+                        for request, engine_input in zip(
+                            decision.requests, engine_inputs, strict=True
+                        ):
+                            self._engine.add_request(
+                                request_id=request.request_id,
+                                prompt=engine_input,
+                                params=self._build_sampling_params(request.sampling),
+                            )
+
+                # Barrier 2 (NCCL): a burst of steps (then loop back for a new decision)
+                for _ in range(self.config.max_steps_per_iteration):
+                    if not self._engine.has_unfinished_requests():
+                        break
+                    with torch.no_grad():
+                        request_outputs = self._engine.step()
+                    self._complete_finished_requests(request_outputs)
+                    await asyncio.sleep(0)  # let pending generate() calls enqueue
+
+        except Exception as exc:
+            logger.exception("engine loop crashed; failing all in-flight requests")
+
+            # resolve all request futures.
+            for inflight in self._inflight_requests.values():
+                if not inflight.future.done():
+                    inflight.future.set_exception(exc)
+            self._inflight_requests.clear()
+
+            # Resolve `pull_model_state_dict` future.
+            if self._pending_pull is not None:
+                if not self._pending_pull.future.done():
+                    self._pending_pull.future.set_exception(exc)
+                self._pending_pull = None
+            raise
+
+    async def _decide_next_action(self) -> LoopDecision:
+        """RANK 0: picks the next action. Sleeps until there is something to do."""
+
+        # `wait_for` returns immediately while there is work; it only SLEEPS when the engine is
+        # fully idle, and then a `notify_all` from `generate` / `pull_model_state_dict` / `close`
+        # wakes it. (In-flight requests keep the predicate true, so they need no notify.)
+        async with self._condition:
+            await self._condition.wait_for(
+                lambda: self._close_requested
+                or self._pending_pull is not None
+                or self._queued_requests
+                or self._engine.has_unfinished_requests()
+            )
+
+            if self._close_requested:
+                return LoopDecision(action=LoopAction.CLOSE, requests=[])
+
+            # A weight pull takes priority over admitting new requests.
+            if self._pending_pull is not None:
+                return LoopDecision(
+                    action=LoopAction.PULL_WEIGHTS,
+                    requests=[],
+                    pull_version=self._pending_pull.version,
+                )
+
+            # STEP: admit whatever is queued (may be empty -> just keep stepping in-flight work).
+            requests, self._queued_requests = self._queued_requests, []
+            return LoopDecision(action=LoopAction.STEP, requests=requests)
+
+    def _complete_finished_requests(self, request_outputs: list[RequestOutput]) -> None:
+        """RANK 0: resolve each finished request's future with its `Completion` (metrics included)."""
+        if self._tp_rank != 0:
+            return  # other ranks hold no futures
+
+        for request_output in request_outputs:
+            # Rank 0 owns every request
+            inflight = self._inflight_requests.pop(request_output.request_id)
+            metrics_prefix = inflight.metrics_prefix
+            completion_output = request_output.outputs[0]  # n=1: one sample per request
+            token_logprobs = [
+                next(iter(logprob_dict.values())).logprob
+                for logprob_dict in completion_output.logprobs
+            ]
+            metrics = _prepare_generation_request_metrics(
+                request_output, prefix=metrics_prefix
+            )
+            # Derivable from completion_token_ids; emitted here to keep generation telemetry together.
+            metrics.append(
                 m.Metric(
                     f"{metrics_prefix}/output_tokens",
-                    m.Sum.from_list(output_token_counts),
+                    m.Sum(float(len(completion_output.token_ids))),
+                )
+            )
+            # Engine concurrency gauge, observed when this request resolves.
+            metrics.append(
+                m.Metric(
+                    "generator/inflight_at_completion",
+                    m.Max(float(len(self._inflight_requests) + 1)),  # +1 due to .pop
+                )
+            )
+            inflight.future.set_result(
+                Completion(
+                    policy_version=self.policy_version,
+                    request_id=request_output.request_id,
+                    token_ids=list(completion_output.token_ids),
+                    token_logprobs=token_logprobs,
+                    finish_reason=completion_output.finish_reason,
+                    metrics=metrics,
                 )
             )
 
-        logger.debug(
-            f"{os.getpid()=} Generating finish generate (policy v{self.policy_version})..."
+    def _build_sampling_params(self, sampling: SamplingConfig) -> SamplingParams:
+        """Translate a `SamplingConfig` into vLLM `SamplingParams` (n=1; seed from debug)."""
+        return SamplingParams(
+            temperature=sampling.temperature,
+            top_p=sampling.top_p,
+            max_tokens=sampling.max_tokens,
+            n=1,  # group_size pre-expands prompts; the RL loop always samples n=1
+            stop_token_ids=self._stop_token_ids or None,
+            seed=self.config.debug.seed,
+            logprobs=1,
+            output_kind=RequestOutputKind.FINAL_ONLY,
         )
-
-        # TODO: consider passing metrics as an arg to Completion and Trajectory,
-        # e.g. Completion(metrics=generation_metrics), so when we log the rollouts
-        # to a json or database,  we can associate each rollout with its metrics
-        # I am keeping like this for now for simplicity.
-        return completions, generation_metrics
 
     @endpoint
     @sl.log_trace_span("pull_model_state_dict")
     async def pull_model_state_dict(self, version: int) -> None:
-        """Pull latest weights from TorchStore.
+        """Queues a weight pull for `version` and blocks until the engine loop has applied it.
 
-        When ``direct_rdma=True``, weights are read directly from the
-        trainer's GPU memory via one-sided RDMA, bypassing StorageVolumes.
-        When ``False``, data is fetched through StorageVolumes (which may
-        themselves use RDMA as their transport internally).
-
-        See ``push_model_state_dict`` for more details on the distinction.
+        The engine loop runs the collective copy between step bursts (a `LoopAction.PULL_WEIGHTS`).
+        In-flight requests are NOT drained here — the endpoint never drains; a caller that wants
+        an idle engine holds off new `generate` calls until the queue drains, then calls this.
 
         Args:
-            version: New policy version number.
+            version: New policy version.
         """
-        from monarch.rdma import is_rdma_available
+        # Called by all ranks, started only once; a no-op on follow-up requests.
+        await self._ensure_engine_loop()
 
+        # Only rank 0 owns the queue + futures moving forward.
+        if self._tp_rank != 0:
+            return
+
+        # A placeholder the engine loop resolves once the pull has been applied.
+        pull_applied: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+
+        # `condition` wakes the engine loop when a pull is queued.
+        async with self._condition:
+            self._pending_pull = PendingPull(version=version, future=pull_applied)
+            self._condition.notify_all()  # wakes the engine loop only if it is idle
+
+        # Await OUTSIDE the lock: the engine loop needs `condition` to decide + run the pull and
+        # resolves the future with no lock held; awaiting inside the lock would deadlock.
+        await pull_applied
+
+    @sl.log_trace_span("pull_weights_copy")
+    async def _pull_weights(self, version: int) -> None:
+        """ALL RANKS: collectively copy the latest weights from TorchStore, drop the prefix
+        cache (so no new request reuses an old-weight prefix), and bump the policy version.
+        """
+        # TODO: with >1 generator, force direct_rdma=False (CPU-staged, fanout-safe) and thread
+        # the same choice to the trainer's push. is_rdma_available() is a hardware probe, not a
+        # fanout-safety signal.
         model_sd = self._get_model().model.state_dict()
         await ts.get_state_dict(
             "model_state_dict",
@@ -526,26 +753,119 @@ class VLLMGenerator(Actor, Configurable):
             direct_rdma=is_rdma_available(),
         )
         self.policy_version = version
-        # Invalidate the KV prefix cache so stale values computed with the
-        # old weights are never reused for new generations.
         self._engine.reset_prefix_cache()
-        logger.debug(
-            f"{os.getpid()=} Generator pulled model state dict for policy v{version}"
-        )
+        gc.collect()
+        # Rank 0 holds the pull's future (followers don't): resolve it so the awaiting
+        # `pull_model_state_dict` returns, then clear the slot.
+        if self._tp_rank == 0 and self._pending_pull is not None:
+            self._pending_pull.future.set_result(version)
+            self._pending_pull = None
 
     @endpoint
     async def close(self) -> None:
-        """Release the vLLM engine.
+        """Stop the engine loop, then release the vLLM engine.
 
-        With ``external_launcher``, vLLM reuses the process group and actor
-        lifetime that Monarch owns. Calling vLLM's internal
-        ``engine_core.shutdown()`` can block while Monarch is also trying to
-        stop the same actor mesh, so this endpoint only closes renderer-local
-        resources and leaves process teardown to ``ProcMesh.stop()``.
+        Rank 0 sets `_close_requested=True` and notifies; the engine loop returns CLOSE in
+        lockstep and every rank awaits it. Any futures the loop left unresolved are then failed,
+        so awaiting callers get an exception instead of hanging.
+
+        Engine teardown: with `external_launcher`, vLLM reuses the process group and actor
+        lifetime that Monarch owns. Calling vLLM's internal `engine_core.shutdown()` can block
+        while Monarch is also trying to stop the same actor mesh, so this endpoint only closes
+        renderer-local resources and leaves process teardown to `ProcMesh.stop()`.
         """
+        if self._tp_rank == 0:
+            async with self._condition:
+                self._close_requested = True
+                self._condition.notify_all()  # wake the loop so it returns CLOSE
+
+        # Let the engine loop process the shutdown.
+        if self._engine_loop_task is not None:
+            try:
+                await self._engine_loop_task
+            except Exception:
+                logger.exception("engine loop raised during shutdown")
+            self._engine_loop_task = None
+
+        # The loop has stopped; fail any futures it left unresolved so awaiting callers get an
+        # exception instead of hanging.
+        for inflight in self._inflight_requests.values():
+            if not inflight.future.done():
+                inflight.future.set_exception(
+                    RuntimeError("generator closed before the request finished")
+                )
+        self._inflight_requests.clear()
+        if self._pending_pull is not None:
+            if not self._pending_pull.future.done():
+                self._pending_pull.future.set_exception(
+                    RuntimeError("generator closed before the weight pull applied")
+                )
+            self._pending_pull = None
+
+        # Shut down engine parts
         if self._engine is not None:
             renderer = getattr(self._engine, "renderer", None)
             if renderer is not None:
                 logger.info("Shutting down vLLM renderer")
                 renderer.shutdown()
             self._engine = None
+
+
+# ===================== Continuous-batching helper types (style.md §39) =====================
+
+
+@dataclass(kw_only=True, slots=True)
+class PendingRequest:
+    """One queued `generate` call awaiting admission to the engine."""
+
+    request_id: str
+    prompt_token_ids: list[int]  # [prompt_tokens]
+    sampling: SamplingConfig
+
+
+@dataclass(kw_only=True, slots=True)
+class _InflightRequest:
+    """RANK 0: an admitted request the loop will resolve. `metrics_prefix` namespaces the
+    per-generation metrics built at completion (e.g. "generator" vs "validation_generator").
+    """
+
+    future: asyncio.Future[Completion]
+    metrics_prefix: str
+
+
+@dataclass(kw_only=True, slots=True)
+class PendingPull:
+    """A queued weight pull: the requested `version` + the future the engine loop resolves
+    once the pull has been applied (so the awaiting `pull_model_state_dict` returns)."""
+
+    version: int
+    future: asyncio.Future[int]
+
+
+class LoopAction(enum.Enum):
+    """What the engine loop does this tick (rank 0 decides; the choice is broadcast to all)."""
+
+    STEP = (
+        "step"  # run a burst of engine.step(); first admit any newly-queued requests.
+    )
+    PULL_WEIGHTS = "pull_weights"  # pull the latest weights between bursts
+    CLOSE = "close"  # stop the loop
+
+
+@dataclass(kw_only=True, slots=True)
+class LoopDecision:
+    """The per-tick decision rank 0 broadcasts so every TP rank acts identically.
+
+    Carries only picklable data (the broadcast pickles it). The pull's future is NOT here —
+    it stays in rank 0's `_pending_pull`; followers don't need it.
+    """
+
+    action: LoopAction
+    requests: list[
+        PendingRequest
+    ]  # requests to admit before a STEP burst (empty unless any queued)
+    pull_version: int | None = None  # set iff action is PULL_WEIGHTS
+
+
+# What `RLTrainer` binds and hands a `Rollouter`: await one prompt -> Completion (or None on followers).
+GenerateFn = Callable[..., Awaitable[Completion | None]]

@@ -11,6 +11,8 @@ from enum import StrEnum
 
 from renderers import Message
 
+from torchtitan.experiments.rl.observability import metrics as m
+
 
 _TRUNCATED = frozenset({"truncated_length", "truncated_prompt_too_long"})
 _ERROR = frozenset({"error_parse", "error_timeout", "error_abort", "error"})
@@ -42,7 +44,7 @@ class RolloutStatus(StrEnum):
 class RolloutTurn:
     """Full per-turn snapshot: the prompt fed to the generator + the sampled completion +
     the env's reply, in both token and message space. Rubrics score it and
-    `rollout_to_episode` flattens it into training tokens."""
+    `rollout_to_episode` flattens the rollout into training tokens."""
 
     # TODO: add a `logs` field (raw prompt/response text, finish_reason, timings)
     # so a turn can be dumped and inspected without re-deriving from tokens.
@@ -79,6 +81,10 @@ class RolloutTurn:
     # For rubrics
     env_rewards: dict[str, float] = field(default_factory=dict)
     """This turn optional reward signals the env attached; the rubric decides how to use them."""
+
+    # Observability
+    metrics: list[m.Metric] = field(default_factory=list)
+    """Per-turn metrics produced during rollouts"""
 
 
 @dataclass(kw_only=True, slots=True)
