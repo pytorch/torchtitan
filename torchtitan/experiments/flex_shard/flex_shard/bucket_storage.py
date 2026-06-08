@@ -76,6 +76,12 @@ class BucketSpec:
         placement_fn: Required callable that maps this bucket's
             ``(named_params, mesh)`` to per-parameter placements.
             The minimal eager path expects one ``Placement`` per parameter.
+        mesh: The 1D CUDA ``DeviceMesh`` this bucket's collective runs on. A
+            bucket is one collective over one process group, so the mesh is a
+            per-bucket property; ``placement_fn`` receives it. Different buckets
+            may use different meshes (e.g. expert params on an expert-parallel
+            mesh vs dense params on the data-parallel mesh), but all bucket
+            meshes in one ``flex_shard()`` call must share a device type.
         mp_policy: Mixed precision policy for this bucket. This currently
             covers parameter and gradient-reduction dtypes only.
             TODO: add module-boundary input/output casting separately from
@@ -94,6 +100,7 @@ class BucketSpec:
 
     patterns: list[str]
     placement_fn: PlacementFn
+    mesh: DeviceMesh
     mp_policy: MixedPrecisionPolicy | None = None
     offload_policy: OffloadPolicy | None = None
     reshard_after_forward: bool = True
