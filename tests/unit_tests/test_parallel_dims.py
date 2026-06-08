@@ -408,7 +408,7 @@ class TestSpmdMeshesLegacy(DTensorTestBase):
                 pp=1,
                 ep=1,
                 world_size=8,
-                full_dtensor=False,
+                spmd_backend="default",
             )
             pd.build_mesh()
 
@@ -444,7 +444,7 @@ class TestSpmdMeshesFullDTensor(DTensorTestBase):
                 pp=1,
                 ep=1,
                 world_size=8,
-                full_dtensor=True,
+                spmd_backend="full_dtensor",
             )
             pd.build_mesh()
 

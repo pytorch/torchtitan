@@ -11,6 +11,11 @@ on:
         description: 'Override default (linux.g5.48xlarge.nvidia.gpu) CUDA runner label'
         required: false
         type: string
+      gpu-arch:
+        description: "Restrict the matrix to a single GPU arch ('cuda' or 'rocm'); 'all' (default) keeps both."
+        required: false
+        type: string
+        default: all
       is-experimental:
         description: 'Check if the workflow is experimental'
         required: false
@@ -18,7 +23,7 @@ on:
         default: false
     outputs:
       matrix:
-        description: dynamically set matrix
+        description: dynamically set matrix, narrowed to the gpu-arch input (both CUDA and ROCm when 'all')
         value: ${{ jobs.set.outputs.matrix }}
       docker-hash:
         description: Git tree hash of .ci/docker, used to build the OSDC image tag
@@ -118,6 +123,25 @@ jobs:
           {"include": [$CUDA_MATRIX]}
           JSON
           fi
+
+          # Optionally narrow the matrix to a single GPU arch. Each consuming
+          # workflow runs one arch on its own reusable workflow (the H100 CUDA
+          # workflow on linux_job_v3, the ROCm workflow on linux_job_v2 -- ROCm
+          # must stay on v2 because v3 does not authenticate ROCm runners to the
+          # private ECR). 'all' (the default) keeps both for the workflows that
+          # run a single combined linux_job_v2 job.
+          GPU_ARCH="${{ inputs.gpu-arch }}"
+          case "${GPU_ARCH:-all}" in
+            all) ;;
+            cuda|rocm)
+              jq -c --arg arch "$GPU_ARCH" '{include: [.include[] | select(.["gpu-arch-type"] == $arch)]}' matrix.json > matrix.filtered.json
+              mv matrix.filtered.json matrix.json
+              ;;
+            *)
+              echo "::error::Invalid gpu-arch '${GPU_ARCH}'. Expected one of: all, cuda, rocm." >&2
+              exit 1
+              ;;
+          esac
 
           # Export matrix to job outputs
           {

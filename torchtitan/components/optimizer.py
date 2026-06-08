@@ -431,7 +431,7 @@ def register_moe_load_balancing_hook(
 
         tokens_per_expert_E_by_layer = torch.vstack(tokens_per_expert_E_list)
 
-        if parallel_dims.full_dtensor:
+        if parallel_dims.spmd_backend == "full_dtensor":
             # full_dtensor: DTensor mesh includes all axes (DP/CP/TP/EP).
             # redistribute Partial→Replicate covers everything.
             assert isinstance(
