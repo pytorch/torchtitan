@@ -11,6 +11,7 @@ import spmd_types as spmd
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
+    dense_sequence_parallel_placement,
     norm_config,
     rowwise_config,
     set_decoder_sharding_config,
@@ -75,14 +76,18 @@ def _set_gpt_oss_layer_sharding(
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.attention_norm.sharding_config = norm
     layer_cfg.ffn_norm.sharding_config = norm
-    attn_x_placement = spmd.S(1) if enable_sp else spmd.R
+    attn_x_layout = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.R)
+    )
 
     # Attention: input x gathered to Replicate.
     # sinks parameter is sharded across heads via state_shardings.
     attention.sharding_config = ShardingConfig(
         state_shardings={"sinks": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings={
-            "x": dense_activation_placement(tp=attn_x_placement),
+            "x": attn_x_layout,
         },
         in_dst_shardings={
             "x": dense_activation_placement(tp=spmd.R),
