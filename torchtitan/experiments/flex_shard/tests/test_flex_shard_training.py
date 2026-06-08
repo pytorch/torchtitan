@@ -89,6 +89,7 @@ def _checkpoint_transformer_execution_units(model: torch.nn.Module) -> None:
 
 def _layer_buckets_with_grouped_root_rest(
     num_layers: int,
+    mesh,
     *,
     reshard_after_forward: bool,
 ) -> list[BucketSpec]:
@@ -97,6 +98,7 @@ def _layer_buckets_with_grouped_root_rest(
             BucketSpec(
                 [f"layers.{idx}.*"],
                 placement_fn=per_param_placements,
+                mesh=mesh,
                 reshard_after_forward=reshard_after_forward,
             )
             for idx in range(num_layers)
@@ -104,6 +106,7 @@ def _layer_buckets_with_grouped_root_rest(
         BucketSpec(
             ["tok_embeddings.*", "pos_embeddings.*", "norm.*", "output.*"],
             placement_fn=per_param_placements,
+            mesh=mesh,
             reshard_after_forward=reshard_after_forward,
         ),
     ]
@@ -127,9 +130,9 @@ class TestFlexShardTraining(FSDPTest):
         reference = copy.deepcopy(model)
         flex_shard(
             model,
-            mesh,
             buckets=transformer_bucket_specs(
                 args.n_layers,
+                mesh,
                 reshard_after_forward=False,
             ),
         )
@@ -173,20 +176,20 @@ class TestFlexShardTraining(FSDPTest):
 
         flex_shard(
             model,
-            mesh,
             buckets=[
                 BucketSpec(
                     ["tok_embeddings.*"],
                     placement_fn=per_param_placements,
+                    mesh=mesh,
                     mp_policy=MixedPrecisionPolicy(
                         param_dtype=torch.bfloat16,
                         reduce_dtype=torch.float32,
                     ),
                     reshard_after_forward=False,
                 ),
-                *transformer_bucket_specs(args.n_layers, reshard_after_forward=False)[
-                    1:
-                ],
+                *transformer_bucket_specs(
+                    args.n_layers, mesh, reshard_after_forward=False
+                )[1:],
             ],
         )
 
@@ -229,9 +232,9 @@ class TestFlexShardTraining(FSDPTest):
 
         flex_shard(
             model,
-            mesh,
             buckets=transformer_bucket_specs(
                 args.n_layers,
+                mesh,
                 reshard_after_forward=True,
             ),
         )
@@ -286,9 +289,9 @@ class TestFlexShardTraining(FSDPTest):
         with self.assertRaisesRegex(RuntimeError, "recomputation-safe"):
             flex_shard(
                 model,
-                mesh,
                 buckets=_layer_buckets_with_grouped_root_rest(
                     args.n_layers,
+                    mesh,
                     reshard_after_forward=True,
                 ),
             )
