@@ -19,6 +19,10 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.logging import logger
 
 
+def round_up(value: int, multiple: int) -> int:
+    return ((value + multiple - 1) // multiple) * multiple
+
+
 def has_cuda_capability(major: int, minor: int) -> bool:
     return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (
         major,

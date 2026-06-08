@@ -24,6 +24,19 @@ from torchtitan.experiments.graph_trainer.common_utils import _is_backward_node
 log = logging.getLogger(__name__)
 
 
+def _privatize_custom_meta(node: fx.Node) -> None:
+    """Give ``node`` its own ``meta["custom"]`` dict.
+
+    ``fx.Graph.node_copy`` / ``dict.update`` shallow-copy ``meta``, so a copied node
+    ends up sharing its source's nested ``custom`` dict; annotating one would then
+    silently mutate the other. A shallow copy suffices -- callers only add or
+    replace keys, they don't mutate the values in place.
+    """
+    custom = node.meta.get("custom")
+    if custom is not None:
+        node.meta["custom"] = dict(custom)
+
+
 def _collect_backward_regions(
     gm: fx.GraphModule,
 ) -> list[tuple[int, int, bool]]:
@@ -295,7 +308,8 @@ def selective_activation_remat_pass(
                 continue
             with gm.graph.inserting_before(bwd_target):
                 dup_attr = gm.graph.get_attr(arg.target)
-            dup_attr.meta.update(arg.meta)
+                dup_attr.meta.update(arg.meta)  # shares arg's nested custom dict
+                _privatize_custom_meta(dup_attr)
             dups[arg] = dup_attr
         return dups
 
@@ -322,6 +336,7 @@ def selective_activation_remat_pass(
 
         with gm.graph.inserting_before(bwd_target):
             dup = gm.graph.node_copy(fwd_node, remat_and_dup_get_attr)
+            _privatize_custom_meta(dup)  # node_copy shares fwd_node's custom dict
         dup.name = fwd_node.name + "_recomputed"
         dup.meta["autograd_backward"] = True
         recomputed_nodes[fwd_node] = dup
