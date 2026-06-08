@@ -269,25 +269,6 @@ class TestNnModuleWrappers(unittest.TestCase):
         self.assertEqual(instance.eps, 1e-5)
         self.assertIs(instance._sharding_config, sc)
 
-    def test_spmd_layout_converts_partition_spec_to_dtensor_shard(self):
-        """PartitionSpec refines V into concrete DTensor Shard placement."""
-        import spmd_types as spmd
-        from torch.distributed.tensor import Shard
-
-        from torchtitan.distributed.spmd_types import spmd_layout_to_dtensor_placements
-        from torchtitan.protocols.types import MeshAxisName, SpmdLayout
-
-        layout = SpmdLayout(
-            {MeshAxisName.TP: spmd.V},
-            partition_spec=spmd.PartitionSpec(MeshAxisName.TP),
-        )
-
-        self.assertEqual(layout.shard_types(), {MeshAxisName.TP: spmd.S(0)})
-        self.assertEqual(
-            spmd_layout_to_dtensor_placements(layout),
-            {MeshAxisName.TP: Shard(0)},
-        )
-
 
 class TestContainerInitStates(unittest.TestCase):
     """Tests for ModuleList, ModuleDict, Sequential init_states."""

@@ -10,7 +10,7 @@ import functools
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -21,15 +21,12 @@ from torch.distributed.tensor.placement_types import Placement
 from torch.utils._pytree import tree_map
 
 from torchtitan.config import Configurable
+from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
 from torchtitan.distributed.spmd_types import (
     redistribute_spmd_per_axis,
     set_current_spmd_mesh,
 )
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
-from torchtitan.protocols.types import SpmdLayout
-
-if TYPE_CHECKING:
-    from torchtitan.distributed.parallel_dims import ParallelDims
 
 
 class Module(nn.Module, Configurable):
