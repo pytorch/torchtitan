@@ -215,7 +215,6 @@ def _validate_eager_params(
 def _validate_placements(
     param_placements: dict[str, tuple[Placement, ...]],
     named_params: list[tuple[str, nn.Parameter]],
-    mesh: DeviceMesh,
 ) -> None:
     """Validate that placements are compatible with eager FlexShard."""
     param_dict = dict(named_params)
