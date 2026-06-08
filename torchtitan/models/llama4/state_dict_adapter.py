@@ -50,8 +50,19 @@ class Llama4StateDictAdapter(StateDictAdapter):
             **qkv_map,
             "language_model.model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
             "language_model.model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
+            # Dense FF layers (non-MoE layers in llama4's interleaved MoE pattern).
+            "language_model.model.layers.{}.feed_forward.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
+            "language_model.model.layers.{}.feed_forward.up_proj.weight": "layers.{}.feed_forward.w3.weight",
+            "language_model.model.layers.{}.feed_forward.down_proj.weight": "layers.{}.feed_forward.w2.weight",
+            # MoE layers. The _EFD / _EDF suffixes are torchtitan's shape-suffix
+            # convention (E=experts, F=ffn, D=hidden) added in PR #3425.
             "language_model.model.layers.{}.feed_forward.router.weight": "layers.{}.moe.router.gate.weight",
-            "language_model.model.layers.{}.feed_forward.experts.down_proj": "layers.{}.moe.experts.w2",
+            "language_model.model.layers.{}.feed_forward.experts.down_proj": "layers.{}.moe.experts.w2_EDF",
+            # expert_bias_E is auxiliary-loss-free load-balancing state (DeepSeek
+            # paper, adapted for Qwen/Mixtral-style routers). HF transformers'
+            # Llama4 router has no equivalent buffer (plain nn.Linear, bias=False),
+            # so to_hf drops this key and from_hf reinitializes it to zeros.
+            # See state_dict_adapter test exclusion for the matching test contract.
             None: "layers.{}.moe.expert_bias_E",
             "language_model.model.layers.{}.feed_forward.shared_expert.gate_proj.weight": "layers.{}.moe.shared_experts.w1.weight",
             "language_model.model.layers.{}.feed_forward.shared_expert.down_proj.weight": "layers.{}.moe.shared_experts.w2.weight",
@@ -111,27 +122,25 @@ class Llama4StateDictAdapter(StateDictAdapter):
                 ] = wv
             elif key in to_hf_map:
                 # do direct mapping
-                if key in "layers.{}.moe.experts.w2":
-                    # we transpose the expert weights for torchtitan optimization purpose
-                    value = value.transpose(-1, -2)
+                if key == "layers.{}.moe.experts.w2_EDF":
+                    # safetensors rejects non-contiguous transposed views.
+                    value = value.transpose(-1, -2).contiguous()
 
                 new_key = to_hf_map[key]
                 if new_key is None:
+                    # Intentionally dropped (e.g. expert_bias_E — see from_hf_map comment).
                     continue
                 if layer_num:
                     new_key = new_key.format(layer_num)
                 hf_state_dict[new_key] = value
             elif key in [
-                "layers.{}.moe.experts.w1",
-                "layers.{}.moe.experts.w3",
+                "layers.{}.moe.experts.w1_EFD",
+                "layers.{}.moe.experts.w3_EFD",
             ]:
                 # handle collecting values to combine
                 hf_abstract_key = (
                     "language_model.model.layers.{}.feed_forward.experts.gate_up_proj"
                 )
-                # pyrefly: ignore [unnecessary-comparison]
-                if hf_abstract_key is None:
-                    continue
                 to_combine[hf_abstract_key.format(layer_num)][
                     key.format(layer_num)
                 ] = value
@@ -143,8 +152,8 @@ class Llama4StateDictAdapter(StateDictAdapter):
             combine_values = []
             # put into correct order to combine
             for tt_abstract_key in [
-                "layers.{}.moe.experts.w1",
-                "layers.{}.moe.experts.w3",
+                "layers.{}.moe.experts.w1_EFD",
+                "layers.{}.moe.experts.w3_EFD",
             ]:
                 tt_key = tt_abstract_key.format(layer_num)
                 # we transpose the expert weights for torchtitan optimization purpose
@@ -221,12 +230,28 @@ class Llama4StateDictAdapter(StateDictAdapter):
                 w1, w3 = value.chunk(2, dim=-1)
                 # we transpose the expert weights for torchtitan optimization purpose
                 w1, w3 = w1.transpose(-1, -2), w3.transpose(-1, -2)
-                state_dict["layers.{}.moe.experts.w1".format(layer_num)] = w1
-                state_dict["layers.{}.moe.experts.w3".format(layer_num)] = w3
+                state_dict["layers.{}.moe.experts.w1_EFD".format(layer_num)] = w1
+                state_dict["layers.{}.moe.experts.w3_EFD".format(layer_num)] = w3
 
         if self.fuse_qkv and pending_qkv:
             raise ValueError(
                 f"Incomplete Q/K/V projections for layers: {list(pending_qkv.keys())}"
             )
+
+        # Restore expert_bias_E (zeros) for every MoE layer. The HF format
+        # doesn't have a key for this auxiliary-loss-free load-balancing bias,
+        # so to_hf drops it; we reinitialize it to zeros so the native key set
+        # stays complete. The bias gets recomputed by the optimizer pre-hook
+        # during training, but resuming from an HF checkpoint loses any
+        # accumulated bias state.
+        for layer_idx, layer_cfg in enumerate(self.model_config.layers):
+            if (
+                getattr(layer_cfg, "moe", None) is not None
+                and layer_cfg.moe.load_balance_coeff is not None
+            ):
+                state_dict[f"layers.{layer_idx}.moe.expert_bias_E"] = torch.zeros(
+                    layer_cfg.moe.num_experts,
+                    dtype=torch.float32,
+                )
 
         return state_dict
