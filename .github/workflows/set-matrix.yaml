@@ -47,7 +47,7 @@ jobs:
       CUDA_RUNNER_INPUT: ${{ inputs.runner-cuda }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - id: set
         run: |

@@ -13,18 +13,12 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.full_dtensor import (
-    resolve_fsdp_mesh,
-    resolve_sparse_fsdp_mesh,
-    validate_config,
-)
+from torchtitan.distributed.full_dtensor import validate_config
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
     apply_cp_to_attention,
     apply_simple_fsdp,
-    legacy_dp_mesh,
-    legacy_edp_mesh,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.qwen3.model import GraphTrainerQwen3Model
@@ -96,22 +90,7 @@ def parallelize_qwen3(
     # Always run simple_fsdp. The DP mesh always exists with a real backend
     # (see ParallelDims._mesh_exist), even at degree 1, so the
     # MixedPrecisionPolicy param_dtype cast still applies in single-GPU runs.
-    if parallelism.full_dtensor:
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
-        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
-    else:
-        dp_mesh, dp_mesh_dims = legacy_dp_mesh(parallel_dims), None
-        edp_mesh, edp_mesh_dims = legacy_edp_mesh(parallel_dims), None
-
-    model = apply_simple_fsdp(
-        model,
-        dp_mesh,
-        edp_mesh,
-        training=training,
-        ep_degree=parallel_dims.ep,
-        dp_mesh_dims=dp_mesh_dims,
-        edp_mesh_dims=edp_mesh_dims,
-    )
+    model = apply_simple_fsdp(model, parallel_dims=parallel_dims, training=training)
 
     # Apply compilation based on mode
     model = apply_compile(

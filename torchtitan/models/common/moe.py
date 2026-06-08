@@ -467,7 +467,10 @@ class MoE(Module):
         return out_BLD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
-        assert isinstance(buffer_device, torch.device)
+        if buffer_device is None:
+            # After ``to_empty()``, the existing buffer records the target device.
+            # Reinitialize MoE counters there when no explicit buffer device is passed.
+            buffer_device = self.tokens_per_expert_E.device
 
         with torch.device(buffer_device):
             self.tokens_per_expert_E = torch.zeros(
