@@ -17,8 +17,9 @@ from dataclasses import dataclass, field
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Placement, Replicate, Shard
 
-from torchtitan.distributed.spmd_types import spmd_layout_to_dtensor_placements
 from torchtitan.distributed.parallel_dims import MeshAxisName, SpmdLayout
+
+from torchtitan.distributed.spmd_types import spmd_layout_to_dtensor_placements
 
 
 __all__ = [
