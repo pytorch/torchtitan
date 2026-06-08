@@ -11,6 +11,7 @@ import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
 from torchtitan.models.common.attention import FusedQKVLinear
+from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.utils import MoEStateDictAdapter
 from .model import GptOssModel
 
@@ -86,13 +87,14 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
 
     def _get_attention_dims(self) -> tuple[int, int, int]:
         """Return (n_heads, n_kv_heads, head_dim) from model config."""
+        # pyrefly: ignore [missing-attribute]
         attn = self.model_config.layers[0].attention
         n_heads = attn.n_heads
         n_kv_heads = attn.n_kv_heads if attn.n_kv_heads is not None else n_heads
         head_dim = (
             attn.head_dim
             if attn.head_dim is not None
-            else self.model_config.dim // n_heads
+            else self.model_config.dim // n_heads  # pyrefly: ignore [missing-attribute]
         )
         return n_heads, n_kv_heads, head_dim
 
@@ -141,6 +143,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         Warning: Conversion does not support saving to mxfp4 quantization format.
                  One can save into unquantized hf checkpoints with last_save_in_hf = true.
         """
+
         if self.fuse_qkv:
             to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
             n_heads, n_kv_heads, head_dim = self._get_attention_dims()
@@ -202,6 +205,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         """
         Convert from hf format state dict to tt model state dict.
         """
+        self._validate_hf_rope_config(CosSinRoPE.Config)
 
         state_dict = {}
         # Collect Q/K/V per layer for fusing (only used when fuse_qkv=True)

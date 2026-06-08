@@ -220,7 +220,7 @@ class Validator(BaseValidator):
                 self.parallelism.context_parallel_load_balancer,
             )
 
-        if self.parallelism.full_dtensor:
+        if self.parallelism.spmd_backend == "full_dtensor":
             inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
