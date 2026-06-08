@@ -61,6 +61,7 @@ uv pip install torch vllm torchcomms  --pre \
 
 5. From the TorchTitan repository root, add the checkout to `PYTHONPATH`. Monarch-spawned RL worker processes inherit this environment variable, so they can import the local `torchtitan` package:
 ```bash
+cd {your_local_torchtitan_root_path}
 export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 ```
 
