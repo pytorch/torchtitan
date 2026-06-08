@@ -8,15 +8,18 @@ import copy
 import unittest
 from unittest.mock import patch
 
+import spmd_types as spmd
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import Shard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
 from torchtitan.config.configs import ParallelismConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims, SpmdLayout
+from torchtitan.distributed.spmd_types import spmd_layout_to_dtensor_placements
 from torchtitan.models.llama3 import model_registry
 from torchtitan.models.llama3.parallelize import apply_fsdp
 
@@ -210,6 +213,45 @@ class TestParallelDimsValidation(unittest.TestCase):
         )
         # Should be tp * (cp * 2) = 4 * 4 = 16
         self.assertEqual(parallel_dims.seq_len_divisor, 16)
+
+
+class TestSpmdLayout(unittest.TestCase):
+    def test_converts_partition_spec_to_dtensor_shard(self):
+        """PartitionSpec refines V into concrete DTensor Shard placement."""
+        layout = SpmdLayout(
+            {MeshAxisName.TP: spmd.V},
+            partition_spec=spmd.PartitionSpec(MeshAxisName.TP),
+        )
+
+        self.assertEqual(layout.shard_types(), {MeshAxisName.TP: spmd.S(0)})
+        self.assertEqual(
+            spmd_layout_to_dtensor_placements(layout),
+            {MeshAxisName.TP: Shard(0)},
+        )
+
+    def test_seq_parallel_activation_shard_types(self):
+        """PartitionSpec can map multiple mesh axes to one tensor dim."""
+        layout = SpmdLayout(
+            {
+                MeshAxisName.DP: spmd.V,
+                MeshAxisName.CP: spmd.V,
+                MeshAxisName.TP: spmd.V,
+            },
+            partition_spec=(
+                MeshAxisName.DP,
+                (MeshAxisName.CP, MeshAxisName.TP),
+                None,
+            ),
+        )
+
+        self.assertEqual(
+            layout.shard_types(),
+            {
+                MeshAxisName.DP: spmd.S(0),
+                MeshAxisName.CP: spmd.S(1),
+                MeshAxisName.TP: spmd.S(1),
+            },
+        )
 
 
 class TestParallelDimsMeshOperations(unittest.TestCase):
