@@ -92,6 +92,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             "DeepSeek V3 FSDP+HybridEP+compile",
             "deepseek_v3_fsdp+hybridep+compile",
             ngpu=4,
+            skip_rocm_test=True,
         ),
     ]
     return integration_tests_flavors
