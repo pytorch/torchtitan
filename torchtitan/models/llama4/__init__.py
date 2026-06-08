@@ -12,6 +12,7 @@ import torch.nn as nn
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
+    ComplexRoPE,
     compute_ffn_hidden_dim,
     Embedding,
     Linear,
@@ -89,6 +90,7 @@ def _build_llama4_layers(
     shared_experts_hidden_dim: int | None = None,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    rope: RoPE.Config,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for a Llama4 model.
 
@@ -107,7 +109,7 @@ def _build_llama4_layers(
 
     layers = []
     for layer_id in range(n_layers):
-        use_rope = (layer_id % every_n_layers_nope) != 0
+        layer_rope = rope if (layer_id % every_n_layers_nope) != 0 else None
         moe_enabled = (layer_id + 1) % interleave_moe_layer_step == 0
 
         attn = make_gqa_config(
@@ -116,10 +118,9 @@ def _build_llama4_layers(
             n_kv_heads=n_kv_heads,
             wqkv_param_init=_LINEAR_INIT,
             wo_param_init=_depth_init(layer_id),
-            use_rope=use_rope,
             inner_attention=inner_attention,
             mask_type=mask_type,
-            rope_backend="complex",
+            rope=layer_rope,
         )
 
         if moe_enabled:
@@ -214,15 +215,14 @@ def _debugmodel(
             fixed_attn_block_size=256,
             attn_backend=attn_backend,
             moe_comm_backend=moe_comm_backend,
-        ),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=1048576,
-            theta=500000,
-            backend="complex",
-            scaling="llama",
-            scaling_factor=16.0,
-            high_freq_factor=1.0,
+            rope=ComplexRoPE.Config(
+                dim=dim // n_heads,
+                max_seq_len=1048576,
+                theta=500000,
+                scaling="llama",
+                scaling_factor=16.0,
+                high_freq_factor=1.0,
+            ),
         ),
     )
 
@@ -271,15 +271,14 @@ def _17bx16e(
             interleave_moe_layer_step=1,
             attn_backend=attn_backend,
             moe_comm_backend=moe_comm_backend,
-        ),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=10485760,
-            theta=500000,
-            backend="complex",
-            scaling="llama",
-            scaling_factor=16.0,
-            high_freq_factor=1.0,
+            rope=ComplexRoPE.Config(
+                dim=dim // n_heads,
+                max_seq_len=10485760,
+                theta=500000,
+                scaling="llama",
+                scaling_factor=16.0,
+                high_freq_factor=1.0,
+            ),
         ),
     )
 
@@ -328,13 +327,12 @@ def _17bx128e(
             interleave_moe_layer_step=1,
             attn_backend=attn_backend,
             moe_comm_backend=moe_comm_backend,
-        ),
-        rope=RoPE.Config(
-            dim=dim // n_heads,
-            max_seq_len=1048576,
-            theta=500000,
-            backend="complex",
-            scaling="none",
+            rope=ComplexRoPE.Config(
+                dim=dim // n_heads,
+                max_seq_len=1048576,
+                theta=500000,
+                scaling="none",
+            ),
         ),
     )
 
