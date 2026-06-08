@@ -56,6 +56,7 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
 )
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     canonicalize_graph_pass,
+    eliminate_dead_code_pass,
 )
 from torchtitan.experiments.graph_trainer.selective_activation_remat import (
     selective_activation_remat_pass,
@@ -131,6 +132,7 @@ def compile_time_passes(
 
     n_layers = len(config.model_spec.model.layers)
     passes: list[Callable] = [
+        eliminate_dead_code_pass,
         canonicalize_graph_pass,
         functools.partial(
             tag_with_memory_policy_pass,

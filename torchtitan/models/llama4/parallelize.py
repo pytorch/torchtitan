@@ -9,7 +9,12 @@ from typing import Any
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+from torch.distributed.fsdp import (
+    CPUOffloadPolicy,
+    DataParallelMeshDims,
+    fully_shard,
+    MixedPrecisionPolicy,
+)
 from torch.distributed.tensor import Shard
 
 from torchtitan.config import (
@@ -142,8 +147,8 @@ def apply_fsdp(
     ep_degree: int = 1,
     edp_mesh: DeviceMesh | None = None,
     enable_symm_mem: bool = False,
-    dp_mesh_dims: "Any" = None,
-    edp_mesh_dims: "Any" = None,
+    dp_mesh_dims: "DataParallelMeshDims | None" = None,
+    edp_mesh_dims: "DataParallelMeshDims | None" = None,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
