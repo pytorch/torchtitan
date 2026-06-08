@@ -12,7 +12,7 @@ import spmd_types as spmd
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
 if TYPE_CHECKING:
-    from torchtitan.protocols.types import MeshAxisName, SpmdLayout
+    from torchtitan.distributed.parallel_dims import MeshAxisName, SpmdLayout
 
 
 def spmd_layout_to_dtensor_placements(
@@ -21,15 +21,12 @@ def spmd_layout_to_dtensor_placements(
     """Convert an SPMD layout to DTensor placements keyed by mesh axis name."""
     result: dict[MeshAxisName, Placement] = {}
     for axis_name, axis_type in layout.shard_types().items():
-        if axis_type == spmd.R or axis_type == spmd.I or axis_type == spmd.V:
+        if axis_type == spmd.R or axis_type == spmd.I:
             dtensor_placement: Placement = Replicate()
         elif axis_type == spmd.P:
             dtensor_placement = Partial()
-        elif isinstance(axis_type, spmd.Shard):
-            dtensor_placement = Shard(axis_type.dim)
         else:
-            raise ValueError(
-                f"Unsupported SPMD type for axis {axis_name.value!r}: {axis_type!r}."
-            )
+            assert isinstance(axis_type, spmd.Shard)
+            dtensor_placement = Shard(axis_type.dim)
         result[axis_name] = dtensor_placement
     return result

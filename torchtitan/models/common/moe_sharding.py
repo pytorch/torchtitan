@@ -13,7 +13,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
 )
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
-from torchtitan.protocols.types import MeshAxisName
+from torchtitan.distributed.parallel_dims import MeshAxisName
 
 
 DP_REPLICATE = MeshAxisName.DP_REPLICATE

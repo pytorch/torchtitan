@@ -16,9 +16,8 @@ from torch.distributed.tensor.experimental import local_map
 from torch.distributed.tensor.placement_types import Placement
 
 from torchtitan.config import Configurable
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
-from torchtitan.protocols.types import SpmdLayout
 
 
 class Module(nn.Module, Configurable):
