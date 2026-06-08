@@ -241,6 +241,15 @@ class CheckpointManager(Configurable):
         transformation. `initial_load_model_only` must be true because safetensors
         doesn't support saving non-tensors. The default value is False.
         """
+        Enable the use of HuggingFace's safetensors format for checkpointing. This will 
+        load checkpoints in HF's model definition and safetensors format instead of the
+        default torchtitan model definition and DCP format, after necessary model state
+        dict transformation. 
+        If `initial_load_path` is not provided, this option will look for weights 
+        in `sd_adapter.hf_assets_path`. `initial_load_model_only` must be True 
+        because safetensors doesn't support saving non-tensors. 
+        The default value is False.
+        """
 
         initial_load_in_hf_quantized: bool = False
         """
