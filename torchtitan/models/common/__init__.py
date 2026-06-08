@@ -23,7 +23,7 @@ from .attention import (
 )
 from .decoder import Decoder, TransformerBlock
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
-from .moe import MoE
+from .moe import MoE, MoELoadBalanceAuxLoss
 from .nn_modules import (
     Conv2d,
     Embedding,
@@ -60,6 +60,7 @@ __all__ = [
     "Identity",
     "LayerNorm",
     "Linear",
+    "MoELoadBalanceAuxLoss",
     "MoE",
     "QKVLinear",
     "RMSNorm",

@@ -96,6 +96,9 @@ def _build_llama4_layers(
 
     Handles iRoPE (NoPE on every N layers) and MoE interleaving. For each
     layer, depth-scaled inits are computed using the layer index.
+
+    Aux loss ref:
+    - https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama4/configuration_llama4.py
     """
     inner_attention, mask_type = get_attention_config(attn_backend)
     if every_n_layers_nope <= 1:
@@ -152,6 +155,9 @@ def _build_llama4_layers(
                 router=router,
                 experts=experts,
                 shared_experts=shared_experts,
+                load_balance_coeff=None,
+                aux_loss_type="batch_wise",
+                aux_loss_coeff=1e-3,
             )
             ffn_cfg = None
         else:

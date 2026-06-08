@@ -23,7 +23,12 @@ from torchtitan.models.common.attention import (
     VarlenAttention,
 )
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import (
+    GroupedExperts,
+    MoE,
+    MoELoadBalanceAuxLoss,
+    TokenChoiceTopKRouter,
+)
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.common.token_dispatcher import (
@@ -146,6 +151,16 @@ def make_ffn_config(
     )
 
 
+def make_aux_loss_config(
+    *,
+    type: Literal["sequence_wise", "batch_wise"],
+    coeff: float,
+    top_k: int,
+) -> MoELoadBalanceAuxLoss.Config:
+    """Build a MoELoadBalanceAuxLoss.Config."""
+    return MoELoadBalanceAuxLoss.Config(type=type, coeff=coeff, top_k=top_k)
+
+
 def make_moe_config(
     *,
     num_experts: int = 8,
@@ -153,14 +168,28 @@ def make_moe_config(
     experts: GroupedExperts.Config,
     shared_experts: FeedForward.Config | None = None,
     load_balance_coeff: float | None = 1e-3,
+    aux_loss_type: str | None = None,
+    aux_loss_coeff: float | None = None,
 ) -> MoE.Config:
     """Build a fully-specified MoE.Config."""
+    aux_loss = None
+    if aux_loss_type is not None:
+        assert (
+            aux_loss_coeff is not None
+        ), "aux_loss_coeff required when aux_loss_type is set"
+        aux_loss = make_aux_loss_config(
+            type=aux_loss_type,  # pyrefly: ignore [bad-argument-type]
+            coeff=aux_loss_coeff,
+            top_k=router.top_k,
+        )
+
     return MoE.Config(
         num_experts=num_experts,
         load_balance_coeff=load_balance_coeff,
         router=router,
         experts=experts,
         shared_experts=shared_experts,
+        aux_loss=aux_loss,
     )
 
 
@@ -269,3 +298,38 @@ def make_experts_config(
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         ),
     )
+
+
+def update_moe_aux_loss_configs(
+    layers: list,
+    *,
+    pp_enabled: bool,
+    local_global_batch_size: int,
+    global_batch_size: int,
+) -> None:
+    """Update aux loss configs for all MoE layers from trainer config.
+
+    Call this from each model's ``update_from_config`` to set
+    ``global_batch_size`` for gradient normalization across PP microbatches,
+    gradient accumulation steps, and DP ranks (FSDP sum). Also validates
+    that batch-wise aux loss is not used with PP or gradient accumulation.
+    """
+    for layer_cfg in layers:
+        moe_cfg = getattr(layer_cfg, "moe", None)
+        if moe_cfg is None:
+            continue
+        aux_loss = moe_cfg.aux_loss
+        if aux_loss is None:
+            continue
+        if aux_loss.type == "batch_wise" and pp_enabled:
+            raise ValueError(
+                "batch_wise MoE aux loss is incompatible with pipeline "
+                "parallelism. Use sequence_wise instead."
+            )
+        if aux_loss.type == "batch_wise" and global_batch_size != local_global_batch_size:
+            raise ValueError(
+                "batch_wise MoE aux loss is incompatible with gradient "
+                "accumulation. Use sequence_wise instead or set "
+                "training.global_batch_size to local_batch_size * data-parallel degree."
+            )
+        aux_loss.global_batch_size = global_batch_size
