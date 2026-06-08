@@ -370,20 +370,16 @@ class TestBucketPlacementValidation(TestCase):
 
     def test_rejects_incomplete_placement_contract(self):
         """Placement subclasses must implement the storage layout contract."""
-        from torchtitan.experiments.flex_shard.flex_shard.utils import (
-            _validate_placements,
-        )
-
         with single_rank_cpu_mesh() as mesh:
             named_params = self._named_params()
             with self.assertRaisesRegex(TypeError, "storage layout contract"):
-                _validate_placements(
+                ShardedBucketStorage.create_param_infos(
+                    named_params,
+                    mesh,
                     {
                         "a.weight": (_IncompletePlacement(),),
                         "b.weight": (_IncompletePlacement(),),
                     },
-                    named_params,
-                    mesh,
                 )
 
     def test_accepts_valid_placement_subclasses(self):
@@ -454,31 +450,24 @@ class TestBucketPlacementValidation(TestCase):
         self.assertEqual(copied, local_payload.contiguous())
 
     def test_rejects_shard_dim_out_of_range(self):
-        """Placement layout validation is front-loaded."""
-        from torchtitan.experiments.flex_shard.flex_shard.utils import (
-            _validate_placements,
-        )
+        """Placement layout validation happens during bucket storage planning."""
 
         with single_rank_cpu_mesh() as mesh:
             with self.assertRaisesRegex(ValueError, "invalid for parameter"):
-                _validate_placements(
-                    {"scalar": (Shard(0),)},
+                ShardedBucketStorage.create_param_infos(
                     [("scalar", nn.Parameter(torch.empty(())))],
                     mesh,
+                    {"scalar": (Shard(0),)},
                 )
 
     def test_rejects_owned_owner_rank_out_of_range(self):
         """Owned placement owner_rank must be valid for the mesh."""
-        from torchtitan.experiments.flex_shard.flex_shard.utils import (
-            _validate_placements,
-        )
-
         with single_rank_cpu_mesh() as mesh:
             with self.assertRaisesRegex(ValueError, "owner_rank"):
-                _validate_placements(
-                    {"weight": (Owned(1),)},
+                ShardedBucketStorage.create_param_infos(
                     [("weight", nn.Parameter(torch.empty(2, 2)))],
                     mesh,
+                    {"weight": (Owned(1),)},
                 )
 
     def test_owned_reduce_grad_single_rank(self):

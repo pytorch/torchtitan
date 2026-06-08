@@ -14,6 +14,7 @@ from typing import Any, TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
+    import torch.nn as nn
     from torch.distributed.device_mesh import DeviceMesh
 
     from .bucket_storage import ParamInfo
@@ -26,6 +27,25 @@ class LocalStorageLayout:
     local_shape: torch.Size
     local_numel: int
     storage_nbytes: int
+
+
+@dataclass(frozen=True)
+class BucketParamStorageLayout:
+    """Placement-owned bucket storage layout for one parameter."""
+
+    local_shape: torch.Size
+    local_numel: int
+    byte_offset: int
+    storage_nbytes: int
+    bucket_layout: Any | None = None
+
+
+@dataclass(frozen=True)
+class BucketStorageLayout:
+    """Placement-owned storage layout for a whole bucket."""
+
+    param_layouts: dict[str, BucketParamStorageLayout]
+    total_bytes: int
 
 
 class Placement(ABC):
@@ -95,6 +115,19 @@ class Placement(ABC):
             local_numel=local_numel,
             storage_nbytes=local_numel * dtype.itemsize,
         )
+
+    def bucket_storage_layout(
+        self,
+        named_params: list[tuple[str, nn.Parameter]],
+        param_placements: dict[str, tuple[Placement, ...]],
+        mesh: DeviceMesh,
+    ) -> BucketStorageLayout | None:
+        """Return an optional bucket-global storage layout.
+
+        Returning None asks ShardedBucketStorage to use the default sequential
+        per-parameter layout derived from local_storage_layout().
+        """
+        return None
 
     def copy_param_to_storage(
         self,
@@ -220,6 +253,8 @@ class PlacementReduceGradResult:
 
 
 __all__ = [
+    "BucketParamStorageLayout",
+    "BucketStorageLayout",
     "LocalStorageLayout",
     "Placement",
     "PlacementPreparedUnshard",
