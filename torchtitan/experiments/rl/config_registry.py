@@ -29,6 +29,7 @@ from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
+from torchtitan.experiments.rl.router import GeneratorRouter
 from torchtitan.experiments.rl.trainer import GRPOLoss, RLTrainer
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.qwen3 import model_registry
@@ -80,7 +81,12 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
         group_size=group_size,
+<<<<<<< HEAD
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
+=======
+        renderer=RendererConfig(name="qwen3", enable_thinking=True),
+        router=GeneratorRouter.Config(strategy="round_robin"),
+>>>>>>> 0210ded57 (Add a router with basic routing strategies)
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
