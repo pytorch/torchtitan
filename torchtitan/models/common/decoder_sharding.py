@@ -6,9 +6,10 @@
 
 import spmd_types as spmd
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
+
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
-from torchtitan.distributed.parallel_dims import MeshAxisName
 
 DP = MeshAxisName.DP
 CP = MeshAxisName.CP
