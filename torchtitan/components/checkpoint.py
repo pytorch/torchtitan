@@ -372,13 +372,8 @@ class CheckpointManager(Configurable):
                     raise ValueError(
                         f"initial_load_path must be absolute: {self.initial_load_path}"
                     )
-            if self.initial_load_in_hf and not (
-                self.initial_load_path and self.initial_load_model_only
-            ):
-                raise ValueError(
-                    "initial_load_in_hf requires both initial_load_path "
-                    "and initial_load_model_only."
-                )
+            if self.initial_load_in_hf and not self.initial_load_model_only:
+                raise ValueError("initial_load_in_hf requires initial_load_model_only.")
             if self.initial_load_in_hf_quantized and not (
                 self.initial_load_in_hf and self.initial_load_path
             ):
