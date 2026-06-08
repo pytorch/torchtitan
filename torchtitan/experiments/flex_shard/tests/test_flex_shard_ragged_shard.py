@@ -164,16 +164,18 @@ class TestRaggedShardPlacement(TestCase):
             "weight": (RaggedShard(dims=(0,), local_units=(1, 3)),),
             "bias": (RaggedShard(dims=(0,), local_units=(2, 2)),),
         }
-        buckets = [
-            BucketSpec(
-                ["*"],
-                placement_fn=make_ragged_placement_fn(
-                    dims=(0,),
-                    local_units=(1, 3),
-                ),
-                reshard_after_forward=False,
-            )
-        ]
+        with single_rank_cpu_mesh() as mesh:
+            buckets = [
+                BucketSpec(
+                    ["*"],
+                    placement_fn=make_ragged_placement_fn(
+                        dims=(0,),
+                        local_units=(1, 3),
+                    ),
+                    mesh=mesh,
+                    reshard_after_forward=False,
+                )
+            ]
         named_params = [
             ("weight", nn.Parameter(torch.empty(4, 4))),
             ("bias", nn.Parameter(torch.empty(4))),
@@ -218,6 +220,7 @@ class TestRaggedShardDistributed(FSDPTestMultiThread):
                 dims=(0,),
                 local_units=(1, 3),
             ),
+            mesh=mesh,
             reshard_after_forward=False,
         )
 
@@ -360,6 +363,7 @@ class TestRaggedShardDistributed(FSDPTestMultiThread):
                 dims=(0,),
                 local_units=(1, 3),
             ),
+            mesh=mesh,
             reshard_after_forward=False,
         )
 
@@ -404,6 +408,7 @@ class TestRaggedShardDistributed(FSDPTestMultiThread):
                 dims=(0,),
                 local_units=(1, 1),
             ),
+            mesh=mesh,
             reshard_after_forward=False,
         )
 
@@ -450,6 +455,7 @@ class TestRaggedShardDistributed(FSDPTestMultiThread):
                 dims=(0,),
                 local_units=(1, 3),
             ),
+            mesh=mesh,
             reshard_after_forward=False,
         )
         bucket_storage = ShardedBucketStorage.from_bucket(
@@ -506,6 +512,7 @@ class TestRaggedShardDistributed(FSDPTestMultiThread):
                 dims=(0,),
                 local_units=(1, 3),
             ),
+            mesh=mesh,
             reshard_after_forward=False,
         )
         bucket_storage = ShardedBucketStorage.from_bucket(
@@ -566,7 +573,6 @@ class TestRaggedShardRuntime(FSDPTest):
 
         flex_shard(
             model,
-            mesh,
             buckets=[
                 BucketSpec(
                     ["*"],
@@ -574,6 +580,7 @@ class TestRaggedShardRuntime(FSDPTest):
                         dims=(0,),
                         local_units=(1, 3),
                     ),
+                    mesh=mesh,
                     reshard_after_forward=False,
                 )
             ],
@@ -630,7 +637,6 @@ class TestRaggedShardRuntime(FSDPTest):
 
         flex_shard(
             model,
-            mesh,
             buckets=[
                 BucketSpec(
                     ["*"],
@@ -638,6 +644,7 @@ class TestRaggedShardRuntime(FSDPTest):
                         dims=(0,),
                         local_units=(1, 3),
                     ),
+                    mesh=mesh,
                     reshard_after_forward=False,
                 )
             ],
