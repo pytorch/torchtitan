@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import contextlib
 import dataclasses
 import json
 import os
@@ -44,7 +43,6 @@ from torchtitan.distributed.context_parallel import prepare_context_parallel_inp
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     preserve_buffers_spmd,
-    set_current_spmd_mesh,
     set_spmd_backend,
 )
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
@@ -484,6 +482,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         self.train_context = dist_utils.get_train_context(
             enable_loss_parallel=loss_parallel_enabled,
+            parallel_dims=parallel_dims,
             spmd_typechecking=(
                 config.parallelism.spmd_backend == "spmd_types"
                 and config.debug.spmd_typechecking
@@ -573,13 +572,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self,
         input_dict: dict[str, torch.Tensor],
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor | float,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
         dict[str, torch.Tensor],
         dict[str, Any],
-        torch.Tensor | float,
     ]:
         """
         Post-processing hook after data loading and before model forward pass.
@@ -600,7 +597,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         Returns:
             A tuple of
-            (inputs, labels, extra_inputs, extra_kwargs, global_valid_tokens)
+            (inputs, labels, extra_inputs, extra_kwargs)
             where:
                 - inputs: Main input tensor extracted from input_dict["input"].
                 - labels: Target labels (unchanged from input parameter).
@@ -611,8 +608,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 - extra_kwargs: Dict of additional keyword arguments for model
                     forward (positions, attention_masks). These ARE forwarded
                     across all pipeline parallel stages.
-                - global_valid_tokens: Loss denominator, possibly annotated for
-                    SPMD typechecking.
 
         Note:
             The distinction between extra_inputs and extra_kwargs is important for
@@ -671,14 +666,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
         elif self.config.parallelism.spmd_backend == "spmd_types":
-            inputs, labels, extra_kwargs, global_valid_tokens = annotate_input_spmd_types(
+            inputs, labels, extra_kwargs = annotate_input_spmd_types(
+                self.parallel_dims,
                 inputs,
                 labels,
                 extra_kwargs,
-                global_valid_tokens,
             )
 
-        return inputs, labels, extra_inputs, extra_kwargs, global_valid_tokens
+        return inputs, labels, extra_inputs, extra_kwargs
 
     @sl.log_trace_span("fwd_bwd")
     def forward_backward_step(
@@ -686,7 +681,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         *,
         input_dict: dict[str, torch.Tensor],
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor | float,
+        global_valid_tokens: float,
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
@@ -696,8 +691,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             labels,
             extra_inputs,
             extra_kwargs,
-            global_valid_tokens,
-        ) = self.post_dataloading_process(input_dict, labels, global_valid_tokens)
+        ) = self.post_dataloading_process(input_dict, labels)
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
@@ -776,15 +770,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 microbatches.append((input_dict, labels))
         sl.log_trace_scalar({"local_valid_tokens": int(local_valid_tokens)})
 
-        # All-reduce to get global token count across DP ranks
-        # Move to GPU for distributed communication
-        local_valid_tokens = local_valid_tokens.to(self.device)
-
         if parallel_dims.dp_enabled:
             batch_mesh = parallel_dims.get_mesh("batch")
-            global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
+            global_valid_tokens = dist_utils.dist_sum(
+                local_valid_tokens.to(self.device), batch_mesh
+            )
         else:
-            global_valid_tokens = local_valid_tokens.float()
+            global_valid_tokens = float(local_valid_tokens.item())
 
         # Process each microbatch: move to GPU, forward/backward, then free
         accumulated_losses = []
@@ -795,20 +787,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     input_dict[k] = v.to(self.device)
             labels = labels.to(self.device)
 
-            spmd_mesh_context = (
-                set_current_spmd_mesh(
-                    self.parallel_dims._global_meshes["spmd_dense_for_fwdbwd"]
-                )
-                if self.config.parallelism.spmd_backend == "spmd_types"
-                else contextlib.nullcontext()
+            loss = self.forward_backward_step(
+                input_dict=input_dict,
+                labels=labels,
+                global_valid_tokens=global_valid_tokens,
             )
-            with spmd_mesh_context:
-                loss = self.forward_backward_step(
-                    input_dict=input_dict,
-                    labels=labels,
-                    # pyrefly: ignore [bad-argument-type]
-                    global_valid_tokens=global_valid_tokens,
-                )
             accumulated_losses.append(loss.detach())
 
         with sl.log_trace_span("optim"):
