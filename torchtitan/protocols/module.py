@@ -139,13 +139,13 @@ class Module(nn.Module, Configurable):
         """
         if self._param_init is None:
             raise ValueError(
-                f"No param_init found for parameter '{name}' in "
+                f"No param_init found for parameter {name!r} in "
                 f"{type(self).__name__}. Set param_init on this "
                 f"module's Config or use skip_param_init."
             )
         if name not in self._param_init:
             raise ValueError(
-                f"No initializer for parameter '{name}' in "
+                f"No initializer for parameter {name!r} in "
                 f"{type(self).__name__}. "
                 f"Available: {list(self._param_init.keys())}"
             )
@@ -388,7 +388,7 @@ class Module(nn.Module, Configurable):
         pos_arg_names = [
             name for name in self._cache_pos_arg_names() if name not in kwargs
         ]
-        new_kwargs = dict(zip(pos_arg_names, args))
+        new_kwargs = dict(zip(pos_arg_names, args, strict=False))
         new_kwargs.update(kwargs)
 
         in_dst_shardings = sharding_config.in_dst_shardings or {}

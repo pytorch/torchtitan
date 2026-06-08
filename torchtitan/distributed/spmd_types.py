@@ -19,8 +19,10 @@ def spmd_layout_to_dtensor_placements(
     layout: "SpmdLayout",
 ) -> dict["MeshAxisName", Placement]:
     """Convert an SPMD layout to DTensor placements keyed by mesh axis name."""
+    from torchtitan.distributed.parallel_dims import MeshAxisName
+
     result: dict[MeshAxisName, Placement] = {}
-    for axis_name, axis_type in layout.shard_types().items():
+    for axis_name, axis_type in layout.per_axis_spmd_types().items():
         if axis_type == spmd.R or axis_type == spmd.I:
             dtensor_placement: Placement = Replicate()
         elif axis_type == spmd.P:
@@ -28,5 +30,10 @@ def spmd_layout_to_dtensor_placements(
         else:
             assert isinstance(axis_type, spmd.Shard)
             dtensor_placement = Shard(axis_type.dim)
-        result[axis_name] = dtensor_placement
+
+        if axis_name == MeshAxisName.DP:
+            result[MeshAxisName.DP_REPLICATE] = dtensor_placement
+            result[MeshAxisName.DP_SHARD] = dtensor_placement
+        else:
+            result[axis_name] = dtensor_placement
     return result

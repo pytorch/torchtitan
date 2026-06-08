@@ -18,7 +18,12 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 from torchtitan.config.configs import ParallelismConfig
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims, SpmdLayout
+from torchtitan.distributed.parallel_dims import (
+    MeshAxisName,
+    ParallelDims,
+    SpmdLayout,
+    unfold_dp_axes,
+)
 from torchtitan.distributed.spmd_types import spmd_layout_to_dtensor_placements
 from torchtitan.models.llama3 import model_registry
 from torchtitan.models.llama3.parallelize import apply_fsdp
@@ -223,13 +228,13 @@ class TestSpmdLayout(unittest.TestCase):
             partition_spec=spmd.PartitionSpec(MeshAxisName.TP),
         )
 
-        self.assertEqual(layout.shard_types(), {MeshAxisName.TP: spmd.S(0)})
+        self.assertEqual(layout.per_axis_spmd_types(), {MeshAxisName.TP: spmd.S(0)})
         self.assertEqual(
             spmd_layout_to_dtensor_placements(layout),
             {MeshAxisName.TP: Shard(0)},
         )
 
-    def test_seq_parallel_activation_shard_types(self):
+    def test_seq_parallel_activation_per_axis_spmd_types(self):
         """PartitionSpec can map multiple mesh axes to one tensor dim."""
         layout = SpmdLayout(
             {
@@ -245,12 +250,19 @@ class TestSpmdLayout(unittest.TestCase):
         )
 
         self.assertEqual(
-            layout.shard_types(),
+            layout.per_axis_spmd_types(),
             {
                 MeshAxisName.DP: spmd.S(0),
                 MeshAxisName.CP: spmd.S(1),
                 MeshAxisName.TP: spmd.S(1),
             },
+        )
+
+    def test_unfold_dp_axes(self):
+        """Logical DP expands only when resolving concrete mesh axes."""
+        self.assertEqual(
+            unfold_dp_axes([MeshAxisName.DP, MeshAxisName.CP, MeshAxisName.TP]),
+            ["dp_replicate", "dp_shard", "cp", "tp"],
         )
 
 
@@ -306,8 +318,8 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
         self.assertEqual(len(parallel_dims._single_axis_meshes), 0)
 
         # get_optional_mesh should trigger build_mesh
-        result = parallel_dims.get_optional_mesh("tp")
         # Result is None because tp has size 1, but build_mesh should have been called
+        self.assertIsNone(parallel_dims.get_optional_mesh("tp"))
         self.assertGreater(len(parallel_dims._single_axis_meshes), 0)
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
