@@ -6,6 +6,8 @@
 
 from .owned import Owned, param_boundary_placements
 from .ragged_shard import (
+    GroupedRaggedShard,
+    make_grouped_ragged_placement_fn,
     make_ragged_placement_fn,
     per_param_ragged_placements,
     RaggedShard,
@@ -13,6 +15,8 @@ from .ragged_shard import (
 from .shard import per_param_placements, Shard
 
 __all__ = [
+    "GroupedRaggedShard",
+    "make_grouped_ragged_placement_fn",
     "make_ragged_placement_fn",
     "Owned",
     "param_boundary_placements",
