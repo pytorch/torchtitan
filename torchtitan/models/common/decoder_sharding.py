@@ -50,7 +50,7 @@ def dense_activation_placement(
 
 
 def dense_sequence_parallel_placement() -> SpmdLayout:
-    """SP activations with CP-TP shard ordering on sequence dimension."""
+    """Sequence-parallel ``(batch, seq, hidden)`` activation placement."""
     return SpmdLayout(
         {
             DP: spmd.V,
@@ -249,22 +249,17 @@ def set_gqa_inner_attention_local_map(
 def set_dense_ffn_sharding(
     feed_forward_cfg,
     *,
-    attn_x_placement: spmd.PerMeshAxisSpmdType,
+    attn_x_layout: SpmdLayout,
     enable_sp: bool,
 ) -> None:
     """Standard dense FFN (``w1``/``w2``/``w3``) TP sharding.
 
-    Shared by llama3, qwen3, llama4, and deepseek_v3. ``attn_x_placement``
-    should match the layout that the layer's attention block emits so the
-    FFN's input wrap is a no-op redistribute when placements already agree.
+    Shared by llama3, qwen3, llama4, and deepseek_v3. ``attn_x_layout`` should
+    match the layout that the layer's attention block emits so the FFN's input
+    wrap is a no-op redistribute when placements already agree.
     """
-    in_src = (
-        dense_sequence_parallel_placement()
-        if enable_sp
-        else dense_activation_placement(tp=attn_x_placement)
-    )
     feed_forward_cfg.sharding_config = ShardingConfig(
-        in_src_shardings={"x": in_src},
+        in_src_shardings={"x": attn_x_layout},
         in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
     )
     feed_forward_cfg.w1.sharding_config = colwise_config()

@@ -13,6 +13,7 @@ from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
+    dense_sequence_parallel_placement,
     norm_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
@@ -91,10 +92,14 @@ def _set_qwen3_layer_sharding(
 
     # Dense FFN (non-MoE layers only)
     if layer_cfg.feed_forward is not None:
-        attn_x_placement = spmd.S(1) if enable_sp else spmd.R
+        attn_x_layout = (
+            dense_sequence_parallel_placement()
+            if enable_sp
+            else dense_activation_placement(tp=spmd.R)
+        )
         set_dense_ffn_sharding(
             layer_cfg.feed_forward,
-            attn_x_placement=attn_x_placement,
+            attn_x_layout=attn_x_layout,
             enable_sp=enable_sp,
         )
 
