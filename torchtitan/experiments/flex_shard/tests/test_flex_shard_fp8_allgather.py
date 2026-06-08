@@ -214,13 +214,13 @@ class TestFp8AllGather(FSDPTest):
 
         flex_shard(
             model,
-            mesh,
             buckets=[
                 BucketSpec(
                     ["w1", "w2"],
                     placement_fn=make_fp8_blockwise_grouped_ragged_placement_fn(
                         block_size=block, local_units=(1,) * self.world_size
                     ),
+                    mesh=mesh,
                     reshard_after_forward=False,
                 )
             ],
@@ -284,13 +284,13 @@ class TestFp8AllGather(FSDPTest):
 
         flex_shard(
             model,
-            mesh,
             buckets=[
                 BucketSpec(
                     ["mlp.wq.weight", "mlp.wo.weight"],
                     placement_fn=make_fp8_blockwise_grouped_ragged_placement_fn(
                         block_size=block, local_units=(1,) * self.world_size
                     ),
+                    mesh=mesh,
                     reshard_after_forward=True,
                 )
             ],
@@ -334,13 +334,13 @@ class TestFp8AllGather(FSDPTest):
 
         flex_shard(
             model,
-            mesh,
             buckets=[
                 BucketSpec(
                     ["w1", "w2"],
                     placement_fn=make_fp8_two_orientation_grouped_ragged_placement_fn(
                         block_size=block, local_units=(1,) * self.world_size
                     ),
+                    mesh=mesh,
                     reshard_after_forward=False,
                 )
             ],
