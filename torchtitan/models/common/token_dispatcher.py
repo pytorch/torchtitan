@@ -268,7 +268,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         num_tokens_per_expert: torch.Tensor,
         num_tokens_per_expert_group: torch.Tensor,
         ep_size: int,
-    ) -> tuple[torch.Tensor, list[int], list[int]]:
+    ) -> tuple[torch.Tensor, list[int], list[int], int | torch.SymInt]:
         num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
             num_tokens_per_expert_group
         )
@@ -287,10 +287,15 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         input_splits_list = input_splits.tolist()
         output_splits_list = output_splits.tolist()
 
+        # This relies on PyTorch support for unbacked SymInt output sizes in
+        # repeat_interleave/arange. The CPU sum gives tracing one symbolic size
+        # instead of a long expression over the split-size list.
+        permute_output_size = output_splits.sum().item()
         return (
             num_tokens_per_expert_group,
             input_splits_list,
             output_splits_list,
+            permute_output_size,
         )
 
     def _dispatch_token_exchange(
@@ -380,6 +385,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 num_global_tokens_per_local_expert_E,
                 input_splits_list,
                 output_splits_list,
+                permute_output_size,
             ) = self._sync_token_count_exchange(
                 num_local_tokens_per_expert_E,
                 num_global_tokens_per_local_expert_E,
@@ -414,6 +420,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             num_global_tokens_per_local_expert_E,
             ep_size,
             num_local_experts,
+            output_size=permute_output_size,
         )
 
         metadata = AllToAllDispatchMetadata(
@@ -432,6 +439,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         num_global_tokens_per_local_expert_E,
         ep_size,
         num_local_experts,
+        output_size=None,
     ):
         """Reorder tokens from rank-major to expert-major layout.
 
@@ -442,7 +450,11 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         ``num_global_tokens_per_local_expert_e`` ``(e,)`` by summing across ranks.
         """
         device = num_global_tokens_per_local_expert_E.device
-        total = routed_input_RD.shape[0]
+        total = (
+            output_size
+            if output_size is not None
+            else num_global_tokens_per_local_expert_E.sum()
+        )
 
         # (EP, e) matrix of token counts per (rank, local_expert)
         t_mat = num_global_tokens_per_local_expert_E.view(ep_size, num_local_experts)
@@ -463,11 +475,9 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             segment_lens, output_size=total
         )
         output_starts = segment_lens.cumsum(0) - segment_lens
-        # seg_ids.shape[0] == segment_lens.sum(), but reuses the unbacked symint
-        # already created by repeat_interleave above.
         permuted_indices = (
             input_starts[seg_ids]
-            + torch.arange(seg_ids.shape[0], device=device)
+            + torch.arange(total, device=device)
             - output_starts[seg_ids]
         )
 
@@ -611,6 +621,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         num_global_tokens_per_local_expert_E,
         ep_size,
         num_local_experts,
+        output_size=None,
     ):
         # FP8/MXFP8 require groups to be permuted to expert major order AND
         # padded to nearest multiple of 16.
