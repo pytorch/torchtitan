@@ -32,8 +32,6 @@ from .utils import (
 )
 
 if TYPE_CHECKING:
-    from torch.distributed.device_mesh import DeviceMesh
-
     from .placement_contract import Placement
 
 
@@ -56,7 +54,6 @@ class FlexShardModule:
 
 def flex_shard(
     module: nn.Module,
-    mesh: DeviceMesh,
     buckets: list[BucketSpec],
 ) -> FlexShardModule:
     """
@@ -74,12 +71,15 @@ def flex_shard(
     independent unshard operations per bucket.
 
     Args:
-        module: The module to shard. CPU modules are moved to the mesh's CUDA
-            device before sharding. Meta parameters keep uninitialized storage.
-        mesh: The 1D device mesh for sharding.
+        module: The module to shard. CPU modules are moved to the bucket mesh's
+            CUDA device before sharding. Meta parameters keep uninitialized
+            storage.
         buckets: Required list of bucket specifications. Each bucket owns its
-            placement function. A single whole-module bucket can be expressed as
-            ``[BucketSpec(["*"], placement_fn=per_param_placements)]``.
+            1D CUDA mesh and its placement function. A bucket is one collective
+            over one process group, so the mesh lives on the bucket; different
+            buckets may use different meshes (all sharing one device type). A
+            single whole-module bucket can be expressed as
+            ``[BucketSpec(["*"], placement_fn=per_param_placements, mesh=mesh)]``.
             When ``reshard_after_forward=True``, FlexShard raises if bucket
             hooks cannot run in both the original forward and activation
             checkpoint recomputation.
@@ -95,22 +95,21 @@ def flex_shard(
         >>> # Single bucket without reshard-after-forward:
         >>> flex_shard(
         ...     model,
-        ...     mesh,
         ...     buckets=[
         ...         BucketSpec(
         ...             ["*"],
         ...             placement_fn=per_param_placements,
+        ...             mesh=mesh,
         ...             reshard_after_forward=False,
         ...         )
         ...     ],
         ... )
-        >>> # Explicit buckets:
+        >>> # Explicit buckets, each carrying its own mesh:
         >>> flex_shard(
         ...     model,
-        ...     mesh,
         ...     buckets=[
-        ...         BucketSpec(["attn.*"], placement_fn=per_param_placements),
-        ...         BucketSpec(["ffn.*"], placement_fn=per_param_placements),
+        ...         BucketSpec(["attn.*"], placement_fn=per_param_placements, mesh=mesh),
+        ...         BucketSpec(["ffn.*"], placement_fn=per_param_placements, mesh=mesh),
         ...     ],
         ... )
     Note:
@@ -121,7 +120,6 @@ def flex_shard(
     """
     inputs = _prepare_flex_shard_inputs(
         module,
-        mesh,
         buckets,
     )
 
@@ -200,7 +198,6 @@ class PreparedFlexShardInputs:
     """Validated inputs and derived setup state for flex_shard()."""
 
     named_params: list[tuple[str, nn.Parameter]]
-    shard_mesh: DeviceMesh
     device: torch.device
     param_placements: dict[str, tuple[Placement, ...]]
     bucket_assignments: BucketParamFQNsByIndex
@@ -231,7 +228,7 @@ def _materialize_bucket_storages(
                 module,
                 bucket_named_params,
                 bucket_placements,
-                inputs.shard_mesh,
+                bucket_spec.mesh,
                 inputs.device,
                 bucket_spec,
             )
@@ -242,7 +239,6 @@ def _materialize_bucket_storages(
 
 def _resolve_bucket_param_placements(
     named_params: list[tuple[str, nn.Parameter]],
-    shard_mesh: DeviceMesh,
     bucket_assignments: BucketParamFQNsByIndex,
     buckets: list[BucketSpec],
 ) -> dict[str, tuple[Placement, ...]]:
@@ -256,24 +252,21 @@ def _resolve_bucket_param_placements(
         bucket_named_params = [(fqn, named_params_dict[fqn]) for fqn in bucket_fqns]
         bucket_param_placements = buckets[bucket_idx].placement_fn(
             bucket_named_params,
-            shard_mesh,
+            buckets[bucket_idx].mesh,
         )
-        _validate_placements(bucket_param_placements, bucket_named_params, shard_mesh)
+        _validate_placements(bucket_param_placements, bucket_named_params)
         param_placements.update(bucket_param_placements)
 
-    _validate_placements(param_placements, named_params, shard_mesh)
+    _validate_placements(param_placements, named_params)
     return param_placements
 
 
 def _prepare_flex_shard_inputs(
     module: nn.Module,
-    mesh: DeviceMesh,
     buckets: list[BucketSpec],
 ) -> PreparedFlexShardInputs:
     """Validate inputs and derive setup state for flex_shard()."""
     _check_not_already_flex_sharded(module)
-    _validate_flex_shard_mesh(mesh)
-    shard_mesh = mesh
 
     if not buckets:
         raise ValueError("flex_shard requires at least one BucketSpec in buckets.")
@@ -282,10 +275,20 @@ def _prepare_flex_shard_inputs(
     for bucket in buckets:
         if not callable(bucket.placement_fn):
             raise TypeError("BucketSpec.placement_fn must be callable.")
+        _validate_flex_shard_mesh(bucket.mesh)
         if bucket.offload_policy is not None:
             raise NotImplementedError(
                 "FlexShard eager mode does not yet support BucketSpec.offload_policy."
             )
+    # A bucket is one collective over one process group, so the mesh is a
+    # per-bucket property. Buckets may use different meshes, but this rank has a
+    # single local device, so require all bucket meshes to share a device type.
+    device_types = {bucket.mesh.device_type for bucket in buckets}
+    if len(device_types) > 1:
+        raise ValueError(
+            "All BucketSpec meshes in one flex_shard() call must share a device "
+            f"type, but got {sorted(device_types)}."
+        )
 
     named_params = _get_managed_named_params(module)
     if not named_params:
@@ -296,7 +299,9 @@ def _prepare_flex_shard_inputs(
 
     all_params_meta = all(param.device.type == "meta" for _, param in named_params)
     device = (
-        torch.device("meta") if all_params_meta else _get_device_from_mesh(shard_mesh)
+        torch.device("meta")
+        if all_params_meta
+        else _get_device_from_mesh(buckets[0].mesh)
     )
     if not all_params_meta and all(
         param.device.type == "cpu" for _, param in named_params
@@ -313,7 +318,6 @@ def _prepare_flex_shard_inputs(
     bucket_assignments = _assign_params_to_buckets(param_fqns, buckets)
     param_placements = _resolve_bucket_param_placements(
         named_params,
-        shard_mesh,
         bucket_assignments,
         buckets,
     )
@@ -326,7 +330,6 @@ def _prepare_flex_shard_inputs(
 
     return PreparedFlexShardInputs(
         named_params=named_params,
-        shard_mesh=shard_mesh,
         device=device,
         param_placements=param_placements,
         bucket_assignments=bucket_assignments,
