@@ -52,9 +52,10 @@ def _router(
     actors,
     *,
     strategy: str = "least_loaded",
+    hot_swap: bool = False,
 ) -> GeneratorRouter:
     return GeneratorRouter(
-        GeneratorRouter.Config(strategy=strategy),
+        GeneratorRouter.Config(strategy=strategy, hot_swap=hot_swap),
         generators=[
             GeneratorHandle(idx=idx, actor=actor) for idx, actor in enumerate(actors)
         ],
@@ -185,6 +186,24 @@ def test_sync_pulls_idle_generators_while_busy_generator_drains():
             [((2,), {})],
             [((2,), {})],
         ]
+
+    asyncio.run(_run())
+
+
+def test_hot_swap_keeps_generators_serving_during_sync():
+    async def _run():
+        actor = _Actor("gen0", wait_pull=True)
+        router = _router([actor], hot_swap=True)
+
+        sync_task = asyncio.create_task(router.sync_weights(3))
+        await actor.pull_model_state_dict.started.wait()
+
+        assert router.generators[0].state is GenState.SERVING
+        assert await router.route("generate") == "gen0"
+
+        actor.pull_model_state_dict.release.set()
+        await sync_task
+        assert actor.pull_model_state_dict.calls == [((3,), {})]
 
     asyncio.run(_run())
 

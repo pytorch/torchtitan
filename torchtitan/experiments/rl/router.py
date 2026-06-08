@@ -150,6 +150,12 @@ class GeneratorRouter(Configurable):
         strategy: str = "least_loaded"
         """Routing strategy name, or a dotted RoutingStrategy subclass path."""
 
+        hot_swap: bool = False
+        """
+        Whether weight sync should update generators without draining in-flight
+        generations first.
+        """
+
     def __init__(
         self,
         config: Config,
@@ -256,14 +262,20 @@ class GeneratorRouter(Configurable):
         """Sync trainer weights to all generators."""
 
         async def _sync_one(h: GeneratorHandle) -> None:
-            try:
-                await h.idle.wait()
+            if self.config.hot_swap:
+                # For hot swap, we can sync the weights concurrently with
+                # in-flight generations.
                 await h.actor.pull_model_state_dict.call(policy_version)
-            finally:
-                self._set_state(h, GenState.SERVING)
-
-        for h in self.generators:
-            self._set_state(h, GenState.SYNCING)
+            else:
+                # Set the generator to syncing state to block it from serving
+                # new work. But wait for any in-flight work to finish before
+                # syncing the weights.
+                self._set_state(h, GenState.SYNCING)
+                try:
+                    await h.idle.wait()
+                    await h.actor.pull_model_state_dict.call(policy_version)
+                finally:
+                    self._set_state(h, GenState.SERVING)
 
         results = await asyncio.gather(
             *[_sync_one(h) for h in self.generators],
