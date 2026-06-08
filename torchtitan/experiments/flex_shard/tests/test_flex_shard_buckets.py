@@ -19,6 +19,7 @@ Usage:
       torchtitan/experiments/flex_shard/tests/test_flex_shard_buckets.py
 """
 
+import copy
 from types import ModuleType, SimpleNamespace
 from typing import cast
 
@@ -33,6 +34,10 @@ from torch.testing._internal.common_fsdp import (
     get_devtype,
 )
 from torch.testing._internal.common_utils import run_tests, TestCase
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    ModelArgs,
+    Transformer,
+)
 
 from torchtitan.experiments.flex_shard import (
     BucketSpec,
@@ -57,6 +62,7 @@ from torchtitan.experiments.flex_shard.flex_shard.flex_shard import (
     PreparedFlexShardInputs,
 )
 from torchtitan.experiments.flex_shard.tests.common import (
+    expected_shard,
     make_transformer_model,
     single_rank_cpu_mesh,
     single_rank_cuda_mesh,
@@ -955,6 +961,306 @@ class TestDistributedBuckets(FSDPTest):
             sd["output.weight"].shape,
             (args.vocab_size // self.world_size, args.dim),
         )
+
+
+# ---------------------------------------------------------------------------
+# Per-bucket mesh: experts on a 1-D efsdp axis, dense on a 1-D dp axis
+# ---------------------------------------------------------------------------
+
+# Sibling-structured MoE for the end-to-end training test: dense blocks (-> dp)
+# and expert FFNs (-> efsdp) as separate module lists, so each is its own bucket.
+# NOTE: forwards read each managed parameter EXACTLY ONCE -- flex_shard's eager
+# getter clears the unshard slot after the first read (a known limitation), so a
+# forward that reads ``self.w`` twice (like the upstream Experts' isinstance +
+# assign) raises. nn.Linear / LayerNorm already read their weight once.
+_TP_VOCAB, _TP_DIM, _TP_HIDDEN, _TP_EXPERTS, _TP_LAYERS = 16, 16, 32, 8, 2
+
+
+class _Experts(nn.Module):
+    """Expert FFN stacks in a submodule (so its bucket resolves to the parent)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.w1 = nn.Parameter(torch.randn(_TP_EXPERTS, _TP_HIDDEN, _TP_DIM) * 0.02)
+        self.w2 = nn.Parameter(torch.randn(_TP_EXPERTS, _TP_DIM, _TP_HIDDEN) * 0.02)
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        w1, w2 = self.w1, self.w2  # read each managed param exactly once
+        e = w1.shape[0]
+        x = h.reshape(-1, _TP_DIM).unsqueeze(0).expand(e, -1, -1)
+        mid = nn.functional.gelu(torch.bmm(x, w1.transpose(-2, -1)))
+        out = torch.bmm(mid, w2.transpose(-2, -1)).sum(0) / e
+        return out.view_as(h)
+
+
+class _ExpertFFN(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.experts = _Experts()
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        return self.experts(h)
+
+
+class _DenseBlock(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(_TP_DIM)
+        self.wq = nn.Linear(_TP_DIM, _TP_DIM, bias=False)
+        self.wo = nn.Linear(_TP_DIM, _TP_DIM, bias=False)
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        return self.wo(nn.functional.gelu(self.wq(self.norm(h))))
+
+
+class _SiblingMoE(nn.Module):
+    """Dense blocks (-> dp) and expert FFNs (-> efsdp) as sibling module lists."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tok_embeddings = nn.Embedding(_TP_VOCAB, _TP_DIM)
+        self.blocks = nn.ModuleList([_DenseBlock() for _ in range(_TP_LAYERS)])
+        self.experts = nn.ModuleList([_ExpertFFN() for _ in range(_TP_LAYERS)])
+        self.norm = nn.LayerNorm(_TP_DIM)
+        self.output = nn.Linear(_TP_DIM, _TP_VOCAB, bias=False)
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        h = self.tok_embeddings(tokens)
+        for blk, exp in zip(self.blocks, self.experts):
+            h = h + blk(h)
+            h = h + exp(h)
+        return self.output(self.norm(h))
+
+
+class TestMultiMeshBuckets(FSDPTest):
+    """Per-bucket mesh: different buckets shard on different 1-D sub-meshes.
+
+    The plain-tensor analog of fully_shard's per-param-mesh MoE setup (experts on
+    an expert-FSDP axis, dense params on the data-parallel axis), expressed with
+    flat, FQN-patterned buckets instead of nested wrapping + shard_placement_fn.
+    Uses the same toy ``Transformer`` (with ``num_experts``) that fully_shard's
+    ``test_shard_placement_fn_tp_ep`` uses, so the dense/expert split is
+    representative: attention ``wq/wk/wv/wo`` and ``attention_norm``/``ffn_norm``
+    are dense; ``expert_layer.experts.{w1,w2}`` are 3-D expert stacks.
+
+    The world (4 ranks) is factored as efsdp(2) x ep(2); same rank set, two 1-D
+    meshes:
+
+      * dense params shard ``Shard(0)`` over the full ``dp`` mesh (size 4)
+      * expert params shard ``Shard(0)`` over the ``efsdp`` sub-mesh (size 2)
+        -- replicated across ``ep``, sharded within ``efsdp``
+
+    Verifies the layout (experts<->efsdp, dense<->dp), that each bucket carries the
+    right mesh, and that gathering each shard over its bucket's mesh reconstructs
+    the full param. (This toy Transformer's MoE has no router gate -- it runs and
+    averages all experts -- so only the expert FFN weights live on efsdp.)
+    """
+
+    @property
+    def world_size(self) -> int:
+        return 4
+
+    @skip_if_lt_x_gpu(4)
+    def test_experts_on_efsdp_dense_on_dp(self) -> None:
+        dp_mesh = init_device_mesh(
+            device_type.type, (self.world_size,), mesh_dim_names=("dp",)
+        )
+        sparse_mesh = init_device_mesh(
+            device_type.type, (2, 2), mesh_dim_names=("efsdp", "ep")
+        )
+        efsdp_mesh = sparse_mesh["efsdp"]
+        self.assertEqual(dp_mesh.size(), 4)
+        self.assertEqual(efsdp_mesh.size(), 2)
+
+        # weight_tying=False: flex_shard rejects shared params (output<->tok_emb).
+        args = ModelArgs(
+            n_layers=2,
+            vocab_size=16,
+            max_seq_len=16,
+            dim=16,
+            n_heads=4,
+            dropout_p=0.0,
+            num_experts=8,
+            weight_tying=False,
+        )
+        model = Transformer(args).to(device_type.type)
+        for p in model.parameters():  # identical full params on every rank
+            dist.broadcast(p.data, src=0)
+        reference = copy.deepcopy(model)
+
+        def _is_expert(fqn: str) -> bool:
+            return "expert_layer" in fqn  # expert_layer.experts.{w1,w2}
+
+        # Flat buckets mirroring root -> layer -> MoE: experts on efsdp, rest on dp.
+        buckets = [
+            BucketSpec(
+                [pattern],
+                placement_fn=per_param_placements,
+                mesh=dp_mesh,
+                reshard_after_forward=False,
+            )
+            for pattern in (
+                "tok_embeddings.*",
+                "pos_embeddings.*",
+                "norm.*",
+                "output.*",
+            )
+        ]
+        for i in range(args.n_layers):
+            # Dense attention q/k/v/o + attention/ffn norms -> one bucket on dp.
+            buckets.append(
+                BucketSpec(
+                    [
+                        f"layers.{i}.attention.*",
+                        f"layers.{i}.attention_norm.*",
+                        f"layers.{i}.ffn_norm.*",
+                    ],
+                    placement_fn=per_param_placements,
+                    mesh=dp_mesh,
+                    reshard_after_forward=False,
+                )
+            )
+            # MoE expert FFN stacks (experts.w1, experts.w2) -> efsdp.
+            buckets.append(
+                BucketSpec(
+                    [f"layers.{i}.expert_layer.*"],
+                    placement_fn=per_param_placements,
+                    mesh=efsdp_mesh,
+                    reshard_after_forward=False,
+                )
+            )
+        flex_shard(model, buckets=buckets)
+
+        # Grouping: each bucket storage carries the mesh its params shard on.
+        for storage in model.sharded_bucket_storages:
+            for fqn in storage._param_infos:
+                expected_mesh = efsdp_mesh if _is_expert(fqn) else dp_mesh
+                self.assertIs(storage._mesh, expected_mesh, fqn)
+
+        # Sharding: experts <-> efsdp, dense <-> dp, byte-for-byte (pre-forward,
+        # while params are still sharded).
+        ref_params = dict(reference.named_parameters())
+        for name, param in model.named_parameters():
+            ref = ref_params[name].detach()
+            param_mesh = efsdp_mesh if _is_expert(name) else dp_mesh
+            want = expected_shard(
+                ref, rank=param_mesh.get_local_rank(), world_size=param_mesh.size()
+            )
+            self.assertEqual(param.detach(), want, name)
+
+        # Expert leading dim follows efsdp (size 2), not dp (size 4).
+        experts_w1 = dict(model.named_parameters())["layers.0.expert_layer.experts.w1"]
+        self.assertEqual(experts_w1.shape[0], args.num_experts // efsdp_mesh.size())
+
+        # Runtime: gathering each local shard over its bucket's mesh reconstructs
+        # the full reference param -- experts gather over efsdp(2), dense over
+        # dp(4) -- exercising the two meshes' all-gather process groups. (Gathered
+        # directly via the mesh PGs rather than model.forward: this upstream model's
+        # Experts.forward reads ``self.w1`` twice (isinstance + assign) and
+        # flex_shard's getter serves a managed param only once per forward.
+        # test_train_parity runs a real fwd/bwd/step loop with a single-read model.)
+        def _gather_full(local: torch.Tensor, mesh, full_dim0: int) -> torch.Tensor:
+            parts = [torch.empty_like(local) for _ in range(mesh.size())]
+            dist.all_gather(parts, local.contiguous(), group=mesh.get_group())
+            return torch.cat(parts, dim=0)[:full_dim0]
+
+        for name, param in model.named_parameters():
+            ref = ref_params[name].detach()
+            param_mesh = efsdp_mesh if _is_expert(name) else dp_mesh
+            self.assertEqual(
+                _gather_full(param.detach(), param_mesh, ref.shape[0]), ref, name
+            )
+
+    @skip_if_lt_x_gpu(4)
+    def test_train_parity(self) -> None:
+        """Full fwd/bwd/SGD loop matches a single-device reference, with dense
+        blocks on dp and expert FFNs on efsdp.
+
+        Sibling module lists (``blocks`` -> dp, ``experts`` -> efsdp); each is its
+        own bucket / unshard hook. All ranks share the input, so per-rank grads are
+        identical and flex's reduce-scatter (mean) is a no-op + chunk, giving exact
+        per-shard parity after each SGD step.
+        """
+        dp_mesh = init_device_mesh(
+            device_type.type, (self.world_size,), mesh_dim_names=("dp",)
+        )
+        efsdp_mesh = init_device_mesh(
+            device_type.type, (2, 2), mesh_dim_names=("efsdp", "ep")
+        )["efsdp"]
+
+        torch.manual_seed(0)
+        model = _SiblingMoE().to(device_type.type)
+        for p in model.parameters():
+            dist.broadcast(p.data, src=0)
+        reference = copy.deepcopy(model)
+
+        def _is_expert(fqn: str) -> bool:
+            return fqn.startswith("experts.")
+
+        buckets = [
+            BucketSpec(
+                [pattern],
+                placement_fn=per_param_placements,
+                mesh=dp_mesh,
+                reshard_after_forward=False,
+            )
+            for pattern in ("tok_embeddings.*", "norm.*", "output.*")
+        ]
+        for i in range(_TP_LAYERS):
+            buckets.append(
+                BucketSpec(
+                    [f"blocks.{i}.*"],
+                    placement_fn=per_param_placements,
+                    mesh=dp_mesh,
+                    reshard_after_forward=False,
+                )
+            )
+            buckets.append(
+                BucketSpec(
+                    [f"experts.{i}.*"],
+                    placement_fn=per_param_placements,
+                    mesh=efsdp_mesh,
+                    reshard_after_forward=False,
+                )
+            )
+        flex_shard(model, buckets=buckets)
+
+        flex_optim = torch.optim.SGD(model.parameters(), lr=0.1)
+        ref_optim = torch.optim.SGD(reference.parameters(), lr=0.1)
+
+        torch.manual_seed(7)
+        x = torch.randint(0, _TP_VOCAB, (2, 8), device=device_type.type)
+        target = torch.randint(0, _TP_VOCAB, (2, 8), device=device_type.type)
+        dist.broadcast(x, src=0)
+        dist.broadcast(target, src=0)
+        cross_entropy = nn.functional.cross_entropy
+
+        for step in range(3):
+            flex_optim.zero_grad()
+            ref_optim.zero_grad()
+            out = model(x)
+            ref_out = reference(x)
+            # Forward parity: dp and efsdp all-gathers both reconstruct the params.
+            self.assertEqual(out, ref_out, f"forward step {step}")
+            loss = cross_entropy(out.reshape(-1, _TP_VOCAB), target.reshape(-1))
+            ref_loss = cross_entropy(ref_out.reshape(-1, _TP_VOCAB), target.reshape(-1))
+            self.assertEqual(loss, ref_loss, f"loss step {step}")
+            loss.backward()
+            ref_loss.backward()
+            flex_optim.step()
+            ref_optim.step()
+
+            # After the step, each local shard equals the reference param chunked
+            # on its bucket's mesh -- experts on efsdp(2), dense on dp(4).
+            ref_now = dict(reference.named_parameters())
+            for name, param in model.named_parameters():
+                param_mesh = efsdp_mesh if _is_expert(name) else dp_mesh
+                want = expected_shard(
+                    ref_now[name].detach(),
+                    rank=param_mesh.get_local_rank(),
+                    world_size=param_mesh.size(),
+                )
+                self.assertEqual(param.detach(), want, f"{name} after step {step}")
 
 
 if __name__ == "__main__":
