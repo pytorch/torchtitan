@@ -670,6 +670,14 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
         model_spec = model_registry("debugmodel")
         model_config = model_spec.model
 
+        # This test runs forward+backward on self.device_type (CPU in the
+        # CPU CI job). The default FlexAttention backend has no CPU backward,
+        # so use ScaledDotProductAttention, which runs on CPU without a mask.
+        from torchtitan.models.common.attention import ScaledDotProductAttention
+
+        for layer in model_config.layers:
+            layer.attention.inner_attention = ScaledDotProductAttention.Config()
+
         with torch.device("meta"):
             model = model_config.build()
         model.to_empty(device=self.device_type)

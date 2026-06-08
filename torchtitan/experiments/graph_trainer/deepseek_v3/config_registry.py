@@ -14,8 +14,6 @@ from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_16b,
     deepseek_v3_671b,
     deepseek_v3_debugmodel,
-    deepseek_v3_debugmodel_flex_attn,
-    deepseek_v3_debugmodel_flex_attn_ep,
 )
 from torchtitan.trainer import Trainer
 
@@ -23,12 +21,6 @@ from . import model_registry
 
 
 def graph_trainer_deepseek_v3_debugmodel() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(deepseek_v3_debugmodel(), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
-    return config
-
-
-def graph_trainer_deepseek_v3_debugmodel_ep() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_debugmodel(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
@@ -45,29 +37,9 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
     return config
 
 
-def graph_trainer_deepseek_v3_debugmodel_flex_attn() -> (GraphTrainer.Config):
-    config = to_graph_trainer_config(deepseek_v3_debugmodel_flex_attn(), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
-    return config
-
-
-def graph_trainer_deepseek_v3_debugmodel_flex_attn_ep() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(
-        deepseek_v3_debugmodel_flex_attn_ep(), model_registry
-    )
-    config.compile = GraphTrainerCompileConfig(enable=True)
-    return config
-
-
 def graph_trainer_deepseek_v3_16b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_16b(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
-    return config
-
-
-def graph_trainer_deepseek_v3_16b_sdpa() -> GraphTrainer.Config:
-    config = graph_trainer_deepseek_v3_16b()
-    config.model_spec = model_registry("16B", attn_backend="sdpa")
     return config
 
 
@@ -82,7 +54,7 @@ def graph_trainer_deepseek_v3_671b() -> GraphTrainer.Config:
 # CrossEntropyLoss; this wrapper applies the same swap to the eager baseline
 # so loss_compare runs apples-to-apples.
 # TODO: Remove once graph_trainer supports ChunkedCELoss.
-def deepseek_v3_debugmodel_ep_ce_loss() -> Trainer.Config:
+def deepseek_v3_debugmodel_ce_loss() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
     config.loss = CrossEntropyLoss.Config()
     return config

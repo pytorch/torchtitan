@@ -11,6 +11,7 @@ from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 from torchtitan.protocols.model_spec import ModelSpec
 
+from ..common_utils import build_decoder_config_for_backend
 from .model import GraphTrainerLlama3Model
 from .parallelize import parallelize_llama
 
@@ -27,9 +28,9 @@ def _parallelize_fn(model, *, compile_config, **kwargs):
 
 def model_registry(
     flavor: str,
-    attn_backend: str = "sdpa",
+    attn_backend: str = "flex",
 ) -> ModelSpec:
-    base = llama3_configs[flavor](attn_backend=attn_backend)
+    base = build_decoder_config_for_backend(llama3_configs[flavor], attn_backend)
     config = GraphTrainerLlama3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}
     )
