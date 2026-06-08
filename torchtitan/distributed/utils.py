@@ -25,6 +25,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import CommConfig, DebugConfig
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
 
@@ -321,6 +322,7 @@ class TrainContext(Protocol):
 def get_train_context(
     *,
     enable_loss_parallel: bool,
+    parallel_dims: "ParallelDims | None" = None,
     spmd_typechecking: bool = False,
 ) -> TrainContext:
     @contextlib.contextmanager
@@ -328,6 +330,14 @@ def get_train_context(
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
+            if parallel_dims is not None and parallel_dims.spmd_backend == "spmd_types":
+                if not parallel_dims._single_axis_meshes:
+                    parallel_dims.build_mesh()
+                stack.enter_context(
+                    set_current_spmd_mesh(
+                        parallel_dims._global_meshes["spmd_dense_for_fwdbwd"]
+                    )
+                )
             if spmd_typechecking:
                 stack.enter_context(spmd.typecheck(local=False))
 

@@ -19,7 +19,7 @@ from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 
 
-__all__ = ["MeshAxisName", "ParallelDims", "SpmdLayout"]
+__all__ = ["MeshAxisName", "ParallelDims", "SpmdLayout", "unfold_dp_axes"]
 
 
 class StrEnum(str, Enum):
@@ -85,13 +85,14 @@ class SpmdLayout:
     def axes(self) -> tuple[MeshAxisName, ...]:
         return tuple(self.axis_types)
 
-    def shard_types(self) -> dict[MeshAxisName, spmd.PerMeshAxisSpmdType]:
+    def per_axis_spmd_types(self) -> dict[MeshAxisName, spmd.PerMeshAxisSpmdType]:
         """
         Return per-axis types with PartitionSpec sharding represented as S(i).
         e.g. {DP: R, CP: V} + PartitionSpec(None, CP) -> {DP: R, CP: S(1)}
 
         This is not meant as a minimal description of the SPMD layout; shard order
-        cannot be expressed carefully. This is a helper for calling spmd.redistribute,
+        cannot be expressed. Specifically, shard order information will be lost in
+        this representation. This is purely a helper for calling spmd.redistribute,
         which takes per-axis types (e.g. redistribute(S(1) -> R)).
 
         This manually handles ``MeshAxisName``, because spmd_types normalization
@@ -114,14 +115,15 @@ class SpmdLayout:
         return result
 
 
-def _unfold_dp_axis(axes: list[str]) -> list[str]:
-    """Expand the logical ``dp`` axis into ``dp_replicate`` and ``dp_shard``."""
+def unfold_dp_axes(axes: Iterable[MeshAxisName | str]) -> list[str]:
+    """Expand logical ``dp`` into concrete dense storage mesh axes."""
     result: list[str] = []
     for axis in axes:
-        if axis == "dp":
+        axis_value = axis.value if isinstance(axis, MeshAxisName) else axis
+        if axis_value == "dp":
             result.extend(("dp_replicate", "dp_shard"))
         else:
-            result.append(axis)
+            result.append(axis_value)
     return result
 
 
@@ -412,7 +414,7 @@ class ParallelDims:
         self,
         dims: str | list[str],
         *,
-        include_single_axes: bool = False,
+        include_singleton_axes: bool = False,
     ) -> DeviceMesh | None:
         """Get a device mesh by dimension name(s), returning None if not enabled.
 
@@ -420,9 +422,10 @@ class ParallelDims:
             dims: Names of the mesh dimension. Valid options include:
                  'pp', 'batch', 'loss', 'dp_replicate', 'fsdp',
                  'cp', 'tp', 'ep', 'efsdp'.
-            include_single_axes: Include axes with size 1 in the returned
-                 submesh. Currently used for spmd_types backend, so no titan-side
-                 active axis filtering is required for typechecking.
+            include_singleton_axes: Include axes with size 1 in the returned
+                 submesh. Only current usecase is in spmd_types backend distributed
+                 param/buffer registration (assert_type call), so that size-1 axis
+                 filtering is handled internally by spmd_types.
 
         Returns:
             DeviceMesh for the requested dimension(s), or None if:
@@ -447,7 +450,7 @@ class ParallelDims:
                     f"Valid dimensions are: {list(self._single_axis_meshes.keys())}"
                 )
 
-        if not include_single_axes and any(
+        if not include_singleton_axes and any(
             not self._mesh_exist(dim, self._single_axis_meshes[dim].size())
             for dim in dims
         ):
@@ -541,12 +544,14 @@ class ParallelDims:
         Raises ``ValueError`` under ``full_dtensor`` if the resolved mesh is
         not one of ``parallel_dims.spmd_meshes()``.
         """
-        axes_list = list(axes)
+        axes_list = [
+            axis.value if isinstance(axis, MeshAxisName) else axis for axis in axes
+        ]
         if self.spmd_backend == "default":
             in_band = ("tp", "ep")
             axes_list = [axis for axis in axes_list if axis in in_band]
         elif self.spmd_backend == "full_dtensor":
-            axes_list = _unfold_dp_axis(axes_list)
+            axes_list = unfold_dp_axes(axes_list)
         elif self.spmd_backend == "spmd_types":
             in_band = ("dp", "cp", "tp", "ep")
             axes_list = [axis for axis in axes_list if axis in in_band]
