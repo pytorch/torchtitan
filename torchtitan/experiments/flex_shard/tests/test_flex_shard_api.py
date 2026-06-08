@@ -38,6 +38,7 @@ class TestFlexShardAPI(TestCase):
                 mesh,
                 buckets=transformer_bucket_specs(
                     args.n_layers,
+                    mesh,
                     reshard_after_forward=False,
                 ),
             )
@@ -64,6 +65,7 @@ class TestFlexShardAPI(TestCase):
                         BucketSpec(
                             ["*"],
                             placement_fn=per_param_placements,
+                            mesh=mesh,
                             reshard_after_forward=False,
                         )
                     ],
@@ -75,11 +77,11 @@ class TestFlexShardAPI(TestCase):
 
             flex_shard(
                 model[0],
-                mesh,
                 buckets=[
                     BucketSpec(
                         ["*"],
                         placement_fn=per_param_placements,
+                        mesh=mesh,
                         reshard_after_forward=False,
                     )
                 ],
@@ -88,11 +90,11 @@ class TestFlexShardAPI(TestCase):
             with self.assertRaisesRegex(ValueError, "Nested flex_shard wrapping"):
                 flex_shard(
                     model,
-                    mesh,
                     buckets=[
                         BucketSpec(
                             ["*"],
                             placement_fn=per_param_placements,
+                            mesh=mesh,
                             reshard_after_forward=False,
                         )
                     ],
@@ -104,11 +106,11 @@ class TestFlexShardAPI(TestCase):
 
             flex_shard(
                 model,
-                mesh,
                 buckets=[
                     BucketSpec(
                         ["*"],
                         placement_fn=per_param_placements,
+                        mesh=mesh,
                         reshard_after_forward=False,
                     )
                 ],
@@ -117,11 +119,11 @@ class TestFlexShardAPI(TestCase):
             with self.assertRaisesRegex(ValueError, "Nested flex_shard wrapping"):
                 flex_shard(
                     model[0],
-                    mesh,
                     buckets=[
                         BucketSpec(
                             ["*"],
                             placement_fn=per_param_placements,
+                            mesh=mesh,
                             reshard_after_forward=False,
                         )
                     ],
@@ -155,6 +157,7 @@ class TestFlexShardAPI(TestCase):
                         BucketSpec(
                             ["*"],
                             placement_fn=per_param_placements,
+                            mesh=mesh,
                             offload_policy=OffloadPolicy(pin_memory=False),
                             reshard_after_forward=False,
                         )
@@ -168,11 +171,11 @@ class TestFlexShardAPI(TestCase):
             with self.assertRaisesRegex(NotImplementedError, "CUDA DeviceMesh"):
                 flex_shard(
                     model,
-                    mesh,
                     buckets=[
                         BucketSpec(
                             ["*"],
                             placement_fn=per_param_placements,
+                            mesh=mesh,
                             reshard_after_forward=False,
                         )
                     ],
@@ -185,11 +188,11 @@ class TestFlexShardAPI(TestCase):
             with self.assertRaisesRegex(RuntimeError, "recomputation-safe"):
                 flex_shard(
                     model,
-                    mesh,
                     buckets=[
                         BucketSpec(
                             ["*"],
                             placement_fn=per_param_placements,
+                            mesh=mesh,
                         )
                     ],
                 )

@@ -81,12 +81,12 @@ def flex_shard_cuda(
             BucketSpec(
                 ["*"],
                 placement_fn=per_param_placements,
+                mesh=mesh,
                 reshard_after_forward=False,
             )
         ]
     return flex_shard(
         model,
-        mesh,
         buckets=buckets,
     )
 
@@ -97,7 +97,9 @@ def flex_shard_transformer_model(mesh) -> tuple[ModelArgs, Transformer]:
     flex_shard_cuda(
         model,
         mesh,
-        buckets=transformer_bucket_specs(args.n_layers, reshard_after_forward=False),
+        buckets=transformer_bucket_specs(
+            args.n_layers, mesh, reshard_after_forward=False
+        ),
     )
     return args, model
 
@@ -199,6 +201,7 @@ def check_flex_shard_parity(
 
 def transformer_bucket_specs(
     num_layers: int,
+    mesh,
     *,
     reshard_after_forward: bool = False,
 ) -> list[BucketSpec]:
@@ -208,11 +211,13 @@ def transformer_bucket_specs(
             BucketSpec(
                 ["tok_embeddings.*"],
                 placement_fn=per_param_placements,
+                mesh=mesh,
                 reshard_after_forward=reshard_after_forward,
             ),
             BucketSpec(
                 ["pos_embeddings.*"],
                 placement_fn=per_param_placements,
+                mesh=mesh,
                 reshard_after_forward=reshard_after_forward,
             ),
         ]
@@ -220,6 +225,7 @@ def transformer_bucket_specs(
             BucketSpec(
                 [f"layers.{idx}.*"],
                 placement_fn=per_param_placements,
+                mesh=mesh,
                 reshard_after_forward=reshard_after_forward,
             )
             for idx in range(num_layers)
@@ -228,11 +234,13 @@ def transformer_bucket_specs(
             BucketSpec(
                 ["norm.*"],
                 placement_fn=per_param_placements,
+                mesh=mesh,
                 reshard_after_forward=reshard_after_forward,
             ),
             BucketSpec(
                 ["output.*"],
                 placement_fn=per_param_placements,
+                mesh=mesh,
                 reshard_after_forward=reshard_after_forward,
             ),
         ]

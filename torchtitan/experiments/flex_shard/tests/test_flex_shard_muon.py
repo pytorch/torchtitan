@@ -59,6 +59,22 @@ except Exception:  # pragma: no cover - deepseek_v3 may be unavailable in some e
     _deepseekv3_configs = None
 
 
+class _FakeMesh:
+    """A 1D ``DeviceMesh`` stand-in for single-process bucket-structure tests.
+
+    The bucket builders only need ``mesh.size()`` (to derive the world size) and
+    stamp the mesh onto each ``BucketSpec``; the structure tests inspect bucket
+    patterns and placements, not the mesh, so a real distributed mesh is not
+    required to check the layout for a hypothetical world size.
+    """
+
+    def __init__(self, size: int) -> None:
+        self._size = size
+
+    def size(self) -> int:
+        return self._size
+
+
 def _build_deepseekv3_kimi_model() -> nn.Module:
     """Build the DeepSeek-V3 debugmodel -- Kimi-K2's architecture family.
 
@@ -313,7 +329,7 @@ class TestCommFreeMuonHelpers(TestCase):
         world_size = 2
         rest_patterns = ["tok_embeddings.*", "pos_embeddings.*", "norm.*", "output.*"]
         _, model = make_transformer_model(n_layers=num_layers)
-        buckets = comm_free_muon_buckets(model, world_size)
+        buckets = comm_free_muon_buckets(model, _FakeMesh(world_size))
         expected_owners = assign_layer_owners_lpt([100] * num_layers, world_size)
 
         self.assertEqual(len(buckets), num_layers + len(rest_patterns))
@@ -344,14 +360,16 @@ class TestCommFreeMuonHelpers(TestCase):
 
     def test_comm_free_muon_buckets_reshard_after_forward_false(self) -> None:
         _, model = make_transformer_model(n_layers=2)
-        buckets = comm_free_muon_buckets(model, 2, reshard_after_forward=False)
+        buckets = comm_free_muon_buckets(
+            model, _FakeMesh(2), reshard_after_forward=False
+        )
         for bucket in buckets:
             self.assertFalse(bucket.reshard_after_forward)
 
     def test_comm_free_muon_buckets_rejects_unknown_balance(self) -> None:
         _, model = make_transformer_model(n_layers=2)
         with self.assertRaisesRegex(ValueError, "balance"):
-            comm_free_muon_buckets(model, 2, balance="bogus")
+            comm_free_muon_buckets(model, _FakeMesh(2), balance="bogus")
 
     def test_comm_free_muon_buckets_per_matrix_structure(self) -> None:
         model = (
@@ -359,7 +377,7 @@ class TestCommFreeMuonHelpers(TestCase):
         )  # 4 layers; each: wq, wo (2D), experts(3D), norm(1D)
         buckets = comm_free_muon_buckets(
             model,
-            world_size=2,
+            _FakeMesh(2),
             balance="per-matrix",
             rest_patterns=["tok_embeddings.*", "output.*"],
         )
@@ -385,18 +403,12 @@ class TestCommFreeMuonHelpers(TestCase):
         model = (
             _make_per_matrix_moe_model()
         )  # 4 layers; each: wq, wo (2D), experts(3D), norm(1D)
-        world_size = 2
+        mesh = _FakeMesh(2)
         buckets = grouped_ragged_shard_muon_buckets(
             model,
-            world_size,
+            mesh,
             rest_patterns=["tok_embeddings.*", "output.*"],
         )
-
-        class _Mesh:  # make_grouped_ragged_placement_fn needs mesh.size()
-            def size(self):
-                return world_size
-
-        mesh = _Mesh()
 
         def placement_of(bucket):
             placements = bucket.placement_fn(
@@ -540,8 +552,7 @@ class TestCommFreeMuon(FSDPTest):
         _, model = make_transformer_model(device=device_type.type, n_layers=4)
         flex_shard(
             model,
-            mesh,
-            buckets=comm_free_muon_buckets(model, self.world_size),
+            buckets=comm_free_muon_buckets(model, mesh),
         )
 
         muon_params, other_params = build_muon_param_groups(model, mesh)
@@ -584,10 +595,9 @@ class TestCommFreeMuon(FSDPTest):
 
         flex_shard(
             model,
-            mesh,
             buckets=comm_free_muon_buckets(
                 model,
-                self.world_size,
+                mesh,
                 reshard_after_forward=reshard_after_forward,
             ),
         )
@@ -669,10 +679,9 @@ class TestCommFreeMuon(FSDPTest):
             _init_params_deterministically(model)
             flex_shard(
                 model,
-                mesh,
                 buckets=comm_free_muon_buckets(
                     model,
-                    self.world_size,
+                    mesh,
                     reshard_after_forward=reshard_after_forward,
                 ),
             )
@@ -702,8 +711,7 @@ class TestCommFreeMuon(FSDPTest):
         _init_params_deterministically(model)
         flex_shard(
             model,
-            mesh,
-            buckets=comm_free_muon_buckets(model, self.world_size),
+            buckets=comm_free_muon_buckets(model, mesh),
         )
         optim = build_comm_free_muon_optimizers(
             model,
@@ -745,6 +753,7 @@ class TestCommFreeMuon(FSDPTest):
             BucketSpec(
                 [f"layers.{lid}.*"],
                 placement_fn=make_owned_placement_fn(owners[i]),
+                mesh=mesh,
                 reshard_after_forward=False,
             )
             for i, lid in enumerate(layer_ids)
@@ -753,12 +762,13 @@ class TestCommFreeMuon(FSDPTest):
             BucketSpec(
                 [pattern],
                 placement_fn=per_param_placements,
+                mesh=mesh,
                 reshard_after_forward=False,
             )
             for pattern in ("tok_embeddings.*", "norm.*", "lm_head.*")
         ]
         # FlexShard must accept the MLA + MoE (incl. 3D grouped experts) structure.
-        flex_shard(model, mesh, buckets=buckets)
+        flex_shard(model, buckets=buckets)
 
         # Router gate (2D, tiny) stays on AdamW, like Keller's recipe.
         def muon_pred(fqn, global_shape):
@@ -815,16 +825,17 @@ class TestCommFreeMuon(FSDPTest):
         model = _MoEish().to(device_type)
         flex_shard(
             model,
-            mesh,
             buckets=[
                 BucketSpec(
                     ["experts"],
                     placement_fn=per_param_placements,  # Shard(0)
+                    mesh=mesh,
                     reshard_after_forward=False,
                 ),
                 BucketSpec(
                     ["proj"],
                     placement_fn=make_owned_placement_fn(0),  # Owned
+                    mesh=mesh,
                     reshard_after_forward=False,
                 ),
             ],
@@ -871,10 +882,9 @@ class TestCommFreeMuon(FSDPTest):
 
         flex_shard(
             model,
-            mesh,
             buckets=comm_free_muon_buckets(
                 model,
-                self.world_size,
+                mesh,
                 balance="per-matrix",
                 reshard_after_forward=False,
                 rest_patterns=["tok_embeddings.*", "output.*"],
@@ -938,10 +948,9 @@ class TestCommFreeMuon(FSDPTest):
 
         flex_shard(
             model,
-            mesh,
             buckets=grouped_ragged_shard_muon_buckets(
                 model,
-                self.world_size,
+                mesh,
                 rest_patterns=["tok_embeddings.*", "output.*"],
             ),
         )

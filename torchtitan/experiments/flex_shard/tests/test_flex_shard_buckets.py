@@ -238,22 +238,25 @@ class TestBucketAssignment(TestCase):
         )
 
         fqns = ["attn.weight", "attn.bias", "ffn.weight", "ffn.bias"]
-        buckets = [
-            BucketSpec(
-                ["attn.*"],
-                placement_fn=per_param_placements,
-                reshard_after_forward=False,
-            ),
-            BucketSpec(
-                ["ffn.*"],
-                placement_fn=per_param_placements,
-                reshard_after_forward=False,
-            ),
-        ]
-        result = _assign_params_to_buckets(fqns, buckets)
+        with single_rank_cpu_mesh() as mesh:
+            buckets = [
+                BucketSpec(
+                    ["attn.*"],
+                    placement_fn=per_param_placements,
+                    mesh=mesh,
+                    reshard_after_forward=False,
+                ),
+                BucketSpec(
+                    ["ffn.*"],
+                    placement_fn=per_param_placements,
+                    mesh=mesh,
+                    reshard_after_forward=False,
+                ),
+            ]
+            result = _assign_params_to_buckets(fqns, buckets)
 
-        self.assertEqual(result[0], ["attn.weight", "attn.bias"])
-        self.assertEqual(result[1], ["ffn.weight", "ffn.bias"])
+            self.assertEqual(result[0], ["attn.weight", "attn.bias"])
+            self.assertEqual(result[1], ["ffn.weight", "ffn.bias"])
 
     def test_rejects_orphan_params(self):
         """Params matching zero buckets raise ValueError."""
@@ -262,15 +265,17 @@ class TestBucketAssignment(TestCase):
         )
 
         fqns = ["attn.weight", "norm.weight"]
-        buckets = [
-            BucketSpec(
-                ["attn.*"],
-                placement_fn=per_param_placements,
-                reshard_after_forward=False,
-            )
-        ]
-        with self.assertRaises(ValueError, msg="not covered by any bucket"):
-            _assign_params_to_buckets(fqns, buckets)
+        with single_rank_cpu_mesh() as mesh:
+            buckets = [
+                BucketSpec(
+                    ["attn.*"],
+                    placement_fn=per_param_placements,
+                    mesh=mesh,
+                    reshard_after_forward=False,
+                )
+            ]
+            with self.assertRaises(ValueError, msg="not covered by any bucket"):
+                _assign_params_to_buckets(fqns, buckets)
 
     def test_rejects_overlapping_params(self):
         """Params matching multiple buckets raise ValueError."""
@@ -279,20 +284,23 @@ class TestBucketAssignment(TestCase):
         )
 
         fqns = ["attn.weight"]
-        buckets = [
-            BucketSpec(
-                ["attn.*"],
-                placement_fn=per_param_placements,
-                reshard_after_forward=False,
-            ),
-            BucketSpec(
-                ["*"],
-                placement_fn=per_param_placements,
-                reshard_after_forward=False,
-            ),
-        ]
-        with self.assertRaises(ValueError, msg="matched multiple buckets"):
-            _assign_params_to_buckets(fqns, buckets)
+        with single_rank_cpu_mesh() as mesh:
+            buckets = [
+                BucketSpec(
+                    ["attn.*"],
+                    placement_fn=per_param_placements,
+                    mesh=mesh,
+                    reshard_after_forward=False,
+                ),
+                BucketSpec(
+                    ["*"],
+                    placement_fn=per_param_placements,
+                    mesh=mesh,
+                    reshard_after_forward=False,
+                ),
+            ]
+            with self.assertRaises(ValueError, msg="matched multiple buckets"):
+                _assign_params_to_buckets(fqns, buckets)
 
 
 # ---------------------------------------------------------------------------
@@ -330,13 +338,12 @@ class TestBucketPlacementValidation(TestCase):
             _validate_placements,
         )
 
-        with single_rank_cpu_mesh() as mesh:
+        with single_rank_cpu_mesh():
             named_params = self._named_params()
             with self.assertRaisesRegex(ValueError, "missing placements"):
                 _validate_placements(
                     {"a.weight": (Shard(0),)},
                     named_params,
-                    mesh,
                 )
 
             with self.assertRaisesRegex(ValueError, "unexpected placements"):
@@ -347,7 +354,6 @@ class TestBucketPlacementValidation(TestCase):
                         "extra.weight": (Shard(0),),
                     },
                     named_params,
-                    mesh,
                 )
 
     def test_rejects_non_placement_object(self):
@@ -356,7 +362,7 @@ class TestBucketPlacementValidation(TestCase):
             _validate_placements,
         )
 
-        with single_rank_cpu_mesh() as mesh:
+        with single_rank_cpu_mesh():
             named_params = self._named_params()
             with self.assertRaisesRegex(TypeError, "Placement instances"):
                 _validate_placements(
@@ -365,7 +371,6 @@ class TestBucketPlacementValidation(TestCase):
                         "b.weight": (object(),),
                     },
                     named_params,
-                    mesh,
                 )
 
     def test_rejects_incomplete_placement_contract(self):
@@ -388,14 +393,13 @@ class TestBucketPlacementValidation(TestCase):
             _validate_placements,
         )
 
-        with single_rank_cpu_mesh() as mesh:
+        with single_rank_cpu_mesh():
             _validate_placements(
                 {
                     "a.weight": (_TestPlacement(),),
                     "b.weight": (_TestPlacement(),),
                 },
                 self._named_params(),
-                mesh,
             )
 
     def test_copy_param_to_storage_accepts_non_contiguous_shard_view(self):
@@ -504,20 +508,22 @@ class TestBucketPlacementValidation(TestCase):
             "a.weight": (Shard(0),),
             "b.weight": (Shard(0),),
         }
-        buckets = [
-            BucketSpec(
-                ["*"],
-                placement_fn=per_param_placements,
-                reshard_after_forward=False,
-            )
-        ]
-        with self.assertRaisesRegex(ValueError, "mixed parameter dtypes"):
-            _validate_bucket_uniform_dtype_and_placement(
-                assignments,
-                placements,
-                buckets,
-                self._named_params({"b.weight": torch.bfloat16}),
-            )
+        with single_rank_cpu_mesh() as mesh:
+            buckets = [
+                BucketSpec(
+                    ["*"],
+                    placement_fn=per_param_placements,
+                    mesh=mesh,
+                    reshard_after_forward=False,
+                )
+            ]
+            with self.assertRaisesRegex(ValueError, "mixed parameter dtypes"):
+                _validate_bucket_uniform_dtype_and_placement(
+                    assignments,
+                    placements,
+                    buckets,
+                    self._named_params({"b.weight": torch.bfloat16}),
+                )
 
     def test_rejects_mixed_placements_in_one_bucket(self):
         """A bucket collective uses one placement layout for all params."""
@@ -530,20 +536,22 @@ class TestBucketPlacementValidation(TestCase):
             "a.weight": (Shard(0),),
             "b.weight": (Shard(1),),
         }
-        buckets = [
-            BucketSpec(
-                ["*"],
-                placement_fn=per_param_placements,
-                reshard_after_forward=False,
-            )
-        ]
-        with self.assertRaisesRegex(ValueError, "mixed placements"):
-            _validate_bucket_uniform_dtype_and_placement(
-                assignments,
-                placements,
-                buckets,
-                self._named_params(),
-            )
+        with single_rank_cpu_mesh() as mesh:
+            buckets = [
+                BucketSpec(
+                    ["*"],
+                    placement_fn=per_param_placements,
+                    mesh=mesh,
+                    reshard_after_forward=False,
+                )
+            ]
+            with self.assertRaisesRegex(ValueError, "mixed placements"):
+                _validate_bucket_uniform_dtype_and_placement(
+                    assignments,
+                    placements,
+                    buckets,
+                    self._named_params(),
+                )
 
     def test_flex_shard_rejects_mixed_placements_before_materializing(self):
         """Invalid bucket placement config should not partially shard the module."""
@@ -565,11 +573,11 @@ class TestBucketPlacementValidation(TestCase):
             with self.assertRaisesRegex(ValueError, "mixed placements"):
                 flex_shard(
                     model,
-                    mesh,
                     buckets=[
                         BucketSpec(
                             ["*"],
                             placement_fn=mixed_placements,
+                            mesh=mesh,
                             reshard_after_forward=False,
                         )
                     ],
@@ -674,6 +682,7 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
         placements = {fqn: (Shard(0),) for fqn, _ in named_params}
         buckets = transformer_bucket_specs(
             args.n_layers,
+            mesh,
             reshard_after_forward=False,
         )
         assignments = _assign_params_to_buckets(
@@ -683,7 +692,6 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
 
         inputs = PreparedFlexShardInputs(
             named_params=named_params,
-            shard_mesh=mesh,
             device=torch.device("cpu"),
             param_placements=placements,
             bucket_assignments=assignments,
@@ -734,6 +742,7 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
             BucketSpec(
                 ["*"],
                 placement_fn=per_param_placements,
+                mesh=mesh,
                 reshard_after_forward=False,
             )
         ]
@@ -741,7 +750,6 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
 
         inputs = PreparedFlexShardInputs(
             named_params=named_params,
-            shard_mesh=mesh,
             device=torch.device("cpu"),
             param_placements=placements,
             bucket_assignments=assignments,
@@ -790,13 +798,13 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
             BucketSpec(
                 ["*"],
                 placement_fn=owned_rank0,
+                mesh=mesh,
                 reshard_after_forward=False,
             )
         ]
 
         inputs = PreparedFlexShardInputs(
             named_params=named_params,
-            shard_mesh=mesh,
             device=torch.device("cpu"),
             param_placements=placements,
             bucket_assignments=[[fqn for fqn, _ in named_params]],
@@ -884,13 +892,13 @@ class TestDistributedBuckets(FSDPTest):
                 BucketSpec(
                     ["*"],
                     placement_fn=per_param_placements,
+                    mesh=mesh,
                     reshard_after_forward=False,
                 )
             ],
         )
         return flex_shard(
             model,
-            mesh,
             **kwargs,
         )
 
@@ -911,6 +919,7 @@ class TestDistributedBuckets(FSDPTest):
             mesh,
             buckets=transformer_bucket_specs(
                 args.n_layers,
+                mesh,
                 reshard_after_forward=False,
             ),
         )
@@ -932,6 +941,7 @@ class TestDistributedBuckets(FSDPTest):
             mesh,
             buckets=transformer_bucket_specs(
                 args.n_layers,
+                mesh,
                 reshard_after_forward=False,
             ),
         )

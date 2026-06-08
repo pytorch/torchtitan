@@ -98,7 +98,7 @@ _DEFAULT_REST_PATTERNS = [
 def _per_matrix_layer_buckets(
     model: nn.Module,
     num_layers: int,
-    world_size: int,
+    mesh: DeviceMesh,
     reshard_after_forward: bool,
 ) -> list[BucketSpec]:
     """One ``Owned`` bucket per 2D matrix (per-layer balanced); non-2D -> ``Shard(0)``.
@@ -109,6 +109,7 @@ def _per_matrix_layer_buckets(
     share of the layer. Each non-2D param gets its own ``Shard(0)`` bucket: >= 3D
     grouped experts (-> ``GroupedMuon``) and 1D norms/biases (-> AdamW).
     """
+    world_size = mesh.size()
     per_layer_matrices: list[list[tuple[str, int]]] = []
     per_layer_other: list[list[str]] = []
     for i in range(num_layers):
@@ -135,6 +136,7 @@ def _per_matrix_layer_buckets(
                 BucketSpec(
                     [fqn],
                     placement_fn=make_owned_placement_fn(owner),
+                    mesh=mesh,
                     reshard_after_forward=reshard_after_forward,
                 )
             )
@@ -143,6 +145,7 @@ def _per_matrix_layer_buckets(
                 BucketSpec(
                     [fqn],
                     placement_fn=per_param_placements,  # Shard(0)
+                    mesh=mesh,
                     reshard_after_forward=reshard_after_forward,
                 )
             )
@@ -151,7 +154,7 @@ def _per_matrix_layer_buckets(
 
 def comm_free_muon_buckets(
     model: nn.Module,
-    world_size: int,
+    mesh: DeviceMesh,
     *,
     reshard_after_forward: bool = True,
     balance: str = "lpt",
@@ -175,7 +178,8 @@ def comm_free_muon_buckets(
     Args:
         model: A FlexShard-compatible Transformer exposing ``model.layers`` as an
             indexable sequence of per-layer modules.
-        world_size: Number of ranks in the 1D FlexShard mesh.
+        mesh: The 1D CUDA FlexShard mesh; every bucket runs its collective on it
+            and ``world_size`` is taken from ``mesh.size()``.
         reshard_after_forward: Free unsharded params after forward and recompute
             them in backward (defaults to ``True``). The ``Owned`` broadcast and the
             ``Shard`` all-gather are both tagged for recompute, so this composes
@@ -191,12 +195,13 @@ def comm_free_muon_buckets(
             becomes its own bucket. Defaults to embeddings, LM head, and final norm.
 
     Returns:
-        A list of ``BucketSpec`` for ``flex_shard(model, mesh, buckets)``.
+        A list of ``BucketSpec`` for ``flex_shard(model, buckets)``.
     """
+    world_size = mesh.size()
     num_layers = len(model.layers)
     if balance == "per-matrix":
         layer_buckets = _per_matrix_layer_buckets(
-            model, num_layers, world_size, reshard_after_forward
+            model, num_layers, mesh, reshard_after_forward
         )
     elif balance in ("lpt", "roundrobin"):
         if balance == "lpt":
@@ -211,6 +216,7 @@ def comm_free_muon_buckets(
             BucketSpec(
                 [f"layers.{i}.*"],
                 placement_fn=make_owned_placement_fn(owners[i]),
+                mesh=mesh,
                 reshard_after_forward=reshard_after_forward,
             )
             for i in range(num_layers)
@@ -225,6 +231,7 @@ def comm_free_muon_buckets(
         BucketSpec(
             [pattern],
             placement_fn=per_param_placements,
+            mesh=mesh,
             reshard_after_forward=reshard_after_forward,
         )
         for pattern in patterns
@@ -234,7 +241,7 @@ def comm_free_muon_buckets(
 
 def grouped_ragged_shard_muon_buckets(
     model: nn.Module,
-    world_size: int,
+    mesh: DeviceMesh,
     *,
     reshard_after_forward: bool = False,
     rest_patterns: list[str] | None = None,
@@ -256,7 +263,8 @@ def grouped_ragged_shard_muon_buckets(
 
     Args:
         model: A FlexShard-compatible Transformer exposing ``model.layers``.
-        world_size: Number of ranks in the 1D FlexShard mesh.
+        mesh: The 1D CUDA FlexShard mesh; every bucket runs its collective on it
+            and ``world_size`` is taken from ``mesh.size()``.
         reshard_after_forward: Free unsharded params after forward (defaults to
             ``False``; ``RaggedShardMuon`` maps bucket params by FQN, and the
             activation-checkpoint wrappers that reshard-after-forward inserts would
@@ -265,8 +273,9 @@ def grouped_ragged_shard_muon_buckets(
             its own bucket. Defaults to embeddings, LM head, and final norm.
 
     Returns:
-        A list of ``BucketSpec`` for ``flex_shard(model, mesh, buckets)``.
+        A list of ``BucketSpec`` for ``flex_shard(model, buckets)``.
     """
+    world_size = mesh.size()
     grouped_ragged = make_grouped_ragged_placement_fn(
         dims=(0,), local_units=(1,) * world_size
     )
@@ -282,6 +291,7 @@ def grouped_ragged_shard_muon_buckets(
                 BucketSpec(
                     matrices,
                     placement_fn=grouped_ragged,
+                    mesh=mesh,
                     reshard_after_forward=reshard_after_forward,
                 )
             )
@@ -290,6 +300,7 @@ def grouped_ragged_shard_muon_buckets(
                 BucketSpec(
                     [fqn],
                     placement_fn=per_param_placements,  # Shard(0)
+                    mesh=mesh,
                     reshard_after_forward=reshard_after_forward,
                 )
             )
@@ -299,6 +310,7 @@ def grouped_ragged_shard_muon_buckets(
         BucketSpec(
             [pattern],
             placement_fn=per_param_placements,
+            mesh=mesh,
             reshard_after_forward=reshard_after_forward,
         )
         for pattern in patterns
