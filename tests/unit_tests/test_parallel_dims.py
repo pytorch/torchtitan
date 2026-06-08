@@ -18,10 +18,20 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 from torchtitan.config.configs import ParallelismConfig
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims, SpmdLayout
-from torchtitan.distributed.spmd_types import spmd_layout_to_dtensor_placements
+from torchtitan.distributed.parallel_dims import (
+    MeshAxisName,
+    ParallelDims,
+    SpmdLayout,
+    unfold_dp_axes,
+)
+from torchtitan.distributed.spmd_types import (
+    _validate_spmd_redistributions,
+    spmd_layout_to_dtensor_placements,
+)
 from torchtitan.models.llama3 import model_registry
 from torchtitan.models.llama3.parallelize import apply_fsdp
+from torchtitan.protocols.module import _shard_spmd_state
+from torchtitan.protocols.sharding import ShardingConfig
 
 
 class TestParallelDimsValidation(unittest.TestCase):
@@ -215,7 +225,11 @@ class TestParallelDimsValidation(unittest.TestCase):
         self.assertEqual(parallel_dims.seq_len_divisor, 16)
 
 
-class TestSpmdLayout(unittest.TestCase):
+class TestSpmdLayout(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 4
+
     def test_converts_partition_spec_to_dtensor_shard(self):
         """PartitionSpec refines V into concrete DTensor Shard placement."""
         layout = SpmdLayout(
@@ -223,13 +237,13 @@ class TestSpmdLayout(unittest.TestCase):
             partition_spec=spmd.PartitionSpec(MeshAxisName.TP),
         )
 
-        self.assertEqual(layout.shard_types(), {MeshAxisName.TP: spmd.S(0)})
+        self.assertEqual(layout.per_axis_spmd_types(), {MeshAxisName.TP: spmd.S(0)})
         self.assertEqual(
             spmd_layout_to_dtensor_placements(layout),
             {MeshAxisName.TP: Shard(0)},
         )
 
-    def test_seq_parallel_activation_shard_types(self):
+    def test_seq_parallel_activation_per_axis_spmd_types(self):
         """PartitionSpec can map multiple mesh axes to one tensor dim."""
         layout = SpmdLayout(
             {
@@ -245,13 +259,129 @@ class TestSpmdLayout(unittest.TestCase):
         )
 
         self.assertEqual(
-            layout.shard_types(),
+            layout.per_axis_spmd_types(),
             {
                 MeshAxisName.DP: spmd.S(0),
                 MeshAxisName.CP: spmd.S(1),
                 MeshAxisName.TP: spmd.S(1),
             },
         )
+
+    def test_unfold_dp_axes(self):
+        """Logical DP expands only when resolving concrete mesh axes."""
+        self.assertEqual(
+            unfold_dp_axes([MeshAxisName.DP, MeshAxisName.CP, MeshAxisName.TP]),
+            ["dp_replicate", "dp_shard", "cp", "tp"],
+        )
+
+    def test_rejects_partition_spec_order_redistribute(self):
+        """Equal per-axis shard types can still hide shard-order changes."""
+        with self.assertRaises(ValueError) as cm:
+            _validate_spmd_redistributions(
+                ShardingConfig(
+                    out_src_shardings=SpmdLayout(
+                        {
+                            MeshAxisName.DP: spmd.V,
+                            MeshAxisName.CP: spmd.V,
+                        },
+                        partition_spec=spmd.PartitionSpec(
+                            (MeshAxisName.DP, MeshAxisName.CP), None
+                        ),
+                    ),
+                    out_dst_shardings=SpmdLayout(
+                        {
+                            MeshAxisName.DP: spmd.V,
+                            MeshAxisName.CP: spmd.V,
+                        },
+                        partition_spec=spmd.PartitionSpec(
+                            (MeshAxisName.CP, MeshAxisName.DP), None
+                        ),
+                    ),
+                )
+            )
+        self.assertEqual(
+            str(cm.exception),
+            "output: SPMD redistribution changes shard order for tensor dim 0. "
+            "Express this as explicit unshard/reshard steps.",
+        )
+
+    def test_rejects_multi_axis_redistribute(self):
+        """Runtime SPMD redistribution supports one changed mesh axis."""
+        with self.assertRaises(ValueError) as cm:
+            _validate_spmd_redistributions(
+                ShardingConfig(
+                    in_src_shardings={
+                        "x": SpmdLayout(
+                            {
+                                MeshAxisName.DP: spmd.S(0),
+                                MeshAxisName.CP: spmd.S(1),
+                                MeshAxisName.TP: spmd.R,
+                            }
+                        )
+                    },
+                    in_dst_shardings={
+                        "x": SpmdLayout(
+                            {
+                                MeshAxisName.DP: spmd.R,
+                                MeshAxisName.CP: spmd.R,
+                                MeshAxisName.TP: spmd.R,
+                            }
+                        )
+                    },
+                )
+            )
+        self.assertEqual(
+            str(cm.exception),
+            "input 'x': SPMD redistribution changes multiple mesh axes "
+            "(['cp', 'dp']). redistribute_spmd_per_axis only supports "
+            "one single-axis redistribution.",
+        )
+
+    @with_comms
+    def test_partition_spec_order_controls_state_shard(self):
+        """Repeated shards on one tensor dim follow raw PartitionSpec order.
+
+        ``(DP, CP)`` and ``(CP, DP)`` both shard dim 0 across the same 2x2
+        mesh, but assign different global slices to ranks. This verifies local
+        state sharding preserves that ordering instead of relying on unordered
+        per-axis shard types.
+        """
+        mesh = init_device_mesh(self.device_type, (2, 2), mesh_dim_names=("dp", "cp"))
+        global_weight = torch.arange(
+            8, dtype=torch.float32, device=self.device_type
+        ).reshape(8, 1)
+
+        for axis_order in (
+            (MeshAxisName.DP, MeshAxisName.CP),
+            (MeshAxisName.CP, MeshAxisName.DP),
+        ):
+            with self.subTest(axis_order=axis_order):
+                layout = SpmdLayout(
+                    {
+                        MeshAxisName.DP: spmd.V,
+                        MeshAxisName.CP: spmd.V,
+                    },
+                    partition_spec=spmd.PartitionSpec(axis_order, None),
+                )
+
+                local_weight = _shard_spmd_state(global_weight.clone(), mesh, layout)
+
+                axis_ranks = {
+                    MeshAxisName.DP: mesh.get_local_rank("dp"),
+                    MeshAxisName.CP: mesh.get_local_rank("cp"),
+                }
+                axis_sizes = {
+                    MeshAxisName.DP: mesh.size(0),
+                    MeshAxisName.CP: mesh.size(1),
+                }
+                shard_idx = 0
+                for axis_name in axis_order:
+                    shard_idx = (
+                        shard_idx * axis_sizes[axis_name] + axis_ranks[axis_name]
+                    )
+                local_rows = global_weight.shape[0] // self.world_size
+                expected = global_weight.narrow(0, shard_idx * local_rows, local_rows)
+                torch.testing.assert_close(local_weight, expected)
 
 
 class TestParallelDimsMeshOperations(unittest.TestCase):
@@ -306,8 +436,8 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
         self.assertEqual(len(parallel_dims._single_axis_meshes), 0)
 
         # get_optional_mesh should trigger build_mesh
-        result = parallel_dims.get_optional_mesh("tp")
         # Result is None because tp has size 1, but build_mesh should have been called
+        self.assertIsNone(parallel_dims.get_optional_mesh("tp"))
         self.assertGreater(len(parallel_dims._single_axis_meshes), 0)
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")

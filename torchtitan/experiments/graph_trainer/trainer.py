@@ -118,7 +118,7 @@ class GraphTrainer(Trainer):
         *,
         input_dict: dict[str, torch.Tensor],
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor,
+        global_valid_tokens: float,
     ) -> torch.Tensor:
         if self.config.compile.mode != "aot_fx_trace":
             return super().forward_backward_step(
@@ -135,8 +135,7 @@ class GraphTrainer(Trainer):
             labels,
             extra_inputs,
             extra_kwargs,
-            global_valid_tokens,
-        ) = self.post_dataloading_process(input_dict, labels, global_valid_tokens)
+        ) = self.post_dataloading_process(input_dict, labels)
         # remove_duplicate=False to preserve duplicate parameter entries
         # from weight tying (e.g. shared embedding/output weights).
         params = [
@@ -187,7 +186,7 @@ class GraphTrainer(Trainer):
         model: nn.Module,
         inputs: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor,
+        global_valid_tokens: float,
         params: list[torch.Tensor],
         extra_inputs: dict[str, torch.Tensor],
         extra_kwargs: dict[str, Any],
