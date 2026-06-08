@@ -5,7 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 from .flex_shard import (
+    BucketParamStorageLayout,
     BucketSpec,
+    BucketStorageLayout,
     flex_shard,
     get_global_shape,
     get_placements,
@@ -19,7 +21,9 @@ from .flex_shard import (
 
 
 __all__ = [
+    "BucketParamStorageLayout",
     "BucketSpec",
+    "BucketStorageLayout",
     "flex_shard",
     "get_global_shape",
     "get_placements",
