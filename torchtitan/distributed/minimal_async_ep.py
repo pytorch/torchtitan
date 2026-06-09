@@ -725,11 +725,9 @@ def combine_backward(
     E_row_to_T_row_N: torch.Tensor,  # noqa: N803
     routed_scores_N: torch.Tensor,  # noqa: N803
     saved_routed_output_ND: torch.Tensor,  # noqa: N803
-    routed_scores_requires_grad: bool,
     top_k: int,
     receive_capacity: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    grad_scores = routed_scores_N.new_empty(0)
     grad_routed_output = expand_topk_grad(
         grad_out,
         E_row_to_T_row_N,
@@ -738,15 +736,14 @@ def combine_backward(
         dtype=grad_out.dtype,
         scores_are_slot_ordered=True,
     )
-    if routed_scores_requires_grad:
-        grad_scores = topk_scores_grad(
-            saved_routed_output_ND,
-            grad_out,
-            E_row_to_T_row_N,
-            top_k=top_k,
-            dtype=routed_scores_N.dtype,
-            scores_are_slot_ordered=True,
-        )
+    grad_scores = topk_scores_grad(
+        saved_routed_output_ND,
+        grad_out,
+        E_row_to_T_row_N,
+        top_k=top_k,
+        dtype=routed_scores_N.dtype,
+        scores_are_slot_ordered=True,
+    )
 
     grad_x = _dispatch_to_experts(
         grad_routed_output,
@@ -766,7 +763,6 @@ def combine_backward_fake(
     E_row_to_T_row_N: torch.Tensor,  # noqa: N803
     routed_scores_N: torch.Tensor,  # noqa: N803
     saved_routed_output_ND: torch.Tensor,  # noqa: N803
-    routed_scores_requires_grad: bool,
     top_k: int,
     receive_capacity: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -775,10 +771,9 @@ def combine_backward_fake(
     del E_row_to_T_row_N
     del saved_routed_output_ND
     del top_k
-    grad_scores_shape = routed_scores_N.shape if routed_scores_requires_grad else (0,)
     return (
         grad_out.new_empty(receive_capacity, grad_out.shape[1]),
-        routed_scores_N.new_empty(grad_scores_shape),
+        routed_scores_N.new_empty(routed_scores_N.shape),
     )
 
 
@@ -900,18 +895,12 @@ class MinimalAsyncEPCombine(torch.autograd.Function):
 
         ctx.top_k = top_k
         ctx.receive_capacity = hidden_states.shape[0]
-        ctx.routed_scores_requires_grad = routed_scores_N.requires_grad
-        saved_routed_output_ND = (  # noqa: N806
-            routed_output_ND
-            if routed_scores_N.requires_grad
-            else routed_output_ND.new_empty(0)
-        )
         ctx.save_for_backward(
             dispatch_dst_ranks,
             dispatch_dst_rows,
             E_row_to_T_row_N,
             routed_scores_N,
-            saved_routed_output_ND,
+            routed_output_ND,
         )
         return combined
 
@@ -926,24 +915,18 @@ class MinimalAsyncEPCombine(torch.autograd.Function):
             dispatch_dst_rows,
             E_row_to_T_row_N,
             routed_scores_N,
-            saved_routed_output_ND,
+            routed_output_ND,
         ) = ctx.saved_tensors
-        grad_scores = None
-        grad_x = None
-        if grad_out is not None:
-            grad_x, grad_scores_tensor = combine_backward(
-                grad_out,
-                dispatch_dst_ranks,
-                dispatch_dst_rows,
-                E_row_to_T_row_N,
-                routed_scores_N,
-                saved_routed_output_ND,
-                ctx.routed_scores_requires_grad,
-                ctx.top_k,
-                ctx.receive_capacity,
-            )
-            if ctx.routed_scores_requires_grad:
-                grad_scores = grad_scores_tensor
+        grad_x, grad_scores = combine_backward(
+            grad_out,
+            dispatch_dst_ranks,
+            dispatch_dst_rows,
+            E_row_to_T_row_N,
+            routed_scores_N,
+            routed_output_ND,
+            ctx.top_k,
+            ctx.receive_capacity,
+        )
 
         return (
             grad_x,
