@@ -85,7 +85,6 @@ class Qwen3Model(Decoder):
             config,
             **kwargs,
         ) -> None:
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
 
             if parallelism.context_parallel_degree > 1 and isinstance(
@@ -104,6 +103,7 @@ class Qwen3Model(Decoder):
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
+            Decoder.Config.update_from_config(self, config=config, **kwargs)
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
