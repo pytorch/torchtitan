@@ -87,6 +87,12 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Maximum CPU memory budget (in GB per rank) for offloaded activations.
     Tensors are selected largest-first until the budget is exhausted."""
 
+    enable_fsdp_ag_rs_overlap: bool = False
+    """When True, run ``overlap_fsdp_ag_rs_pass``. The pass moves backward
+    FSDP all-gathers onto a separate CUDA stream from reduce-scatters so the
+    two collectives can overlap. It is a no-op when the graph contains no
+    FSDP all-gathers."""
+
     precompile_artifact_dir: str = ""
     """
     Directory for precompiled artifacts. Setting this enables precompile:

@@ -41,6 +41,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--generator.debug.no_batch_invariant",
                     "--compile.no-enable",
                     "--generator.cudagraph.no-enable",
+                    "--metrics.no-enable-wandb",
                 ],
             ],
             "RL GRPO TP=2 no compile",
@@ -57,6 +58,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--generator.sampling.n 2",
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
+                    "--metrics.no-enable-wandb",
                 ],
             ],
             "RL GRPO TP=2 compile",
@@ -73,6 +75,7 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
                 [
                     "--module rl",
                     "--config rl_grpo_qwen3_0_6b_batch_invariant",
+                    "--metrics.no-enable-wandb",
                 ],
             ],
             "RL GRPO TP=2 batch-invariant + deterministic",

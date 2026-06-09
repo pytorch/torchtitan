@@ -67,14 +67,22 @@ def _make_eager_memory_policy(save_ops: set | None = None) -> Callable:
 
     Matches the behavior of torchtitan.distributed.activation_checkpoint:
     every second mm/linear op is marked PREFER_RECOMPUTE instead of MUST_SAVE.
+    The mm counter resets at each layer boundary so every layer sees the same
+    alternation pattern, just like eager AC's per-layer checkpoint_wrapper.
     """
     if save_ops is None:
         save_ops = _get_save_ops()
     mm_ops = {torch.ops.aten.mm.default, torch.ops.aten.linear.default}
     mm_count = 0
+    current_layer = None
 
     def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
-        nonlocal mm_count
+        nonlocal mm_count, current_layer
+        layer_id = _get_layer_id(node)
+        if layer_id != _NOT_IN_LAYERS and layer_id != current_layer:
+            mm_count = 0
+            current_layer = layer_id
+
         if node.target in mm_ops:
             mm_count += 1
             if node.target in save_ops and mm_count % 2 == 0:

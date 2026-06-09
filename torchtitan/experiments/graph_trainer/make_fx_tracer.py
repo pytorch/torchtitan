@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import copy
 from collections.abc import Callable, Generator
 from contextlib import contextmanager, nullcontext
@@ -272,16 +273,64 @@ def extract_module_state(mod: nn.Module) -> dict[str, torch.Tensor]:
     }
 
 
-def _check_no_extra_module_in_user_inputs(
-    args: tuple, kwargs: dict, fn_name: str
+def extract_train_state(
+    module: nn.Module | None = None,
+    optimizer: "torch.optim.Optimizer | None" = None,
+) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+    """Return ``(model_state, optim_state)`` for ``minimal_fx_tracer``.
+
+    Both are dicts (empty when the corresponding object is ``None``) and are
+    sampled from the live module/optimizer, so callers can reuse this helper
+    to refresh state at runtime.
+    """
+    model_state = extract_module_state(module) if module is not None else {}
+    optim_state = optimizer.state_dict() if optimizer is not None else {}
+    return model_state, optim_state
+
+
+def _check_optimizer_has_module(
+    module: nn.Module | None,
+    optimizer: "torch.optim.Optimizer | None",
 ) -> None:
-    """Reject extra nn.Module instances in user args/kwargs (args[0] is the
-    module-rooted entry point)."""
-    if any(isinstance(v, nn.Module) for v in (*args, *kwargs.values())):
+    """Optimizer parameters align with module.named_parameters() by order, so
+    requiring a module guarantees that alignment."""
+    if optimizer is not None and module is None:
         raise ValueError(
-            f"{fn_name} supports exactly one nn.Module at args[0]. "
-            "Additional nn.Module instances found in args[1:] or kwargs."
+            "minimal_fx_tracer: when 'optimizer' is provided, 'module' must also "
+            "be provided so optimizer parameters align with the module's parameters."
         )
+
+
+@contextlib.contextmanager
+def _reparametrize_train_state(
+    module: nn.Module | None,
+    optimizer: "torch.optim.Optimizer | None",
+    model_state: dict[str, torch.Tensor],
+    optim_state: dict[str, Any],
+):
+    """Reparametrize module and optimizer with explicit tensor state for tracing."""
+    with contextlib.ExitStack() as stack:
+        if optimizer is not None:
+            # swap_in pairs values positionally in optimizer.param_groups flat
+            # order, which differs from named_parameters() order for bucketed
+            # param_groups. Walk param_groups and resolve names by id() against
+            # the originals; must run before _reparametrize_module rebinds them.
+            id_to_name = {
+                id(p): n for n, p in module.named_parameters(remove_duplicate=False)
+            }
+            params_for_optim = {
+                id_to_name[id(p)]: model_state[id_to_name[id(p)]]
+                for group in optimizer.param_groups
+                for p in group["params"]
+            }
+            stack.enter_context(
+                torch.optim.swap_in_optimizer_params_and_state(
+                    optimizer, params_for_optim, optim_state
+                )
+            )
+        if module is not None:
+            stack.enter_context(stateless._reparametrize_module(module, model_state))
+        yield
 
 
 @dataclass
@@ -297,7 +346,7 @@ class TracedResult:
         num_flat_outputs: Number of flat graph outputs before subclass rewrapping.
         output_subclass_layouts: Subclass unwrap/rewrap metadata for outputs.
         output_spec: Original output pytree spec used during reconstruction.
-        state_fqns: Trace-time state keys.
+        state_fqns: Trace-time module parameter/buffer FQNs.
     """
 
     gm: torch.fx.GraphModule
@@ -322,8 +371,13 @@ class TracedResult:
         """Number of leading graph inputs with stable tensor addresses.
 
         Parameters and buffers (the state entries) have fixed addresses across
-        training steps.  Each may expand to multiple plain tensors after
+        training steps. Each may expand to multiple plain tensors after
         subclass unwrapping (e.g. DTensor -> inner tensors).
+
+        TODO: graph_trainer does not trace optimizers yet, so optimizer state
+        tensors are not counted here. When optimizer tracing is enabled, they
+        should be included since their addresses are also stable across steps,
+        avoiding cudagraph re-copying them every step.
         """
         num_state = len(self.state_fqns)
         return sum(
@@ -336,25 +390,36 @@ class TracedResult:
 
 def minimal_fx_tracer(
     fn: Callable,
+    module: nn.Module | None = None,
+    optimizer: "torch.optim.Optimizer | None" = None,
     *,
     _insert_runtime_asserts: bool = False,
 ) -> Callable[..., TracedResult]:
-    """Return a tracer for a stateless ``fn`` with explicit ``state`` input.
+    """Return a tracer that captures ``fn`` with implicit module/optimizer state.
 
-    ``fn`` must be a plain callable (not an ``nn.Module``). The returned
-    callable expects ``state`` as the first positional argument, followed by
-    the traced user inputs (positional and keyword)::
+    The returned callable takes the user-facing ``*args`` and ``**kwargs`` for
+    ``fn``; module parameters/buffers and optimizer state are extracted from the
+    live objects and threaded through the graph as static inputs::
 
-        traced_result = minimal_fx_tracer(train_step)(state, tokens, labels=labels)
-        result = run_traced(traced_result, state, tokens, labels=labels)
+        # Stateless function: no module, no optimizer.
+        traced = minimal_fx_tracer(fn)(*args, **kwargs)
 
-    The trace-time ``state``, ``args``, and ``kwargs`` must satisfy these
-    constraints:
-    - ``state`` must be a ``dict[str, Tensor]`` of parameters/buffers
+        # Module-only: parameters/buffers extracted from `module`.
+        traced = minimal_fx_tracer(fn, module=model)(*args, **kwargs)
+
+        # Module + optimizer: optimizer state must already be initialized
+        # before tracing.
+        traced = minimal_fx_tracer(fn, module=model, optimizer=opt)(*args, **kwargs)
+
+    ``fn`` should reference ``module`` and ``optimizer`` from its enclosing
+    closure — passing them explicitly through ``args``/``kwargs`` is invalid
+    because ``nn.Module`` and ``Optimizer`` instances are not pytree-able.
+
+    The trace-time ``args`` and ``kwargs`` must satisfy these constraints:
+
     - all pytree leaves must be tensors or make_fx-safe primitives
       (``int``, ``float``, ``bool``, ``str``, ``None``)
-    - there must be no ``nn.Module`` instances in ``state``, ``args``, or
-      ``kwargs``
+    - there must be no ``nn.Module`` instances in ``args`` or ``kwargs``
 
     Tensor subclasses (for example ``DTensor``) are recursively unwrapped into
     plain tensors for tracing, and the layouts needed to rewrap them are stored
@@ -366,10 +431,16 @@ def minimal_fx_tracer(
     cudagraph capture does not evaluate these nodes, and downstream graph
     passes generally don't need them.
     """
+    _check_optimizer_has_module(module, optimizer)
 
-    def _trace_with_args(state: Any, *args: Any, **kwargs: Any) -> TracedResult:
-        state_fqns = list(state.keys())
-        state_flat = list(state.values())
+    def _trace_with_args(*args: Any, **kwargs: Any) -> TracedResult:
+        model_state, optim_state = extract_train_state(module, optimizer)
+        state_fqns = list(model_state.keys())
+
+        state_tree = {"model": model_state, "optim": optim_state}
+        state_flat, state_spec = pytree.tree_flatten(state_tree)
+        num_state_inputs = len(state_flat)
+
         user_inputs_flat, user_inputs_spec = pytree.tree_flatten((args, kwargs))
 
         # Validate leaves.
@@ -377,8 +448,8 @@ def minimal_fx_tracer(
             if isinstance(leaf, nn.Module):
                 raise ValueError(
                     "minimal_fx_tracer requires explicit tensor state, not nn.Module "
-                    "instances. Use trace_train_step(...) for the reference "
-                    "train-step wrapper."
+                    "instances. Capture nn.Modules in fn's closure or pass them "
+                    "via the 'module' kwarg."
                 )
             if not isinstance(leaf, _ALLOWED_LEAF_TYPES):
                 raise ValueError(
@@ -439,15 +510,20 @@ def minimal_fx_tracer(
             output_layouts = {}
 
             wrapped = _wrap_subclasses(plain_args, num_full_args, input_layouts)
-            state_wrapped = wrapped[: len(state_flat)]
-            user_flat = wrapped[len(state_flat) :]
+            state_wrapped = wrapped[:num_state_inputs]
+            user_flat = wrapped[num_state_inputs:]
 
-            state_for_fn = dict(zip(state_fqns, state_wrapped, strict=True))
+            state_t = pytree.tree_unflatten(list(state_wrapped), state_spec)
+            model_state_t = state_t["model"]
+            optim_state_t = state_t["optim"]
             user_args, user_kwargs = pytree.tree_unflatten(
                 list(user_flat), user_inputs_spec
             )
-            with torch.compiler._patch_engine_backward():
-                result = fn(state_for_fn, *user_args, **user_kwargs)
+
+            with _reparametrize_train_state(
+                module, optimizer, model_state_t, optim_state_t
+            ), torch.compiler._patch_engine_backward():
+                result = fn(*user_args, **user_kwargs)
 
             flat_outs, output_spec = pytree.tree_flatten(result)
             num_flat_outputs = len(flat_outs)
@@ -513,108 +589,73 @@ def minimal_fx_tracer(
 
 def run_traced(
     traced_result: TracedResult,
-    state: Any,
-    *args: Any,
+    *,
+    module: nn.Module | None = None,
+    optimizer: "torch.optim.Optimizer | None" = None,
     _validate_runtime: bool = False,
-    **kwargs: Any,
-) -> Any:
-    """Execute a traced graph with fresh parameters read from the live module.
+) -> Callable[..., Any]:
+    """Return a runner that executes a traced graph against live module/optimizer state.
 
-    This is a reference implementation of traced-graph execution. It keeps the
-    state handling, subclass unwrapping, and output reconstruction logic
-    explicit instead of baking those semantics into ``TracedResult`` itself.
-    Runs under ``torch.no_grad()`` because the graph already contains explicit
-    backward ops (from ``torch.autograd.grad`` traced by make_fx). Without
-    this, PyTorch would build a redundant autograd graph on top, keeping all
-    forward intermediates alive via ``grad_fn`` references.
+    The returned callable takes user-facing args and kwargs::
 
-    With ``_validate_runtime=True``, runtime ``(args, kwargs)`` must flatten
-    to the same pytree spec as trace time; any mismatch raises. Off by
-    default to keep the per-step path overhead-free; the caller must pass
-    kwargs in trace-time order.
+        traced = minimal_fx_tracer(fn, module=model, optimizer=opt)(*args, **kwargs)
+        outputs = run_traced(traced, module=model, optimizer=opt)(*args, **kwargs)
+
+    Mirrors :func:`minimal_fx_tracer`'s state extraction: parameters/buffers
+    are sampled from ``module`` and the optimizer state is sampled from
+    ``optimizer.state_dict()``. Runs under ``torch.no_grad()`` because the
+    graph already contains explicit backward ops (from ``torch.autograd.grad``
+    traced by make_fx). Without this, PyTorch would build a redundant autograd
+    graph on top, keeping all forward intermediates alive via ``grad_fn``
+    references.
+
+    With ``_validate_runtime=True``, runtime module parameter/buffer FQNs must match
+    trace time and runtime ``(args, kwargs)`` must flatten to the same pytree
+    spec as trace time; any mismatch raises. Off by default to keep the
+    per-step path overhead-free; the caller must pass kwargs in trace-time
+    order.
     """
-    state_flat = list(state.values())
-    user_args_flat, runtime_spec = pytree.tree_flatten((args, kwargs))
-    # TODO: pytree's dict flatten preserves insertion order, so kwargs in a
-    # different order than trace produce a different spec even though they
-    # describe the same logical inputs. If pytree sorted dict keys (or
-    # provided a canonicalizing flatten), this check could match valid
-    # reordered calls without needing an explicit reorder step here.
-    if _validate_runtime and runtime_spec != traced_result.user_inputs_spec:
-        raise ValueError(
-            f"input spec mismatch: runtime {runtime_spec} != "
-            f"trace-time {traced_result.user_inputs_spec}"
-        )
-    if any(isinstance(leaf, nn.Module) for leaf in [*state_flat, *user_args_flat]):
-        raise ValueError(
-            "run_traced requires explicit tensor state, not nn.Module instances. "
-            "Use run_traced_train_step(...) for the reference train-step wrapper."
-        )
-    all_args = list(state_flat) + list(user_args_flat)
-    flat_inputs, _ = _unwrap_subclasses(all_args)
+    _check_optimizer_has_module(module, optimizer)
 
-    with torch.no_grad():
-        flat_outputs = traced_result.gm(*flat_inputs)
-    wrapped = _wrap_subclasses(
-        flat_outputs,
-        traced_result.num_flat_outputs,
-        traced_result.output_subclass_layouts,
-    )
-    return pytree.tree_unflatten(wrapped, traced_result.output_spec)
-
-
-def trace_train_step(fn: Callable) -> Callable[..., TracedResult]:
-    """Reference implementation for capturing a whole train step via the core API."""
-
-    def _trace_with_module(
-        module: nn.Module, *args: Any, **kwargs: Any
-    ) -> TracedResult:
-        if not isinstance(module, nn.Module):
+    def _run(*args: Any, **kwargs: Any) -> Any:
+        model_state, optim_state = extract_train_state(module, optimizer)
+        if _validate_runtime and list(model_state.keys()) != traced_result.state_fqns:
             raise ValueError(
-                "trace_train_step requires args[0] to be an nn.Module, "
-                f"got {type(module).__name__}."
+                "module has different parameter/buffer names than during tracing.\n"
+                f"  Traced: {traced_result.state_fqns}\n"
+                f"  Got:    {list(model_state.keys())}"
             )
-        _check_no_extra_module_in_user_inputs(args, kwargs, "trace_train_step")
+        state_tree = {"model": model_state, "optim": optim_state}
+        state_flat, _ = pytree.tree_flatten(state_tree)
 
-        def _stateless_fn(
-            state: dict[str, torch.Tensor], *user_args: Any, **user_kwargs: Any
-        ) -> Any:
-            with stateless._reparametrize_module(module, state):
-                return fn(module, *user_args, **user_kwargs)
+        user_inputs_flat, runtime_spec = pytree.tree_flatten((args, kwargs))
+        # TODO: pytree's dict flatten preserves insertion order, so kwargs in a
+        # different order than trace produce a different spec even though they
+        # describe the same logical inputs. If pytree sorted dict keys (or
+        # provided a canonicalizing flatten), this check could match valid
+        # reordered calls without needing an explicit reorder step here.
+        if _validate_runtime and runtime_spec != traced_result.user_inputs_spec:
+            raise ValueError(
+                f"input spec mismatch: runtime {runtime_spec} != "
+                f"trace-time {traced_result.user_inputs_spec}"
+            )
+        if any(
+            isinstance(leaf, nn.Module) for leaf in [*state_flat, *user_inputs_flat]
+        ):
+            raise ValueError(
+                "run_traced requires explicit tensor state, not nn.Module instances. "
+                "Capture nn.Modules in fn's closure or pass them via the 'module' kwarg."
+            )
+        all_args = list(state_flat) + list(user_inputs_flat)
+        flat_inputs, _ = _unwrap_subclasses(all_args)
 
-        return minimal_fx_tracer(_stateless_fn)(
-            extract_module_state(module), *args, **kwargs
+        with torch.no_grad():
+            flat_outputs = traced_result.gm(*flat_inputs)
+        wrapped = _wrap_subclasses(
+            flat_outputs,
+            traced_result.num_flat_outputs,
+            traced_result.output_subclass_layouts,
         )
+        return pytree.tree_unflatten(wrapped, traced_result.output_spec)
 
-    return _trace_with_module
-
-
-def run_traced_train_step(
-    traced_result: TracedResult,
-    module: nn.Module,
-    *args: Any,
-    validate_module_fqns: bool = False,
-    **kwargs: Any,
-) -> Any:
-    """Reference implementation for executing a traced whole train step.
-
-    ``validate_module_fqns`` is a reserved keyword on this wrapper; user kwargs
-    of that name must be passed via the underlying ``fn``'s positional args.
-    """
-
-    if not isinstance(module, nn.Module):
-        raise ValueError(
-            "run_traced_train_step requires args[0] to be an nn.Module, "
-            f"got {type(module).__name__}."
-        )
-    _check_no_extra_module_in_user_inputs(args, kwargs, "run_traced_train_step")
-
-    # TODO: Consider stronger state validation once the long-term state API settles.
-    state = extract_module_state(module)
-    if validate_module_fqns and list(state.keys()) != traced_result.state_fqns:
-        raise ValueError(
-            "module has different parameter/buffer names than during tracing.\n"
-            f"  Traced: {traced_result.state_fqns}\n"
-            f"  Got:    {list(state.keys())}"
-        )
-    return run_traced(traced_result, state, *args, **kwargs)
+    return _run

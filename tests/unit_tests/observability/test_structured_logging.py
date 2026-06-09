@@ -252,7 +252,7 @@ class TestRelativeStep:
         """When set_step is called without relative_step, it defaults to step.
 
         Prevents a stale _RELATIVE_STEP_GLOBAL from leaking across calls
-        (e.g. sync_step broadcasts that omit the kwarg). Correct for
+        (e.g. sync_log_step broadcasts that omit the kwarg). Correct for
         non-resumed runs; resumed trainers must pass relative_step
         explicitly.
         """
@@ -662,7 +662,7 @@ class TestNoOpFlag:
             set_step(1)
             with log_trace_span("step"):
                 pass
-            log_trace_instant("binary_start")
+            log_trace_instant("structured_logger_started")
 
         trace_dir = tmp_path / "structured_logs"
         lines = []
@@ -688,7 +688,7 @@ class TestNoOpFlag:
             set_step(1)
             with log_trace_span("step"):
                 pass
-            log_trace_instant("binary_start")
+            log_trace_instant("structured_logger_started")
             log_trace_scalar({"x": 1.0})
         finally:
             sl_mod._disabled = False
@@ -760,7 +760,7 @@ class TestLogTraceScalar:
 class TestLogTraceInstant:
     def test_writes_instant_marker(self, tmp_path, structured_logger_fixture):
         init_structured_logger(rank=0, source="trainer", output_dir=str(tmp_path))
-        log_trace_instant("binary_start")
+        log_trace_instant("structured_logger_started")
 
         trace_dir = os.path.join(str(tmp_path), "structured_logs")
         jsonl_files = [f for f in os.listdir(trace_dir) if f.endswith(".jsonl")]
@@ -768,7 +768,7 @@ class TestLogTraceInstant:
             lines = [json.loads(line) for line in f if line.strip()]
 
         assert len(lines) == 1
-        assert lines[0]["log_type_name"] == "binary_start"
+        assert lines[0]["log_type_name"] == "structured_logger_started"
         assert lines[0]["log_type"] == "instant"
         assert lines[0]["event_name"] is None
 
@@ -1091,11 +1091,11 @@ class TestGenerateGanttTrace:
         """Records with ``log_type == "instant"`` render as instants even when
         their ``log_type_name`` ends in ``_start``. Confirms the classifier
         branches on emission intent, not name suffix — so future instants
-        like ``binary_start`` / ``training_start`` work without an allowlist.
+        like ``structured_logger_started`` / ``training_start`` work without an allowlist.
         """
         records = [
             {
-                "log_type_name": "binary_start",
+                "log_type_name": "structured_logger_started",
                 "log_type": "instant",
                 "time_us": 1000,
                 "rank": 0,
@@ -1118,7 +1118,7 @@ class TestGenerateGanttTrace:
         instant_names = [
             e.get("name") for e in trace["traceEvents"] if e.get("ph") == "i"
         ]
-        assert "binary_start" in instant_names
+        assert "structured_logger_started" in instant_names
         assert "training_start" in instant_names
         # No span-pair events were created from these records.
         assert not any(e.get("ph") == "X" for e in trace["traceEvents"])

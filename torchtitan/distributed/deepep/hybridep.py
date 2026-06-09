@@ -9,7 +9,7 @@ HybridEP: Expert Parallel Communication for GB200 NVLink72 Systems.
 
 Provides efficient token dispatch/combine for MoE training via TMA-optimized all-to-all.
 
-Configuration (via DeepEPTokenDispatcher.Config):
+Configuration (via HybridEPTokenDispatcher.Config):
     non_blocking_capacity_factor: float | None
         None = blocking mode (default).  HybridEP calls cudaStreamSynchronize
         after dispatch and computes the exact num_permuted_tokens on the host.

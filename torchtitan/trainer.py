@@ -17,6 +17,7 @@ import torch
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
@@ -39,7 +40,7 @@ from torchtitan.config.configs import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
@@ -628,6 +629,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # unique tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += labels.numel()
 
+        if self.config.parallelism.full_dtensor:
+            inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
+                self.parallel_dims, inputs, labels, extra_kwargs
+            )
+
         return inputs, labels, extra_inputs, extra_kwargs
 
     @sl.log_trace_span("fwd_bwd")
@@ -684,6 +690,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             assert len(model_parts) == 1
             with self.train_context():
                 pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                # Under non-full_dtensor, labels stay as plain tensors. See
+                # ``cross_entropy_loss`` for why pred must also be plain.
+                # Remove once non-full_dtensor is no longer supported.
+                if (
+                    isinstance(pred, DTensor)
+                    and not self.config.parallelism.full_dtensor
+                    and self.config.parallelism.disable_loss_parallel
+                ):
+                    pred = pred.to_local()
                 loss = self.loss_fn(pred, labels, global_valid_tokens)
                 del pred
                 loss.backward()
