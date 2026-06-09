@@ -639,6 +639,10 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "torchcomms_3d_dp+cp+pp+compile",
             ngpu=8,
             skip_rocm_test=True,
+            # NotImplementedError: new_group cannot delegate to split_group
+            # with use_local_synchronization=True; split_group requires all
+            # ranks in the parent group to participate.
+            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -654,7 +658,9 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "torchcomms_3d_dp+tp+pp+compile",
             ngpu=8,
             skip_rocm_test=True,
-            disabled=True,  # torchcomms-managed TP PG not registered in c10d; resolve fails under compile
+            # torchcomms-managed TP PG not registered in c10d;
+            # resolve fails under compile
+            disabled=True,
         ),
         OverrideDefinitions(
             [

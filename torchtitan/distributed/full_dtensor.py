@@ -41,12 +41,6 @@ def validate_config(
         VarlenAttention,
     )
 
-    if parallel_dims.ep_enabled:
-        raise NotImplementedError(
-            f"{parallel_dims.spmd_backend} is not supported with Expert Parallel. "
-            "Disable EP or use a different spmd_backend."
-        )
-
     if parallel_dims.cp_enabled:
         if any(
             isinstance(m, (ScaledDotProductAttention, VarlenAttention))
@@ -87,6 +81,17 @@ def _get_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
 
 
 _DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
+_SPARSE_STORAGE_AXES = ["dp_replicate", "efsdp", "ep"]
+
+
+def _get_sparse_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
+    """Build ``DataParallelMeshDims`` for routed-expert (sparse) parameters.
+
+    The FSDP axis is ``efsdp`` and ``dp_replicate`` is shared with the dense path.
+    """
+    shard_axis = "efsdp" if parallel_dims.ep_enabled else None
+    replicate_axis = "dp_replicate" if parallel_dims.dp_replicate_enabled else None
+    return DataParallelMeshDims(shard=shard_axis, replicate=replicate_axis)
 
 
 def resolve_fsdp_mesh(
@@ -100,6 +105,25 @@ def resolve_fsdp_mesh(
     storage_mesh = parallel_dims.get_activated_mesh(_DENSE_STORAGE_AXES)
     assert storage_mesh is not None
     return storage_mesh, _get_dp_mesh_axes(parallel_dims)
+
+
+def resolve_sparse_fsdp_mesh(
+    parallel_dims: ParallelDims,
+) -> tuple[DeviceMesh | None, DataParallelMeshDims | None]:
+    """Sparse counterpart of ``resolve_fsdp_mesh`` for routed experts.
+
+    Returns ``(None, None)`` when EP is disabled; otherwise the sparse
+    storage mesh + sparse DP axes.
+    """
+    assert parallel_dims.spmd_backend in (
+        "full_dtensor",
+        "spmd_types",
+    ), "resolve_sparse_fsdp_mesh is only meaningful under full_dtensor or spmd_types"
+    if not parallel_dims.ep_enabled:
+        return None, None
+    sparse_mesh = parallel_dims.get_activated_mesh(_SPARSE_STORAGE_AXES)
+    assert sparse_mesh is not None
+    return sparse_mesh, _get_sparse_dp_mesh_axes(parallel_dims)
 
 
 def parallelize_inputs(
