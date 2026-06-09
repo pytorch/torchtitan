@@ -43,7 +43,6 @@ from torchtitan.experiments.graph_trainer.debug_utils import (
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     joint_transformer_block_bucketing_reordering_pass,
-    overlap_fsdp_ag_rs_pass,
 )
 from torchtitan.experiments.graph_trainer.inductor_passes import (
     annotate_flex_attention_for_regional_inductor_pass,
@@ -138,18 +137,18 @@ def compile_time_passes(
     cudagraph is excluded because it needs to re-capture the graph into
     an in-memory CUDA graph at runtime.
 
-    ``overlap_fsdp_ag_rs_pass`` runs immediately before
-    ``joint_transformer_block_bucketing_reordering_pass`` so that
-    forward+backward all-gathers end up on a separate CUDA stream from
-    reduce-scatters (enabling AG/RS overlap in backward). It is a no-op
-    when the graph contains no FSDP all-gathers.
+    ``joint_transformer_block_bucketing_reordering_pass`` optionally runs
+    ``overlap_fsdp_ag_rs_pass`` first (gated by
+    ``compile.enable_fsdp_ag_rs_overlap``) so that forward+backward
+    all-gathers end up on a separate CUDA stream from reduce-scatters
+    (enabling AG/RS overlap in backward).
     """
     from torchtitan.experiments.graph_trainer.common_utils import (
         get_default_transformer_block_buckets,
     )
     from torchtitan.models.common.attention import FlexAttention
 
-    layers = config.model_spec.model.layers
+    n_layers = len(config.model_spec.model.layers)
     passes: list[Callable] = [
         remove_detach_pass,
         remove_identity_view_pass,
@@ -165,24 +164,12 @@ def compile_time_passes(
             defer_n_layers=config.compile.cpu_offload_defer_n_layers,
         ),
         selective_activation_remat_pass,
-        overlap_fsdp_ag_rs_pass,
+        functools.partial(
+            joint_transformer_block_bucketing_reordering_pass,
+            module_bucket_plans=get_default_transformer_block_buckets(n_layers),
+            enable_fsdp_ag_rs_overlap=config.compile.enable_fsdp_ag_rs_overlap,
+        ),
     ]
-    ep_enabled = config.parallelism.expert_parallel_degree > 1
-    has_moe_layers = any(
-        getattr(layer_cfg, "moe", None) is not None for layer_cfg in layers
-    )
-    if ep_enabled and has_moe_layers:
-        logger.info(
-            "Skipping joint transformer block bucketing for MoE under "
-            "expert parallelism"
-        )
-    else:
-        passes.append(
-            functools.partial(
-                joint_transformer_block_bucketing_reordering_pass,
-                module_bucket_plans=get_default_transformer_block_buckets(len(layers)),
-            )
-        )
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
@@ -242,21 +229,17 @@ def construct_default_graph_passes(
     When ``precompile_artifact_dir`` is set, the artifact has graph
     transformed during precompile phase, so only cudagraph is returned.
     """
-    from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
-
-    cudagraph_disabled = "cudagraph_pass" in config.compile.disable_passes
-    use_cudagraph = not cudagraph_disabled and is_cudagraph_compatible(traced_result.gm)
+    want_cudagraph = "cudagraph_pass" not in config.compile.disable_passes
 
     has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
 
     passes: list[Callable] = []
     if not has_precompile_artifact:
         passes.extend(
-            compile_time_passes(traced_result, config, use_cudagraph=use_cudagraph)
+            compile_time_passes(traced_result, config, use_cudagraph=want_cudagraph)
         )
 
-    # cudagraph should be the last pass.
-    if use_cudagraph:
+    if want_cudagraph:
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
             functools.partial(

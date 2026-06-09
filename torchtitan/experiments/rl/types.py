@@ -42,10 +42,11 @@ class Completion:
 
     policy_version: int
     prompt_idx: int
-    prompt_token_ids: list[int]
     text: str
     token_ids: list[int]
     token_logprobs: list[float]
+    finish_reason: str | None = None
+    """vLLM `CompletionOutput.finish_reason` ("stop" | "length" | "abort")"""
 
 
 @dataclass(kw_only=True, slots=True)
@@ -53,11 +54,12 @@ class Trajectory:
     """One rollout: a sequence of ``(Completion, Step)`` transitions.
 
     Single-turn tasks produce trajectories with one transition. The
-    Completion carries the generator's token-level metadata; the Step
-    carries the env's reward and done flag.
+    Completion carries the generator's response-side metadata; the Step
+    carries the env's reward and done flag;
     """
 
     sample_idx: int
+    prompt_token_ids: list[int]
     transitions: list[tuple[Completion, Step]]
 
     @property
@@ -84,7 +86,7 @@ class Episode:
 
 
 @dataclass(kw_only=True, slots=True)
-class TrainBatch:
+class TrainingBatch:
     token_ids: torch.Tensor  # [1, total_tokens]
     prompt_lens: list[int]  # [num_episodes]
     response_lens: list[int]  # [num_episodes]
@@ -93,3 +95,11 @@ class TrainBatch:
     token_logprobs: list[
         list[float]
     ]  # [num_episodes][response_len_i] per-token logprobs from rollout
+
+
+@dataclass(frozen=True, slots=True)
+class OptimStepOutput:
+    """Result returned by ``PolicyTrainer.optim_step`` to the controller."""
+
+    policy_version: int
+    metrics: dict[str, float]

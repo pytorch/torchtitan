@@ -7,7 +7,10 @@
 import unittest
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import DTensor, Partial, Replicate
 from torchtitan.components.loss import (
     ChunkedCELoss,
     cross_entropy_loss,
@@ -190,6 +193,71 @@ class TestGradAccumulator(unittest.TestCase):
         acc.add(torch.randn(2, 4, 16))
         with self.assertRaises(ValueError):
             acc.add(torch.randn(2, 4, 16))
+
+
+class TestGradAccumulatorDTensor(unittest.TestCase):
+    """Regression tests for the DTensor path.
+
+    These pin down the contract that prevented the TP gradient-placement bug:
+    result() must label the buffer with the placement of the chunks that were
+    actually added (e.g. Partial(sum) for a loss-parallel ColwiseParallel
+    lm_head), not the placement of the reference activation.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if not dist.is_initialized():
+            dist.init_process_group(
+                backend="gloo",
+                init_method="tcp://localhost:12358",
+                world_size=1,
+                rank=0,
+            )
+        cls._mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("tp",))
+
+    @classmethod
+    def tearDownClass(cls):
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+    def _make_chunk(self, shape, placement):
+        return DTensor.from_local(
+            torch.randn(*shape), self._mesh, (placement,), run_check=False
+        )
+
+    def test_result_takes_placement_from_first_chunk(self):
+        """result() wraps the buffer with chunk_grad's placement.
+
+        The pre-fix code wrapped with the reference activation's placement
+        (Replicate) even when chunks were Partial(sum), which silently dropped
+        the implied all-reduce and corrupted TP training.
+        """
+        B, L, D = 2, 8, 16
+        num_chunks = 4
+        reference = DTensor.from_local(
+            torch.zeros(B, L, D), self._mesh, (Replicate(),), run_check=False
+        )
+
+        acc = GradAccumulator(reference, num_chunks=num_chunks, dtype=torch.float32)
+        for _ in range(num_chunks):
+            acc.add(self._make_chunk((B, L // num_chunks, D), Partial()))
+
+        result = acc.result()
+        self.assertIsInstance(result, DTensor)
+        self.assertEqual(result.placements, (Partial(),))
+
+    def test_placement_mismatch_raises(self):
+        """A chunk whose placement disagrees with the first one is a bug."""
+        B, L, D = 2, 8, 16
+        num_chunks = 2
+        reference = DTensor.from_local(
+            torch.zeros(B, L, D), self._mesh, (Replicate(),), run_check=False
+        )
+
+        acc = GradAccumulator(reference, num_chunks=num_chunks, dtype=torch.float32)
+        acc.add(self._make_chunk((B, L // num_chunks, D), Partial()))
+        with self.assertRaisesRegex(ValueError, "does not match first chunk"):
+            acc.add(self._make_chunk((B, L // num_chunks, D), Replicate()))
 
 
 class _FakeDecoder(nn.Module):

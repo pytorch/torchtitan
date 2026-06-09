@@ -50,6 +50,8 @@ from vllm.config import AttentionConfig
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from torchtitan.components.checkpoint import CheckpointManager
+
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
@@ -444,6 +446,11 @@ class TestBitwiseParity(unittest.TestCase):
             config.model_spec,
             parallelism=config.generator.parallelism,
             compile_config=config.compile,
+            checkpoint_config=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                initial_load_path=config.hf_assets_path,
+            ),
         )
 
         # Test runs trainer and generator in the same process, so limit

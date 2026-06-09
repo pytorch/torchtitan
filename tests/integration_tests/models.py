@@ -154,7 +154,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
         # Integration Test Cases for gpt-oss
         # TODO: re-enable compile after fixing
-        # https://github.com/pytorch/torchtitan/issues/2776
+        # https://github.com/pytorch/torchtitan/issues/3409
         OverrideDefinitions(
             [
                 [

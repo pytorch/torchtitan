@@ -99,9 +99,9 @@ class VarlenAttention(Module):
 
     def forward(
         self,
-        xq: torch.Tensor,
-        xk: torch.Tensor,
-        xv: torch.Tensor,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
         *,
         attention_masks: VarlenMetadata,
         scale: float | None = None,
@@ -116,12 +116,12 @@ class VarlenAttention(Module):
         max_q = attention_masks.max_q
         max_k = attention_masks.max_k
 
-        batch_size, seq_len, _, head_dim = xq.shape
+        batch_size, seq_len, _, head_dim = q.shape
 
         # varlen attention expects (bs*seqlen, n_heads, head_dim)
-        xq_packed = xq.reshape(batch_size * seq_len, -1, head_dim)
-        xk_packed = xk.reshape(batch_size * seq_len, -1, head_dim)
-        xv_packed = xv.reshape(batch_size * seq_len, -1, head_dim)
+        xq_packed = q.reshape(batch_size * seq_len, -1, head_dim)
+        xk_packed = k.reshape(batch_size * seq_len, -1, head_dim)
+        xv_packed = v.reshape(batch_size * seq_len, -1, head_dim)
 
         # Some operators can upcast under AMP, but varlen attention currently only
         # supports bf16/fp16 inputs. If this changes, or fp16 training support
@@ -162,7 +162,7 @@ class VarlenAttention(Module):
         # Reshape back to the format expected by GQAttention.forward()
         out = out_packed.view(batch_size, seq_len, -1, head_dim)
 
-        return out.to(xq.dtype)
+        return out.to(q.dtype)
 
 
 class FlexAttention(Module):

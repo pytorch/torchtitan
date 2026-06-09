@@ -533,6 +533,120 @@ class TestCpuOffloadPass(TestCase):
         ]
         self.assertEqual(len(view_ops), 1, "Expected only the original view op")
 
+    def test_wait_dep_points_to_last_forward_consumer(self):
+        """Forward wait_tensor dep arg should reference the last forward consumer."""
+        from torchtitan.experiments.graph_trainer.cpu_offload import (
+            _is_backward_node,
+            apply_cpu_offload_pass,
+            tag_all_offloadable_activations,
+        )
+
+        gm, _, _ = self._build_joint_graph(num_layers=4)
+        tag_all_offloadable_activations(gm)
+        apply_cpu_offload_pass(gm, defer_n_layers=1, prefetch_lookahead=0)
+
+        nodes = list(gm.graph.nodes)
+        node_pos = {n: i for i, n in enumerate(nodes)}
+        ao_ops = {
+            torch.ops.ao.offload.default,
+            torch.ops.ao.reload.default,
+            torch.ops.ao.wait_tensor.default,
+        }
+
+        for node in nodes:
+            if not (
+                node.op == "call_function"
+                and node.target is torch.ops.ao.wait_tensor.default
+                and not node.meta.get("autograd_backward")
+            ):
+                continue
+            # dep is the third arg
+            self.assertGreater(len(node.args), 2, "Forward wait should have dep arg")
+            dep = node.args[2]
+            keepalive = node.args[1]
+            self.assertIsNotNone(dep)
+
+            # dep must be a forward non-AO consumer of keepalive's storage
+            self.assertFalse(_is_backward_node(dep))
+            self.assertNotIn(dep.target, ao_ops)
+
+            # dep must be >= all other forward non-AO consumers by position
+            for user in keepalive.users:
+                if user.op != "call_function":
+                    continue
+                if _is_backward_node(user) or user.target in ao_ops:
+                    continue
+                self.assertGreaterEqual(
+                    node_pos[dep],
+                    node_pos[user],
+                    f"dep {dep.name} should be at or after consumer {user.name}",
+                )
+
+    def test_wait_dep_follows_view_chain(self):
+        """dep should track through views to find the true last consumer."""
+        from torchtitan.experiments.graph_trainer.cpu_offload import (
+            apply_cpu_offload_pass,
+        )
+
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        x.meta["val"] = self._make_fake_val()
+
+        # Layer 0: mm -> view -> relu (view shares storage with mm)
+        mm = graph.call_function(torch.ops.aten.mm.default, args=(x, x))
+        mm.meta["autograd_backward"] = False
+        mm.meta["custom"] = {"module_fqn": "layers.0.block"}
+        mm.meta["val"] = self._make_fake_val()
+        mm.meta["recompute"] = CheckpointPolicy.MUST_CPU_OFFLOAD
+
+        view = graph.call_function(torch.ops.aten.view.default, args=(mm, [64, 64]))
+        view.meta["autograd_backward"] = False
+        view.meta["custom"] = {"module_fqn": "layers.0.block"}
+        view.meta["val"] = self._make_fake_val()
+
+        # Layer 1: consumes the view (which aliases mm's storage)
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(view,))
+        relu.meta["autograd_backward"] = False
+        relu.meta["custom"] = {"module_fqn": "layers.1.block"}
+        relu.meta["val"] = self._make_fake_val()
+
+        # Layer 2
+        mm2 = graph.call_function(torch.ops.aten.mm.default, args=(relu, relu))
+        mm2.meta["autograd_backward"] = False
+        mm2.meta["custom"] = {"module_fqn": "layers.2.block"}
+        mm2.meta["val"] = self._make_fake_val()
+
+        # Backward: uses mm directly
+        bwd = graph.call_function(torch.ops.aten.mm.default, args=(mm2, mm))
+        bwd.meta["autograd_backward"] = True
+        bwd.meta["custom"] = {"module_fqn": "layers.0.block"}
+        bwd.meta["val"] = self._make_fake_val()
+
+        graph.output(bwd)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        apply_cpu_offload_pass(gm, defer_n_layers=1, prefetch_lookahead=0)
+
+        # Find the forward wait for mm's offload
+        fwd_waits = [
+            n
+            for n in gm.graph.nodes
+            if n.op == "call_function"
+            and n.target is torch.ops.ao.wait_tensor.default
+            and not n.meta.get("autograd_backward")
+        ]
+        self.assertEqual(len(fwd_waits), 1)
+        wait = fwd_waits[0]
+
+        # dep should be relu (layer 1), not mm itself (layer 0), because
+        # the view chain extends mm's storage lifetime to relu's consumption.
+        dep = wait.args[2]
+        self.assertEqual(
+            dep.target,
+            torch.ops.aten.relu.default,
+            "dep should follow view chain to the last consumer of the storage",
+        )
+
     def test_single_layer_tagged(self):
         """With only one layer, nodes are still tagged (last-layer skip only applies with multiple layers)."""
         from torchtitan.experiments.graph_trainer.cpu_offload import (

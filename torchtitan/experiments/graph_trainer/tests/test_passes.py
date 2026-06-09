@@ -29,15 +29,9 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.cudagraph import (
     insert_kernel_annotations_pass,
 )
-from torchtitan.experiments.graph_trainer.fsdp_passes import (
-    _add_chunked_ce_accumulator_deps,
-    overlap_fsdp_ag_rs_pass,
-)
+from torchtitan.experiments.graph_trainer.fsdp_passes import overlap_fsdp_ag_rs_pass
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
-from torchtitan.experiments.graph_trainer.make_fx_tracer import (
-    minimal_fx_tracer,
-    trace_train_step,
-)
+from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
 from torchtitan.experiments.graph_trainer.memory_policy import (
     _make_default_memory_policy,
     tag_sac_policy,
@@ -195,6 +189,62 @@ class TestOverlapFsdpAgRsPass(FSDPTest):
         total_after = self._count_all_ag_nodes(bw_gm)
 
         self.assertEqual(total_before, total_after)
+
+    def test_overlap_rewrites_multiple_pgs(self):
+        """When the graph has AG nodes from multiple FSDP PGs (e.g. FSDP +
+        expert-FSDP), each source PG should be mapped to its own extra PG."""
+        import torch.distributed as dist
+
+        from torchtitan.experiments.graph_trainer.fsdp_passes import (
+            _EXTRA_FSDP_PG_REGISTRY,
+        )
+
+        self._setup()
+        model = self._make_fsdp_model()
+        inputs = torch.randn(4, 16).cuda()
+        fsdp_pg_name = self._get_fsdp_pg_name()
+
+        bw_gm, bw_example_inputs = self._export_and_get_bw_graph(model, inputs)
+
+        # Create a second PG to simulate expert-FSDP
+        second_pg = dist.new_group(
+            ranks=list(range(self.world_size)),
+            use_local_synchronization=True,
+        )
+        second_pg_name = second_pg.group_name
+
+        # Rewrite half the AG nodes to use the second PG
+        ag_nodes = [n for n in bw_gm.graph.nodes if is_all_gather(n)]
+        self.assertGreater(len(ag_nodes), 1)
+        half = len(ag_nodes) // 2
+        for node in ag_nodes[:half]:
+            node.args = (node.args[0], node.args[1], second_pg_name)
+
+        ag_pg1_before = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
+        ag_pg2_before = self._count_ag_nodes_with_pg(bw_gm, second_pg_name)
+        self.assertGreater(ag_pg1_before, 0)
+        self.assertGreater(ag_pg2_before, 0)
+
+        _EXTRA_FSDP_PG_REGISTRY.pop(fsdp_pg_name, None)
+        _EXTRA_FSDP_PG_REGISTRY.pop(second_pg_name, None)
+        overlap_fsdp_ag_rs_pass(bw_gm, bw_example_inputs)
+
+        # Both source PGs should have their own extra PG
+        self.assertIn(fsdp_pg_name, _EXTRA_FSDP_PG_REGISTRY)
+        self.assertIn(second_pg_name, _EXTRA_FSDP_PG_REGISTRY)
+        extra_pg1 = _EXTRA_FSDP_PG_REGISTRY[fsdp_pg_name]
+        extra_pg2 = _EXTRA_FSDP_PG_REGISTRY[second_pg_name]
+        self.assertNotEqual(
+            extra_pg1, extra_pg2, "Each source PG must map to a distinct extra PG"
+        )
+
+        # No AG nodes should still use original PGs
+        self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name), 0)
+        self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, second_pg_name), 0)
+
+        # All AG nodes should use their respective extra PGs
+        self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, extra_pg1), ag_pg1_before)
+        self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, extra_pg2), ag_pg2_before)
 
     def test_overlap_is_noop_when_no_fsdp_ag(self):
         """If the graph has no FSDP all-gathers, the pass is a no-op."""
@@ -384,36 +434,6 @@ class TestApplySACPass(TestCase):
         ]
         self.assertEqual(len(recomputed_nodes), 1)
         self.assertTrue(recomputed_nodes[0].meta["autograd_backward"])
-
-
-class TestChunkedCEAccumulatorDeps(TestCase):
-    def test_copy_slice_writes_ordered_before_later_base_reads(self):
-        graph = torch.fx.Graph()
-        x = graph.placeholder("x")
-        grad0 = graph.placeholder("grad0")
-        grad1 = graph.placeholder("grad1")
-        base = graph.call_function(torch.ops.aten.zeros_like.default, args=(x,))
-
-        slice0 = graph.call_function(torch.ops.aten.slice.Tensor, args=(base, 1, 0, 2))
-        copy0 = graph.call_function(torch.ops.aten.copy_.default, args=(slice0, grad0))
-        read_after_first = graph.call_function(
-            torch.ops.aten._to_copy.default, args=(base,)
-        )
-
-        slice1 = graph.call_function(torch.ops.aten.slice.Tensor, args=(base, 1, 2, 4))
-        copy1 = graph.call_function(torch.ops.aten.copy_.default, args=(slice1, grad1))
-        read_after_second = graph.call_function(
-            torch.ops.aten._to_copy.default, args=(base,)
-        )
-        graph.output(read_after_second)
-
-        deps = {}
-        _add_chunked_ce_accumulator_deps(graph, deps)
-
-        self.assertEqual(list(deps[read_after_first]), [copy0])
-        self.assertEqual(list(deps[read_after_second]), [copy0, copy1])
-        self.assertNotIn(slice0, deps)
-        self.assertNotIn(slice1, deps)
 
 
 class TestBucketingPrefetchOrder(FSDPTest):
@@ -1134,16 +1154,16 @@ class TestAnnotateModuleFqns(TestCase):
     """Unit tests for annotate_module_fqns and insert_kernel_annotations_pass."""
 
     def _trace_and_get_fqns(self, model, *args):
-        """Trace fwd+bwd with trace_train_step and return module_fqn annotations."""
+        """Trace fwd+bwd via minimal_fx_tracer and return module_fqn annotations."""
 
-        def fwd_step(model, *inputs):
+        def fwd_step(*inputs):
             pred = model(inputs[0])
             loss = pred.sum()
             params = [p for p in model.parameters() if p.requires_grad]
             grads = torch.autograd.grad(loss, params)
             return [loss] + list(grads)
 
-        traced = trace_train_step(fwd_step)(model, *args)
+        traced = minimal_fx_tracer(fwd_step, module=model)(*args)
         fqns = set()
         for node in traced.gm.graph.nodes:
             fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)
@@ -1152,7 +1172,7 @@ class TestAnnotateModuleFqns(TestCase):
         return fqns
 
     def test_annotate_transformer_like_model(self):
-        """Module FQNs survive trace_train_step for a transformer-like model
+        """Module FQNs survive minimal_fx_tracer for a transformer-like model
         with distinct submodule classes (norm, attention, ffn)."""
 
         class Norm(torch.nn.Module):
@@ -1220,8 +1240,8 @@ class TestAnnotateModuleFqns(TestCase):
     def test_same_class_instances_get_distinct_fqns(self):
         """Two parameterless instances of the same class get distinct fqns.
 
-        Uses minimal_fx_tracer directly (not trace_train_step) because
-        parameterless models cannot produce gradients via autograd.grad.
+        Calls minimal_fx_tracer without ``module=`` because parameterless
+        models cannot produce gradients via autograd.grad.
         """
 
         class Block(torch.nn.Module):
@@ -1240,10 +1260,10 @@ class TestAnnotateModuleFqns(TestCase):
         model = Model()
         annotate_module_fqns(model)
 
-        def fwd_only(state, x):
+        def fwd_only(x):
             return model(x)
 
-        traced = minimal_fx_tracer(fwd_only)({}, torch.randn(4))
+        traced = minimal_fx_tracer(fwd_only)(torch.randn(4))
         fqns = set()
         for node in traced.gm.graph.nodes:
             fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)

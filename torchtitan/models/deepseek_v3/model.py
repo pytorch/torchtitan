@@ -20,6 +20,10 @@ from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import apply_rotary_emb_single_complex
+from torchtitan.models.common.token_dispatcher import (
+    DeepEPTokenDispatcher,
+    HybridEPTokenDispatcher,
+)
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
@@ -214,17 +218,19 @@ class DeepSeekV3Model(Decoder):
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
-                    comm_backend = getattr(
-                        layer_cfg.moe.experts.token_dispatcher,
-                        "comm_backend",
-                        "standard",
-                    )
+                    token_dispatcher_cfg = layer_cfg.moe.experts.token_dispatcher
                     if (
-                        comm_backend in ("deepep", "hybridep")
+                        isinstance(
+                            token_dispatcher_cfg,
+                            (
+                                DeepEPTokenDispatcher.Config,
+                                HybridEPTokenDispatcher.Config,
+                            ),
+                        )
                         and parallelism.expert_parallel_degree == 1
                     ):
                         raise ValueError(
-                            f"{comm_backend.upper()} requires expert parallelism "
+                            f"{type(token_dispatcher_cfg).__qualname__} requires expert parallelism "
                             "(expert_parallel_degree > 1)."
                         )
 
@@ -246,6 +252,7 @@ class DeepSeekV3Model(Decoder):
                 self,
                 loss_parallel=not parallelism.disable_loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
         def get_nparams_and_flops(

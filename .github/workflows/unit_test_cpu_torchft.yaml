@@ -15,6 +15,9 @@ concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   build-test:
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
