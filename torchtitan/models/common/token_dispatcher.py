@@ -14,6 +14,11 @@ from torch.distributed._functional_collectives import (
 from torch.distributed.tensor import DeviceMesh
 
 from torchtitan.config import Configurable
+from torchtitan.distributed.minimal_async_ep import (
+    combine_tokens,
+    dispatch_tokens,
+    expert_counting_sort,
+)
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 
 
@@ -849,10 +854,6 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         self.ep_mesh: DeviceMesh | None = None
         self.sp_size: int = 1
 
-        # Import to register custom ops so SAC saves communication outputs
-        # instead of recomputing them. This must happen before apply_ac.
-        from torchtitan.distributed import minimal_async_ep  # noqa: F401
-
     def wire_meshes(
         self,
         *,
@@ -909,8 +910,6 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             dispatch_input = x_TD
             routed_scores_N = topk_scores_TK.view(-1)
 
-        from torchtitan.distributed.minimal_async_ep import dispatch_tokens
-
         hidden_states_RD, tokens_per_expert_E, state = dispatch_tokens(
             dispatch_input,
             num_local_tokens_per_expert_E,
@@ -931,8 +930,6 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         self,
         topk_expert_ids_TK: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        from torchtitan.distributed.minimal_async_ep import expert_counting_sort
-
         return expert_counting_sort(
             topk_expert_ids_TK,
             num_experts=self.num_experts,
@@ -949,8 +946,6 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         del x_TD
         if self.sp_size != 1:
             raise ValueError("MinimalAsyncEPTokenDispatcher requires sp_size == 1.")
-
-        from torchtitan.distributed.minimal_async_ep import combine_tokens
 
         # pyrefly: ignore [bad-argument-type]
         return combine_tokens(routed_output_RD, metadata.state)

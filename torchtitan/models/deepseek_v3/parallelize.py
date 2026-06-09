@@ -14,6 +14,7 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import minimal_async_ep
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
@@ -75,8 +76,6 @@ def _init_minimal_async_ep_buffer(
     parallel_dims: ParallelDims,
     training: TrainingConfig,
 ) -> None:
-    from torchtitan.distributed import minimal_async_ep
-
     minimal_async_ep.init_buffer(
         group=parallel_dims.get_mesh("ep").get_group(),
         hidden_dim=model.config.dim,
