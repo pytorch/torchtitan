@@ -22,12 +22,12 @@ Three tests:
 
 By transitivity of test 2 and test 3: trainer == vLLM decode.
 
-Run:
-    torchrun --nproc_per_node=1 -m pytest \
-        torchtitan/experiments/rl/tests/test_bitwise_parity.py -v
+Run each backend in a separate torchrun invocation:
+    torchrun --nproc_per_node=2 -m pytest \
+        torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityVarlen -v
 
     torchrun --nproc_per_node=2 -m pytest \
-        torchtitan/experiments/rl/tests/test_bitwise_parity.py -v
+        torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityFlex -v
 """
 
 import gc
