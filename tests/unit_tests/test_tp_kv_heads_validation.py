@@ -9,7 +9,7 @@ Unit tests for TP-degree / n_kv_heads divisibility validation in model configs.
 
 Covers Issue #2574: models with GQA (n_kv_heads < n_heads) would crash deep in
 the forward pass when tensor_parallel_degree > n_kv_heads. The fix adds an
-early ValueError in update_from_config for llama3, llama4, qwen3, and gpt_oss.
+early ValueError in update_from_config for llama3, qwen3, and gpt_oss.
 """
 
 import unittest

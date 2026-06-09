@@ -62,7 +62,6 @@ class Llama3Model(Decoder):
     class Config(Decoder.Config):
         dim: int = 4096
         vocab_size: int = 128256
-        enable_weight_tying: bool = False
 
         def update_from_config(
             self,
@@ -79,11 +78,6 @@ class Llama3Model(Decoder):
                 raise NotImplementedError(
                     "Context Parallel only supports SDPA and FlexAttention. "
                     "Varlen attention is not supported with CP."
-                )
-
-            if self.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
-                raise NotImplementedError(
-                    "Weight tying is not supported with Pipeline Parallel."
                 )
 
             from torchtitan.components.loss import ChunkedCELoss
@@ -119,24 +113,3 @@ class Llama3Model(Decoder):
                 seq_len=seq_len,
                 enable_weight_tying=self.enable_weight_tying,
             )
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.enable_weight_tying = config.enable_weight_tying
-
-        if self.enable_weight_tying:
-            self.tok_embeddings.weight = self.lm_head.weight
-
-    def init_states(
-        self,
-        *,
-        buffer_device: torch.device | None = None,
-    ) -> None:
-        if self.enable_weight_tying:
-            # Re-tie weights before parameter init so that tok_embeddings.weight
-            # (skipped by skip_param_init) and output.weight point to the same
-            # tensor after output is initialized.
-            assert self.tok_embeddings is not None and self.lm_head is not None
-            self.tok_embeddings.weight = self.lm_head.weight
-
-        super().init_states(buffer_device=buffer_device)

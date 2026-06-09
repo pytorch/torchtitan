@@ -18,6 +18,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 from torchtitan.config.configs import ParallelismConfig
+from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallel_dims import (
     MeshAxisName,
     ParallelDims,
@@ -29,7 +30,6 @@ from torchtitan.distributed.spmd_types import (
     spmd_layout_to_dtensor_placements,
 )
 from torchtitan.models.llama3 import model_registry
-from torchtitan.models.llama3.parallelize import apply_fsdp
 from torchtitan.protocols.module import _shard_spmd_state
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -798,7 +798,7 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
         ref_optim = torch.optim.Adam(ref_model.parameters(), lr=1e-4)
 
         dp_mesh = init_device_mesh(self.device_type, (1,))
-        apply_fsdp(
+        apply_fsdp_to_decoder(
             model,
             dp_mesh,
             param_dtype=torch.bfloat16,

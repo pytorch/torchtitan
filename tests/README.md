@@ -6,10 +6,10 @@ This directory contains tests for the torchtitan project, including unit tests a
 
 - `unit_tests/`: Contains unit tests for individual components
 - `integration_tests/`: Contains integration tests that test multiple components together
-  - `features.py`: Tests for torchtitan features and composability
-  - `ft.py`: Fault-tolerance integration tests
+  - `features.py`: Tests for torchtitan features and composability, based on Llama3
+  - `flux.py`: Tests for the FLUX model
   - `h100.py`: Tests cases for H100 GPUs
-  - `models.py`: Tests for specific model architectures and configurations
+  - `models.py`: Tests for specific model architectures and configurations, other than Llama3 and FLUX
 - `assets/`: Contains test assets and fixtures used by the tests
   - `tokenizer/`: Tokenizer configuration and vocabulary files for testing
   - `custom_schedule.csv`: Custom PP schedule for testing

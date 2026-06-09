@@ -76,5 +76,5 @@ fi
 # Disable Nvlink Sharp. The CI machine seems to be unstable state to support
 # NLVS according to several CI runs.
 # DeepEP needs CUDA_HOME specified to JIT kernels.
-CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests --test_suite h100 "${ARTIFACTS}" --ngpu 8
+CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests --test_suite h100 --gpu_arch_type "${GPU_ARCH_TYPE}" "${ARTIFACTS}" --ngpu 8
 rm -rf "${ARTIFACTS}"/*/checkpoint
