@@ -209,8 +209,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         # rank-agnostic. None when EP=1 so dispatch falls back to the
         # LocalTokenDispatcher path.
         self.ep_mesh: DeviceMesh | None = None
+        # Sequence-parallel split coordinates derived from tp_mesh.
+        # ``sp_rank`` uses ``DeviceMesh._sym_get_coordinate`` so it is a
+        # ``SymInt`` under CooR precompile, keeping the FX graph
+        # rank-agnostic. Defaults are the TP=1 values.
         self.sp_size: int = 1
-        self.sp_rank: int = 0
+        self.sp_rank: int | torch.SymInt = 0
 
     def wire_meshes(
         self,
@@ -227,7 +231,6 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         self.ep_mesh = ep_mesh
         if tp_mesh is not None:
             self.sp_size = tp_mesh.size()
-            # pyrefly: ignore [bad-assignment]
             self.sp_rank = tp_mesh._sym_get_coordinate(0)
 
     def dispatch(
@@ -585,8 +588,6 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
     def __init__(self, config: Config):
         super().__init__(config)
         self.ep_mesh: DeviceMesh | None = None
-        self.sp_size: int = 1
-        self.sp_rank: int = 0
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
@@ -728,7 +729,7 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
         self.pad_multiple = config.pad_multiple
         self.ep_mesh: DeviceMesh | None = None
         self.sp_size: int = 1
-        self.sp_rank: int = 0
+        self.sp_rank: int | torch.SymInt = 0
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
