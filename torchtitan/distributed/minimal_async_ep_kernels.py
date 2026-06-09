@@ -558,13 +558,6 @@ def expert_counting_sort(
     AllToAllTokenDispatcher: sorted by expert id, stable by original flattened
     top-k slot within each expert segment.
     """
-    if topk_expert_ids.ndim != 2:
-        raise ValueError("expert_counting_sort expects a 2D topk_expert_ids tensor.")
-    if num_experts <= 0:
-        raise ValueError(f"num_experts must be positive, got {num_experts}.")
-    if topk_expert_ids.dtype not in (torch.int32, torch.int64):
-        raise ValueError("expert_counting_sort expects integer expert ids.")
-
     flat_expert_ids = topk_expert_ids.reshape(-1)
 
     flat_indices = torch.argsort(flat_expert_ids, stable=True)
@@ -592,33 +585,6 @@ def copy_full_counts_to_peers(
     num_experts: int,
     dst_ptrs: torch.Tensor | None = None,
 ) -> None:
-    if counts.ndim != 1:
-        raise ValueError("copy_full_counts_to_peers expects a 1D counts tensor.")
-    if len(dsts) != ep_size:
-        raise ValueError(f"Expected {ep_size} destination tensors, got {len(dsts)}.")
-    if any(dst.ndim != 2 for dst in dsts):
-        raise ValueError("copy_full_counts_to_peers expects 2D destination tensors.")
-    if counts.numel() < num_experts:
-        raise ValueError(
-            "copy_full_counts_to_peers counts tensor is too small. Got "
-            f"{counts.numel()} values for num_experts={num_experts}."
-        )
-    if counts.dtype != torch.int64:
-        raise ValueError("copy_full_counts_to_peers expects int64 counts.")
-    if any(dst.dtype != counts.dtype for dst in dsts):
-        raise ValueError("copy_full_counts_to_peers destination dtype mismatch.")
-    if dst_ptrs is not None:
-        if dst_ptrs.ndim != 1:
-            raise ValueError("copy_full_counts_to_peers dst_ptrs must be 1D.")
-        if dst_ptrs.numel() < ep_size:
-            raise ValueError("copy_full_counts_to_peers dst_ptrs tensor is too small.")
-        if dst_ptrs.dtype != torch.int64:
-            raise ValueError("copy_full_counts_to_peers dst_ptrs must be int64.")
-        if dst_ptrs.device != counts.device:
-            raise ValueError(
-                "copy_full_counts_to_peers dst_ptrs must match counts device."
-            )
-
     use_pointer_table = ep_size > _POINTER_TABLE_EP_THRESHOLD
     if dst_ptrs is None and use_pointer_table:
         dst_ptrs = torch.tensor(
@@ -651,27 +617,6 @@ def copy_full_counts_to_peers(
             BLOCK_SIZE=block_size,
         )
 
-
-def _validate_active_swiglu_args(
-    gate: torch.Tensor,
-    up: torch.Tensor,
-    active_rows: torch.Tensor,
-) -> None:
-    if gate.ndim != 2 or up.ndim != 2:
-        raise ValueError("active_swiglu expects 2D gate and up tensors.")
-    if gate.shape != up.shape:
-        raise ValueError(
-            "active_swiglu gate and up tensors must have the same shape. Got "
-            f"{gate.shape} and {up.shape}."
-        )
-    if gate.device != up.device or gate.device != active_rows.device:
-        raise ValueError("active_swiglu tensors must be on the same device.")
-    if active_rows.ndim != 1 or active_rows.numel() < 1:
-        raise ValueError("active_swiglu active_rows must be a non-empty 1D tensor.")
-    if active_rows.dtype not in (torch.int32, torch.int64):
-        raise ValueError("active_swiglu active_rows must be int32 or int64.")
-
-
 def active_swiglu_forward(
     gate: torch.Tensor,
     up: torch.Tensor,
@@ -682,7 +627,6 @@ def active_swiglu_forward(
     Rows at or after ``active_rows[0]`` in the returned tensor are unspecified.
     MinimalAsyncEP only consumes rows covered by the same grouped-mm offsets.
     """
-    _validate_active_swiglu_args(gate, up, active_rows)
     out = torch.empty_like(gate)
 
     block_m = 4
@@ -713,15 +657,6 @@ def active_swiglu_backward(
     up: torch.Tensor,
     active_rows: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    _validate_active_swiglu_args(gate, up, active_rows)
-    if grad_out.shape != gate.shape:
-        raise ValueError(
-            "active_swiglu grad_out must match gate/up shape. Got "
-            f"{grad_out.shape} and {gate.shape}."
-        )
-    if grad_out.device != gate.device:
-        raise ValueError("active_swiglu grad_out must be on the same device.")
-
     grad_gate = torch.empty_like(gate)
     grad_up = torch.empty_like(up)
 
@@ -769,63 +704,6 @@ def copy_rows_to_peers(
     dst_ptrs: torch.Tensor | None = None,
     num_valid_rows: torch.Tensor | None = None,
 ) -> None:
-    if src.ndim != 2:
-        raise ValueError("copy_rows_to_peers expects a 2D source tensor.")
-    if len(dsts) != ep_size:
-        raise ValueError(f"Expected {ep_size} destination tensors, got {len(dsts)}.")
-    if any(dst.ndim != 2 for dst in dsts):
-        raise ValueError("copy_rows_to_peers expects 2D destination tensors.")
-    if dst_ranks.ndim != 1 or dst_rows.ndim != 1:
-        raise ValueError("copy_rows_to_peers expects 1D routing tensors.")
-    if dst_ranks.device != src.device or dst_rows.device != src.device:
-        raise ValueError("copy_rows_to_peers routing tensors must match src device.")
-    if dst_ranks.dtype != torch.int64 or dst_rows.dtype != torch.int64:
-        raise ValueError("copy_rows_to_peers routing tensors must be int64.")
-    if valid_rows is not None:
-        if valid_rows.ndim != 1:
-            raise ValueError("copy_rows_to_peers valid_rows must be 1D.")
-        if valid_rows.device != src.device:
-            raise ValueError("copy_rows_to_peers valid_rows must match src device.")
-    if num_valid_rows is not None:
-        if num_valid_rows.shape != (1,):
-            raise ValueError("copy_rows_to_peers num_valid_rows must have shape (1,).")
-        if num_valid_rows.device != src.device:
-            raise ValueError("copy_rows_to_peers num_valid_rows must match src device.")
-        if num_valid_rows.dtype not in (torch.int32, torch.int64):
-            raise ValueError("copy_rows_to_peers num_valid_rows must be integer.")
-    if src_rows is not None:
-        if src_rows.ndim != 1:
-            raise ValueError("copy_rows_to_peers src_rows must be 1D.")
-        if src_rows.device != src.device:
-            raise ValueError("copy_rows_to_peers src_rows must match src device.")
-        if src_rows.dtype != torch.int64:
-            raise ValueError("copy_rows_to_peers src_rows must be int64.")
-    if dst_ptrs is not None:
-        if dst_ptrs.ndim != 1:
-            raise ValueError("copy_rows_to_peers dst_ptrs must be 1D.")
-        if dst_ptrs.numel() < ep_size:
-            raise ValueError("copy_rows_to_peers dst_ptrs tensor is too small.")
-        if dst_ptrs.dtype != torch.int64:
-            raise ValueError("copy_rows_to_peers dst_ptrs must be int64.")
-        if dst_ptrs.device != src.device:
-            raise ValueError("copy_rows_to_peers dst_ptrs must match src device.")
-    if ep_size <= 0:
-        raise ValueError(f"ep_size must be positive, got {ep_size}.")
-    if num_rows < 0:
-        raise ValueError(f"num_rows must be non-negative, got {num_rows}.")
-    if num_cols <= 0:
-        raise ValueError(f"num_cols must be positive, got {num_cols}.")
-    if block_m <= 0:
-        raise ValueError(f"block_m must be positive, got {block_m}.")
-    if num_warps <= 0:
-        raise ValueError(f"num_warps must be positive, got {num_warps}.")
-    if dst_ranks.numel() < num_rows or dst_rows.numel() < num_rows:
-        raise ValueError("copy_rows_to_peers routing tensors are too small.")
-    if valid_rows is not None and valid_rows.numel() < num_rows:
-        raise ValueError("copy_rows_to_peers valid_rows tensor is too small.")
-    if src_rows is not None and src_rows.numel() < num_rows:
-        raise ValueError("copy_rows_to_peers src_rows tensor is too small.")
-
     use_pointer_table = ep_size > _POINTER_TABLE_EP_THRESHOLD
     if dst_ptrs is None and use_pointer_table:
         dst_ptrs = torch.tensor(
@@ -891,9 +769,6 @@ def fill_dispatch_metadata(
     num_local_experts: int,
     max_tokens_per_segment: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if counts.ndim != 1 or local_dest_offsets.ndim != 1 or local_count_starts.ndim != 1:
-        raise ValueError("fill_dispatch_metadata expects 1D input tensors.")
-
     dst_ranks = torch.empty(
         num_routed_tokens,
         device=counts.device,
@@ -931,11 +806,6 @@ def fill_combine_metadata(
     receive_capacity: int,
     max_tokens_per_segment: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if segment_lens.ndim != 1 or output_starts.ndim != 1:
-        raise ValueError("fill_combine_metadata expects 1D segment tensors.")
-    if source_input_starts.ndim != 2:
-        raise ValueError("fill_combine_metadata expects 2D source_input_starts.")
-
     dst_ranks = torch.empty(
         receive_capacity,
         device=segment_lens.device,
@@ -969,15 +839,6 @@ def invert_flat_indices(
     *,
     num_rows: int,
 ) -> torch.Tensor:
-    if flat_indices.ndim != 1:
-        raise ValueError("invert_flat_indices expects a 1D tensor.")
-    if flat_indices.numel() != num_rows:
-        raise ValueError(
-            f"Expected {num_rows} flat indices, got {flat_indices.numel()}."
-        )
-    if flat_indices.dtype != torch.int64:
-        raise ValueError("invert_flat_indices expects int64 indices.")
-
     slot_to_row = torch.empty_like(flat_indices)
 
     block_size = 1024
@@ -999,32 +860,7 @@ def reduce_topk_slots(
     top_k: int,
     scores_are_slot_ordered: bool = False,
 ) -> torch.Tensor:
-    if routed_output.ndim != 2:
-        raise ValueError("reduce_topk_slots expects a 2D routed_output tensor.")
-    if slot_to_row.ndim != 1:
-        raise ValueError("reduce_topk_slots expects a 1D slot_to_row tensor.")
-    if top_k <= 0:
-        raise ValueError(f"top_k must be positive, got {top_k}.")
-    num_rows, num_cols = routed_output.shape
-    if num_tokens * top_k != num_rows:
-        raise ValueError(
-            "num_tokens * top_k must match routed rows. Got "
-            f"{num_tokens} * {top_k} != {num_rows}."
-        )
-    if slot_to_row.numel() != num_rows:
-        raise ValueError("slot_to_row length must match routed rows.")
-    if slot_to_row.device != routed_output.device:
-        raise ValueError("slot_to_row must be on the routed_output device.")
-    if slot_to_row.dtype != torch.int64:
-        raise ValueError("slot_to_row must be int64.")
-    if scores is not None:
-        if scores.ndim != 1:
-            raise ValueError("scores must be 1D.")
-        if scores.numel() != num_rows:
-            raise ValueError("scores length must match routed rows.")
-        if scores.device != routed_output.device:
-            raise ValueError("scores must be on the routed_output device.")
-
+    num_cols = routed_output.shape[1]
     out = torch.empty(
         num_tokens,
         num_cols,
@@ -1061,19 +897,6 @@ def expand_topk_grad(
     dtype: torch.dtype,
     scores_are_slot_ordered: bool = False,
 ) -> torch.Tensor:
-    if grad_out.ndim != 2:
-        raise ValueError("expand_topk_grad expects a 2D grad_out tensor.")
-    if flat_indices.ndim != 1:
-        raise ValueError("expand_topk_grad expects 1D flat_indices.")
-    if top_k <= 0:
-        raise ValueError(f"top_k must be positive, got {top_k}.")
-    if flat_indices.dtype != torch.int64:
-        raise ValueError("flat_indices must be int64.")
-    if flat_indices.device != grad_out.device:
-        raise ValueError("flat_indices must be on the grad_out device.")
-    if scores is not None and scores.device != grad_out.device:
-        raise ValueError("scores must be on the grad_out device.")
-
     num_rows = flat_indices.numel()
     num_cols = grad_out.shape[1]
 
@@ -1114,19 +937,6 @@ def topk_scores_grad(
     dtype: torch.dtype,
     scores_are_slot_ordered: bool = False,
 ) -> torch.Tensor:
-    if routed_output.ndim != 2 or grad_out.ndim != 2:
-        raise ValueError("topk_scores_grad expects 2D tensors.")
-    if flat_indices.ndim != 1:
-        raise ValueError("topk_scores_grad expects 1D flat_indices.")
-    if routed_output.shape[1] != grad_out.shape[1]:
-        raise ValueError("routed_output and grad_out hidden dimensions must match.")
-    if flat_indices.numel() != routed_output.shape[0]:
-        raise ValueError("flat_indices length must match routed rows.")
-    if flat_indices.device != routed_output.device:
-        raise ValueError("flat_indices must be on the routed_output device.")
-    if grad_out.device != routed_output.device:
-        raise ValueError("grad_out must be on the routed_output device.")
-
     num_rows, num_cols = routed_output.shape
     grad_scores = torch.empty(
         num_rows,

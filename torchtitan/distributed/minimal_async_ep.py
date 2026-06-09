@@ -12,7 +12,7 @@ The symmetric-memory allocation is explicit and must happen before dispatch.
 """
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
@@ -48,7 +48,6 @@ _counts_recv_peer_buffers: list[torch.Tensor] | None = None
 _counts_recv_peer_ptrs: torch.Tensor | None = None
 _rendezvous_handle: list[Any] | None = None
 _group: dist.ProcessGroup | None = None
-_group_name: str | None = None
 _hidden_dim: int = 0
 _max_tokens_per_rank: int = 0
 _max_routed_tokens: int = 0
@@ -90,22 +89,9 @@ def init_buffer(
     global _hidden_recv_buffer_index
     global _counts_recv_buffer, _counts_recv_handle, _counts_recv_peer_buffers
     global _counts_recv_peer_ptrs
-    global _rendezvous_handle, _group, _group_name
+    global _rendezvous_handle, _group
     global _hidden_dim, _max_tokens_per_rank, _max_routed_tokens
     global _num_local_experts, _top_k
-
-    if hidden_dim <= 0:
-        raise ValueError(f"hidden_dim must be positive, got {hidden_dim}.")
-    if max_tokens_per_rank <= 0:
-        raise ValueError(
-            f"max_tokens_per_rank must be positive, got {max_tokens_per_rank}."
-        )
-    if num_local_experts <= 0:
-        raise ValueError(
-            f"num_local_experts must be positive, got {num_local_experts}."
-        )
-    if top_k <= 0:
-        raise ValueError(f"top_k must be positive, got {top_k}.")
 
     device = torch.device(device)
     max_routed_tokens = (
@@ -211,46 +197,12 @@ def init_buffer(
         ]
 
     _group = group
-    _group_name = group.group_name
     _hidden_dim = hidden_dim
     _max_tokens_per_rank = max_tokens_per_rank
     _max_routed_tokens = max_routed_tokens
     _num_local_experts = num_local_experts
     _top_k = top_k
     _hidden_recv_buffer_index = 0
-
-
-def _require_initialized(
-    group_name: str,
-    x: torch.Tensor,
-) -> None:
-    if (
-        _hidden_recv_buffers is None
-        or _hidden_recv_handles is None
-        or _hidden_recv_peer_buffers is None
-        or _hidden_recv_peer_ptrs is None
-        or _counts_recv_buffer is None
-        or _counts_recv_handle is None
-        or _counts_recv_peer_buffers is None
-        or _counts_recv_peer_ptrs is None
-        or _rendezvous_handle is None
-    ):
-        raise RuntimeError("MinimalAsyncEP buffer not initialized.")
-    if _group_name != group_name:
-        raise RuntimeError(
-            f"MinimalAsyncEP buffer initialized for group {_group_name!r}, "
-            f"but dispatch used group {group_name!r}."
-        )
-    if x.device != _hidden_recv_buffers[0].device:
-        raise RuntimeError(
-            "MinimalAsyncEP buffer initialized on device "
-            f"{_hidden_recv_buffers[0].device}, but dispatch used device {x.device}."
-        )
-    if x.shape[1] > _hidden_dim:
-        raise RuntimeError(
-            f"MinimalAsyncEP buffer hidden_dim ({_hidden_dim}) is smaller than input "
-            f"hidden_dim ({x.shape[1]})."
-        )
 
 
 def _copy_rows_to_peers_cuda(
@@ -270,12 +222,6 @@ def _copy_rows_to_peers_cuda(
     assert _hidden_recv_peer_buffers is not None
     assert _hidden_recv_peer_ptrs is not None
     assert _group is not None
-
-    if x.shape[0] > _max_routed_tokens:
-        raise RuntimeError(
-            f"MinimalAsyncEP send buffer capacity ({_max_routed_tokens}) is smaller "
-            f"than input rows ({x.shape[0]})."
-        )
 
     buffer_index = _hidden_recv_buffer_index
     _hidden_recv_buffer_index = (
@@ -339,12 +285,6 @@ def _copy_all_counts_to_peers_cuda(
     assert _group is not None
 
     num_experts = ep_size * _num_local_experts
-    if num_local_tokens_per_expert_E.numel() != num_experts:
-        raise RuntimeError(
-            "MinimalAsyncEP count exchange expected "
-            f"{num_experts} counts, got {num_local_tokens_per_expert_E.numel()}."
-        )
-
     copy_full_counts_to_peers(
         num_local_tokens_per_expert_E,
         _counts_recv_peer_buffers,
@@ -643,8 +583,6 @@ def combine(
     top_k: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Move expert outputs to origin ranks and reduce routed top-k rows."""
-    if _hidden_recv_buffers is None:
-        raise RuntimeError("MinimalAsyncEP buffer not initialized.")
     del dispatch_dst_ranks, dispatch_dst_rows
 
     routed_output_ND = _combine_to_origin(  # noqa: N806
@@ -817,11 +755,8 @@ def combine_backward(
             else grad_routed_output + grad_routed_output_extra
         )
 
-    if grad_routed_output is None:
-        raise RuntimeError("combine backward custom op requires a non-empty gradient.")
-
     grad_x = _dispatch_to_experts(
-        grad_routed_output,
+        cast(torch.Tensor, grad_routed_output),
         dispatch_dst_ranks,
         dispatch_dst_rows,
         flat_indices_experts_sorted_N.numel(),
@@ -1056,49 +991,13 @@ def dispatch_tokens(
     token_indices_experts_sorted_N: torch.Tensor,  # noqa: N803
     flat_indices_experts_sorted_N: torch.Tensor,  # noqa: N803
     routed_scores_N: torch.Tensor,  # noqa: N803
-    num_tokens: int,
-    num_local_experts: int,
     group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor, MinimalAsyncEPDispatchMetadata]:
     """Dispatch tokens to experts via MinimalAsyncEP."""
-    if _hidden_recv_buffers is None or _rendezvous_handle is None:
-        raise RuntimeError("MinimalAsyncEP buffer not initialized.")
-    _require_initialized(group.group_name, dispatch_input)
-    if num_tokens > _max_tokens_per_rank:
-        raise RuntimeError(
-            "MinimalAsyncEP buffer max_tokens_per_rank "
-            f"({_max_tokens_per_rank}) is smaller than input tokens ({num_tokens})."
-        )
-    if num_local_experts != _num_local_experts:
-        raise RuntimeError(
-            "MinimalAsyncEP buffer initialized for "
-            f"{_num_local_experts} local experts, "
-            f"but dispatch used {num_local_experts}."
-        )
     ep_size = group.size()
     num_experts = num_local_tokens_per_expert_E.numel()
-    if num_experts % ep_size != 0:
-        raise ValueError(
-            f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size})."
-        )
+    num_tokens = dispatch_input.shape[0]
     num_routed_tokens = flat_indices_experts_sorted_N.numel()
-    if num_routed_tokens > _max_routed_tokens:
-        raise RuntimeError(
-            f"MinimalAsyncEP buffer max_routed_tokens ({_max_routed_tokens}) "
-            "is smaller "
-            f"than routed input rows ({num_routed_tokens})."
-        )
-    if token_indices_experts_sorted_N.numel() != num_routed_tokens:
-        raise ValueError(
-            "token_indices_experts_sorted_N and flat_indices_experts_sorted_N "
-            "must have the same length, got "
-            f"{token_indices_experts_sorted_N.numel()} and {num_routed_tokens}."
-        )
-    if dispatch_input.shape[0] != num_tokens:
-        raise ValueError(
-            "MinimalAsyncEP expects token-ordered dispatch_input with one row per "
-            f"token, got {dispatch_input.shape[0]} rows for {num_tokens} tokens."
-        )
     if routed_scores_N.dtype != dispatch_input.dtype:
         routed_scores_N = routed_scores_N.to(dispatch_input.dtype)
 
@@ -1161,8 +1060,6 @@ def combine_tokens(
     metadata: MinimalAsyncEPDispatchMetadata,
 ) -> torch.Tensor:
     """Combine expert outputs back to original token order."""
-    if _hidden_recv_buffers is None or _rendezvous_handle is None:
-        raise RuntimeError("MinimalAsyncEP buffer not initialized.")
     out_TD, _routed_output_ND = combine(  # noqa: N806
         hidden_states,
         metadata.dispatch_dst_ranks,
