@@ -43,6 +43,12 @@ from torchtitan.experiments.graph_trainer.registry import (
 from torchtitan.tools.logging import logger
 
 
+def _is_symint_node(node: torch.fx.Node) -> bool:
+    """True if the node produces a SymInt (a shape read like sym_size/sym_stride,
+    or a tensor->int scalar conversion) rather than a tensor."""
+    return "val" in node.meta and isinstance(node.meta["val"], torch.SymInt)
+
+
 def _make_default_memory_policy(
     save_ops: set | None = None,
     *,
@@ -185,7 +191,7 @@ def tag_sac_policy(
         # a shape read pins the parent tensor alive in backward just to reread its
         # size. We key off meta["val"] being a SymInt -- mirroring AOT Autograd's
         # partitioner, which saves SymInts (cheap scalars) but never SymFloats.
-        if "val" in node.meta and isinstance(node.meta["val"], torch.SymInt):
+        if _is_symint_node(node):
             node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
             continue
 
@@ -225,19 +231,21 @@ def tag_sac_policy(
     # ops plus getitem/wait_tensor (which inherit a parent's tag) plus any node
     # the boundary pass forced to MUST_SAVE — so the per-layer MUST_SAVE counts
     # account for boundary saves wherever they land (including on getitem /
-    # wait_tensor). The recompute count covers both PREFER_RECOMPUTE and
-    # MUST_RECOMPUTE, so the column is labelled generically as RECOMPUTE.
+    # wait_tensor). MUST_SAVE is split into tensor saves vs. symint saves (the
+    # shape reads force-saved above), since the two have very different memory
+    # cost — a saved tensor pins an activation, a saved SymInt is a cheap scalar.
+    # The recompute count covers both PREFER_RECOMPUTE and MUST_RECOMPUTE, so the
+    # column is labelled generically as RECOMPUTE.
     layer_stats: dict[int, dict[str, int]] = defaultdict(
-        lambda: {"save": 0, "recompute": 0}
+        lambda: {"tensor_save": 0, "symint_save": 0, "recompute": 0}
     )
     for node in gm.graph.nodes:
         if "recompute" not in node.meta:
             continue
-        key = (
-            "save"
-            if node.meta["recompute"] == CheckpointPolicy.MUST_SAVE
-            else "recompute"
-        )
+        if node.meta["recompute"] == CheckpointPolicy.MUST_SAVE:
+            key = "symint_save" if _is_symint_node(node) else "tensor_save"
+        else:
+            key = "recompute"
         layer_stats[_get_layer_id(node)][key] += 1
 
     logger.info("Applied selective activation checkpointing (SAC) graph pass.")
@@ -248,7 +256,8 @@ def tag_sac_policy(
         label = "non-layer" if layer_id == _NOT_IN_LAYERS else str(layer_id)
         logger.info(
             f"  Layer {label}: "
-            f"{stats['save']} MUST_SAVE, "
+            f"{stats['tensor_save']} MUST_SAVE tensor, "
+            f"{stats['symint_save']} MUST_SAVE symint, "
             f"{stats['recompute']} RECOMPUTE"
         )
     return gm
