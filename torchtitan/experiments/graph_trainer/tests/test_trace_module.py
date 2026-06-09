@@ -1364,9 +1364,6 @@ class TestTraceModels(unittest.TestCase):
                     f"{node.name} missing compile_with_inductor annotation",
                 )
 
-    # TODO: Fix scatter() dtype mismatch — scatter_add expects self.dtype == src.dtype
-    # but GptOss produces mismatched dtypes during tracing.
-    @unittest.skip("scatter(): Expected self.dtype to be equal to src.dtype")
     def test_gpt_oss(self):
         from torch.nn.attention.flex_attention import and_masks
 
@@ -1608,8 +1605,6 @@ class TestTraceFSDP(FSDPTest):
         )
         self._run_fsdp_model_test(DeepSeekV3Model, config)
 
-    # TODO: Fix scatter() dtype mismatch — same root cause as TestTraceModels.test_gpt_oss.
-    @unittest.skip("scatter(): Expected self.dtype to be equal to src.dtype")
     def test_gpt_oss_fsdp(self):
         from torch.nn.attention.flex_attention import and_masks
 

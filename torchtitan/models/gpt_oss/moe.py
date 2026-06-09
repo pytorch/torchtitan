@@ -127,6 +127,11 @@ class GptOssGroupedExperts(Module):
             [num_tokens_per_expert_E, tail_slack]
         ).long()
 
+        # torch._grouped_mm needs bf16 inputs, so both matmuls run in bf16 and the
+        # bias-adds/swiglu stay in bf16 too (matching GroupedExperts; only the bias is
+        # new here). The output is cast back to the input dtype at the end via
+        # .type_as(x_RD). Keeping intermediates in bf16 is fine since real usage is bf16.
+
         # G = gate+up dimension (2*F)
         h_RG = torch._grouped_mm(
             x_RD.bfloat16(),
@@ -155,7 +160,8 @@ class GptOssGroupedExperts(Module):
             num_tokens_per_expert_long, dim=0, output_size=x_RD.shape[0]
         )
         b2_RD = ScaleBiasForward.apply(b2_RD, tp_degree)
-        return h_RD + b2_RD.to(h_RD.dtype)
+        # Cast bf16 result back to the input dtype (see note above), like GroupedExperts.
+        return (h_RD + b2_RD.to(h_RD.dtype)).type_as(x_RD)
 
     def forward(
         self,
