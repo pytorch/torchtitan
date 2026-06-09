@@ -426,6 +426,8 @@ class ParallelDims:
                  submesh. Only current usecase is in spmd_types backend distributed
                  param/buffer registration (assert_type call), so that size-1 axis
                  filtering is handled internally by spmd_types.
+                 TODO(pianpwk): let spmd_types handle all size-1 mesh axis filtering
+                 once migration to spmd_types backend is complete.
 
         Returns:
             DeviceMesh for the requested dimension(s), or None if:
