@@ -587,19 +587,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         positions = extra_inputs.pop("positions", None)
 
-        if isinstance(self.model_config, Decoder.Config):
-            attn_config = self.model_config.layers[0].attention
-            inner_attention = attn_config.inner_attention
-
-            if attn_config.mask_type == "block_causal":
-                assert (
-                    positions is not None
-                ), "block_causal mask requires per-document positions from the dataloader"
-            else:
-                positions = torch.arange(
-                    inputs.shape[1], dtype=torch.int32, device=inputs.device
-                ).repeat(inputs.shape[0], 1)
-
+        # positions and attention_masks are optional (Decoder.forward defaults
+        # both to None). Build attention masks only for the masked backends
+        # (Flex/Varlen), which is where get_attention_masks is defined. A
+        # maskless backend (e.g. the SDPA config used by the graph_trainer
+        # tests) still receives positions for RoPE but no masks — it relies on
+        # is_causal instead.
+        if isinstance(self.model_config, Decoder.Config) and positions is not None:
+            inner_attention = self.model_config.layers[0].attention.inner_attention
             if isinstance(
                 inner_attention, (FlexAttention.Config, VarlenAttention.Config)
             ):

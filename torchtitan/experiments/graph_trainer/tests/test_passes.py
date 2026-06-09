@@ -861,6 +861,14 @@ class TestBucketingPrefetchOrder(FSDPTest):
         labels = torch.randint(
             0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device="cuda"
         )
+        # The dataloader always supplies per-document positions, which the
+        # trainer requires to build the (block_causal) FlexAttention mask. A
+        # single document (sequential positions) is fine here.
+        positions = (
+            torch.arange(self.SEQ_LEN, device="cuda", dtype=torch.int32)
+            .unsqueeze(0)
+            .expand(self.BATCH_SIZE, self.SEQ_LEN)
+        )
         global_valid_tokens = torch.tensor(
             self.BATCH_SIZE * self.SEQ_LEN, dtype=torch.float, device="cuda"
         )
@@ -868,7 +876,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
         # One forward_backward_step triggers _make_fx_forward_backward_step
         # which traces the model and applies all graph passes.
         trainer.forward_backward_step(
-            input_dict={"input": inputs},
+            input_dict={"input": inputs, "positions": positions},
             labels=labels,
             global_valid_tokens=global_valid_tokens,
         )

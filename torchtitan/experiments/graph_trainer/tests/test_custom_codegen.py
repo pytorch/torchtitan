@@ -161,6 +161,12 @@ class TestCustomCodegenPass(TestCase):
 
         with open(custom_gm._code_path, "w") as f:
             f.write(modified_code)
+        # Bump mtime so the hot-reload check reaches the content-hash compare.
+        # _check_file_modified short-circuits when the mtime is unchanged; on a
+        # coarse-granularity filesystem the rewrite can land in the same mtime
+        # tick as the cached value (a real edit always lands in a later tick).
+        bumped = custom_gm._code_mtime + 1
+        os.utime(custom_gm._code_path, (bumped, bumped))
 
         # Bump the file's mtime past the cached value. The initial write and this
         # rewrite can land in the same mtime tick on filesystems with coarse
