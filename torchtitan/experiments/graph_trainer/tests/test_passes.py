@@ -35,7 +35,9 @@ from torchtitan.experiments.graph_trainer.cudagraph import (
 from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
     isolate_ep_process_group_pass,
 )
-from torchtitan.experiments.graph_trainer.fsdp_passes import overlap_fsdp_ag_rs_pass
+from torchtitan.experiments.graph_trainer.fsdp_passes import (
+    reassign_collective_pgs_pass,
+)
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
 from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
 from torchtitan.experiments.graph_trainer.memory_policy import (
@@ -92,8 +94,8 @@ class ToyModel(Module):
         return x
 
 
-class TestOverlapFsdpAgRsPass(FSDPTest):
-    """Integration tests: toy model + simple_fsdp + export_joint + overlap_fsdp_ag_rs_pass."""
+class TestReassignCollectivePgsPass(FSDPTest):
+    """Integration tests: toy model + simple_fsdp + export_joint + reassign_collective_pgs_pass."""
 
     def _setup(self):
         """Set up ParallelDims and device mesh for FSDP."""
@@ -165,7 +167,7 @@ class TestOverlapFsdpAgRsPass(FSDPTest):
         )
 
     def test_overlap_rewrites_ag_nodes(self):
-        """Apply overlap_fsdp_ag_rs_pass on the real backward graph and verify
+        """Apply reassign_collective_pgs_pass on the real backward graph and verify
         that FSDP AG nodes are rewritten to the auto-created extra PG."""
         from torchtitan.experiments.graph_trainer.fsdp_passes import (
             _EXTRA_FSDP_PG_REGISTRY,
@@ -183,7 +185,7 @@ class TestOverlapFsdpAgRsPass(FSDPTest):
         self.assertGreater(ag_before, 0, "Expected AG nodes with FSDP PG name")
 
         _EXTRA_FSDP_PG_REGISTRY.pop(fsdp_pg_name, None)
-        overlap_fsdp_ag_rs_pass(bw_gm, bw_example_inputs)
+        reassign_collective_pgs_pass(bw_gm, bw_example_inputs)
 
         extra_pg_name = _EXTRA_FSDP_PG_REGISTRY[fsdp_pg_name]
         ag_with_old = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
@@ -205,7 +207,7 @@ class TestOverlapFsdpAgRsPass(FSDPTest):
         bw_gm, bw_example_inputs = self._export_and_get_bw_graph(model, inputs)
 
         total_before = self._count_all_ag_nodes(bw_gm)
-        overlap_fsdp_ag_rs_pass(bw_gm, bw_example_inputs)
+        reassign_collective_pgs_pass(bw_gm, bw_example_inputs)
         total_after = self._count_all_ag_nodes(bw_gm)
 
         self.assertEqual(total_before, total_after)
@@ -247,7 +249,7 @@ class TestOverlapFsdpAgRsPass(FSDPTest):
 
         _EXTRA_FSDP_PG_REGISTRY.pop(fsdp_pg_name, None)
         _EXTRA_FSDP_PG_REGISTRY.pop(second_pg_name, None)
-        overlap_fsdp_ag_rs_pass(bw_gm, bw_example_inputs)
+        reassign_collective_pgs_pass(bw_gm, bw_example_inputs)
 
         # Both source PGs should have their own extra PG
         self.assertIn(fsdp_pg_name, _EXTRA_FSDP_PG_REGISTRY)
@@ -296,7 +298,7 @@ class TestOverlapFsdpAgRsPass(FSDPTest):
 
         _EXTRA_FSDP_PG_REGISTRY.pop(fsdp_pg_name, None)
         _EXTRA_EP_PG_REGISTRY.pop(fsdp_pg_name, None)
-        overlap_fsdp_ag_rs_pass(gm, ())
+        reassign_collective_pgs_pass(gm, ())
         isolate_ep_process_group_pass(gm, ())
 
         fsdp_extra_pg = _EXTRA_FSDP_PG_REGISTRY[fsdp_pg_name]
@@ -343,7 +345,7 @@ class TestOverlapFsdpAgRsPass(FSDPTest):
 
         _EXTRA_FSDP_PG_REGISTRY.pop(fsdp_pg_name, None)
         _EXTRA_EP_PG_REGISTRY.pop(ep_pg_name, None)
-        overlap_fsdp_ag_rs_pass(gm, ())
+        reassign_collective_pgs_pass(gm, ())
         isolate_ep_process_group_pass(gm, ())
 
         self.assertNotIn(ep_pg_name, _EXTRA_EP_PG_REGISTRY)
@@ -391,7 +393,7 @@ class TestOverlapFsdpAgRsPass(FSDPTest):
         # Plain (non-FSDP) module: a graph without FSDP all-gathers.
         gm = torch.fx.symbolic_trace(torch.nn.Linear(4, 4))
         ag_before = self._count_all_ag_nodes(gm)
-        overlap_fsdp_ag_rs_pass(gm, ())
+        reassign_collective_pgs_pass(gm, ())
         ag_after = self._count_all_ag_nodes(gm)
         self.assertEqual(ag_before, 0)
         self.assertEqual(ag_after, 0)
