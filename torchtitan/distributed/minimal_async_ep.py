@@ -17,7 +17,6 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
-from torch.utils._python_dispatch import _disable_current_modes
 
 from torchtitan.distributed.minimal_async_ep_kernels import (
     active_swiglu_backward as active_swiglu_backward_kernel,
@@ -138,69 +137,68 @@ def init_buffer(
         group.size(),
         max_routed_tokens,
     )
-    with _disable_current_modes():
-        backend = symm_mem.get_backend(device)
-        if backend != "CUDA":
-            raise RuntimeError(
-                "MinimalAsyncEP custom all-to-allv requires the symmetric-memory CUDA "
-                f"backend, got {backend}."
-            )
+    backend = symm_mem.get_backend(device)
+    if backend != "CUDA":
+        raise RuntimeError(
+            "MinimalAsyncEP custom all-to-allv requires the symmetric-memory CUDA "
+            f"backend, got {backend}."
+        )
 
-        _hidden_recv_buffers = [
-            symm_mem.empty(
-                max_routed_tokens,
-                hidden_dim,
-                dtype=dtype,
-                device=device,
-            )
-            for _ in range(_HIDDEN_RECV_BUFFER_COUNT)
-        ]
-        _counts_recv_buffer = symm_mem.empty(
-            group.size(),
-            num_experts,
-            dtype=torch.int64,
+    _hidden_recv_buffers = [
+        symm_mem.empty(
+            max_routed_tokens,
+            hidden_dim,
+            dtype=dtype,
             device=device,
         )
-        _hidden_recv_handles = [
-            symm_mem.rendezvous(hidden_recv_buffer, group)
-            for hidden_recv_buffer in _hidden_recv_buffers
-        ]
-        _counts_recv_handle = symm_mem.rendezvous(_counts_recv_buffer, group)
-        _hidden_recv_peer_buffers = [
-            [
-                hidden_recv_handle.get_buffer(
-                    peer,
-                    hidden_recv_buffer.shape,
-                    hidden_recv_buffer.dtype,
-                )
-                for peer in range(group.size())
-            ]
-            for hidden_recv_buffer, hidden_recv_handle in zip(
-                _hidden_recv_buffers,
-                _hidden_recv_handles,
-            )
-        ]
-        _hidden_recv_peer_ptrs = [
-            torch.tensor(
-                [peer_buffer.data_ptr() for peer_buffer in hidden_recv_peer_buffers],
-                dtype=torch.int64,
-                device=device,
-            )
-            for hidden_recv_peer_buffers in _hidden_recv_peer_buffers
-        ]
-        _counts_recv_peer_buffers = [
-            _counts_recv_handle.get_buffer(
+        for _ in range(_HIDDEN_RECV_BUFFER_COUNT)
+    ]
+    _counts_recv_buffer = symm_mem.empty(
+        group.size(),
+        num_experts,
+        dtype=torch.int64,
+        device=device,
+    )
+    _hidden_recv_handles = [
+        symm_mem.rendezvous(hidden_recv_buffer, group)
+        for hidden_recv_buffer in _hidden_recv_buffers
+    ]
+    _counts_recv_handle = symm_mem.rendezvous(_counts_recv_buffer, group)
+    _hidden_recv_peer_buffers = [
+        [
+            hidden_recv_handle.get_buffer(
                 peer,
-                _counts_recv_buffer.shape,
-                _counts_recv_buffer.dtype,
+                hidden_recv_buffer.shape,
+                hidden_recv_buffer.dtype,
             )
             for peer in range(group.size())
         ]
-        _counts_recv_peer_ptrs = torch.tensor(
-            [peer_buffer.data_ptr() for peer_buffer in _counts_recv_peer_buffers],
+        for hidden_recv_buffer, hidden_recv_handle in zip(
+            _hidden_recv_buffers,
+            _hidden_recv_handles,
+        )
+    ]
+    _hidden_recv_peer_ptrs = [
+        torch.tensor(
+            [peer_buffer.data_ptr() for peer_buffer in hidden_recv_peer_buffers],
             dtype=torch.int64,
             device=device,
         )
+        for hidden_recv_peer_buffers in _hidden_recv_peer_buffers
+    ]
+    _counts_recv_peer_buffers = [
+        _counts_recv_handle.get_buffer(
+            peer,
+            _counts_recv_buffer.shape,
+            _counts_recv_buffer.dtype,
+        )
+        for peer in range(group.size())
+    ]
+    _counts_recv_peer_ptrs = torch.tensor(
+        [peer_buffer.data_ptr() for peer_buffer in _counts_recv_peer_buffers],
+        dtype=torch.int64,
+        device=device,
+    )
 
     _group = group
     _tokens_per_rank = tokens_per_rank
@@ -505,12 +503,30 @@ def dispatch_metadata_fake(
     torch.Tensor,
 ]:
     num_local_experts = num_local_tokens_per_expert_E.shape[0] // ep_size
-    dispatch_dst_ranks = num_local_tokens_per_expert_E.new_empty(num_routed_rows)
-    dispatch_dst_rows = num_local_tokens_per_expert_E.new_empty(num_routed_rows)
-    combine_dst_ranks = num_local_tokens_per_expert_E.new_empty(receive_capacity)
-    combine_dst_rows = num_local_tokens_per_expert_E.new_empty(receive_capacity)
-    combine_num_valid_rows = num_local_tokens_per_expert_E.new_empty(1)
-    tokens_per_expert = num_local_tokens_per_expert_E.new_empty(num_local_experts)
+    dispatch_dst_ranks = num_local_tokens_per_expert_E.new_empty(
+        num_routed_rows,
+        dtype=torch.int64,
+    )
+    dispatch_dst_rows = num_local_tokens_per_expert_E.new_empty(
+        num_routed_rows,
+        dtype=torch.int64,
+    )
+    combine_dst_ranks = num_local_tokens_per_expert_E.new_empty(
+        receive_capacity,
+        dtype=torch.int64,
+    )
+    combine_dst_rows = num_local_tokens_per_expert_E.new_empty(
+        receive_capacity,
+        dtype=torch.int64,
+    )
+    combine_num_valid_rows = num_local_tokens_per_expert_E.new_empty(
+        1,
+        dtype=torch.int64,
+    )
+    tokens_per_expert = num_local_tokens_per_expert_E.new_empty(
+        num_local_experts,
+        dtype=torch.int64,
+    )
     return (
         dispatch_dst_ranks,
         dispatch_dst_rows,
