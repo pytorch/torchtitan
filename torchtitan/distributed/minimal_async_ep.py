@@ -411,7 +411,18 @@ def active_swiglu(
     up: torch.Tensor,
     active_rows: torch.Tensor,
 ) -> torch.Tensor:
-    """Compute ``silu(gate) * up`` only for active rows in padded expert buffers."""
+    """Compute ``silu(gate) * up`` over active padded expert-buffer rows.
+
+    Args:
+        gate, up: ``(R_max, F)`` expert intermediate rows, where only the
+            first ``R`` rows are active and ``R_max`` is the static receive
+            capacity.
+        active_rows: ``(1,)`` device scalar containing ``R``.
+
+    Returns:
+        ``(R_max, F)`` output. Rows ``[:R]`` are defined; rows ``[R:]`` are
+        unspecified because grouped-mm offsets skip receive-capacity padding.
+    """
     return active_swiglu_forward(gate, up, active_rows)
 
 
@@ -433,7 +444,16 @@ def invert_flat_indices(
     flat_indices: torch.Tensor,
     num_rows: int,
 ) -> torch.Tensor:
-    """Invert an E-major to T-major routed-row mapping."""
+    """Invert the routed-row permutation.
+
+    Args:
+        flat_indices: ``(N,)`` mapping E-major routed rows to T-major top-k
+            slots.
+        num_rows: ``N`` routed rows.
+
+    Returns:
+        ``(N,)`` mapping T-major top-k slots to E-major routed rows.
+    """
     return _invert_flat_indices(flat_indices, num_rows=num_rows)
 
 
@@ -463,7 +483,24 @@ def dispatch_metadata(
     torch.Tensor,
     torch.Tensor,
 ]:
-    """Exchange int64 per-expert local token counts and build routing metadata."""
+    """Exchange per-expert local counts and build dispatch/combine metadata.
+
+    Args:
+        num_local_tokens_per_expert_E: ``(E,)`` int64 counts for this rank's
+            local token shard over all global experts.
+        num_routed_rows: ``N = T * K`` routed rows in local E-major order.
+        receive_capacity: ``R_max`` static receive-buffer row capacity.
+        ep_size: ``EP`` expert-parallel group size.
+
+    Returns:
+        ``dispatch_dst_ranks`` and ``dispatch_dst_rows``: ``(N,)`` maps local
+        E-major routed rows to destination EP rank and destination receive row.
+        ``combine_dst_ranks`` and ``combine_dst_rows``: ``(R_max,)`` maps
+        active received rows back to origin EP rank and origin E-major row.
+        ``combine_num_valid_rows``: ``(1,)`` device scalar active row count
+        ``R``. ``tokens_per_expert``: ``(E / EP,)`` active rows per local
+        expert on this rank.
+    """
 
     # Mirrors AllToAllTokenDispatcher's count exchange: each rank starts with
     # counts for its local tokens over all global experts, then learns how many
@@ -546,7 +583,20 @@ def dispatch_forward(
     E_row_to_token_N: torch.Tensor,  # noqa: N803
     receive_capacity: int,
 ) -> torch.Tensor:
-    """Dispatch E-major routed rows using source token-row indices."""
+    """Dispatch local token rows to expert-owner ranks.
+
+    Args:
+        dispatch_input: ``(T, D)`` local token rows.
+        dispatch_dst_ranks, dispatch_dst_rows: ``(N,)`` destination rank and
+            receive row for each E-major routed row.
+        E_row_to_token_N: ``(N,)`` maps E-major routed rows to source token
+            rows in ``dispatch_input``.
+        receive_capacity: ``R_max`` static receive-buffer row capacity.
+
+    Returns:
+        ``(R_max, D)`` local expert-major receive buffer. Rows beyond the
+        active received row count are padding.
+    """
     num_routed_rows = E_row_to_token_N.numel()
     # This direct copy corresponds to AllToAllTokenDispatcher's token all-to-all;
     # dispatch_dst_rows already point at the post-_permute E-major layout.
@@ -591,7 +641,28 @@ def combine_forward(
     num_tokens: int,
     top_k: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Move expert outputs to origin ranks and reduce routed top-k rows."""
+    """Move expert outputs to origin ranks and reduce routed top-k rows.
+
+    Args:
+        x: ``(R_max, D)`` local expert output rows.
+        dispatch_dst_ranks, dispatch_dst_rows: ``(N,)`` forward dispatch
+            destinations, saved for backward.
+        combine_dst_ranks, combine_dst_rows: ``(R_max,)`` origin rank and
+            origin E-major row for each active received row.
+        combine_num_valid_rows: ``(1,)`` device scalar active row count ``R``.
+        T_row_to_E_row_N: ``(N,)`` maps T-major top-k slots to E-major routed
+            rows.
+        E_row_to_T_row_N: ``(N,)`` maps E-major routed rows to T-major top-k
+            slots.
+        routed_scores_N: ``(N,)`` T-major routed scores.
+        num_tokens: ``T`` local tokens.
+        top_k: ``K`` routed rows per token.
+
+    Returns:
+        ``out_TD``: ``(T, D)`` reduced token rows.
+        ``routed_output_ND``: ``(N, D)`` origin-rank E-major routed rows, saved
+        for routing-score gradients.
+    """
     routed_output_ND = _combine_to_origin(  # noqa: N806
         x,
         combine_dst_ranks,
@@ -644,7 +715,16 @@ def active_swiglu_backward(
     up: torch.Tensor,
     active_rows: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute active-row gradients for ``minimal_async_ep::active_swiglu``."""
+    """Compute active-row gradients for ``minimal_async_ep::active_swiglu``.
+
+    Args:
+        grad_out, gate, up: ``(R_max, F)`` tensors from the forward op.
+        active_rows: ``(1,)`` device scalar containing active row count ``R``.
+
+    Returns:
+        ``grad_gate`` and ``grad_up`` with shape ``(R_max, F)``. Rows ``[R:]``
+        are unspecified because receive-capacity padding is not consumed.
+    """
     return active_swiglu_backward_kernel(grad_out, gate, up, active_rows)
 
 
@@ -673,7 +753,22 @@ def dispatch_backward(
     num_tokens: int,
     top_k: int,
 ) -> torch.Tensor:
-    """Move dispatched activation gradients back and reduce routed top-k rows."""
+    """Move dispatched activation gradients back and reduce routed top-k rows.
+
+    Args:
+        grad_hidden: ``(R_max, D)`` gradient for expert-owner received rows.
+        combine_dst_ranks, combine_dst_rows: ``(R_max,)`` origin rank and
+            origin E-major row for each active received row.
+        combine_num_valid_rows: ``(1,)`` device scalar active row count ``R``.
+        T_row_to_E_row_N: ``(N,)`` maps T-major top-k slots to E-major routed
+            rows.
+        num_routed_rows: ``N`` routed rows.
+        num_tokens: ``T`` local tokens.
+        top_k: ``K`` routed rows per token.
+
+    Returns:
+        ``(T, D)`` gradient for the dispatch input token rows.
+    """
     grad_routed_input = _combine_to_origin(
         grad_hidden,
         combine_dst_ranks,
@@ -719,7 +814,24 @@ def combine_backward(
     top_k: int,
     receive_capacity: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Expand combine gradients and dispatch them back to expert-owner ranks."""
+    """Expand combine gradients and dispatch them back to expert-owner ranks.
+
+    Args:
+        grad_out: ``(T, D)`` gradient for reduced token rows.
+        dispatch_dst_ranks, dispatch_dst_rows: ``(N,)`` destination rank and
+            receive row for each E-major routed row.
+        E_row_to_T_row_N: ``(N,)`` maps E-major routed rows to T-major top-k
+            slots.
+        routed_scores_N: ``(N,)`` T-major routed scores.
+        saved_routed_output_ND: ``(N, D)`` origin-rank E-major routed output
+            rows from ``combine_forward``.
+        top_k: ``K`` routed rows per token.
+        receive_capacity: ``R_max`` static receive-buffer row capacity.
+
+    Returns:
+        ``grad_x``: ``(R_max, D)`` gradient for expert output rows.
+        ``grad_scores``: ``(N,)`` gradient for routed scores.
+    """
     grad_routed_output = expand_topk_grad(
         grad_out,
         E_row_to_T_row_N,
