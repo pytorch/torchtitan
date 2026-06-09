@@ -13,6 +13,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
+from torchtitan.distributed.minimal_async_ep import active_swiglu
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
@@ -96,8 +97,6 @@ class GroupedExperts(Module):
             offs=offsets_E,
         )
         if skip_swiglu_padding:
-            from torchtitan.distributed.minimal_async_ep import active_swiglu
-
             h_RF = active_swiglu(gate_RF, up_RF, offsets_E[-1:])
         else:
             h_RF = F.silu(gate_RF) * up_RF
