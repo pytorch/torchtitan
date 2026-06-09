@@ -50,7 +50,6 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
     annotate_module_fqns(model)
 
 
-# Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
     model: GraphTrainerDeepSeekV3Model,
     *,
@@ -85,7 +84,7 @@ def parallelize_deepseekv3(
     if is_hybridep:
         from torchtitan.distributed.deepep import hybridep  # noqa: F401
 
-    if parallelism.full_dtensor:
+    if parallelism.spmd_backend == "full_dtensor":
         validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)
     else:

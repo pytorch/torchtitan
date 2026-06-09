@@ -220,7 +220,7 @@ class Validator(BaseValidator):
                 self.parallelism.context_parallel_load_balancer,
             )
 
-        if self.parallelism.full_dtensor:
+        if self.parallelism.spmd_backend == "full_dtensor":
             inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
@@ -274,7 +274,7 @@ class Validator(BaseValidator):
                     local_valid_tokens, batch_mesh, None
                 )
             else:
-                global_valid_tokens = local_valid_tokens.float()
+                global_valid_tokens = float(local_valid_tokens.item())
 
             # Process data (extract inputs, handle attention masks, CP sharding)
             inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(

@@ -171,7 +171,6 @@ class ReplicateComputation(Module):
         self,
         device_mesh: DeviceMesh,
         param_sharding: tuple[Placement, ...],
-        mode: str,
         mp_policy: MixedPrecisionPolicy | None,
         dp_axis_names_in_full_mesh: frozenset[str] | None = None,
         full_spmd_mesh: DeviceMesh | None = None,
@@ -179,7 +178,6 @@ class ReplicateComputation(Module):
         super().__init__()
         self.device_mesh = device_mesh
         self.param_sharding = param_sharding
-        self.mode = mode
         self.compute_placements: list[Placement] = [Replicate()] * self.device_mesh.ndim
         self.grad_placements: list[Placement] = [
             Partial(reduce_op="sum")
@@ -440,7 +438,6 @@ def data_parallel(
                 ReplicateComputation(
                     device_mesh,
                     param_sharding,
-                    mode,
                     mp_policy=mp_policy,
                     full_spmd_mesh=full_spmd_mesh,
                     dp_axis_names_in_full_mesh=dp_axis_names if full_dtensor else None,

@@ -200,7 +200,7 @@ def apply_simple_fsdp(
     their DP axes; on the legacy path they are pre-flattened (no dims). The dense
     ``edp_mesh`` is ``None`` when EP is disabled.
     """
-    if parallel_dims.full_dtensor:
+    if parallel_dims.spmd_backend == "full_dtensor":
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
         edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
     else:

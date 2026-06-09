@@ -75,7 +75,7 @@ def parallelize_qwen3(
 
     annotate_qwen3(model)
 
-    if parallelism.full_dtensor:
+    if parallelism.spmd_backend == "full_dtensor":
         validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)
     else:

@@ -26,7 +26,7 @@ def build_ft_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module ft.llama3 --config llama3_ft_debugmodel",
+                    "--module torchft.llama3 --config llama3_torchft_debugmodel",
                     "--training.steps 10",
                     "--checkpoint.enable",
                 ],
