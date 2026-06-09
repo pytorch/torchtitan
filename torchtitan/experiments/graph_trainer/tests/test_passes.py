@@ -16,6 +16,7 @@ from torch._inductor.fx_passes.bucketing import (
 )
 from torch.cuda._graph_annotations import _is_tools_id_unavailable
 from torch.fx.experimental.proxy_tensor import make_fx
+from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.fx.traceback import preserve_node_meta
 from torch.testing._internal.common_fsdp import FSDPTest
 from torch.testing._internal.common_utils import TestCase
@@ -449,6 +450,33 @@ class TestApplySACPass(TestCase):
         nodes = self._get_call_function_nodes(gm)
         self.assertEqual(len(nodes), 1)
         self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
+
+    def test_sym_size_ops_always_saved(self):
+        """Sym-int nodes are forced MUST_SAVE regardless of policy: recomputing a
+        shape read would pin the parent tensor alive just to reread its size."""
+        # sym_size produces a SymInt only for symbolic dims, so tag the node's
+        # meta["val"] with a real SymInt — that is what is_sym_node keys off.
+        shape_env = ShapeEnv()
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+        sym = graph.call_function(torch.ops.aten.sym_size.int, args=(relu, 0))
+        sym.meta["val"] = shape_env.create_unbacked_symint()
+        graph.output(relu)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        # Even a recompute-everything policy must save sym_size.
+        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+
+        tags = {
+            n.target: n.meta["recompute"]
+            for n in gm.graph.nodes
+            if n.op == "call_function"
+        }
+        self.assertEqual(tags[torch.ops.aten.sym_size.int], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(
+            tags[torch.ops.aten.relu.default], CheckpointPolicy.MUST_RECOMPUTE
+        )
 
     def test_getitem_propagates_parent_tags(self):
         """operator.getitem nodes should inherit the parent's recompute tag."""
