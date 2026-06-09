@@ -79,7 +79,7 @@ def _init_minimal_async_ep_buffer(
     minimal_async_ep.init_buffer(
         group=parallel_dims.get_mesh("ep").get_group(),
         hidden_dim=model.config.dim,
-        max_tokens_per_rank=training.local_batch_size * training.seq_len,
+        tokens_per_rank=training.local_batch_size * training.seq_len,
         num_local_experts=dispatcher_config.num_experts // parallel_dims.ep,
         top_k=dispatcher_config.top_k,
         dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],

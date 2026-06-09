@@ -973,7 +973,5 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
         """Combine tokens via MinimalAsyncEP."""
-        del x_TD
-
         # pyrefly: ignore [bad-argument-type]
         return combine_tokens(routed_output_RD, metadata.state)
