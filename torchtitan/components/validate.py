@@ -181,25 +181,18 @@ class Validator(BaseValidator):
 
         # TODO: deduplicate with Trainer.post_dataloading_process which has
         # the same logic; extract a shared function to prevent further drift.
-        # Resolve positions once: per-document positions for block_causal,
-        # sequential positions when CP needs them for shard indexing,
-        # or None (model uses sequential RoPE slice by default).
+        # The dataloader always provides per-document positions, which drive
+        # both RoPE and block_causal attention masking.
         model_config = getattr(model_parts[0], "config", None)
 
         positions = extra_inputs.pop("positions", None)
-        if isinstance(model_config, Decoder.Config):
-            attn_config = model_config.layers[0].attention
-            inner_attention = attn_config.inner_attention
-
-            if attn_config.mask_type == "block_causal":
-                assert (
-                    positions is not None
-                ), "block_causal mask requires per-document positions from the dataloader"
-            else:
-                positions = torch.arange(
-                    inputs.shape[1], dtype=torch.int32, device=inputs.device
-                ).repeat(inputs.shape[0], 1)
-
+        # positions and attention_masks are optional (Decoder.forward defaults
+        # both to None). Build masks only for the masked backends (Flex/Varlen),
+        # which is where get_attention_masks is defined. A maskless backend (the
+        # SDPA config used by the graph_trainer tests) still receives positions
+        # for RoPE but no masks — it relies on is_causal instead.
+        if isinstance(model_config, Decoder.Config) and positions is not None:
+            inner_attention = model_config.layers[0].attention.inner_attention
             if isinstance(
                 inner_attention, (FlexAttention.Config, VarlenAttention.Config)
             ):
@@ -274,7 +267,7 @@ class Validator(BaseValidator):
                     local_valid_tokens, batch_mesh, None
                 )
             else:
-                global_valid_tokens = local_valid_tokens.float()
+                global_valid_tokens = float(local_valid_tokens.item())
 
             # Process data (extract inputs, handle attention masks, CP sharding)
             inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(

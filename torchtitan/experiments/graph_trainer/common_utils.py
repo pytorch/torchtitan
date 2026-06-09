@@ -32,6 +32,37 @@ def log_timer(label: str):
     logger.info("%s took %.3fs", label, elapsed_s)
 
 
+def build_decoder_config_for_backend(
+    config_builder: Callable, attn_backend: str, **builder_kwargs
+):
+    """Build a Decoder model config for ``attn_backend``, allowing test-only SDPA.
+
+    ``SDPA`` is not a valid production language-model backend — ``get_attention_config``
+    rejects it because the dataloaders always emit per-document positions and SDPA
+    cannot consume them (it only has a boolean ``is_causal``). The graph_trainer
+    tests, however, use SDPA to exercise *backend-agnostic* graph machinery
+    (precompile-artifact serialization, custom codegen, context parallel, bitwise
+    determinism) without FlexAttention's ``BlockMask``, which is unpicklable (its
+    ``mask_mod`` closures are Python code objects), is not a tensor (so it breaks
+    pipeline-parallel split-backward, which calls ``.requires_grad`` on every stage
+    input), and overflows the fp32 Triton shared-memory limit on large head dims.
+
+    For SDPA we build the flex config (a valid backend) and swap each layer's
+    ``inner_attention`` to ``ScaledDotProductAttention.Config()``. Production code
+    never reaches this path: ``get_attention_config`` still rejects ``sdpa``, so no
+    model registry can construct an SDPA language model outside these tests.
+    """
+    if attn_backend != "sdpa":
+        return config_builder(attn_backend=attn_backend, **builder_kwargs)
+
+    from torchtitan.models.common.attention import ScaledDotProductAttention
+
+    config = config_builder(attn_backend="flex", **builder_kwargs)
+    for layer in config.layers:
+        layer.attention.inner_attention = ScaledDotProductAttention.Config()
+    return config
+
+
 _MODULE_FQN = "module_fqn"
 _NOT_IN_LAYERS = -1
 
