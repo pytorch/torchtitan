@@ -388,6 +388,8 @@ class FaultTolerantTrainer(Trainer):
             local_valid_tokens += (labels != IGNORE_INDEX).sum()
             microbatches.append((input_dict, labels))
 
+        # All-reduce to get global token count across DP ranks
+        # Move to GPU for distributed communication
         if parallel_dims.dp_enabled:
             batch_mesh = parallel_dims.get_mesh("batch")
             global_valid_tokens = dist_utils.dist_sum(
