@@ -212,6 +212,42 @@ def _migrate_cpu_get_attrs_to_cuda(gm: torch.fx.GraphModule) -> None:
                 _assign_attr(attr.cuda(), module, node.target)
 
 
+def _mark_nodes_for_full_inductor(gm: torch.fx.GraphModule) -> None:
+    """Tag nodes with ``compile_with_inductor`` so regional_inductor scoops the
+    whole graph as one region.
+
+    Tags every node except placeholders, outputs, and tensor-constant
+    ``get_attr``s. ``get_attr`` is overloaded:
+
+    - A tensor-constant get_attr (e.g. a TP-redistribution mesh/mask) must stay
+      UNtagged so it remains in the outer FX graph and crosses into
+      ``standalone_compile`` as an ordinary input; tagging it pulls the constant
+      into the region where AOTAutograd lifts it to an input the serialized CooR
+      artifact never re-supplies.
+    - FlexAttention stores its score/mask functions as GraphModule attrs
+      (``sdpa_score0``/``sdpa_mask0``). Those are executable subgraphs, not
+      tensor constants: they MUST stay tagged/in-region so regional_inductor
+      recurses through them rather than externalizing them as fake-tensor inputs
+      (which fails with "non fake tensor value" — a GraphModule has no
+      ``meta["val"]``).
+    """
+    from torch.fx.graph_module import _get_attr
+
+    for module in gm.modules():
+        if not isinstance(module, torch.fx.GraphModule):
+            continue
+        for node in module.graph.nodes:
+            if node.op in ("placeholder", "output"):
+                continue
+            if node.op == "get_attr" and not isinstance(
+                _get_attr(module, node.target), torch.fx.GraphModule
+            ):
+                continue
+            node.meta.setdefault("custom", {}).setdefault(
+                "compile_with_inductor", {"inductor_configs": {}}
+            )
+
+
 def full_inductor_compilation_pass(
     gm: torch.fx.GraphModule, example_inputs: tuple
 ) -> torch.fx.GraphModule:
@@ -244,15 +280,7 @@ def full_inductor_compilation_pass(
     )
 
     _migrate_cpu_get_attrs_to_cuda(gm)
-    for module in gm.modules():
-        if not isinstance(module, torch.fx.GraphModule):
-            continue
-        for node in module.graph.nodes:
-            if node.op in ("placeholder", "output"):
-                continue
-            node.meta.setdefault("custom", {}).setdefault(
-                "compile_with_inductor", {"inductor_configs": {}}
-            )
+    _mark_nodes_for_full_inductor(gm)
     # AOT autograd (via ``standalone_compile``) reorders the gm and breaks
     # fwd/bwd interleaving, blowing up the baseline schedule. Re-enable
     # Inductor's reorder pass (disabled globally in ``compile.py``) to fix.
