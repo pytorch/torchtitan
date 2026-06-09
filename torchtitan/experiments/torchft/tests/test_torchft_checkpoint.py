@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from torchtitan.experiments.ft.checkpoint import FTCheckpointManager
+from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 
 
 class FakeOptimizersContainer:
@@ -68,7 +68,7 @@ def fake_async_save(*args, **kwargs):
 
 
 class DummyFTManager:
-    """Mimics FTManager for testing without requiring torchft."""
+    """Mimics TorchFTManager for testing without requiring torchft."""
 
     def __init__(self, enabled=True, replica_id=0, participating_rank=0):
         self._enabled = enabled
@@ -113,7 +113,7 @@ class TestFTCheckpointManager(unittest.TestCase):
     @mock.patch(
         "torchtitan.components.checkpoint.dcp.async_save", side_effect=fake_async_save
     )
-    def test_ft_async_save_calls_maybe_wait_for_saving(
+    def test_torchft_async_save_calls_maybe_wait_for_saving(
         self,
         mock_async_save,
         mock_cuda_stream,
@@ -121,7 +121,7 @@ class TestFTCheckpointManager(unittest.TestCase):
         """
         Test that with FT enabled, AsyncMode.ASYNC via FT triggers correct waits.
         """
-        config = FTCheckpointManager.Config(
+        config = TorchFTCheckpointManager.Config(
             enable=True,
             async_mode="async",
             folder=self.test_folder,
@@ -134,7 +134,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             initial_load_model_only=False,
             enable_ft_dataloader_checkpoints=True,
         )
-        manager = FTCheckpointManager(
+        manager = TorchFTCheckpointManager(
             config,
             dataloader=self.data_loader,
             model_parts=self.model_parts,

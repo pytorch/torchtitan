@@ -13,7 +13,7 @@ from torch import nn
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
-    ScaledDotProductAttention,
+    FlexAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
@@ -47,10 +47,7 @@ class Attention(BaseAttention):
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
         rope: RoPE.Config
-        inner_attention: Module.Config = field(
-            default_factory=ScaledDotProductAttention.Config
-        )
-        mask_type: str = "causal"
+        inner_attention: Module.Config = field(default_factory=FlexAttention.Config)
         mscale: float = 1.0
 
     def __init__(self, config: Config):
@@ -93,7 +90,7 @@ class Attention(BaseAttention):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_masks: AttentionMasksType,
         positions: torch.Tensor | None = None,
     ):
         bsz, seqlen, _ = x.size()
@@ -183,16 +180,6 @@ class DeepSeekV3Model(Decoder):
         ) -> None:
             Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
-
-            if parallelism.context_parallel_degree > 1 and not isinstance(
-                self.layers[0].attention.inner_attention,
-                ScaledDotProductAttention.Config,
-            ):
-                raise NotImplementedError(
-                    "Context Parallel for DeepSeek V3 only supports "
-                    "ScaledDotProductAttention. Got "
-                    f"{type(self.layers[0].attention.inner_attention).__name__}."
-                )
 
             from torchtitan.models.deepseek_v3.sharding import (
                 set_deepseek_v3_sharding_config,
