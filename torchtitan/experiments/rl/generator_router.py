@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import itertools
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
@@ -45,102 +44,76 @@ class GeneratorHandle:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class RouteContext:
+class RoutingContext:
     """Routing metadata for one generation request."""
 
     est_cost: int = 1
     """Estimated request cost used by load-aware routing strategies."""
 
 
-class RoutingStrategy(ABC):
-    """Policy object that chooses one serving generator for a request."""
+class RoutingStrategy(Configurable, ABC):
+    """Policy object that chooses one generator for a request.
+
+    Add a new strategy by subclassing this, defining a nested ``Config``, and
+    selecting it explicitly in config, e.g.
+    ``GeneratorRouter.Config(strategy=MyRoutingStrategy.Config())``.
+    """
+
+    def __init__(self, config: Configurable.Config):
+        # Stateless by default; stateful strategies override __init__.
+        del config
 
     @abstractmethod
     def choose(
         self,
-        ctx: RouteContext,
+        routing_ctx: RoutingContext,
         candidates: Sequence[GeneratorHandle],
     ) -> GeneratorHandle:
-        """Choose one generator from the currently-serving candidates."""
-
-        ...
+        """Choose one generator from the (non-empty) serving candidates."""
 
 
-_ROUTING_STRATEGIES: dict[str, type[RoutingStrategy]] = {}
+class RoundRobinRoutingStrategy(RoutingStrategy):
+    """Cycle over the serving generators in order, ignoring load."""
 
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        pass
 
-def register_strategy(name: str):
-    """Register a RoutingStrategy subclass under a config-visible name."""
-
-    def _decorator(cls: type[RoutingStrategy]) -> type[RoutingStrategy]:
-        """Add cls to the strategy registry and return it unchanged."""
-
-        if name in _ROUTING_STRATEGIES:
-            raise ValueError(f"routing strategy {name!r} is already registered")
-        _ROUTING_STRATEGIES[name] = cls
-        return cls
-
-    return _decorator
-
-
-def _load_strategy_cls(name: str) -> type[RoutingStrategy]:
-    """Resolve a registered strategy name or dotted strategy class path."""
-
-    if name in _ROUTING_STRATEGIES:
-        return _ROUTING_STRATEGIES[name]
-    if "." not in name:
-        known = ", ".join(sorted(_ROUTING_STRATEGIES))
-        raise ValueError(
-            f"unknown routing strategy {name!r}; known strategies: {known}"
-        )
-    module_name, cls_name = name.rsplit(".", 1)
-    cls = getattr(importlib.import_module(module_name), cls_name)
-    if not issubclass(cls, RoutingStrategy):
-        raise ValueError(f"{name!r} is not a routing strategy")
-    return cls
-
-
-def _build_strategy(name: str) -> RoutingStrategy:
-    """Instantiate the routing strategy configured by name."""
-
-    return _load_strategy_cls(name)()
-
-
-@register_strategy("round_robin")
-class _RoundRobin(RoutingStrategy):
-    """Cycle over the currently-serving generators."""
-
-    def __init__(self):
+    def __init__(self, config: Config):
+        del config
         self._counter = itertools.count()
 
     def choose(
         self,
-        ctx: RouteContext,
+        routing_ctx: RoutingContext,
         candidates: Sequence[GeneratorHandle],
     ) -> GeneratorHandle:
         """Return the next serving generator in round-robin order."""
 
-        del ctx
+        del routing_ctx
         return candidates[next(self._counter) % len(candidates)]
 
 
-@register_strategy("least_loaded")
-class _LeastLoaded(RoutingStrategy):
-    """Pick the generator with the least controller-reserved load."""
+class LeastLoadedRoutingStrategy(RoutingStrategy):
+    """Pick the serving generator with the least controller-reserved load."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        pass
 
     def choose(
         self,
-        ctx: RouteContext,
+        routing_ctx: RoutingContext,
         candidates: Sequence[GeneratorHandle],
     ) -> GeneratorHandle:
         """Return the serving generator with the lowest reserved load."""
 
-        del ctx
+        del routing_ctx
         return min(candidates, key=lambda h: h.reserved_load)
 
 
 class GeneratorRouter(Configurable):
-    """Routes generation calls and coordinates generator weight sync.
+    """Routes generation calls across generator meshes and pulls model's state dict.
 
     Thread safety:
         This class is not thread-safe. Its mutable state and ``asyncio.Event``
@@ -150,14 +123,17 @@ class GeneratorRouter(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        strategy: str = "least_loaded"
-        """Routing strategy name, or a dotted strategy class path."""
+        strategy: RoutingStrategy.Config = field(
+            default_factory=LeastLoadedRoutingStrategy.Config
+        )
+        """Routing strategy, selected by its config type, e.g.
+        ``RoundRobinRoutingStrategy.Config()`` or
+        ``LeastLoadedRoutingStrategy.Config()``."""
 
         hot_swap: bool = False
-        """
-        Whether weight sync should update generators without draining in-flight
-        generations first.
-        """
+        """When True, pulls model's state dict concurrently with in-flight
+        generation (no draining). When False, each generator is drained before
+        its pull."""
 
     def __init__(
         self,
@@ -174,7 +150,7 @@ class GeneratorRouter(Configurable):
         for h in self._generators:
             h.idle.set()
 
-        self._strategy = _build_strategy(config.strategy)
+        self._strategy = config.strategy.build()
         self._serving = asyncio.Event()
         self._refresh_serving()
 
@@ -220,22 +196,20 @@ class GeneratorRouter(Configurable):
         self,
         method: str,
         *args,
-        ctx: RouteContext | None = None,
+        routing_ctx: RoutingContext,
         **kwargs,
-    ):
-        """Dispatch one actor call to a strategy-selected serving generator."""
+    ) -> Any:
+        """Dispatch one call to a strategy-chosen serving generator; return its result."""
 
-        ctx = ctx or RouteContext()
         await self._serving.wait()
         candidates = self._candidates()
         assert candidates, "serving event was set with no serving generators"
-        h = self._strategy.choose(ctx, candidates)
-
-        self._reserve(h, ctx.est_cost)
+        h = self._strategy.choose(routing_ctx, candidates)
+        self._reserve(h, routing_ctx.est_cost)
         try:
             return await getattr(h.actor, method).call(*args, **kwargs)
         finally:
-            self._release(h, ctx.est_cost)
+            self._release(h, routing_ctx.est_cost)
 
     async def fanout(
         self,
@@ -243,28 +217,46 @@ class GeneratorRouter(Configurable):
         *args,
         return_exceptions: bool = False,
         **kwargs,
-    ):
-        """Call one actor method on every generator and gather the results."""
+    ) -> list[Any | BaseException]:
+        """Call ``method`` on every generator concurrently and gather results.
 
+        Args:
+            method: Actor endpoint name to call on every generator.
+            *args: Positional arguments forwarded to each call.
+            return_exceptions: If False (default), the first exception
+                propagates immediately; if True, each call's exception is
+                returned in the list instead of raised. Either way, a failure
+                never cancels the other calls.
+            **kwargs: Keyword arguments forwarded to each call.
+
+        Returns:
+            One entry per generator, in order: its result, or its exception when
+            ``return_exceptions`` is True.
+        """
         return await asyncio.gather(
-            *[getattr(h.actor, method).call(*args, **kwargs) for h in self._generators],
+            *[
+                getattr(h.actor, method).call(*args, **kwargs)
+                for h in self._generators
+            ],
             return_exceptions=return_exceptions,
         )
 
-    async def sync_weights(self, policy_version: int) -> None:
-        """Sync trainer weights to all generators."""
+    async def pull_model_state_dict(self, *, policy_version: int) -> None:
+        """Pull the given policy version's state dict into every generator.
 
-        async def _sync_one(h: GeneratorHandle) -> None:
+        Args:
+            policy_version: Trainer policy version whose state dict to pull.
+        """
+
+        async def _pull_one(h: GeneratorHandle) -> None:
             if self._config.hot_swap:
-                # For hot swap, router allows syncing the weights concurrently
-                # with in-flight generations. Note that the actual concurrency
-                # and correctness is ultimately up to the generator
-                # implementation.
+                # Hot swap: pull concurrently with in-flight generation, without
+                # draining. Whether the pull is genuinely concurrent and safe is
+                # up to the generator's implementation.
                 await h.actor.pull_model_state_dict.call(policy_version)
             else:
-                # Set the generator to syncing state to block it from serving
-                # new work. But wait for any in-flight work to finish before
-                # syncing the weights.
+                # Drain: stop routing to this generator and wait for in-flight
+                # work to finish before pulling, then re-admit it.
                 self._set_state(h, _GenState.SYNCING)
                 try:
                     await h.idle.wait()
@@ -272,13 +264,7 @@ class GeneratorRouter(Configurable):
                 finally:
                     self._set_state(h, _GenState.SERVING)
 
-        # Start the syncs in parallel. Technically we could do rolling sync to
+        # Start the pulls in parallel. Technically we could do rolling sync to
         # maintain availability during weight sync, but that's not a priority
         # for now.
-        results = await asyncio.gather(
-            *[_sync_one(h) for h in self._generators],
-            return_exceptions=True,
-        )
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
+        await asyncio.gather(*[_pull_one(h) for h in self._generators])

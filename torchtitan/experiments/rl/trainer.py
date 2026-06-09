@@ -47,7 +47,7 @@ from torchtitan.experiments.rl.rollout import (
 )
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
-from torchtitan.experiments.rl.generator_router import GeneratorRouter, RouteContext
+from torchtitan.experiments.rl.generator_router import GeneratorRouter, RoutingContext
 from torchtitan.experiments.rl.types import Episode
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
@@ -239,7 +239,9 @@ class RLTrainer(Configurable):
         generator: VLLMGenerator.Config = field(default_factory=VLLMGenerator.Config)
         """VLLMGenerator actor configuration (vLLM engine, sampling)."""
 
-        router: GeneratorRouter.Config = field(default_factory=GeneratorRouter.Config)
+        generator_router: GeneratorRouter.Config = field(
+            default_factory=GeneratorRouter.Config
+        )
         """Generator routing strategy configuration."""
 
         metrics: m.MetricsProcessor.Config = field(
@@ -277,7 +279,7 @@ class RLTrainer(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
-        self.trainer = None
+        self.trainer: PolicyTrainer | None = None
         self.generator_router: GeneratorRouter | None = None
         self._proc_meshes = []
         self.metrics_processor: m.MetricsProcessor = config.metrics.build(
@@ -313,8 +315,7 @@ class RLTrainer(Configurable):
 
         if self.generator_router is not None:
             close_results = await self.generator_router.fanout(
-                "close",
-                return_exceptions=True,
+                "close", return_exceptions=True
             )
             for idx, result in enumerate(close_results):
                 if isinstance(result, BaseException):
@@ -407,8 +408,8 @@ class RLTrainer(Configurable):
             self._proc_meshes = [trainer_mesh, *generator_meshes]
 
             await setup_torch_elastic_env_async(trainer_mesh)
-            for mesh in generator_meshes:
-                await setup_torch_elastic_env_async(mesh)
+            for generator_mesh in generator_meshes:
+                await setup_torch_elastic_env_async(generator_mesh)
 
             # Spawn actors on their respective meshes
             self.trainer = trainer_mesh.spawn(
@@ -423,11 +424,11 @@ class RLTrainer(Configurable):
             )
 
             generators = []
-            for idx, mesh in enumerate(generator_meshes):
+            for idx, generator_mesh in enumerate(generator_meshes):
                 actor_name = (
                     "generator" if len(generator_meshes) == 1 else f"generator_{idx}"
                 )
-                generator = mesh.spawn(
+                generator = generator_mesh.spawn(
                     actor_name,
                     VLLMGenerator,
                     config.generator,
@@ -442,9 +443,8 @@ class RLTrainer(Configurable):
                     stop_token_ids=self._stop_token_ids,
                 )
                 generators.append(generator)
-            self.generator_router = GeneratorRouter(
-                config.router,
-                generators=generators,
+            self.generator_router = config.generator_router.build(
+                generators=generators
             )
 
         # Initialize TorchStore for weight sync between trainer and generator.
@@ -460,7 +460,7 @@ class RLTrainer(Configurable):
         with sl.log_trace_span("trainer_push_model_state_dict"):
             await self.trainer.push_model_state_dict.call()
         with sl.log_trace_span("generator_pull_model_state_dict"):
-            await self.generator_router.sync_weights(0)
+            await self.generator_router.pull_model_state_dict(policy_version=0)
 
     @sl.log_trace_span("_collect_rollouts")
     async def _collect_rollouts(
@@ -580,7 +580,7 @@ class RLTrainer(Configurable):
                     request_ids=request_ids,
                     sampling_config=sampling,
                     metrics_prefix=generation_metrics_prefix,
-                    ctx=RouteContext(est_cost=len(prompt_token_ids)),
+                    routing_ctx=RoutingContext(est_cost=len(prompt_token_ids)),
                 )
             )
             returned_ids = [completion.request_id for completion in completions]
@@ -986,7 +986,9 @@ class RLTrainer(Configurable):
                 await self.trainer.push_model_state_dict.call()
             t_weight_sync_push_s = time.perf_counter() - t_push_start
             with sl.log_trace_span("generator_pull_model_state_dict"):
-                await self.generator_router.sync_weights(trainer_policy_version)
+                await self.generator_router.pull_model_state_dict(
+                    policy_version=trainer_policy_version
+                )
             t_weight_sync_total_s = time.perf_counter() - t_push_start
             t_step_s = time.perf_counter() - t_step_start
             # --- divergence check before any logging ---
