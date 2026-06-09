@@ -262,9 +262,7 @@ class TestCudagraphPass(unittest.TestCase):
             return args
 
         with self.assertRaisesRegex(TypeError, "requires a GraphModule"):
-            cudagraph_pass(
-                plain_fn, (torch.zeros(4),), is_forward=True, static_input_indices=[0]
-            )
+            cudagraph_pass(plain_fn, (torch.zeros(4),), static_input_indices=[0])
 
     def test_graphmodule_wraps_forward(self):
         """cudagraph_pass wraps gm.forward with CUDAGraphWrapper."""
@@ -278,9 +276,7 @@ class TestCudagraphPass(unittest.TestCase):
         ) as MockWrapper:
             mock_instance = MagicMock()
             MockWrapper.return_value = mock_instance
-            result = cudagraph_pass(
-                gm, example_inputs, is_forward=True, static_input_indices=[0]
-            )
+            result = cudagraph_pass(gm, example_inputs, static_input_indices=[0])
             self.assertIs(result, gm)
             self.assertIs(gm.forward, mock_instance)
 

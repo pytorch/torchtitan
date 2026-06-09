@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from torchtitan.experiments.rl import grpo
+from torchtitan.experiments.rl import train
 from torchtitan.experiments.rl.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.batcher import Batcher
 
@@ -22,7 +22,7 @@ class _FakeRLTrainer:
         self.events = []
         self.instances.append(self)
 
-    async def setup_async(self):
+    async def setup_async(self, *, trainer_mesh=None, generator_mesh=None):
         self.events.append("setup")
         if getattr(self.config, "fail_setup", False):
             raise RuntimeError("setup failed")
@@ -44,6 +44,10 @@ class _FakeDebug:
 
 class _FakeTrainerConfig:
     debug = _FakeDebug()
+    # main() reads config.trainer.parallelism to size the trainer mesh; the
+    # value is irrelevant here because stub_mesh_provisioning stubs
+    # _compute_world_size, so a placeholder is enough to resolve the access.
+    parallelism = None
 
 
 class _FakeConfig:
@@ -51,6 +55,15 @@ class _FakeConfig:
 
     dump_folder = "/tmp/test_rl"
     trainer = _FakeTrainerConfig()
+    # main() also reads config.generator.parallelism (same stubbing applies).
+    generator = SimpleNamespace(parallelism=None)
+
+    @property
+    def __class__(self):
+        # main() does `assert isinstance(config, RLTrainer.Config)`. Reporting
+        # that type lets this lightweight stand-in pass the check (the
+        # unittest.mock `spec` idiom) without constructing a real Config.
+        return train.RLTrainer.Config
 
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
@@ -89,37 +102,51 @@ def _make_stub_rl_trainer():
         def to_dict(self):
             return {}
 
-    return grpo.RLTrainer(_StubConfig())
+    return train.RLTrainer(_StubConfig())
 
 
-def test_main_shuts_down_after_success(monkeypatch):
+@pytest.fixture
+def stub_mesh_provisioning(monkeypatch):
+    """Stub the Monarch mesh provisioning ``main()`` runs before ``setup_async``.
+
+    ``spawn_proc_mesh`` spawns real GPU proc meshes and ``_compute_world_size``
+    reads parallelism degrees; neither matters to shutdown behavior, so stub
+    both and let the test intercept at the ``_FakeRLTrainer`` boundary.
+    """
+    monkeypatch.setattr(train, "_compute_world_size", lambda p: 1)
+    monkeypatch.setattr(
+        train, "spawn_proc_mesh", lambda *args, **kwargs: (object(), object())
+    )
+
+
+def test_main_shuts_down_after_success(monkeypatch, stub_mesh_provisioning):
     _FakeConfigManager.config = _FakeConfig()
     _FakeRLTrainer.instances = []
-    monkeypatch.setattr(grpo, "ConfigManager", _FakeConfigManager)
+    monkeypatch.setattr(train, "ConfigManager", _FakeConfigManager)
 
-    asyncio.run(grpo.main())
+    asyncio.run(train.main())
 
     assert _FakeRLTrainer.instances[0].events == ["setup", "train", "close"]
 
 
-def test_main_shuts_down_after_train_failure(monkeypatch):
+def test_main_shuts_down_after_train_failure(monkeypatch, stub_mesh_provisioning):
     _FakeConfigManager.config = _FakeConfig(fail_train=True)
     _FakeRLTrainer.instances = []
-    monkeypatch.setattr(grpo, "ConfigManager", _FakeConfigManager)
+    monkeypatch.setattr(train, "ConfigManager", _FakeConfigManager)
 
     with pytest.raises(RuntimeError, match="train failed"):
-        asyncio.run(grpo.main())
+        asyncio.run(train.main())
 
     assert _FakeRLTrainer.instances[0].events == ["setup", "train", "close"]
 
 
-def test_main_shuts_down_after_setup_failure(monkeypatch):
+def test_main_shuts_down_after_setup_failure(monkeypatch, stub_mesh_provisioning):
     _FakeConfigManager.config = _FakeConfig(fail_setup=True)
     _FakeRLTrainer.instances = []
-    monkeypatch.setattr(grpo, "ConfigManager", _FakeConfigManager)
+    monkeypatch.setattr(train, "ConfigManager", _FakeConfigManager)
 
     with pytest.raises(RuntimeError, match="setup failed"):
-        asyncio.run(grpo.main())
+        asyncio.run(train.main())
 
     assert _FakeRLTrainer.instances[0].events == ["setup", "close"]
 
@@ -134,17 +161,17 @@ def test_rl_trainer_shutdown_is_noop_before_meshes_spawn():
     assert trainer._proc_meshes == []
 
 
-def test_main_swallows_cancellation_after_shutdown(monkeypatch):
+def test_main_swallows_cancellation_after_shutdown(monkeypatch, stub_mesh_provisioning):
     """Signal-driven cancellation surfaces as ``CancelledError`` from the
     running task; ``main`` runs ``close`` in ``finally`` and the explicit
     ``except`` clause swallows the interrupt so the process exits 0
     without a traceback."""
     _FakeConfigManager.config = _FakeConfig(cancel_train=True)
     _FakeRLTrainer.instances = []
-    monkeypatch.setattr(grpo, "ConfigManager", _FakeConfigManager)
+    monkeypatch.setattr(train, "ConfigManager", _FakeConfigManager)
 
     # No exception escapes; close still ran.
-    asyncio.run(grpo.main())
+    asyncio.run(train.main())
 
     assert _FakeRLTrainer.instances[0].events == ["setup", "train", "close"]
 
