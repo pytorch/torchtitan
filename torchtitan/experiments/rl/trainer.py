@@ -47,11 +47,7 @@ from torchtitan.experiments.rl.rollout import (
 )
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
-from torchtitan.experiments.rl.router import (
-    GeneratorHandle,
-    GeneratorRouter,
-    RouteContext,
-)
+from torchtitan.experiments.rl.router import GeneratorRouter, RouteContext
 from torchtitan.experiments.rl.types import Episode
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
@@ -426,7 +422,7 @@ class RLTrainer(Configurable):
                 output_dir=config.dump_folder,
             )
 
-            generator_handles: list[GeneratorHandle] = []
+            generators = []
             for idx, mesh in enumerate(generator_meshes):
                 actor_name = (
                     "generator" if len(generator_meshes) == 1 else f"generator_{idx}"
@@ -445,10 +441,10 @@ class RLTrainer(Configurable):
                     output_dir=config.dump_folder,
                     stop_token_ids=self._stop_token_ids,
                 )
-                generator_handles.append(GeneratorHandle(idx=idx, actor=generator))
+                generators.append(generator)
             self.generator_router = GeneratorRouter(
                 config.router,
-                generators=generator_handles,
+                generators=generators,
             )
 
         # Initialize TorchStore for weight sync between trainer and generator.

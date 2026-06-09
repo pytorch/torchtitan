@@ -20,7 +20,7 @@ from typing import Any
 from torchtitan.config import Configurable
 
 
-class GenState(Enum):
+class _GenState(Enum):
     """Lifecycle state that controls whether a generator can receive routes."""
 
     SERVING = auto()
@@ -31,16 +31,13 @@ class GenState(Enum):
 class GeneratorHandle:
     """Controller-side metadata for one generator mesh."""
 
-    idx: int
-    """Dense router index for this generator."""
-
     actor: Any
     """Monarch actor handle for the generator mesh."""
 
     reserved_load: int = 0
     """Controller-side estimate of in-flight routed generation work."""
 
-    state: GenState = GenState.SERVING
+    state: _GenState = _GenState.SERVING
     """Current routing lifecycle state for this generator."""
 
     idle: asyncio.Event = field(default_factory=asyncio.Event)
@@ -69,7 +66,7 @@ class RoutingStrategy(ABC):
         ...
 
 
-ROUTING_STRATEGIES: dict[str, type[RoutingStrategy]] = {}
+_ROUTING_STRATEGIES: dict[str, type[RoutingStrategy]] = {}
 
 
 def register_strategy(name: str):
@@ -78,9 +75,9 @@ def register_strategy(name: str):
     def _decorator(cls: type[RoutingStrategy]) -> type[RoutingStrategy]:
         """Add cls to the strategy registry and return it unchanged."""
 
-        if name in ROUTING_STRATEGIES:
+        if name in _ROUTING_STRATEGIES:
             raise ValueError(f"routing strategy {name!r} is already registered")
-        ROUTING_STRATEGIES[name] = cls
+        _ROUTING_STRATEGIES[name] = cls
         return cls
 
     return _decorator
@@ -89,28 +86,28 @@ def register_strategy(name: str):
 def _load_strategy_cls(name: str) -> type[RoutingStrategy]:
     """Resolve a registered strategy name or dotted strategy class path."""
 
-    if name in ROUTING_STRATEGIES:
-        return ROUTING_STRATEGIES[name]
+    if name in _ROUTING_STRATEGIES:
+        return _ROUTING_STRATEGIES[name]
     if "." not in name:
-        known = ", ".join(sorted(ROUTING_STRATEGIES))
+        known = ", ".join(sorted(_ROUTING_STRATEGIES))
         raise ValueError(
             f"unknown routing strategy {name!r}; known strategies: {known}"
         )
     module_name, cls_name = name.rsplit(".", 1)
     cls = getattr(importlib.import_module(module_name), cls_name)
     if not issubclass(cls, RoutingStrategy):
-        raise ValueError(f"{name!r} is not a RoutingStrategy")
+        raise ValueError(f"{name!r} is not a routing strategy")
     return cls
 
 
-def build_strategy(name: str) -> RoutingStrategy:
+def _build_strategy(name: str) -> RoutingStrategy:
     """Instantiate the routing strategy configured by name."""
 
     return _load_strategy_cls(name)()
 
 
 @register_strategy("round_robin")
-class RoundRobin(RoutingStrategy):
+class _RoundRobin(RoutingStrategy):
     """Cycle over the currently-serving generators."""
 
     def __init__(self):
@@ -128,7 +125,7 @@ class RoundRobin(RoutingStrategy):
 
 
 @register_strategy("least_loaded")
-class LeastLoaded(RoutingStrategy):
+class _LeastLoaded(RoutingStrategy):
     """Pick the generator with the least controller-reserved load."""
 
     def choose(
@@ -139,16 +136,22 @@ class LeastLoaded(RoutingStrategy):
         """Return the serving generator with the lowest reserved load."""
 
         del ctx
-        return min(candidates, key=lambda h: (h.reserved_load, h.idx))
+        return min(candidates, key=lambda h: h.reserved_load)
 
 
 class GeneratorRouter(Configurable):
-    """Routes generation calls and coordinates generator weight sync."""
+    """Routes generation calls and coordinates generator weight sync.
+
+    Thread safety:
+        This class is not thread-safe. Its mutable state and ``asyncio.Event``
+        objects are intended to be accessed from one event loop. Do not call a
+        single router instance from multiple OS threads or event loops.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         strategy: str = "least_loaded"
-        """Routing strategy name, or a dotted RoutingStrategy subclass path."""
+        """Routing strategy name, or a dotted strategy class path."""
 
         hot_swap: bool = False
         """
@@ -160,35 +163,25 @@ class GeneratorRouter(Configurable):
         self,
         config: Config,
         *,
-        generators: Sequence[GeneratorHandle],
+        generators: Sequence[Any],
     ):
-        self.config = config
-        self.generators = list(generators)
-        if not self.generators:
+        self._config = config
+        self._generators = [
+            GeneratorHandle(actor=generator) for generator in generators
+        ]
+        if not self._generators:
             raise ValueError("GeneratorRouter requires at least one generator")
-        for expected_idx, h in enumerate(self.generators):
-            if h.idx != expected_idx:
-                raise ValueError(
-                    f"generator handle idx must be dense and ordered; "
-                    f"expected {expected_idx}, got {h.idx}"
-                )
-            if h.reserved_load < 0:
-                raise ValueError(
-                    f"generator {h.idx} has negative reserved_load {h.reserved_load}"
-                )
-            if h.reserved_load == 0:
-                h.idle.set()
-            else:
-                h.idle.clear()
+        for h in self._generators:
+            h.idle.set()
 
-        self.strategy = build_strategy(config.strategy)
+        self._strategy = _build_strategy(config.strategy)
         self._serving = asyncio.Event()
         self._refresh_serving()
 
     def _candidates(self) -> list[GeneratorHandle]:
         """Return generator handles that are currently routable."""
 
-        return [h for h in self.generators if h.state is GenState.SERVING]
+        return [h for h in self._generators if h.state is _GenState.SERVING]
 
     def _refresh_serving(self) -> None:
         """Update the event that tracks whether any generator can serve work."""
@@ -198,7 +191,7 @@ class GeneratorRouter(Configurable):
         else:
             self._serving.clear()
 
-    def _set_state(self, h: GeneratorHandle, state: GenState) -> None:
+    def _set_state(self, h: GeneratorHandle, state: _GenState) -> None:
         """Move a generator between serving and syncing states."""
 
         h.state = state
@@ -219,7 +212,7 @@ class GeneratorRouter(Configurable):
         h.reserved_load -= cost
         assert (
             h.reserved_load >= 0
-        ), f"generator {h.idx} reserved_load went negative: {h.reserved_load}"
+        ), f"generator reserved_load went negative: {h.reserved_load}"
         if h.reserved_load == 0:
             h.idle.set()
 
@@ -236,7 +229,7 @@ class GeneratorRouter(Configurable):
         await self._serving.wait()
         candidates = self._candidates()
         assert candidates, "serving event was set with no serving generators"
-        h = self.strategy.choose(ctx, candidates)
+        h = self._strategy.choose(ctx, candidates)
 
         self._reserve(h, ctx.est_cost)
         try:
@@ -254,7 +247,7 @@ class GeneratorRouter(Configurable):
         """Call one actor method on every generator and gather the results."""
 
         return await asyncio.gather(
-            *[getattr(h.actor, method).call(*args, **kwargs) for h in self.generators],
+            *[getattr(h.actor, method).call(*args, **kwargs) for h in self._generators],
             return_exceptions=return_exceptions,
         )
 
@@ -262,23 +255,28 @@ class GeneratorRouter(Configurable):
         """Sync trainer weights to all generators."""
 
         async def _sync_one(h: GeneratorHandle) -> None:
-            if self.config.hot_swap:
-                # For hot swap, we can sync the weights concurrently with
-                # in-flight generations.
+            if self._config.hot_swap:
+                # For hot swap, router allows syncing the weights concurrently
+                # with in-flight generations. Note that the actual concurrency
+                # and correctness is ultimately up to the generator
+                # implementation.
                 await h.actor.pull_model_state_dict.call(policy_version)
             else:
                 # Set the generator to syncing state to block it from serving
                 # new work. But wait for any in-flight work to finish before
                 # syncing the weights.
-                self._set_state(h, GenState.SYNCING)
+                self._set_state(h, _GenState.SYNCING)
                 try:
                     await h.idle.wait()
                     await h.actor.pull_model_state_dict.call(policy_version)
                 finally:
-                    self._set_state(h, GenState.SERVING)
+                    self._set_state(h, _GenState.SERVING)
 
+        # Start the syncs in parallel. Technically we could do rolling sync to
+        # maintain availability during weight sync, but that's not a priority
+        # for now.
         results = await asyncio.gather(
-            *[_sync_one(h) for h in self.generators],
+            *[_sync_one(h) for h in self._generators],
             return_exceptions=True,
         )
         for result in results:

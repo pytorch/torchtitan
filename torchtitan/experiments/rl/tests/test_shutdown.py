@@ -13,7 +13,7 @@ from torchtitan.experiments.rl import train
 from torchtitan.experiments.rl.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.batcher import Batcher
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
-from torchtitan.experiments.rl.router import GeneratorHandle, GeneratorRouter
+from torchtitan.experiments.rl.router import GeneratorRouter
 
 
 class _FakeRLTrainer:
@@ -212,10 +212,7 @@ class _StubMesh:
 def _set_generator_router(rl_trainer, generators):
     rl_trainer.generator_router = GeneratorRouter(
         GeneratorRouter.Config(),
-        generators=[
-            GeneratorHandle(idx=idx, actor=generator)
-            for idx, generator in enumerate(generators)
-        ],
+        generators=generators,
     )
 
 
