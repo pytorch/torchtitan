@@ -867,125 +867,108 @@ class MinimalAsyncEPDispatch(torch.autograd.Function):
         return grad_input, None, None, None, None, None, None, None, None, None
 
 
-def combine_autograd_backward(ctx, grad_out, unused_routed_output_grad):
-    del unused_routed_output_grad
-    (
-        dispatch_dst_ranks,
-        dispatch_dst_rows,
-        E_row_to_T_row_N,
-        routed_scores_N,
-        saved_routed_output_ND,
-    ) = ctx.saved_tensors
-    grad_scores = None
-    grad_x = None
-    if grad_out is not None:
-        grad_x, grad_scores_tensor = combine_backward(
-            grad_out,
+class MinimalAsyncEPCombine(torch.autograd.Function):
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def forward(
+        ctx,
+        hidden_states: torch.Tensor,
+        dispatch_dst_ranks: torch.Tensor,
+        dispatch_dst_rows: torch.Tensor,
+        combine_dst_ranks: torch.Tensor,
+        combine_dst_rows: torch.Tensor,
+        combine_num_valid_rows: torch.Tensor,
+        T_row_to_E_row_N: torch.Tensor,  # noqa: N803
+        E_row_to_T_row_N: torch.Tensor,  # noqa: N803
+        routed_scores_N: torch.Tensor,  # noqa: N803
+        num_tokens: int,
+        top_k: int,
+    ) -> torch.Tensor:
+        combined, routed_output_ND = combine(  # noqa: N806
+            hidden_states,
+            dispatch_dst_ranks,
+            dispatch_dst_rows,
+            combine_dst_ranks,
+            combine_dst_rows,
+            combine_num_valid_rows,
+            T_row_to_E_row_N,
+            E_row_to_T_row_N,
+            routed_scores_N,
+            num_tokens,
+            top_k,
+        )
+
+        ctx.top_k = top_k
+        ctx.receive_capacity = hidden_states.shape[0]
+        ctx.routed_scores_requires_grad = routed_scores_N.requires_grad
+        saved_routed_output_ND = (  # noqa: N806
+            routed_output_ND
+            if routed_scores_N.requires_grad
+            else routed_output_ND.new_empty(0)
+        )
+        ctx.save_for_backward(
             dispatch_dst_ranks,
             dispatch_dst_rows,
             E_row_to_T_row_N,
             routed_scores_N,
             saved_routed_output_ND,
-            ctx.routed_scores_requires_grad,
-            ctx.top_k,
-            ctx.receive_capacity,
         )
-        if ctx.routed_scores_requires_grad:
-            grad_scores = grad_scores_tensor
+        return combined
 
-    return (
-        grad_x,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        grad_scores,
-        None,
-        None,
-    )
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def backward(
+        ctx,
+        grad_out,
+    ):
+        (
+            dispatch_dst_ranks,
+            dispatch_dst_rows,
+            E_row_to_T_row_N,
+            routed_scores_N,
+            saved_routed_output_ND,
+        ) = ctx.saved_tensors
+        grad_scores = None
+        grad_x = None
+        if grad_out is not None:
+            grad_x, grad_scores_tensor = combine_backward(
+                grad_out,
+                dispatch_dst_ranks,
+                dispatch_dst_rows,
+                E_row_to_T_row_N,
+                routed_scores_N,
+                saved_routed_output_ND,
+                ctx.routed_scores_requires_grad,
+                ctx.top_k,
+                ctx.receive_capacity,
+            )
+            if ctx.routed_scores_requires_grad:
+                grad_scores = grad_scores_tensor
 
-
-def combine_setup_context(ctx, inputs, output):
-    (
-        x,
-        dispatch_dst_ranks,
-        dispatch_dst_rows,
-        _combine_dst_ranks,
-        _combine_dst_rows,
-        _combine_num_valid_rows,
-        _T_row_to_E_row_N,
-        E_row_to_T_row_N,
-        routed_scores_N,
-        _num_tokens,
-        top_k,
-    ) = inputs
-    _, routed_output_ND = output
-    ctx.top_k = top_k
-    ctx.receive_capacity = x.shape[0]
-    ctx.routed_scores_requires_grad = routed_scores_N.requires_grad
-    saved_routed_output_ND = (  # noqa: N806
-        routed_output_ND
-        if routed_scores_N.requires_grad
-        else routed_output_ND.new_empty(0)
-    )
-    ctx.save_for_backward(
-        dispatch_dst_ranks,
-        dispatch_dst_rows,
-        E_row_to_T_row_N,
-        routed_scores_N,
-        saved_routed_output_ND,
-    )
+        return (
+            grad_x,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            grad_scores,
+            None,
+            None,
+        )
 
 
 active_swiglu.register_autograd(
     active_swiglu_autograd_backward, setup_context=active_swiglu_setup_context
 )
-combine.register_autograd(
-    combine_autograd_backward, setup_context=combine_setup_context
-)
-
-
-def combine_tokens(
-    hidden_states: torch.Tensor,
-    metadata: MinimalAsyncEPDispatchMetadata,
-) -> torch.Tensor:
-    """Combine expert outputs back to original token order.
-
-    Shape symbols match ``MinimalAsyncEPTokenDispatcher.dispatch`` and
-    ``AllToAllTokenDispatcher``.
-
-    Args:
-        hidden_states: logical ``(R, D)`` expert outputs in the same
-            E-major layout returned by the matching dispatch. For
-            MinimalAsyncEP this is physically padded to ``(R_max, D)``.
-        metadata: routing metadata from the matching dispatch.
-
-    Returns:
-        Combined token outputs with shape ``(T, D)``.
-    """
-    out_TD, _routed_output_ND = combine(  # noqa: N806
-        hidden_states,
-        metadata.dispatch_dst_ranks,
-        metadata.dispatch_dst_rows,
-        metadata.combine_dst_ranks,
-        metadata.combine_dst_rows,
-        metadata.combine_num_valid_rows,
-        metadata.T_row_to_E_row,
-        metadata.E_row_to_T_row,
-        metadata.routed_scores,
-        metadata.num_tokens,
-        metadata.top_k,
-    )
-    return out_TD
-
 
 __all__ = [
+    "MinimalAsyncEPCombine",
+    "MinimalAsyncEPDispatch",
     "MinimalAsyncEPDispatchMetadata",
     "active_swiglu",
-    "combine_tokens",
     "init_buffer",
     "invert_flat_indices",
 ]

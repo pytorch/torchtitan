@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 from torch.distributed._functional_collectives import (
@@ -15,9 +16,9 @@ from torch.distributed.tensor import DeviceMesh
 
 from torchtitan.config import Configurable
 from torchtitan.distributed.minimal_async_ep import (
+    MinimalAsyncEPCombine,
     MinimalAsyncEPDispatch,
     MinimalAsyncEPDispatchMetadata,
-    combine_tokens,
     dispatch_metadata,
     invert_flat_indices,
 )
@@ -1013,5 +1014,17 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
         """Combine tokens via MinimalAsyncEP."""
-        # pyrefly: ignore [bad-argument-type]
-        return combine_tokens(routed_output_RD, metadata.state)
+        state = cast(MinimalAsyncEPDispatchMetadata, metadata.state)
+        return MinimalAsyncEPCombine.apply(
+            routed_output_RD,
+            state.dispatch_dst_ranks,
+            state.dispatch_dst_rows,
+            state.combine_dst_ranks,
+            state.combine_dst_rows,
+            state.combine_num_valid_rows,
+            state.T_row_to_E_row,
+            state.E_row_to_T_row,
+            state.routed_scores,
+            state.num_tokens,
+            state.top_k,
+        )
