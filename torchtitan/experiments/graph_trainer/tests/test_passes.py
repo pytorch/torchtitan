@@ -28,6 +28,8 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 )
 from torchtitan.experiments.graph_trainer.cudagraph import (
     insert_kernel_annotations_pass,
+    is_cudagraphable,
+    is_full_cudagraphable,
 )
 from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
     isolate_ep_process_group_pass,
@@ -894,6 +896,27 @@ class TestBucketingPrefetchOrder(FSDPTest):
                 f"layer {backward_ids[i]} after layer {backward_ids[i - 1]} "
                 f"(full order: {layer_ids})",
             )
+
+    def test_drops_assert_async_and_dead_chain(self):
+        # _assert_async is side-effectful, so plain DCE keeps it (and its whole
+        # le/all condition chain). The pass erases the assert, then DCE reaps the
+        # now-orphaned chain; unrelated live nodes are untouched.
+        aten = torch.ops.aten
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        le = g.call_function(aten.le.Scalar, (x, 5))
+        reduced = g.call_function(aten.all.default, (le,))
+        g.call_function(aten._assert_async.msg, (reduced, "cond"))  # side-effect
+        out = g.call_function(aten.relu.default, (x,))
+        g.output(out)
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+
+        eliminate_dead_code_pass(gm)
+        targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
+        self.assertNotIn(aten._assert_async.msg, targets)
+        self.assertNotIn(aten.le.Scalar, targets)
+        self.assertNotIn(aten.all.default, targets)
+        self.assertIn(aten.relu.default, targets)
 
 
 class TestRemoveDetachPass(TestCase):
@@ -2284,6 +2307,31 @@ class TestEliminateDeadCodePass(TestCase):
         eliminate_dead_code_pass(gm)
         targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
         self.assertIn(torch.ops.aten.copy_.default, targets)
+
+
+class TestIsFullCudagraphable(TestCase):
+    """Pure-CPU tests for the per-node cudagraph-safety predicate and the
+    whole-graph gate built on it."""
+
+    def test_clean_graph_is_full_cudagraphable(self):
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        relu = g.call_function(torch.ops.aten.relu.default, (x,))
+        g.output(relu)
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+        self.assertTrue(is_cudagraphable(relu))
+        self.assertTrue(is_full_cudagraphable(gm))
+
+    def test_local_scalar_dense_is_unsafe(self):
+        # _local_scalar_dense (.item()/.tolist()) extracts a host scalar a CUDA
+        # graph replay can't reproduce -> unsafe, so the graph is not one piece.
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        s = g.call_function(torch.ops.aten._local_scalar_dense.default, (x,))
+        g.output(s)
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+        self.assertFalse(is_cudagraphable(s))
+        self.assertFalse(is_full_cudagraphable(gm))
 
 
 if __name__ == "__main__":

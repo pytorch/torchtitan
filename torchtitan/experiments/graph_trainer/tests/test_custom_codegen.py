@@ -162,6 +162,14 @@ class TestCustomCodegenPass(TestCase):
         with open(custom_gm._code_path, "w") as f:
             f.write(modified_code)
 
+        # Bump the file's mtime past the cached value. The initial write and this
+        # rewrite can land in the same mtime tick on filesystems with coarse
+        # mtime resolution (e.g. CI), and _check_file_modified() short-circuits to
+        # "unchanged" when the mtime matches its cache -- without this the content
+        # change (same byte length, 2 -> 4) would go undetected.
+        bumped = os.path.getmtime(custom_gm._code_path) + 10
+        os.utime(custom_gm._code_path, (bumped, bumped))
+
         # Force check that modification is detected
         self.assertTrue(
             custom_gm._check_file_modified(), "File modification should be detected"
