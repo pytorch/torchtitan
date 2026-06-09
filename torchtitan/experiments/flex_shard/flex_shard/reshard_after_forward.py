@@ -43,19 +43,10 @@ class _ReshardAfterForwardRecomputeState:
         self._bucket_ids.reset(token)
 
 
-# Collective ops that produce the unsharded parameter tensors we want freed after
-# forward and recomputed in backward. Both spellings are listed so the policy fires
-# on either path: torch.compile lowers to functional collectives, while the eager
-# runtime issues legacy in-place collectives. Shard unshards with all-gather; Owned
-# unshards with broadcast.
+# These produce the unsharded param tensors that we want freed per-layer.
 _FLEX_SHARD_COLLECTIVE_OPS = {
-    # torch.compile path (functional collectives).
     torch.ops._c10d_functional.all_gather_into_tensor.default,
-    torch.ops._c10d_functional.broadcast.default,
     torch.ops._c10d_functional.wait_tensor.default,
-    # Eager path (legacy in-place collectives).
-    torch.ops.c10d.allgather_.default,
-    torch.ops.c10d.broadcast_.default,
 }
 
 
