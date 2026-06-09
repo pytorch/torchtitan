@@ -547,35 +547,6 @@ def _copy_rows_to_peer_ptrs_kernel_{str(dtype).replace('.', '_')}(
     return kernel
 
 
-def expert_counting_sort(
-    topk_expert_ids: torch.Tensor,
-    *,
-    num_experts: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Group flattened top-k slots by expert id using stable argsort.
-
-    Returns ``(counts, flat_indices)`` with the same ordering as
-    AllToAllTokenDispatcher: sorted by expert id, stable by original flattened
-    top-k slot within each expert segment.
-    """
-    flat_expert_ids = topk_expert_ids.reshape(-1)
-
-    flat_indices = torch.argsort(flat_expert_ids, stable=True)
-    sorted_expert_ids = flat_expert_ids[flat_indices]
-    expert_boundaries = torch.arange(
-        num_experts + 1,
-        dtype=flat_expert_ids.dtype,
-        device=topk_expert_ids.device,
-    )
-    count_offsets = torch.searchsorted(
-        sorted_expert_ids,
-        expert_boundaries,
-        right=False,
-    )
-    counts = count_offsets[1:] - count_offsets[:-1]
-    return counts, flat_indices
-
-
 def copy_full_counts_to_peers(
     counts: torch.Tensor,
     dsts: list[torch.Tensor],

@@ -17,7 +17,6 @@ from torchtitan.config import Configurable
 from torchtitan.distributed.minimal_async_ep import (
     combine_tokens,
     dispatch_tokens,
-    expert_counting_sort,
 )
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 
@@ -851,11 +850,8 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         assert self.ep_mesh is not None, "ep_mesh must be set before dispatch"
         ep_group = self.ep_mesh.get_group()
 
-        (
-            _num_tokens_per_expert_E,
-            flat_indices_experts_sorted_N,
-        ) = self._counting_sort_tokens_by_expert(
-            topk_expert_ids_TK,
+        flat_indices_experts_sorted_N = torch.argsort(
+            topk_expert_ids_TK.reshape(-1), stable=True
         )
         token_indices_experts_sorted_N = flat_indices_experts_sorted_N // self.top_k
 
@@ -873,15 +869,6 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
 
         metadata = DeepEPDispatchMetadata(state=state)
         return hidden_states_RD, tokens_per_expert_E, metadata
-
-    def _counting_sort_tokens_by_expert(
-        self,
-        topk_expert_ids_TK: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return expert_counting_sort(
-            topk_expert_ids_TK,
-            num_experts=self.num_experts,
-        )
 
     # pyrefly: ignore [bad-override]
     def combine(
