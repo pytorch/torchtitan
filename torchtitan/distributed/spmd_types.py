@@ -325,6 +325,7 @@ def _validate_spmd_redistributions(sharding_config: Any) -> None:
 
 def redistribute_spmd_per_axis(
     x: torch.Tensor,
+    mesh: DeviceMesh | None,
     src_types: spmd.PerMeshAxisSpmdTypes,
     dst_types: spmd.PerMeshAxisSpmdTypes,
 ) -> torch.Tensor:
@@ -338,9 +339,9 @@ def redistribute_spmd_per_axis(
     per-axis types + ``PartitionSpec``, so the library handles multi-axis
     redistribute ordering internally.
     """
-    mesh = current_mesh()
     if mesh is None:
         return x
+    assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
 
     for axis_types in (src_types, dst_types):
         for axis_name, axis_type in axis_types.items():
@@ -352,11 +353,17 @@ def redistribute_spmd_per_axis(
 
     for axis_name, dst_t in dst_types.items():
         src_t = src_types.get(axis_name)
-        if src_t is None or src_t == dst_t or mesh_size(axis_name.value) == 1:
+        axis = axis_name.value
+        axis_size = (
+            mesh.size(mesh.mesh_dim_names.index(axis))
+            if axis in mesh.mesh_dim_names
+            else 1
+        )
+        if src_t is None or src_t == dst_t or axis_size == 1:
             continue
         x = spmd.redistribute(
             x,
-            mesh.get_group(axis_name.value),
+            mesh.get_group(axis),
             src=src_t,
             dst=dst_t,
             backward_options={"op_dtype": x.dtype},
