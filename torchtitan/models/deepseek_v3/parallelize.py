@@ -93,6 +93,8 @@ def _maybe_init_minimal_async_ep_buffer(
     parallel_dims: ParallelDims,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
+    ac_config: ActivationCheckpointConfig,
+    memory_policy: str | None = None,
 ) -> None:
     moe_config = next((l.moe for l in model.config.layers if l.moe is not None), None)
     if moe_config is None:
@@ -101,6 +103,13 @@ def _maybe_init_minimal_async_ep_buffer(
     dispatcher_config = moe_config.experts.token_dispatcher
     if not isinstance(dispatcher_config, MinimalAsyncEPTokenDispatcher.Config):
         return
+
+    if ac_config.mode != "full" and memory_policy != "full":
+        raise ValueError(
+            "MinimalAsyncEP requires full recompute: set "
+            "--activation_checkpoint.mode full for eager training or "
+            "--compile.memory_policy full for graph_trainer."
+        )
 
     _validate_minimal_async_ep_config(
         dispatcher_config,
@@ -137,6 +146,7 @@ def parallelize_deepseekv3(
         parallel_dims=parallel_dims,
         training=training,
         parallelism=parallelism,
+        ac_config=ac_config,
     )
 
     if parallelism.spmd_backend == "full_dtensor":
