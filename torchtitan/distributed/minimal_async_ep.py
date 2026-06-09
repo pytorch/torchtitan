@@ -25,7 +25,6 @@ from torchtitan.distributed.minimal_async_ep_kernels import (
     copy_full_counts_to_peers,
     copy_rows_to_peers,
     expand_topk_grad,
-    expert_counting_sort as _expert_counting_sort,
     fill_combine_metadata,
     fill_dispatch_metadata,
     invert_flat_indices as _invert_flat_indices,
@@ -973,18 +972,6 @@ combine.register_autograd(
 )
 
 
-def expert_counting_sort(
-    topk_expert_ids: torch.Tensor,
-    *,
-    num_experts: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Group flattened top-k slots by expert id in stable AllToAll order."""
-    return _expert_counting_sort(
-        topk_expert_ids,
-        num_experts=num_experts,
-    )
-
-
 def dispatch_tokens(
     dispatch_input: torch.Tensor,
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
@@ -1081,7 +1068,6 @@ __all__ = [
     "active_swiglu",
     "combine_tokens",
     "dispatch_tokens",
-    "expert_counting_sort",
     "init_buffer",
     "invert_flat_indices",
 ]
