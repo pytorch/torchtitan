@@ -375,7 +375,6 @@ def _dispatch_to_experts(
     num_routed_rows: int,
     receive_capacity: int,
 ) -> torch.Tensor:
-    del receive_capacity
     hidden_recv_buffer = _copy_rows_to_peers_cuda(
         x_ND,
         dispatch_dst_ranks,
@@ -425,7 +424,6 @@ def active_swiglu_fake(
     up: torch.Tensor,
     active_rows: torch.Tensor,
 ) -> torch.Tensor:
-    del up, active_rows
     return torch.empty_like(gate)
 
 
@@ -537,7 +535,6 @@ def dispatch_forward(
     receive_capacity: int,
 ) -> torch.Tensor:
     """Dispatch E-major routed rows using source token-row indices."""
-    del receive_capacity
     num_routed_rows = E_row_to_token_N.numel()
     # This direct copy corresponds to AllToAllTokenDispatcher's token all-to-all;
     # dispatch_dst_rows already point at the post-_permute E-major layout.
@@ -561,9 +558,6 @@ def dispatch_forward_fake(
     E_row_to_token_N: torch.Tensor,  # noqa: N803
     receive_capacity: int,
 ) -> torch.Tensor:
-    del dispatch_dst_ranks
-    del dispatch_dst_rows
-    del E_row_to_token_N
     return dispatch_input.new_empty(receive_capacity, dispatch_input.shape[1])
 
 
@@ -586,8 +580,6 @@ def combine_forward(
     top_k: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Move expert outputs to origin ranks and reduce routed top-k rows."""
-    del dispatch_dst_ranks, dispatch_dst_rows
-
     routed_output_ND = _combine_to_origin(  # noqa: N806
         x,
         combine_dst_ranks,
@@ -620,14 +612,6 @@ def combine_forward_fake(
     num_tokens: int,
     top_k: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    del dispatch_dst_ranks
-    del dispatch_dst_rows
-    del combine_dst_ranks
-    del combine_dst_rows
-    del combine_num_valid_rows
-    del T_row_to_E_row_N
-    del routed_scores_N
-    del top_k
     return (
         x.new_empty(num_tokens, x.shape[1]),
         x.new_empty(
@@ -658,7 +642,6 @@ def active_swiglu_backward_fake(
     up: torch.Tensor,
     active_rows: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    del grad_out, active_rows
     return torch.empty_like(gate), torch.empty_like(up)
 
 
@@ -704,12 +687,6 @@ def dispatch_backward_fake(
     num_tokens: int,
     top_k: int,
 ) -> torch.Tensor:
-    del combine_dst_ranks
-    del combine_dst_rows
-    del combine_num_valid_rows
-    del T_row_to_E_row_N
-    del num_routed_rows
-    del top_k
     return grad_hidden.new_empty(num_tokens, grad_hidden.shape[1])
 
 
@@ -766,11 +743,6 @@ def combine_backward_fake(
     top_k: int,
     receive_capacity: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    del dispatch_dst_ranks
-    del dispatch_dst_rows
-    del E_row_to_T_row_N
-    del saved_routed_output_ND
-    del top_k
     return (
         grad_out.new_empty(receive_capacity, grad_out.shape[1]),
         routed_scores_N.new_empty(routed_scores_N.shape),
@@ -791,7 +763,6 @@ def active_swiglu_autograd_backward(ctx, grad_out):
 
 
 def active_swiglu_setup_context(ctx, inputs, output):
-    del output
     gate, up, active_rows = inputs
     ctx.save_for_backward(gate, up, active_rows)
 
@@ -838,7 +809,6 @@ class MinimalAsyncEPDispatch(torch.autograd.Function):
         grad_hidden,
         *unused_grads,
     ):
-        del unused_grads
         (
             combine_dst_ranks,
             combine_dst_rows,
