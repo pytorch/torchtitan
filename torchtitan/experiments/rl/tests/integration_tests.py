@@ -81,6 +81,7 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
                 [
                     "--module rl",
                     "--config rl_grpo_qwen3_0_6b_varlen_batch_invariant",
+                    "--group_size 2",
                     "--batcher.batch.seq_len 256",
                     "--renderer.enable-thinking False",
                     "--generator.sampling.max_tokens 80",
