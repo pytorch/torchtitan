@@ -88,6 +88,24 @@ class Decoder(BaseModel):
                     return rope_cfg.max_seq_len
             raise ValueError("Decoder config does not define RoPE max_seq_len.")
 
+        @property
+        def first_attn_config(self) -> BaseAttention.Config | None:
+            """Attention config of the first layer that has one, else None.
+
+            Hybrid models (linear + full attention) don't carry an attention
+            config on every layer, so callers needing attention metadata (TP
+            validation, FLOPs, mask type) look up the first full-attention
+            layer rather than assuming ``layers[0]``.
+            """
+            return next(
+                (
+                    layer.attention
+                    for layer in self.layers
+                    if layer.attention is not None
+                ),
+                None,
+            )
+
         def update_from_config(
             self,
             *,

@@ -9,10 +9,11 @@
 Sets ``ShardingConfig`` on all sub-configs so that ``model.parallelize()``
 applies TP via the Module protocol. Same pattern as ``qwen3/sharding.py``.
 
-Full attention layers: TP on wq/wk/wv/wo with local_map for inner attention.
+Full-attention layers: TP on wq/wk/wv/wo with local_map for inner attention;
+each layer's MRoPE ``cache`` buffer is sharded Replicate.
 GatedDeltaNet layers: head-sharded TP on projections (ColwiseParallel) and
-out_proj (RowwiseParallel). FLA kernel uses local_map for DTensor→local
-conversion. Conv1d sharding is set on built modules.
+out_proj (RowwiseParallel); the FLA kernel and depthwise Conv1d run on local
+tensors via local_map.
 """
 
 from typing import TYPE_CHECKING
@@ -34,24 +35,44 @@ from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.qwen3_5.model import (
+        GatedDeltaNet,
         Qwen35Attention,
         Qwen35Model,
         Qwen35TransformerBlock,
+        SharedExperts,
+    )
+    from torchtitan.models.qwen3_5.vision_encoder import Qwen35VisionEncoder
+
+def _replicate_norm() -> ShardingConfig:
+    """Replicate norm (weight/bias and activations) — used by the vision
+    encoder, which runs without sequence parallelism."""
+    return ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=Replicate()),
+            "bias": dense_param_placement(tp=Replicate()),
+        },
+        in_src_shardings={"input": dense_activation_placement(tp=Replicate())},
+        in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
+        out_dst_shardings=dense_activation_placement(tp=Replicate()),
     )
 
-_REPLICATE_PARAM = dense_param_placement(tp=Replicate())
-_REPLICATE_STATE = ShardingConfig(
-    state_shardings={"weight": _REPLICATE_PARAM, "bias": _REPLICATE_PARAM}
-)
-_REPLICATE_ACT = dense_activation_placement(tp=Replicate())
 
-# For norms/modules that receive and emit Replicate activations
-_REPLICATE_NORM = ShardingConfig(
-    state_shardings={"weight": _REPLICATE_PARAM, "bias": _REPLICATE_PARAM},
-    in_src_shardings={"input": _REPLICATE_ACT},
-    in_dst_shardings={"input": _REPLICATE_ACT},
-    out_dst_shardings=_REPLICATE_ACT,
-)
+def _qk_norm_sharding() -> ShardingConfig:
+    """Per-head QK-norm sharding: weight Replicate, activations Shard(2)."""
+    head_plc = dense_activation_placement(tp=Shard(2))
+    return ShardingConfig(
+        state_shardings={"weight": dense_param_placement(tp=Replicate())},
+        in_src_shardings={"input": head_plc},
+        in_dst_shardings={"input": head_plc},
+        out_dst_shardings=head_plc,
+    )
+
+
+def _conv_weight_sharding() -> ShardingConfig:
+    """Depthwise Conv1d weight sharded Shard(0) on out-channels (head-sharded)."""
+    return ShardingConfig(
+        state_shardings={"weight": dense_param_placement(tp=Shard(0))},
+    )
 
 
 _GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, Placement] = {
@@ -73,14 +94,15 @@ def set_qwen35_sharding_config(
     stays Replicate so vision scatter and MRoPE can access the full sequence.
     The model forward redistributes to Shard(1) before entering the layers.
     """
-    # SP on norm, lm_head, and layers. freqs_cis stays Replicate (set by base).
+    # SP on norm, lm_head, and layers. Each full-attention layer owns its rope;
+    # its cache buffer is sharded Replicate in _set_full_attention_sharding.
     set_decoder_sharding_config(config, loss_parallel=loss_parallel, enable_sp=True)
     # Override tok_embeddings: output Replicate (not Shard(1)) for vision scatter
     config.tok_embeddings.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=Shard(0))},
-        in_src_shardings={"input": _REPLICATE_ACT},
-        in_dst_shardings={"input": _REPLICATE_ACT},
-        out_dst_shardings=_REPLICATE_ACT,
+        in_src_shardings={"input": dense_activation_placement(tp=Replicate())},
+        in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
+        out_dst_shardings=dense_activation_placement(tp=Replicate()),
     )
     _set_vision_encoder_sharding(config.vision_encoder)
     for layer_cfg in config.layers:
@@ -92,9 +114,8 @@ def _set_qwen35_layer_sharding(
     *,
     enable_ep: bool,
 ) -> None:
-    norm = norm_config(enable_sp=True)
-    layer_cfg.attention_norm.sharding_config = norm
-    layer_cfg.ffn_norm.sharding_config = norm
+    layer_cfg.attention_norm.sharding_config = norm_config(enable_sp=True)
+    layer_cfg.ffn_norm.sharding_config = norm_config(enable_sp=True)
 
     if layer_cfg.attention is not None:
         _set_full_attention_sharding(layer_cfg.attention)
@@ -116,9 +137,34 @@ def _set_qwen35_layer_sharding(
             enable_sp=True,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
+        _set_shared_expert_gate_sharding(layer_cfg.moe.shared_experts)
 
 
-def _set_vision_encoder_sharding(ve_cfg) -> None:
+def _set_shared_expert_gate_sharding(
+    shared_experts: "SharedExperts.Config | None",
+) -> None:
+    """Shard Qwen3.5's shared-expert sigmoid gate.
+
+    The common MoE sharding handles the shared FFN (w1/w2/w3) and the
+    module-boundary gather that feeds the gate a Replicate ``x``. Here we only
+    add the gate: its weight is Replicate and its output is Replicate, so
+    ``sigmoid(gate(x)) * ffn(x)`` is ``Replicate * Partial = Partial`` with no
+    extra collective. ``getattr`` keeps this a no-op when the MoE has no shared
+    expert (``None``); Qwen3.5's shared expert always carries the gate.
+    """
+    gate = getattr(shared_experts, "gate", None)
+    if gate is None:
+        return
+    gate.sharding_config = ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=Replicate()),
+            "bias": dense_param_placement(tp=Replicate()),
+        },
+        out_dst_shardings=dense_activation_placement(tp=Replicate()),
+    )
+
+
+def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
     """Sharding for the vision encoder.
 
     All activations flow as Replicate — no SP in the vision encoder.
@@ -126,25 +172,28 @@ def _set_vision_encoder_sharding(ve_cfg) -> None:
     Norms are Replicate. pos_embed is Replicate via state_shardings.
     """
     ve_cfg.sharding_config = ShardingConfig(
-        state_shardings={"pos_embed": _REPLICATE_PARAM},
+        state_shardings={"pos_embed": dense_param_placement(tp=Replicate())},
     )
 
     # patch_embed receives plain pixel_values — wrap as DTensor(Replicate)
     ve_cfg.patch_embed_proj.sharding_config = ShardingConfig(
-        state_shardings={"weight": _REPLICATE_PARAM, "bias": _REPLICATE_PARAM},
-        in_src_shardings={"input": _REPLICATE_ACT},
-        in_dst_shardings={"input": _REPLICATE_ACT},
-        out_dst_shardings=_REPLICATE_ACT,
+        state_shardings={
+            "weight": dense_param_placement(tp=Replicate()),
+            "bias": dense_param_placement(tp=Replicate()),
+        },
+        in_src_shardings={"input": dense_activation_placement(tp=Replicate())},
+        in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
+        out_dst_shardings=dense_activation_placement(tp=Replicate()),
     )
 
     # Block sub-modules
     block = ve_cfg.block
-    block.norm1.sharding_config = _REPLICATE_NORM
-    block.norm2.sharding_config = _REPLICATE_NORM
+    block.norm1.sharding_config = _replicate_norm()
+    block.norm2.sharding_config = _replicate_norm()
 
     block.attn.sharding_config = ShardingConfig(
-        in_src_shardings={"rope_cache": _REPLICATE_ACT},
-        in_dst_shardings={"rope_cache": _REPLICATE_ACT},
+        in_src_shardings={"rope_cache": dense_activation_placement(tp=Replicate())},
+        in_dst_shardings={"rope_cache": dense_activation_placement(tp=Replicate())},
     )
     block.attn.wq.sharding_config = colwise_config()
     block.attn.wk.sharding_config = colwise_config()
@@ -157,7 +206,7 @@ def _set_vision_encoder_sharding(ve_cfg) -> None:
 
     # Merger sub-modules
     merger = ve_cfg.merger
-    merger.norm.sharding_config = _REPLICATE_NORM
+    merger.norm.sharding_config = _replicate_norm()
     merger.fc1.sharding_config = colwise_config()
     merger.fc2.sharding_config = rowwise_config(output_sp=False)
 
@@ -167,34 +216,26 @@ def _set_full_attention_sharding(
 ) -> None:
     """TP sharding for Qwen35Attention (output gating + partial RoPE)."""
     attention_cfg.sharding_config = ShardingConfig(
-        in_src_shardings={
-            "x": dense_activation_placement(tp=Shard(1)),
-            "rope_cache": dense_param_placement(tp=Replicate()),
-        },
-        in_dst_shardings={
-            "x": dense_activation_placement(tp=Replicate()),
-            "rope_cache": dense_param_placement(tp=Replicate()),
-        },
+        in_src_shardings={"x": dense_activation_placement(tp=Shard(1))},
+        in_dst_shardings={"x": dense_activation_placement(tp=Replicate())},
+    )
+    # The per-layer rope ``cache`` buffer is a Replicate DTensor; MRoPE builds the
+    # position-resolved cache from it (``positions`` stays a plain input).
+    attention_cfg.rope.sharding_config = ShardingConfig(
+        state_shardings={"cache": dense_param_placement(tp=Replicate())},
     )
     attention_cfg.wq.sharding_config = colwise_config()
     attention_cfg.wk.sharding_config = colwise_config()
     attention_cfg.wv.sharding_config = colwise_config()
     attention_cfg.wo.sharding_config = rowwise_config(output_sp=True)
 
-    _head_plc = dense_activation_placement(tp=Shard(2))
-    qk_norm_sharding = ShardingConfig(
-        state_shardings={"weight": _REPLICATE_PARAM},
-        in_src_shardings={"input": _head_plc},
-        in_dst_shardings={"input": _head_plc},
-        out_dst_shardings=_head_plc,
-    )
-    attention_cfg.q_norm.sharding_config = qk_norm_sharding
-    attention_cfg.k_norm.sharding_config = qk_norm_sharding
+    attention_cfg.q_norm.sharding_config = _qk_norm_sharding()
+    attention_cfg.k_norm.sharding_config = _qk_norm_sharding()
 
     set_gqa_inner_attention_local_map(attention_cfg.inner_attention)
 
 
-def _set_deltanet_sharding(deltanet_cfg) -> None:
+def _set_deltanet_sharding(deltanet_cfg: "GatedDeltaNet.Config") -> None:
     """Sharding for GatedDeltaNet: head-sharded TP on projections.
 
     Input is allgathered (Shard(1)→Replicate) so that the recurrence
@@ -218,12 +259,9 @@ def _set_deltanet_sharding(deltanet_cfg) -> None:
         getattr(deltanet_cfg, name).sharding_config = colwise_config()
 
     # Depthwise Conv1d weights: Shard(0) on out-channels (head-sharded).
-    _conv_shard = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=Shard(0))},
-    )
-    deltanet_cfg.conv_q.sharding_config = _conv_shard
-    deltanet_cfg.conv_k.sharding_config = _conv_shard
-    deltanet_cfg.conv_v.sharding_config = _conv_shard
+    deltanet_cfg.conv_q.sharding_config = _conv_weight_sharding()
+    deltanet_cfg.conv_k.sharding_config = _conv_weight_sharding()
+    deltanet_cfg.conv_v.sharding_config = _conv_weight_sharding()
 
     # RowwiseParallel on output projection (reduce-scatter to SP)
     deltanet_cfg.out_proj.sharding_config = rowwise_config(output_sp=True)
@@ -231,7 +269,7 @@ def _set_deltanet_sharding(deltanet_cfg) -> None:
     # RMSNormGated: per-head norm, weight Replicate, activations Shard(2)
     _norm_plc = dense_activation_placement(tp=Shard(2))
     deltanet_cfg.norm.sharding_config = ShardingConfig(
-        state_shardings={"weight": _REPLICATE_PARAM},
+        state_shardings={"weight": dense_param_placement(tp=Replicate())},
         in_src_shardings={"x": _norm_plc, "gate": _norm_plc},
         in_dst_shardings={"x": _norm_plc, "gate": _norm_plc},
         out_dst_shardings=_norm_plc,

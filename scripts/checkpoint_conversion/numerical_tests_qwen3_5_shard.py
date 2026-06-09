@@ -116,10 +116,14 @@ def run_worker(args):
     tokens = torch.randint(0, 248320, (1, seq_len), device="cuda")
     dist.broadcast(tokens, src=0)
 
+    # Text-only inputs
+    positions = torch.arange(seq_len, device="cuda").unsqueeze(0)
+
     with torch.no_grad():
         output = model(
             tokens,
-            special_tokens={"image_id": 151859, "video_id": 151860},
+            positions=positions,
+            special_tokens={"image_id": 248056, "video_id": 248057},
         )
 
     if isinstance(output, DTensor):

@@ -586,6 +586,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         extra_kwargs: dict[str, Any] = {}
 
         positions = extra_inputs.pop("positions", None)
+        mrope_positions = extra_inputs.pop("mrope_positions", None)
 
         # positions and attention_masks are optional (Decoder.forward defaults
         # both to None). Build attention masks only for the masked backends
@@ -615,6 +616,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 )
 
         extra_kwargs["positions"] = positions
+        if mrope_positions is not None:
+            extra_kwargs["mrope_positions"] = mrope_positions
 
         if self.parallel_dims.cp_enabled:
             inputs, labels, extra_kwargs = prepare_context_parallel_input(

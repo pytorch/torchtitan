@@ -33,6 +33,7 @@ def _dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
         max_pixels=16777216,
         image_mean=(0.5, 0.5, 0.5),
         image_std=(0.5, 0.5, 0.5),
+        build_mrope_positions=True,
         **kwargs,
     )
 

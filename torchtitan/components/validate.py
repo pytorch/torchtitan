@@ -191,8 +191,20 @@ class Validator(BaseValidator):
         # which is where get_attention_masks is defined. A maskless backend (the
         # SDPA config used by the graph_trainer tests) still receives positions
         # for RoPE but no masks — it relies on is_causal instead.
-        if isinstance(model_config, Decoder.Config) and positions is not None:
-            inner_attention = model_config.layers[0].attention.inner_attention
+        mrope_positions = extra_inputs.pop("mrope_positions", None)
+        if isinstance(model_config, Decoder.Config):
+            attn_config = model_config.layers[0].attention
+            inner_attention = attn_config.inner_attention
+
+            if attn_config.mask_type == "block_causal":
+                assert (
+                    positions is not None
+                ), "block_causal mask requires per-document positions from the dataloader"
+            else:
+                positions = torch.arange(
+                    inputs.shape[1], dtype=torch.int32, device=inputs.device
+                ).repeat(inputs.shape[0], 1)
+
             if isinstance(
                 inner_attention, (FlexAttention.Config, VarlenAttention.Config)
             ):
@@ -202,6 +214,8 @@ class Validator(BaseValidator):
                 )
 
         extra_kwargs["positions"] = positions
+        if mrope_positions is not None:
+            extra_kwargs["mrope_positions"] = mrope_positions
 
         if self.parallel_dims.cp_enabled:
             inputs, labels, extra_kwargs = prepare_context_parallel_input(

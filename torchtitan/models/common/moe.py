@@ -295,30 +295,6 @@ class TokenChoiceTopKRouter(Module):
         )
 
 
-class SharedExperts(FeedForward):
-    """Shared expert: SwiGLU FFN with an optional per-token sigmoid gate.
-
-    When ``gate`` is set, the output is ``sigmoid(gate(x)) * ffn(x)``;
-    otherwise it is a plain SwiGLU FFN. Inherits ``w1/w2/w3`` from
-    FeedForward so weight FQNs are unchanged.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(FeedForward.Config):
-        gate: Linear.Config | None = None
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.gate = config.gate.build() if config.gate is not None else None
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = super().forward(x)
-        if self.gate is not None:
-            # TODO: make the gate activation configurable (e.g. softmax, silu)
-            out = torch.sigmoid(self.gate(x)) * out
-        return out
-
-
 class MoE(Module):
     """Mixture of Experts layer.
 
@@ -346,7 +322,7 @@ class MoE(Module):
         experts: GroupedExperts.Config
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
-        shared_experts: SharedExperts.Config | None = None
+        shared_experts: FeedForward.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()

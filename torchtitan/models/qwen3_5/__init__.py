@@ -12,14 +12,13 @@ import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 
-from torchtitan.models.common import Conv1d, Embedding, Linear, RoPE  # noqa: F401
+from torchtitan.models.common import Conv1d, Embedding, Linear  # noqa: F401
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_experts_config,
     make_ffn_config,
     make_moe_config,
     make_router_config,
-    make_shared_experts_config,
 )
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
@@ -36,8 +35,10 @@ from .model import (
     Qwen35Model,
     Qwen35TransformerBlock,
     RMSNormGated,
+    SharedExperts,
 )
 from .parallelize import parallelize_qwen3_5, pipeline_qwen3_5
+from .rope import MRoPE
 from .state_dict_adapter import Qwen35StateDictAdapter
 from .vision_encoder import (
     PatchMerger,
@@ -115,6 +116,24 @@ def _offset_norm(dim: int) -> OffsetRMSNorm.Config:
     return OffsetRMSNorm.Config(dim=dim, eps=_EPS, param_init=_OFFSET_NORM_INIT)
 
 
+def _shared_experts_config(
+    *, dim: int, hidden_dim: int, layer_id: int
+) -> SharedExperts.Config:
+    """Build Qwen3.5's sigmoid-gated shared-expert config (SwiGLU FFN + gate)."""
+    ffn = make_ffn_config(
+        dim=dim,
+        hidden_dim=hidden_dim,
+        w1_param_init=_LINEAR_INIT,
+        w2w3_param_init=_depth_init(layer_id),
+    )
+    return SharedExperts.Config(
+        w1=ffn.w1,
+        w2=ffn.w2,
+        w3=ffn.w3,
+        gate=Linear.Config(in_features=dim, out_features=1, param_init=_LINEAR_INIT),
+    )
+
+
 def _qwen35_vision_encoder_config(
     *,
     dim: int,
@@ -182,6 +201,7 @@ def _qwen35_attention_config(
     n_kv_heads: int,
     head_dim: int,
     rotary_dim: int,
+    rope: MRoPE.Config,
     attn_backend: str,
     layer_id: int,
 ) -> Qwen35Attention.Config:
@@ -192,6 +212,7 @@ def _qwen35_attention_config(
         n_kv_heads=n_kv_heads,
         head_dim=head_dim,
         rotary_dim=rotary_dim,
+        rope=rope,
         wq=Linear.Config(
             in_features=dim,
             out_features=n_heads * head_dim * 2,
@@ -288,6 +309,7 @@ def _build_qwen35_layers(
     n_kv_heads: int,
     head_dim: int,
     rotary_dim: int,
+    rope: MRoPE.Config,
     hidden_dim: int,
     n_key_heads: int,
     n_value_heads: int,
@@ -311,6 +333,7 @@ def _build_qwen35_layers(
                 n_kv_heads=n_kv_heads,
                 head_dim=head_dim,
                 rotary_dim=rotary_dim,
+                rope=rope,
                 attn_backend=attn_backend,
                 layer_id=layer_id,
             )
@@ -356,6 +379,7 @@ def _build_qwen35_moe_layers(
     n_kv_heads: int,
     head_dim: int,
     rotary_dim: int,
+    rope: MRoPE.Config,
     moe_hidden_dim: int,
     num_experts: int,
     top_k: int,
@@ -384,6 +408,7 @@ def _build_qwen35_moe_layers(
                 n_kv_heads=n_kv_heads,
                 head_dim=head_dim,
                 rotary_dim=rotary_dim,
+                rope=rope,
                 attn_backend=attn_backend,
                 layer_id=layer_id,
             )
@@ -428,12 +453,10 @@ def _build_qwen35_moe_layers(
                         comm_backend=moe_comm_backend,
                         non_blocking_capacity_factor=non_blocking_capacity_factor,
                     ),
-                    shared_experts=make_shared_experts_config(
+                    shared_experts=_shared_experts_config(
                         dim=dim,
                         hidden_dim=shared_expert_hidden_dim,
-                        w1_param_init=_LINEAR_INIT,
-                        w2w3_param_init=_depth_init(layer_id),
-                        gate_param_init=_LINEAR_INIT,
+                        layer_id=layer_id,
                     ),
                 ),
                 attention_norm=_offset_norm(dim),
@@ -467,13 +490,13 @@ def _debugmodel(attn_backend: str) -> Qwen35Model.Config:
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=rotary_dim,
-            max_seq_len=4096,
-            theta=10_000_000.0,
-            backend="cos_sin",
-        ),
         layers=_build_qwen35_layers(
+            rope=MRoPE.Config(
+                dim=rotary_dim,
+                max_seq_len=4096,
+                theta=10_000_000.0,
+                mrope_section=[3, 3, 2],
+            ),
             attn_backend=attn_backend,
             n_layers=n_layers,
             dim=dim,
@@ -499,7 +522,6 @@ def _debugmodel(attn_backend: str) -> Qwen35Model.Config:
             out_hidden_size=256,
             num_position_embeddings=1024,
         ),
-        mrope_section=[3, 3, 2],
     )
 
 
@@ -528,13 +550,13 @@ def _debugmodel_moe(
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=rotary_dim,
-            max_seq_len=4096,
-            theta=10_000_000.0,
-            backend="cos_sin",
-        ),
         layers=_build_qwen35_moe_layers(
+            rope=MRoPE.Config(
+                dim=rotary_dim,
+                max_seq_len=4096,
+                theta=10_000_000.0,
+                mrope_section=[3, 3, 2],
+            ),
             attn_backend=attn_backend,
             n_layers=n_layers,
             dim=dim,
@@ -564,7 +586,6 @@ def _debugmodel_moe(
             out_hidden_size=256,
             num_position_embeddings=1024,
         ),
-        mrope_section=[3, 3, 2],
     )
 
 
@@ -595,13 +616,13 @@ def _0_8b(attn_backend: str) -> Qwen35Model.Config:
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=rotary_dim,
-            max_seq_len=262144,
-            theta=10_000_000.0,
-            backend="cos_sin",
-        ),
         layers=_build_qwen35_layers(
+            rope=MRoPE.Config(
+                dim=rotary_dim,
+                max_seq_len=262144,
+                theta=10_000_000.0,
+                mrope_section=[11, 11, 10],
+            ),
             attn_backend=attn_backend,
             n_layers=n_layers,
             dim=dim,
@@ -626,7 +647,6 @@ def _0_8b(attn_backend: str) -> Qwen35Model.Config:
             out_hidden_size=1024,
             num_position_embeddings=2304,
         ),
-        mrope_section=[11, 11, 10],
     )
 
 
@@ -657,13 +677,13 @@ def _2b(attn_backend: str) -> Qwen35Model.Config:
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=rotary_dim,
-            max_seq_len=262144,
-            theta=10_000_000.0,
-            backend="cos_sin",
-        ),
         layers=_build_qwen35_layers(
+            rope=MRoPE.Config(
+                dim=rotary_dim,
+                max_seq_len=262144,
+                theta=10_000_000.0,
+                mrope_section=[11, 11, 10],
+            ),
             attn_backend=attn_backend,
             n_layers=n_layers,
             dim=dim,
@@ -688,7 +708,6 @@ def _2b(attn_backend: str) -> Qwen35Model.Config:
             out_hidden_size=2048,
             num_position_embeddings=2304,
         ),
-        mrope_section=[11, 11, 10],
     )
 
 
@@ -718,13 +737,13 @@ def _4b(attn_backend: str) -> Qwen35Model.Config:
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=rotary_dim,
-            max_seq_len=262144,
-            theta=10_000_000.0,
-            backend="cos_sin",
-        ),
         layers=_build_qwen35_layers(
+            rope=MRoPE.Config(
+                dim=rotary_dim,
+                max_seq_len=262144,
+                theta=10_000_000.0,
+                mrope_section=[11, 11, 10],
+            ),
             attn_backend=attn_backend,
             n_layers=n_layers,
             dim=dim,
@@ -749,7 +768,6 @@ def _4b(attn_backend: str) -> Qwen35Model.Config:
             out_hidden_size=2560,
             num_position_embeddings=2304,
         ),
-        mrope_section=[11, 11, 10],
     )
 
 
@@ -775,13 +793,13 @@ def _9b(attn_backend: str) -> Qwen35Model.Config:
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=rotary_dim,
-            max_seq_len=262144,
-            theta=10_000_000.0,
-            backend="cos_sin",
-        ),
         layers=_build_qwen35_layers(
+            rope=MRoPE.Config(
+                dim=rotary_dim,
+                max_seq_len=262144,
+                theta=10_000_000.0,
+                mrope_section=[11, 11, 10],
+            ),
             attn_backend=attn_backend,
             n_layers=n_layers,
             dim=dim,
@@ -806,7 +824,6 @@ def _9b(attn_backend: str) -> Qwen35Model.Config:
             out_hidden_size=4096,
             num_position_embeddings=2304,
         ),
-        mrope_section=[11, 11, 10],
     )
 
 
@@ -832,13 +849,13 @@ def _27b(attn_backend: str) -> Qwen35Model.Config:
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=rotary_dim,
-            max_seq_len=262144,
-            theta=10_000_000.0,
-            backend="cos_sin",
-        ),
         layers=_build_qwen35_layers(
+            rope=MRoPE.Config(
+                dim=rotary_dim,
+                max_seq_len=262144,
+                theta=10_000_000.0,
+                mrope_section=[11, 11, 10],
+            ),
             attn_backend=attn_backend,
             n_layers=n_layers,
             dim=dim,
@@ -863,7 +880,6 @@ def _27b(attn_backend: str) -> Qwen35Model.Config:
             out_hidden_size=5120,
             num_position_embeddings=2304,
         ),
-        mrope_section=[11, 11, 10],
     )
 
 
@@ -892,13 +908,13 @@ def _35b_a3b(
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=rotary_dim,
-            max_seq_len=262144,
-            theta=10_000_000.0,
-            backend="cos_sin",
-        ),
         layers=_build_qwen35_moe_layers(
+            rope=MRoPE.Config(
+                dim=rotary_dim,
+                max_seq_len=262144,
+                theta=10_000_000.0,
+                mrope_section=[11, 11, 10],
+            ),
             attn_backend=attn_backend,
             n_layers=n_layers,
             dim=dim,
@@ -927,7 +943,6 @@ def _35b_a3b(
             out_hidden_size=2048,
             num_position_embeddings=2304,
         ),
-        mrope_section=[11, 11, 10],
     )
 
 
@@ -956,13 +971,13 @@ def _122b_a10b(
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=rotary_dim,
-            max_seq_len=262144,
-            theta=10_000_000.0,
-            backend="cos_sin",
-        ),
         layers=_build_qwen35_moe_layers(
+            rope=MRoPE.Config(
+                dim=rotary_dim,
+                max_seq_len=262144,
+                theta=10_000_000.0,
+                mrope_section=[11, 11, 10],
+            ),
             attn_backend=attn_backend,
             n_layers=n_layers,
             dim=dim,
@@ -991,7 +1006,6 @@ def _122b_a10b(
             out_hidden_size=3072,
             num_position_embeddings=2304,
         ),
-        mrope_section=[11, 11, 10],
     )
 
 
@@ -1020,13 +1034,13 @@ def _397b_a17b(
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
         ),
-        rope=RoPE.Config(
-            dim=rotary_dim,
-            max_seq_len=262144,
-            theta=10_000_000.0,
-            backend="cos_sin",
-        ),
         layers=_build_qwen35_moe_layers(
+            rope=MRoPE.Config(
+                dim=rotary_dim,
+                max_seq_len=262144,
+                theta=10_000_000.0,
+                mrope_section=[11, 11, 10],
+            ),
             attn_backend=attn_backend,
             n_layers=n_layers,
             dim=dim,
@@ -1055,7 +1069,6 @@ def _397b_a17b(
             out_hidden_size=4096,
             num_position_embeddings=2304,
         ),
-        mrope_section=[11, 11, 10],
     )
 
 

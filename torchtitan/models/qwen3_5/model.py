@@ -5,35 +5,29 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 import torch
 import torch.nn.functional as F
+
+from fla.ops.gated_delta_rule import (
+    chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
+    fused_recurrent_gated_delta_rule as _fla_fused_recurrent_gated_delta_rule,
+)
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
-from torchtitan.models.common import Conv1d, Linear
+from torchtitan.models.common import Conv1d, FeedForward, Linear
 from torchtitan.models.common.attention import AttentionMasksType, BaseAttention
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
+from .rope import MRoPE
 from .sharding import set_qwen35_sharding_config
 from .vision_encoder import Qwen35VisionEncoder
-
-
-try:
-    from fla.ops.gated_delta_rule import (
-        chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
-        fused_recurrent_gated_delta_rule as _fla_fused_recurrent_gated_delta_rule,
-    )
-
-    _HAS_FLA = True
-except ImportError:
-    _HAS_FLA = False
 
 
 def _l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
@@ -87,6 +81,27 @@ def _torch_native_gated_delta(
         output[:, t] = torch.einsum("bhkv,bhk->bhv", state, q_t)
 
     return output.to(dtype)
+
+
+class SharedExperts(FeedForward):
+    """Qwen3.5 shared expert: SwiGLU FFN with a per-token sigmoid gate.
+
+    The output is ``sigmoid(gate(x)) * ffn(x)``. Inherits ``w1/w2/w3`` from
+    FeedForward so weight FQNs are unchanged. This gate is specific to
+    Qwen3.5; other models use a plain ``FeedForward`` shared expert.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(FeedForward.Config):
+        gate: Linear.Config
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.gate = config.gate.build()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = super().forward(x)
+        return torch.sigmoid(self.gate(x)) * out
 
 
 class OffsetRMSNorm(Module):
@@ -180,12 +195,6 @@ class GatedDeltaKernel(Module):
 
         if self.backend == "torch_native":
             return _torch_native_gated_delta(q, k, v, g, beta)
-
-        if not _HAS_FLA:
-            raise RuntimeError(
-                f"Backend '{self.backend}' requires the `fla` package. "
-                "Install: pip install flash-linear-attention"
-            )
 
         if self.backend == "fla_chunked":
             result = _fla_chunk_gated_delta_rule(
@@ -309,7 +318,10 @@ class GatedDeltaNet(Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bs, seqlen, _ = x.shape
 
-        # Split projections (not fused QKV) so each is ColwiseParallel for TP.
+        # Shapes:
+        #   xq, xk: (bs, seqlen, n_key_heads * key_head_dim)
+        #   xv, xz: (bs, seqlen, n_value_heads * value_head_dim)
+        #   xa, xb: (bs, seqlen, n_value_heads)
         xq = self._causal_conv(self.in_proj_q(x), self.conv_q)
         xk = self._causal_conv(self.in_proj_k(x), self.conv_k)
         xv = self._causal_conv(self.in_proj_v(x), self.conv_v)
@@ -321,10 +333,11 @@ class GatedDeltaNet(Module):
         xk = xk.view(bs, seqlen, -1, self.key_head_dim)
         xv = xv.view(bs, seqlen, -1, self.value_head_dim)
 
-        g = -torch.exp(self.A_log.float()) * F.softplus(
-            xa.float() + self.dt_bias
-        )  # decay rate, always negative
-        beta = torch.sigmoid(xb)  # update gate ∈ (0, 1)
+        # Gating signals, shape (bs, seqlen, n_value_heads):
+        #   g:    decay rate per head, always negative
+        #   beta: update gate ∈ (0, 1)
+        g = -torch.exp(self.A_log.float()) * F.softplus(xa.float() + self.dt_bias)
+        beta = torch.sigmoid(xb)
 
         output = self.kernel(xq, xk, xv, g, beta)
 
@@ -343,6 +356,10 @@ class Qwen35Attention(BaseAttention):
     - Partial RoPE: only first ``rotary_dim`` elements get RoPE
     - Output gating: ``attn_output * sigmoid(gate)`` before ``wo``
     - QK norm uses OffsetRMSNorm
+
+    Uses separate ``wq``/``wk``/``wv`` instead of the common fused ``qkv_linear``
+    (so this subclasses ``BaseAttention``, not ``GQAttention``): the 2x-wide,
+    gated ``wq`` doesn't fit a fused QKV projection that TP-shards by head.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -351,6 +368,7 @@ class Qwen35Attention(BaseAttention):
         n_kv_heads: int
         head_dim: int
         rotary_dim: int
+        rope: MRoPE.Config
         wq: Linear.Config
         wk: Linear.Config
         wv: Linear.Config
@@ -373,6 +391,8 @@ class Qwen35Attention(BaseAttention):
         self.wv = config.wv.build()
         self.wo = config.wo.build()
 
+        self.rope = config.rope.build()
+
         self.q_norm = config.q_norm.build()
         self.k_norm = config.k_norm.build()
 
@@ -383,7 +403,6 @@ class Qwen35Attention(BaseAttention):
     def forward(
         self,
         x: torch.Tensor,
-        rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -403,7 +422,7 @@ class Qwen35Attention(BaseAttention):
         assert self.rotary_dim <= self.head_dim
         xq_rot, xq_pass = xq[..., : self.rotary_dim], xq[..., self.rotary_dim :]
         xk_rot, xk_pass = xk[..., : self.rotary_dim], xk[..., self.rotary_dim :]
-        xq_rot, xk_rot = apply_rotary_emb_cos_sin(xq_rot, xk_rot, rope_cache, positions)
+        xq_rot, xk_rot = self.rope(xq_rot, xk_rot, positions)
         xq = torch.cat([xq_rot, xq_pass], dim=-1)
         xk = torch.cat([xk_rot, xk_pass], dim=-1)
 
@@ -463,13 +482,12 @@ class Qwen35TransformerBlock(Module):
     def forward(
         self,
         x: torch.Tensor,
-        freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         h = self.attention_norm(x)
         if self.full_attn:
-            h = self.attn(h, freqs_cis, attention_masks, positions)
+            h = self.attn(h, attention_masks, positions)
         else:
             h = self.attn(h)
         x = x + h
@@ -494,35 +512,37 @@ class Qwen35Model(Decoder):
     - Output gating on full attention: ``attn_out * sigmoid(gate)``
     - Partial RoPE: only first ``rotary_dim`` elements get positional encoding
     - OffsetRMSNorm: ``(1 + weight) * norm(x)`` with zero-init weight
-    - MRoPE: 3D position IDs (temporal, height, width) for vision tokens
+    - MRoPE: 3D (temporal/height/width) position IDs for multimodal batches;
+      text batches use the plain 1D positions
     - MoE variant: routed experts + shared expert with sigmoid gate
+
+    MRoPE positions (``mrope_positions``, shape ``(batch, seq, 3)``) are built by
+    the dataloader and forwarded to every pipeline stage, so RoPE stays consistent
+    across stages even though the raw vision inputs (``pixel_values``/``grid_thw``)
+    only reach the first stage. Text batches carry no ``mrope_positions`` and use
+    the 2D ``positions`` instead.
 
     Forward pass flow::
 
-        forward(tokens, pixel_values, grid_thw, ...)
+        forward(tokens, pixel_values, grid_thw, mrope_positions, ...)
           │
           ├─ _prepare_multimodal_embeds
           │    ├─ tok_embeddings(tokens)              → text embeddings
           │    ├─ _get_vision_embeds(pixel_values)     → vision embeddings
           │    │    └─ vision_encoder(pixel_values)     → merge patches
-          │    ├─ _compute_vision_positions             → locate vision regions
+          │    ├─ _get_vision_positions             → locate vision regions
           │    └─ _scatter_vision_embeds                → scatter into text sequence
           │
-          ├─ _compute_mrope_freqs                      → 3D position IDs → interleaved cos/sin
-          │
-          └─ transformer layers (hybrid)
+          └─ transformer layers (hybrid), each given (mrope_positions or positions)
                └─ for each layer:
                     ├─ full attention (every Nth):  QK-norm → partial RoPE → SDPA → gate
+                    │    (the layer's MRoPE builds the cos/sin cache from positions)
                     └─ GatedDeltaNet (others):      Conv1d → gated delta rule → gated norm
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         vision_encoder: Qwen35VisionEncoder.Config
-
-        # MRoPE section sizes for interleaved multi-dimensional RoPE
-        # [temporal, height, width] - controls how position dimensions are interleaved
-        mrope_section: list[int] = field(default_factory=lambda: [24, 20, 20])
 
         def update_from_config(
             self,
@@ -579,218 +599,9 @@ class Qwen35Model(Decoder):
         super().__init__(config)
 
         self.vision_encoder = config.vision_encoder.build()
-
-        self.mrope_section = config.mrope_section
         self.spatial_merge_size = config.vision_encoder.spatial_merge_size
 
-    def _compute_mrope_freqs(
-        self,
-        tokens: torch.Tensor,
-        *,
-        grid_thw: torch.Tensor | None,
-        grid_thw_videos: torch.Tensor | None,
-        special_tokens: dict[str, int],
-        positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Build 3D position IDs and compute interleaved MRoPE cos/sin frequencies.
-
-        Constructs (temporal, height, width) position IDs for each token, then
-        looks up cos/sin from the 1D RoPE table and overwrites H/W-assigned dims
-        with their own position lookups.
-
-        Args:
-            tokens: (batch, seq_len) token IDs
-            grid_thw: (num_images, 3) grid dimensions for images
-            grid_thw_videos: (num_videos, 3) grid dimensions for videos
-            special_tokens: Special token definitions
-            positions: (batch, seq_len) per-token position IDs for packed
-                sequences. When provided, document boundaries are detected
-                where positions reset (positions[t] < positions[t-1]), and
-                pos_id_offset resets to 0 at each boundary
-
-        Returns:
-            (batch, seq_len, 1, head_dim * 2) pre-computed MRoPE cos/sin
-        """
-        # --- Build 3D position IDs ---
-
-        # Expand each video [T, H, W] into T rows of [1, H, W] so that
-        # each frame is treated like an image in the MRoPE code below
-        # Temporal position comes from frame ordering in the sequence
-        if grid_thw_videos is not None:
-            grid_thw_videos = torch.repeat_interleave(
-                grid_thw_videos, grid_thw_videos[:, 0], dim=0
-            )
-            grid_thw_videos[:, 0] = 1
-
-        spatial_merge_size = self.spatial_merge_size
-        image_token_id = special_tokens["image_id"]
-        video_token_id = special_tokens["video_id"]
-
-        batch_size, seq_len = tokens.shape
-        position_ids = torch.zeros(
-            3,
-            batch_size,
-            seq_len,
-            dtype=tokens.dtype,
-            device=tokens.device,
-        )
-
-        # Precompute document boundaries and vision token positions across batch
-        if positions is not None:
-            resets = positions[:, 1:] < positions[:, :-1]  # (batch, seq_len-1)
-        # Find the first token of each consecutive vision region (image or video)
-        # E.g. for [text, img, img, img, text, vid, vid] → positions [1, 5]
-        vision_mask = (tokens == image_token_id) | (tokens == video_token_id)
-        prev_vision = torch.cat(
-            [torch.zeros_like(vision_mask[:, :1]), vision_mask[:, :-1]], dim=1
-        )
-        batch_vision_starts = vision_mask & ~prev_vision  # (batch, seq_len)
-        # Cache vision grid indices by shape to avoid redundant construction
-        grid_cache: dict[tuple[int, int, int], torch.Tensor] = {}
-
-        image_index, video_index = 0, 0
-        # Build MRoPE 3D position IDs per sample
-        # With sample packing, each sample may contain multiple documents
-        for sample_i in range(batch_size):
-            llm_pos_ids_list: list[torch.Tensor] = []
-
-            if positions is not None:
-                # Detect document boundaries within one packed sample
-                # pyrefly: ignore [unbound-name]
-                reset_indices = torch.where(resets[sample_i])[0] + 1
-                doc_starts = [0] + reset_indices.tolist()
-                doc_ranges = [
-                    (
-                        doc_starts[d],
-                        doc_starts[d + 1] if d + 1 < len(doc_starts) else seq_len,
-                    )
-                    for d in range(len(doc_starts))
-                ]
-            else:
-                doc_ranges = [(0, seq_len)]
-
-            sample_tokens = tokens[sample_i]
-            sample_vision_starts = torch.where(batch_vision_starts[sample_i])[
-                0
-            ].tolist()
-            vision_start_index = 0
-
-            for doc_start, doc_end in doc_ranges:
-                doc_pos_ids_list: list[torch.Tensor] = []
-
-                # Advance pointer to collect vision region starts in this document
-                doc_vision_starts: list[int] = []
-                while (
-                    vision_start_index < len(sample_vision_starts)
-                    and sample_vision_starts[vision_start_index] < doc_end
-                ):
-                    doc_vision_starts.append(sample_vision_starts[vision_start_index])
-                    vision_start_index += 1
-
-                # Process [text tokens][vision tokens] pairs within this document
-                pair_cursor = doc_start
-                for vision_start in doc_vision_starts:
-                    if sample_tokens[vision_start] == image_token_id:
-                        # pyrefly: ignore [unsupported-operation]
-                        t, h, w = grid_thw[image_index]
-                        image_index += 1
-                    else:
-                        # pyrefly: ignore [unsupported-operation]
-                        t, h, w = grid_thw_videos[video_index]
-                        video_index += 1
-
-                    llm_grid_t, llm_grid_h, llm_grid_w = (
-                        int(t.item()),
-                        int(h.item()) // spatial_merge_size,
-                        int(w.item()) // spatial_merge_size,
-                    )
-                    text_len = vision_start - pair_cursor
-
-                    # pos_id_offset may differ from pair_cursor due to compact
-                    # spatial position IDs for vision regions
-                    pos_id_offset = (
-                        doc_pos_ids_list[-1].max() + 1
-                        if len(doc_pos_ids_list) > 0
-                        else 0
-                    )
-                    # [text tokens] — sequential positions, identical on all 3 axes
-                    doc_pos_ids_list.append(
-                        torch.arange(text_len).view(1, -1).expand(3, -1) + pos_id_offset
-                    )
-                    # [vision tokens] — 3D grid positions (T, H, W)
-                    grid_key = (llm_grid_t, llm_grid_h, llm_grid_w)
-                    if grid_key not in grid_cache:
-                        hw = llm_grid_h * llm_grid_w
-                        t_index = (
-                            torch.arange(llm_grid_t)
-                            .view(-1, 1)
-                            .expand(-1, hw)
-                            .flatten()
-                        )
-                        h_index = (
-                            torch.arange(llm_grid_h)
-                            .view(1, -1, 1)
-                            .expand(llm_grid_t, -1, llm_grid_w)
-                            .flatten()
-                        )
-                        w_index = (
-                            torch.arange(llm_grid_w)
-                            .view(1, 1, -1)
-                            .expand(llm_grid_t, llm_grid_h, -1)
-                            .flatten()
-                        )
-                        grid_cache[grid_key] = torch.stack([t_index, h_index, w_index])
-                    doc_pos_ids_list.append(
-                        grid_cache[grid_key] + text_len + pos_id_offset
-                    )
-                    pair_cursor = vision_start + llm_grid_t * llm_grid_h * llm_grid_w
-
-                # Trailing [text tokens] after the last [text tokens][vision tokens] pair
-                if pair_cursor < doc_end:
-                    pos_id_offset = (
-                        doc_pos_ids_list[-1].max() + 1
-                        if len(doc_pos_ids_list) > 0
-                        else 0
-                    )
-                    text_len = doc_end - pair_cursor
-                    doc_pos_ids_list.append(
-                        torch.arange(text_len).view(1, -1).expand(3, -1) + pos_id_offset
-                    )
-
-                llm_pos_ids_list.extend(doc_pos_ids_list)
-
-            llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
-            position_ids[:, sample_i, :] = llm_positions.to(position_ids.device)
-
-        # --- Compute interleaved MRoPE cos/sin from position IDs ---
-        # Convert to local — DTensor doesn't support fancy indexing with
-        # plain-tensor indices (cos_cache[t_pos], sin_cache[:, col][dim_pos]).
-        freqs_cis = self.freqs_cis
-        if isinstance(freqs_cis, DTensor):
-            freqs_cis = freqs_cis.to_local()
-        head_dim = freqs_cis.shape[-1] // 2
-        cos_cache = freqs_cis[:, :head_dim]
-        sin_cache = freqs_cis[:, head_dim:]
-
-        # Initialize with temporal positions, then overwrite H/W slices
-        t_pos = position_ids[0].long()
-        mrope_cos = cos_cache[t_pos]
-        mrope_sin = sin_cache[t_pos]
-
-        # Overwrite H and W slices with their own position lookups
-        # Both halves of head_dim must be updated (head_dim = cat([freqs, freqs]))
-        half = head_dim // 2
-        for dim, offset in enumerate((1, 2), start=1):  # H, W
-            length = self.mrope_section[dim] * 3
-            low = torch.arange(offset, length, 3, device=freqs_cis.device)
-            col_indices = torch.cat([low, low + half])
-            dim_pos = position_ids[dim].long()
-            mrope_cos[..., col_indices] = cos_cache[:, col_indices][dim_pos]
-            mrope_sin[..., col_indices] = sin_cache[:, col_indices][dim_pos]
-
-        return torch.cat([mrope_cos, mrope_sin], dim=-1).unsqueeze(2)
-
-    def _compute_vision_positions(
+    def _get_vision_positions(
         self,
         tokens: torch.Tensor,
         num_tokens_per_item: torch.Tensor,
@@ -908,7 +719,7 @@ class Qwen35Model(Decoder):
             merged_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values, grid_thw=grid_thw
             )
-            image_positions = self._compute_vision_positions(
+            image_positions = self._get_vision_positions(
                 tokens, num_tokens, image_token_id
             )
             if image_positions:
@@ -922,7 +733,7 @@ class Qwen35Model(Decoder):
             merged_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values_videos, grid_thw=grid_thw_videos
             )
-            video_positions = self._compute_vision_positions(
+            video_positions = self._get_vision_positions(
                 tokens, num_tokens, video_token_id
             )
             if video_positions:
@@ -944,6 +755,7 @@ class Qwen35Model(Decoder):
         grid_thw_videos: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
+        mrope_positions: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
     ):
         if self.tok_embeddings is not None:
@@ -958,18 +770,11 @@ class Qwen35Model(Decoder):
         else:
             x = tokens
 
-        if grid_thw is not None or grid_thw_videos is not None:
-            freqs_cis = self._compute_mrope_freqs(
-                tokens,
-                grid_thw=grid_thw,
-                grid_thw_videos=grid_thw_videos,
-                special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
-                positions=positions,
-            )
-        else:
-            freqs_cis = self.freqs_cis
+        # 3D MRoPE positions for multimodal batches, else 2D text positions.
+        rope_positions = mrope_positions if mrope_positions is not None else positions
+        assert rope_positions is not None
         for layer in self.layers.values():
-            x = layer(x, freqs_cis, attention_masks, positions)
+            x = layer(x, attention_masks, rope_positions)
 
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:

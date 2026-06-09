@@ -27,7 +27,6 @@ from torchtitan.models.common.config_utils import (
     make_ffn_config,
     make_moe_config,
     make_router_config,
-    make_shared_experts_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.utils import validate_converter_order
@@ -243,7 +242,7 @@ def _build_dsv3_layers(
                     comm_backend=moe_comm_backend,
                     non_blocking_capacity_factor=non_blocking_capacity_factor,
                 ),
-                shared_experts=make_shared_experts_config(
+                shared_experts=make_ffn_config(
                     dim=dim,
                     hidden_dim=moe_hidden_dim * num_shared_experts,
                     w1_param_init=_LINEAR_INIT,
