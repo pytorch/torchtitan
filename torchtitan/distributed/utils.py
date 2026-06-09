@@ -10,7 +10,7 @@ import contextlib
 import math
 import os
 from abc import abstractmethod
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from datetime import timedelta
 from typing import Protocol, TYPE_CHECKING
 

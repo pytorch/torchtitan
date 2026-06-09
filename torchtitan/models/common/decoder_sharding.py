@@ -19,8 +19,8 @@ TP = MeshAxisName.TP
 def dense_param_placement(*, tp: spmd.PerMeshAxisSpmdType) -> SpmdLayout:
     """Placement for dense-path params/buffers.
 
-    DP/CP axes are ``Replicate`` at ``distribute_tensor`` time; the DTensor
-    bridge unfolds logical DP into storage axes. TP placement is caller-specified.
+    DP/CP axes are ``Replicate`` at ``distribute_tensor`` time; FSDP reshards
+    DP post-parallelize. TP placement is caller-specified.
     """
     return SpmdLayout(
         {

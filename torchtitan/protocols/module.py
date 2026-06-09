@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 from torch.distributed.tensor import distribute_tensor, DTensor
@@ -22,9 +23,11 @@ from torchtitan.config import Configurable
 from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
 from torchtitan.distributed.spmd_types import (
     current_mesh,
-    redistribute_spmd_per_axis,
+    preserve_buffers_spmd,
+    spmd_distribute_tensor,
+    spmd_redistribute_per_axis,
     set_current_spmd_mesh,
-    _validate_spmd_redistributions,
+    spmd_validate_redistributions,
 )
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
 
@@ -97,7 +100,8 @@ class Module(nn.Module, Configurable):
             for name, buf in self._buffers.items()
             if isinstance(buf, DTensor)
         }
-        self._init_self_buffers(buffer_device=buffer_device)
+        with preserve_buffers_spmd(self):
+            self._init_self_buffers(buffer_device=buffer_device)
         for name, (mesh, placements) in dtensor_meta.items():
             new_buf = self._buffers.get(name)
             if new_buf is None or isinstance(new_buf, DTensor):
@@ -108,6 +112,11 @@ class Module(nn.Module, Configurable):
                 distribute_tensor(new_buf, mesh, list(placements)),
                 persistent=persistent,
             )
+
+    def _apply(self, fn, recurse=True):
+        """Override to preserve annotations across model.to_empty() in trainer.py"""
+        with preserve_buffers_spmd(self):
+            return super()._apply(fn, recurse=recurse)
 
     def _init_self_parameters(self) -> None:
         """Initialize this module's own direct parameters.
@@ -233,7 +242,7 @@ class Module(nn.Module, Configurable):
             return
 
         if parallel_dims.spmd_backend == "spmd_types":
-            _validate_spmd_redistributions(self._sharding_config)
+            spmd_validate_redistributions(self._sharding_config)
         self._shard_states(parallel_dims)
         self._cache_pos_arg_names()
         fn = self._maybe_wrap_with_local_region(self.forward, parallel_dims)
@@ -245,7 +254,7 @@ class Module(nn.Module, Configurable):
 
         self.forward = forward_with_redistribution
 
-    def _register_spmd_state(
+    def _spmd_register_state(
         self,
         parallel_dims: ParallelDims,
         name: str,
@@ -262,7 +271,7 @@ class Module(nn.Module, Configurable):
         assert mesh is not None
         assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
 
-        tensor = _shard_spmd_state(tensor, mesh, layout)
+        tensor = spmd_distribute_tensor(tensor, mesh, layout)
         if is_param:
             self.register_parameter(name, nn.Parameter(tensor))
             registered = self._parameters[name]
@@ -299,7 +308,7 @@ class Module(nn.Module, Configurable):
                     "in sharding_config.state_shardings."
                 )
             if parallel_dims.spmd_backend == "spmd_types":
-                self._register_spmd_state(
+                self._spmd_register_state(
                     parallel_dims,
                     name,
                     param,
@@ -342,7 +351,7 @@ class Module(nn.Module, Configurable):
                 # by ``init_states`` later; nothing to distribute yet.
                 continue
             if parallel_dims.spmd_backend == "spmd_types":
-                self._register_spmd_state(
+                self._spmd_register_state(
                     parallel_dims,
                     name,
                     buffer,
@@ -396,7 +405,7 @@ class Module(nn.Module, Configurable):
         in_named: list[SpmdLayout] = [in_dst[name] for name in pos_args]
 
         if parallel_dims.spmd_backend == "spmd_types":
-            return self._apply_local_spmd(fn, in_named, out_src)
+            return self._spmd_apply_local_map(fn, in_named, out_src)
         return self._apply_local_map(fn, parallel_dims, in_named, out_src)
 
     def _apply_local_map(
@@ -440,7 +449,7 @@ class Module(nn.Module, Configurable):
             device_mesh=resolved_mesh,
         )
 
-    def _apply_local_spmd(
+    def _spmd_apply_local_map(
         self,
         fn: Callable,
         in_named: list[SpmdLayout],
@@ -518,7 +527,7 @@ class Module(nn.Module, Configurable):
                 if dst_spmd_layout is None:
                     new_kwargs[name] = value
                     continue
-                value = redistribute_spmd_per_axis(
+                value = spmd_redistribute_per_axis(
                     value,
                     current_mesh(),
                     src_spmd_layout.per_axis_spmd_types(),
@@ -594,7 +603,7 @@ class Module(nn.Module, Configurable):
             out_dst = sharding_config.out_dst_shardings
             if out_dst is None:
                 return outputs
-            return redistribute_spmd_per_axis(
+            return spmd_redistribute_per_axis(
                 outputs,
                 current_mesh(),
                 out_src.per_axis_spmd_types(),

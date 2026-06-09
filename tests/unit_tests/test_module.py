@@ -11,12 +11,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.models.common.nn_modules import Linear
-from torchtitan.protocols.module import (
-    Module,
-    ModuleDict,
-    ModuleList,
-    Sequential,
-)
+from torchtitan.protocols.module import Module, ModuleDict, ModuleList, Sequential
 
 
 class TestModuleInitStates(unittest.TestCase):
