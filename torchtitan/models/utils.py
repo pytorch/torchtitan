@@ -12,7 +12,6 @@ from torch.distributed.tensor.placement_types import _StridedShard, Replicate, S
 
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
-
 from torchtitan.tools.logging import logger
 
 
@@ -194,7 +193,6 @@ class MoEStateDictAdapter(StateDictAdapter):
 
         This method handles various sharding strategies for expert weights:
         - FSDP + EP: StridedShard(0)Shard(0) or Shard(0)
-        - FSDP + ETP + EP: StridedShard(0)Shard(0)Shard(1/2) or StridedShard(1)Shard(0)Shard(1/2)
 
         Args:
             abstract_key: HuggingFace templage key with {} placeholders for layer and expert IDs

@@ -7,10 +7,10 @@
 import math
 from dataclasses import dataclass, fields
 
+import spmd_types as spmd
+
 import torch
 import torch.nn as nn
-
-from torch.distributed.tensor import Replicate
 
 from torchtitan.config import Configurable
 from torchtitan.models.common.decoder_sharding import dense_param_placement
@@ -38,7 +38,7 @@ def _lora_adapter_sharding(
         return None, None
 
     replicate_weight = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=Replicate())},
+        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
     )
     # lora_b: same TP shard as base weight → output matches base_out
     lora_b_sharding = ShardingConfig(
