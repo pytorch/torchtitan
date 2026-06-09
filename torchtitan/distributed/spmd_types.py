@@ -4,11 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""SPMD type helpers for the local-tensor parallelization path.
-
-Bridges TorchTitan's ``SpmdLayout`` sharding annotations with ``spmd_types``
-runtime APIs (``assert_type``, ``redistribute``, ``PartitionSpec``).
-"""
+"""Helpers for torchtitan's spmd_types backend."""
 
 from __future__ import annotations
 
@@ -216,7 +212,7 @@ def _validate_spmd_redistributions(sharding_config: Any) -> None:
         *,
         ndim: int,
     ) -> tuple[tuple["MeshAxisName", ...], ...]:
-        """Synthesize PartitionSpec-like entries from plain S(dim) axis types."""
+        """Normalize per-axis-types w/ S(dim) -> PartitionSpec-style tuple."""
         entries: list[tuple["MeshAxisName", ...]] = [()] * ndim
         for axis_name, axis_type in axis_types.items():
             if not isinstance(axis_type, spmd.Shard):
@@ -241,6 +237,12 @@ def _validate_spmd_redistributions(sharding_config: Any) -> None:
         # Store the changed_axes so we know what to look for in PartitionSpec.
         src_types = src.per_axis_spmd_types()
         dst_types = dst.per_axis_spmd_types()
+        if set(src_types) != set(dst_types):
+            raise ValueError(
+                "SpmdLayout-based redistribute axis keys do not match for "
+                f"src: {src_types} -> dst: {dst_types}."
+            )
+
         changed_axes = [
             axis_name
             for axis_name in src_types.keys() | dst_types.keys()
@@ -248,8 +250,8 @@ def _validate_spmd_redistributions(sharding_config: Any) -> None:
         ]
         if len(changed_axes) > 1:
             raise ValueError(
-                f"{name}: SPMD redistribution changes multiple mesh axes "
-                f"({sorted(axis.value for axis in changed_axes)}). "
+                f"{name}: SpmdLayout-based redistribution changes multiple mesh "
+                f"axes ({sorted(axis.value for axis in changed_axes)}). "
                 "redistribute_spmd_per_axis only supports one single-axis "
                 "redistribution."
             )
@@ -298,8 +300,10 @@ def _validate_spmd_redistributions(sharding_config: Any) -> None:
             if changed_axis is not None and src_axes == dst_axes + (changed_axis,):
                 continue
             raise ValueError(
-                f"{name}: SPMD redistribution changes shard order for tensor "
-                f"dim {dim}. Express this as explicit unshard/reshard steps."
+                "SpmdLayout-based redistribution changes shard order for "
+                f"tensor {name} dim {dim}, which is currently unsupported "
+                "by redistribute_spmd_per_axis. Please write this as an "
+                "explicit collective instead."
             )
 
     in_src = sharding_config.in_src_shardings or {}
@@ -314,12 +318,6 @@ def _validate_spmd_redistributions(sharding_config: Any) -> None:
     out_src = sharding_config.out_src_shardings
     out_dst = sharding_config.out_dst_shardings
     if out_src is not None and out_dst is not None:
-        if isinstance(out_src, tuple):
-            raise ValueError(
-                "SPMD output redistribution with multiple outputs is not "
-                "supported. Add per-output destination shardings before using "
-                "out_dst_shardings."
-            )
         _validate_redistribute_spmd_pair(out_src, out_dst, name="output")
 
 
@@ -341,16 +339,8 @@ def redistribute_spmd_per_axis(
     """
     if mesh is None:
         return x
+
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
-
-    for axis_types in (src_types, dst_types):
-        for axis_name, axis_type in axis_types.items():
-            if not isinstance(axis_type, spmd.PerMeshAxisSpmdType):
-                raise ValueError(
-                    "SPMD backend requires SPMD placements. "
-                    f"Got {axis_type!r} for axis {axis_name!r}."
-                )
-
     for axis_name, dst_t in dst_types.items():
         src_t = src_types.get(axis_name)
         axis = axis_name.value
@@ -359,7 +349,7 @@ def redistribute_spmd_per_axis(
             if axis in mesh.mesh_dim_names
             else 1
         )
-        if src_t is None or src_t == dst_t or axis_size == 1:
+        if src_t == dst_t or axis_size == 1:
             continue
         x = spmd.redistribute(
             x,
@@ -369,3 +359,52 @@ def redistribute_spmd_per_axis(
             backward_options={"op_dtype": x.dtype},
         )
     return x
+
+
+def _shard_spmd_state(
+    tensor: torch.Tensor,
+    mesh: DeviceMesh,
+    layout: SpmdLayout,
+) -> torch.Tensor:
+    """Materialize local state shards according to the declared SPMD layout.
+
+    Direct ``S(dim)`` layouts are applied per axis. For ``V + PartitionSpec``
+    layouts, raw PartitionSpec tuple order controls repeated sharding of the
+    same tensor dim, e.g. ``(DP, CP)`` means shard by DP, then shard each DP
+    slice by CP.
+    """
+    shard_types = layout.per_axis_spmd_types()
+    if layout.partition_spec is None:
+        axis_shard_dims = [
+            (axis_name, axis_type.dim)
+            for axis_name, axis_type in shard_types.items()
+            if isinstance(axis_type, spmd.Shard)
+        ]
+    else:
+        # When multiple mesh axes shard the same tensor dim, the raw
+        # PartitionSpec tuple defines the slicing order. For example,
+        # PartitionSpec((DP, CP), None) shards by DP first, then CP.
+        axis_shard_dims = []
+        for dim, entry in enumerate(layout.partition_spec):
+            if entry is None:
+                continue
+            axes = entry if isinstance(entry, tuple) else (entry,)
+            for axis_name in axes:
+                axis_shard_dims.append((axis_name, dim))
+
+    assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
+    for axis_name, dim in axis_shard_dims:
+        axis = axis_name.value
+        axis_size = (
+            mesh.size(mesh.mesh_dim_names.index(axis))
+            if axis in mesh.mesh_dim_names
+            else 1
+        )
+        if axis_size > 1:
+            tensor = spmd.shard(
+                tensor,
+                mesh.get_group(axis),
+                src=spmd.I,
+                dst=spmd.S(dim),
+            )
+    return tensor

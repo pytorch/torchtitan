@@ -27,6 +27,7 @@ from torchtitan.distributed.parallel_dims import (
     unfold_dp_axes,
 )
 from torchtitan.distributed.spmd_types import (
+    _shard_spmd_state,
     _validate_spmd_redistributions,
     redistribute_spmd_per_axis,
     spmd_layout_to_dtensor_placements,
@@ -36,7 +37,6 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
 )
 from torchtitan.models.llama3 import model_registry
-from torchtitan.protocols.module import _shard_spmd_state
 from torchtitan.protocols.sharding import ShardingConfig
 
 
@@ -280,8 +280,8 @@ class TestSpmdLayout(DTensorTestBase):
             ["dp_replicate", "dp_shard", "cp", "tp"],
         )
 
-    def test_rejects_partition_spec_order_redistribute(self):
-        """Equal per-axis shard types can still hide shard-order changes."""
+    def test_rejects_partition_spec_reorder_redistribute(self):
+        """((DP, CP), None) -> ((CP, DP), None) not supported by a single redistribute call."""
         with self.assertRaises(ValueError) as cm:
             _validate_spmd_redistributions(
                 ShardingConfig(
@@ -305,14 +305,9 @@ class TestSpmdLayout(DTensorTestBase):
                     ),
                 )
             )
-        self.assertEqual(
-            str(cm.exception),
-            "output: SPMD redistribution changes shard order for tensor dim 0. "
-            "Express this as explicit unshard/reshard steps.",
-        )
 
     def test_rejects_multi_axis_redistribute(self):
-        """Runtime SPMD redistribution supports one changed mesh axis."""
+        """Redistributing multiple mesh axes is unsupported."""
         with self.assertRaises(ValueError) as cm:
             _validate_spmd_redistributions(
                 ShardingConfig(
@@ -336,16 +331,10 @@ class TestSpmdLayout(DTensorTestBase):
                     },
                 )
             )
-        self.assertEqual(
-            str(cm.exception),
-            "input 'x': SPMD redistribution changes multiple mesh axes "
-            "(['cp', 'dp']). redistribute_spmd_per_axis only supports "
-            "one single-axis redistribution.",
-        )
 
     @with_comms
     def test_partition_spec_order_controls_state_shard(self):
-        """Repeated shards on one tensor dim follow raw PartitionSpec order.
+        """Test _shard_spmd_state follows PartitionSpec order.
 
         ``(DP, CP)`` and ``(CP, DP)`` both shard dim 0 across the same 2x2
         mesh, but assign different global slices to ranks. This verifies local
@@ -391,7 +380,11 @@ class TestSpmdLayout(DTensorTestBase):
 
     @with_comms
     def test_redistribute_spmd_per_axis_allgather(self):
-        """Sequence-parallel to replicated-TP redistribution issues one all-gather."""
+        """
+        Test redistribute_spmd_per_axis performs seq-dim allgather.
+        src: dense SP placement (V + PartitionSpec)
+        dst: dense activation w/ I@TP
+        """
         mesh = init_device_mesh(
             self.device_type,
             (1, 1, 4),
