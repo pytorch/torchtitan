@@ -4,23 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from .muon import (
-    build_comm_free_muon_optimizers,
-    build_muon_param_groups,
-    build_ragged_shard_muon_optimizers,
-    CombinedOptimizer,
-    comm_free_muon_buckets,
-    grouped_ragged_shard_muon_buckets,
-    GroupedMuon,
-    RaggedShardMuon,
-)
-from .owned import (
-    assign_layer_owners_lpt,
-    assign_matrix_owners_per_layer_balanced,
-    make_owned_placement_fn,
-    Owned,
-    param_boundary_placements,
-)
+from .owned import Owned, param_boundary_placements
 from .ragged_shard import (
     GroupedRaggedShard,
     make_grouped_ragged_placement_fn,
@@ -31,24 +15,13 @@ from .ragged_shard import (
 from .shard import per_param_placements, Shard
 
 __all__ = [
-    "assign_layer_owners_lpt",
-    "assign_matrix_owners_per_layer_balanced",
-    "build_comm_free_muon_optimizers",
-    "build_muon_param_groups",
-    "build_ragged_shard_muon_optimizers",
-    "CombinedOptimizer",
-    "comm_free_muon_buckets",
-    "GroupedMuon",
     "GroupedRaggedShard",
-    "grouped_ragged_shard_muon_buckets",
     "make_grouped_ragged_placement_fn",
-    "make_owned_placement_fn",
     "make_ragged_placement_fn",
     "Owned",
     "param_boundary_placements",
-    "per_param_placements",
     "per_param_ragged_placements",
+    "per_param_placements",
     "RaggedShard",
-    "RaggedShardMuon",
     "Shard",
 ]
