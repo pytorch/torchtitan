@@ -234,7 +234,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
                     cpu_offload_prefetch_n_layers=1,
                     cpu_offload_defer_n_layers=1,
                     cpu_offload_budget_gb=100.0,
-                    enable_fsdp_ag_rs_overlap=False,
                 ),
                 parallelism=SimpleNamespace(
                     pipeline_parallel_degree=1,
