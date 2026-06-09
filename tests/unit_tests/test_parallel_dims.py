@@ -13,6 +13,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard
+from torch.distributed.tensor.debug import CommDebugMode
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -27,7 +28,12 @@ from torchtitan.distributed.parallel_dims import (
 )
 from torchtitan.distributed.spmd_types import (
     _validate_spmd_redistributions,
+    redistribute_spmd_per_axis,
     spmd_layout_to_dtensor_placements,
+)
+from torchtitan.models.common.decoder_sharding import (
+    dense_activation_placement,
+    dense_sequence_parallel_placement,
 )
 from torchtitan.models.llama3 import model_registry
 from torchtitan.protocols.module import _shard_spmd_state
@@ -382,6 +388,30 @@ class TestSpmdLayout(DTensorTestBase):
                 local_rows = global_weight.shape[0] // self.world_size
                 expected = global_weight.narrow(0, shard_idx * local_rows, local_rows)
                 torch.testing.assert_close(local_weight, expected)
+
+    @with_comms
+    def test_redistribute_spmd_per_axis_allgather(self):
+        """Sequence-parallel to replicated-TP redistribution issues one all-gather."""
+        mesh = init_device_mesh(
+            self.device_type,
+            (1, 1, 4),
+            mesh_dim_names=("dp", "cp", "tp"),
+        )
+        x = torch.ones(2, 2, device=self.device_type)
+        src = dense_sequence_parallel_placement()
+        dst = dense_activation_placement(tp=spmd.I)
+
+        comm_mode = CommDebugMode()
+        with comm_mode:
+            result = redistribute_spmd_per_axis(
+                x,
+                mesh,
+                src.per_axis_spmd_types(),
+                dst.per_axis_spmd_types(),
+            )
+
+        self.assertEqual(comm_mode.get_total_counts(), 1)
+        self.assertTrue(torch.equal(result, torch.ones(2, 8, device=self.device_type)))
 
 
 class TestParallelDimsMeshOperations(unittest.TestCase):
