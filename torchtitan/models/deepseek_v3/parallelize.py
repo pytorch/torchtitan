@@ -29,17 +29,8 @@ from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 from torchtitan.tools.utils import device_module, device_type
 
 
-def _uses_minimal_async_ep(model: DeepSeekV3Model) -> bool:
-    return any(
-        isinstance(
-            getattr(module, "token_dispatcher", None),
-            MinimalAsyncEPTokenDispatcher,
-        )
-        for module in model.modules()
-    )
-
-
-def _validate_minimal_async_ep_parallelism(
+def _validate_minimal_async_ep_config(
+    dispatcher_config: MinimalAsyncEPTokenDispatcher.Config,
     *,
     parallel_dims: ParallelDims,
     parallelism: ParallelismConfig,
@@ -48,6 +39,11 @@ def _validate_minimal_async_ep_parallelism(
         raise ValueError("MinimalAsyncEP does not support full_dtensor SPMD.")
     if parallel_dims.ep <= 1:
         raise ValueError("MinimalAsyncEP requires expert_parallel_degree > 1.")
+    if dispatcher_config.num_experts % parallel_dims.ep != 0:
+        raise ValueError(
+            f"MinimalAsyncEP num_experts ({dispatcher_config.num_experts}) must be "
+            f"divisible by expert_parallel_degree ({parallel_dims.ep})."
+        )
     if parallel_dims.tp != 1:
         raise ValueError(
             "MinimalAsyncEP does not support tensor or sequence parallelism."
@@ -58,53 +54,68 @@ def _validate_minimal_async_ep_parallelism(
         raise ValueError("MinimalAsyncEP does not support context parallelism.")
     if parallel_dims.pp != 1:
         raise ValueError("MinimalAsyncEP does not support pipeline parallelism.")
-    if parallel_dims.dp_replicate != 1 or parallel_dims.dp_shard != parallel_dims.ep:
+    if parallel_dims.dp_replicate != 1:
         raise ValueError(
-            "MinimalAsyncEP requires dp == ep with "
-            "data_parallel_replicate_degree == 1 "
-            "and data_parallel_shard_degree == expert_parallel_degree. Got "
-            f"data_parallel_replicate_degree={parallel_dims.dp_replicate}, "
+            "MinimalAsyncEP requires data_parallel_replicate_degree == 1. Got "
+            f"{parallel_dims.dp_replicate}."
+        )
+    if parallel_dims.dp_shard % parallel_dims.ep != 0:
+        raise ValueError(
+            "MinimalAsyncEP requires data_parallel_shard_degree to be a multiple "
+            "of expert_parallel_degree. Got "
             f"data_parallel_shard_degree={parallel_dims.dp_shard}, "
             f"expert_parallel_degree={parallel_dims.ep}."
         )
 
 
-def _get_minimal_async_ep_dispatcher_config(
-    model: DeepSeekV3Model,
-) -> tuple[int, int]:
-    for module in model.modules():
-        dispatcher = getattr(module, "token_dispatcher", None)
-        if isinstance(dispatcher, MinimalAsyncEPTokenDispatcher):
-            return dispatcher.num_experts, dispatcher.top_k
-    raise AssertionError("MinimalAsyncEP dispatcher not found.")
-
-
 def _init_minimal_async_ep_buffer(
     model: DeepSeekV3Model,
     *,
+    dispatcher_config: MinimalAsyncEPTokenDispatcher.Config,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
 ) -> None:
     from torchtitan.distributed import minimal_async_ep
 
-    num_experts, top_k = _get_minimal_async_ep_dispatcher_config(model)
-    if num_experts % parallel_dims.ep != 0:
-        raise ValueError(
-            f"num_experts ({num_experts}) must be divisible by "
-            f"expert_parallel_degree ({parallel_dims.ep}) for MinimalAsyncEP."
-        )
-
     minimal_async_ep.init_buffer(
         group=parallel_dims.get_mesh("ep").get_group(),
         hidden_dim=model.config.dim,
         max_tokens_per_rank=training.local_batch_size * training.seq_len,
-        num_local_experts=num_experts // parallel_dims.ep,
-        top_k=top_k,
+        num_local_experts=dispatcher_config.num_experts // parallel_dims.ep,
+        top_k=dispatcher_config.top_k,
         dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
         device=torch.device(device_type, device_module.current_device()),
     )
 
+def _maybe_init_minimal_async_ep_buffer(
+    model: DeepSeekV3Model,
+    *,
+    parallel_dims: ParallelDims,
+    training: TrainingConfig,
+    parallelism: ParallelismConfig,
+) -> None:
+    moe_config = next((l.moe for l in model.config.layers if l.moe is not None), None)
+    if moe_config is None:
+        return
 
+    dispatcher_config = moe_config.experts.token_dispatcher
+    if not isinstance(dispatcher_config, MinimalAsyncEPTokenDispatcher.Config):
+        return
+
+    _validate_minimal_async_ep_config(
+        dispatcher_config,
+        parallel_dims=parallel_dims,
+        parallelism=parallelism,
+    )
+    _init_minimal_async_ep_buffer(
+        model,
+        dispatcher_config=dispatcher_config,
+        parallel_dims=parallel_dims,
+        training=training,
+    )
+
+
+# Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
     model: DeepSeekV3Model,
     *,
@@ -121,13 +132,12 @@ def parallelize_deepseekv3(
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
-
-    minimal_async_ep_enabled = _uses_minimal_async_ep(model)
-    if minimal_async_ep_enabled:
-        _validate_minimal_async_ep_parallelism(
-            parallel_dims=parallel_dims,
-            parallelism=parallelism,
-        )
+    _maybe_init_minimal_async_ep_buffer(
+        model,
+        parallel_dims=parallel_dims,
+        training=training,
+        parallelism=parallelism,
+    )
 
     if parallelism.spmd_backend == "full_dtensor":
         validate_config(parallel_dims, model)
@@ -143,13 +153,6 @@ def parallelize_deepseekv3(
             )
         if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
             model.parallelize(parallel_dims)
-
-    if minimal_async_ep_enabled:
-        _init_minimal_async_ep_buffer(
-            model,
-            parallel_dims=parallel_dims,
-            training=training,
-        )
 
     if parallel_dims.tp_enabled:
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
