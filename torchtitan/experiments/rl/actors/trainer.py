@@ -160,6 +160,8 @@ class PolicyTrainer(Actor, Configurable):
         output_dir: str,
     ):
         init_logger()
+        if not config.dump_folder:
+            config.dump_folder = output_dir
         sl.init_structured_logger(
             source="rl_trainer",
             output_dir=output_dir,
