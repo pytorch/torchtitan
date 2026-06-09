@@ -8,7 +8,7 @@ import asyncio
 
 import pytest
 
-from torchtitan.experiments.rl.router import _GenState, GeneratorRouter, RouteContext
+from torchtitan.experiments.rl.generator_router import _GenState, GeneratorRouter, RouteContext
 
 
 class _Endpoint:

@@ -47,7 +47,7 @@ from torchtitan.experiments.rl.rollout import (
 )
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
-from torchtitan.experiments.rl.router import GeneratorRouter, RouteContext
+from torchtitan.experiments.rl.generator_router import GeneratorRouter, RouteContext
 from torchtitan.experiments.rl.types import Episode
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec

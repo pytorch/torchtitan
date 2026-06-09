@@ -13,7 +13,7 @@ from torchtitan.experiments.rl import train
 from torchtitan.experiments.rl.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.batcher import Batcher
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
-from torchtitan.experiments.rl.router import GeneratorRouter
+from torchtitan.experiments.rl.generator_router import GeneratorRouter
 
 
 class _FakeRLTrainer:

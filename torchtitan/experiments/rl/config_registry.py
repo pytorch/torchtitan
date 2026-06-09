@@ -29,7 +29,7 @@ from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
-from torchtitan.experiments.rl.router import GeneratorRouter
+from torchtitan.experiments.rl.generator_router import GeneratorRouter
 from torchtitan.experiments.rl.trainer import GRPOLoss, RLTrainer
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.qwen3 import model_registry
