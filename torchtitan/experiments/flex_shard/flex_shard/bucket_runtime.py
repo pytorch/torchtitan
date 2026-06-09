@@ -564,11 +564,11 @@ class BucketRuntime:
         for bucket_param, full_param in zip(
             self.bucket_params, full_params, strict=True
         ):
-            bucket_param.unsharded_param_slot._current_unsharded_param = full_param
+            bucket_param.unsharded_param_slot.push_unsharded_param(full_param)
 
     def post_forward_hook(self, mod, args, output) -> None:
         for bucket_param in self.bucket_params:
-            bucket_param.unsharded_param_slot._current_unsharded_param = None
+            bucket_param.unsharded_param_slot.pop_unsharded_param()
 
 
 class _BucketUnshard(torch.autograd.Function):
@@ -768,7 +768,10 @@ def _install_bucket_unshard_hooks(
         if target is None:
             _raise_unreplayable_reshard_hook(bucket_storage)
         target.register_forward_pre_hook(bucket_runtime.pre_forward_hook)
-        target.register_forward_hook(bucket_runtime.post_forward_hook)
+        target.register_forward_hook(
+            bucket_runtime.post_forward_hook,
+            always_call=True,
+        )
         bucket_runtime.context.buckets.append(bucket_runtime)
         for bucket_param in bucket_runtime.bucket_params:
             bucket_param.unsharded_param_slot.bucket_unshard_hook_registered = True

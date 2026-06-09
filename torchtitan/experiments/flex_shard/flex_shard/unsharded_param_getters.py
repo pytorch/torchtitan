@@ -7,11 +7,19 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
 import torch.nn as nn
+
+
+@dataclass
+class _UnshardedParamFrame:
+    """Forward-scoped parameter view exposed by a bucket unshard hook."""
+
+    unsharded_param: torch.Tensor
+    exposed_param: torch.Tensor | None = None
 
 
 @dataclass
@@ -20,9 +28,9 @@ class UnshardedParamSlot:
 
     FlexShard replaces managed module parameters with dynamic properties.
     A bucket pre-forward hook writes the full parameter tensor produced by
-    bucket unshard into this slot. The dynamic property getter consumes that
+    bucket unshard into this slot. The dynamic property getter returns that
     tensor when module code reads ``self.weight``. The post-forward hook clears
-    any remaining value.
+    the forward frame.
 
     The slot also carries per-parameter dtype/device policy for the getter; it
     does not own the unsharded parameter tensor's storage.
@@ -34,24 +42,40 @@ class UnshardedParamSlot:
     param_dtype: torch.dtype | None = None
     reduce_dtype: torch.dtype | None = None
     compute_device: torch.device | None = None
-    _current_unsharded_param: torch.Tensor | None = None
+    _unsharded_param_stack: list[_UnshardedParamFrame] = field(default_factory=list)
 
-    def consume_unsharded_param(self) -> torch.Tensor:
+    def push_unsharded_param(self, unsharded_param: torch.Tensor) -> None:
+        """Push the hook-provided full parameter for a module forward."""
+        self._unsharded_param_stack.append(_UnshardedParamFrame(unsharded_param))
+
+    def pop_unsharded_param(self) -> None:
+        """Pop the current module forward's full parameter frame."""
+        if not self._unsharded_param_stack:
+            raise AssertionError(
+                "Attempted to clear a FlexShard unsharded parameter slot "
+                f"for {self.param_fqn!r}, but no slot frame is active."
+            )
+        self._unsharded_param_stack.pop()
+
+    def get_unsharded_param(self) -> torch.Tensor:
         """Return the hook-provided unsharded param or raise if absent."""
         # Filled from bucket unshard output by the pre-forward hook so parameter
-        # reads preserve bucketed collectives.
-        current = self._current_unsharded_param
-        if current is not None:
-            # TODO: Keep this cache valid for the whole forward. Clearing it
-            # here breaks legal modules that read the same parameter more than
-            # once, and the post-forward hook already owns cleanup.
-            self._current_unsharded_param = None
+        # reads preserve bucketed collectives. The value is intentionally stable
+        # for the whole hooked forward because legal modules may read the same
+        # parameter attribute more than once.
+        if self._unsharded_param_stack:
+            frame = self._unsharded_param_stack[-1]
+            if frame.exposed_param is not None:
+                return frame.exposed_param
+
+            current = frame.unsharded_param
             if self.param_dtype is not None or self.reduce_dtype is not None:
                 current = _UnshardedParamMixedPrecisionCast.apply(
                     current,
                     self.param_dtype,
                     self.reduce_dtype,
                 )
+            frame.exposed_param = current
             return current
 
         _raise_missing_eager_bucket_unshard(self)
@@ -87,7 +111,7 @@ def _install_module_unsharded_param_getters(
 
     def _make_flex_shard_param_getter(unsharded_param_slot: UnshardedParamSlot):
         def get_flex_shard_param(self):
-            return unsharded_param_slot.consume_unsharded_param()
+            return unsharded_param_slot.get_unsharded_param()
 
         return get_flex_shard_param
 
