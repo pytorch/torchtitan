@@ -48,13 +48,6 @@ class TrainingConfig:
     Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP
     """
 
-    enable_cuda_graphs: bool = False
-    """
-    Wrap the forward+backward step with CUDA graph capture and replay.
-    Requires fixed-shape inputs and no CPU↔GPU synchronization during the
-    captured region. Incompatible with pipeline parallelism.
-    """
-
     dtype: Literal["bfloat16", "float32"] = "float32"
     """
     torch dtype for training. In contrast to mixed precision training, setting training_dtype=bfloat16 will
