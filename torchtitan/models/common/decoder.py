@@ -32,7 +32,7 @@ __all__ = ["Decoder", "TransformerBlock"]
 
 # TODO: we can unify the TransformerBlock impl across all models when
 # there is no special logic for each model, including
-# ffn vs. moe naming and creation, rope vs. nope, etc.
+# ffn vs. moe naming and creation, etc.
 class TransformerBlock(Module):
     """Base class for all language model transformer blocks.
 
@@ -72,17 +72,14 @@ class Decoder(BaseModel):
         # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
         # and fix the typing here
         layers: list  # list[TransformerBlock.Config] or subclass configs
+        # Tie ``tok_embeddings`` and ``lm_head`` to share one weight. Models
+        # that support it set this True in their config factories; the tying
+        # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.
+        enable_weight_tying: bool = False
 
         @property
         def max_seq_len(self) -> int:
-            # Llama4/iRoPE can have NoPE layers with ``rope=None``; use the
-            # first layer that carries RoPE to expose the model context length.
-            for layer_cfg in self.layers:
-                attention_cfg = getattr(layer_cfg, "attention", None)
-                rope_cfg = getattr(attention_cfg, "rope", None)
-                if rope_cfg is not None:
-                    return rope_cfg.max_seq_len
-            raise ValueError("Decoder config does not define RoPE max_seq_len.")
+            return self.layers[0].attention.rope.max_seq_len
 
         def update_from_config(
             self,
@@ -111,6 +108,11 @@ class Decoder(BaseModel):
                 "config.parallelism must be a ParallelismConfig, got "
                 f"{type(parallelism).__name__}."
             )
+
+            if self.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
+                raise NotImplementedError(
+                    "Weight tying is not supported with Pipeline Parallel."
+                )
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
@@ -168,13 +170,9 @@ class Decoder(BaseModel):
 
                 for layer_cfg in self.layers:
                     attention_cfg = getattr(layer_cfg, "attention", None)
-                    if (
-                        attention_cfg is not None
-                        and getattr(attention_cfg, "rope", None) is not None
-                    ):
-                        rope_cfg = attention_cfg.rope
+                    if attention_cfg is not None:
                         attention_cfg.rope = dataclasses.replace(
-                            rope_cfg, max_seq_len=seq_len
+                            attention_cfg.rope, max_seq_len=seq_len
                         )
                     if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
                         layer_cfg.moe.router._debug_force_load_balance = (
@@ -199,6 +197,24 @@ class Decoder(BaseModel):
 
         self.norm = config.norm.build()
         self.lm_head = config.lm_head.build()
+
+        self.enable_weight_tying = config.enable_weight_tying
+        if self.enable_weight_tying:
+            self.tok_embeddings.weight = self.lm_head.weight
+
+    def init_states(
+        self,
+        *,
+        buffer_device: torch.device | None = None,
+    ) -> None:
+        if self.enable_weight_tying:
+            # Re-tie before init: on meta device the ``__init__`` tying may not
+            # have taken effect, and ``tok_embeddings.weight`` is skipped by
+            # ``skip_param_init``, so re-point it at the initialized lm_head
+            # weight.
+            assert self.tok_embeddings is not None and self.lm_head is not None
+            self.tok_embeddings.weight = self.lm_head.weight
+        super().init_states(buffer_device=buffer_device)
 
     def forward(
         self,
