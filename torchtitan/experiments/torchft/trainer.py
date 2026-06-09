@@ -19,9 +19,12 @@ from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.experiments.ft.config.job_config import FaultTolerance
-from torchtitan.experiments.ft.manager import FTManager, maybe_semi_sync_training
-from torchtitan.experiments.ft.optimizer import FTOptimizersContainer
+from torchtitan.experiments.torchft.config.job_config import FaultTolerance
+from torchtitan.experiments.torchft.manager import (
+    maybe_semi_sync_training,
+    TorchFTManager,
+)
+from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
 from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -33,7 +36,7 @@ class FaultTolerantTrainer(Trainer):
     class Config(Trainer.Config):
         fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
 
-    ft_manager: FTManager
+    ft_manager: TorchFTManager
 
     @record
     def __init__(self, config: Config):
@@ -255,8 +258,8 @@ class FaultTolerantTrainer(Trainer):
         )
 
         # build optimizer after applying parallelisms to the model
-        # FT addition: pass ft_manager for FTOptimizersContainer
-        if isinstance(config.optimizer, FTOptimizersContainer.Config):
+        # FT addition: pass ft_manager for TorchFTOptimizersContainer
+        if isinstance(config.optimizer, TorchFTOptimizersContainer.Config):
             self.optimizers = config.optimizer.build(
                 model_parts=self.model_parts, ft_manager=self.ft_manager
             )
@@ -359,7 +362,7 @@ class FaultTolerantTrainer(Trainer):
             ranks=global_ranks,
         )
 
-        # FT addition: build FTManager
+        # FT addition: build TorchFTManager
         self.ft_manager = config.fault_tolerance.build()
 
         world_size = int(os.environ["WORLD_SIZE"])
