@@ -897,6 +897,27 @@ class TestBucketingPrefetchOrder(FSDPTest):
                 f"(full order: {layer_ids})",
             )
 
+    def test_drops_assert_async_and_dead_chain(self):
+        # _assert_async is side-effectful, so plain DCE keeps it (and its whole
+        # le/all condition chain). The pass erases the assert, then DCE reaps the
+        # now-orphaned chain; unrelated live nodes are untouched.
+        aten = torch.ops.aten
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        le = g.call_function(aten.le.Scalar, (x, 5))
+        reduced = g.call_function(aten.all.default, (le,))
+        g.call_function(aten._assert_async.msg, (reduced, "cond"))  # side-effect
+        out = g.call_function(aten.relu.default, (x,))
+        g.output(out)
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+
+        eliminate_dead_code_pass(gm)
+        targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
+        self.assertNotIn(aten._assert_async.msg, targets)
+        self.assertNotIn(aten.le.Scalar, targets)
+        self.assertNotIn(aten.all.default, targets)
+        self.assertIn(aten.relu.default, targets)
+
 
 class TestRemoveDetachPass(TestCase):
     """Unit tests for the remove_detach_pass graph pass."""
