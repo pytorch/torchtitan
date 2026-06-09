@@ -271,7 +271,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
         ndim = (
             len(src.partition_spec)  # pyrefly: ignore [bad-argument-type]
             if dst.partition_spec is None
-            else len(dst.partition_spec)  # pyrefly: ignore [bad-argument-type]
+            else len(dst.partition_spec)
         )
         src_spec, dst_spec = src.partition_spec, dst.partition_spec
         if src_spec is None:
