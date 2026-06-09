@@ -11,6 +11,9 @@ from typing import Literal
 from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
 from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.config.configs import CompileConfig
+from torchtitan.experiments.graph_trainer.synthetic_dataloader import (
+    SyntheticDataLoader,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
@@ -107,6 +110,28 @@ def validate_autoparallel_config(
             "AutoParallel graph_trainer integration only supports "
             "--compile.mode aot_fx_trace"
         )
+
+
+def use_synthetic_dataloader(config: "GraphTrainer.Config") -> "GraphTrainer.Config":
+    """Replace the dataloader config with a synthetic one for precompilation.
+
+    Reads vocab_size from the model config so callers don't need to specify it
+    manually. This avoids initializing a real dataset (e.g. downloading from
+    HuggingFace) when only input shapes matter for graph tracing.
+
+    Args:
+        config: A GraphTrainer.Config with model_spec already set.
+
+    Returns:
+        The same config object with dataloader replaced (mutated in place
+        and returned for chaining convenience).
+    """
+    assert (
+        config.model_spec is not None
+    ), "model_spec must be set before calling use_synthetic_dataloader"
+    vocab_size = config.model_spec.model.vocab_size
+    config.dataloader = SyntheticDataLoader.Config(vocab_size=vocab_size)
+    return config
 
 
 def to_graph_trainer_config(
