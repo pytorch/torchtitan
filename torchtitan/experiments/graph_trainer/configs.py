@@ -86,6 +86,7 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Maximum CPU memory budget (in GB per rank) for offloaded activations.
     Tensors are selected largest-first until the budget is exhausted."""
 
+    # TODO: deprecate this flag and make view replay the default behavior
     cpu_offload_view_replay: bool = False
     """When True, offload tensors whose backward consumers reach them through
     view chains (transpose, reshape, etc.) by replaying the view ops after
