@@ -8,17 +8,25 @@ import copy
 import unittest
 from unittest.mock import patch
 
+import spmd_types as spmd
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import Shard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
 from torchtitan.config.configs import ParallelismConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
+from torchtitan.distributed.parallel_dims import (
+    MeshAxisName,
+    ParallelDims,
+    SpmdLayout,
+    unfold_dp_axes,
+)
+from torchtitan.distributed.spmd_types import spmd_layout_to_dtensor_placements
 from torchtitan.models.llama3 import model_registry
-from torchtitan.models.llama3.parallelize import apply_fsdp
 
 
 class TestParallelDimsValidation(unittest.TestCase):
@@ -212,6 +220,52 @@ class TestParallelDimsValidation(unittest.TestCase):
         self.assertEqual(parallel_dims.seq_len_divisor, 16)
 
 
+class TestSpmdLayout(unittest.TestCase):
+    def test_converts_partition_spec_to_dtensor_shard(self):
+        """PartitionSpec refines V into concrete DTensor Shard placement."""
+        layout = SpmdLayout(
+            {MeshAxisName.TP: spmd.V},
+            partition_spec=spmd.PartitionSpec(MeshAxisName.TP),
+        )
+
+        self.assertEqual(layout.per_axis_spmd_types(), {MeshAxisName.TP: spmd.S(0)})
+        self.assertEqual(
+            spmd_layout_to_dtensor_placements(layout),
+            {MeshAxisName.TP: Shard(0)},
+        )
+
+    def test_seq_parallel_activation_per_axis_spmd_types(self):
+        """PartitionSpec can map multiple mesh axes to one tensor dim."""
+        layout = SpmdLayout(
+            {
+                MeshAxisName.DP: spmd.V,
+                MeshAxisName.CP: spmd.V,
+                MeshAxisName.TP: spmd.V,
+            },
+            partition_spec=(
+                MeshAxisName.DP,
+                (MeshAxisName.CP, MeshAxisName.TP),
+                None,
+            ),
+        )
+
+        self.assertEqual(
+            layout.per_axis_spmd_types(),
+            {
+                MeshAxisName.DP: spmd.S(0),
+                MeshAxisName.CP: spmd.S(1),
+                MeshAxisName.TP: spmd.S(1),
+            },
+        )
+
+    def test_unfold_dp_axes(self):
+        """Logical DP expands only when resolving concrete mesh axes."""
+        self.assertEqual(
+            unfold_dp_axes([MeshAxisName.DP, MeshAxisName.CP, MeshAxisName.TP]),
+            ["dp_replicate", "dp_shard", "cp", "tp"],
+        )
+
+
 class TestParallelDimsMeshOperations(unittest.TestCase):
     """Test ParallelDims mesh operations with single-rank distributed environment."""
 
@@ -264,8 +318,8 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
         self.assertEqual(len(parallel_dims._single_axis_meshes), 0)
 
         # get_optional_mesh should trigger build_mesh
-        result = parallel_dims.get_optional_mesh("tp")
         # Result is None because tp has size 1, but build_mesh should have been called
+        self.assertIsNone(parallel_dims.get_optional_mesh("tp"))
         self.assertGreater(len(parallel_dims._single_axis_meshes), 0)
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
@@ -626,7 +680,7 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
         ref_optim = torch.optim.Adam(ref_model.parameters(), lr=1e-4)
 
         dp_mesh = init_device_mesh(self.device_type, (1,))
-        apply_fsdp(
+        apply_fsdp_to_decoder(
             model,
             dp_mesh,
             param_dtype=torch.bfloat16,

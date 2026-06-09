@@ -180,6 +180,15 @@ def tag_sac_policy(
                 node.meta["recompute"] = parent.meta["recompute"]
             continue
 
+        # Always save sym-int nodes (shape reads like sym_size/sym_stride, and
+        # tensor->int scalar conversions) rather than recompute them: recomputing
+        # a shape read pins the parent tensor alive in backward just to reread its
+        # size. We key off meta["val"] being a SymInt -- mirroring AOT Autograd's
+        # partitioner, which saves SymInts (cheap scalars) but never SymFloats.
+        if "val" in node.meta and isinstance(node.meta["val"], torch.SymInt):
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+            continue
+
         # NOTE: The eager SAC policy (activation_checkpoint.py) alternates
         # mm ops between MUST_SAVE and PREFER_RECOMPUTE. We omit that here
         # because the alternating heuristic is arbitrary.

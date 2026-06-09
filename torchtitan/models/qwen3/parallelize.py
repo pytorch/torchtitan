@@ -18,10 +18,9 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
+from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.llama4.parallelize import apply_fsdp
 from torchtitan.models.qwen3.model import Qwen3Model
-from torchtitan.tools.logging import logger
 
 
 def parallelize_qwen3(
@@ -96,7 +95,7 @@ def parallelize_qwen3(
         )
         edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
-    apply_fsdp(
+    apply_fsdp_to_decoder(
         model,
         dp_mesh,
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
@@ -108,10 +107,5 @@ def parallelize_qwen3(
         edp_mesh=edp_mesh,
         enable_symm_mem=parallelism.enable_fsdp_symm_mem,
     )
-
-    logger.info("Applied fully_shard to the model")
-
-    if training.enable_cpu_offload:
-        logger.info("Applied CPU Offloading to the model")
 
     return model
