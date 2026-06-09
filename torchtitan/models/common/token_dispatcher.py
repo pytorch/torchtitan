@@ -892,6 +892,10 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
         """Reorder tokens, then MinimalAsyncEP dispatch to expert-parallel ranks.
 
+        We abbreviate:
+            T-major: Token-major
+            E-major: Expert-major
+
         Logical shapes match ``AllToAllTokenDispatcher``:
             B = batch size before flattening, L = sequence length before
                 flattening, and T = B * L local tokens.
@@ -899,7 +903,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             E = global number of experts, EP = expert-parallel group size,
                 and e = E / EP local experts per EP rank.
             K = top-k router choices per token.
-            N = routed slots before EP exchange, T * K.
+            N = routed rows, T * K.
             R = active rows assigned to this rank's local experts,
                 sum(num_tokens_per_local_expert_e).
 
@@ -917,7 +921,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         Returns:
             routed_input_RD: logical
                 ``[R = sum(num_tokens_per_local_expert_e), input_dim(D)]``.
-                Tokens in expert-major order for local experts, physically
+                Tokens in E-major order for local experts, physically
                 padded to ``(R_max, D)`` for this backend.
             num_tokens_per_local_expert_e: ``(num_local_experts,)`` token counts
             metadata: dispatch metadata for combine()
@@ -925,48 +929,51 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         assert self.ep_mesh is not None, "ep_mesh must be set before dispatch"
         ep_group = self.ep_mesh.get_group()
 
-        # A slot is one flattened (token, top-k choice) routing entry. Sorting
-        # slot ids by expert id creates the expert-sorted routed rows used by
-        # MinimalAsyncEP; floor-dividing by top_k gives each row's source token.
-        flat_indices_experts_sorted_N = torch.argsort(
-            topk_expert_ids_TK.reshape(-1), stable=True
+        # [NOTE: Routed rows]
+        # T_ means token-major order; E_ means expert-major order.
+        # Flattening topk_expert_ids_TK gives N = T * K T-major routed rows:
+        # row j corresponds to token j // K and top-k choice j % K.
+        # Sorting T-major row ids by expert id creates E-major routed rows.
+        # We track row mappings instead of materializing routed_input_ND.
+        T_row_to_expert_N = topk_expert_ids_TK.reshape(-1)  # noqa: N806
+        num_routed_rows = T_row_to_expert_N.numel()
+        E_row_to_T_row_N = torch.argsort(  # noqa: N806
+            T_row_to_expert_N, stable=True
         )
-        token_indices_experts_sorted_N = flat_indices_experts_sorted_N // self.top_k
+        top_k = self.top_k
+        E_row_to_token_N = E_row_to_T_row_N // top_k  # noqa: N806
 
         routed_scores_N = topk_scores_TK.view(-1)
 
         ep_size = ep_group.size()
         num_tokens = x_TD.shape[0]
-        num_routed_tokens = flat_indices_experts_sorted_N.numel()
-        num_experts = num_local_tokens_per_expert_E.numel()
-        top_k = num_routed_tokens // num_tokens
+        num_local_experts = num_local_tokens_per_expert_E.numel() // ep_size
         # TODO(xmfan): make this capacity configurable by user
         num_receive_rows_per_source_rank = num_tokens * min(
-            top_k, num_experts // ep_size
+            top_k, num_local_experts
         )
         receive_capacity = ep_size * num_receive_rows_per_source_rank
 
         (
-            dispatch_dst_ranks,  # local routed row -> destination EP rank
-            dispatch_dst_rows,  # local routed row -> destination receive row
+            dispatch_dst_ranks,  # local E-major row -> destination EP rank
+            dispatch_dst_rows,  # local E-major row -> destination receive row
             combine_dst_ranks,  # received row -> origin EP rank; length R_max
-            combine_dst_rows,  # received row -> origin routed row; length R_max
+            combine_dst_rows,  # received row -> origin E-major row; length R_max
             combine_num_valid_rows,  # actual received rows, device-side scalar
             num_tokens_per_local_expert_e,  # local expert -> active row count
         ) = dispatch_metadata(
             num_local_tokens_per_expert_E,
-            num_routed_tokens,
+            num_routed_rows,
             receive_capacity,
             ep_size,
         )
 
-
-        # Invert the expert-sorted slot permutation for combine. Example:
-        # flat_indices_experts_sorted_N=[2, 0, 3, 1] means routed row 0 came
-        # from slot 2, so slot_to_row_N=[1, 3, 0, 2] maps slot 2 back to row 0.
-        slot_to_row_N = invert_flat_indices(  # noqa: N806
-            flat_indices_experts_sorted_N,
-            num_routed_tokens,
+        # Invert the E-major permutation for combine. Example:
+        # E_row_to_T_row_N=[2, 0, 3, 1] means E-major row 0 came
+        # from T-major row 2, so T_row_to_E_row_N=[1, 3, 0, 2].
+        T_row_to_E_row_N = invert_flat_indices(  # noqa: N806
+            E_row_to_T_row_N,
+            num_routed_rows,
         )
 
         hidden_states_RD = MinimalAsyncEPDispatch.apply(
@@ -976,8 +983,8 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             combine_dst_ranks,
             combine_dst_rows,
             combine_num_valid_rows,
-            token_indices_experts_sorted_N,
-            slot_to_row_N,
+            E_row_to_token_N,
+            T_row_to_E_row_N,
             num_tokens,
             receive_capacity,
         )
@@ -988,8 +995,8 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             combine_dst_ranks=combine_dst_ranks,
             combine_dst_rows=combine_dst_rows,
             combine_num_valid_rows=combine_num_valid_rows,
-            flat_indices_experts_sorted=flat_indices_experts_sorted_N,
-            slot_to_row=slot_to_row_N,
+            E_row_to_T_row=E_row_to_T_row_N,
+            T_row_to_E_row=T_row_to_E_row_N,
             routed_scores=routed_scores_N,
             num_tokens=num_tokens,
             top_k=top_k,
