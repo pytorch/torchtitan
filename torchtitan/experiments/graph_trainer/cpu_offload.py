@@ -541,7 +541,12 @@ def apply_cpu_offload_pass(
         with gm.graph.inserting_before(info.first_bwd_consumer):
             reload_node = gm.graph.call_function(
                 torch.ops.ao.reload.default,
-                args=(wait_offload_node, device),
+                args=(
+                    wait_offload_node,
+                    device,
+                    list(val.size()),
+                    list(val.stride()),
+                ),
             )
             reload_node.meta.update(src_meta)
             reload_node.meta["val"] = val
