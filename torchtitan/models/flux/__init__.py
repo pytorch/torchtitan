@@ -9,15 +9,15 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.rmsnorm import RMSNorm
+from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.utils import validate_converter_order
 
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .flux_datasets import FluxDataLoader
-from .model.autoencoder import AutoEncoderParams
+from .model.autoencoder import AutoEncoder
+from .model.hf_embedder import FluxEmbedder
 from .model.layers import (
     DoubleStreamBlock,
     EmbedND,
@@ -43,6 +43,9 @@ _ZERO_LINEAR = {"weight": nn.init.zeros_, "bias": nn.init.zeros_}
 _XAVIER_LINEAR = {"weight": nn.init.xavier_uniform_, "bias": nn.init.zeros_}
 _NORMAL_02 = {"weight": partial(nn.init.normal_, std=0.02), "bias": nn.init.zeros_}
 _NORM_INIT = {"weight": nn.init.ones_}
+
+_T5_ENCODER_VERSION = "google/t5-v1_1-xxl"
+_CLIP_ENCODER_VERSION = "openai/clip-vit-large-patch14"
 
 
 def _make_double_block_config(
@@ -248,7 +251,7 @@ def _flux_dev() -> FluxModel.Config:
             bias=True,
             param_init=_XAVIER_LINEAR,
         ),
-        autoencoder_params=AutoEncoderParams(
+        autoencoder=AutoEncoder.Config(
             resolution=256,
             in_channels=3,
             ch=128,
@@ -259,6 +262,8 @@ def _flux_dev() -> FluxModel.Config:
             scale_factor=0.3611,
             shift_factor=0.1159,
         ),
+        clip_encoder=FluxEmbedder.Config(version=_CLIP_ENCODER_VERSION),
+        t5_encoder=FluxEmbedder.Config(version=_T5_ENCODER_VERSION),
         pe_config=EmbedND.Config(dim=128, theta=10_000, axes_dim=(16, 56, 56)),
         time_in_config=MLPEmbedder.Config(
             in_dim=256,
@@ -360,7 +365,7 @@ def _flux_schnell() -> FluxModel.Config:
             bias=True,
             param_init=_XAVIER_LINEAR,
         ),
-        autoencoder_params=AutoEncoderParams(
+        autoencoder=AutoEncoder.Config(
             resolution=256,
             in_channels=3,
             ch=128,
@@ -371,6 +376,8 @@ def _flux_schnell() -> FluxModel.Config:
             scale_factor=0.3611,
             shift_factor=0.1159,
         ),
+        clip_encoder=FluxEmbedder.Config(version=_CLIP_ENCODER_VERSION),
+        t5_encoder=FluxEmbedder.Config(version=_T5_ENCODER_VERSION),
         pe_config=EmbedND.Config(dim=128, theta=10_000, axes_dim=(16, 56, 56)),
         time_in_config=MLPEmbedder.Config(
             in_dim=256,
@@ -472,7 +479,7 @@ def _flux_debug() -> FluxModel.Config:
             bias=True,
             param_init=_XAVIER_LINEAR,
         ),
-        autoencoder_params=AutoEncoderParams(
+        autoencoder=AutoEncoder.Config(
             resolution=256,
             in_channels=3,
             ch=128,
@@ -483,6 +490,8 @@ def _flux_debug() -> FluxModel.Config:
             scale_factor=0.3611,
             shift_factor=0.1159,
         ),
+        clip_encoder=FluxEmbedder.Config(version=_CLIP_ENCODER_VERSION),
+        t5_encoder=FluxEmbedder.Config(version=_T5_ENCODER_VERSION),
         pe_config=EmbedND.Config(dim=128, theta=10_000, axes_dim=(16, 56, 56)),
         time_in_config=MLPEmbedder.Config(
             in_dim=256,

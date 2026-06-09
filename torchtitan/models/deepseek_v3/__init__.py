@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from collections.abc import Callable
 from functools import partial
 from typing import Literal
@@ -12,7 +13,14 @@ import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
-from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
+from torchtitan.models.common import (
+    ComplexRoPE,
+    Embedding,
+    Linear,
+    RMSNorm,
+    RoPE,
+    TransformerBlock,
+)
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_experts_config,
@@ -61,9 +69,9 @@ def _depth_init(layer_id: int) -> dict[str, Callable]:
 
 def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
     return {
-        "w1": partial(nn.init.trunc_normal_, std=0.02),
-        "w2": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-        "w3": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
+        "w2_EDF": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "w3_EFD": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
     }
 
 
@@ -79,6 +87,7 @@ def _make_dsv3_attn_config(
     v_head_dim: int,
     mscale: float = 1.0,
     attn_backend: str,
+    rope: RoPE.Config,
 ) -> Attention.Config:
     """Build a fully-specified DeepSeek V3 MLA Attention.Config.
 
@@ -86,7 +95,7 @@ def _make_dsv3_attn_config(
     When q_lora_rank == 0, sets wq (not wq_a/wq_b).
     When q_lora_rank > 0, sets wq_a/wq_b (not wq).
     """
-    inner_attention, mask_type = get_attention_config(attn_backend)
+    inner_attention = get_attention_config(attn_backend)
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
 
     if q_lora_rank == 0:
@@ -144,7 +153,7 @@ def _make_dsv3_attn_config(
             param_init=_depth_init(layer_id),
         ),
         inner_attention=inner_attention,
-        mask_type=mask_type,
+        rope=dataclasses.replace(rope),
     )
 
 
@@ -174,6 +183,7 @@ def _build_dsv3_layers(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
+    rope: RoPE.Config,
 ) -> list[TransformerBlock.Config]:
     """Build the list of per-layer TransformerBlock configs.
 
@@ -196,6 +206,7 @@ def _build_dsv3_layers(
             v_head_dim=v_head_dim,
             mscale=mscale,
             attn_backend=attn_backend,
+            rope=rope,
         )
 
         if layer_id < n_dense_layers:
@@ -290,6 +301,16 @@ def _debugmodel(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
+        rope=ComplexRoPE.Config(
+            dim=rope_dim,
+            max_seq_len=4096 * 4,
+            theta=10000.0,
+            scaling="yarn",
+            rope_factor=40.0,
+            beta_fast=32.0,
+            beta_slow=1.0,
+            original_seq_len=4096,
+        ),
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -302,17 +323,6 @@ def _debugmodel(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
-        ),
-        rope=RoPE.Config(
-            dim=rope_dim,
-            max_seq_len=4096 * 4,
-            theta=10000.0,
-            backend="complex",
-            scaling="yarn",
-            rope_factor=40.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=4096,
         ),
         layers=layers,
     )
@@ -355,6 +365,16 @@ def _16b(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
+        rope=ComplexRoPE.Config(
+            dim=rope_dim,
+            max_seq_len=4096 * 4,
+            theta=10000.0,
+            scaling="yarn",
+            rope_factor=40.0,
+            beta_fast=32.0,
+            beta_slow=1.0,
+            original_seq_len=4096,
+        ),
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -367,17 +387,6 @@ def _16b(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
-        ),
-        rope=RoPE.Config(
-            dim=rope_dim,
-            max_seq_len=4096 * 4,
-            theta=10000.0,
-            backend="complex",
-            scaling="yarn",
-            rope_factor=40.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=4096,
         ),
         layers=layers,
     )
@@ -424,6 +433,16 @@ def _236b(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
+        rope=ComplexRoPE.Config(
+            dim=rope_dim,
+            max_seq_len=4096 * 4,
+            theta=10000.0,
+            scaling="yarn",
+            rope_factor=40.0,
+            beta_fast=32.0,
+            beta_slow=1.0,
+            original_seq_len=4096,
+        ),
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -436,17 +455,6 @@ def _236b(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
-        ),
-        rope=RoPE.Config(
-            dim=rope_dim,
-            max_seq_len=4096 * 4,
-            theta=10000.0,
-            backend="complex",
-            scaling="yarn",
-            rope_factor=40.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=4096,
         ),
         layers=layers,
     )
@@ -494,6 +502,16 @@ def _671b(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
+        rope=ComplexRoPE.Config(
+            dim=rope_dim,
+            max_seq_len=4096 * 4,
+            theta=10000.0,
+            scaling="yarn",
+            rope_factor=40.0,
+            beta_fast=32.0,
+            beta_slow=1.0,
+            original_seq_len=4096,
+        ),
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -506,17 +524,6 @@ def _671b(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
-        ),
-        rope=RoPE.Config(
-            dim=rope_dim,
-            max_seq_len=4096 * 4,
-            theta=10000.0,
-            backend="complex",
-            scaling="yarn",
-            rope_factor=40.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=4096,
         ),
         layers=layers,
     )
@@ -532,7 +539,7 @@ deepseekv3_configs = {
 
 def model_registry(
     flavor: str,
-    attn_backend: str = "sdpa",
+    attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,

@@ -22,7 +22,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel_ep",
+                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
                     "--compile.enable",
@@ -35,7 +35,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel_ep",
+                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.data_parallel_shard_degree 2",
@@ -50,7 +50,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel_ep",
+                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
                     "--parallelism.data_parallel_replicate_degree 2",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.expert_parallel_degree 2",
@@ -63,7 +63,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel_flex_attn_ep",
+                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
@@ -79,7 +79,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module qwen3 --config qwen3_debugmodel_param_groups",
+                    "--module qwen3 --config qwen3_debugmodel_moe_param_groups",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
@@ -119,25 +119,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "qwen3_fsdp+tp+cp",
             ngpu=8,
         ),
-        # Integration Test Cases for Llama 4
-        # TODO: re-enable compile after fixing
-        # https://github.com/pytorch/torchtitan/issues/2771
-        OverrideDefinitions(
-            [
-                [
-                    "--module llama4 --config llama4_debugmodel_ep",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.expert_parallel_degree 4",
-                    # "--compile.enable",
-                ],
-            ],
-            "Llama 4 PP+FSDP+TP+EP+compile",
-            "llama4_pp+fsdp+tp+ep+compile",
-            ngpu=8,
-        ),
         # Integration Test Cases for Qwen3-VL
         OverrideDefinitions(
             [
@@ -158,7 +139,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module gpt_oss --config gpt_oss_debugmodel_ep",
+                    "--module gpt_oss --config gpt_oss_debugmodel",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",

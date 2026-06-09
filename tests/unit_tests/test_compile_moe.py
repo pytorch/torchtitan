@@ -10,7 +10,7 @@ import torch
 
 from torchtitan.config import CompileConfig
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module, ModuleDict
 
 

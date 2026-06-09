@@ -138,7 +138,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.model_config = model_config = self.train_spec.model
         # set the model args from training configs
         model_config.update_from_config(
-            trainer_config=config,
+            config=config,
         )
 
         with (

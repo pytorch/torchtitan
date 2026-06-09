@@ -29,47 +29,57 @@ from torchtitan.tools.logging import logger
 
 __all__ = [
     "OptimizersContainer",
-    "OptimizersInBackwardContainer",
     "ParamGroupConfig",
+    "default_adamw",
     "register_moe_load_balancing_hook",
 ]
 
 
 @dataclass(kw_only=True, slots=True)
 class ParamGroupConfig:
-    """Configuration for a parameter group with custom optimizer settings.
+    """Configuration for a parameter group with its own optimizer.
 
-    Parameters matching the regex pattern will use lr and weight_decay values
-    derived by multiplying the global optimizer values with the specified multipliers.
+    Each entry specifies a regex pattern matching parameter FQNs and a
+    self-contained optimizer setup. ``optimizer_name`` and ``optimizer_kwargs``
+    fully define the optimizer for matched parameters — no implicit inheritance.
+
+    Patterns are checked in order; first match wins. Place specific patterns
+    before broad ones, and use ``r".*"`` as the last entry to catch all
+    remaining parameters. Example::
+
+        param_groups=[
+            ParamGroupConfig(pattern=r"\\.bias$", ...),   # specific: biases first
+            ParamGroupConfig(pattern=r"\\.router\\.", ...),  # specific: routers
+            ParamGroupConfig(pattern=r".*", ...),          # catch-all: everything else
+        ]
     """
 
     pattern: str
     """Regex pattern matched against parameter fully qualified names (FQNs).
-    E.g. '.*bias$', '.*norm.*', '.*\\.embed_tokens\\..*'"""
+    E.g. '.*bias$', '.*norm.*', '.*\\.embed_tokens\\..*', '.*' (catch-all)"""
 
-    lr_multiplier: float = 1.0
-    """Multiplied with the global optimizer lr to get this group's lr."""
+    optimizer_name: str
+    """Optimizer type for this group."""
 
-    weight_decay_multiplier: float = 1.0
-    """Multiplied with the global optimizer weight_decay to get this group's weight_decay."""
-
-    beta1: float | None = None
-    beta2: float | None = None
-    """Override betas for this group. None means use the global optimizer betas.
-    Each can be overridden independently."""
+    optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
+    """Keyword arguments passed to the optimizer constructor.
+    Must include all required kwargs (e.g. ``lr``). No implicit defaults."""
 
 
 T = TypeVar("T", bound=Optimizer)
 
 
-# TODO: Right now this class is biased towards AdamW. We should refactor to
-# support mixed optimizers, including Muon.
 class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
-    """A container for multiple optimizers.
+    """A container for multiple optimizers, supporting mixed optimizer types.
 
-    This class is used to wrap multiple optimizers into a single object that can be
-    used to reduce the complexity of the training loop. This mimics the behavior of
-    ``torch.optim.Optimizer``. This class currently only supports ``Adam`` and ``AdamW``.
+    This class wraps multiple optimizers into a single object to simplify the
+    training loop. Each parameter group is configured via ``ParamGroupConfig``
+    with its own optimizer type and kwargs. Parameters are matched to groups
+    by regex pattern (first match wins), and groups using the same optimizer
+    type are batched into a single optimizer instance for performance.
+
+    Each model part (from pipeline parallelism) may have multiple optimizer
+    instances if different parameter groups use different optimizer types.
 
     **Note**
     Users who want to customize the optimizer behavior can inherit from this class and
@@ -77,79 +87,52 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     as ``torch.optim.Optimizer`` class: ``step()``, ``zero_grad()``, ``state_dict()``,
     ``load_state_dict()``.
 
-    **Limitations**
-    This class assumes that all the optimizers are the same type and have the same
-    configurations. With this assumption, TorchTitan can support lr scheduler resharding
-    (e.g., loading a checkpoint with a different number of GPUs and/or different
-    parallelization strategy). Note that ``get_optimizer_state_dict`` already enables the
-    resharding for the optimizer state but not for the lr scheduler state, hence the limitation.
-
     Args:
+        config (Config): Optimizer configuration with param group definitions.
         model_parts (List[nn.Module]): List of model parts to be optimized.
-        optimizer_kwargs (Dict[str, Any]): Keyword arguments for the optimizers.
-        name (str): Name of the optimizers.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        name: str = "AdamW"
-        """Optimizer to use"""
-
-        lr: float = 8e-4
-        """Learning rate to use"""
-
-        beta1: float = 0.9
-        beta2: float = 0.95
-        """Exponential moving average hyperparameters to use"""
-
-        eps: float = 1e-8
-        """Epsilon value to use"""
-
-        weight_decay: float = 0.1
-        """Weight decay to use"""
+        param_groups: list[ParamGroupConfig] = field(default_factory=list)
+        """Per-parameter-group optimizer configurations. Each entry specifies a
+        regex pattern and a self-contained optimizer setup.
+        Patterns are checked in order; first match wins."""
 
         implementation: Literal[
             "for-loop", "foreach", "fused", "fused_opt_states_bf16"
         ] = "fused"
         """
-        Specify which optimizer implementation to use:
+        Optimizer implementation mode applied to all optimizer instances.
+        Per-param-group ``optimizer_kwargs`` can override this (e.g.
+        ``"fused": False`` for optimizers that don't support fused).
+
         - 'fused': Use fused implementation (CUDA only) for best performance.
         - 'foreach': Use some horizontal fusion of tensors for better performance.
         - 'for-loop': Use the default implementation for the optimizer (slowest).
         - 'fused_opt_states_bf16': Like 'fused', but initialize Adam/AdamW
           momentum and variance in bfloat16 via a step pre-hook so the fused
           CUDA kernel uses its mixed-precision path (fp32 params + bf16 states).
-          Only supported for Adam/AdamW with OptimizersContainer (not
-          OptimizersInBackwardContainer). See docs/bf16_optimizer_states.md.
+          Only supported for Adam/AdamW. See docs/bf16_optimizer_states.md.
         - more info: https://pytorch.org/docs/stable/optim.html
         """
-
-        param_groups: list[ParamGroupConfig] = field(default_factory=list)
-        """Optional per-parameter-group overrides. Each entry specifies a regex
-        pattern matching parameter FQNs and multipliers for lr and weight_decay.
-        Parameters not matching any pattern use the global defaults.
-        Patterns are checked in order; first match wins."""
-
-        def __post_init__(self):
-            if self.implementation == "fused_opt_states_bf16":
-                if self.name not in ("Adam", "AdamW"):
-                    raise ValueError(
-                        "implementation='fused_opt_states_bf16' is only supported "
-                        f"for Adam/AdamW, got optimizer '{self.name}'"
-                    )
 
     optimizers: list[T]
     model_parts: list[nn.Module]
 
     @staticmethod
     def _resolve_optimizer_cls(name: str) -> type:
-        optimizer_classes = {"Adam": torch.optim.Adam, "AdamW": torch.optim.AdamW}
+        optimizer_classes = {
+            "Adam": torch.optim.Adam,
+            "AdamW": torch.optim.AdamW,
+        }
         if name not in optimizer_classes:
             raise NotImplementedError(f"Optimizer {name} not added.")
         return optimizer_classes[name]
 
     @staticmethod
-    def _build_optimizer_kwargs(config: Config) -> dict[str, Any]:
+    def _build_impl_kwargs(config: Config) -> dict[str, Any]:
+        """Build implementation-related kwargs (fused/foreach) from config."""
         assert config.implementation in [
             "fused",
             "foreach",
@@ -158,10 +141,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         ]
         fused = config.implementation in ("fused", "fused_opt_states_bf16")
         return {
-            "lr": config.lr,
-            "betas": (config.beta1, config.beta2),
-            "eps": config.eps,
-            "weight_decay": config.weight_decay,
             "fused": fused,
             "foreach": config.implementation == "foreach",
         }
@@ -169,81 +148,109 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     @staticmethod
     def _build_param_groups(
         model: nn.Module,
-        config: Config,
-        default_kwargs: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        """Build PyTorch param groups from model parameters and config.
+        param_group_configs: list[ParamGroupConfig],
+        impl_kwargs: dict[str, Any],
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Build PyTorch param groups from model parameters, partitioned by optimizer.
 
-        Each parameter is assigned to the first matching ParamGroupConfig pattern,
-        or to the default group if no pattern matches. Returns a list of dicts
-        with "params" key and optimizer kwargs, suitable for passing to an optimizer.
+        Each parameter is assigned to the first matching ParamGroupConfig pattern.
+        Returns a dict mapping optimizer name to a list of param group dicts.
+
+        Each param group dict includes a ``pattern`` key with the regex pattern
+        string for logging.
         """
-        if not config.param_groups:
-            params = [p for p in model.parameters() if p.requires_grad]
-            return [{"params": params, **default_kwargs}]
+        result: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        claimed: set[str] = set()  # first-match-wins
 
-        compiled_patterns = [re.compile(pg.pattern) for pg in config.param_groups]
+        for pg in param_group_configs:
+            pattern = re.compile(pg.pattern)
+            matched = []
+            for name, param in model.named_parameters():
+                if param.requires_grad and name not in claimed and pattern.search(name):
+                    matched.append(param)
+                    claimed.add(name)
 
-        # group_index -> list of params; None means default group
-        grouped_params: dict[int | None, list[nn.Parameter]] = defaultdict(list)
-
-        for name, param in model.named_parameters():
-            if not param.requires_grad:
-                continue
-            matched_index = None
-            for i, pat in enumerate(compiled_patterns):
-                if pat.search(name):
-                    matched_index = i
-                    break
-            grouped_params[matched_index].append(param)
-
-        # Warn for patterns that matched nothing
-        for i, pg in enumerate(config.param_groups):
-            if i not in grouped_params:
-                logger.warning(
+            if not matched:
+                raise ValueError(
                     f"Optimizer param_groups pattern '{pg.pattern}' "
                     f"matched no parameters"
                 )
 
-        result = []
-        # Default group first (unmatched params)
-        if None in grouped_params:
-            result.append({"params": grouped_params[None], **default_kwargs})
-
-        # Then each matched group in pattern order
-        for i, pg in enumerate(config.param_groups):
-            if i not in grouped_params:
-                continue
-            group_kwargs = {**default_kwargs}
-            group_kwargs["lr"] = default_kwargs["lr"] * pg.lr_multiplier
-            group_kwargs["weight_decay"] = (
-                default_kwargs["weight_decay"] * pg.weight_decay_multiplier
+            result[pg.optimizer_name].append(
+                {
+                    "params": matched,
+                    "pattern": pg.pattern,
+                    **impl_kwargs,
+                    **pg.optimizer_kwargs,
+                }
             )
-            if pg.beta1 is not None or pg.beta2 is not None:
-                default_beta1, default_beta2 = default_kwargs["betas"]
-                group_kwargs["betas"] = (
-                    pg.beta1 if pg.beta1 is not None else default_beta1,
-                    pg.beta2 if pg.beta2 is not None else default_beta2,
-                )
-            result.append({"params": grouped_params[i], **group_kwargs})
 
         return result
 
     def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
-        optimizer_cls = self._resolve_optimizer_cls(config.name)
-        optimizer_kwargs = self._build_optimizer_kwargs(config)
+        impl_kwargs = self._build_impl_kwargs(config)
+        param_group_configs = config.param_groups
         all_params = []
         self.optimizers = []
         self.model_parts = model_parts
-        for model in self.model_parts:
-            param_groups = self._build_param_groups(model, config, optimizer_kwargs)
-            self.optimizers.append(optimizer_cls(param_groups))
-            for group in param_groups:
-                all_params.extend(group["params"])
+        # Maps each optimizer to its model part (for state_dict/load_state_dict)
+        self._model_part_indices: list[int] = []
+
+        for part_idx, model in enumerate(self.model_parts):
+            groups_by_opt_name = self._build_param_groups(
+                model, param_group_configs, impl_kwargs
+            )
+            for opt_name, opt_param_groups in groups_by_opt_name.items():
+                opt_cls = self._resolve_optimizer_cls(opt_name)
+                self.optimizers.append(opt_cls(opt_param_groups))
+                self._model_part_indices.append(part_idx)
+                for group in opt_param_groups:
+                    all_params.extend(group["params"])
+
+        self._validate_params(all_params)
+
         if config.implementation == "fused_opt_states_bf16":
             self._register_bf16_optimizer_state_hook()
-        self._validate_length(len(self.model_parts))
-        self._post_init(all_params, optimizer_kwargs)
+        self._post_init(all_params)
+        self._log_summary()
+
+    def _log_summary(self) -> None:
+        """Log a summary of optimizer assignments."""
+        _KEY_KWARGS = {
+            "lr",
+            "weight_decay",
+            "betas",
+            "eps",
+            "momentum",
+            "nesterov",
+            "fused",
+            "foreach",
+        }
+        for i, opt in enumerate(self.optimizers):
+            opt_name = type(opt).__name__
+            part_idx = self._model_part_indices[i]
+            for group in opt.param_groups:
+                num_params = len(group["params"])
+                kwargs = {k: v for k, v in group.items() if k in _KEY_KWARGS}
+                pattern = group["pattern"]
+                logger.info(
+                    f"Optimizer {opt_name} (model_part={part_idx}): "
+                    f"{num_params} params [{pattern}] {kwargs}"
+                )
+
+    def _validate_params(self, all_params: list[nn.Parameter]) -> None:
+        """Verify every trainable param is assigned to exactly one optimizer."""
+        expected = {
+            id(p)
+            for model in self.model_parts
+            for p in model.parameters()
+            if p.requires_grad
+        }
+        actual = {id(p) for p in all_params}
+        assert expected == actual, (
+            f"Parameter mismatch: {len(expected)} trainable params in model, "
+            f"{len(actual)} in optimizers"
+        )
 
     def __iter__(self) -> Iterator[T]:
         return iter(self.optimizers)
@@ -274,11 +281,11 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             get_optimizer_state_dict,
             options=StateDictOptions(flatten_optimizer_state_dict=True),
         )
-        return {
-            k: v
-            for sd in map(func, self.model_parts, self.optimizers)
-            for k, v in sd.items()
-        }
+        result = {}
+        for opt, part_idx in zip(self.optimizers, self._model_part_indices):
+            sd = func(self.model_parts[part_idx], opt)
+            result.update(sd)
+        return result
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         func = functools.partial(
@@ -286,20 +293,13 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             optim_state_dict=state_dict,
             options=StateDictOptions(flatten_optimizer_state_dict=True),
         )
-        list(map(func, self.model_parts, self.optimizers))
+        for opt, part_idx in zip(self.optimizers, self._model_part_indices):
+            func(self.model_parts[part_idx], opt)
 
-    def _validate_length(self, expected_length: int) -> None:
-        assert expected_length == len(self.optimizers), (
-            "Must pass one optimizer per model part or per param if "
-            "using OptimizersInBackwardContainer."
-        )
-
-    def _post_init(
-        self, all_params: list[nn.Parameter], optimizer_kwargs: dict[str, Any]
-    ) -> None:
+    def _post_init(self, all_params: list[nn.Parameter]) -> None:
         # We need to call Optimizer.__init__() to initialize some necessary optimizer
-        # functionality such as hooks.
-        Optimizer.__init__(self, all_params, optimizer_kwargs)
+        # functionality such as hooks (e.g. register_step_pre_hook for MoE load balancing).
+        Optimizer.__init__(self, all_params, {})
 
     def _register_bf16_optimizer_state_hook(self) -> None:
         """Register a step pre-hook to create Adam optimizer states in bfloat16.
@@ -339,83 +339,36 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                             )
 
         for optim in self.optimizers:
-            optim.register_step_pre_hook(_bf16_state_init_hook)
+            if isinstance(optim, (torch.optim.Adam, torch.optim.AdamW)):
+                optim.register_step_pre_hook(_bf16_state_init_hook)
 
     def init_cache_state_dict(self) -> None:
         """Initialize cached state dict for TorchFT. No-op for base class."""
         pass
 
 
-class OptimizersInBackwardContainer(OptimizersContainer):
-    """OptimizersContainer for executing ``optim.step()`` in backward pass.
+def default_adamw(lr: float = 8e-4, **kwargs: Any) -> OptimizersContainer.Config:
+    """Create an OptimizersContainer.Config with a catch-all AdamW param group.
 
-    This class extend ``OptimizersContainer`` to support optimizer step in
-    backward pass. ``step()`` and ``zero_grad()`` are no-op in this class.
-    Instead, ``register_post_accumulate_grad_hook`` is used to register a hook to
-    execute these methods when the gradient is accumulated.
+    Use as a convenience for the common case::
+
+        optimizer=default_adamw(lr=3e-4)
     """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(OptimizersContainer.Config):
-        def __post_init__(self) -> None:
-            if self.implementation == "fused_opt_states_bf16":
-                raise ValueError(
-                    "implementation='fused_opt_states_bf16' is not supported with "
-                    "OptimizersInBackwardContainer"
-                )
-            OptimizersContainer.Config.__post_init__(self)
-
-    def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
-        optimizer_cls = self._resolve_optimizer_cls(config.name)
-        optimizer_kwargs = self._build_optimizer_kwargs(config)
-        all_params = []
-        self.model_parts = model_parts
-
-        # Build a mapping from param -> effective kwargs using param group config
-        param_to_kwargs: dict[nn.Parameter, dict[str, Any]] = {}
-        for model in self.model_parts:
-            param_groups = self._build_param_groups(model, config, optimizer_kwargs)
-            for group in param_groups:
-                group_kwargs = {k: v for k, v in group.items() if k != "params"}
-                for p in group["params"]:
-                    param_to_kwargs[p] = group_kwargs
-
-        optim_dict = {}
-        for model in self.model_parts:
-            for p in model.parameters():
-                if p.requires_grad:
-                    optim_dict[p] = optimizer_cls([p], **param_to_kwargs[p])
-                all_params.append(p)
-
-        def optim_hook(param) -> None:
-            optim_dict[param].step()
-            optim_dict[param].zero_grad()
-
-        for model in self.model_parts:
-            for param in model.parameters():
-                if param.requires_grad:
-                    param.register_post_accumulate_grad_hook(optim_hook)
-
-        self.optimizers = list(optim_dict.values())
-
-        self._validate_length(
-            sum(len(list(model.parameters())) for model in self.model_parts)
-        )
-        self._post_init(all_params, optimizer_kwargs)
-
-    @overload
-    def step(self, closure: None = None) -> None:
-        ...
-
-    @overload
-    def step(self, closure: Callable[[], float]) -> float:
-        ...
-
-    def step(self, closure: Callable[[], float] | None = None) -> float | None:
-        return None
-
-    def zero_grad(self, set_to_none: bool = True) -> None:
-        pass
+    return OptimizersContainer.Config(
+        param_groups=[
+            ParamGroupConfig(
+                pattern=r".*",
+                optimizer_name="AdamW",
+                optimizer_kwargs={
+                    "lr": lr,
+                    "betas": (0.9, 0.95),
+                    "eps": 1e-8,
+                    "weight_decay": 0.1,
+                    **kwargs,
+                },
+            )
+        ]
+    )
 
 
 def register_moe_load_balancing_hook(
@@ -456,7 +409,7 @@ def register_moe_load_balancing_hook(
         loss_mesh = parallel_dims.get_optional_mesh("loss")
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
-        tokens_per_expert_list = []
+        tokens_per_expert_E_list = []
         for model_part in model_parts:
             layers = model_part.get_submodule("layers")
             assert isinstance(layers, nn.ModuleDict)
@@ -467,28 +420,28 @@ def register_moe_load_balancing_hook(
                 if transformer_block.moe.load_balance_coeff is None:
                     return
                 # pyrefly: ignore [missing-attribute]
-                tokens_per_expert = transformer_block.moe.tokens_per_expert
+                tokens_per_expert_E = transformer_block.moe.tokens_per_expert_E
                 if _is_recomputation_enabled(transformer_block):
-                    # TODO: This is a hack, we assume with full AC, the tokens_per_expert is counted twice.
+                    # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
                     # This does not affect to expert choice, but affects the experts usage metrics.
                     # We divide by 2 to correct for this double-counting due to recomputation
                     # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
-                    tokens_per_expert = tokens_per_expert // 2
-                tokens_per_expert_list.append(tokens_per_expert)
+                    tokens_per_expert_E = tokens_per_expert_E // 2
+                tokens_per_expert_E_list.append(tokens_per_expert_E)
 
-        tokens_per_expert_by_layer = torch.vstack(tokens_per_expert_list)
+        tokens_per_expert_E_by_layer = torch.vstack(tokens_per_expert_E_list)
 
-        if parallel_dims.full_dtensor:
+        if parallel_dims.spmd_backend == "full_dtensor":
             # full_dtensor: DTensor mesh includes all axes (DP/CP/TP/EP).
             # redistribute Partial→Replicate covers everything.
             assert isinstance(
-                tokens_per_expert_by_layer, torch.distributed.tensor.DTensor
+                tokens_per_expert_E_by_layer, torch.distributed.tensor.DTensor
             )
-            dtensor_mesh = tokens_per_expert_by_layer.device_mesh
+            dtensor_mesh = tokens_per_expert_E_by_layer.device_mesh
             # TODO: This incurs multiple sequential all-reduces, one per
             # SPMD mesh axis. We should provide a utility to do a single all-reduce
             # on the flattened global SPMD mesh.
-            tokens_per_expert_by_layer = tokens_per_expert_by_layer.redistribute(
+            tokens_per_expert_E_by_layer = tokens_per_expert_E_by_layer.redistribute(
                 placements=[Replicate()] * dtensor_mesh.ndim
             )
         else:
@@ -496,24 +449,26 @@ def register_moe_load_balancing_hook(
             # full_tensor() reduces on TP/EP, then all-reduce on loss_mesh
             # covers DP/CP separately.
             is_dtensor = isinstance(
-                tokens_per_expert_by_layer, torch.distributed.tensor.DTensor
+                tokens_per_expert_E_by_layer, torch.distributed.tensor.DTensor
             )
             if is_dtensor:
-                dtensor_mesh = tokens_per_expert_by_layer.device_mesh
-                tokens_per_expert_by_layer = tokens_per_expert_by_layer.full_tensor()
+                dtensor_mesh = tokens_per_expert_E_by_layer.device_mesh
+                tokens_per_expert_E_by_layer = (
+                    tokens_per_expert_E_by_layer.full_tensor()
+                )
             if loss_mesh is not None:
                 torch.distributed.all_reduce(
-                    tokens_per_expert_by_layer,
+                    tokens_per_expert_E_by_layer,
                     group=loss_mesh.get_group(),
                     op=torch.distributed.ReduceOp.SUM,
                 )
             if is_dtensor:
-                tokens_per_expert_by_layer = torch.distributed.tensor.DTensor.from_local(
-                    tokens_per_expert_by_layer,
+                tokens_per_expert_E_by_layer = torch.distributed.tensor.DTensor.from_local(
+                    tokens_per_expert_E_by_layer,
                     # pyrefly: ignore [unbound-name]
                     device_mesh=dtensor_mesh,
-                    placements=[Replicate()]
-                    * dtensor_mesh.ndim,  # pyrefly: ignore [unbound-name]
+                    # pyrefly: ignore [unbound-name]
+                    placements=[Replicate()] * dtensor_mesh.ndim,
                     run_check=False,
                 )
 
@@ -527,7 +482,7 @@ def register_moe_load_balancing_hook(
                         continue
                     moe = transformer_block.moe
 
-                    tokens_per_expert = tokens_per_expert_by_layer[
+                    tokens_per_expert_E = tokens_per_expert_E_by_layer[
                         moe_layer_idx
                     ].float()
                     moe_layer_idx += 1
@@ -535,14 +490,16 @@ def register_moe_load_balancing_hook(
                     # update the expert bias
                     # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
                     # pyrefly: ignore [missing-attribute]
-                    expert_bias_delta = moe.load_balance_coeff * torch.sign(
-                        tokens_per_expert.mean() - tokens_per_expert
+                    expert_bias_delta_E = moe.load_balance_coeff * torch.sign(
+                        tokens_per_expert_E.mean() - tokens_per_expert_E
                     )
-                    expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
+                    expert_bias_delta_E = (
+                        expert_bias_delta_E - expert_bias_delta_E.mean()
+                    )
                     # pyrefly: ignore [missing-attribute]
-                    moe.expert_bias.add_(expert_bias_delta)
+                    moe.expert_bias_E.add_(expert_bias_delta_E)
                     # pyrefly: ignore [missing-attribute]
-                    moe.tokens_per_expert.zero_()
+                    moe.tokens_per_expert_E.zero_()
 
     if _should_register_moe_balancing_hook(model_parts):
         optimizers.register_step_pre_hook(

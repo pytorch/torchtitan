@@ -113,7 +113,7 @@ def _common_setup(config):
     # TODO: Factor the model setup below with the training path so precompile
     # and training share a single implementation of build/parallelize/init.
     model_config = model_spec.model
-    model_config.update_from_config(trainer_config=config)
+    model_config.update_from_config(config=config)
 
     logger.info(f"Building {model_spec.name} {model_spec.flavor} on meta device")
     with (
@@ -214,14 +214,9 @@ def _precompile_aot_fx_trace(
         attn_config = model_config.layers[0].attention
         inner_attention = attn_config.inner_attention
 
-        if attn_config.mask_type == "block_causal":
-            positions = torch.arange(
-                0, dummy_inputs.shape[1], dtype=torch.int32, device=dummy_inputs.device
-            ).expand(dummy_inputs.shape)
-        else:
-            positions = torch.arange(
-                dummy_inputs.shape[1], dtype=torch.int32, device=dummy_inputs.device
-            ).repeat(dummy_inputs.shape[0], 1)
+        positions = torch.arange(
+            0, dummy_inputs.shape[1], dtype=torch.int32, device=dummy_inputs.device
+        ).expand(dummy_inputs.shape)
 
         if isinstance(inner_attention, (FlexAttention.Config, VarlenAttention.Config)):
             extra_kwargs["attention_masks"] = cast(Decoder, model).get_attention_masks(

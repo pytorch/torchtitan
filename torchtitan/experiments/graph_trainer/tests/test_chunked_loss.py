@@ -62,7 +62,7 @@ class TestChunkedCELossWithParamGrads(TestCase):
         torch.manual_seed(42)
         B, L, D, V = 2, 8, 32, 64
         labels = torch.randint(0, V, (B, L))
-        global_valid_tokens = (labels != IGNORE_INDEX).sum().float()
+        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
         hidden_states = torch.randn(B, L, D)
 
         model_a, loss_a_fn = _make_model_and_loss(D, V)

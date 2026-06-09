@@ -6,7 +6,6 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-import dataclasses
 from dataclasses import dataclass
 
 import torch
@@ -15,7 +14,6 @@ from torch import nn
 from torchtitan.models.common.attention import AttentionMasksType, VarlenAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
-from torchtitan.tools.logging import logger
 
 
 class Llama3TransformerBlock(TransformerBlock):
@@ -44,13 +42,10 @@ class Llama3TransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
-        h = x + self.attention(
-            self.attention_norm(x), freqs_cis, attention_masks, positions
-        )
+        h = x + self.attention(self.attention_norm(x), attention_masks, positions)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
@@ -67,23 +62,15 @@ class Llama3Model(Decoder):
     class Config(Decoder.Config):
         dim: int = 4096
         vocab_size: int = 128256
-        enable_weight_tying: bool = False
 
         def update_from_config(
             self,
             *,
-            trainer_config,
+            config,
             **kwargs,
         ) -> None:
-            training = trainer_config.training
-            parallelism = trainer_config.parallelism
-            seq_len = training.seq_len
-            if seq_len > self.rope.max_seq_len:
-                logger.warning(
-                    f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
-                )
-            # Sync rope max_seq_len
-            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
+            Decoder.Config.update_from_config(self, config=config, **kwargs)
+            parallelism = config.parallelism
 
             if parallelism.context_parallel_degree > 1 and isinstance(
                 self.layers[0].attention.inner_attention, VarlenAttention.Config
@@ -91,24 +78,6 @@ class Llama3Model(Decoder):
                 raise NotImplementedError(
                     "Context Parallel only supports SDPA and FlexAttention. "
                     "Varlen attention is not supported with CP."
-                )
-
-            tp = parallelism.tensor_parallel_degree
-            if tp > 1:
-                n_heads = self.layers[0].attention.n_heads
-                n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
-                if n_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
-                    )
-                if n_kv_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
-                    )
-
-            if self.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
-                raise NotImplementedError(
-                    "Weight tying is not supported with Pipeline Parallel."
                 )
 
             from torchtitan.models.llama3.sharding import set_llama3_sharding_config
@@ -130,24 +99,3 @@ class Llama3Model(Decoder):
                 seq_len=seq_len,
                 enable_weight_tying=self.enable_weight_tying,
             )
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.enable_weight_tying = config.enable_weight_tying
-
-        if self.enable_weight_tying:
-            self.tok_embeddings.weight = self.lm_head.weight
-
-    def init_states(
-        self,
-        *,
-        buffer_device: torch.device | None = None,
-    ) -> None:
-        if self.enable_weight_tying:
-            # Re-tie weights before parameter init so that tok_embeddings.weight
-            # (skipped by skip_param_init) and output.weight point to the same
-            # tensor after output is initialized.
-            assert self.tok_embeddings is not None and self.lm_head is not None
-            self.tok_embeddings.weight = self.lm_head.weight
-
-        super().init_states(buffer_device=buffer_device)

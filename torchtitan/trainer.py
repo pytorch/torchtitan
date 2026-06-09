@@ -24,10 +24,7 @@ from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhausted
 from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
-from torchtitan.components.optimizer import (
-    OptimizersContainer,
-    OptimizersInBackwardContainer,
-)
+from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
@@ -107,15 +104,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise ValueError(
                     "Batch-invariant mode is not supported in pre-training."
                 )
-            if isinstance(self.optimizer, OptimizersInBackwardContainer.Config):
-                if self.parallelism.expert_parallel_degree > 1:
-                    raise NotImplementedError(
-                        "Optimizers in backward is not supported with Expert Parallel."
-                    )
-                if self.parallelism.pipeline_parallel_degree > 1:
-                    raise NotImplementedError(
-                        "Optimizers in backward is not supported with Pipeline Parallel."
-                    )
 
         def to_dict(self) -> dict[str, Any]:
             d = {}
@@ -230,23 +218,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.debug,
             distinct_seed_mesh_dims=["pp"],
         )
-        # build tokenizer
-        self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
-
-        # build dataloader
-        self.dataloader = config.dataloader.build(
-            dp_world_size=batch_degree,
-            dp_rank=batch_rank,
-            tokenizer=self.tokenizer,
-            seq_len=config.training.seq_len,
-            local_batch_size=config.training.local_batch_size,
-        )
 
         # build model (using meta init)
         model_config = model_spec.model
         # set the model args from training job configs
         model_config.update_from_config(
-            trainer_config=config,
+            config=config,
         )
         self.model_config = model_config
 
@@ -447,6 +424,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.step = 0
         self.ntokens_seen = 0
 
+        # build tokenizer
+        self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+
+        # build dataloader
+        self.dataloader = config.dataloader.build(
+            dp_world_size=batch_degree,
+            dp_rank=batch_rank,
+            tokenizer=self.tokenizer,
+            seq_len=config.training.seq_len,
+            local_batch_size=config.training.local_batch_size,
+            snapshot_every_n_steps=(
+                config.checkpoint.interval * self.gradient_accumulation_steps
+                if config.checkpoint.enable
+                else None
+            ),
+        )
+
+        # build checkpointer
         self.checkpointer = config.checkpoint.build(
             dataloader=self.dataloader,
             model_parts=self.model_parts,
@@ -592,19 +587,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         positions = extra_inputs.pop("positions", None)
 
-        if isinstance(self.model_config, Decoder.Config):
-            attn_config = self.model_config.layers[0].attention
-            inner_attention = attn_config.inner_attention
-
-            if attn_config.mask_type == "block_causal":
-                assert (
-                    positions is not None
-                ), "block_causal mask requires per-document positions from the dataloader"
-            else:
-                positions = torch.arange(
-                    inputs.shape[1], dtype=torch.int32, device=inputs.device
-                ).repeat(inputs.shape[0], 1)
-
+        # positions and attention_masks are optional (Decoder.forward defaults
+        # both to None). Build attention masks only for the masked backends
+        # (Flex/Varlen), which is where get_attention_masks is defined. A
+        # maskless backend (e.g. the SDPA config used by the graph_trainer
+        # tests) still receives positions for RoPE but no masks — it relies on
+        # is_causal instead.
+        if isinstance(self.model_config, Decoder.Config) and positions is not None:
+            inner_attention = self.model_config.layers[0].attention.inner_attention
             if isinstance(
                 inner_attention, (FlexAttention.Config, VarlenAttention.Config)
             ):
@@ -629,7 +619,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # unique tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += labels.numel()
 
-        if self.config.parallelism.full_dtensor:
+        if self.config.parallelism.spmd_backend == "full_dtensor":
             inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
@@ -642,7 +632,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         *,
         input_dict: dict[str, torch.Tensor],
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor,
+        global_valid_tokens: float,
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
@@ -695,7 +685,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # Remove once non-full_dtensor is no longer supported.
                 if (
                     isinstance(pred, DTensor)
-                    and not self.config.parallelism.full_dtensor
+                    and self.config.parallelism.spmd_backend != "full_dtensor"
                     and self.config.parallelism.disable_loss_parallel
                 ):
                     pred = pred.to_local()
@@ -710,8 +700,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
         self.optimizers.zero_grad()
-        # Save the current step learning rate for logging
-        lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
+        # Save per-optimizer-group learning rates for logging
+        lr_metrics = self.lr_schedulers.get_metrics()
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -729,12 +719,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # All-reduce to get global token count across DP ranks
         # Move to GPU for distributed communication
-        local_valid_tokens = local_valid_tokens.to(self.device)
         if parallel_dims.dp_enabled:
             batch_mesh = parallel_dims.get_mesh("batch")
-            global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
+            global_valid_tokens = dist_utils.dist_sum(
+                local_valid_tokens.to(self.device), batch_mesh
+            )
         else:
-            global_valid_tokens = local_valid_tokens.float()
+            global_valid_tokens = float(local_valid_tokens.item())
 
         # Process each microbatch: move to GPU, forward/backward, then free
         accumulated_losses = []
@@ -748,7 +739,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             loss = self.forward_backward_step(
                 input_dict=input_dict,
                 labels=labels,
-                # pyrefly: ignore [bad-argument-type]
                 global_valid_tokens=global_valid_tokens,
             )
             accumulated_losses.append(loss.detach())
@@ -806,7 +796,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
-            "lr": lr,
+            **lr_metrics,
         }
         self.metrics_processor.log(
             self.step,

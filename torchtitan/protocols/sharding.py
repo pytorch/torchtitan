@@ -8,8 +8,8 @@
 
 ``ShardingConfig`` is set on ``Module.Config`` by ``set_sharding_config()``
 and read by ``Module.parallelize(parallel_dims)``.  All placements use
-``NamedPlacement`` (dict keyed by ``MeshAxisName``) so they are
-self-documenting and support multi-dimensional meshes.
+``SpmdLayout`` so they are self-documenting and support multi-dimensional
+meshes.
 """
 
 from dataclasses import dataclass, field
@@ -17,13 +17,15 @@ from dataclasses import dataclass, field
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Placement, Replicate, Shard
 
-from torchtitan.protocols.types import MeshAxisName, NamedPlacement
+from torchtitan.distributed.parallel_dims import MeshAxisName, SpmdLayout
+
+from torchtitan.distributed.spmd_types import spmd_layout_to_dtensor_placements
 
 
 __all__ = [
     "LocalMapConfig",
-    "NamedPlacement",
     "ShardingConfig",
+    "SpmdLayout",
     "resolve_placements",
 ]
 
@@ -48,11 +50,11 @@ class LocalMapConfig:
     ``ShardingConfig`` today.
 
     Attributes:
-        in_grad_placements: Per-input-gradient NamedPlacements (positional,
-            ordered by ``forward`` args).
+        in_grad_placements: Per-input-gradient SpmdLayouts (positional,
+            ordered by ``forward`` args). Use ``None`` for non-tensor args.
     """
 
-    in_grad_placements: tuple[NamedPlacement, ...]
+    in_grad_placements: tuple[SpmdLayout | None, ...]
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}
@@ -62,9 +64,9 @@ class LocalMapConfig:
 class ShardingConfig:
     """Declarative sharding for a Module's states and activations.
 
-    All placements use ``NamedPlacement`` (``dict[MeshAxisName, Placement]``)
-    keyed by mesh axis names.  At ``parallelize()`` time, NamedPlacements
-    are resolved to ``tuple[Placement, ...]`` in mesh axis order.
+    All placements use ``SpmdLayout`` keyed by mesh axis names.  At
+    ``parallelize()`` time, SpmdLayouts are resolved to
+    ``tuple[Placement, ...]`` in mesh axis order.
 
     Completely dtype-agnostic at this moment — quantization (Float8/MXFP8) is
     orthogonal.
@@ -93,7 +95,7 @@ class ShardingConfig:
         out_src_shardings: Source placement of the forward's output as a
             DTensor. When ``local_map`` is set this also tells ``local_map``
             what to wrap the local output back to. Accepts a single
-            ``NamedPlacement`` (single-output case) or a tuple (multi-
+            ``SpmdLayout`` (single-output case) or a tuple (multi-
             output case, e.g. attention with ``return_lse=True``). ``None``
             means "infer from the output" (it's already a DTensor at the
             right placement, or there's no local_map to drive).
@@ -107,11 +109,11 @@ class ShardingConfig:
             ``in_grad_placements``.
     """
 
-    state_shardings: dict[str, NamedPlacement] = field(default_factory=dict)
-    in_src_shardings: dict[str, NamedPlacement] | None = None
-    in_dst_shardings: dict[str, NamedPlacement] | None = None
-    out_src_shardings: NamedPlacement | tuple[NamedPlacement, ...] | None = None
-    out_dst_shardings: NamedPlacement | None = None
+    state_shardings: dict[str, SpmdLayout] = field(default_factory=dict)
+    in_src_shardings: dict[str, SpmdLayout] | None = None
+    in_dst_shardings: dict[str, SpmdLayout] | None = None
+    out_src_shardings: SpmdLayout | tuple[SpmdLayout, ...] | None = None
+    out_dst_shardings: SpmdLayout | None = None
     local_map: LocalMapConfig | None = None
 
     def to_dict(self) -> dict:
@@ -120,10 +122,10 @@ class ShardingConfig:
 
 
 def resolve_placements(
-    named: NamedPlacement,
+    layout: SpmdLayout,
     mesh: DeviceMesh,
 ) -> tuple[Placement, ...]:
-    """Resolve NamedPlacement against a mesh in axis order.
+    """Resolve SpmdLayout against a mesh in axis order.
 
     Every sharding_config must explicitly declare a placement for every mesh axis
     it will be applied against. Missing declarations raise ``ValueError``;
@@ -138,17 +140,18 @@ def resolve_placements(
     # TODO(fegin): remove the ``Shard(d)`` on a size-1 mesh to ``Replicate()``
     # conversion once FlexShard replaces ``fully_shard``.
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
+    placements = spmd_layout_to_dtensor_placements(layout)
     result = []
     for i, axis_name in enumerate(mesh.mesh_dim_names):
         key = MeshAxisName(axis_name)
-        if key not in named:
+        if key not in placements:
             raise ValueError(
                 f"ShardingConfig does not declare a placement for mesh axis "
                 f"{axis_name!r}. Declared: "
-                f"{sorted(k.value for k in named)}; "
+                f"{sorted(k.value for k in layout.axes())}; "
                 f"required: {list(mesh.mesh_dim_names)}."
             )
-        p = named[key]
+        p = placements[key]
         if isinstance(p, Shard) and mesh.size(i) == 1:
             p = Replicate()
         result.append(p)

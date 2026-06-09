@@ -12,9 +12,11 @@ from typing import Any
 import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
+import torch.nn.functional as F
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
@@ -29,20 +31,83 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
-from torchtitan.experiments.rl.actors.utils import (
-    compute_logprobs,
-    extract_response_logprobs,
-    PartialLogprobDrift,
-    verify_logprob_identity,
-)
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingBatch
-from torchtitan.models.common.attention import create_varlen_metadata_for_document
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger
 
 logger = logging.getLogger(__name__)
+
+
+@sl.log_trace_span("compute_logprobs")
+def compute_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Compute per-position logprobs from logits and pre-shifted labels.
+
+    ``labels`` is pre-shifted per episode in the batcher
+    (``labels[i] = raw_token_ids[i+1]``), matching the pre-training
+    dataloader convention.  No internal shift is needed.
+    Output shape matches input: ``[batch, seq_len]``.
+    """
+    from torch.distributed.tensor import DTensor
+
+    if isinstance(logits, DTensor):
+        # TODO: pass `grad_placements=[Replicate(), ...]` to make the autograd
+        # contract explicit (see .claude/rules/distributed.md).
+        logits = logits.to_local()
+    B, S, V = logits.shape
+    return -F.cross_entropy(
+        logits.float().reshape(B * S, V),
+        labels.reshape(B * S),
+        reduction="none",
+        ignore_index=IGNORE_INDEX,
+    ).reshape(B, S)
+
+
+@dataclass(frozen=True, slots=True)
+class PartialLogprobDrift:
+    """Per-rank generator-vs-trainer logprob drift awaiting reduction across the loss-mesh."""
+
+    logprob_diff_mean: torch.Tensor
+    logprob_diff_max: torch.Tensor
+    ratio_tokens_different: torch.Tensor
+
+
+@torch.no_grad()
+@sl.log_trace_span("verify_logprob_identity")
+def verify_logprob_identity(
+    generator_logprobs: torch.Tensor,
+    policy_logprobs: torch.Tensor,
+    loss_mask: torch.Tensor,
+    *,
+    num_global_valid_tokens: int,
+) -> PartialLogprobDrift:
+    """Compute per-rank drift between generator and trainer logprobs.
+
+    Args:
+        generator_logprobs: [B, L] generator logprobs from TrainingBatch.
+        policy_logprobs: [B, L] trainer-computed logprobs.
+        loss_mask: [B, L] bool mask; True for response tokens.
+        num_global_valid_tokens: Total response tokens across all DP ranks.
+
+    Returns:
+        PartialLogprobDrift.
+    """
+    ref_flat = generator_logprobs[loss_mask].float()
+    policy_flat = policy_logprobs[loss_mask].float()
+
+    if ref_flat.numel() == 0:
+        zero = torch.zeros((), dtype=torch.float32, device=generator_logprobs.device)
+        return PartialLogprobDrift(zero, zero, zero)
+
+    denom = max(num_global_valid_tokens, 1)
+    diff = policy_flat - ref_flat
+    return PartialLogprobDrift(
+        logprob_diff_mean=diff.sum() / denom,
+        logprob_diff_max=diff.abs().max(),
+        ratio_tokens_different=(diff.abs() > 1e-6).sum() / denom,
+    )
 
 
 class PolicyTrainer(Actor, Configurable):
@@ -224,17 +289,18 @@ class PolicyTrainer(Actor, Configurable):
             Model with random-initialized weights.
         """
 
-        # TODO: Also support flex attention backend later.
         from torchtitan.models.common.attention import VarlenAttention
 
+        inner_attn = model_spec.model.layers[0].attention.inner_attention
         assert isinstance(
-            model_spec.model.layers[0].attention.inner_attention, VarlenAttention.Config
-        ), "Only varlen attention backend is allowed."
+            model_spec.model.layers[0].attention.inner_attention,
+            (VarlenAttention.Config, FlexAttention.Config),
+        ), "Only varlen and flex attention backends are allowed."
 
         # Fill sharding configs on the config BEFORE build via the
         # model-agnostic `update_from_config` hook (RL's trainer bypasses
         # `torchtitan.Trainer's` call, so we invoke it directly).
-        model_spec.model.update_from_config(trainer_config=config)
+        model_spec.model.update_from_config(config=config)
 
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
@@ -302,15 +368,14 @@ class PolicyTrainer(Actor, Configurable):
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        train_data: list[TrainingBatch],
-        *,
+        training_data: list[TrainingBatch],
         num_global_valid_tokens: int,
     ) -> dict[str, float]:
         """Run forward pass, compute loss, call backward, and reduce metrics.
 
         Args:
-            train_data: List of TrainingBatch, one per DP rank. Local rank
-                picks train_data[self.dp_rank].
+            training_data: List of TrainingBatch, one per DP rank. Local rank
+                picks training_data[self.dp_rank].
             num_global_valid_tokens: Total response tokens across all DP
                 ranks for this step. The controller computes this before
                 sharding episodes.
@@ -333,61 +398,41 @@ class PolicyTrainer(Actor, Configurable):
             )
         model = self.model_parts[0]
 
-        local_batch = train_data[self.dp_rank]
+        local_batch = training_data[self.dp_rank]
         device = self.device
-
         token_ids = local_batch.token_ids.to(device)
-        seq_lens = local_batch.seq_lens
-        prompt_lens = local_batch.prompt_lens
-        response_lens = local_batch.response_lens
+        labels = local_batch.labels.to(device)
+        positions = local_batch.positions.to(device)
+        loss_mask = local_batch.loss_mask.to(device)
+        generator_logprobs = local_batch.generator_logprobs.to(device)
         advantages = local_batch.advantages.to(device)
 
-        max_seq_len = max(seq_lens)
-        rope_cache_len = self.model.freqs_cis.shape[0]
-        if max_seq_len > rope_cache_len:
-            raise ValueError(
-                f"Episode length {max_seq_len} exceeds rope cache size "
-                f"{rope_cache_len}. Increase model max_seq_len or reduce "
-                f"generation max_tokens."
-            )
-
-        num_global_valid_tokens: torch.Tensor = torch.tensor(
-            float(max(num_global_valid_tokens, 1)),
-            device=device,
-            dtype=torch.float32,
-        )
-
-        positions = torch.cat(
-            [torch.arange(l, device=device) for l in seq_lens]
-        ).unsqueeze(0)
-        attention_masks = create_varlen_metadata_for_document(positions)
+        attention_masks = model.get_attention_masks(positions)
 
         with sl.log_trace_span("model_forward"):
             logits = model(
                 token_ids, attention_masks=attention_masks, positions=positions
             )
-        all_policy_logprobs = compute_logprobs(logits, token_ids)
-        policy_logprobs = extract_response_logprobs(
-            all_policy_logprobs, seq_lens, prompt_lens, response_lens
-        )
+        policy_logprobs = compute_logprobs(logits, labels)
 
         with sl.log_trace_span("loss_fn"):
             loss, loss_metrics = self.loss_fn(
                 policy_logprobs=policy_logprobs,
+                generator_logprobs=generator_logprobs,
+                loss_mask=loss_mask,
                 advantages=advantages,
                 num_global_valid_tokens=num_global_valid_tokens,
             )
 
-        self.optimizers.zero_grad()
         with sl.log_trace_span("model_backward"):
             loss.backward()
 
         # Metrics for bitwise verification of policy logprobs.
         verification: PartialLogprobDrift = verify_logprob_identity(
-            generator_token_logprobs=local_batch.token_logprobs,
-            trainer_token_logprobs=policy_logprobs,
+            generator_logprobs=generator_logprobs,
+            policy_logprobs=policy_logprobs,
+            loss_mask=loss_mask,
             num_global_valid_tokens=num_global_valid_tokens,
-            device=device,
         )
 
         # Per-rank pre-normalized metrics, so SUM-reducing reconstructs the global.
@@ -410,7 +455,7 @@ class PolicyTrainer(Actor, Configurable):
     async def optim_step(self) -> OptimStepOutput:
         """Clip gradients, step optimizer + LR scheduler, return updated state."""
         # TODO: Accept optional optimizer params (e.g. learning rate)
-        # to allow controller-owned schedules (see Tinker API).
+        # to allow controller-owned schedules.
 
         # capture LR before step
         current_lrs = self.lr_schedulers.schedulers[0].get_last_lr()
@@ -432,6 +477,7 @@ class PolicyTrainer(Actor, Configurable):
         with sl.log_trace_span("optim"):
             self.optimizers.step()
             self.lr_schedulers.step()
+            self.optimizers.zero_grad()
 
         self.policy_version += 1
 

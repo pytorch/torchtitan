@@ -4,13 +4,21 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from collections.abc import Callable
 from functools import partial
 
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
+from torchtitan.models.common import (
+    CosSinRoPE,
+    Embedding,
+    Linear,
+    RMSNorm,
+    RoPE,
+    TransformerBlock,
+)
 from torchtitan.models.common.attention import FusedQKVLinear, QKVLinear
 from torchtitan.models.common.config_utils import make_token_dispatcher_config
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
@@ -18,9 +26,7 @@ from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
-
 from .model import Attention, GptOssModel, GptOssTransformerBlock
-
 from .moe import GptOssGroupedExperts, GptOssMoE
 from .parallelize import parallelize_gptoss
 from .state_dict_adapter import GptOssStateDictAdapter
@@ -60,6 +66,7 @@ def _make_gptoss_attn_config(
     head_dim: int = 64,
     sliding_window_size: int = 128,
     fuse_qkv: bool = False,
+    rope: RoPE.Config,
 ) -> Attention.Config:
     """Build a fully-specified GPT-OSS Attention.Config for a single layer.
 
@@ -114,6 +121,7 @@ def _make_gptoss_attn_config(
         ),
         sliding_window_size=sliding_window_size,
         param_init=sinks_init,
+        rope=dataclasses.replace(rope),
     )
 
 
@@ -131,10 +139,10 @@ def _make_gptoss_experts_config(
     """Build a fully-specified GptOssGroupedExperts.Config for a single layer."""
     std = depth_scaled_std(0.02, layer_id)
     experts_init = {
-        "mlp1_weight": partial(nn.init.trunc_normal_, std=std),
-        "mlp1_bias": partial(nn.init.trunc_normal_, std=std),
-        "mlp2_weight": partial(nn.init.trunc_normal_, std=std),
-        "mlp2_bias": partial(nn.init.trunc_normal_, std=std),
+        "mlp1_weight_EGD": partial(nn.init.trunc_normal_, std=std),
+        "mlp1_bias_EG": partial(nn.init.trunc_normal_, std=std),
+        "mlp2_weight_EDF": partial(nn.init.trunc_normal_, std=std),
+        "mlp2_bias_ED": partial(nn.init.trunc_normal_, std=std),
     }
     return GptOssGroupedExperts.Config(
         dim=dim,
@@ -163,6 +171,7 @@ def _build_gptoss_layers(
     fuse_qkv: bool = False,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    rope: RoPE.Config,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for GPT-OSS.
 
@@ -172,7 +181,10 @@ def _build_gptoss_layers(
     layers = []
     for layer_id in range(n_layers):
         attn_cfg = _make_gptoss_attn_config(
-            dim=dim, layer_id=layer_id, fuse_qkv=fuse_qkv
+            dim=dim,
+            layer_id=layer_id,
+            fuse_qkv=fuse_qkv,
+            rope=rope,
         )
         experts_cfg = _make_gptoss_experts_config(
             dim=dim,
@@ -239,17 +251,16 @@ def _debugmodel(
             score_before_experts=False,
             load_balance_coeff=1e-3,
             moe_comm_backend=moe_comm_backend,
-        ),
-        rope=RoPE.Config(
-            dim=64,
-            max_seq_len=131072,
-            theta=150000.0,
-            backend="cos_sin",
-            scaling="yarn",
-            rope_factor=32,
-            beta_slow=32.0,
-            beta_fast=1.0,
-            original_seq_len=4096,
+            rope=CosSinRoPE.Config(
+                dim=64,
+                max_seq_len=131072,
+                theta=150000.0,
+                scaling="yarn",
+                rope_factor=32,
+                beta_slow=32.0,
+                beta_fast=1.0,
+                original_seq_len=4096,
+            ),
         ),
     )
 
@@ -281,17 +292,16 @@ def _20b(
             score_before_experts=False,
             load_balance_coeff=1e-3,
             moe_comm_backend=moe_comm_backend,
-        ),
-        rope=RoPE.Config(
-            dim=64,
-            max_seq_len=131072,
-            theta=150000.0,
-            backend="cos_sin",
-            scaling="yarn",
-            rope_factor=32,
-            beta_slow=32.0,
-            beta_fast=1.0,
-            original_seq_len=4096,
+            rope=CosSinRoPE.Config(
+                dim=64,
+                max_seq_len=131072,
+                theta=150000.0,
+                scaling="yarn",
+                rope_factor=32,
+                beta_slow=32.0,
+                beta_fast=1.0,
+                original_seq_len=4096,
+            ),
         ),
     )
 
@@ -323,17 +333,16 @@ def _120b(
             score_before_experts=False,
             load_balance_coeff=1e-3,
             moe_comm_backend=moe_comm_backend,
-        ),
-        rope=RoPE.Config(
-            dim=64,
-            max_seq_len=131072,
-            theta=150000.0,
-            backend="cos_sin",
-            scaling="yarn",
-            rope_factor=32,
-            beta_slow=32.0,
-            beta_fast=1.0,
-            original_seq_len=4096,
+            rope=CosSinRoPE.Config(
+                dim=64,
+                max_seq_len=131072,
+                theta=150000.0,
+                scaling="yarn",
+                rope_factor=32,
+                beta_slow=32.0,
+                beta_fast=1.0,
+                original_seq_len=4096,
+            ),
         ),
     )
 

@@ -64,10 +64,11 @@ jobs:
         # Install uv for faster dependency resolution
         pip install uv
 
-        # 1. Install Monarch and TorchStore
-        uv pip install torchmonarch==0.4.1
+        # 1. Install Monarch, TorchStore, and Renderers
+        uv pip install torchmonarch
         uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
         uv pip install pygtrie portpicker
+        uv pip install "git+https://github.com/PrimeIntellect-ai/renderers.git@main"
 
         # 2. Install batch-invariant ops
         uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
@@ -78,10 +79,9 @@ jobs:
         uv pip install torch torchvision vllm xformers --pre \
           --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
           --index-strategy unsafe-best-match
-        uv pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 
         # 4. Install torchtitan in editable mode because integration test spawns
-        # python grpo.py as a subprocess
+        # python train.py as a subprocess
         uv pip install -e .
 
         # 5. Download HF model checkpoint for tests
