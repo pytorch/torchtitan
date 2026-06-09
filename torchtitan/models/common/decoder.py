@@ -209,7 +209,7 @@ class Decoder(BaseModel):
                             debug.moe_force_load_balance
                         )
 
-    # Set by the trainer when ChunkedCELoss is used, so lm_head is applied
+    # Set by the trainer when ChunkedLoss is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().
     # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor
     # inputs (bool kwargs cause 'has no attribute requires_grad' errors).

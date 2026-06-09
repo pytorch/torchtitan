@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
 from typing import Literal
 
-from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
+from torchtitan.components.loss import ChunkedLoss
 from torchtitan.config.configs import CompileConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.protocols.model_spec import ModelSpec
@@ -154,9 +154,14 @@ def to_graph_trainer_config(
     if ac is not None:
         d["activation_checkpoint"] = SelectiveAC.Config()
 
-    # TODO: graph_trainer doesn't yet support ChunkedCELoss
-    if isinstance(d.get("loss"), ChunkedCELoss.Config):
-        d["loss"] = CrossEntropyLoss.Config()
+    # graph_trainer doesn't support ChunkedLoss's per-chunk lm_head execution.
+    # ChunkedLoss is only a memory-saving executor around a logits-domain inner
+    # loss, so unwrap it to that inner loss_fn and run it un-chunked on full
+    # logits -- numerically equivalent and valid for any leaf loss. Plain
+    # CrossEntropyLoss / MSELoss configs aren't wrapped and pass through as-is.
+    loss_cfg = d.get("loss")
+    if isinstance(loss_cfg, ChunkedLoss.Config):
+        d["loss"] = loss_cfg.loss_fn
 
     # Merge CUDA graph kernel annotations into profiler traces when profiling
     # is active.  No-op otherwise (and no-op when requirements aren't met).

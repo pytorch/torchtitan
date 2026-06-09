@@ -90,10 +90,10 @@ def graph_trainer_deepseek_v3_671b() -> GraphTrainer.Config:
 
 
 # CrossEntropyLoss baseline for graph_trainer numerics tests. graph_trainer
-# doesn't yet support ChunkedCELoss, so to_graph_trainer_config swaps it for
+# doesn't yet support ChunkedLoss, so to_graph_trainer_config swaps it for
 # CrossEntropyLoss; this wrapper applies the same swap to the eager baseline
 # so loss_compare runs apples-to-apples.
-# TODO: Remove once graph_trainer supports ChunkedCELoss.
+# TODO: Remove once graph_trainer supports ChunkedLoss.
 def deepseek_v3_debugmodel_ce_loss() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
     config.loss = CrossEntropyLoss.Config()

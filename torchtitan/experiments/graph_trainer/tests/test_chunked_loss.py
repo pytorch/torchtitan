@@ -10,14 +10,14 @@ import torch
 import torch.nn as nn
 from torch.testing._internal.common_utils import TestCase
 
-from torchtitan.components.loss import ChunkedCELoss, IGNORE_INDEX
+from torchtitan.components.loss import ChunkedLoss, IGNORE_INDEX
 from torchtitan.experiments.graph_trainer.chunked_loss import (
-    ChunkedCELossWithParamGrads,
+    ChunkedLossWithParamGrads,
 )
 
 
 class _FakeDecoder(nn.Module):
-    """Minimal Decoder-like model for testing ChunkedCELossWithParamGrads."""
+    """Minimal Decoder-like model for testing ChunkedLossWithParamGrads."""
 
     def __init__(self, dim: int, vocab_size: int):
         super().__init__()
@@ -34,7 +34,7 @@ class _FakeDecoder(nn.Module):
 
 def _make_model_and_loss(dim, vocab_size, num_chunks=4, with_param_grads=False):
     model = _FakeDecoder(dim, vocab_size)
-    loss_cls = ChunkedCELossWithParamGrads if with_param_grads else ChunkedCELoss
+    loss_cls = ChunkedLossWithParamGrads if with_param_grads else ChunkedLoss
     chunked_loss = loss_cls(loss_cls.Config(num_chunks=num_chunks))
     chunked_loss.lm_head = model.output
     return model, chunked_loss
@@ -43,7 +43,7 @@ def _make_model_and_loss(dim, vocab_size, num_chunks=4, with_param_grads=False):
 def _chunked_loss_and_grads(model, chunked_loss, hidden_states, labels, gvt):
     h = hidden_states.detach().requires_grad_(True)
     loss = chunked_loss(h, labels, gvt)
-    if isinstance(chunked_loss, ChunkedCELossWithParamGrads):
+    if isinstance(chunked_loss, ChunkedLossWithParamGrads):
         h_grad, w_grad = torch.autograd.grad(loss, [h, model.output.weight])
     else:
         loss.backward()
@@ -52,8 +52,8 @@ def _chunked_loss_and_grads(model, chunked_loss, hidden_states, labels, gvt):
     return loss, h_grad.clone(), w_grad.clone()
 
 
-class TestChunkedCELossWithParamGrads(TestCase):
-    def test_bitwise_equal_with_chunked_celoss(self):
+class TestChunkedLossWithParamGrads(TestCase):
+    def test_bitwise_equal_with_chunked_loss(self):
         torch.manual_seed(42)
         B, L, D, V = 2, 8, 32, 64
         labels = torch.randint(0, V, (B, L))

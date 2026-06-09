@@ -67,7 +67,7 @@ gh pr list --repo pytorch/torchtitan \
 ### Discover PRs by file path (git log)
 
 Title-based search misses PRs that touch graph_trainer code but don't mention
-it in the title (e.g., MoE refactors, Full DTensor infra, ChunkedCELoss).
+it in the title (e.g., MoE refactors, Full DTensor infra, ChunkedLoss).
 Use `git log` to find commits that modified files under the graph_trainer
 directory, then extract PR numbers:
 
@@ -141,7 +141,7 @@ After classification, tag each PR as **direct** or **upstream**:
   or the PR's changed files are entirely/primarily under the graph_trainer
   experiment directory.
 - **Upstream** — PR is primarily about core torchtitan infrastructure (MoE
-  refactors, Full DTensor, ChunkedCELoss, model config changes, etc.) but
+  refactors, Full DTensor, ChunkedLoss, model config changes, etc.) but
   was discovered via git log because it touched graph_trainer files.
 
 Direct PRs get full narrative treatment in "What Landed." Upstream PRs

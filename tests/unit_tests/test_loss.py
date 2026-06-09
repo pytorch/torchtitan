@@ -27,7 +27,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.components.loss import (
     _LossParallelCrossEntropy,
-    ChunkedCELoss,
+    ChunkedLoss,
     cross_entropy_loss,
     GradAccumulator,
     IGNORE_INDEX,
@@ -401,12 +401,12 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
 
 
 class _FakeDecoder(nn.Module):
-    """Minimal Decoder-like model for testing ChunkedCELoss."""
+    """Minimal Decoder-like model for testing ChunkedLoss."""
 
     def __init__(self, dim: int, vocab_size: int):
         super().__init__()
         self.output = nn.Linear(dim, vocab_size, bias=False)
-        # Make it look like a Decoder to ChunkedCELoss
+        # Make it look like a Decoder to ChunkedLoss
         self.layers = nn.ModuleDict()
         self.tok_embeddings = None
         self.norm = None
@@ -417,17 +417,17 @@ class _FakeDecoder(nn.Module):
         return self.output(tokens)
 
 
-class TestChunkedCELoss(unittest.TestCase):
+class TestChunkedLoss(unittest.TestCase):
     def _make_model_and_loss(self, dim=32, vocab_size=64, num_chunks=4):
-        """Create a fake Decoder and ChunkedCELoss for testing."""
+        """Create a fake Decoder and ChunkedLoss for testing."""
         model = _FakeDecoder(dim, vocab_size)
-        chunked_loss = ChunkedCELoss(ChunkedCELoss.Config(num_chunks=num_chunks))
+        chunked_loss = ChunkedLoss(ChunkedLoss.Config(num_chunks=num_chunks))
         # Bypass isinstance(model, Decoder) check for unit testing
         chunked_loss.lm_head = model.output
         return model, chunked_loss
 
     def test_numerical_equivalence(self):
-        """ChunkedCELoss must produce the same loss and gradients as the standard path."""
+        """ChunkedLoss must produce the same loss and gradients as the standard path."""
         torch.manual_seed(42)
         B, L, D, V = 2, 8, 32, 64
         num_chunks = 4

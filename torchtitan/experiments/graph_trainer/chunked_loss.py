@@ -7,11 +7,11 @@
 import torch
 import torch.nn as nn
 
-from torchtitan.components.loss import ChunkedCELoss
+from torchtitan.components.loss import ChunkedLoss
 
 
-class ChunkedCELossWithParamGrads(ChunkedCELoss):
-    """ChunkedCELoss variant that exposes sharded lm_head param grads as
+class ChunkedLossWithParamGrads(ChunkedLoss):
+    """ChunkedLoss variant that exposes sharded lm_head param grads as
     explicit autograd outputs of the returned loss tensor, so outer
     ``torch.autograd.grad(loss, [hidden_states, *lm_head.parameters()])``
     returns real grads instead of relying on ``param.grad`` side effects.

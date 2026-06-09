@@ -14,7 +14,7 @@ from torch.optim import swap_in_optimizer_params_and_state
 from torch.testing._internal.common_fsdp import FSDPTest
 
 from torchtitan.experiments.graph_trainer.chunked_loss import (
-    ChunkedCELossWithParamGrads,
+    ChunkedLossWithParamGrads,
 )
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
@@ -365,7 +365,7 @@ class TestTraceModule(unittest.TestCase):
         for gr, gt in zip(grads_ref, grads_tr, strict=True):
             self.assertTrue(torch.equal(gr, gt))
 
-    def test_chunked_ce_loss_train_step(self):
+    def test_chunked_loss_train_step(self):
         D, V, num_chunks = 32, 257, 4
         lm_head_ref = nn.Linear(D, V, bias=False).to(
             device=self.DEVICE, dtype=self.DTYPE
@@ -387,8 +387,8 @@ class TestTraceModule(unittest.TestCase):
         )
 
         def train_step(lm_head, hidden_states, labels):
-            loss_fn = ChunkedCELossWithParamGrads(
-                ChunkedCELossWithParamGrads.Config(num_chunks=num_chunks)
+            loss_fn = ChunkedLossWithParamGrads(
+                ChunkedLossWithParamGrads.Config(num_chunks=num_chunks)
             )
             loss_fn.set_lm_head(lm_head)
             loss = loss_fn(hidden_states, labels)

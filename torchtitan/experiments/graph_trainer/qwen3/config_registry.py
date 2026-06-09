@@ -39,10 +39,10 @@ def graph_trainer_qwen3_14b() -> GraphTrainer.Config:
 
 
 # CrossEntropyLoss baselines for graph_trainer numerics tests. graph_trainer
-# doesn't yet support ChunkedCELoss, so to_graph_trainer_config swaps it for
+# doesn't yet support ChunkedLoss, so to_graph_trainer_config swaps it for
 # CrossEntropyLoss; these wrappers apply the same swap to the eager baseline
 # so loss_compare runs apples-to-apples.
-# TODO: Remove once graph_trainer supports ChunkedCELoss.
+# TODO: Remove once graph_trainer supports ChunkedLoss.
 def qwen3_debugmodel_ce_loss() -> Trainer.Config:
     config = qwen3_debugmodel()
     config.loss = CrossEntropyLoss.Config()

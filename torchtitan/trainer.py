@@ -22,7 +22,7 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
+from torchtitan.components.loss import BaseLoss, ChunkedLoss, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
@@ -419,16 +419,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
                 self.model_parts = [model]
 
-        # Set lm_head reference for ChunkedCELoss after model construction.
+        # Set lm_head reference for ChunkedLoss after model construction.
         # Non-PP: single model part always has lm_head.
         # PP: only the last stage has lm_head; non-last stages skip this.
-        if isinstance(self.loss_fn, ChunkedCELoss):
+        if isinstance(self.loss_fn, ChunkedLoss):
             if parallel_dims.pp_enabled:
                 if self.pp_has_last_stage:
                     lm_head = self.model_parts[-1].lm_head
                     assert (
                         lm_head is not None
-                    ), "Last PP stage must have lm_head for ChunkedCELoss"
+                    ), "Last PP stage must have lm_head for ChunkedLoss"
                     self.loss_fn.set_lm_head(
                         lm_head  # pyrefly: ignore[bad-argument-type]
                     )
@@ -438,7 +438,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             else:
                 assert len(self.model_parts) == 1
                 lm_head = self.model_parts[0].lm_head
-                assert lm_head is not None, "Model must have lm_head for ChunkedCELoss"
+                assert lm_head is not None, "Model must have lm_head for ChunkedLoss"
                 self.loss_fn.set_lm_head(lm_head)  # pyrefly: ignore[bad-argument-type]
                 self.model_parts[
                     0

@@ -6,7 +6,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TypeAlias
 
 import spmd_types as spmd
@@ -258,7 +258,9 @@ class BaseLoss(ABC, Configurable):
 
     Provides compile support and a unified ``__call__`` signature:
     ``(pred, labels, global_valid_tokens) -> scaled_loss``.
-    Subclasses must implement ``__init__`` and set ``self.fn``.
+    Subclasses must implement ``__init__``. Leaf losses set ``self.fn`` and
+    reuse the default ``__call__``; composite losses (e.g. ``ChunkedLoss``) may
+    override ``__call__`` and delegate to an inner loss instead.
     """
 
     fn: LossFunction
@@ -287,6 +289,9 @@ class BaseLoss(ABC, Configurable):
         global_valid_tokens: float | None = None,
     ) -> torch.Tensor:
         loss = self.fn(pred, labels)
+        # Normalization is owned by the loss: leaf losses (CrossEntropyLoss,
+        # MSELoss) inherit this division, and ChunkedLoss delegates to its
+        # inner loss so each chunk is normalized the same way.
         if global_valid_tokens is not None:
             loss = loss / global_valid_tokens
         return loss
@@ -434,20 +439,37 @@ class GradAccumulator:
         return self._buffer
 
 
-class ChunkedCELoss(BaseLoss):
-    """Chunked cross-entropy loss that splits the sequence dimension to reduce peak memory.
+class ChunkedLoss(BaseLoss):
+    """Memory-saving executor that wraps an inner logits-domain loss.
+
+    Unlike the leaf losses (``CrossEntropyLoss``, ``MSELoss``), this is not a new
+    loss function: it owns the ``lm_head`` and runs a configurable inner
+    ``loss_fn`` over the model's hidden states in chunks. Consequently its
+    ``__call__`` ``pred`` is *hidden states* ``[B, L, D]`` (model forward with
+    ``_skip_lm_head=True``), whereas a leaf loss's ``pred`` is *logits*
+    ``[B, L, V]``. The trainer wires this up explicitly (``set_lm_head`` +
+    ``_skip_lm_head``), so the wrapper and the leaf losses are intentionally
+    not substitutable despite sharing ``BaseLoss``.
 
     Instead of materializing the full [B, L, V] logits tensor at once, this splits
     the hidden states into N chunks along the sequence dimension and computes
-    lm_head + cross_entropy_loss on each chunk sequentially. This reduces peak memory
+    lm_head + ``loss_fn`` on each chunk sequentially. This reduces peak memory
     from O(B*L*V) to O(B*L/N*V).
+
+    The inner ``loss_fn`` is configurable and defaults to ``CrossEntropyLoss``.
+    Each chunk is passed through ``loss_fn(logits, labels, global_valid_tokens)``,
+    so the inner loss owns its normalization by ``global_valid_tokens``; because
+    that divisor is a global constant, the per-chunk losses are additive and
+    summing them equals the full-sequence loss. With the default
+    ``CrossEntropyLoss`` this is bitwise-identical to the legacy chunked
+    cross-entropy behavior.
 
     The flow:
     1. Model forward with _skip_lm_head=True to get hidden states [B, L, D]
     2. Detach hidden states at the boundary
     3. Split detached hidden states into N chunks along seq dim
     4. Disable FSDP reshard on lm_head to keep weight unsharded across chunks
-    5. For each chunk: lm_head(chunk) -> ce_loss -> backward()
+    5. For each chunk: lm_head(chunk) -> loss_fn(logits, labels, gvt) -> backward()
     6. Assemble chunk gradients into a full gradient [B, L, D] via GradAccumulator
     7. Backward through the decoder via hidden_states.backward(accumulated_grad)
 
@@ -469,7 +491,8 @@ class ChunkedCELoss(BaseLoss):
 
     CP: Further chunks the local sequence dimension. Works out of the box.
 
-    Compile: ce_loss can be compiled independently; lm_head is not compiled.
+    Compile: the inner ``loss_fn`` can be compiled independently (via
+    ``compile_config``); lm_head is not compiled.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -477,15 +500,19 @@ class ChunkedCELoss(BaseLoss):
         num_chunks: int = 8
         """Number of chunks to split the sequence into."""
 
+        loss_fn: BaseLoss.Config = field(default_factory=CrossEntropyLoss.Config)
+        """Loss applied to each chunk's logits. Defaults to ``CrossEntropyLoss``
+        (the legacy behavior). The inner loss owns its normalization by
+        ``global_valid_tokens``."""
+
     def __init__(
         self,
         config: Config,
         *,
         compile_config: CompileConfig | None = None,
     ):
-        self.fn: LossFunction = cross_entropy_loss
-        self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
+        self.loss_fn: BaseLoss = config.loss_fn.build(compile_config=compile_config)
         self.lm_head: nn.Module | None = None
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
@@ -498,10 +525,10 @@ class ChunkedCELoss(BaseLoss):
         labels: torch.Tensor,
         global_valid_tokens: float | None = None,
     ) -> torch.Tensor:
-        """Compute chunked cross-entropy loss.
+        """Compute the chunked loss by running the inner ``loss_fn`` per chunk.
 
         ``pred`` should be hidden states from model forward with
-        ``_skip_lm_head=True``.
+        ``_skip_lm_head=True`` (not logits, unlike a leaf loss).
 
         When ``pred`` does not require grad (e.g. validation), runs chunked
         forward only — no per-chunk backward or gradient accumulation.
@@ -515,7 +542,7 @@ class ChunkedCELoss(BaseLoss):
         hidden_states = pred
         num_chunks = self.num_chunks
         lm_head = self.lm_head
-        assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
+        assert lm_head is not None, "Set lm_head before calling ChunkedLoss"
         fsdp_enabled = isinstance(lm_head, FSDPModule)
 
         # If SP is enabled, hidden states are Shard(1) on the TP mesh dim.
@@ -591,9 +618,10 @@ class ChunkedCELoss(BaseLoss):
 
             logits = lm_head(h_chunk)
 
-            chunk_loss = self.fn(logits, label_chunk)
-            if global_valid_tokens is not None:
-                chunk_loss = chunk_loss / global_valid_tokens
+            # Delegate normalization to the inner loss: it divides by the global
+            # ``global_valid_tokens``, so summing the per-chunk losses equals the
+            # full-sequence loss.
+            chunk_loss = self.loss_fn(logits, label_chunk, global_valid_tokens)
             total_loss = total_loss + chunk_loss.detach()
 
             if requires_grad:
