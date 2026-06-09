@@ -414,7 +414,6 @@ def _copy_rows_to_peers_kernel_ep{ep_size}(
     {dst_params},
     dst_ranks,
     dst_rows,
-    valid_rows,
     num_valid_rows,
     src_rows,
     NUM_ROWS: tl.constexpr,
@@ -422,7 +421,6 @@ def _copy_rows_to_peers_kernel_ep{ep_size}(
     SRC_ROW_STRIDE: tl.constexpr,
     SRC_COL_STRIDE: tl.constexpr,
     DST_ROW_STRIDE: tl.constexpr,
-    HAS_VALID_ROWS: tl.constexpr,
     HAS_NUM_VALID_ROWS: tl.constexpr,
     HAS_SRC_ROWS: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -438,15 +436,12 @@ def _copy_rows_to_peers_kernel_ep{ep_size}(
     col = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     row_mask = row < row_limit
     col_mask = col < NUM_COLS
-    row_valid = row_mask
-    if HAS_VALID_ROWS:
-        row_valid = tl.load(valid_rows + row, mask=row_mask, other=0) != 0
-    mask = row_valid[:, None] & col_mask[None, :]
+    mask = row_mask[:, None] & col_mask[None, :]
     src_row = row
     if HAS_SRC_ROWS:
-        src_row = tl.load(src_rows + row, mask=row_valid, other=0)
-    dst_rank = tl.load(dst_ranks + row, mask=row_valid, other=-1)
-    dst_row = tl.load(dst_rows + row, mask=row_valid, other=0)
+        src_row = tl.load(src_rows + row, mask=row_mask, other=0)
+    dst_rank = tl.load(dst_ranks + row, mask=row_mask, other=-1)
+    dst_row = tl.load(dst_rows + row, mask=row_mask, other=0)
     values = tl.load(
         src
         + src_row[:, None] * SRC_ROW_STRIDE
@@ -487,7 +482,6 @@ def _copy_rows_to_peer_ptrs_kernel_{str(dtype).replace('.', '_')}(
     dst_ptrs,
     dst_ranks,
     dst_rows,
-    valid_rows,
     num_valid_rows,
     src_rows,
     NUM_ROWS: tl.constexpr,
@@ -495,7 +489,6 @@ def _copy_rows_to_peer_ptrs_kernel_{str(dtype).replace('.', '_')}(
     SRC_ROW_STRIDE: tl.constexpr,
     SRC_COL_STRIDE: tl.constexpr,
     DST_ROW_STRIDE: tl.constexpr,
-    HAS_VALID_ROWS: tl.constexpr,
     HAS_NUM_VALID_ROWS: tl.constexpr,
     HAS_SRC_ROWS: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -511,22 +504,19 @@ def _copy_rows_to_peer_ptrs_kernel_{str(dtype).replace('.', '_')}(
     col = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     row_mask = row < row_limit
     col_mask = col < NUM_COLS
-    row_valid = row_mask
-    if HAS_VALID_ROWS:
-        row_valid = tl.load(valid_rows + row, mask=row_mask, other=0) != 0
-    mask = row_valid[:, None] & col_mask[None, :]
+    mask = row_mask[:, None] & col_mask[None, :]
     src_row = row
     if HAS_SRC_ROWS:
-        src_row = tl.load(src_rows + row, mask=row_valid, other=0)
-    dst_rank = tl.load(dst_ranks + row, mask=row_valid, other=-1)
-    dst_row = tl.load(dst_rows + row, mask=row_valid, other=0)
+        src_row = tl.load(src_rows + row, mask=row_mask, other=0)
+    dst_rank = tl.load(dst_ranks + row, mask=row_mask, other=-1)
+    dst_row = tl.load(dst_rows + row, mask=row_mask, other=0)
     values = tl.load(
         src
         + src_row[:, None] * SRC_ROW_STRIDE
         + col[None, :] * SRC_COL_STRIDE,
         mask=mask,
     )
-    dst_base = tl.load(dst_ptrs + dst_rank, mask=row_valid, other=0)
+    dst_base = tl.load(dst_ptrs + dst_rank, mask=row_mask, other=0)
     dst_byte_offset = (
         (dst_row[:, None] * DST_ROW_STRIDE + col[None, :]) * {element_size}
     )
@@ -554,18 +544,11 @@ def copy_full_counts_to_peers(
     rank: int,
     ep_size: int,
     num_experts: int,
-    dst_ptrs: torch.Tensor | None = None,
+    dst_ptrs: torch.Tensor,
 ) -> None:
     use_pointer_table = ep_size > _POINTER_TABLE_EP_THRESHOLD
-    if dst_ptrs is None and use_pointer_table:
-        dst_ptrs = torch.tensor(
-            [dst.data_ptr() for dst in dsts],
-            dtype=torch.int64,
-            device=counts.device,
-        )
     block_size = 1024
     if use_pointer_table:
-        assert dst_ptrs is not None
         grid = (ep_size, triton.cdiv(num_experts, block_size))
         _copy_full_counts_to_peer_ptrs_kernel[grid](
             counts,
@@ -587,6 +570,7 @@ def copy_full_counts_to_peers(
             DST_ROW_STRIDE=dsts[0].stride(0),
             BLOCK_SIZE=block_size,
         )
+
 
 def active_swiglu_forward(
     gate: torch.Tensor,
@@ -664,35 +648,26 @@ def copy_rows_to_peers(
     dsts: list[torch.Tensor],
     dst_ranks: torch.Tensor,
     dst_rows: torch.Tensor,
-    valid_rows: torch.Tensor | None,
     *,
     ep_size: int,
     num_rows: int,
     num_cols: int,
+    dst_ptrs: torch.Tensor,
     block_m: int = 1,
     num_warps: int = 4,
     src_rows: torch.Tensor | None = None,
-    dst_ptrs: torch.Tensor | None = None,
     num_valid_rows: torch.Tensor | None = None,
 ) -> None:
     use_pointer_table = ep_size > _POINTER_TABLE_EP_THRESHOLD
-    if dst_ptrs is None and use_pointer_table:
-        dst_ptrs = torch.tensor(
-            [dst.data_ptr() for dst in dsts],
-            dtype=torch.int64,
-            device=src.device,
-        )
     block_n = min(2048, triton.next_power_of_2(num_cols))
     grid = (triton.cdiv(num_rows, block_m), triton.cdiv(num_cols, block_n))
     if use_pointer_table:
-        assert dst_ptrs is not None
         kernel = _make_copy_rows_to_peer_ptrs_kernel(src.dtype)
         kernel[grid](
             src,
             dst_ptrs,
             dst_ranks,
             dst_rows,
-            valid_rows if valid_rows is not None else dst_rows,
             num_valid_rows if num_valid_rows is not None else dst_rows[:1],
             src_rows if src_rows is not None else dst_rows,
             NUM_ROWS=num_rows,
@@ -700,7 +675,6 @@ def copy_rows_to_peers(
             SRC_ROW_STRIDE=src.stride(0),
             SRC_COL_STRIDE=src.stride(1),
             DST_ROW_STRIDE=dsts[0].stride(0),
-            HAS_VALID_ROWS=valid_rows is not None,
             HAS_NUM_VALID_ROWS=num_valid_rows is not None,
             HAS_SRC_ROWS=src_rows is not None,
             BLOCK_M=block_m,
@@ -714,7 +688,6 @@ def copy_rows_to_peers(
             *dsts,
             dst_ranks,
             dst_rows,
-            valid_rows if valid_rows is not None else dst_rows,
             num_valid_rows if num_valid_rows is not None else dst_rows[:1],
             src_rows if src_rows is not None else dst_rows,
             NUM_ROWS=num_rows,
@@ -722,7 +695,6 @@ def copy_rows_to_peers(
             SRC_ROW_STRIDE=src.stride(0),
             SRC_COL_STRIDE=src.stride(1),
             DST_ROW_STRIDE=dsts[0].stride(0),
-            HAS_VALID_ROWS=valid_rows is not None,
             HAS_NUM_VALID_ROWS=num_valid_rows is not None,
             HAS_SRC_ROWS=src_rows is not None,
             BLOCK_M=block_m,
