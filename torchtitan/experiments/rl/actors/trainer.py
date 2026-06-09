@@ -424,7 +424,6 @@ class PolicyTrainer(Actor, Configurable):
                 num_global_valid_tokens=num_global_valid_tokens,
             )
 
-        self.optimizers.zero_grad()
         with sl.log_trace_span("model_backward"):
             loss.backward()
 
@@ -478,6 +477,7 @@ class PolicyTrainer(Actor, Configurable):
         with sl.log_trace_span("optim"):
             self.optimizers.step()
             self.lr_schedulers.step()
+            self.optimizers.zero_grad()
 
         self.policy_version += 1
 

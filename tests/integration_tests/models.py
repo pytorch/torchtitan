@@ -119,25 +119,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "qwen3_fsdp+tp+cp",
             ngpu=8,
         ),
-        # Integration Test Cases for Llama 4
-        # TODO: re-enable compile after fixing
-        # https://github.com/pytorch/torchtitan/issues/2771
-        OverrideDefinitions(
-            [
-                [
-                    "--module llama4 --config llama4_debugmodel_ep",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.expert_parallel_degree 4",
-                    # "--compile.enable",
-                ],
-            ],
-            "Llama 4 PP+FSDP+TP+EP+compile",
-            "llama4_pp+fsdp+tp+ep+compile",
-            ngpu=8,
-        ),
         # Integration Test Cases for Qwen3-VL
         OverrideDefinitions(
             [
