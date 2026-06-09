@@ -9,7 +9,6 @@ import triton
 import triton.language as tl
 
 
-_INT64_ELEMENT_SIZE = torch.empty((), dtype=torch.int64).element_size()
 _COUNT_COPY_BLOCK_SIZE = 1024
 _METADATA_BLOCK_SIZE = 256
 _MAX_BLOCK_N = 2048
@@ -31,7 +30,6 @@ def _copy_full_counts_to_peer_ptrs_kernel(
     EP_SIZE: tl.constexpr,
     NUM_EXPERTS: tl.constexpr,
     DST_ROW_STRIDE: tl.constexpr,
-    COUNT_ELEMENT_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ) -> None:
     """Copy this rank's global expert counts into every peer count buffer.
@@ -47,9 +45,7 @@ def _copy_full_counts_to_peer_ptrs_kernel(
     offsets = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = (peer < EP_SIZE) & (offsets < NUM_EXPERTS)
     base = tl.load(dst_ptrs + peer, mask=peer < EP_SIZE, other=0)
-    dst = (base + (rank * DST_ROW_STRIDE + offsets) * COUNT_ELEMENT_SIZE).to(
-        tl.pointer_type(tl.int64)
-    )
+    dst = base.to(tl.pointer_type(tl.int64)) + rank * DST_ROW_STRIDE + offsets
     values = tl.load(counts + offsets, mask=mask, other=0)
     tl.store(dst, values, mask=mask)
 
@@ -439,7 +435,6 @@ def _copy_rows_to_peer_ptrs_kernel(
     SRC_COL_STRIDE: tl.constexpr,
     DST_ROW_STRIDE: tl.constexpr,
     DST_DTYPE: tl.constexpr,
-    DST_ELEMENT_SIZE: tl.constexpr,
     HAS_NUM_VALID_ROWS: tl.constexpr,
     HAS_SRC_ROWS: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -480,10 +475,11 @@ def _copy_rows_to_peer_ptrs_kernel(
         mask=mask,
     )
     dst_base = tl.load(dst_ptrs + dst_rank, mask=dst_rank_mask, other=0)
-    dst_byte_offset = (
-        (dst_row[:, None] * DST_ROW_STRIDE + col[None, :]) * DST_ELEMENT_SIZE
+    dst_ptr = (
+        dst_base.to(tl.pointer_type(DST_DTYPE))[:, None]
+        + dst_row[:, None] * DST_ROW_STRIDE
+        + col[None, :]
     )
-    dst_ptr = (dst_base[:, None] + dst_byte_offset).to(tl.pointer_type(DST_DTYPE))
     tl.store(dst_ptr, values, mask=mask & dst_rank_mask[:, None])
 
 
@@ -512,7 +508,6 @@ def copy_full_counts_to_peers(
         EP_SIZE=ep_size,
         NUM_EXPERTS=num_experts,
         DST_ROW_STRIDE=dsts[0].stride(0),
-        COUNT_ELEMENT_SIZE=_INT64_ELEMENT_SIZE,
         BLOCK_SIZE=block_size,
     )
 
@@ -624,7 +619,6 @@ def copy_rows_to_peers(
         SRC_COL_STRIDE=src.stride(1),
         DST_ROW_STRIDE=dsts[0].stride(0),
         DST_DTYPE=dst_dtype,
-        DST_ELEMENT_SIZE=src.element_size(),
         HAS_NUM_VALID_ROWS=num_valid_rows is not None,
         HAS_SRC_ROWS=src_rows is not None,
         BLOCK_M=block_m,
