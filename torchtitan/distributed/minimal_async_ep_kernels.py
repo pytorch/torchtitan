@@ -37,6 +37,15 @@ def _copy_full_counts_to_peer_ptrs_kernel(
     DST_ROW_STRIDE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ) -> None:
+    """Copy this rank's global expert counts into every peer count buffer.
+
+    Each peer exposes its symmetric counts buffer through ``dst_ptrs``. This
+    kernel writes ``counts[:]`` into row ``RANK`` of each peer's buffer.
+
+    Example:
+        With ``RANK=1`` and ``counts=[2, 0, 1, 3]``, every peer buffer has
+        row 1 updated to ``[2, 0, 1, 3]`` after the kernel finishes.
+    """
     peer = tl.program_id(0)
     offsets = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = (peer < EP_SIZE) & (offsets < NUM_EXPERTS)
@@ -60,6 +69,17 @@ def _fill_dispatch_metadata_kernel(
     MAX_TOKENS_PER_SEGMENT: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ) -> None:
+    """Build per-routed-row peer destinations for the dispatch copy.
+
+    Rows are in this rank's expert-sorted routed-token order. ``dst_rows``
+    indexes the destination peer's expert-major receive buffer.
+
+    Example:
+        With ``NUM_LOCAL_EXPERTS=2``, ``counts=[2, 0, 1, 1]``,
+        ``local_count_starts=[0, 2, 2, 3]``, and
+        ``local_dest_offsets=[0, 0, 5, 9]``, the outputs are
+        ``dst_ranks=[0, 0, 1, 1]`` and ``dst_rows=[0, 1, 5, 9]``.
+    """
     expert = tl.program_id(0)
     block = tl.program_id(1)
     offset = block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -84,6 +104,18 @@ def _fill_combine_metadata_kernel(
     MAX_TOKENS_PER_SEGMENT: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ) -> None:
+    """Build per-active-row peer destinations for the combine copy.
+
+    Rows are local expert-major rows in ``x_recv``. ``dst_rows`` maps each
+    active received row back to the source rank's expert-sorted routed rows.
+
+    Example:
+        With ``EP_RANK=1``, ``EP_SIZE=2``, ``NUM_LOCAL_EXPERTS=2``,
+        ``segment_lens=[2, 1, 0, 1]``, ``output_starts=[0, 2, 3, 3]``,
+        and source starts for global experts 2 and 3 equal to
+        ``[[4, 6], [8, 10]]``, the active prefix is
+        ``dst_ranks=[0, 0, 1, 1]`` and ``dst_rows=[4, 5, 8, 10]``.
+    """
     segment = tl.program_id(0)
     block = tl.program_id(1)
     offset = block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -108,6 +140,12 @@ def _invert_flat_indices_kernel(
     NUM_ROWS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ) -> None:
+    """Invert routed-row to top-k-slot indices into top-k-slot to routed-row.
+
+    Example:
+        ``flat_indices=[2, 0, 3, 1]`` means rows 0..3 belong to slots
+        2, 0, 3, 1. The output is ``slot_to_row=[1, 3, 0, 2]``.
+    """
     row = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = row < NUM_ROWS
     slot = tl.load(flat_indices + row, mask=mask, other=0)
@@ -130,6 +168,17 @@ def _reduce_topk_slots_kernel(
     OUT_COL_STRIDE: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ) -> None:
+    """Reduce expert-sorted routed rows back to origin token rows.
+
+    This runs over local origin tokens and their ``TOP_K`` routed slots, not
+    the worst-case receive-capacity buffer. Accumulation is done in fp32.
+
+    Example:
+        With ``TOP_K=2``, ``routed_output=[[10], [20], [30], [40]]``,
+        ``slot_to_row=[1, 3, 0, 2]``, and slot-ordered
+        ``scores=[0.1, 0.2, 0.3, 0.4]``, the output is
+        ``[[10], [15]]``.
+    """
     token = tl.program_id(0)
     col = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     col_mask = col < NUM_COLS
@@ -171,6 +220,17 @@ def _expand_topk_grad_kernel(
     GRAD_ROUTED_COL_STRIDE: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ) -> None:
+    """Expand token gradients into expert-sorted routed-row gradients.
+
+    This is the backward of ``_reduce_topk_slots_kernel`` with respect to the
+    routed rows. It covers the local routed rows described by ``flat_indices``.
+
+    Example:
+        With ``TOP_K=2``, ``grad_out=[[100], [200]]``,
+        ``flat_indices=[2, 0, 3, 1]``, and slot-ordered
+        ``scores=[0.1, 0.2, 0.3, 0.4]``, the output is
+        ``grad_routed=[[60], [10], [80], [20]]``.
+    """
     row = tl.program_id(0)
     col = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     col_mask = col < NUM_COLS
@@ -206,6 +266,17 @@ def _topk_scores_grad_kernel(
     SCORES_ARE_SLOT_ORDERED: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ) -> None:
+    """Compute routing-score gradients for each local routed row.
+
+    The score gradient is the dot product of that routed row's output and the
+    gradient of its origin token output.
+
+    Example:
+        With ``TOP_K=2``, ``routed_output=[[10], [20], [30], [40]]``,
+        ``grad_out=[[100], [200]]``, and
+        ``flat_indices=[2, 0, 3, 1]``, the slot-ordered output is
+        ``grad_scores=[2000, 4000, 2000, 6000]``.
+    """
     row = tl.program_id(0)
     col = tl.arange(0, BLOCK_N)
     col_mask = col < NUM_COLS
@@ -241,6 +312,16 @@ def _active_swiglu_forward_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ) -> None:
+    """Compute ``silu(gate) * up`` for active received rows only.
+
+    Rows at or after ``active_rows_ptr[0]`` are receive-capacity padding and
+    are intentionally left unspecified because grouped-mm offsets skip them.
+
+    Example:
+        With ``active_rows=2``, ``gate=[[0], [1], [9]]``, and
+        ``up=[[2], [3], [4]]``, the first two output rows are
+        approximately ``[[0.0], [2.193]]`` and row 2 is unspecified.
+    """
     row_start = tl.program_id(0) * BLOCK_M
     active_rows = tl.load(active_rows_ptr)
     if row_start >= active_rows:
@@ -290,6 +371,18 @@ def _active_swiglu_backward_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ) -> None:
+    """Backward for ``_active_swiglu_forward_kernel`` over active rows only.
+
+    Gradients for receive-capacity padding rows are intentionally left
+    unspecified because no later grouped-mm segment consumes them.
+
+    Example:
+        With ``active_rows=2``, ``grad_out=[[5], [7], [11]]``,
+        ``gate=[[0], [1], [9]]``, and ``up=[[2], [3], [4]]``, the first
+        two ``grad_gate`` rows are approximately ``[[5.0], [19.48]]``,
+        the first two ``grad_up`` rows are approximately
+        ``[[0.0], [5.118]]``, and row 2 is unspecified.
+    """
     row_start = tl.program_id(0) * BLOCK_M
     active_rows = tl.load(active_rows_ptr)
     if row_start >= active_rows:
@@ -366,6 +459,17 @@ def _copy_rows_to_peer_ptrs_kernel_{str(dtype).replace('.', '_')}(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ) -> None:
+    '''Copy rows into peer symmetric hidden buffers through pointer tables.
+
+    ``dst_ranks`` selects the peer buffer, ``dst_rows`` selects the row within
+    that peer buffer, and ``src_rows`` optionally gathers rows from ``src``.
+    ``num_valid_rows`` optionally limits the copy to the active prefix.
+
+    Example:
+        With ``src=[[10], [20], [30]]``, ``dst_ranks=[1, 0]``,
+        ``dst_rows=[3, 4]``, and ``src_rows=[2, 0]``, peer 1 row 3 receives
+        ``[30]`` and peer 0 row 4 receives ``[10]``.
+    '''
     row_start = tl.program_id(0) * BLOCK_M
     row_limit = NUM_ROWS
     if HAS_NUM_VALID_ROWS:
