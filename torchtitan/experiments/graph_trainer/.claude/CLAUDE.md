@@ -117,8 +117,7 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmo
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
-    --parallelism.expert_parallel_degree=4 \
-    --parallelism.expert_tensor_parallel_degree=1
+    --parallelism.expert_parallel_degree=4
 ```
 
 ### Tests

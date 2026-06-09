@@ -49,7 +49,6 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
     annotate_module_fqns(model)
 
 
-# Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
     model: GraphTrainerDeepSeekV3Model,
     *,
