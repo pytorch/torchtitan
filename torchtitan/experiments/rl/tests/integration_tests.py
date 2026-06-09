@@ -33,7 +33,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module rl",
-                    "--config rl_grpo_qwen3_0_6b",
+                    "--config rl_grpo_qwen3_0_6b_varlen",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
                     "--group_size 2",
@@ -53,7 +53,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module rl",
-                    "--config rl_grpo_qwen3_0_6b",
+                    "--config rl_grpo_qwen3_0_6b_varlen",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
                     "--group_size 2",
@@ -76,7 +76,7 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module rl",
-                    "--config rl_grpo_qwen3_0_6b_batch_invariant",
+                    "--config rl_grpo_qwen3_0_6b_varlen_batch_invariant",
                     "--batcher.batch.seq_len 256",
                     "--metrics.no-enable-wandb",
                 ],

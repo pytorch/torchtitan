@@ -25,7 +25,9 @@ from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.logger import init_logger
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b
+from torchtitan.experiments.rl.config_registry import (
+    rl_grpo_qwen3_0_6b_varlen,
+)
 
 
 logger = init_logger(__name__)
@@ -33,7 +35,7 @@ logger = init_logger(__name__)
 
 def generate():
 
-    config = rl_grpo_qwen3_0_6b()
+    config = rl_grpo_qwen3_0_6b_varlen()
     gen_config = config.generator
     model_path = config.hf_assets_path
 

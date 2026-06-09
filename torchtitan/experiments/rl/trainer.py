@@ -173,7 +173,7 @@ class RLTrainer(Configurable):
 
     Example:
 
-        cfg = config_registry.rl_grpo_qwen3_0_6b()
+        cfg = config_registry.rl_grpo_qwen3_0_6b_varlen()
         trainer = cfg.build()
         await trainer.setup_async()
         await trainer.train()

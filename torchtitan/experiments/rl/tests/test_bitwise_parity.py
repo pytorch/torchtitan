@@ -60,7 +60,7 @@ from torchtitan.distributed.utils import (
 )
 from torchtitan.experiments.rl.actors.trainer import compute_logprobs
 from torchtitan.experiments.rl.config_registry import (
-    rl_grpo_qwen3_0_6b_batch_invariant,
+    rl_grpo_qwen3_0_6b_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
 )
 from torchtitan.experiments.rl.models.vllm_registry import (
@@ -514,7 +514,7 @@ class BitwiseParityTestBase(unittest.TestCase):
     PROMPT_LENGTH = 150
     MAX_GEN_TOKENS = 50
 
-    config_fn = staticmethod(rl_grpo_qwen3_0_6b_batch_invariant)
+    config_fn = staticmethod(rl_grpo_qwen3_0_6b_varlen_batch_invariant)
     attn_backend: str = "varlen"
 
     # Shared across all tests in the class (built once in setUpClass)
@@ -693,7 +693,7 @@ class TestBitwiseParityVarlen(BitwiseParityTestBase):
     """Bitwise parity tests using varlen attention."""
 
     __test__ = True
-    config_fn = staticmethod(rl_grpo_qwen3_0_6b_batch_invariant)
+    config_fn = staticmethod(rl_grpo_qwen3_0_6b_varlen_batch_invariant)
     attn_backend = "varlen"
 
 

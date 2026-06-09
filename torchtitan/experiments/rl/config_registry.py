@@ -317,7 +317,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
+def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
     """On-policy GRPO config for Qwen3-0.6B (4 GPUs: 2 gen + 2 train).
 
     Enables deterministic + batch-invariant mode for true on-policy RL training.
