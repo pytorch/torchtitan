@@ -23,7 +23,7 @@ _RENDERER_BY_MODEL = {
     "qwen3_vl": "qwen3-vl",
     "gpt_oss": "gpt-oss",
     "deepseek_v3": "deepseek-v3",
-    "default": "default",  # llama3, llama4
+    "default": "default",  # llama3
     "auto": "auto",  # ignores knobs, resolves from tokenizer,
 }
 

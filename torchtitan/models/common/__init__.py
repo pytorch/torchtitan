@@ -35,15 +35,12 @@ from .nn_modules import (
     RMSNorm,
     SiLU,
 )
-from .rope import (
-    apply_rotary_emb_complex,
-    apply_rotary_emb_cos_sin,
-    apply_rotary_emb_single_complex,
-    RoPE,
-)
+from .rope import ComplexRoPE, CosSinRoPE, RoPE
 
 __all__ = [
     "Conv2d",
+    "ComplexRoPE",
+    "CosSinRoPE",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
     "Decoder",
@@ -72,8 +69,5 @@ __all__ = [
     "TransformerBlock",
     "VarlenAttention",
     "VarlenMetadata",
-    "apply_rotary_emb_complex",
-    "apply_rotary_emb_cos_sin",
-    "apply_rotary_emb_single_complex",
     "compute_ffn_hidden_dim",
 ]

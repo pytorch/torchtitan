@@ -272,12 +272,11 @@ class VLLMModelWrapper(Module):
         # Get embeddings
         h = self.model.tok_embeddings(tokens_2d)
 
-        rope_cache = self.model.freqs_cis
         positions = positions.unsqueeze(0)
 
         # Pass through transformer layers
         for layer in self.model.layers.values():
-            h = layer(h, rope_cache, attention_masks=None, positions=positions)
+            h = layer(h, attention_masks=None, positions=positions)
 
         h = self.model.norm(h)
         # When parallelism is applied, get full tensor before return to vLLM Engine
@@ -313,7 +312,7 @@ class VLLMModelWrapper(Module):
         logits = self.model.lm_head(hidden_states)
 
         # Full DTensor path returns logits as DTensor; vLLM expects plain tensors.
-        # disable_loss_parallel=True already makes lm_head output Replicate 
+        # disable_loss_parallel=True already makes lm_head output Replicate
         if isinstance(logits, DTensor):
             logits = logits.to_local()
 

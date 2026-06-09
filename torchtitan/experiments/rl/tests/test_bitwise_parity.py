@@ -64,11 +64,11 @@ from torchtitan.experiments.rl.config_registry import (
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
     rl_grpo_qwen3_moe_debug_ep_batch_invariant,
 )
-from torchtitan.experiments.rl.grpo import RLTrainer
 from torchtitan.experiments.rl.models.vllm_registry import (
     registry_to_vllm,
     VLLM_MODEL_NAME,
 )
+from torchtitan.experiments.rl.trainer import RLTrainer
 from torchtitan.models.common.attention import (
     create_attention_mask,
     FlexAttention,
@@ -225,8 +225,8 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     if not has_cuda_capability(9, 0) and not use_flex:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
-    engine_kwargs["max_model_len"] = config.model_spec.model.rope.max_seq_len
-    max_num_seqs = config.num_groups_per_rollout_batch * config.group_size
+    engine_kwargs["max_model_len"] = config.model_spec.model.max_seq_len
+    max_num_seqs = config.num_groups_per_rollout_batch * gen_config.sampling.n
     engine_kwargs["max_num_seqs"] = max_num_seqs
     vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,

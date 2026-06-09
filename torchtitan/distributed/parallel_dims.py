@@ -8,19 +8,123 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from enum import Enum
+from typing import Any, Literal
 
+import spmd_types as spmd
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from torchtitan.config.configs import ParallelismConfig
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 
-if TYPE_CHECKING:
-    from torchtitan.protocols.types import MeshAxisName, NamedPlacement
+
+__all__ = ["MeshAxisName", "ParallelDims", "SpmdLayout", "unfold_dp_axes"]
 
 
-__all__ = ["ParallelDims"]
+class StrEnum(str, Enum):
+    """str + Enum for Python < 3.11 compatibility."""
+
+    pass
+
+
+class MeshAxisName(StrEnum):
+    """Names for axes of a ``DeviceMesh``.
+
+    Naming convention: throughout torchtitan code, comments, and docstrings
+    we say ``axis`` for a ``DeviceMesh`` axis and ``dim`` for a tensor
+    dimension. This avoids the ambiguity of ``dim`` referring to both.
+
+    Note that PyTorch upstream's ``DeviceMesh`` API still uses the older
+    ``mesh_dim_names`` attribute and ``mesh_dim`` parameter names; we keep
+    those exact spellings when calling into PyTorch APIs (we cannot rename
+    upstream surface), but use ``axis`` for any name we own.
+    """
+
+    DP = "dp"
+    DP_REPLICATE = "dp_replicate"
+    DP_SHARD = "dp_shard"
+    FSDP = "fsdp"
+    TP = "tp"
+    CP = "cp"
+    PP = "pp"
+    EP = "ep"
+    EFSDP = "efsdp"
+
+
+@dataclass(frozen=True, slots=True)
+class SpmdLayout:
+    """Temporary SPMD layout annotations keyed by logical mesh axis name.
+
+    TODO(pianpwk): Replace this with ``spmd_types.SpmdLayout`` once that API is
+    available in TorchTitan's minimum ``spmd_types`` version.
+    """
+
+    axis_types: dict[MeshAxisName, spmd.PerMeshAxisSpmdType]
+    partition_spec: spmd.PartitionSpec | tuple[Any, ...] | None = None
+
+    def __post_init__(self) -> None:
+        sharded_dims: dict[int, MeshAxisName] = {}
+        for axis_name, axis_type in self.axis_types.items():
+            if not isinstance(axis_type, spmd.Shard):
+                continue
+            if self.partition_spec is not None:
+                raise ValueError(
+                    "SpmdLayout with PartitionSpec should use spmd.V instead "
+                    "of spmd.S(dim) in per-axis-types, and express tensor dim "
+                    "sharding in the provided PartitionSpec."
+                )
+            if axis_type.dim in sharded_dims:
+                raise ValueError(
+                    "SpmdLayout has multiple mesh axes sharding tensor dim "
+                    f"{axis_type.dim}; provide partition_spec to make shard "
+                    "ordering explicit."
+                )
+            sharded_dims[axis_type.dim] = axis_name
+
+    def axes(self) -> tuple[MeshAxisName, ...]:
+        return tuple(self.axis_types)
+
+    def per_axis_spmd_types(self) -> dict[MeshAxisName, spmd.PerMeshAxisSpmdType]:
+        """
+        Return per-axis types with PartitionSpec sharding represented as S(i).
+        e.g. {DP: R, CP: V} + PartitionSpec(None, CP) -> {DP: R, CP: S(1)}
+
+        This is not meant as a minimal description of the SPMD layout; shard order
+        cannot be expressed. Specifically, shard order information will be lost in
+        this representation. This is purely a helper for calling spmd.redistribute,
+        which takes per-axis types (e.g. redistribute(S(1) -> R)).
+
+        This manually handles ``MeshAxisName``, because spmd_types normalization
+        functions often attempt to resolve to concrete runtime mesh axes, even
+        without a set current mesh.
+        """
+        result = dict(self.axis_types)
+        if self.partition_spec is not None:
+            for dim, entry in enumerate(self.partition_spec):
+                if entry is None:
+                    continue
+                axes = entry if isinstance(entry, tuple) else (entry,)
+                for axis_name in axes:
+                    if not isinstance(axis_name, MeshAxisName):
+                        raise TypeError(
+                            f"Expected MeshAxisName in partition_spec, "
+                            f"got {axis_name!r}."
+                        )
+                    result[axis_name] = spmd.S(dim)
+        return result
+
+
+def unfold_dp_axes(axes: Iterable[MeshAxisName | str]) -> list[str]:
+    """Expand logical ``dp`` into concrete dense storage mesh axes."""
+    result: list[str] = []
+    for axis in axes:
+        axis_value = axis.value if isinstance(axis, MeshAxisName) else axis
+        if axis_value == "dp":
+            result.extend(("dp_replicate", "dp_shard"))
+        else:
+            result.append(axis_value)
+    return result
 
 
 @dataclass
@@ -32,7 +136,7 @@ class ParallelDims:
     pp: int
     ep: int
     world_size: int
-    full_dtensor: bool = False
+    spmd_backend: Literal["default", "full_dtensor", "spmd_types"] = "default"
     # Cache by axis name(s); DeviceMesh equality is by identity, so reuse
     # is required for ``mesh in spmd_meshes()`` checks.
     _single_axis_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
@@ -52,7 +156,7 @@ class ParallelDims:
             pp=parallelism_config.pipeline_parallel_degree,
             ep=parallelism_config.expert_parallel_degree,
             world_size=world_size,
-            full_dtensor=parallelism_config.full_dtensor,
+            spmd_backend=parallelism_config.spmd_backend,
         )
 
     def __post_init__(self):
@@ -69,7 +173,6 @@ class ParallelDims:
         )
         for d in (dp_replicate, cp, tp, pp, ep):
             assert d >= 1, "Parallelism degree should be >= 1, except for dp_shard"
-
         assert dp_shard == -1 or dp_shard >= 1, "dp_shard must -1 or >=1."
         if dp_shard < 0:
             self.dp_shard = dp_shard = self.world_size // (dp_replicate * cp * tp * pp)
@@ -85,7 +188,7 @@ class ParallelDims:
             # Always keep fsdp mesh with real backend so fully_shard()
             # can apply MixedPrecisionPolicy even at degree 1.
             return True
-        if name == "dp_shard" and self.full_dtensor:
+        if name == "dp_shard" and self.spmd_backend == "full_dtensor":
             # Under full_dtensor ``dp_shard`` is the DP storage axis (no
             # flattened ``fsdp``); keep alive at size 1 so ``fully_shard``
             # can install MixedPrecisionPolicy and FSDP can discriminate
@@ -180,7 +283,7 @@ class ParallelDims:
             (self.pp, batch, self.cp, self.tp),
         )
         loss_mesh = dataloading_mesh["batch", "cp"]._flatten("loss_mesh")
-        if self.full_dtensor:
+        if self.spmd_backend == "full_dtensor":
             # Under full_dtensor, ``dp_shard`` and ``cp`` cannot be folded
             # together: activations carry a ``cp`` dimension, so parameters
             # need a ``cp`` axis as well. ``fully_shard`` folds ``dp_shard``
@@ -223,7 +326,7 @@ class ParallelDims:
             "ep": full_sparse_mesh["ep"],
             "efsdp": full_sparse_mesh["efsdp"],
         }
-        if self.full_dtensor:
+        if self.spmd_backend == "full_dtensor":
             self._single_axis_meshes["dp_shard"] = full_dense_mesh["dp_shard"]
         else:
             self._single_axis_meshes["fsdp"] = full_dense_mesh["fsdp"]
@@ -258,7 +361,7 @@ class ParallelDims:
             "ep": self.ep,
             "efsdp": self.dp_shard * self.cp * self.tp // self.ep,
         }
-        if self.full_dtensor:
+        if self.spmd_backend == "full_dtensor":
             expected_sizes["dp_shard"] = self.dp_shard
         else:
             expected_sizes["fsdp"] = self.dp_shard * self.cp
@@ -395,15 +498,15 @@ class ParallelDims:
         Raises ``ValueError`` under ``full_dtensor`` if the resolved mesh is
         not one of ``parallel_dims.spmd_meshes()``.
         """
-        axes_list = list(axes)
-        if not self.full_dtensor:
+        axes_list = unfold_dp_axes(axes)
+        if self.spmd_backend == "default":
             in_band = ("tp", "ep")
             axes_list = [axis for axis in axes_list if axis in in_band]
         mesh = self.get_activated_mesh(axes_list)
         if mesh is None:
             return None
         assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
-        if self.full_dtensor and mesh not in self.spmd_meshes():
+        if self.spmd_backend == "full_dtensor" and mesh not in self.spmd_meshes():
             raise ValueError(
                 f"Resolved mesh {list(mesh.mesh_dim_names)} does not match any "
                 f"SPMD mesh. Valid meshes: "
@@ -412,9 +515,9 @@ class ParallelDims:
         return mesh
 
     def resolve_shared_mesh(
-        self, placements: Iterable["NamedPlacement | None"]
+        self, placements: Iterable["SpmdLayout | None"]
     ) -> DeviceMesh | None:
-        """Resolve the mesh shared by a list of NamedPlacements.
+        """Resolve the mesh shared by a list of SpmdLayouts.
 
         All non-``None`` entries must reference the same axis keys (placement
         values may differ -- "redistribute on the same mesh" is exactly the
@@ -429,12 +532,13 @@ class ParallelDims:
         non_none = [p for p in placements if p is not None]
         if not non_none:
             return None
-        axes = non_none[0].keys()
+        axes = non_none[0].axes()
         for p in non_none[1:]:
-            assert p.keys() == axes, (
+            p_axes = p.axes()
+            assert p_axes == axes, (
                 f"Inconsistent mesh axes within a boundary: "
                 f"{sorted(k.value for k in axes)} vs "
-                f"{sorted(k.value for k in p.keys())}"
+                f"{sorted(k.value for k in p_axes)}"
             )
         return self.resolve_mesh(axes)
 
@@ -462,7 +566,7 @@ class ParallelDims:
             dict_keys(['dp_replicate', 'fsdp', 'tp', 'batch', 'loss', 'efsdp'])
 
         Note:
-            Under ``full_dtensor=True`` the dense shard axis appears as
+            Under ``spmd_backend="full_dtensor"`` the dense shard axis appears as
             ``'dp_shard'`` instead of the pre-flattened ``'fsdp'``.
         """
         if not self._single_axis_meshes:

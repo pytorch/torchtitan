@@ -339,7 +339,7 @@ class VLLMGenerator(Actor, Configurable):
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
         )
-        engine_kwargs["max_model_len"] = model_spec.model.rope.max_seq_len
+        engine_kwargs["max_model_len"] = model_spec.model.max_seq_len
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
         # FA2 requires block_size to be a multiple of 256
         if not has_cuda_capability(9, 0):
