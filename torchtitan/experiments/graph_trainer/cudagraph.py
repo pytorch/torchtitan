@@ -552,7 +552,7 @@ def cudagraph_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple,
     *,
-    is_forward: bool,
+    is_forward: bool = True,
     static_input_indices: list[int] | None = None,
     tensor_input_indices: list[int] | None = None,
 ) -> torch.fx.GraphModule:
@@ -570,7 +570,9 @@ def cudagraph_pass(
         example_inputs: Example inputs for warmup/recording.
         is_forward: Whether this is a forward graph (True) or backward graph
             (False). Used to infer which inputs have stable tensor addresses
-            when ``static_input_indices`` is not provided.
+            when ``static_input_indices`` is not provided. Defaults to True --
+            graph_trainer traces a single fwd+loss+bwd graph and always wraps it
+            as the forward.
         static_input_indices: Explicit list of input indices with stable tensor
             addresses. When provided, ``is_forward`` is not used for inference.
         tensor_input_indices: Indices of graph inputs that are tensors (as
