@@ -55,13 +55,15 @@ class GroupedExperts(Module):
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
         self.token_dispatcher = config.token_dispatcher.build()
+        self._use_active_swiglu = isinstance(
+            self.token_dispatcher,
+            MinimalAsyncEPTokenDispatcher,
+        )
 
     def _experts_forward(
         self,
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
-        *,
-        skip_swiglu_padding: bool = False,
     ) -> torch.Tensor:
         """Raw expert computation without dispatch/combine.
 
@@ -96,7 +98,7 @@ class GroupedExperts(Module):
             w3_EFD.bfloat16().transpose(-2, -1),
             offs=offsets_E,
         )
-        if skip_swiglu_padding:
+        if self._use_active_swiglu:
             h_RF = active_swiglu(gate_RF, up_RF, offsets_E[-1:])
         else:
             h_RF = F.silu(gate_RF) * up_RF
@@ -133,10 +135,6 @@ class GroupedExperts(Module):
         routed_output_RD = self._experts_forward(
             routed_input_RD,
             num_global_tokens_per_local_expert_e,
-            skip_swiglu_padding=isinstance(
-                self.token_dispatcher,
-                MinimalAsyncEPTokenDispatcher,
-            ),
         )
         out_TD = self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
         # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
