@@ -166,7 +166,8 @@ class FluxTrainer(Trainer):
         Args:
             input_dict: Dictionary containing input data including prompts and other metadata
             labels: Target tensor containing the ground truth image data
-            global_valid_tokens: Optional loss denominator.
+            global_valid_tokens: Optional float tracking the total number of
+                valid tokens across all processes.
                 This field is a placeholder for now as we rescale the loss within forward_backward_step for FLUX.
 
         Returns:
