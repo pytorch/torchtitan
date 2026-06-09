@@ -849,11 +849,11 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
 
         (
             _num_tokens_per_expert_E,
-            token_indices_experts_sorted_N,
             flat_indices_experts_sorted_N,
         ) = self._counting_sort_tokens_by_expert(
             topk_expert_ids_TK,
         )
+        token_indices_experts_sorted_N = flat_indices_experts_sorted_N // self.top_k
 
         if self.score_before_experts:
             topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[
@@ -887,7 +887,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     def _counting_sort_tokens_by_expert(
         self,
         topk_expert_ids_TK: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         return expert_counting_sort(
             topk_expert_ids_TK,
             num_experts=self.num_experts,
