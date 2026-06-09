@@ -568,11 +568,11 @@ def dispatch_forward_fake(
 
 
 @torch.library.custom_op(
-    "minimal_async_ep::combine",
+    "minimal_async_ep::combine_forward",
     mutates_args=(),
     device_types="cuda",
 )
-def combine(
+def combine_forward(
     x: torch.Tensor,
     dispatch_dst_ranks: torch.Tensor,
     dispatch_dst_rows: torch.Tensor,
@@ -606,8 +606,8 @@ def combine(
     return out_TD, routed_output_ND
 
 
-@combine.register_fake
-def combine_fake(
+@combine_forward.register_fake
+def combine_forward_fake(
     x: torch.Tensor,
     dispatch_dst_ranks: torch.Tensor,
     dispatch_dst_rows: torch.Tensor,
@@ -879,7 +879,7 @@ class MinimalAsyncEPCombine(torch.autograd.Function):
         num_tokens: int,
         top_k: int,
     ) -> torch.Tensor:
-        combined, routed_output_ND = combine(  # noqa: N806
+        combined, routed_output_ND = combine_forward(  # noqa: N806
             hidden_states,
             dispatch_dst_ranks,
             dispatch_dst_rows,
