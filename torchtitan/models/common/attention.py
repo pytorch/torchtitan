@@ -212,7 +212,7 @@ class FlexAttention(Module):
         k: torch.Tensor,
         v: torch.Tensor,
         *,
-        attention_masks: BlockMask | None = None,
+        attention_masks: BlockMask,
         score_mod: _score_mod_signature | None = None,
         scale: float | None = None,
         return_lse: bool = False,
@@ -220,8 +220,8 @@ class FlexAttention(Module):
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert isinstance(
-            attention_masks, (BlockMask, type(None))
-        ), f"attention_masks must be instance of BlockMask or None, got {type(attention_masks)}"
+            attention_masks, BlockMask
+        ), f"attention_masks must be instance of BlockMask, got {type(attention_masks)}"
 
         # Transpose to (bs, heads, seq, dim) for flex_attention
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
@@ -282,11 +282,17 @@ class ScaledDotProductAttention(Module):
         k: torch.Tensor,
         v: torch.Tensor,
         *,
+        attention_masks: AttentionMasksType | None = None,
         scale: float | None = None,
         enable_gqa: bool = False,
         is_causal: bool = True,
         **kwargs,
     ) -> torch.Tensor:
+        if attention_masks is not None:
+            raise ValueError(
+                "ScaledDotProductAttention does not support attention_masks; it "
+                "only supports causal/non-causal attention via is_causal."
+            )
         # Transpose to (bs, heads, seq, dim) for SDPA
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
         with sdpa_kernel(self.sdpa_backends, set_priority=True):
@@ -535,26 +541,9 @@ class BaseAttention(Module):
     class Config(Module.Config):
         n_heads: int
         inner_attention: Module.Config
-        mask_type: str
 
         def __post_init__(self):
             assert self.n_heads > 0, "n_heads must be > 0"
-            assert isinstance(self.inner_attention, Module.Config), (
-                f"inner_attention must be a Module.Config, "
-                f"got {type(self.inner_attention)}"
-            )
-            assert self.mask_type in [
-                "causal",
-                "block_causal",
-            ], f"mask_type must be one of ['causal', 'block_causal'], got {self.mask_type}"
-            if (
-                isinstance(self.inner_attention, ScaledDotProductAttention.Config)
-                and self.mask_type == "block_causal"
-            ):
-                raise ValueError(
-                    "mask_type 'block_causal' is not supported with "
-                    "ScaledDotProductAttention"
-                )
 
 
 class BaseQKVLinear(Module):
@@ -673,8 +662,7 @@ class GQAttention(BaseAttention):
         n_kv_heads: int | None = None
         head_dim: int | None = None
         inner_attention: Module.Config
-        mask_type: str = "causal"
-        rope: RoPE.Config | None = None
+        rope: RoPE.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -688,7 +676,7 @@ class GQAttention(BaseAttention):
             else config.dim // config.n_heads
         )
         self.enable_gqa = self.n_heads > self.n_kv_heads
-        self.rope = config.rope.build() if config.rope is not None else None
+        self.rope = config.rope.build()
 
         # Pluggable QKV projection
         self.qkv_linear = config.qkv_linear.build()
@@ -721,13 +709,7 @@ class GQAttention(BaseAttention):
             xk = self.k_norm(xk)
 
         # Apply rotary embeddings
-        if self.rope is not None:
-            xq, xk = self.rope(xq, xk, positions)
-
-        # Handle iRoPE dict masks (Llama4)
-        if isinstance(attention_masks, dict):
-            mask_key = "rope" if self.rope is not None else "nope"
-            attention_masks = attention_masks[mask_key]
+        xq, xk = self.rope(xq, xk, positions)
 
         output = self.inner_attention(
             xq,

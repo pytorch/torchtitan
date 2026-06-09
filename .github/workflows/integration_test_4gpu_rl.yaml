@@ -81,7 +81,7 @@ jobs:
           --index-strategy unsafe-best-match
 
         # 4. Install torchtitan in editable mode because integration test spawns
-        # python grpo.py as a subprocess
+        # python train.py as a subprocess
         uv pip install -e .
 
         # 5. Download HF model checkpoint for tests

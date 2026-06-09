@@ -30,20 +30,20 @@ import warnings
 from collections.abc import Callable
 
 import torch
-from torch._logging import trace_structured
 
 from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_pass
 from torchtitan.experiments.graph_trainer.cudagraph import (
     cudagraph_pass,
     insert_kernel_annotations_pass,
 )
-from torchtitan.experiments.graph_trainer.custom_codegen import custom_codegen_pass
 from torchtitan.experiments.graph_trainer.debug_utils import (
     log_graph_diff,
     snapshot_graph,
+    tlparse_log_graph_pass,
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     joint_transformer_block_bucketing_reordering_pass,
+    reassign_collective_pgs_pass,
 )
 from torchtitan.experiments.graph_trainer.inductor_passes import (
     annotate_flex_attention_for_regional_inductor_pass,
@@ -119,11 +119,10 @@ def compile_time_passes(
     cudagraph is excluded because it needs to re-capture the graph into
     an in-memory CUDA graph at runtime.
 
-    ``joint_transformer_block_bucketing_reordering_pass`` optionally runs
-    ``overlap_fsdp_ag_rs_pass`` first (gated by
-    ``compile.enable_fsdp_ag_rs_overlap``) so that forward+backward
-    all-gathers end up on a separate CUDA stream from reduce-scatters
-    (enabling AG/RS overlap in backward).
+    ``reassign_collective_pgs_pass`` runs just before bucketing to place
+    collectives on dedicated process groups / streams (bucketing then inherits
+    the new PGs). Disable with
+    ``--compile.disable_passes reassign_collective_pgs_pass``.
     """
     from torchtitan.experiments.graph_trainer.common_utils import (
         get_default_transformer_block_buckets,
@@ -144,10 +143,11 @@ def compile_time_passes(
             defer_n_layers=config.compile.cpu_offload_defer_n_layers,
         ),
         selective_activation_remat_pass,
+        # Run before bucketing so bucketed collectives inherit the dedicated PG.
+        reassign_collective_pgs_pass,
         functools.partial(
             joint_transformer_block_bucketing_reordering_pass,
             module_bucket_plans=get_default_transformer_block_buckets(n_layers),
-            enable_fsdp_ag_rs_overlap=config.compile.enable_fsdp_ag_rs_overlap,
         ),
     ]
     if config.parallelism.enable_async_tensor_parallel:
@@ -157,8 +157,7 @@ def compile_time_passes(
     if inductor_compilation == "full":
         # Compile the entire graph into optimized Triton kernels. Must
         # be terminal — the FX graph is no longer authoritative after
-        # this pass, so custom_codegen_pass and
-        # insert_kernel_annotations_pass cannot follow.
+        # this pass, so insert_kernel_annotations_pass cannot follow.
         passes.append(full_inductor_compilation_pass)
     if inductor_compilation == "regional":
         # FlexAttention HOPs must be compiled (via regional_inductor) to
@@ -180,20 +179,8 @@ def compile_time_passes(
             passes.append(annotate_rmsnorm_for_regional_inductor_pass)
         passes.append(regional_inductor_pass)
         if use_cudagraph:
-            # Must run before custom_codegen_pass (last in pre_passes)
-            # which replaces the GraphModule's forward().
-            # Also must run before cudagraph_pass.
+            # Must run before cudagraph_pass (which replaces forward()).
             passes.append(insert_kernel_annotations_pass)
-        # TODO: Switch to upstream PyTorch implementation when
-        # https://github.com/pytorch/pytorch/pull/178246 lands.
-        # custom_codegen_pass saves the FX graph to disk for:
-        # 1. Debugging: inspect the generated graph code directly
-        # 2. Profiling provenance: dual-path codegen with _RecordFunctionFast
-        #    gives fine-grained operator-level attribution in profiler traces
-        # 3. User-editable codegen: users can directly modify the generated
-        #    program on disk for fine-grain scheduling optimizations, with
-        #    hot-reload picking up changes at runtime
-        passes.append(custom_codegen_pass)
     return passes
 
 
@@ -224,7 +211,6 @@ def construct_default_graph_passes(
         passes.append(
             functools.partial(
                 cudagraph_pass,
-                is_forward=True,
                 static_input_indices=static_input_indices,
                 tensor_input_indices=traced_result.tensor_input_indices,
             )
@@ -305,49 +291,4 @@ def apply_graph_passes(
             log_graph_diff(before_snapshot, after_snapshot, pass_name)
     all_passes_elapsed = time.perf_counter() - all_passes_start
     logger.info(f"All {len(passes)} graph passes took {all_passes_elapsed:.3f}s")
-    return gm
-
-
-def tlparse_log_graph_pass(
-    gm: torch.fx.GraphModule,
-    example_inputs: tuple | None = None,
-    *,
-    graph_name: str,
-    debug: bool = False,
-) -> torch.fx.GraphModule:
-    """Log the transformed graph to tlparse via trace_structured.
-
-    This pass should be added as the last transform in fwd/bwd_transforms
-    so that the logged graph reflects all prior transformations.
-
-    Args:
-        gm: The graph module to log.
-        example_inputs: The example inputs (unused, required by protocol).
-        graph_name: The name for this graph artifact
-            (e.g. "aot_forward_graph_transformed").
-        debug: When True, include additional metadata in the printed nodes.
-
-    Returns:
-        The graph module unchanged.
-    """
-    additional_meta = ["autograd_backward"]
-    if debug:
-        additional_meta.append("seq_nr")
-
-    trace_structured(
-        "artifact",
-        metadata_fn=lambda: {
-            "name": graph_name,
-            "encoding": "string",
-        },
-        payload_fn=lambda: gm.print_readable(
-            print_output=False,
-            include_stride=True,
-            include_device=True,
-            expanded_def=True,
-            additional_meta=additional_meta,
-        ),
-        expect_trace_id=False,
-    )
-
     return gm
