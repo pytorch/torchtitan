@@ -12,7 +12,7 @@ The symmetric-memory allocation is explicit and must happen before dispatch.
 """
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -45,13 +45,8 @@ _counts_recv_buffer: torch.Tensor | None = None
 _counts_recv_handle: Any = None
 _counts_recv_peer_buffers: list[torch.Tensor] | None = None
 _counts_recv_peer_ptrs: torch.Tensor | None = None
-_rendezvous_handle: list[Any] | None = None
 _group: dist.ProcessGroup | None = None
-_hidden_dim: int = 0
 _max_tokens_per_rank: int = 0
-_max_routed_tokens: int = 0
-_num_local_experts: int = 0
-_top_k: int = 0
 
 _HIDDEN_READY_CHANNEL = 0
 _COUNTS_READY_CHANNEL = 0
@@ -88,14 +83,13 @@ def init_buffer(
     global _hidden_recv_buffer_index
     global _counts_recv_buffer, _counts_recv_handle, _counts_recv_peer_buffers
     global _counts_recv_peer_ptrs
-    global _rendezvous_handle, _group
-    global _hidden_dim, _max_tokens_per_rank, _max_routed_tokens
-    global _num_local_experts, _top_k
+    global _group, _max_tokens_per_rank
 
     device = torch.device(device)
     max_routed_tokens = (
         group.size() * max_tokens_per_rank * min(top_k, num_local_experts)
     )
+    num_experts = group.size() * num_local_experts
     needs_init = (
         _hidden_recv_buffers is None
         or _hidden_recv_handles is None
@@ -106,11 +100,10 @@ def init_buffer(
         or _counts_recv_peer_buffers is None
         or _counts_recv_peer_ptrs is None
         or _group != group
-        or _hidden_dim < hidden_dim
+        or _hidden_recv_buffers[0].shape[1] < hidden_dim
+        or _hidden_recv_buffers[0].shape[0] < max_routed_tokens
+        or _counts_recv_buffer.shape[1] < num_experts
         or _max_tokens_per_rank < max_tokens_per_rank
-        or _max_routed_tokens < max_routed_tokens
-        or _num_local_experts < num_local_experts
-        or _top_k < top_k
         or _hidden_recv_buffers[0].dtype != dtype
         or _hidden_recv_buffers[0].device != device
     )
@@ -146,7 +139,7 @@ def init_buffer(
         ]
         _counts_recv_buffer = symm_mem.empty(
             group.size(),
-            group.size() * num_local_experts,
+            num_experts,
             dtype=torch.int64,
             device=device,
         )
@@ -190,17 +183,9 @@ def init_buffer(
             dtype=torch.int64,
             device=device,
         )
-        _rendezvous_handle = [
-            *_hidden_recv_handles,
-            _counts_recv_handle,
-        ]
 
     _group = group
-    _hidden_dim = hidden_dim
     _max_tokens_per_rank = max_tokens_per_rank
-    _max_routed_tokens = max_routed_tokens
-    _num_local_experts = num_local_experts
-    _top_k = top_k
     _hidden_recv_buffer_index = 0
 
 
@@ -236,7 +221,6 @@ def _copy_rows_to_peers_cuda(
         hidden_recv_peer_buffers,
         dst_ranks,
         dst_rows,
-        None,
         ep_size=_group.size(),
         num_rows=num_rows,
         num_cols=x.shape[1],
@@ -283,7 +267,7 @@ def _copy_all_counts_to_peers_cuda(
     assert _counts_recv_peer_ptrs is not None
     assert _group is not None
 
-    num_experts = ep_size * _num_local_experts
+    num_experts = num_local_tokens_per_expert_E.numel()
     copy_full_counts_to_peers(
         num_local_tokens_per_expert_E,
         _counts_recv_peer_buffers,
@@ -713,49 +697,36 @@ def dispatch_backward_fake(
 )
 def combine_backward(
     grad_out: torch.Tensor,
-    grad_routed_output_extra: torch.Tensor,
     dispatch_dst_ranks: torch.Tensor,
     dispatch_dst_rows: torch.Tensor,
     flat_indices_experts_sorted_N: torch.Tensor,  # noqa: N803
     routed_scores_N: torch.Tensor,  # noqa: N803
     saved_routed_output_ND: torch.Tensor,  # noqa: N803
-    has_grad_out: bool,
-    has_grad_routed_output_extra: bool,
     routed_scores_requires_grad: bool,
     top_k: int,
     receive_capacity: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    grad_routed_output = None
     grad_scores = routed_scores_N.new_empty(0)
-
-    if has_grad_out:
-        grad_routed_output = expand_topk_grad(
+    grad_routed_output = expand_topk_grad(
+        grad_out,
+        flat_indices_experts_sorted_N,
+        routed_scores_N,
+        top_k=top_k,
+        dtype=grad_out.dtype,
+        scores_are_slot_ordered=True,
+    )
+    if routed_scores_requires_grad:
+        grad_scores = topk_scores_grad(
+            saved_routed_output_ND,
             grad_out,
             flat_indices_experts_sorted_N,
-            routed_scores_N,
             top_k=top_k,
-            dtype=grad_out.dtype,
+            dtype=routed_scores_N.dtype,
             scores_are_slot_ordered=True,
-        )
-        if routed_scores_requires_grad:
-            grad_scores = topk_scores_grad(
-                saved_routed_output_ND,
-                grad_out,
-                flat_indices_experts_sorted_N,
-                top_k=top_k,
-                dtype=routed_scores_N.dtype,
-                scores_are_slot_ordered=True,
-            )
-
-    if has_grad_routed_output_extra:
-        grad_routed_output = (
-            grad_routed_output_extra
-            if grad_routed_output is None
-            else grad_routed_output + grad_routed_output_extra
         )
 
     grad_x = _dispatch_to_experts(
-        cast(torch.Tensor, grad_routed_output),
+        grad_routed_output,
         dispatch_dst_ranks,
         dispatch_dst_rows,
         flat_indices_experts_sorted_N.numel(),
@@ -767,30 +738,21 @@ def combine_backward(
 @combine_backward.register_fake
 def combine_backward_fake(
     grad_out: torch.Tensor,
-    grad_routed_output_extra: torch.Tensor,
     dispatch_dst_ranks: torch.Tensor,
     dispatch_dst_rows: torch.Tensor,
     flat_indices_experts_sorted_N: torch.Tensor,  # noqa: N803
     routed_scores_N: torch.Tensor,  # noqa: N803
     saved_routed_output_ND: torch.Tensor,  # noqa: N803
-    has_grad_out: bool,
-    has_grad_routed_output_extra: bool,
     routed_scores_requires_grad: bool,
     top_k: int,
     receive_capacity: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    del grad_routed_output_extra
     del dispatch_dst_ranks
     del dispatch_dst_rows
     del flat_indices_experts_sorted_N
     del saved_routed_output_ND
-    del has_grad_routed_output_extra
     del top_k
-    grad_scores_shape = (
-        routed_scores_N.shape
-        if has_grad_out and routed_scores_requires_grad
-        else (0,)
-    )
+    grad_scores_shape = routed_scores_N.shape if routed_scores_requires_grad else (0,)
     return (
         grad_out.new_empty(receive_capacity, grad_out.shape[1]),
         routed_scores_N.new_empty(grad_scores_shape),
@@ -882,7 +844,8 @@ class MinimalAsyncEPDispatch(torch.autograd.Function):
         return grad_input, None, None, None, None, None, None, None, None, None
 
 
-def combine_autograd_backward(ctx, grad_out, grad_routed_output_extra):
+def combine_autograd_backward(ctx, grad_out, unused_routed_output_grad):
+    del unused_routed_output_grad
     (
         dispatch_dst_ranks,
         dispatch_dst_rows,
@@ -892,29 +855,19 @@ def combine_autograd_backward(ctx, grad_out, grad_routed_output_extra):
     ) = ctx.saved_tensors
     grad_scores = None
     grad_x = None
-    if grad_out is not None or grad_routed_output_extra is not None:
-        grad_out_arg = grad_out if grad_out is not None else grad_routed_output_extra
-        assert grad_out_arg is not None
-        grad_routed_output_extra_arg = (
-            grad_routed_output_extra
-            if grad_routed_output_extra is not None
-            else grad_out_arg.new_empty(0)
-        )
+    if grad_out is not None:
         grad_x, grad_scores_tensor = combine_backward(
-            grad_out_arg,
-            grad_routed_output_extra_arg,
+            grad_out,
             dispatch_dst_ranks,
             dispatch_dst_rows,
             flat_indices_experts_sorted_N,
             routed_scores_N,
             saved_routed_output_ND,
-            grad_out is not None,
-            grad_routed_output_extra is not None,
             ctx.routed_scores_requires_grad,
             ctx.top_k,
             ctx.receive_capacity,
         )
-        if grad_out is not None and ctx.routed_scores_requires_grad:
+        if ctx.routed_scores_requires_grad:
             grad_scores = grad_scores_tensor
 
     return (
