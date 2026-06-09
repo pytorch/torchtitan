@@ -23,11 +23,11 @@ _HIDDEN_ROW_DTYPES = {
 }
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["rank"])
 def _copy_full_counts_to_peer_ptrs_kernel(
     counts: tl.pointer_type(tl.int64),
     dst_ptrs: tl.pointer_type(tl.int64),
-    RANK: tl.constexpr,
+    rank: tl.int64,
     EP_SIZE: tl.constexpr,
     NUM_EXPERTS: tl.constexpr,
     DST_ROW_STRIDE: tl.constexpr,
@@ -37,17 +37,17 @@ def _copy_full_counts_to_peer_ptrs_kernel(
     """Copy this rank's global expert counts into every peer count buffer.
 
     Each peer exposes its symmetric counts buffer through ``dst_ptrs``. This
-    kernel writes ``counts[:]`` into row ``RANK`` of each peer's buffer.
+    kernel writes ``counts[:]`` into row ``rank`` of each peer's buffer.
 
     Example:
-        With ``RANK=1`` and ``counts=[2, 0, 1, 3]``, every peer buffer has
+        With ``rank=1`` and ``counts=[2, 0, 1, 3]``, every peer buffer has
         row 1 updated to ``[2, 0, 1, 3]`` after the kernel finishes.
     """
     peer = tl.program_id(0)
     offsets = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = (peer < EP_SIZE) & (offsets < NUM_EXPERTS)
     base = tl.load(dst_ptrs + peer, mask=peer < EP_SIZE, other=0)
-    dst = (base + (RANK * DST_ROW_STRIDE + offsets) * COUNT_ELEMENT_SIZE).to(
+    dst = (base + (rank * DST_ROW_STRIDE + offsets) * COUNT_ELEMENT_SIZE).to(
         tl.pointer_type(tl.int64)
     )
     values = tl.load(counts + offsets, mask=mask, other=0)
@@ -86,14 +86,14 @@ def _fill_dispatch_metadata_kernel(
     tl.store(dst_rows + row, tl.load(local_dest_offsets + expert) + offset, mask=mask)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ep_rank"])
 def _fill_combine_metadata_kernel(
     segment_lens: tl.pointer_type(tl.int64),
     output_starts: tl.pointer_type(tl.int64),
     source_input_starts: tl.pointer_type(tl.int64),
     dst_ranks: tl.pointer_type(tl.int64),
     dst_rows: tl.pointer_type(tl.int64),
-    EP_RANK: tl.constexpr,
+    ep_rank: tl.int64,
     EP_SIZE: tl.constexpr,
     NUM_LOCAL_EXPERTS: tl.constexpr,
     NUM_EXPERTS: tl.constexpr,
@@ -105,7 +105,7 @@ def _fill_combine_metadata_kernel(
     active received row back to the source rank's expert-sorted routed rows.
 
     Example:
-        With ``EP_RANK=1``, ``EP_SIZE=2``, ``NUM_LOCAL_EXPERTS=2``,
+        With ``ep_rank=1``, ``EP_SIZE=2``, ``NUM_LOCAL_EXPERTS=2``,
         ``segment_lens=[2, 1, 0, 1]``, ``output_starts=[0, 2, 3, 3]``,
         and source starts for global experts 2 and 3 equal to
         ``[[4, 6], [8, 10]]``, the active prefix is
@@ -121,7 +121,7 @@ def _fill_combine_metadata_kernel(
     row = output_start + offset
     src_rank = segment % EP_SIZE
     local_expert = segment // EP_SIZE
-    global_expert = EP_RANK * NUM_LOCAL_EXPERTS + local_expert
+    global_expert = ep_rank * NUM_LOCAL_EXPERTS + local_expert
     source_start = tl.load(source_input_starts + src_rank * NUM_EXPERTS + global_expert)
 
     tl.store(dst_ranks + row, src_rank, mask=mask)
@@ -508,7 +508,7 @@ def copy_full_counts_to_peers(
     _copy_full_counts_to_peer_ptrs_kernel[grid](
         counts,
         dst_ptrs,
-        RANK=rank,
+        rank=rank,
         EP_SIZE=ep_size,
         NUM_EXPERTS=num_experts,
         DST_ROW_STRIDE=dsts[0].stride(0),
@@ -695,7 +695,7 @@ def fill_combine_metadata(
         source_input_starts,
         dst_ranks,
         dst_rows,
-        EP_RANK=ep_rank,
+        ep_rank=ep_rank,
         EP_SIZE=ep_size,
         NUM_LOCAL_EXPERTS=num_local_experts,
         NUM_EXPERTS=ep_size * num_local_experts,
