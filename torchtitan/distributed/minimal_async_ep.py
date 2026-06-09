@@ -35,20 +35,28 @@ from torchtitan.tools.logging import logger
 
 _HIDDEN_RECV_BUFFER_COUNT = 2
 
-_hidden_recv_buffers: list[torch.Tensor] | None = None
-_hidden_recv_handles: list[Any] | None = None
-_hidden_recv_peer_buffers: list[list[torch.Tensor]] | None = None
-_hidden_recv_peer_ptrs: list[torch.Tensor] | None = None
-_hidden_recv_buffer_index: int = 0
-_counts_recv_buffer: torch.Tensor | None = None
-_counts_recv_handle: Any = None
-_counts_recv_peer_buffers: list[torch.Tensor] | None = None
-_counts_recv_peer_ptrs: torch.Tensor | None = None
-_group: dist.ProcessGroup | None = None
-_tokens_per_rank: int = 0
-
 _HIDDEN_READY_CHANNEL = 0
 _COUNTS_READY_CHANNEL = 0
+
+
+@dataclass
+class _MinimalAsyncEPBufferState:
+    """Process-local symmetric-memory state initialized as one unit."""
+
+    group: dist.ProcessGroup
+    tokens_per_rank: int
+    hidden_recv_buffers: list[torch.Tensor]
+    hidden_recv_handles: list[Any]
+    hidden_recv_peer_buffers: list[list[torch.Tensor]]
+    hidden_recv_peer_ptrs: list[torch.Tensor]
+    counts_recv_buffer: torch.Tensor
+    counts_recv_handle: Any
+    counts_recv_peer_buffers: list[torch.Tensor]
+    counts_recv_peer_ptrs: torch.Tensor
+    hidden_recv_buffer_index: int = 0
+
+
+_buffer_state: _MinimalAsyncEPBufferState | None = None
 
 
 @dataclass
@@ -95,12 +103,7 @@ def init_buffer(
     device: torch.device,
 ) -> None:
     """Initialize the process-local MinimalAsyncEP symmetric-memory buffer."""
-    global _hidden_recv_buffers, _hidden_recv_handles
-    global _hidden_recv_peer_buffers, _hidden_recv_peer_ptrs
-    global _hidden_recv_buffer_index
-    global _counts_recv_buffer, _counts_recv_handle, _counts_recv_peer_buffers
-    global _counts_recv_peer_ptrs
-    global _group, _tokens_per_rank
+    global _buffer_state
 
     device = torch.device(device)
     max_routed_tokens = (
@@ -108,21 +111,14 @@ def init_buffer(
     )
     num_experts = group.size() * num_local_experts
     needs_init = (
-        _hidden_recv_buffers is None
-        or _hidden_recv_handles is None
-        or _hidden_recv_peer_buffers is None
-        or _hidden_recv_peer_ptrs is None
-        or _counts_recv_buffer is None
-        or _counts_recv_handle is None
-        or _counts_recv_peer_buffers is None
-        or _counts_recv_peer_ptrs is None
-        or _group != group
-        or _hidden_recv_buffers[0].shape[1] < hidden_dim
-        or _hidden_recv_buffers[0].shape[0] < max_routed_tokens
-        or _counts_recv_buffer.shape[1] < num_experts
-        or _tokens_per_rank < tokens_per_rank
-        or _hidden_recv_buffers[0].dtype != dtype
-        or _hidden_recv_buffers[0].device != device
+        _buffer_state is None
+        or _buffer_state.group != group
+        or _buffer_state.hidden_recv_buffers[0].shape[1] < hidden_dim
+        or _buffer_state.hidden_recv_buffers[0].shape[0] < max_routed_tokens
+        or _buffer_state.counts_recv_buffer.shape[1] < num_experts
+        or _buffer_state.tokens_per_rank < tokens_per_rank
+        or _buffer_state.hidden_recv_buffers[0].dtype != dtype
+        or _buffer_state.hidden_recv_buffers[0].device != device
     )
     if not needs_init:
         return
@@ -144,7 +140,7 @@ def init_buffer(
             f"backend, got {backend}."
         )
 
-    _hidden_recv_buffers = [
+    hidden_recv_buffers = [
         symm_mem.empty(
             max_routed_tokens,
             hidden_dim,
@@ -153,18 +149,18 @@ def init_buffer(
         )
         for _ in range(_HIDDEN_RECV_BUFFER_COUNT)
     ]
-    _counts_recv_buffer = symm_mem.empty(
+    counts_recv_buffer = symm_mem.empty(
         group.size(),
         num_experts,
         dtype=torch.int64,
         device=device,
     )
-    _hidden_recv_handles = [
+    hidden_recv_handles = [
         symm_mem.rendezvous(hidden_recv_buffer, group)
-        for hidden_recv_buffer in _hidden_recv_buffers
+        for hidden_recv_buffer in hidden_recv_buffers
     ]
-    _counts_recv_handle = symm_mem.rendezvous(_counts_recv_buffer, group)
-    _hidden_recv_peer_buffers = [
+    counts_recv_handle = symm_mem.rendezvous(counts_recv_buffer, group)
+    hidden_recv_peer_buffers = [
         [
             hidden_recv_handle.get_buffer(
                 peer,
@@ -174,35 +170,44 @@ def init_buffer(
             for peer in range(group.size())
         ]
         for hidden_recv_buffer, hidden_recv_handle in zip(
-            _hidden_recv_buffers,
-            _hidden_recv_handles,
+            hidden_recv_buffers,
+            hidden_recv_handles,
         )
     ]
-    _hidden_recv_peer_ptrs = [
+    hidden_recv_peer_ptrs = [
         torch.tensor(
             [peer_buffer.data_ptr() for peer_buffer in hidden_recv_peer_buffers],
             dtype=torch.int64,
             device=device,
         )
-        for hidden_recv_peer_buffers in _hidden_recv_peer_buffers
+        for hidden_recv_peer_buffers in hidden_recv_peer_buffers
     ]
-    _counts_recv_peer_buffers = [
-        _counts_recv_handle.get_buffer(
+    counts_recv_peer_buffers = [
+        counts_recv_handle.get_buffer(
             peer,
-            _counts_recv_buffer.shape,
-            _counts_recv_buffer.dtype,
+            counts_recv_buffer.shape,
+            counts_recv_buffer.dtype,
         )
         for peer in range(group.size())
     ]
-    _counts_recv_peer_ptrs = torch.tensor(
-        [peer_buffer.data_ptr() for peer_buffer in _counts_recv_peer_buffers],
+    counts_recv_peer_ptrs = torch.tensor(
+        [peer_buffer.data_ptr() for peer_buffer in counts_recv_peer_buffers],
         dtype=torch.int64,
         device=device,
     )
 
-    _group = group
-    _tokens_per_rank = tokens_per_rank
-    _hidden_recv_buffer_index = 0
+    _buffer_state = _MinimalAsyncEPBufferState(
+        group=group,
+        tokens_per_rank=tokens_per_rank,
+        hidden_recv_buffers=hidden_recv_buffers,
+        hidden_recv_handles=hidden_recv_handles,
+        hidden_recv_peer_buffers=hidden_recv_peer_buffers,
+        hidden_recv_peer_ptrs=hidden_recv_peer_ptrs,
+        counts_recv_buffer=counts_recv_buffer,
+        counts_recv_handle=counts_recv_handle,
+        counts_recv_peer_buffers=counts_recv_peer_buffers,
+        counts_recv_peer_ptrs=counts_recv_peer_ptrs,
+    )
 
 
 def _copy_rows_to_peers_cuda(
@@ -216,28 +221,23 @@ def _copy_rows_to_peers_cuda(
     src_rows: torch.Tensor | None = None,
     num_valid_rows: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    global _hidden_recv_buffer_index
-    assert _hidden_recv_buffers is not None
-    assert _hidden_recv_handles is not None
-    assert _hidden_recv_peer_buffers is not None
-    assert _hidden_recv_peer_ptrs is not None
-    assert _group is not None
+    assert _buffer_state is not None
 
-    buffer_index = _hidden_recv_buffer_index
-    _hidden_recv_buffer_index = (
-        _hidden_recv_buffer_index + 1
+    buffer_index = _buffer_state.hidden_recv_buffer_index
+    _buffer_state.hidden_recv_buffer_index = (
+        _buffer_state.hidden_recv_buffer_index + 1
     ) % _HIDDEN_RECV_BUFFER_COUNT
-    hidden_recv_buffer = _hidden_recv_buffers[buffer_index]
-    hidden_recv_handle = _hidden_recv_handles[buffer_index]
-    hidden_recv_peer_buffers = _hidden_recv_peer_buffers[buffer_index]
-    hidden_recv_peer_ptrs = _hidden_recv_peer_ptrs[buffer_index]
+    hidden_recv_buffer = _buffer_state.hidden_recv_buffers[buffer_index]
+    hidden_recv_handle = _buffer_state.hidden_recv_handles[buffer_index]
+    hidden_recv_peer_buffers = _buffer_state.hidden_recv_peer_buffers[buffer_index]
+    hidden_recv_peer_ptrs = _buffer_state.hidden_recv_peer_ptrs[buffer_index]
 
     copy_rows_to_peers(
         x,
         hidden_recv_peer_buffers,
         dst_ranks,
         dst_rows,
-        ep_size=_group.size(),
+        ep_size=_buffer_state.group.size(),
         num_rows=num_rows,
         num_cols=x.shape[1],
         block_m=block_m,
@@ -255,8 +255,8 @@ def _wait_hidden_ready(hidden_recv_handle: Any) -> None:
 
 
 def _wait_counts_ready() -> None:
-    assert _counts_recv_handle is not None
-    _wait_ready(_counts_recv_handle, _COUNTS_READY_CHANNEL)
+    assert _buffer_state is not None
+    _wait_ready(_buffer_state.counts_recv_handle, _COUNTS_READY_CHANNEL)
 
 
 def _wait_ready(handle: Any, channel: int) -> None:
@@ -270,7 +270,6 @@ def _wait_ready(handle: Any, channel: int) -> None:
     kernel) -- the dominant MinimalAsyncEP comm cost once CPU-launch overhead is removed
     by CUDA graphs / compiled steps.
     """
-    assert _group is not None
     handle.barrier(channel=channel)
 
 
@@ -278,21 +277,18 @@ def _copy_all_counts_to_peers_cuda(
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
     ep_size: int,
 ) -> torch.Tensor:
-    assert _counts_recv_buffer is not None
-    assert _counts_recv_peer_buffers is not None
-    assert _counts_recv_peer_ptrs is not None
-    assert _group is not None
+    assert _buffer_state is not None
 
     num_experts = num_local_tokens_per_expert_E.numel()
     copy_full_counts_to_peers(
         num_local_tokens_per_expert_E,
-        _counts_recv_peer_buffers,
-        rank=_group.rank(),
+        _buffer_state.counts_recv_peer_buffers,
+        rank=_buffer_state.group.rank(),
         ep_size=ep_size,
         num_experts=num_experts,
-        dst_ptrs=_counts_recv_peer_ptrs,
+        dst_ptrs=_buffer_state.counts_recv_peer_ptrs,
     )
-    return _counts_recv_buffer
+    return _buffer_state.counts_recv_buffer
 
 
 def _compute_direct_metadata(
@@ -309,9 +305,9 @@ def _compute_direct_metadata(
     torch.Tensor,
     torch.Tensor,
 ]:
-    assert _group is not None
+    assert _buffer_state is not None
 
-    rank = _group.rank()
+    rank = _buffer_state.group.rank()
     num_experts = num_local_tokens_per_expert_E.numel()
     num_local_experts = num_experts // ep_size
 
@@ -336,7 +332,7 @@ def _compute_direct_metadata(
         local_count_starts_E,
         num_routed_tokens=num_routed_rows,
         num_local_experts=num_local_experts,
-        max_tokens_per_segment=_tokens_per_rank,
+        max_tokens_per_segment=_buffer_state.tokens_per_rank,
     )
 
     segment_lens = counts_sde[:, rank, :].t().reshape(-1)
@@ -353,7 +349,7 @@ def _compute_direct_metadata(
         ep_size=ep_size,
         num_local_experts=num_local_experts,
         receive_capacity=receive_capacity,
-        max_tokens_per_segment=_tokens_per_rank,
+        max_tokens_per_segment=_buffer_state.tokens_per_rank,
     )
 
     return (
