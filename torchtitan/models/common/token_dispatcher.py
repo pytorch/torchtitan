@@ -150,7 +150,7 @@ class LocalTokenDispatcher(Configurable):
         metadata: LocalDispatchMetadata,
         x_TD: torch.Tensor,
         *,
-        num_tokens_per_sp_rank: int | torch.SymInt | None = None,
+        num_local_tokens_after_padding: int,
     ) -> torch.Tensor:
         """Score and scatter_add routed expert outputs.
 
@@ -158,18 +158,15 @@ class LocalTokenDispatcher(Configurable):
             routed_output_RD: ``(R, D)`` expert outputs
             metadata: LocalDispatchMetadata from dispatch()
             x_TD: ``(T, D)`` original input tokens
-            num_tokens_per_sp_rank: Local token count to use for the
-                combined output. Defaults to ``x_TD.shape[0]``; MoE padding
-                passes the padded local count without materializing pad rows.
+            num_local_tokens_after_padding: Local token count to use for the
+                combined output after logical padding. MoE padding passes this
+                count without materializing pad rows.
 
         Returns:
-            out_TD: ``(num_tokens_per_sp_rank, D)`` combined output.
+            out_TD: ``(num_local_tokens_after_padding, D)`` combined output.
         """
-        if num_tokens_per_sp_rank is None:
-            num_tokens_per_sp_rank = x_TD.shape[0]
-
         out_TD = torch.zeros(
-            num_tokens_per_sp_rank,
+            num_local_tokens_after_padding,
             x_TD.shape[-1],
             device=x_TD.device,
             dtype=x_TD.dtype,
@@ -213,7 +210,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         # LocalTokenDispatcher path.
         self.ep_mesh: DeviceMesh | None = None
         self.sp_size: int = 1
-        self.sp_rank: int | torch.SymInt = 0
+        self.sp_rank: int = 0
 
     def wire_meshes(
         self,
@@ -410,7 +407,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         metadata: AllToAllDispatchMetadata,
         x_TD: torch.Tensor,
         *,
-        num_tokens_per_sp_rank: int | torch.SymInt | None = None,
+        num_local_tokens_after_padding: int,
     ) -> torch.Tensor:
         """Reverse the dispatch: unpermute + all-to-all + score + scatter_add.
 
@@ -422,13 +419,13 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             routed_output_RD: ``(R, D)`` expert outputs in expert-major order
             metadata: AllToAllDispatchMetadata from dispatch()
             x_TD: ``(T, D)`` original input tokens
-            num_tokens_per_sp_rank: Local token count to use for the
-                combined SP view. Defaults to ``x_TD.shape[0]``; MoE padding
-                passes the padded local count without materializing pad rows.
+            num_local_tokens_after_padding: Local token count to use for the
+                combined SP view after logical padding. MoE padding passes this
+                count without materializing pad rows.
 
         Returns:
             out_TD: Combined output. With SP, shape is
-                ``(num_tokens_per_sp_rank * sp_size, D)``.
+                ``(num_local_tokens_after_padding * sp_size, D)``.
         """
         # EP=1: fall back to local combine (no all-to-all needed)
         if self.ep_mesh is None:
@@ -436,7 +433,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
                 routed_output_RD,
                 metadata,
                 x_TD,
-                num_tokens_per_sp_rank=num_tokens_per_sp_rank,
+                num_local_tokens_after_padding=num_local_tokens_after_padding,
             )
 
         # Reverse expert-major reordering
@@ -453,14 +450,11 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             self.ep_mesh,
         )
 
-        if num_tokens_per_sp_rank is None:
-            num_tokens_per_sp_rank = x_TD.shape[0]
-
         # With SP, create a full-size buffer for scatter_add so routed results
         # from all SP ranks can be placed at global positions. Padded tail rows
         # are never routed and are sliced off below.
         out_TD = torch.zeros(
-            num_tokens_per_sp_rank * self.sp_size,
+            num_local_tokens_after_padding * self.sp_size,
             x_TD.shape[-1],
             device=x_TD.device,
             dtype=x_TD.dtype,
@@ -477,7 +471,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         if self.sp_size > 1:
             token_indices_experts_sorted_N = (
                 metadata.token_indices_experts_sorted_N
-                + num_tokens_per_sp_rank * self.sp_rank
+                + num_local_tokens_after_padding * self.sp_rank
             )
         else:
             token_indices_experts_sorted_N = metadata.token_indices_experts_sorted_N
@@ -591,7 +585,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         super().__init__(config)
         self.ep_mesh: DeviceMesh | None = None
         self.sp_size: int = 1
-        self.sp_rank: int | torch.SymInt = 0
+        self.sp_rank: int = 0
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
@@ -653,7 +647,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         metadata: DeepEPDispatchMetadata,
         x_TD: torch.Tensor,
         *,
-        num_tokens_per_sp_rank: int | torch.SymInt | None = None,
+        num_local_tokens_after_padding: int,
     ) -> torch.Tensor:
         """Combine tokens via DeepEP.
 
@@ -669,15 +663,13 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
 
         if self.sp_size > 1:
             sync_combine()
-            if num_tokens_per_sp_rank is None:
-                num_tokens_per_sp_rank = x_TD.shape[0]
             out_TD = torch.zeros(
-                num_tokens_per_sp_rank * self.sp_size,
+                num_local_tokens_after_padding * self.sp_size,
                 combined_TD.shape[-1],
                 device=combined_TD.device,
                 dtype=combined_TD.dtype,
             )
-            offset = num_tokens_per_sp_rank * self.sp_rank
+            offset = num_local_tokens_after_padding * self.sp_rank
             out_TD[offset : offset + combined_TD.shape[0]] = combined_TD
             return out_TD
 
@@ -734,7 +726,7 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
         self.pad_multiple = config.pad_multiple
         self.ep_mesh: DeviceMesh | None = None
         self.sp_size: int = 1
-        self.sp_rank: int | torch.SymInt = 0
+        self.sp_rank: int = 0
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
@@ -798,7 +790,7 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
         metadata: DeepEPDispatchMetadata,
         x_TD: torch.Tensor,
         *,
-        num_tokens_per_sp_rank: int | torch.SymInt | None = None,
+        num_local_tokens_after_padding: int,
     ) -> torch.Tensor:
         """Combine tokens via HybridEP."""
         from torchtitan.distributed.deepep import hybridep
@@ -810,15 +802,13 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
         )
 
         if self.sp_size > 1:
-            if num_tokens_per_sp_rank is None:
-                num_tokens_per_sp_rank = x_TD.shape[0]
             out_TD = torch.zeros(
-                num_tokens_per_sp_rank * self.sp_size,
+                num_local_tokens_after_padding * self.sp_size,
                 combined_TD.shape[-1],
                 device=combined_TD.device,
                 dtype=combined_TD.dtype,
             )
-            offset = num_tokens_per_sp_rank * self.sp_rank
+            offset = num_local_tokens_after_padding * self.sp_rank
             out_TD[offset : offset + combined_TD.shape[0]] = combined_TD
             return out_TD
 

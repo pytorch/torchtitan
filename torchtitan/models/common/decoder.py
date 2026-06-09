@@ -225,6 +225,7 @@ class Decoder(BaseModel):
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
+
         for layer in self.layers.values():
             h = layer(h, attention_masks, positions)
 

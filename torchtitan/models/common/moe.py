@@ -102,7 +102,7 @@ class GroupedExperts(Module):
         topk_expert_ids_BLK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
         *,
-        num_tokens_per_sp_rank: int | torch.SymInt | None = None,
+        num_local_tokens_after_padding: int,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
@@ -114,8 +114,6 @@ class GroupedExperts(Module):
         K = topk_scores_BLK.size(-1)
         T = B * L
         x_TD = x_BLD.view(T, D)
-        if num_tokens_per_sp_rank is None:
-            num_tokens_per_sp_rank = T
 
         topk_scores_TK = topk_scores_BLK.view(T, K)
         topk_expert_ids_TK = topk_expert_ids_BLK.view(T, K)
@@ -136,7 +134,7 @@ class GroupedExperts(Module):
             routed_output_RD,
             metadata,
             x_TD,
-            num_tokens_per_sp_rank=num_tokens_per_sp_rank,
+            num_local_tokens_after_padding=num_local_tokens_after_padding,
         )
 
     def parallelize(self, parallel_dims) -> None:
@@ -382,15 +380,13 @@ class MoE(Module):
         """
         B, L, D = x_BLD.shape
         T = B * L
-        num_tokens_per_sp_rank = None
         sp_size = getattr(self.experts.token_dispatcher, "sp_size", 1)
         pad_tokens = (-T) % sp_size
-        if pad_tokens:
-            # Padding is logically appended to the flattened global token tail,
-            # but we do not physically pad this DTensor. Cat along Shard(1)
-            # would unshard the sequence dimension. GroupedExperts receives
-            # only the count metadata needed for dispatch/combine shape math.
-            num_tokens_per_sp_rank = (T + pad_tokens) // sp_size
+        # Padding is logically appended to the flattened global token tail, but
+        # we do not physically pad this DTensor. Cat along Shard(1) would
+        # unshard the sequence dimension. GroupedExperts receives only the
+        # count metadata needed for dispatch/combine shape math.
+        num_local_tokens_after_padding = (T + pad_tokens) // sp_size
 
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # scores_BLE shape (B, L, E)
@@ -450,7 +446,7 @@ class MoE(Module):
             topk_scores_BLK,
             topk_expert_ids_BLK,
             num_local_tokens_per_expert_E,
-            num_tokens_per_sp_rank=num_tokens_per_sp_rank,
+            num_local_tokens_after_padding=num_local_tokens_after_padding,
         )
 
         # shared_experts runs in parallel with deepep combine communication.
@@ -469,7 +465,7 @@ class MoE(Module):
 
             sync_combine()
 
-        if num_tokens_per_sp_rank is not None:
+        if pad_tokens:
             # Combine constructs the full logically padded SP view so each rank
             # uses the same stride for global token offsets. The input was not
             # physically padded, so trim the logical tail padding before

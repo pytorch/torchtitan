@@ -181,7 +181,12 @@ class GptOssGroupedExperts(Module):
         routed_output_RD = self._experts_forward(
             routed_input_RD, num_global_tokens_per_local_expert_e
         )
-        return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        return self.token_dispatcher.combine(
+            routed_output_RD,
+            metadata,
+            x_TD,
+            num_local_tokens_after_padding=T,
+        )
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize experts and wire dispatcher meshes.
