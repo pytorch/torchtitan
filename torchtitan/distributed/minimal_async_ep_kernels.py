@@ -25,8 +25,8 @@ _HIDDEN_ROW_DTYPES = {
 
 @triton.jit
 def _copy_full_counts_to_peer_ptrs_kernel(
-    counts,
-    dst_ptrs,
+    counts: tl.pointer_type(tl.int64),
+    dst_ptrs: tl.pointer_type(tl.int64),
     RANK: tl.constexpr,
     EP_SIZE: tl.constexpr,
     NUM_EXPERTS: tl.constexpr,
@@ -56,11 +56,11 @@ def _copy_full_counts_to_peer_ptrs_kernel(
 
 @triton.jit
 def _fill_dispatch_metadata_kernel(
-    counts,
-    local_dest_offsets,
-    local_count_starts,
-    dst_ranks,
-    dst_rows,
+    counts: tl.pointer_type(tl.int64),
+    local_dest_offsets: tl.pointer_type(tl.int64),
+    local_count_starts: tl.pointer_type(tl.int64),
+    dst_ranks: tl.pointer_type(tl.int64),
+    dst_rows: tl.pointer_type(tl.int64),
     NUM_EXPERTS: tl.constexpr,
     NUM_LOCAL_EXPERTS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -88,11 +88,11 @@ def _fill_dispatch_metadata_kernel(
 
 @triton.jit
 def _fill_combine_metadata_kernel(
-    segment_lens,
-    output_starts,
-    source_input_starts,
-    dst_ranks,
-    dst_rows,
+    segment_lens: tl.pointer_type(tl.int64),
+    output_starts: tl.pointer_type(tl.int64),
+    source_input_starts: tl.pointer_type(tl.int64),
+    dst_ranks: tl.pointer_type(tl.int64),
+    dst_rows: tl.pointer_type(tl.int64),
     EP_RANK: tl.constexpr,
     EP_SIZE: tl.constexpr,
     NUM_LOCAL_EXPERTS: tl.constexpr,
@@ -130,8 +130,8 @@ def _fill_combine_metadata_kernel(
 
 @triton.jit
 def _invert_flat_indices_kernel(
-    flat_indices,
-    slot_to_row,
+    flat_indices: tl.pointer_type(tl.int64),
+    slot_to_row: tl.pointer_type(tl.int64),
     NUM_ROWS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ) -> None:
@@ -150,7 +150,7 @@ def _invert_flat_indices_kernel(
 @triton.jit
 def _reduce_topk_slots_kernel(
     routed_output,
-    slot_to_row,
+    slot_to_row: tl.pointer_type(tl.int64),
     scores,
     out,
     NUM_COLS: tl.constexpr,
@@ -201,7 +201,7 @@ def _reduce_topk_slots_kernel(
 @triton.jit
 def _expand_topk_grad_kernel(
     grad_out,
-    flat_indices,
+    flat_indices: tl.pointer_type(tl.int64),
     scores,
     grad_routed,
     NUM_ROWS: tl.constexpr,
@@ -250,7 +250,7 @@ def _expand_topk_grad_kernel(
 def _topk_scores_grad_kernel(
     routed_output,
     grad_out,
-    flat_indices,
+    flat_indices: tl.pointer_type(tl.int64),
     grad_scores,
     NUM_COLS: tl.constexpr,
     TOP_K: tl.constexpr,
@@ -296,7 +296,7 @@ def _active_swiglu_forward_kernel(
     gate,
     up,
     out,
-    active_rows_ptr,
+    active_rows_ptr: tl.pointer_type(tl.int32),
     NUM_COLS: tl.constexpr,
     GATE_ROW_STRIDE: tl.constexpr,
     GATE_COL_STRIDE: tl.constexpr,
@@ -351,7 +351,7 @@ def _active_swiglu_backward_kernel(
     up,
     grad_gate,
     grad_up,
-    active_rows_ptr,
+    active_rows_ptr: tl.pointer_type(tl.int32),
     NUM_COLS: tl.constexpr,
     GRAD_OUT_ROW_STRIDE: tl.constexpr,
     GRAD_OUT_COL_STRIDE: tl.constexpr,
@@ -428,11 +428,11 @@ def _active_swiglu_backward_kernel(
 @triton.jit
 def _copy_rows_to_peer_ptrs_kernel(
     src,
-    dst_ptrs,
-    dst_ranks,
-    dst_rows,
-    num_valid_rows,
-    src_rows,
+    dst_ptrs: tl.pointer_type(tl.int64),
+    dst_ranks: tl.pointer_type(tl.int64),
+    dst_rows: tl.pointer_type(tl.int64),
+    num_valid_rows: tl.pointer_type(tl.int64),
+    src_rows: tl.pointer_type(tl.int64),
     NUM_ROWS: tl.constexpr,
     NUM_COLS: tl.constexpr,
     SRC_ROW_STRIDE: tl.constexpr,
