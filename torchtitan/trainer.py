@@ -770,6 +770,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 microbatches.append((input_dict, labels))
         sl.log_trace_scalar({"local_valid_tokens": int(local_valid_tokens)})
 
+        # All-reduce to get global token count across DP ranks
+        # Move to GPU for distributed communication
         if parallel_dims.dp_enabled:
             batch_mesh = parallel_dims.get_mesh("batch")
             global_valid_tokens = dist_utils.dist_sum(
