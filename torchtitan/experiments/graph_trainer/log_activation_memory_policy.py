@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import operator
-import re
 from collections import defaultdict
 
 import torch
@@ -49,12 +48,76 @@ def _resolve_producing_op(node: torch.fx.Node) -> torch.fx.Node:
 # ---------------------------------------------------------------------------
 
 
+def _sym_hint(dim: object) -> int | None:
+    """Concrete value for a (possibly symbolic) size, or ``None`` if unknown.
+
+    Reads only existing hints / example values and never introduces a guard, so
+    this stays read-only:
+      * backed (statically-known) sizes resolve via ``ShapeEnv.size_hint``;
+      * unbacked (data-dependent, e.g. MoE token counts) sizes resolve to the
+        example value observed during tracing when ``propagate_real_tensors`` is
+        on; otherwise they stay unknown.
+    """
+    if isinstance(dim, int):
+        return dim
+    if not isinstance(dim, torch.SymInt):
+        return None
+    node = dim.node
+    shape_env = getattr(node, "shape_env", None)
+    if shape_env is None:
+        return None
+    expr = node.expr
+    try:
+        hint = shape_env.size_hint(expr, allow_none=True)
+    except Exception:
+        hint = None
+    if hint is not None and getattr(hint, "is_number", False):
+        return int(hint)
+    rt_vals = getattr(shape_env, "real_tensor_prop_unbacked_vals", None)
+    if rt_vals:
+        substituted = expr.xreplace(rt_vals)
+        if getattr(substituted, "is_number", False):
+            return int(substituted)
+    return None
+
+
 def _format_shape(val: object) -> str:
     if isinstance(val, torch.Tensor):
-        return str(list(val.shape))
+        dims = []
+        for d in val.shape:
+            hint = _sym_hint(d)
+            if hint is not None:
+                dims.append(str(hint))
+            elif isinstance(d, torch.SymInt):
+                # Data-dependent size with no available value (e.g. unbacked MoE
+                # token count). Mark compactly instead of dumping the raw symbol
+                # expression, which is unreadable.
+                dims.append("dyn")
+            else:
+                dims.append(str(d))
+        return "[" + ", ".join(dims) + "]"
     if isinstance(val, (tuple, list)):
         parts = [_format_shape(v) for v in val]
         return "(" + ", ".join(parts) + ")"
+    if isinstance(val, (torch.SymInt, torch.SymFloat, torch.SymBool)):
+        return "SymInt"
+    if isinstance(val, (int, float, bool)):
+        return "Scalar"
+    return "?"
+
+
+def _shape_key(val: object) -> str:
+    """Structural shape key for layer consolidation.
+
+    All symbolic dims collapse to ``S`` (regardless of any resolved value) so
+    layers with the same op/shape *structure* still group together even when
+    their data-dependent sizes differ across layers.
+    """
+    if isinstance(val, torch.Tensor):
+        dims = ["S" if isinstance(d, torch.SymInt) else str(int(d)) for d in val.shape]
+        return "[" + ",".join(dims) + "]"
+    if isinstance(val, (tuple, list)):
+        return "(" + ",".join(_shape_key(v) for v in val) + ")"
     if isinstance(val, (torch.SymInt, torch.SymFloat, torch.SymBool)):
         return "SymInt"
     if isinstance(val, (int, float, bool)):
@@ -66,10 +129,16 @@ _SYMBOLIC_NBYTES = -1
 
 
 def _tensor_nbytes(val: object) -> int:
-    """Return byte count, or ``_SYMBOLIC_NBYTES`` for symbolic shapes."""
+    """Return byte count, or ``_SYMBOLIC_NBYTES`` when any dim is unresolved."""
     if isinstance(val, torch.Tensor):
+        numel = 1
+        for d in val.shape:
+            hint = _sym_hint(d)
+            if hint is None:
+                return _SYMBOLIC_NBYTES
+            numel *= hint
         try:
-            return int(val.numel() * val.element_size())
+            return int(numel * val.element_size())
         except Exception:
             return _SYMBOLIC_NBYTES
     if isinstance(val, (tuple, list)):
@@ -182,6 +251,12 @@ def _format_policy(node: torch.fx.Node) -> str:
     return _POLICY_SHORT_NAMES.get(policy, str(policy))
 
 
+# Policies whose activations actually stay resident in GPU memory for backward.
+# Everything else is either recomputed (RECOMPUTE/RECOMPUTE!) or moved off the
+# GPU (OFFLOAD), so it does not count toward saved activation memory.
+_SAVED_POLICIES = frozenset({"SAVE", "SAVE*"})
+
+
 def _format_original_aten(node: torch.fx.Node) -> str:
     original = node.meta.get("original_aten")
     if original is None or str(original) == str(node.target):
@@ -194,20 +269,17 @@ def _format_original_aten(node: torch.fx.Node) -> str:
 # ---------------------------------------------------------------------------
 
 
-# Matches PyTorch symbolic shape variables (s0, u12, etc.)
-_SYM_VAR_RE = re.compile(r"\b[su]\d+\b")
-
-
-def _normalize_shape(shape: str) -> str:
-    return _SYM_VAR_RE.sub("S", shape)
-
-
 def _layer_fingerprint(activations: list[dict]) -> tuple:
-    """Return a hashable fingerprint for a layer's activation pattern."""
+    """Return a hashable fingerprint for a layer's activation pattern.
+
+    Uses the symbol-normalized ``shape_key`` (not the display shape) so layers
+    whose data-dependent sizes resolve to different concrete values still
+    consolidate when their structure matches.
+    """
     return tuple(
         (
             act["target"],
-            _normalize_shape(act["shape"]),
+            act["shape_key"],
             act["dtype"],
             act["policy"],
             act["original_aten"],
@@ -262,6 +334,7 @@ def log_activation_memory_policy(
                 "name": node.name,
                 "target": str(producer.target),
                 "shape": _format_shape(val),
+                "shape_key": _shape_key(val),
                 "dtype": _tensor_dtype(val),
                 "nbytes": _tensor_nbytes(val),
                 "policy": _format_policy(node),
@@ -302,21 +375,34 @@ def log_activation_memory_policy(
     def _sum_concrete_bytes(acts: list[dict]) -> int:
         return sum(a["nbytes"] for a in acts if a["nbytes"] != _SYMBOLIC_NBYTES)
 
+    def _sum_saved_bytes(acts: list[dict]) -> int:
+        # Bytes that actually stay resident in GPU memory: only SAVE/SAVE*.
+        # RECOMPUTE(!) are discarded and recomputed in backward; OFFLOAD goes to CPU.
+        return sum(
+            a["nbytes"]
+            for a in acts
+            if a["policy"] in _SAVED_POLICIES and a["nbytes"] != _SYMBOLIC_NBYTES
+        )
+
     total_activations = 0
     total_bytes = 0
+    total_saved_bytes = 0
 
     # Print non-layer activations
     if _NOT_IN_LAYERS in activations_by_layer:
         other_acts = activations_by_layer[_NOT_IN_LAYERS]
         other_bytes = _sum_concrete_bytes(other_acts)
+        other_saved = _sum_saved_bytes(other_acts)
         lines.append(
-            f"[non-layer] ({len(other_acts)} activations, {_format_bytes(other_bytes)})"
+            f"[non-layer] ({len(other_acts)} activations; "
+            f"saved: {_format_bytes(other_saved)}; "
+            f"if all saved: {_format_bytes(other_bytes)})"
         )
         for i, act in enumerate(other_acts):
             lines.append(_fmt_row(i, act, act["fqn"]))
-            total_activations += 1
-            if act["nbytes"] != _SYMBOLIC_NBYTES:
-                total_bytes += act["nbytes"]
+        total_activations += len(other_acts)
+        total_bytes += other_bytes
+        total_saved_bytes += other_saved
         lines.append("")
 
     # Print consolidated layer groups
@@ -326,6 +412,7 @@ def log_activation_memory_policy(
         representative = activations_by_layer[layer_ids[0]]
         num_layers = len(layer_ids)
         layer_bytes = _sum_concrete_bytes(representative)
+        layer_saved = _sum_saved_bytes(representative)
 
         if num_layers == 1:
             label = f"[layer {layer_ids[0]}]"
@@ -334,8 +421,10 @@ def log_activation_memory_policy(
             label = f"[layers {first}-{last}] (x{num_layers}, same pattern)"
 
         lines.append(
-            f"{label} ({len(representative)} activations, "
-            f"{_format_bytes(layer_bytes)} each, "
+            f"{label} ({len(representative)} activations; "
+            f"saved: {_format_bytes(layer_saved)} each, "
+            f"{_format_bytes(layer_saved * num_layers)} total; "
+            f"if all saved: {_format_bytes(layer_bytes)} each, "
             f"{_format_bytes(layer_bytes * num_layers)} total)"
         )
         for i, act in enumerate(representative):
@@ -343,6 +432,7 @@ def log_activation_memory_policy(
             lines.append(_fmt_row(i, act, sub))
         total_activations += len(representative) * num_layers
         total_bytes += layer_bytes * num_layers
+        total_saved_bytes += layer_saved * num_layers
         lines.append("")
 
     num_layers = sum(len(ids) for ids in fingerprint_to_layers.values())
@@ -350,12 +440,19 @@ def log_activation_memory_policy(
     scope = f"{num_layers} layer(s)" + (" + non-layer" if has_non_layer else "")
     lines.append(sep)
     lines.append(
-        f"Total: {total_activations} activations, "
-        f"{_format_bytes(total_bytes)} across {scope}"
+        f"Total: {total_activations} activations; "
+        f"saved: {_format_bytes(total_saved_bytes)}; "
+        f"if all saved: {_format_bytes(total_bytes)}; across {scope}"
     )
     lines.append(sep)
 
-    lines.append("SAVE* = untagged (kept in GPU memory by default)")
+    lines.append(
+        "saved = SAVE/SAVE* resident in GPU memory; RECOMPUTE(!) is recomputed in "
+        "backward and OFFLOAD lives on CPU, so neither counts toward saved. "
+        "SAVE* = untagged (kept in GPU memory by default). "
+        "Shape 'dyn' = data-dependent (unbacked) size with no value available; "
+        "other resolved dims of such tensors are example values from this trace."
+    )
 
     output = "\n".join(lines)
     logger.debug(
