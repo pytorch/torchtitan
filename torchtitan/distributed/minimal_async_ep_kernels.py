@@ -11,12 +11,7 @@ import triton
 import triton.language as tl
 
 
-_copy_full_counts_to_peers_kernel_cache: dict[int, object] = {}
-_copy_rows_to_peers_kernel_cache: dict[int, object] = {}
 _copy_rows_to_peer_ptrs_kernel_cache: dict[torch.dtype, object] = {}
-
-_POINTER_TABLE_EP_THRESHOLD = 8
-
 
 _TRITON_DTYPE_NAMES = {
     torch.bool: "tl.int1",
@@ -342,129 +337,6 @@ def _active_swiglu_backward_kernel(
     )
 
 
-def _make_copy_full_counts_to_peers_kernel(ep_size: int):
-    kernel = _copy_full_counts_to_peers_kernel_cache.get(ep_size)
-    if kernel is not None:
-        return kernel
-
-    dst_params = ",\n    ".join(f"dst{peer}" for peer in range(ep_size))
-    copy_blocks = []
-    for peer in range(ep_size):
-        copy_blocks.append(
-            f"""
-    values_{peer} = tl.load(counts + offsets, mask=mask, other=0)
-    tl.store(
-        dst{peer} + RANK * DST_ROW_STRIDE + offsets,
-        values_{peer},
-        mask=mask,
-    )
-"""
-        )
-
-    source = f"""
-@triton.jit
-def _copy_full_counts_to_peers_kernel_ep{ep_size}(
-    counts,
-    {dst_params},
-    RANK: tl.constexpr,
-    NUM_EXPERTS: tl.constexpr,
-    DST_ROW_STRIDE: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-) -> None:
-    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < NUM_EXPERTS
-{''.join(copy_blocks)}
-"""
-    filename = f"<torchtitan_minimal_async_ep_copy_full_counts_to_peers_ep{ep_size}>"
-    lines = source.splitlines(keepends=True)
-    linecache.cache[filename] = (len(source), None, lines, filename)
-    namespace = {
-        "triton": triton,
-        "tl": tl,
-    }
-    exec(compile(source, filename, "exec"), namespace)
-    kernel = namespace[f"_copy_full_counts_to_peers_kernel_ep{ep_size}"]
-    _copy_full_counts_to_peers_kernel_cache[ep_size] = kernel
-    return kernel
-
-
-def _make_copy_rows_to_peers_kernel(ep_size: int):
-    kernel = _copy_rows_to_peers_kernel_cache.get(ep_size)
-    if kernel is not None:
-        return kernel
-
-    dst_params = ",\n    ".join(f"dst{peer}" for peer in range(ep_size))
-    dst_ptr_init = "dst0 + dst_row[:, None] * DST_ROW_STRIDE + col[None, :]"
-    dst_ptr_select = []
-    for peer in range(1, ep_size):
-        dst_ptr_select.append(
-            f"""
-    dst_ptr = tl.where(
-        dst_rank[:, None] == {peer},
-        dst{peer} + dst_row[:, None] * DST_ROW_STRIDE + col[None, :],
-        dst_ptr,
-    )
-"""
-        )
-
-    source = f"""
-@triton.jit
-def _copy_rows_to_peers_kernel_ep{ep_size}(
-    src,
-    {dst_params},
-    dst_ranks,
-    dst_rows,
-    num_valid_rows,
-    src_rows,
-    NUM_ROWS: tl.constexpr,
-    NUM_COLS: tl.constexpr,
-    SRC_ROW_STRIDE: tl.constexpr,
-    SRC_COL_STRIDE: tl.constexpr,
-    DST_ROW_STRIDE: tl.constexpr,
-    HAS_NUM_VALID_ROWS: tl.constexpr,
-    HAS_SRC_ROWS: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-) -> None:
-    row_start = tl.program_id(0) * BLOCK_M
-    row_limit = NUM_ROWS
-    if HAS_NUM_VALID_ROWS:
-        row_limit = tl.load(num_valid_rows)
-        if row_start >= row_limit:
-            return
-    row = row_start + tl.arange(0, BLOCK_M)
-    col = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
-    row_mask = row < row_limit
-    col_mask = col < NUM_COLS
-    mask = row_mask[:, None] & col_mask[None, :]
-    src_row = row
-    if HAS_SRC_ROWS:
-        src_row = tl.load(src_rows + row, mask=row_mask, other=0)
-    dst_rank = tl.load(dst_ranks + row, mask=row_mask, other=-1)
-    dst_row = tl.load(dst_rows + row, mask=row_mask, other=0)
-    values = tl.load(
-        src
-        + src_row[:, None] * SRC_ROW_STRIDE
-        + col[None, :] * SRC_COL_STRIDE,
-        mask=mask,
-    )
-    dst_ptr = {dst_ptr_init}
-{''.join(dst_ptr_select)}
-    tl.store(dst_ptr, values, mask=mask & (dst_rank[:, None] >= 0))
-"""
-    filename = f"<torchtitan_minimal_async_ep_copy_rows_to_peers_ep{ep_size}>"
-    lines = source.splitlines(keepends=True)
-    linecache.cache[filename] = (len(source), None, lines, filename)
-    namespace = {
-        "triton": triton,
-        "tl": tl,
-    }
-    exec(compile(source, filename, "exec"), namespace)
-    kernel = namespace[f"_copy_rows_to_peers_kernel_ep{ep_size}"]
-    _copy_rows_to_peers_kernel_cache[ep_size] = kernel
-    return kernel
-
-
 def _make_copy_rows_to_peer_ptrs_kernel(dtype: torch.dtype):
     kernel = _copy_rows_to_peer_ptrs_kernel_cache.get(dtype)
     if kernel is not None:
@@ -546,30 +418,17 @@ def copy_full_counts_to_peers(
     num_experts: int,
     dst_ptrs: torch.Tensor,
 ) -> None:
-    use_pointer_table = ep_size > _POINTER_TABLE_EP_THRESHOLD
     block_size = 1024
-    if use_pointer_table:
-        grid = (ep_size, triton.cdiv(num_experts, block_size))
-        _copy_full_counts_to_peer_ptrs_kernel[grid](
-            counts,
-            dst_ptrs,
-            RANK=rank,
-            EP_SIZE=ep_size,
-            NUM_EXPERTS=num_experts,
-            DST_ROW_STRIDE=dsts[0].stride(0),
-            BLOCK_SIZE=block_size,
-        )
-    else:
-        grid = (triton.cdiv(num_experts, block_size),)
-        kernel = _make_copy_full_counts_to_peers_kernel(ep_size)
-        kernel[grid](
-            counts,
-            *dsts,
-            RANK=rank,
-            NUM_EXPERTS=num_experts,
-            DST_ROW_STRIDE=dsts[0].stride(0),
-            BLOCK_SIZE=block_size,
-        )
+    grid = (ep_size, triton.cdiv(num_experts, block_size))
+    _copy_full_counts_to_peer_ptrs_kernel[grid](
+        counts,
+        dst_ptrs,
+        RANK=rank,
+        EP_SIZE=ep_size,
+        NUM_EXPERTS=num_experts,
+        DST_ROW_STRIDE=dsts[0].stride(0),
+        BLOCK_SIZE=block_size,
+    )
 
 
 def active_swiglu_forward(
@@ -658,49 +517,27 @@ def copy_rows_to_peers(
     src_rows: torch.Tensor | None = None,
     num_valid_rows: torch.Tensor | None = None,
 ) -> None:
-    use_pointer_table = ep_size > _POINTER_TABLE_EP_THRESHOLD
     block_n = min(2048, triton.next_power_of_2(num_cols))
     grid = (triton.cdiv(num_rows, block_m), triton.cdiv(num_cols, block_n))
-    if use_pointer_table:
-        kernel = _make_copy_rows_to_peer_ptrs_kernel(src.dtype)
-        kernel[grid](
-            src,
-            dst_ptrs,
-            dst_ranks,
-            dst_rows,
-            num_valid_rows if num_valid_rows is not None else dst_rows[:1],
-            src_rows if src_rows is not None else dst_rows,
-            NUM_ROWS=num_rows,
-            NUM_COLS=num_cols,
-            SRC_ROW_STRIDE=src.stride(0),
-            SRC_COL_STRIDE=src.stride(1),
-            DST_ROW_STRIDE=dsts[0].stride(0),
-            HAS_NUM_VALID_ROWS=num_valid_rows is not None,
-            HAS_SRC_ROWS=src_rows is not None,
-            BLOCK_M=block_m,
-            BLOCK_N=block_n,
-            num_warps=num_warps,
-        )
-    else:
-        kernel = _make_copy_rows_to_peers_kernel(ep_size)
-        kernel[grid](
-            src,
-            *dsts,
-            dst_ranks,
-            dst_rows,
-            num_valid_rows if num_valid_rows is not None else dst_rows[:1],
-            src_rows if src_rows is not None else dst_rows,
-            NUM_ROWS=num_rows,
-            NUM_COLS=num_cols,
-            SRC_ROW_STRIDE=src.stride(0),
-            SRC_COL_STRIDE=src.stride(1),
-            DST_ROW_STRIDE=dsts[0].stride(0),
-            HAS_NUM_VALID_ROWS=num_valid_rows is not None,
-            HAS_SRC_ROWS=src_rows is not None,
-            BLOCK_M=block_m,
-            BLOCK_N=block_n,
-            num_warps=num_warps,
-        )
+    kernel = _make_copy_rows_to_peer_ptrs_kernel(src.dtype)
+    kernel[grid](
+        src,
+        dst_ptrs,
+        dst_ranks,
+        dst_rows,
+        num_valid_rows if num_valid_rows is not None else dst_rows[:1],
+        src_rows if src_rows is not None else dst_rows,
+        NUM_ROWS=num_rows,
+        NUM_COLS=num_cols,
+        SRC_ROW_STRIDE=src.stride(0),
+        SRC_COL_STRIDE=src.stride(1),
+        DST_ROW_STRIDE=dsts[0].stride(0),
+        HAS_NUM_VALID_ROWS=num_valid_rows is not None,
+        HAS_SRC_ROWS=src_rows is not None,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        num_warps=num_warps,
+    )
 
 
 def fill_dispatch_metadata(
