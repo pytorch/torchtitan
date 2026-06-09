@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from functools import partial
 from importlib.util import find_spec
 from typing import Literal
@@ -36,6 +36,7 @@ try:
             """Drop-in replacement for Linear.Config that builds Float8Linear."""
 
             _torchao_config: object = None
+            precompute_float8_dynamic_scale_for_fsdp: bool = False
 
         def __init__(self, config: Config):
             TorchAOFloat8Linear.__init__(
@@ -44,6 +45,9 @@ try:
                 config.out_features,
                 bias=config.bias,
                 config=config._torchao_config,
+            )
+            self.precompute_float8_dynamic_scale_for_fsdp = (
+                config.precompute_float8_dynamic_scale_for_fsdp
             )
 
 except ImportError:
@@ -55,7 +59,7 @@ class Float8LinearConverter(QuantizationConverter):
 
     @dataclass(kw_only=True, slots=True)
     class Config(QuantizationConverter.Config):
-        recipe_name: Literal["rowwise", "rowwise_with_gw_hp"] = "rowwise"
+        recipe_name: Literal["tensorwise", "rowwise", "rowwise_with_gw_hp"] = "rowwise"
         """Float8 recipe name."""
 
         filter_fqns: list[str] = field(default_factory=list)
@@ -71,6 +75,12 @@ class Float8LinearConverter(QuantizationConverter):
         This is for test purpose only. Not compatible with torch.compile.
         """
 
+        enable_fsdp_float8_all_gather: bool = False
+        """Enable torchao's FSDP float8 all-gather path when supported."""
+
+        precompute_float8_dynamic_scale_for_fsdp: bool = False
+        """Precompute dynamic FP8 weight scales after each optimizer step."""
+
     def __init__(self, config: Config):
         self.config = config
 
@@ -81,6 +91,7 @@ class Float8LinearConverter(QuantizationConverter):
 
         cfg = self.config
         filter_fqns = cfg.filter_fqns
+        precompute_scales = cfg.precompute_float8_dynamic_scale_for_fsdp
 
         if has_cuda_capability(8, 9) or (cfg.emulate and not cfg.model_compile_enabled):
             pass
@@ -110,7 +121,18 @@ class Float8LinearConverter(QuantizationConverter):
         )
         if cfg.emulate:
             self.torchao_config = TorchAOFloat8LinearConfig(emulate=True)
-        logger.info(f"Float8 training active with recipe {cfg.recipe_name}")
+        if hasattr(self.torchao_config, "enable_fsdp_float8_all_gather"):
+            self.torchao_config = replace(
+                self.torchao_config,
+                enable_fsdp_float8_all_gather=cfg.enable_fsdp_float8_all_gather,
+            )
+        logger.info(
+            "Float8 training active with "
+            f"recipe {cfg.recipe_name}, "
+            f"scaling {self.torchao_config.cast_config_input.scaling_granularity.value}, "
+            f"fsdp_float8_all_gather={cfg.enable_fsdp_float8_all_gather}, "
+            f"precompute_dynamic_scale_for_fsdp={precompute_scales}"
+        )
 
         # short-term solution for https://github.com/pytorch/pytorch/issues/150859
         if cfg.recipe_name == "rowwise":
@@ -148,6 +170,7 @@ class Float8LinearConverter(QuantizationConverter):
             return
 
         assert Float8Linear is not None
+        precompute_scales = self.config.precompute_float8_dynamic_scale_for_fsdp
         for fqn, linear_config, parent, attr in model_config.traverse(Linear.Config):
             if self.filter_fn(linear_config, fqn):
                 new_config = Float8Linear.Config(
@@ -156,6 +179,7 @@ class Float8LinearConverter(QuantizationConverter):
                     bias=linear_config.bias,
                     param_init=linear_config.param_init,
                     _torchao_config=self.torchao_config,
+                    precompute_float8_dynamic_scale_for_fsdp=precompute_scales,
                 )
                 if isinstance(parent, list):
                     parent[attr] = new_config

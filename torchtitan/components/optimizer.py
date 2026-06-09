@@ -25,12 +25,14 @@ from torch.distributed.tensor import Replicate
 from torch.optim import Optimizer
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
+from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.logging import logger
 
 __all__ = [
     "OptimizersContainer",
     "ParamGroupConfig",
     "default_adamw",
+    "register_float8_precompute_scale_hook",
     "register_moe_load_balancing_hook",
 ]
 
@@ -369,6 +371,41 @@ def default_adamw(lr: float = 8e-4, **kwargs: Any) -> OptimizersContainer.Config
             )
         ]
     )
+
+
+def register_float8_precompute_scale_hook(
+    optimizers: OptimizersContainer,
+    model_parts: list[nn.Module],
+    parallel_dims: ParallelDims | None,
+) -> None:
+    """Register an optimizer step post-hook for TorchAO FSDP float8 scale precompute."""
+
+    del parallel_dims
+
+    def _should_precompute_scales(model: nn.Module) -> bool:
+        return any(
+            bool(getattr(module, "precompute_float8_dynamic_scale_for_fsdp", False))
+            for module in model.modules()
+        )
+
+    models_to_precompute = [
+        model for model in model_parts if _should_precompute_scales(model)
+    ]
+    if not models_to_precompute:
+        return
+
+    from torchao.float8 import precompute_float8_dynamic_scale_for_fsdp
+
+    def _precompute_scales_hook(
+        _optimizer: Optimizer,
+        _args: tuple[Any, ...],
+        _kwargs: dict[str, Any],
+    ) -> None:
+        with sl.log_trace_span("float8_precompute_scales"):
+            for model in models_to_precompute:
+                precompute_float8_dynamic_scale_for_fsdp(model)
+
+    optimizers.register_step_post_hook(_precompute_scales_hook)
 
 
 def register_moe_load_balancing_hook(
