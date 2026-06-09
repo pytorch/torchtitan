@@ -163,6 +163,8 @@ class GptOssGroupedExperts(Module):
         topk_scores_BLK: torch.Tensor,
         topk_expert_ids_BLK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
+        *,
+        num_local_tokens_after_padding: int,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add."""
         B, L, D = x_BLD.shape
@@ -185,7 +187,7 @@ class GptOssGroupedExperts(Module):
             routed_output_RD,
             metadata,
             x_TD,
-            num_local_tokens_after_padding=T,
+            num_local_tokens_after_padding=num_local_tokens_after_padding,
         )
 
     def parallelize(self, parallel_dims) -> None:
