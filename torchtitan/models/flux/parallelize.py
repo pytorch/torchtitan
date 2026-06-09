@@ -201,8 +201,6 @@ def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
     # Apply CP using direct forward wrapping (always uses SDPA for Flux)
     apply_cp_to_forward(attention_modules, cp_mesh)
 
-    logger.info("Applied Context Parallel to the Flux model")
-
 
 def parallelize_encoders(
     t5_model: nn.Module,
