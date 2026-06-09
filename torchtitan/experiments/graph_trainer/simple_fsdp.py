@@ -20,11 +20,13 @@ from torch.distributed._tensor import (
     Shard,
 )
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp import DataParallelMeshDims
 from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
 
 from torchtitan.protocols.module import Module
+from torchtitan.tools.logging import logger
 
 _active_parametrization = True
 
@@ -169,14 +171,13 @@ class ReplicateComputation(Module):
         self,
         device_mesh: DeviceMesh,
         param_sharding: tuple[Placement, ...],
-        mode: str,
         mp_policy: MixedPrecisionPolicy | None,
-        full_dtensor: bool = False,
+        dp_axis_names_in_full_mesh: frozenset[str] | None = None,
+        full_spmd_mesh: DeviceMesh | None = None,
     ) -> None:
         super().__init__()
         self.device_mesh = device_mesh
         self.param_sharding = param_sharding
-        self.mode = mode
         self.compute_placements: list[Placement] = [Replicate()] * self.device_mesh.ndim
         self.grad_placements: list[Placement] = [
             Partial(reduce_op="sum")
@@ -184,9 +185,72 @@ class ReplicateComputation(Module):
         mp_policy = mp_policy or MixedPrecisionPolicy()
         self.param_dtype: torch.dtype | None = mp_policy.param_dtype
         self.reduce_dtype: torch.dtype | None = mp_policy.reduce_dtype
-        self.full_dtensor = full_dtensor
+        # full_spmd_mesh is the mesh to lift the all-gathered param onto; it is
+        # set only under full_dtensor, so its presence is the full_dtensor switch.
+        # dp_axis_names: SPMD DP axes to all-gather (see replicate_compute).
+        self.full_dtensor = full_spmd_mesh is not None
+        self.full_spmd_mesh = full_spmd_mesh
+        self.dp_axis_names: frozenset[str] = (
+            dp_axis_names_in_full_mesh
+            if dp_axis_names_in_full_mesh is not None
+            else frozenset(device_mesh.mesh_dim_names or ())
+        )
 
     def replicate_compute(self, x: DTensor) -> torch.Tensor:
+        if self.full_dtensor:
+            # x is stored on the folded DP submesh (+ tp/ep) exactly like the
+            # legacy nD path, so the all-gather below is bit-identical to legacy.
+            non_dp_mesh_dims = x._spec.mesh.ndim - self.device_mesh.ndim
+            if non_dp_mesh_dims > 0:
+                sharded_local = x.to_local()
+                sharded_on_dp = DTensor.from_local(
+                    sharded_local, self.device_mesh, self.param_sharding
+                )
+                replicated_on_dp = sharded_on_dp.redistribute(
+                    placements=self.compute_placements,
+                    forward_dtype=self.param_dtype,
+                    backward_dtype=self.reduce_dtype,
+                )
+                replicated_local = replicated_on_dp.to_local(
+                    grad_placements=self.grad_placements
+                )
+                non_dp_placements = tuple(x._spec.placements[-non_dp_mesh_dims:])
+                non_dp_names = tuple(x._spec.mesh.mesh_dim_names[-non_dp_mesh_dims:])
+            else:
+                replicated = x.redistribute(
+                    placements=self.compute_placements,
+                    forward_dtype=self.param_dtype,
+                    backward_dtype=self.reduce_dtype,
+                )
+                replicated_local = replicated.to_local(
+                    grad_placements=self.grad_placements
+                )
+                non_dp_placements = ()
+                non_dp_names = ()
+
+            # Lift the all-gathered local back onto the full SPMD mesh so it
+            # composes with cp-carrying activations: DP axes become Replicate,
+            # tp/ep keep their placement. grad_placements = Partial on the DP
+            # axes (the R->P duality) so the backward reduce-scatters once with
+            # no spurious reduction -- no custom autograd function needed.
+            non_dp_map = dict(zip(non_dp_names, non_dp_placements))
+            full_names = self.full_spmd_mesh.mesh_dim_names or ()
+            fwd_placements = tuple(
+                Replicate() if n in self.dp_axis_names else non_dp_map[n]
+                for n in full_names
+            )
+            grad_placements = tuple(
+                Partial() if n in self.dp_axis_names else non_dp_map[n]
+                for n in full_names
+            )
+            return DTensor.from_local(
+                replicated_local,
+                self.full_spmd_mesh,
+                fwd_placements,
+                run_check=False,
+                grad_placements=grad_placements,
+            )
+
         # data parallel runtime replicate parameters and do local compute
         # the gradients are partial tensors that needs to perform reduction
         # (i.e. DDP: allreduce, FSDP: reduce_scatter, HSDP: mix of both)
@@ -194,10 +258,6 @@ class ReplicateComputation(Module):
         non_dp_mesh_dims = x._spec.mesh.ndim - self.device_mesh.ndim
         assert non_dp_mesh_dims <= 2, "Only DP + EP/TP/EP+TP is supported"
         if non_dp_mesh_dims > 0:
-            if self.full_dtensor:
-                raise NotImplementedError(
-                    "full_dtensor not implemented for nD parallelisms"
-                )
             dp_mesh = self.device_mesh
             # re-wrap 2D DTensor to 1D DTensor on dp_mesh for efficient FSDP all-gather
             sharded_local_tensor = x.to_local()
@@ -235,8 +295,7 @@ class ReplicateComputation(Module):
                 backward_dtype=self.reduce_dtype,
             )
 
-            if not self.full_dtensor:
-                output = output.to_local(grad_placements=self.grad_placements)
+            output = output.to_local(grad_placements=self.grad_placements)
         else:
             raise AssertionError(
                 f"Unsupported replicate compute on placement {x._spec.placements} for DTensor {x}"
@@ -258,14 +317,61 @@ class ReplicateComputation(Module):
         return output
 
 
+def _simple_fsdp_mode(dp_mesh: DeviceMesh) -> str:
+    """Pick the simple_fsdp mode from a DP mesh's axis names."""
+    names = dp_mesh.mesh_dim_names or ()
+    if "dp_replicate" in names:
+        return "hybrid_shard" if len(names) > 1 else "replicate"
+    return "fully_shard"
+
+
 def data_parallel(
     model: nn.Module,
     device_mesh: DeviceMesh,
-    mode: str = "replicate",
     mp_policy: MixedPrecisionPolicy | None = None,
     shard_dim: int = 0,
-    full_dtensor: bool = False,
+    dp_mesh_dims: "DataParallelMeshDims | None" = None,
 ) -> nn.Module:
+    """Apply simple_fsdp parametrization, the graph_trainer analog of fully_shard.
+
+    Legacy (``dp_mesh_dims is None``): ``device_mesh`` is the DP-only mesh
+    (ParallelDims pre-flattens ``dp_shard``/``cp`` into it); params are plain
+    tensors or TP/EP DTensors.
+
+    Full DTensor (``dp_mesh_dims`` set): ``device_mesh`` is the full SPMD mesh and
+    ``dp_mesh_dims`` names its DP axes, like fully_shard. The named shard axes are
+    flattened into one FSDP storage axis; each param is reduced to its pre-FSDP
+    form, stored there by the same path as legacy, and lifted onto the full SPMD
+    mesh at compute time.
+
+    The sharding mode is inferred from the mesh (like fully_shard), not passed in.
+    """
+    full_dtensor = dp_mesh_dims is not None
+    full_spmd_mesh: DeviceMesh | None = None
+    shard_names: tuple[str, ...] = ()
+    dp_axis_names: frozenset[str] = frozenset()
+    if dp_mesh_dims is not None:
+        # Like fully_shard: flatten the named DP shard axes (e.g. dp_shard + cp)
+        # into one FSDP storage axis, then prepend the optional replicate axis.
+        full_spmd_mesh = device_mesh
+        shard_names = dp_mesh_dims.shard_names
+        replicate_names = dp_mesh_dims.replicate_names
+        fsdp_mesh = (
+            full_spmd_mesh[shard_names]._flatten("_".join(shard_names) + "_fsdp")
+            if len(shard_names) > 1
+            else full_spmd_mesh[shard_names[0]]
+        )
+        device_mesh = (
+            DeviceMesh._concatenate([full_spmd_mesh[replicate_names], fsdp_mesh])
+            if replicate_names
+            else fsdp_mesh
+        )
+        dp_axis_names = frozenset(shard_names + replicate_names)
+        # A replicate axis means HSDP; otherwise pure FSDP.
+        mode = "hybrid_shard" if replicate_names else "fully_shard"
+    else:
+        mode = _simple_fsdp_mode(device_mesh)
+
     param_sharding: tuple[Placement, ...]
     if mode == "replicate":
         param_sharding = (Replicate(),)
@@ -280,50 +386,86 @@ def data_parallel(
     else:
         raise ValueError(f"Unsupported mode {mode}")
 
-    modules = list(model.modules())
+    logger.info("simple_fsdp: %s on mesh %s", mode, device_mesh.mesh_dim_names)
 
-    for mod in modules:
-        params_dict = dict(mod.named_parameters(recurse=False))
-        # we shouldn't apply data parallel to the modules that are already
-        # sharded by data parallel
+    for mod in list(model.modules()):
+        # Skip modules already parametrized by an earlier data_parallel pass.
         if "SimpleFSDP" in mod.__class__.__name__:
             continue
+        params_dict = dict(mod.named_parameters(recurse=False))
 
+        wrapped_names: list[str] = []
         for p_name, p in params_dict.items():
-            if p is not None and p.numel() > 0:
-                distribute_tensor_func = (
-                    _distribute_dtensor if isinstance(p, DTensor) else distribute_tensor
-                )
-                mod.register_parameter(
-                    p_name,
-                    nn.Parameter(
-                        distribute_tensor_func(p, device_mesh, param_sharding)
-                    ),
-                )
+            if p is None or p.numel() == 0:
+                continue
+            to_store: torch.Tensor = p
+            if full_dtensor:
+                if not isinstance(p, DTensor):
+                    raise TypeError(
+                        f"{type(mod).__name__}.{p_name} must already be a DTensor "
+                        "before apply_simple_fsdp under full_dtensor "
+                        "(model.parallelize must run first)."
+                    )
+                if not set(shard_names) <= set(p._spec.mesh.mesh_dim_names or ()):
+                    # Param on a different SPMD family (dense vs sparse); a
+                    # sibling data_parallel pass covers it.
+                    continue
+                # Reduce to the pre-FSDP (tp/ep-only) form the storage expects.
+                to_store = _strip_dp_axes(p, dp_axis_names)
+            # Custom _register_parametrization (not nn.utils.parametrize) keeps
+            # the state_dict DCP-compatible by reading params directly.
+            distribute = (
+                _distribute_dtensor
+                if isinstance(to_store, DTensor)
+                else distribute_tensor
+            )
+            mod.register_parameter(
+                p_name,
+                nn.Parameter(
+                    distribute(to_store, device_mesh, param_sharding),
+                    requires_grad=p.requires_grad,
+                ),
+            )
+            wrapped_names.append(p_name)
 
-                # to be compatible with DCP, we use a customized _register_parametrization
-                # instead of nn.utils.parametrize.register_parametrization here
-                # nn.utils.parametrize.register_parametrization(
-                #     mod,
-                #     p_name,
-                #     ReplicateComputation(
-                #         device_mesh,
-                #         param_sharding,
-                #         mode,
-                #         mp_policy=mp_policy,
-                #     ),
-                #     unsafe=True,
-                # )
-
-        _register_parametrization(
-            mod,
-            list(params_dict.keys()),
-            ReplicateComputation(
-                device_mesh,
-                param_sharding,
-                mode,
-                mp_policy=mp_policy,
-                full_dtensor=full_dtensor,
-            ),
-        )
+        # Register only the params this pass took ownership of, so the storage
+        # decision and the parametrization stay in lockstep. Legacy wraps every
+        # param, so it registers all names.
+        if wrapped_names or not full_dtensor:
+            _register_parametrization(
+                mod,
+                wrapped_names if full_dtensor else list(params_dict.keys()),
+                ReplicateComputation(
+                    device_mesh,
+                    param_sharding,
+                    mp_policy=mp_policy,
+                    full_spmd_mesh=full_spmd_mesh,
+                    dp_axis_names_in_full_mesh=dp_axis_names if full_dtensor else None,
+                ),
+            )
     return model
+
+
+def _strip_dp_axes(p: DTensor, dp_axis_names: frozenset[str]) -> torch.Tensor:
+    """Reduce an fdt param to its pre-FSDP form by dropping the DP axes.
+
+    model.parallelize leaves params Replicate on every DP axis (FSDP has not
+    sharded them yet), so the local tensor is the full tp/ep-sharded param.
+    Returns a plain tensor when there is no tp/ep, else a DTensor on the tp/ep
+    submesh -- the same starting point the legacy storage path expects.
+    """
+    full_mesh = p._spec.mesh
+    names = full_mesh.mesh_dim_names or ()
+    non_dp = [(n, plc) for n, plc in zip(names, p.placements) if n not in dp_axis_names]
+    for n, plc in zip(names, p.placements):
+        if n in dp_axis_names:
+            assert (
+                plc.is_replicate()
+            ), f"full_dtensor param must be Replicate on DP axis {n}, got {plc}"
+    # detach: at setup the param is not in an autograd graph, and
+    # distribute_tensor / _distribute_dtensor require a leaf tensor.
+    local = p.to_local().detach()
+    if not non_dp:
+        return local
+    non_dp_mesh = full_mesh[tuple(n for n, _ in non_dp)]
+    return DTensor.from_local(local, non_dp_mesh, tuple(plc for _, plc in non_dp))
