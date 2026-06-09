@@ -243,6 +243,19 @@ class RLTrainer(Configurable):
                     "(weights are synced from the trainer via TorchStore). "
                     "Set generator.checkpoint.enable=False."
                 )
+            trainer_parallelism = self.trainer.parallelism
+            sp_degree = trainer_parallelism.tensor_parallel_degree
+            # RL policy inputs are shaped by BatchConfig, not TrainingConfig.
+            seq_len = self.batcher.batch.seq_len
+            if (
+                trainer_parallelism.enable_sequence_parallel
+                and sp_degree > 1
+                and seq_len % sp_degree != 0
+            ):
+                raise ValueError(
+                    f"RL batcher sequence length ({seq_len}) must be divisible "
+                    f"by sequence parallel degree ({sp_degree})."
+                )
             if self.trainer.debug.batch_invariant:
                 if not self.trainer.debug.deterministic:
                     raise ValueError("batch_invariant requires deterministic=True")
