@@ -77,6 +77,8 @@ def parallelize_deepseekv3(
         parallel_dims=parallel_dims,
         training=training,
         parallelism=parallelism,
+        ac_config=ac_config,
+        memory_policy=getattr(compile_config, "memory_policy", None),
     )
 
     if parallel_dims.cp_enabled:
