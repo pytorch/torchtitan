@@ -463,10 +463,7 @@ def dispatch_metadata(
     torch.Tensor,
     torch.Tensor,
 ]:
-    """Exchange counts and build dispatch/combine routing metadata."""
-    num_local_tokens_per_expert_E = num_local_tokens_per_expert_E.to(
-        torch.int64
-    ).contiguous()
+    """Exchange int64 per-expert local token counts and build routing metadata."""
 
     # Mirrors AllToAllTokenDispatcher's count exchange: each rank starts with
     # counts for its local tokens over all global experts, then learns how many
