@@ -373,7 +373,6 @@ def _dispatch_to_experts(
     dispatch_dst_ranks: torch.Tensor,
     dispatch_dst_rows: torch.Tensor,
     num_routed_rows: int,
-    receive_capacity: int,
 ) -> torch.Tensor:
     hidden_recv_buffer = _copy_rows_to_peers_cuda(
         x_ND,
@@ -727,7 +726,6 @@ def combine_backward(
         dispatch_dst_ranks,
         dispatch_dst_rows,
         E_row_to_T_row_N.numel(),
-        receive_capacity,
     )
     return grad_x, grad_scores
 
@@ -750,8 +748,6 @@ def combine_backward_fake(
 
 
 def active_swiglu_autograd_backward(ctx, grad_out):
-    if grad_out is None:
-        return None, None, None
     gate, up, active_rows = ctx.saved_tensors
     grad_gate, grad_up = active_swiglu_backward(
         grad_out,
@@ -816,18 +812,16 @@ class MinimalAsyncEPDispatch(torch.autograd.Function):
             T_row_to_E_row_N,
         ) = ctx.saved_tensors
 
-        grad_input = None
-        if grad_hidden is not None:
-            grad_input = dispatch_backward(
-                grad_hidden,
-                combine_dst_ranks,
-                combine_dst_rows,
-                combine_num_valid_rows,
-                T_row_to_E_row_N,
-                ctx.num_routed_rows,
-                ctx.num_tokens,
-                ctx.top_k,
-            )
+        grad_input = dispatch_backward(
+            grad_hidden,
+            combine_dst_ranks,
+            combine_dst_rows,
+            combine_num_valid_rows,
+            T_row_to_E_row_N,
+            ctx.num_routed_rows,
+            ctx.num_tokens,
+            ctx.top_k,
+        )
 
         return grad_input, None, None, None, None, None, None, None, None, None
 
