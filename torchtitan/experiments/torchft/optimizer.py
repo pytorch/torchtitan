@@ -14,16 +14,16 @@ from torch.distributed.checkpoint.state_dict import get_optimizer_state_dict
 from torchtitan.components.optimizer import OptimizersContainer
 
 if TYPE_CHECKING:
-    from torchtitan.experiments.ft.manager import FTManager
+    from torchtitan.experiments.torchft.manager import TorchFTManager
 
-__all__ = ["FTOptimizersContainer"]
+__all__ = ["TorchFTOptimizersContainer"]
 
 has_torchft = importlib.util.find_spec("torchft") is not None
 if has_torchft:
-    import torchft as ft
+    import torchft
 
 
-class FTOptimizersContainer(OptimizersContainer):
+class TorchFTOptimizersContainer(OptimizersContainer):
     @dataclass(kw_only=True, slots=True)
     class Config(OptimizersContainer.Config):
         pass
@@ -33,7 +33,7 @@ class FTOptimizersContainer(OptimizersContainer):
         config: Config,
         *,
         model_parts: list[nn.Module],
-        ft_manager: "FTManager",
+        ft_manager: "TorchFTManager",
     ) -> None:
         super().__init__(config, model_parts=model_parts)
 
@@ -45,7 +45,7 @@ class FTOptimizersContainer(OptimizersContainer):
             for k, v in sd.items()
         }
         self.cache_state_dict: dict[str, Any] = {}
-        self._ft_optimizer = ft.Optimizer(ft_manager.manager, self)
+        self._ft_optimizer = torchft.Optimizer(ft_manager.manager, self)
         # Whether to determine quorum using FT.optimizer,
         # in semi-sync training we use the synchronization step to start quorum
         self._use_ft_optimizer: bool = ft_manager.use_async_quorum
@@ -68,7 +68,7 @@ class FTOptimizersContainer(OptimizersContainer):
         """Calling the correct step() depending on the caller.
 
         TorchFT's OptimizerWrapper.step() is designed to be called only once
-        per train step per ft.Manager regardless how many optimizers are used.
+        per train step per torchft.Manager regardless how many optimizers are used.
         Hence we will need to appropriately dispatch the call.
         """
         if self._use_ft_optimizer:
