@@ -43,10 +43,10 @@ def spmd_layout_to_dtensor_placements(
     return result
 
 
-def _validate_spmd_redistributions(sharding_config: Any) -> None:
+def spmd_validate_redistributions(sharding_config: Any) -> None:
     """Validate that SPMD redistributions fit the current runtime helper.
 
-    ``redistribute_spmd_per_axis`` can issue at most one single-axis
+    ``spmd_redistribute_per_axis`` can issue at most one single-axis
     collective for a src/dst layout pair. It does not implement multi-axis
     moves, and it cannot express unshard/reshard reorderings such as
     ``PartitionSpec((DP, CP)) -> PartitionSpec((CP, DP))`` where per-axis
@@ -104,7 +104,7 @@ def _validate_spmd_redistributions(sharding_config: Any) -> None:
             raise ValueError(
                 f"{name}: SpmdLayout-based redistribution changes multiple mesh "
                 f"axes ({sorted(axis.value for axis in changed_axes)}). "
-                "redistribute_spmd_per_axis only supports one single-axis "
+                "spmd_redistribute_per_axis only supports one single-axis "
                 "redistribution."
             )
 
@@ -115,9 +115,9 @@ def _validate_spmd_redistributions(sharding_config: Any) -> None:
         # 3) If one side has no PartitionSpec, synthesize the simple
         # one-axis-per-dim form from its S(dim) local types.
         ndim = (
-            len(src.partition_spec)
+            len(src.partition_spec)  # pyrefly: ignore [bad-argument-type]
             if dst.partition_spec is None
-            else len(dst.partition_spec)
+            else len(dst.partition_spec)  # pyrefly: ignore [bad-argument-type]
         )
         src_spec, dst_spec = src.partition_spec, dst.partition_spec
         if src_spec is None:
@@ -130,6 +130,7 @@ def _validate_spmd_redistributions(sharding_config: Any) -> None:
         # from the innermost position. For example, (DP) -> (DP, CP) is valid
         # when CP is the changed axis, but (DP) -> (CP, DP) changes shard order.
         changed_axis = changed_axes[0] if changed_axes else None
+        # pyrefly: ignore [bad-argument-type]
         for dim, (src_entry, dst_entry) in enumerate(zip(src_spec, dst_spec)):
             src_axes = (
                 ()
@@ -154,7 +155,7 @@ def _validate_spmd_redistributions(sharding_config: Any) -> None:
             raise ValueError(
                 "SpmdLayout-based redistribution changes shard order for "
                 f"tensor {name} dim {dim}, which is currently unsupported "
-                "by redistribute_spmd_per_axis. Please write this as an "
+                "by spmd_redistribute_per_axis. Please write this as an "
                 "explicit collective instead."
             )
 
@@ -173,7 +174,7 @@ def _validate_spmd_redistributions(sharding_config: Any) -> None:
         _validate_redistribute_spmd_pair(out_src, out_dst, name="output")
 
 
-def redistribute_spmd_per_axis(
+def spmd_redistribute_per_axis(
     x: torch.Tensor,
     mesh: DeviceMesh | None,
     src_types: spmd.PerMeshAxisSpmdTypes,
@@ -195,6 +196,7 @@ def redistribute_spmd_per_axis(
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
     for axis_name, dst_t in dst_types.items():
         src_t = src_types.get(axis_name)
+        # pyrefly: ignore [missing-attribute]
         axis = axis_name.value
         axis_size = (
             mesh.size(mesh.mesh_dim_names.index(axis))
@@ -213,7 +215,7 @@ def redistribute_spmd_per_axis(
     return x
 
 
-def _shard_spmd_state(
+def spmd_distribute_tensor(
     tensor: torch.Tensor,
     mesh: DeviceMesh,
     layout: SpmdLayout,
