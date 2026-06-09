@@ -70,9 +70,9 @@ class MinimalAsyncEPDispatchMetadata:
     combine_num_valid_rows: torch.Tensor
     flat_indices_experts_sorted: torch.Tensor
     slot_to_row: torch.Tensor
-    routed_scores: torch.Tensor | None = None
-    num_tokens: int = 0
-    top_k: int = 0
+    routed_scores: torch.Tensor
+    num_tokens: int
+    top_k: int
 
 
 def init_buffer(
@@ -257,7 +257,6 @@ def _copy_rows_to_peers_cuda(
     x: torch.Tensor,
     dst_ranks: torch.Tensor,
     dst_rows: torch.Tensor,
-    valid_rows: torch.Tensor | None,
     num_rows: int,
     *,
     block_m: int = 1,
@@ -292,7 +291,7 @@ def _copy_rows_to_peers_cuda(
         hidden_recv_peer_buffers,
         dst_ranks,
         dst_rows,
-        valid_rows,
+        None,
         ep_size=_group.size(),
         num_rows=num_rows,
         num_cols=x.shape[1],
@@ -439,7 +438,6 @@ def _dispatch_to_experts(
         x_ND,
         dispatch_dst_ranks,
         dispatch_dst_rows,
-        None,
         num_routed_tokens,
         block_m=4,
         num_warps=8,
@@ -458,7 +456,6 @@ def _combine_to_origin(
         x_RD,
         combine_dst_ranks,
         combine_dst_rows,
-        None,
         x_RD.shape[0],
         block_m=4,
         num_valid_rows=combine_num_valid_rows,
@@ -605,7 +602,6 @@ def dispatch_forward(
         dispatch_input,
         dispatch_dst_ranks,
         dispatch_dst_rows,
-        None,
         num_routed_tokens,
         block_m=4,
         num_warps=8,
@@ -643,7 +639,6 @@ def combine(
     slot_to_row_N: torch.Tensor,  # noqa: N803
     flat_indices_experts_sorted_N: torch.Tensor,  # noqa: N803
     routed_scores_N: torch.Tensor,  # noqa: N803
-    has_scores: bool,
     num_tokens: int,
     top_k: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -662,7 +657,7 @@ def combine(
     out_TD = reduce_topk_slots(  # noqa: N806
         routed_output_ND,
         slot_to_row_N,
-        routed_scores_N if has_scores else None,
+        routed_scores_N,
         num_tokens=num_tokens,
         top_k=top_k,
         scores_are_slot_ordered=True,
@@ -681,7 +676,6 @@ def combine_fake(
     slot_to_row_N: torch.Tensor,  # noqa: N803
     flat_indices_experts_sorted_N: torch.Tensor,  # noqa: N803
     routed_scores_N: torch.Tensor,  # noqa: N803
-    has_scores: bool,
     num_tokens: int,
     top_k: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -692,7 +686,6 @@ def combine_fake(
     del combine_num_valid_rows
     del slot_to_row_N
     del routed_scores_N
-    del has_scores
     del top_k
     return (
         x.new_empty(num_tokens, x.shape[1]),
@@ -791,7 +784,6 @@ def combine_backward(
     saved_routed_output_ND: torch.Tensor,  # noqa: N803
     has_grad_out: bool,
     has_grad_routed_output_extra: bool,
-    has_scores: bool,
     routed_scores_requires_grad: bool,
     top_k: int,
     receive_capacity: int,
@@ -803,12 +795,12 @@ def combine_backward(
         grad_routed_output = expand_topk_grad(
             grad_out,
             flat_indices_experts_sorted_N,
-            routed_scores_N if has_scores else None,
+            routed_scores_N,
             top_k=top_k,
             dtype=grad_out.dtype,
             scores_are_slot_ordered=True,
         )
-        if has_scores and routed_scores_requires_grad:
+        if routed_scores_requires_grad:
             grad_scores = topk_scores_grad(
                 saved_routed_output_ND,
                 grad_out,
@@ -849,7 +841,6 @@ def combine_backward_fake(
     saved_routed_output_ND: torch.Tensor,  # noqa: N803
     has_grad_out: bool,
     has_grad_routed_output_extra: bool,
-    has_scores: bool,
     routed_scores_requires_grad: bool,
     top_k: int,
     receive_capacity: int,
@@ -863,7 +854,7 @@ def combine_backward_fake(
     del top_k
     grad_scores_shape = (
         routed_scores_N.shape
-        if has_grad_out and has_scores and routed_scores_requires_grad
+        if has_grad_out and routed_scores_requires_grad
         else (0,)
     )
     return (
@@ -985,12 +976,11 @@ def combine_autograd_backward(ctx, grad_out, grad_routed_output_extra):
             saved_routed_output_ND,
             grad_out is not None,
             grad_routed_output_extra is not None,
-            ctx.has_scores,
             ctx.routed_scores_requires_grad,
             ctx.top_k,
             ctx.receive_capacity,
         )
-        if grad_out is not None and ctx.has_scores and ctx.routed_scores_requires_grad:
+        if grad_out is not None and ctx.routed_scores_requires_grad:
             grad_scores = grad_scores_tensor
 
     return (
@@ -1003,7 +993,6 @@ def combine_autograd_backward(ctx, grad_out, grad_routed_output_extra):
         None,
         None,
         grad_scores,
-        None,
         None,
         None,
     )
@@ -1020,18 +1009,16 @@ def combine_setup_context(ctx, inputs, output):
         _slot_to_row_N,
         flat_indices_experts_sorted_N,
         routed_scores_N,
-        has_scores,
         _num_tokens,
         top_k,
     ) = inputs
     _, routed_output_ND = output
-    ctx.has_scores = has_scores
     ctx.top_k = top_k
     ctx.receive_capacity = x.shape[0]
     ctx.routed_scores_requires_grad = routed_scores_N.requires_grad
     saved_routed_output_ND = (  # noqa: N806
         routed_output_ND
-        if has_scores and routed_scores_N.requires_grad
+        if routed_scores_N.requires_grad
         else routed_output_ND.new_empty(0)
     )
     ctx.save_for_backward(
@@ -1068,7 +1055,7 @@ def dispatch_tokens(
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
     token_indices_experts_sorted_N: torch.Tensor,  # noqa: N803
     flat_indices_experts_sorted_N: torch.Tensor,  # noqa: N803
-    routed_scores_N: torch.Tensor | None,  # noqa: N803
+    routed_scores_N: torch.Tensor,  # noqa: N803
     num_tokens: int,
     num_local_experts: int,
     group: dist.ProcessGroup,
@@ -1111,11 +1098,6 @@ def dispatch_tokens(
         raise ValueError(
             "MinimalAsyncEP expects token-ordered dispatch_input with one row per "
             f"token, got {dispatch_input.shape[0]} rows for {num_tokens} tokens."
-        )
-    if routed_scores_N is None:
-        raise ValueError(
-            "MinimalAsyncEP requires routed_scores_N because it only supports "
-            "score_before_experts=False."
         )
     if routed_scores_N.dtype != dispatch_input.dtype:
         routed_scores_N = routed_scores_N.to(dispatch_input.dtype)
@@ -1181,12 +1163,6 @@ def combine_tokens(
     """Combine expert outputs back to original token order."""
     if _hidden_recv_buffers is None or _rendezvous_handle is None:
         raise RuntimeError("MinimalAsyncEP buffer not initialized.")
-    has_scores = metadata.routed_scores is not None
-    routed_scores_N = (  # noqa: N806
-        metadata.routed_scores
-        if metadata.routed_scores is not None
-        else hidden_states.new_empty(0)
-    )
     out_TD, _routed_output_ND = combine(  # noqa: N806
         hidden_states,
         metadata.dispatch_dst_ranks,
@@ -1196,8 +1172,7 @@ def combine_tokens(
         metadata.combine_num_valid_rows,
         metadata.slot_to_row,
         metadata.flat_indices_experts_sorted,
-        routed_scores_N,
-        has_scores,
+        metadata.routed_scores,
         metadata.num_tokens,
         metadata.top_k,
     )
