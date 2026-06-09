@@ -644,6 +644,7 @@ def active_swiglu_backward(
     up: torch.Tensor,
     active_rows: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute active-row gradients for ``minimal_async_ep::active_swiglu``."""
     return active_swiglu_backward_kernel(grad_out, gate, up, active_rows)
 
 
@@ -672,6 +673,7 @@ def dispatch_backward(
     num_tokens: int,
     top_k: int,
 ) -> torch.Tensor:
+    """Move dispatched activation gradients back and reduce routed top-k rows."""
     grad_routed_input = _combine_to_origin(
         grad_hidden,
         combine_dst_ranks,
@@ -717,6 +719,7 @@ def combine_backward(
     top_k: int,
     receive_capacity: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Expand combine gradients and dispatch them back to expert-owner ranks."""
     grad_routed_output = expand_topk_grad(
         grad_out,
         E_row_to_T_row_N,
