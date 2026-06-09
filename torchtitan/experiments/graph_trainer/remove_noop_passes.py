@@ -23,6 +23,28 @@ import torch
 
 from torchtitan.tools.logging import logger
 
+# Op overloads that are registered side-effectful but that we want DCE to treat
+# as pure (so unused instances, and their now-orphaned input chains, are dropped).
+# Currently just the ``aten._assert_async`` runtime asserts; add other removable
+# side-effect ops here as they come up.
+_FORCE_PURE_TARGETS = (
+    torch.ops.aten._assert_async.msg,
+    torch.ops.aten._assert_async.default,
+)
+
+
+def _is_impure_for_dce(node: torch.fx.Node) -> bool:
+    """``is_impure_node`` for DCE that forces :data:`_FORCE_PURE_TARGETS` pure.
+
+    Mirrors the default ``node.is_impure()`` for every node except the targets in
+    :data:`_FORCE_PURE_TARGETS`, which we report as pure so dead-code elimination
+    can drop them (and their now-orphaned input chains). See
+    ``eliminate_dead_code_pass``.
+    """
+    if node.op == "call_function" and node.target in _FORCE_PURE_TARGETS:
+        return False
+    return node.is_impure()
+
 
 def eliminate_dead_code_pass(
     gm: torch.fx.GraphModule, example_inputs=None
@@ -35,6 +57,10 @@ def eliminate_dead_code_pass(
     dropped. Running it first shrinks the graph for every downstream pass (memory
     policy, bucketing, cudagraph partitioning), and removes orphaned subtrees left
     by tracing so they don't get scheduled or counted.
+
+    Dead ``aten._assert_async`` runtime asserts are dropped too, via the custom
+    :func:`_is_impure_for_dce` (default DCE keeps them, and their condition chain,
+    as side-effectful). They are pure runtime guards with no bearing on numerics.
 
     Keeping a side-effecting custom op alive: a custom op with a real side effect
     but no users (e.g. a debug/log op, a barrier, an in-place buffer write) is
@@ -67,7 +93,7 @@ def eliminate_dead_code_pass(
     Returns:
         The graph module with dead code removed.
     """
-    if gm.graph.eliminate_dead_code():
+    if gm.graph.eliminate_dead_code(is_impure_node=_is_impure_for_dce):
         gm.graph.lint()
         gm.recompile()
         logger.info("Eliminated dead code from the graph")
