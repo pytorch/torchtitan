@@ -33,39 +33,6 @@ _TRITON_DTYPE_NAMES = {
 
 
 @triton.jit
-def _count_expert_ids_kernel(
-    expert_ids,
-    counts,
-    NUM_IDS: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-) -> None:
-    offset = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offset < NUM_IDS
-    expert = tl.load(expert_ids + offset, mask=mask, other=0)
-    tl.atomic_add(counts + expert, 1, mask=mask, sem="relaxed")
-
-
-@triton.jit
-def _scatter_expert_indices_kernel(
-    expert_ids,
-    starts,
-    write_offsets,
-    token_indices,
-    flat_indices,
-    NUM_IDS: tl.constexpr,
-    TOP_K: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-) -> None:
-    offset = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offset < NUM_IDS
-    expert = tl.load(expert_ids + offset, mask=mask, other=0)
-    local_offset = tl.atomic_add(write_offsets + expert, 1, mask=mask, sem="relaxed")
-    dst = tl.load(starts + expert, mask=mask, other=0) + local_offset
-    tl.store(flat_indices + dst, offset, mask=mask)
-    tl.store(token_indices + dst, offset // TOP_K, mask=mask)
-
-
-@triton.jit
 def _copy_full_counts_to_peer_ptrs_kernel(
     counts,
     dst_ptrs,
@@ -584,12 +551,12 @@ def expert_counting_sort(
     topk_expert_ids: torch.Tensor,
     *,
     num_experts: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Group flattened top-k slots by expert id without a global sort.
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Group flattened top-k slots by expert id using stable argsort.
 
-    Returns ``(counts, token_indices, flat_indices)``. Ordering within each
-    expert segment is unspecified; callers must use ``flat_indices`` for the
-    inverse mapping instead of relying on stable order.
+    Returns ``(counts, flat_indices)`` with the same ordering as
+    AllToAllTokenDispatcher: sorted by expert id, stable by original flattened
+    top-k slot within each expert segment.
     """
     if topk_expert_ids.ndim != 2:
         raise ValueError("expert_counting_sort expects a 2D topk_expert_ids tensor.")
@@ -598,45 +565,22 @@ def expert_counting_sort(
     if topk_expert_ids.dtype not in (torch.int32, torch.int64):
         raise ValueError("expert_counting_sort expects integer expert ids.")
 
-    num_ids = topk_expert_ids.numel()
-    top_k = topk_expert_ids.shape[1]
     flat_expert_ids = topk_expert_ids.reshape(-1)
 
-    counts = torch.zeros(
-        num_experts,
-        dtype=torch.int64,
+    flat_indices = torch.argsort(flat_expert_ids, stable=True)
+    sorted_expert_ids = flat_expert_ids[flat_indices]
+    expert_boundaries = torch.arange(
+        num_experts + 1,
+        dtype=flat_expert_ids.dtype,
         device=topk_expert_ids.device,
     )
-    block_size = 256
-    grid = (triton.cdiv(num_ids, block_size),)
-    _count_expert_ids_kernel[grid](
-        flat_expert_ids,
-        counts,
-        NUM_IDS=num_ids,
-        BLOCK_SIZE=block_size,
-        num_warps=4,
+    count_offsets = torch.searchsorted(
+        sorted_expert_ids,
+        expert_boundaries,
+        right=False,
     )
-
-    starts = counts.cumsum(0) - counts
-    write_offsets = torch.zeros_like(counts)
-    token_indices = torch.empty(
-        num_ids,
-        dtype=torch.int64,
-        device=topk_expert_ids.device,
-    )
-    flat_indices = torch.empty_like(token_indices)
-    _scatter_expert_indices_kernel[grid](
-        flat_expert_ids,
-        starts,
-        write_offsets,
-        token_indices,
-        flat_indices,
-        NUM_IDS=num_ids,
-        TOP_K=top_k,
-        BLOCK_SIZE=block_size,
-        num_warps=4,
-    )
-    return counts, token_indices, flat_indices
+    counts = count_offsets[1:] - count_offsets[:-1]
+    return counts, flat_indices
 
 
 def copy_full_counts_to_peers(
