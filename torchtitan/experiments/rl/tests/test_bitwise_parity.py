@@ -63,11 +63,11 @@ from torchtitan.experiments.rl.config_registry import (
     rl_grpo_qwen3_0_6b_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
 )
-from torchtitan.experiments.rl.trainer import RLTrainer
 from torchtitan.experiments.rl.models.vllm_registry import (
     registry_to_vllm,
     VLLM_MODEL_NAME,
 )
+from torchtitan.experiments.rl.trainer import RLTrainer
 from torchtitan.models.common.attention import (
     create_attention_mask,
     FlexAttention,
