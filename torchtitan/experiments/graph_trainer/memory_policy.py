@@ -89,15 +89,6 @@ def _make_full_memory_policy() -> Callable:
     return policy_fn
 
 
-def _make_none_memory_policy() -> Callable:
-    """No-recompute policy: mark every tagged forward op as MUST_SAVE."""
-
-    def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
-        return CheckpointPolicy.MUST_SAVE
-
-    return policy_fn
-
-
 def _make_eager_memory_policy(save_ops: set | None = None) -> Callable:
     """Eager-compatible SAC policy that alternates mm ops between save/recompute.
 
@@ -292,17 +283,6 @@ def _full_memory_policy_pass(
     return gm
 
 
-@register_memory_policy("none")
-def _none_memory_policy_pass(
-    gm: torch.fx.GraphModule,
-    *,
-    config: "GraphTrainer.Config",
-) -> torch.fx.GraphModule:
-    """No recompute: save all tagged forward activations."""
-    tag_sac_policy(gm, policy_fn=_make_none_memory_policy())
-    return gm
-
-
 @register_memory_policy("eager")
 def _eager_memory_policy_pass(
     gm: torch.fx.GraphModule,
@@ -340,7 +320,6 @@ def tag_with_memory_policy_pass(
     The ``config.compile.memory_policy`` selects the tagging strategy:
         default: SAC with all compute-intensive ops saved.
         full: full recompute — only layer outputs are saved.
-        none: no recompute — save all tagged forward activations.
         eager: SAC alternating mm ops between save/recompute.
         sac_and_offload: SAC + CPU offload within budget.
 
