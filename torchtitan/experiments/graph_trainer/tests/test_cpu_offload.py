@@ -111,6 +111,64 @@ class TestCpuOffloadPass(TestCase):
                 "layers.2", fqn, "Last layer nodes should not be tagged for offload"
             )
 
+    def test_must_save_sym_int_not_offloaded(self):
+        """A MUST_SAVE sym-int node must survive tag_all_offloadable_activations.
+
+        tag_sac_policy force-saves sym-int shape reads (sym_size etc.). The
+        offload pass only considers nodes whose meta["val"] is a real tensor, so
+        a sym-int (whose val is a SymInt) must be left untouched -- otherwise its
+        MUST_SAVE tag would be flipped to MUST_CPU_OFFLOAD.
+        """
+        from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+        from torchtitan.experiments.graph_trainer.cpu_offload import (
+            tag_all_offloadable_activations,
+        )
+
+        shape_env = ShapeEnv()
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        x.meta["val"] = self._make_fake_val()
+
+        # Forward tensor in a non-last layer: a genuine offload candidate.
+        mm = graph.call_function(torch.ops.aten.mm.default, args=(x, x))
+        mm.meta["autograd_backward"] = False
+        mm.meta["custom"] = {"module_fqn": "layers.0.block"}
+        mm.meta["val"] = self._make_fake_val()
+
+        # Sym-int shape read of mm in the same non-last layer, force-saved as
+        # tag_sac_policy would. Its val is a SymInt, not a tensor.
+        sym = graph.call_function(torch.ops.aten.sym_size.int, args=(mm, 0))
+        sym.meta["autograd_backward"] = False
+        sym.meta["custom"] = {"module_fqn": "layers.0.block"}
+        sym.meta["val"] = shape_env.create_unbacked_symint()
+        sym.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+
+        # Backward consumers (last layer): mm feeds a bwd matmul; sym feeds a
+        # bwd view's size arg -- both forward values are live into backward.
+        bwd_mm = graph.call_function(torch.ops.aten.mm.default, args=(mm, mm))
+        bwd_mm.meta["autograd_backward"] = True
+        bwd_mm.meta["custom"] = {"module_fqn": "layers.1.block"}
+        bwd_mm.meta["val"] = self._make_fake_val()
+
+        bwd_view = graph.call_function(
+            torch.ops.aten.view.default, args=(bwd_mm, [sym, sym])
+        )
+        bwd_view.meta["autograd_backward"] = True
+        bwd_view.meta["custom"] = {"module_fqn": "layers.1.block"}
+        bwd_view.meta["val"] = self._make_fake_val()
+
+        graph.output(bwd_view)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        tag_all_offloadable_activations(gm)
+
+        # The sym-int keeps its MUST_SAVE tag (never flipped to CPU offload)...
+        self.assertIs(sym.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        # ...while the real tensor in the same non-last layer WAS offloaded,
+        # proving the pass ran and would have touched the sym node if eligible.
+        self.assertIs(mm.meta["recompute"], CheckpointPolicy.MUST_CPU_OFFLOAD)
+
     def test_tag_no_backward_consumers(self):
         """Forward nodes without backward consumers should NOT be tagged."""
         from torchtitan.experiments.graph_trainer.cpu_offload import (

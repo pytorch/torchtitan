@@ -23,7 +23,7 @@ from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger
 
 if importlib.util.find_spec("torchft") is not None:
-    import torchft as ft
+    import torchft
 
     if TYPE_CHECKING:
         from torchft import local_sgd
@@ -33,7 +33,7 @@ else:
     has_torchft = False
 
 
-class FTManager(Configurable):
+class TorchFTManager(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         enable: bool = False
@@ -89,9 +89,9 @@ class FTManager(Configurable):
 
         process_group_timeout = timedelta(milliseconds=config.process_group_timeout_ms)
         if config.process_group == "gloo":
-            pg = ft.ProcessGroupGloo(timeout=process_group_timeout)
+            pg = torchft.ProcessGroupGloo(timeout=process_group_timeout)
         elif config.process_group == "nccl":
-            pg = ft.ProcessGroupNCCL(timeout=process_group_timeout)
+            pg = torchft.ProcessGroupNCCL(timeout=process_group_timeout)
         elif config.process_group == "mccl":
             import torchcomms
             from torchft.torchcomms import ProcessGroupTorchComms
@@ -110,7 +110,7 @@ class FTManager(Configurable):
         # If the training method is specific, then the quorum should be synchronous
         self.use_async_quorum = config.semi_sync_method is None
 
-        self._manager = ft.Manager(
+        self._manager = torchft.Manager(
             pg=pg,
             min_replica_size=config.min_replica_size,
             load_state_dict=None,
@@ -122,7 +122,7 @@ class FTManager(Configurable):
         self.replica_id = config.replica_id
 
         if self.use_async_quorum:
-            self.replicate_pg = ft.process_group.ManagedProcessGroup(self._manager)
+            self.replicate_pg = torchft.process_group.ManagedProcessGroup(self._manager)
             self.replicate_pg.register("dp_replicate")
 
     @property
@@ -130,7 +130,7 @@ class FTManager(Configurable):
         return self._manager is not None
 
     @property
-    def manager(self) -> "ft.Manager":
+    def manager(self) -> "torchft.Manager":
         assert self._manager is not None
         return self._manager
 
@@ -156,7 +156,7 @@ class FTManager(Configurable):
     @property
     def loss_sync_pg(
         self,
-    ) -> "ft.process_group.ManagedProcessGroup" | None:
+    ) -> "torchft.process_group.ManagedProcessGroup" | None:
         if self.enabled and self.use_async_quorum:
             return self.replicate_pg
         else:
@@ -165,8 +165,8 @@ class FTManager(Configurable):
 
 
 def maybe_semi_sync_training(
-    ft_config: "FTManager.Config",
-    ft_manager: FTManager,
+    ft_config: "TorchFTManager.Config",
+    ft_manager: TorchFTManager,
     model: torch.nn.Module,
     n_layers: int,
     optimizer: torch.optim.Optimizer,
@@ -175,16 +175,18 @@ def maybe_semi_sync_training(
     """
     If TorchFT is enabled and the config is set, use semi_sync_method
     """
-    from torchtitan.experiments.ft.config import FaultTolerance as ExtendedFTConfig
+    from torchtitan.experiments.torchft.config import (
+        FaultTolerance as ExtendedTorchFTConfig,
+    )
 
-    extend_ft_config = cast(ExtendedFTConfig, ft_config)
+    extend_ft_config = cast(ExtendedTorchFTConfig, ft_config)
     semi_sync_method = extend_ft_config.semi_sync_method
     if extend_ft_config.enable and semi_sync_method is not None:
         from torchft import local_sgd
 
         assert (
             ft_manager._manager is not None
-        ), "FTManager must be enabled to use semi-sync training."
+        ), "TorchFTManager must be enabled to use semi-sync training."
         logger.info(
             f"using fragment function to split model: {fragment_fn is not None}"
         )

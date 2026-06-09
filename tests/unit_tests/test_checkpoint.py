@@ -801,11 +801,12 @@ class TestConfigPostInit(unittest.TestCase):
 
     def test_dependency_assertions(self):
         """Test logic where one field requires another to be set."""
-        # HF load requires path and model_only
-        with self.assertRaisesRegex(
-            ValueError, "requires both initial_load_path and initial_load_model_only"
-        ):
-            CheckpointManager.Config(initial_load_in_hf=True, initial_load_path=None)
+        # HF load needs model_only=True; initial_load_path stays optional.
+        with self.assertRaisesRegex(ValueError, "requires initial_load_model_only"):
+            CheckpointManager.Config(
+                initial_load_in_hf=True, initial_load_model_only=False
+            )
+        CheckpointManager.Config(initial_load_in_hf=True, initial_load_path=None)
 
         # HF quantized requires HF enabled
         with self.assertRaisesRegex(ValueError, "requires initial_load_in_hf"):

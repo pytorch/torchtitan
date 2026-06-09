@@ -12,6 +12,7 @@ from torchtitan.models.deepseek_v3 import deepseekv3_configs
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 from torchtitan.protocols.model_spec import ModelSpec
 
+from ..common_utils import build_decoder_config_for_backend
 from .model import GraphTrainerDeepSeekV3Model
 from .parallelize import parallelize_deepseekv3
 
@@ -28,12 +29,13 @@ def _parallelize_fn(model, *, compile_config, **kwargs):
 
 def model_registry(
     flavor: str,
-    attn_backend: str = "sdpa",
+    attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
 ) -> ModelSpec:
-    base = deepseekv3_configs[flavor](
-        attn_backend=attn_backend,
+    base = build_decoder_config_for_backend(
+        deepseekv3_configs[flavor],
+        attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
     )

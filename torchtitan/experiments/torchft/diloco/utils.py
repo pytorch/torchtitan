@@ -7,7 +7,7 @@
 import torch.nn as nn
 
 from torchtitan.distributed.pipeline_parallel import _generate_llm_fqn_per_model_part
-from torchtitan.experiments.ft.config import FaultTolerance as FTConfig
+from torchtitan.experiments.torchft.config import FaultTolerance as TorchFTConfig
 from torchtitan.protocols.module import ModuleList
 from torchtitan.tools.logging import logger
 
@@ -111,7 +111,7 @@ def module_split(
 
 def fragment_llm(
     model: nn.Module,
-    ft_config: FTConfig,
+    ft_config: TorchFTConfig,
     n_layers: int,
 ) -> list[nn.Module]:
     assert ft_config.num_fragments > 0
