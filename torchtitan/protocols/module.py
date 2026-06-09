@@ -9,8 +9,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import distribute_tensor, DTensor
 from torch.distributed.tensor.experimental import local_map
 from torch.distributed.tensor.placement_types import Placement
@@ -18,6 +20,55 @@ from torch.distributed.tensor.placement_types import Placement
 from torchtitan.config import Configurable
 from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
+
+
+def _shard_spmd_state(
+    tensor: torch.Tensor,
+    mesh: DeviceMesh,
+    layout: SpmdLayout,
+) -> torch.Tensor:
+    """Materialize local state shards according to the declared SPMD layout.
+
+    Direct ``S(dim)`` layouts are applied per axis. For ``V + PartitionSpec``
+    layouts, raw PartitionSpec tuple order controls repeated sharding of the
+    same tensor dim, e.g. ``(DP, CP)`` means shard by DP, then shard each DP
+    slice by CP.
+    """
+    shard_types = layout.per_axis_spmd_types()
+    if layout.partition_spec is None:
+        axis_shard_dims = [
+            (axis_name, axis_type.dim)
+            for axis_name, axis_type in shard_types.items()
+            if isinstance(axis_type, spmd.Shard)
+        ]
+    else:
+        # When multiple mesh axes shard the same tensor dim, the raw
+        # PartitionSpec tuple defines the slicing order. For example,
+        # PartitionSpec((DP, CP), None) shards by DP first, then CP.
+        axis_shard_dims = []
+        for dim, entry in enumerate(layout.partition_spec):
+            if entry is None:
+                continue
+            axes = entry if isinstance(entry, tuple) else (entry,)
+            for axis_name in axes:
+                axis_shard_dims.append((axis_name, dim))
+
+    assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
+    for axis_name, dim in axis_shard_dims:
+        axis = axis_name.value
+        axis_size = (
+            mesh.size(mesh.mesh_dim_names.index(axis))
+            if axis in mesh.mesh_dim_names
+            else 1
+        )
+        if axis_size > 1:
+            tensor = spmd.shard(
+                tensor,
+                mesh.get_group(axis),
+                src=spmd.I,
+                dst=spmd.S(dim),
+            )
+    return tensor
 
 
 class Module(nn.Module, Configurable):
