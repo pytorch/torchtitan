@@ -99,7 +99,6 @@ class Llama3Model(Decoder):
                 loss_parallel=loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
                 spmd_backend=parallelism.spmd_backend,
-                chunked_loss=chunked_loss,
             )
 
         def get_nparams_and_flops(
