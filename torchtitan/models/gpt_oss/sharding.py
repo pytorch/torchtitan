@@ -6,11 +6,12 @@
 
 from typing import TYPE_CHECKING
 
-from torch.distributed.tensor import Placement, Replicate, Shard
+import spmd_types as spmd
 
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
+    dense_sequence_parallel_placement,
     norm_config,
     rowwise_config,
     set_decoder_sharding_config,
@@ -27,11 +28,11 @@ if TYPE_CHECKING:
 
 # Routed-expert layout for ``GptOssGroupedExperts`` (mlp1/mlp2 fused
 # weights + biases): mlp1 colwise, mlp2 rowwise, mlp2_bias replicated.
-_GPT_OSS_EXPERTS_PARAM_LAYOUT: dict[str, Placement] = {
-    "mlp1_weight_EGD": Shard(1),
-    "mlp1_bias_EG": Shard(1),
-    "mlp2_weight_EDF": Shard(2),
-    "mlp2_bias_ED": Replicate(),
+_GPT_OSS_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
+    "mlp1_weight_EGD": spmd.S(1),
+    "mlp1_bias_EG": spmd.S(1),
+    "mlp2_weight_EDF": spmd.S(2),
+    "mlp2_bias_ED": spmd.R,
 }
 
 
@@ -75,20 +76,25 @@ def _set_gpt_oss_layer_sharding(
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.attention_norm.sharding_config = norm
     layer_cfg.ffn_norm.sharding_config = norm
-    attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
+    attn_x_layout = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.R)
+    )
 
-    # Attention: input x gathered to Replicate, freqs_cis always Replicate.
+    # Attention: input x gathered to Replicate.
     # sinks parameter is sharded across heads via state_shardings.
     attention.sharding_config = ShardingConfig(
-        state_shardings={"sinks": dense_param_placement(tp=Shard(0))},
+        state_shardings={"sinks": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings={
-            "x": dense_activation_placement(tp=attn_x_placement),
-            "freqs_cis": dense_param_placement(tp=Replicate()),
+            "x": attn_x_layout,
         },
         in_dst_shardings={
-            "x": dense_activation_placement(tp=Replicate()),
-            "freqs_cis": dense_param_placement(tp=Replicate()),
+            "x": dense_activation_placement(tp=spmd.R),
         },
+    )
+    attention.rope.sharding_config = ShardingConfig(
+        state_shardings={"cache": dense_param_placement(tp=spmd.R)},
     )
     set_qkv_linear_sharding(attention.qkv_linear)
     attention.wo.sharding_config = rowwise_config(output_sp=enable_sp)

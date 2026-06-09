@@ -34,9 +34,11 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+from torchtitan.distributed.fsdp import (
+    apply_fsdp_to_decoder,
+    get_fsdp_reshard_after_forward_policy,
+)
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
-from torchtitan.models.llama4.parallelize import apply_fsdp
 from torchtitan.models.qwen3_vl.model import Qwen3VLModel
 from torchtitan.tools.logging import logger
 
@@ -158,7 +160,7 @@ def parallelize_qwen3_vl(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    if parallelism.full_dtensor:
+    if parallelism.spmd_backend == "full_dtensor":
         raise NotImplementedError("full_dtensor is not supported yet.")
 
     model_compile_enabled = (
@@ -231,7 +233,7 @@ def parallelize_qwen3_vl(
         )
 
     # FSDP the decoder with MoE-aware sharding
-    apply_fsdp(
+    apply_fsdp_to_decoder(
         model,
         dp_mesh,
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
@@ -242,10 +244,5 @@ def parallelize_qwen3_vl(
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
     )
-
-    logger.info("Applied fully_shard to the Qwen3-VL model")
-
-    if training.enable_cpu_offload:
-        logger.info("Applied CPU Offloading to the Qwen3-VL model")
 
     return model
