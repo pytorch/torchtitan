@@ -25,9 +25,7 @@ from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.logger import init_logger
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.experiments.rl.config_registry import (
-    rl_grpo_qwen3_0_6b_varlen,
-)
+from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b_varlen
 
 
 logger = init_logger(__name__)
