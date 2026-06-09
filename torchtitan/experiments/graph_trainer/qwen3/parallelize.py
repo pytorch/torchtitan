@@ -13,6 +13,7 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.full_dtensor import validate_config
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
@@ -72,20 +73,23 @@ def parallelize_qwen3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
         """
 
-    if parallel_dims.cp_enabled:
-        apply_cp_to_attention(model, parallel_dims)
-
     annotate_qwen3(model)
 
-    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+    if parallelism.spmd_backend == "full_dtensor":
+        validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)
+    else:
+        if parallel_dims.cp_enabled:
+            apply_cp_to_attention(model, parallel_dims)
+        if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+            model.parallelize(parallel_dims)
 
     if parallel_dims.tp_enabled:
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
-    # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
-    # real backend (see ParallelDims._mesh_exist), even at degree 1, so that
-    # MixedPrecisionPolicy's param_dtype cast still applies in single-GPU runs.
+    # Always run simple_fsdp. The DP mesh always exists with a real backend
+    # (see ParallelDims._mesh_exist), even at degree 1, so the
+    # MixedPrecisionPolicy param_dtype cast still applies in single-GPU runs.
     model = apply_simple_fsdp(model, parallel_dims=parallel_dims, training=training)
 
     # Apply compilation based on mode

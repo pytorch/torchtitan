@@ -17,6 +17,10 @@ from torch.utils._pytree import register_constant, register_pytree_node, tree_ma
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
+from torchtitan.distributed.full_dtensor import (
+    resolve_fsdp_mesh,
+    resolve_sparse_fsdp_mesh,
+)
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
@@ -191,35 +195,37 @@ def apply_simple_fsdp(
 ) -> nn.Module:
     """Wrap the model (and any MoE experts) with graph_trainer's simple_fsdp.
 
-    For MoE-enabled models, ``moe.experts`` submodules are separately wrapped
-    on the EDP mesh when expert parallelism is enabled.
+    Resolves the dense / routed-expert DP meshes from ``parallel_dims``. Under
+    full_dtensor the meshes are the full SPMD meshes and the ``*_mesh_dims`` name
+    their DP axes; on the legacy path they are pre-flattened (no dims). The dense
+    ``edp_mesh`` is ``None`` when EP is disabled.
     """
-    if parallel_dims.dp_replicate_enabled:
-        if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-            dp_mesh_dim_names = ["dp_replicate", "fsdp"]
-            dp_mode = "hybrid_shard"
-        else:
-            dp_mesh_dim_names = ["dp_replicate"]
-            dp_mode = "replicate"
+    if parallel_dims.spmd_backend == "full_dtensor":
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
     else:
-        dp_mesh_dim_names = ["fsdp"]
-        dp_mode = "fully_shard"
+        dp_mesh_dims = None
+        edp_mesh_dims = None
+        if parallel_dims.dp_replicate_enabled:
+            dp_axes = (
+                ["dp_replicate", "fsdp"]
+                if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled
+                else ["dp_replicate"]
+            )
+        else:
+            dp_axes = ["fsdp"]
+        dp_mesh = parallel_dims.get_mesh(dp_axes)
+        edp_mesh = None
+        if parallel_dims.ep_enabled:
+            edp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "efsdp"])
+            assert edp_mesh is not None
 
-    dp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
     mp_policy = MixedPrecisionPolicy(
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
     )
 
     if parallel_dims.ep_enabled and hasattr(model, "layers"):
-        edp_mesh_names = (
-            ["dp_replicate", "efsdp"]
-            if parallel_dims.dp_replicate_enabled
-            else ["efsdp"]
-        )
-        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
-        assert edp_mesh is not None
-
         for _, transformer_block in model.layers.items():
             if not getattr(transformer_block, "moe_enabled", False):
                 continue
@@ -234,18 +240,16 @@ def apply_simple_fsdp(
             transformer_block.moe.experts = data_parallel(
                 transformer_block.moe.experts,
                 edp_mesh,
-                dp_mode,
                 mp_policy=mp_policy,
                 shard_dim=experts_shard_dim,
+                dp_mesh_dims=edp_mesh_dims,
             )
 
     model = data_parallel(
         model,
         dp_mesh,
-        dp_mode,
         mp_policy=mp_policy,
+        dp_mesh_dims=dp_mesh_dims,
     )
-    logger.info(
-        "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode
-    )
+    logger.info("Applied Data Parallel (simple_fsdp) to the model")
     return model
