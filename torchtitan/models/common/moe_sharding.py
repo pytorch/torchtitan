@@ -208,8 +208,8 @@ def set_moe_sharding_config(
     ``expert_param_layout`` maps each routed-expert parameter name to its
     dense in/out-dim placement (used on the EP-disabled + TP-enabled path):
     ``Shard(1)`` for colwise, ``Shard(2)`` for rowwise, ``Replicate()`` for
-    replicated bias. The shared ``GroupedExperts`` (qwen3, llama4,
-    deepseek_v3) passes ``{"w1_EFD": Shard(1), "w2_EDF": Shard(2), "w3_EFD": Shard(1)}``;
+    replicated bias. The shared ``GroupedExperts`` (qwen3, deepseek_v3)
+    passes ``{"w1_EFD": Shard(1), "w2_EDF": Shard(2), "w3_EFD": Shard(1)}``;
     ``GptOssGroupedExperts`` passes its mlp1/mlp2 layout.
 
     Args:
