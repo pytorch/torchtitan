@@ -861,12 +861,17 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         tp_mesh: DeviceMesh | None,
     ) -> None:
         """Install the EP mesh used by MinimalAsyncEP dispatch / combine."""
-        self.ep_mesh = ep_mesh
+        if ep_mesh is None:
+            raise ValueError(
+                "MinimalAsyncEPTokenDispatcher requires expert parallelism "
+                "(ep_mesh must be set)."
+            )
         if tp_mesh is not None and tp_mesh.size() > 1:
             raise ValueError(
                 "MinimalAsyncEPTokenDispatcher does not support tensor or sequence "
                 "parallelism."
             )
+        self.ep_mesh = ep_mesh
         self.sp_size = 1
 
     # pyrefly: ignore [bad-override]
@@ -877,14 +882,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
-        if self.ep_mesh is None:
-            raise ValueError(
-                "MinimalAsyncEPTokenDispatcher requires expert parallelism "
-                "(ep_mesh must be set)."
-            )
-        if self.sp_size != 1:
-            raise ValueError("MinimalAsyncEPTokenDispatcher requires sp_size == 1.")
-
+        assert self.ep_mesh is not None, "ep_mesh must be set before dispatch"
         ep_group = self.ep_mesh.get_group()
         num_local_experts = self.num_experts // ep_group.size()
         input_is_token_ordered = not self.score_before_experts
