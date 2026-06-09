@@ -15,8 +15,11 @@ from torch.distributed.tensor import DeviceMesh
 
 from torchtitan.config import Configurable
 from torchtitan.distributed.minimal_async_ep import (
+    MinimalAsyncEPDispatch,
+    MinimalAsyncEPDispatchMetadata,
     combine_tokens,
-    dispatch_tokens,
+    dispatch_metadata,
+    invert_flat_indices,
 )
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 
@@ -887,28 +890,115 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
+        """Reorder tokens, then MinimalAsyncEP dispatch to expert-parallel ranks.
+
+        Logical shapes match ``AllToAllTokenDispatcher``:
+            B = batch size before flattening, L = sequence length before
+                flattening, and T = B * L local tokens.
+            D = model dimension of each token row.
+            E = global number of experts, EP = expert-parallel group size,
+                and e = E / EP local experts per EP rank.
+            K = top-k router choices per token.
+            N = routed slots before EP exchange, T * K.
+            R = active rows assigned to this rank's local experts,
+                sum(num_tokens_per_local_expert_e).
+
+        MinimalAsyncEP stores ``routed_input_RD`` in a static-capacity receive
+        buffer with row capacity ``R_max = EP * T * min(K, e)``. Only the
+        first ``R`` rows are active; padding rows keep the launch shape static.
+
+        Args:
+            x_TD: ``(T, D)`` local token shard.
+            topk_scores_TK: ``(T, K)`` routing scores.
+            topk_expert_ids_TK: ``(T, K)`` expert indices.
+            num_local_tokens_per_expert_E: ``(E,)`` token counts for this local
+                token shard.
+
+        Returns:
+            routed_input_RD: logical
+                ``[R = sum(num_tokens_per_local_expert_e), input_dim(D)]``.
+                Tokens in expert-major order for local experts, physically
+                padded to ``(R_max, D)`` for this backend.
+            num_tokens_per_local_expert_e: ``(num_local_experts,)`` token counts
+            metadata: dispatch metadata for combine()
+        """
         assert self.ep_mesh is not None, "ep_mesh must be set before dispatch"
         ep_group = self.ep_mesh.get_group()
 
+        # A slot is one flattened (token, top-k choice) routing entry. Sorting
+        # slot ids by expert id creates the expert-sorted routed rows used by
+        # MinimalAsyncEP; floor-dividing by top_k gives each row's source token.
         flat_indices_experts_sorted_N = torch.argsort(
             topk_expert_ids_TK.reshape(-1), stable=True
         )
         token_indices_experts_sorted_N = flat_indices_experts_sorted_N // self.top_k
 
-        dispatch_input = x_TD
         routed_scores_N = topk_scores_TK.view(-1)
+        if routed_scores_N.dtype != x_TD.dtype:
+            routed_scores_N = routed_scores_N.to(x_TD.dtype)
 
-        hidden_states_RD, tokens_per_expert_E, state = dispatch_tokens(
-            dispatch_input,
+        ep_size = ep_group.size()
+        num_tokens = x_TD.shape[0]
+        num_routed_tokens = flat_indices_experts_sorted_N.numel()
+        num_experts = num_local_tokens_per_expert_E.numel()
+        top_k = num_routed_tokens // num_tokens
+        # TODO(xmfan): make this capacity configurable by user
+        num_receive_rows_per_source_rank = num_tokens * min(
+            top_k, num_experts // ep_size
+        )
+        receive_capacity = ep_size * num_receive_rows_per_source_rank
+
+        (
+            dispatch_dst_ranks,  # local routed row -> destination EP rank
+            dispatch_dst_rows,  # local routed row -> destination receive row
+            combine_dst_ranks,  # received row -> origin EP rank; length R_max
+            combine_dst_rows,  # received row -> origin routed row; length R_max
+            combine_num_valid_rows,  # actual received rows, device-side scalar
+            num_tokens_per_local_expert_e,  # local expert -> active row count
+        ) = dispatch_metadata(
             num_local_tokens_per_expert_E,
-            token_indices_experts_sorted_N,
+            num_routed_tokens,
+            receive_capacity,
+            ep_size,
+        )
+
+
+        # Invert the expert-sorted slot permutation for combine. Example:
+        # flat_indices_experts_sorted_N=[2, 0, 3, 1] means routed row 0 came
+        # from slot 2, so slot_to_row_N=[1, 3, 0, 2] maps slot 2 back to row 0.
+        slot_to_row_N = invert_flat_indices(  # noqa: N806
             flat_indices_experts_sorted_N,
-            routed_scores_N,
-            ep_group,
+            num_routed_tokens,
+        )
+
+        hidden_states_RD = MinimalAsyncEPDispatch.apply(
+            x_TD,
+            dispatch_dst_ranks,
+            dispatch_dst_rows,
+            combine_dst_ranks,
+            combine_dst_rows,
+            combine_num_valid_rows,
+            token_indices_experts_sorted_N,
+            slot_to_row_N,
+            num_tokens,
+            receive_capacity,
+        )
+
+        state = MinimalAsyncEPDispatchMetadata(
+            dispatch_dst_ranks=dispatch_dst_ranks,
+            dispatch_dst_rows=dispatch_dst_rows,
+            combine_dst_ranks=combine_dst_ranks,
+            combine_dst_rows=combine_dst_rows,
+            combine_num_valid_rows=combine_num_valid_rows,
+            flat_indices_experts_sorted=flat_indices_experts_sorted_N,
+            slot_to_row=slot_to_row_N,
+            routed_scores=routed_scores_N,
+            num_tokens=num_tokens,
+            top_k=top_k,
         )
 
         metadata = DeepEPDispatchMetadata(state=state)
-        return hidden_states_RD, tokens_per_expert_E, metadata
+        return hidden_states_RD, num_tokens_per_local_expert_e, metadata
 
     # pyrefly: ignore [bad-override]
     def combine(

@@ -54,7 +54,23 @@ _COUNTS_READY_CHANNEL = 0
 
 @dataclass
 class MinimalAsyncEPDispatchMetadata:
-    """MinimalAsyncEP metadata from dispatch needed for combine."""
+    """MinimalAsyncEP metadata from dispatch needed for combine.
+
+    Shape symbols match ``MinimalAsyncEPTokenDispatcher.dispatch`` and
+    ``AllToAllTokenDispatcher``: ``T`` local tokens, ``D`` model dimension,
+    ``N = T * K`` routed rows before EP exchange, and ``R`` active rows
+    assigned to this rank's local experts. MinimalAsyncEP additionally keeps
+    a static receive capacity ``R_max >= R``.
+
+    Field shapes:
+        dispatch_dst_ranks, dispatch_dst_rows: ``(N,)``.
+        combine_dst_ranks, combine_dst_rows: ``(R_max,)``.
+        combine_num_valid_rows: ``(1,)`` active receive rows, where
+            ``combine_num_valid_rows[0] == R``.
+        flat_indices_experts_sorted, slot_to_row, routed_scores: ``(N,)``.
+        num_tokens: ``T``.
+        top_k: ``K``.
+    """
 
     dispatch_dst_ranks: torch.Tensor
     dispatch_dst_rows: torch.Tensor
@@ -925,81 +941,24 @@ combine.register_autograd(
 )
 
 
-def dispatch_tokens(
-    dispatch_input: torch.Tensor,
-    num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
-    token_indices_experts_sorted_N: torch.Tensor,  # noqa: N803
-    flat_indices_experts_sorted_N: torch.Tensor,  # noqa: N803
-    routed_scores_N: torch.Tensor,  # noqa: N803
-    group: dist.ProcessGroup,
-) -> tuple[torch.Tensor, torch.Tensor, MinimalAsyncEPDispatchMetadata]:
-    """Dispatch tokens to experts via MinimalAsyncEP."""
-    ep_size = group.size()
-    num_experts = num_local_tokens_per_expert_E.numel()
-    num_tokens = dispatch_input.shape[0]
-    num_routed_tokens = flat_indices_experts_sorted_N.numel()
-    if routed_scores_N.dtype != dispatch_input.dtype:
-        routed_scores_N = routed_scores_N.to(dispatch_input.dtype)
-
-    top_k = num_routed_tokens // num_tokens
-    slot_size = num_tokens * min(top_k, num_experts // ep_size)
-    receive_capacity = ep_size * slot_size
-
-    (
-        dispatch_dst_ranks,
-        dispatch_dst_rows,
-        combine_dst_ranks,
-        combine_dst_rows,
-        combine_num_valid_rows,
-        tokens_per_expert,
-    ) = dispatch_metadata(
-        num_local_tokens_per_expert_E,
-        num_routed_tokens,
-        receive_capacity,
-        ep_size,
-    )
-
-    # Invert the expert-sorted slot permutation for combine. Example:
-    # flat_indices_experts_sorted_N=[2, 0, 3, 1] means routed row 0 came
-    # from slot 2, so slot_to_row_N=[1, 3, 0, 2] maps slot 2 back to row 0.
-    slot_to_row_N = invert_flat_indices(  # noqa: N806
-        flat_indices_experts_sorted_N,
-        num_routed_tokens,
-    )
-
-    hidden = MinimalAsyncEPDispatch.apply(
-        dispatch_input,
-        dispatch_dst_ranks,
-        dispatch_dst_rows,
-        combine_dst_ranks,
-        combine_dst_rows,
-        combine_num_valid_rows,
-        token_indices_experts_sorted_N,
-        slot_to_row_N,
-        num_tokens,
-        receive_capacity,
-    )
-
-    metadata = MinimalAsyncEPDispatchMetadata(
-        dispatch_dst_ranks=dispatch_dst_ranks,
-        dispatch_dst_rows=dispatch_dst_rows,
-        combine_dst_ranks=combine_dst_ranks,
-        combine_dst_rows=combine_dst_rows,
-        combine_num_valid_rows=combine_num_valid_rows,
-        flat_indices_experts_sorted=flat_indices_experts_sorted_N,
-        slot_to_row=slot_to_row_N,
-        routed_scores=routed_scores_N,
-        num_tokens=num_tokens,
-        top_k=top_k,
-    )
-    return hidden, tokens_per_expert, metadata
-
-
 def combine_tokens(
     hidden_states: torch.Tensor,
     metadata: MinimalAsyncEPDispatchMetadata,
 ) -> torch.Tensor:
-    """Combine expert outputs back to original token order."""
+    """Combine expert outputs back to original token order.
+
+    Shape symbols match ``MinimalAsyncEPTokenDispatcher.dispatch`` and
+    ``AllToAllTokenDispatcher``.
+
+    Args:
+        hidden_states: logical ``(R, D)`` expert outputs in the same
+            expert-major layout returned by the matching dispatch. For
+            MinimalAsyncEP this is physically padded to ``(R_max, D)``.
+        metadata: routing metadata from the matching dispatch.
+
+    Returns:
+        Combined token outputs with shape ``(T, D)``.
+    """
     out_TD, _routed_output_ND = combine(  # noqa: N806
         hidden_states,
         metadata.dispatch_dst_ranks,
@@ -1020,7 +979,6 @@ __all__ = [
     "MinimalAsyncEPDispatchMetadata",
     "active_swiglu",
     "combine_tokens",
-    "dispatch_tokens",
     "init_buffer",
     "invert_flat_indices",
 ]
