@@ -16,7 +16,6 @@ from torch.testing._internal.common_fsdp import FSDPTest
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedCELossWithParamGrads,
 )
-
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
@@ -949,7 +948,7 @@ class TestTraceDTensor(unittest.TestCase):
                 f"{name} should have been migrated to CUDA",
             )
 
-        gm = cudagraph_pass(gm, traced.example_inputs, is_forward=True)
+        gm = cudagraph_pass(gm, traced.example_inputs)
         real_x = torch.zeros(4, dtype=torch.float32, device=self.DEVICE)
         expected = f({}, real_x.clone())
         for _ in range(3):
@@ -1250,7 +1249,7 @@ class TestTraceModels(unittest.TestCase):
             get_document_mask_mod,
         )
         from torchtitan.models.common.nn_modules import Linear, RMSNorm
-        from torchtitan.models.common.rope import RoPE
+        from torchtitan.models.common.rope import ComplexRoPE
         from torchtitan.models.deepseek_v3.model import Attention as DSAttention
 
         dim = 64
@@ -1277,6 +1276,11 @@ class TestTraceModels(unittest.TestCase):
                         qk_nope_head_dim=qk_nope_head_dim,
                         qk_rope_head_dim=rope_dim,
                         v_head_dim=v_head_dim,
+                        rope=ComplexRoPE.Config(
+                            dim=rope_dim,
+                            max_seq_len=seq_len,
+                            scaling="none",
+                        ),
                         q_norm=RMSNorm.Config(normalized_shape=1),
                         kv_norm=RMSNorm.Config(normalized_shape=kv_lora_rank),
                         inner_attention=FlexAttention.Config(),
@@ -1299,24 +1303,16 @@ class TestTraceModels(unittest.TestCase):
                         ),
                     ),
                 )
-                self.rope = RoPE(
-                    RoPE.Config(
-                        dim=rope_dim,
-                        max_seq_len=seq_len,
-                        backend="complex",
-                        scaling="none",
-                    )
-                )
                 self.proj = nn.Linear(dim, vocab_size)
 
             def init_states(self, buffer_device=None):
-                self.rope._init_self_buffers(
+                self.attn.rope._init_self_buffers(
                     buffer_device=buffer_device or torch.device("cuda")
                 )
 
             def forward(self, tokens, block_mask):
                 x = self.embed(tokens)
-                x = self.attn(x, self.rope.cache, block_mask)
+                x = self.attn(x, block_mask)
                 return self.proj(x)
 
         model = TinyFlexMLA().to(device=self.DEVICE, dtype=self.DTYPE)
@@ -1367,20 +1363,6 @@ class TestTraceModels(unittest.TestCase):
                     custom,
                     f"{node.name} missing compile_with_inductor annotation",
                 )
-
-    def test_llama4(self):
-        from torchtitan.models.llama4 import llama4_configs
-        from torchtitan.models.llama4.model import Llama4Model
-
-        config = llama4_configs["debugmodel"](
-            attn_backend="flex", moe_comm_backend="standard"
-        )
-        self._run_model_test(
-            Llama4Model,
-            config,
-            use_attn_masks=True,
-            use_regional_inductor=True,
-        )
 
     # TODO: Fix scatter() dtype mismatch — scatter_add expects self.dtype == src.dtype
     # but GptOss produces mismatched dtypes during tracing.
@@ -1625,20 +1607,6 @@ class TestTraceFSDP(FSDPTest):
             attn_backend="sdpa", moe_comm_backend="standard"
         )
         self._run_fsdp_model_test(DeepSeekV3Model, config)
-
-    def test_llama4_fsdp(self):
-        from torchtitan.models.llama4 import llama4_configs
-        from torchtitan.models.llama4.model import Llama4Model
-
-        config = llama4_configs["debugmodel"](
-            attn_backend="flex", moe_comm_backend="standard"
-        )
-        self._run_fsdp_model_test(
-            Llama4Model,
-            config,
-            use_attn_masks=True,
-            use_regional_inductor=True,
-        )
 
     # TODO: Fix scatter() dtype mismatch — same root cause as TestTraceModels.test_gpt_oss.
     @unittest.skip("scatter(): Expected self.dtype to be equal to src.dtype")

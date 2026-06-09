@@ -624,7 +624,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # unique tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += labels.numel()
 
-        if self.config.parallelism.full_dtensor:
+        if self.config.parallelism.spmd_backend == "full_dtensor":
             inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
@@ -690,7 +690,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # Remove once non-full_dtensor is no longer supported.
                 if (
                     isinstance(pred, DTensor)
-                    and not self.config.parallelism.full_dtensor
+                    and self.config.parallelism.spmd_backend != "full_dtensor"
                     and self.config.parallelism.disable_loss_parallel
                 ):
                     pred = pred.to_local()

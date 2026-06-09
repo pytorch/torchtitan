@@ -24,7 +24,6 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import Embedding, Linear, RMSNorm
-from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 
@@ -33,7 +32,7 @@ __all__ = ["Decoder", "TransformerBlock"]
 
 # TODO: we can unify the TransformerBlock impl across all models when
 # there is no special logic for each model, including
-# ffn vs. moe naming and creation, rope vs. nope, etc.
+# ffn vs. moe naming and creation, etc.
 class TransformerBlock(Module):
     """Base class for all language model transformer blocks.
 
@@ -69,16 +68,18 @@ class Decoder(BaseModel):
         lm_head: Linear.Config
         tok_embeddings: Embedding.Config
         norm: RMSNorm.Config
-        # TODO: Right now RoPE config is not in each TransformerBlock / Attention,
-        # so that rope cache, a.k.a. freqs_cis, is shared by all layers. However,
-        # it causes redundantly passing backend (complex / cos_sin) to both RoPE
-        # and Attention. Also RoPE itself as a standalone module requires PP special
-        # handling, see below.
-        rope: RoPE.Config
         # TODO(fegin): revisit
         # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
         # and fix the typing here
         layers: list  # list[TransformerBlock.Config] or subclass configs
+        # Tie ``tok_embeddings`` and ``lm_head`` to share one weight. Models
+        # that support it set this True in their config factories; the tying
+        # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.
+        enable_weight_tying: bool = False
+
+        @property
+        def max_seq_len(self) -> int:
+            return self.layers[0].attention.rope.max_seq_len
 
         def update_from_config(
             self,
@@ -89,8 +90,8 @@ class Decoder(BaseModel):
             """Apply runtime config to model config.
 
             When *config* is a ``Trainer.Config``, validates
-            ``training.seq_len`` against the model's intrinsic
-            ``rope.max_seq_len``, resizes the RoPE cache, and propagates
+            ``training.seq_len`` against each attention layer's intrinsic
+            RoPE max sequence length, resizes RoPE caches, and propagates
             debug flags. Non-trainer callers may pass any config-like
             object with a ``ParallelismConfig`` in its ``parallelism``
             field; in that case the training/debug setup is skipped.
@@ -107,6 +108,11 @@ class Decoder(BaseModel):
                 "config.parallelism must be a ParallelismConfig, got "
                 f"{type(parallelism).__name__}."
             )
+
+            if self.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
+                raise NotImplementedError(
+                    "Weight tying is not supported with Pipeline Parallel."
+                )
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
@@ -154,16 +160,33 @@ class Decoder(BaseModel):
             if isinstance(config, Trainer.Config):
                 debug = config.debug
                 seq_len = config.training.seq_len
-
-                if seq_len > self.rope.max_seq_len:
+                max_seq_len = self.max_seq_len
+                if seq_len > max_seq_len:
                     raise ValueError(
                         f"Training sequence length {seq_len} exceeds "
-                        f"model's maximum supported sequence length "
-                        f"{self.rope.max_seq_len}."
+                        f"attention RoPE maximum supported sequence "
+                        f"length {max_seq_len}."
                     )
-                self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
+
+                # Pretraining inputs are shaped by TrainingConfig.seq_len when
+                # sequence_parallel is applied
+                sp_degree = parallelism.tensor_parallel_degree
+                if (
+                    parallelism.enable_sequence_parallel
+                    and sp_degree > 1
+                    and seq_len % sp_degree != 0
+                ):
+                    raise ValueError(
+                        f"Training sequence length ({seq_len}) must be "
+                        f"divisible by sequence parallel degree ({sp_degree})."
+                    )
 
                 for layer_cfg in self.layers:
+                    attention_cfg = getattr(layer_cfg, "attention", None)
+                    if attention_cfg is not None:
+                        attention_cfg.rope = dataclasses.replace(
+                            attention_cfg.rope, max_seq_len=seq_len
+                        )
                     if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
                         layer_cfg.moe.router._debug_force_load_balance = (
                             debug.moe_force_load_balance
@@ -180,8 +203,6 @@ class Decoder(BaseModel):
         self.config = config
 
         self.tok_embeddings = config.tok_embeddings.build()
-        self.rope = config.rope.build()
-        self.register_buffer("freqs_cis", self.rope.cache, persistent=False)
 
         self.layers = ModuleDict()
         for i, layer_config in enumerate(config.layers):
@@ -190,30 +211,23 @@ class Decoder(BaseModel):
         self.norm = config.norm.build()
         self.lm_head = config.lm_head.build()
 
+        self.enable_weight_tying = config.enable_weight_tying
+        if self.enable_weight_tying:
+            self.tok_embeddings.weight = self.lm_head.weight
+
     def init_states(
         self,
         *,
         buffer_device: torch.device | None = None,
     ) -> None:
-        # Compute buffer_device before recursion so children (RoPE) get
-        # the correct device when buffer_device is not explicitly provided.
-        if buffer_device is None:
-            buffer_device = self.freqs_cis.device
+        if self.enable_weight_tying:
+            # Re-tie before init: on meta device the ``__init__`` tying may not
+            # have taken effect, and ``tok_embeddings.weight`` is skipped by
+            # ``skip_param_init``, so re-point it at the initialized lm_head
+            # weight.
+            assert self.tok_embeddings is not None and self.lm_head is not None
+            self.tok_embeddings.weight = self.lm_head.weight
         super().init_states(buffer_device=buffer_device)
-
-    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
-        assert buffer_device is None or buffer_device.type != "meta", (
-            f"buffer_device must not be meta, got {buffer_device}. "
-            f"Buffers should be initialized on a real device after to_empty()."
-        )
-        if self.rope is not None:
-            # RoPE's _init_self_buffers was already called by auto-recursion
-            self.freqs_cis = self.rope.cache
-        else:
-            # PP case: rope module was pruned, rebuild to get freqs_cis
-            rope = self.config.rope.build()
-            rope._init_self_buffers(buffer_device=buffer_device)
-            self.freqs_cis = rope.cache
 
     def forward(
         self,
@@ -225,7 +239,7 @@ class Decoder(BaseModel):
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
         for layer in self.layers.values():
-            h = layer(h, self.freqs_cis, attention_masks, positions)
+            h = layer(h, attention_masks, positions)
 
         h = self.norm(h) if self.norm is not None else h
 

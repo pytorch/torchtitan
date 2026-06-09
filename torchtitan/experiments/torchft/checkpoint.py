@@ -35,13 +35,13 @@ from torchtitan.components.checkpoint import (
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.experiments.ft.manager import FTManager
+from torchtitan.experiments.torchft.manager import TorchFTManager
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
 
-class FTCheckpointManager(CheckpointManager):
+class TorchFTCheckpointManager(CheckpointManager):
     """CheckpointManager with TorchFT fault tolerance support.
 
     There are two types of checkpoints when TorchFT is enabled:
@@ -80,7 +80,7 @@ class FTCheckpointManager(CheckpointManager):
         states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
-        ft_manager: FTManager | None = None,
+        ft_manager: TorchFTManager | None = None,
     ) -> None:
         # Initialize the base checkpoint manager (without FT)
         super().__init__(
@@ -173,7 +173,7 @@ class FTCheckpointManager(CheckpointManager):
             states.pop(DATALOADER, None)
         return states
 
-    def _async_wait(self) -> None:
+    def maybe_wait_for_saving(self) -> None:
         # _ft_save() always uses AsyncMode.ASYNC (regardless of self.async_mode),
         # so save_future can exist even when self.async_mode is DISABLED. The base
         # class would incorrectly raise in that case, so we override to handle it.
@@ -198,12 +198,12 @@ class FTCheckpointManager(CheckpointManager):
 
     def _ft_save(self, step: int) -> None:
         begin = time.monotonic()
-        self._async_wait()
+        self.maybe_wait_for_saving()
         checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
         self.save_future = self.dcp_save(
             self.ft_states, checkpoint_id=checkpoint_id, async_mode=AsyncMode.ASYNC
         )
-        logger.info(f"Staging ft checkpoint took {time.monotonic() - begin} secs.")
+        logger.info(f"Staging torchft checkpoint took {time.monotonic() - begin} secs.")
 
     def _ft_load(self) -> None:
         step = self._find_load_step(folder=self._ft_folder())
@@ -221,6 +221,6 @@ class FTCheckpointManager(CheckpointManager):
         )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
-            f"Finished loading the ft checkpoint in "
+            f"Finished loading the torchft checkpoint in "
             f"{time.monotonic() - begin:.2f} seconds."
         )

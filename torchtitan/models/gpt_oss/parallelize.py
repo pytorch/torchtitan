@@ -15,12 +15,10 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
+from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.models.gpt_oss.model import GptOssModel
-from torchtitan.models.llama4.parallelize import apply_fsdp
-from torchtitan.tools.logging import logger
 
 
-# Adapted from llama4/infra/parallelize.py
 def parallelize_gptoss(
     model: GptOssModel,
     *,
@@ -38,7 +36,7 @@ def parallelize_gptoss(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    if parallelism.full_dtensor:
+    if parallelism.spmd_backend == "full_dtensor":
         raise NotImplementedError("full_dtensor is not supported yet.")
 
     model_compile_enabled = (
@@ -82,7 +80,7 @@ def parallelize_gptoss(
         )
         edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
-    apply_fsdp(
+    apply_fsdp_to_decoder(
         model,
         dp_mesh,
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
@@ -94,13 +92,5 @@ def parallelize_gptoss(
         edp_mesh=edp_mesh,
         enable_symm_mem=parallelism.enable_fsdp_symm_mem,
     )
-
-    logger.info("Applied fully_shard to the model")
-
-    if parallel_dims.cp_enabled:
-        logger.info("Applied Context Parallel to the model")
-
-    if training.enable_cpu_offload:
-        logger.info("Applied CPU Offloading to the model")
 
     return model
