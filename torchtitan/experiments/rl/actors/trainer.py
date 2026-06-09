@@ -189,7 +189,7 @@ class PolicyTrainer(Actor, Configurable):
         with sl.log_trace_span("torch_distributed_init"):
             world_size = dist_utils.init_distributed(
                 config.comm,
-                base_folder=config.dump_folder,
+                base_folder=output_dir,
             )
 
         self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
