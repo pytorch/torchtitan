@@ -27,8 +27,6 @@ def set_llama3_sharding_config(
     *,
     loss_parallel: bool,
     enable_sp: bool,
-    spmd_backend: str = "default",
-    chunked_loss: bool = True,
 ) -> None:
     """Fill ``sharding_config`` on all Llama3 sub-configs.
 
@@ -41,17 +39,10 @@ def set_llama3_sharding_config(
     ``loss_parallel`` controls whether the output projection is vocab-parallel.
     """
     set_decoder_sharding_config(
-        config,
-        loss_parallel=loss_parallel,
-        enable_sp=enable_sp,
-        spmd_backend=spmd_backend,
-        chunked_loss=chunked_loss,
+        config, loss_parallel=loss_parallel, enable_sp=enable_sp
     )
     for layer_cfg in config.layers:
-        _set_llama3_layer_sharding(
-            layer_cfg,
-            enable_sp=enable_sp,
-        )
+        _set_llama3_layer_sharding(layer_cfg, enable_sp=enable_sp)
 
 
 def _set_llama3_layer_sharding(
@@ -76,13 +67,8 @@ def _set_llama3_layer_sharding(
         else dense_activation_placement(tp=spmd.I)
     )
 
-    set_gqa_attention_sharding(
-        layer_cfg.attention,
-        enable_sp=enable_sp,
-    )
-    set_gqa_inner_attention_local_map(
-        layer_cfg.attention.inner_attention,
-    )
+    set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
+    set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)
 
     assert layer_cfg.feed_forward is not None
     set_dense_ffn_sharding(

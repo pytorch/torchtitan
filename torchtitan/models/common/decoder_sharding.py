@@ -19,8 +19,8 @@ TP = MeshAxisName.TP
 def dense_param_placement(*, tp: spmd.PerMeshAxisSpmdType) -> SpmdLayout:
     """Placement for dense-path params/buffers.
 
-    DP/CP axes are replicated. TP placement is caller-specified.
-    DTensor backend unfolds the DP axis to shard/replicate DTensor storage axes.
+    DP/CP axes are spmd.R; the DTensor bridge unfolds DP into storage axes.
+    TP placement is caller-specified.
     """
     return SpmdLayout(
         {
@@ -59,28 +59,6 @@ def dense_sequence_parallel_placement() -> SpmdLayout:
             TP: spmd.V,
         },
         partition_spec=(DP, (CP, TP), None),
-    )
-
-
-def lm_head_sharding_config(
-    *,
-    loss_parallel: bool,
-) -> ShardingConfig:
-    """Sharding for the decoder lm_head projection."""
-    in_src = dense_activation_placement(tp=spmd.R)
-    in_dst = dense_activation_placement(tp=spmd.R)
-
-    out_src = dense_activation_placement(tp=spmd.S(-1))
-    out_dst = out_src if loss_parallel else dense_activation_placement(tp=spmd.I)
-
-    return ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(0)),
-        },
-        in_src_shardings={"input": in_src},
-        in_dst_shardings={"input": in_dst},
-        out_src_shardings=out_src,
-        out_dst_shardings=out_dst,
     )
 
 
@@ -189,18 +167,17 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         f"set_gqa_attention_sharding requires GQAttention.Config, "
         f"got {type(attention_cfg).__name__}"
     )
-    x_src = (
+    attn_x_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
         else dense_activation_placement(tp=spmd.I)
     )
-    x_dst = dense_activation_placement(tp=spmd.R)
     attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={
-            "x": x_src,
+            "x": attn_x_layout,
         },
         in_dst_shardings={
-            "x": x_dst,
+            "x": dense_activation_placement(tp=spmd.R),
         },
     )
     if attention_cfg.rope is not None:
@@ -236,10 +213,10 @@ def set_gqa_inner_attention_local_map(
     GPT-OSS's flash attention with ``return_lse=True``); both outputs share
     the same heads-sharded placement.
     """
-    q_placements = dense_activation_placement(tp=spmd.S(2))
-    kv_src_placements = dense_activation_placement(tp=spmd.S(2))
-    kv_placements = dense_activation_placement(tp=spmd.S(2), cp=spmd.R)
-    kv_grad_placements = dense_activation_placement(tp=spmd.S(2), cp=spmd.P)
+    q_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2))
+    kv_src_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2))
+    kv_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2), cp=spmd.R)
+    kv_grad_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2), cp=spmd.P)
     out_src: SpmdLayout | tuple[SpmdLayout, ...] = (
         (q_placements, q_placements) if return_lse else q_placements
     )
@@ -288,7 +265,6 @@ def set_decoder_sharding_config(
     loss_parallel: bool,
     enable_sp: bool,
     spmd_backend: str = "default",
-    chunked_loss: bool = True,
 ) -> None:
     """Set sharding on root-level configs only: ``tok_embeddings``, ``norm``,
     and ``output``.
@@ -301,21 +277,20 @@ def set_decoder_sharding_config(
     ``enable_sp=False`` -> activations stay ``Replicate``; root norm is left
     unsharded (equivalent to the legacy ``NoParallel`` plan).
     """
-    embed_input = dense_activation_placement(tp=spmd.R)
-    embed_out = (
+    activation_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
         else dense_activation_placement(tp=spmd.I)
     )
+    loss_tp = spmd.S(-1) if loss_parallel else spmd.I
+
     embed_src = dense_activation_placement(tp=spmd.P)
     config.tok_embeddings.sharding_config = ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(0)),
-        },
-        in_src_shardings={"input": embed_input},
-        in_dst_shardings={"input": embed_input},
+        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
+        in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
+        in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
         out_src_shardings=embed_src,
-        out_dst_shardings=embed_out,
+        out_dst_shardings=activation_layout,
         # spmd_types backend relies on local SPMD + manual vocab-parallel embedding impl.
         local_map=LocalMapConfig(in_grad_placements=(None,))
         if spmd_backend == "spmd_types"
@@ -323,6 +298,10 @@ def set_decoder_sharding_config(
     )
     config.norm.sharding_config = pre_lm_head_norm_config(enable_sp=enable_sp)
 
-    config.lm_head.sharding_config = lm_head_sharding_config(
-        loss_parallel=loss_parallel,
+    config.lm_head.sharding_config = ShardingConfig(
+        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
+        in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
+        in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
+        out_src_shardings=dense_activation_placement(tp=spmd.S(-1)),
+        out_dst_shardings=dense_activation_placement(tp=loss_tp),
     )
