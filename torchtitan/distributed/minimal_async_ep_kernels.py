@@ -4,26 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import linecache
-
 import torch
 import triton
 import triton.language as tl
 
 
-_copy_rows_to_peer_ptrs_kernel_cache: dict[torch.dtype, object] = {}
+_INT64_ELEMENT_SIZE = torch.empty((), dtype=torch.int64).element_size()
+_COUNT_COPY_BLOCK_SIZE = 1024
+_METADATA_BLOCK_SIZE = 256
+_MAX_BLOCK_N = 2048
+_SWIGLU_BLOCK_M = 4
 
-_TRITON_DTYPE_NAMES = {
-    torch.bool: "tl.int1",
-    torch.uint8: "tl.uint8",
-    torch.int8: "tl.int8",
-    torch.int16: "tl.int16",
-    torch.int32: "tl.int32",
-    torch.int64: "tl.int64",
-    torch.float16: "tl.float16",
-    torch.bfloat16: "tl.bfloat16",
-    torch.float32: "tl.float32",
-    torch.float64: "tl.float64",
+# MinimalAsyncEP hidden buffers use TrainingConfig.mixed_precision_param,
+# currently restricted to bfloat16 or float32.
+_HIDDEN_ROW_DTYPES = {
+    torch.bfloat16: tl.bfloat16,
+    torch.float32: tl.float32,
 }
 
 
@@ -35,6 +31,7 @@ def _copy_full_counts_to_peer_ptrs_kernel(
     EP_SIZE: tl.constexpr,
     NUM_EXPERTS: tl.constexpr,
     DST_ROW_STRIDE: tl.constexpr,
+    COUNT_ELEMENT_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ) -> None:
     """Copy this rank's global expert counts into every peer count buffer.
@@ -50,7 +47,7 @@ def _copy_full_counts_to_peer_ptrs_kernel(
     offsets = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = (peer < EP_SIZE) & (offsets < NUM_EXPERTS)
     base = tl.load(dst_ptrs + peer, mask=peer < EP_SIZE, other=0)
-    dst = (base + (RANK * DST_ROW_STRIDE + offsets) * 8).to(
+    dst = (base + (RANK * DST_ROW_STRIDE + offsets) * COUNT_ELEMENT_SIZE).to(
         tl.pointer_type(tl.int64)
     )
     values = tl.load(counts + offsets, mask=mask, other=0)
@@ -66,7 +63,6 @@ def _fill_dispatch_metadata_kernel(
     dst_rows,
     NUM_EXPERTS: tl.constexpr,
     NUM_LOCAL_EXPERTS: tl.constexpr,
-    MAX_TOKENS_PER_SEGMENT: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ) -> None:
     """Build per-routed-row peer destinations for the dispatch copy.
@@ -101,7 +97,6 @@ def _fill_combine_metadata_kernel(
     EP_SIZE: tl.constexpr,
     NUM_LOCAL_EXPERTS: tl.constexpr,
     NUM_EXPERTS: tl.constexpr,
-    MAX_TOKENS_PER_SEGMENT: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ) -> None:
     """Build per-active-row peer destinations for the combine copy.
@@ -243,7 +238,7 @@ def _expand_topk_grad_kernel(
     )
     if HAS_SCORES:
         score_index = flat_index if SCORES_ARE_SLOT_ORDERED else row
-        value *= tl.load(scores + score_index)
+        value = value.to(tl.float32) * tl.load(scores + score_index).to(tl.float32)
     tl.store(
         grad_routed + row * GRAD_ROUTED_ROW_STRIDE + col * GRAD_ROUTED_COL_STRIDE,
         value,
@@ -430,19 +425,8 @@ def _active_swiglu_backward_kernel(
     )
 
 
-def _make_copy_rows_to_peer_ptrs_kernel(dtype: torch.dtype):
-    kernel = _copy_rows_to_peer_ptrs_kernel_cache.get(dtype)
-    if kernel is not None:
-        return kernel
-
-    dtype_name = _TRITON_DTYPE_NAMES.get(dtype)
-    if dtype_name is None:
-        raise ValueError(f"Unsupported MinimalAsyncEP row-copy dtype: {dtype}.")
-    element_size = torch.empty((), dtype=dtype).element_size()
-
-    source = f"""
 @triton.jit
-def _copy_rows_to_peer_ptrs_kernel_{str(dtype).replace('.', '_')}(
+def _copy_rows_to_peer_ptrs_kernel(
     src,
     dst_ptrs,
     dst_ranks,
@@ -454,12 +438,14 @@ def _copy_rows_to_peer_ptrs_kernel_{str(dtype).replace('.', '_')}(
     SRC_ROW_STRIDE: tl.constexpr,
     SRC_COL_STRIDE: tl.constexpr,
     DST_ROW_STRIDE: tl.constexpr,
+    DST_DTYPE: tl.constexpr,
+    DST_ELEMENT_SIZE: tl.constexpr,
     HAS_NUM_VALID_ROWS: tl.constexpr,
     HAS_SRC_ROWS: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ) -> None:
-    '''Copy rows into peer symmetric hidden buffers through pointer tables.
+    """Copy rows into peer symmetric hidden buffers through pointer tables.
 
     ``dst_ranks`` selects the peer buffer, ``dst_rows`` selects the row within
     that peer buffer, and ``src_rows`` optionally gathers rows from ``src``.
@@ -469,7 +455,7 @@ def _copy_rows_to_peer_ptrs_kernel_{str(dtype).replace('.', '_')}(
         With ``src=[[10], [20], [30]]``, ``dst_ranks=[1, 0]``,
         ``dst_rows=[3, 4]``, and ``src_rows=[2, 0]``, peer 1 row 3 receives
         ``[30]`` and peer 0 row 4 receives ``[10]``.
-    '''
+    """
     row_start = tl.program_id(0) * BLOCK_M
     row_limit = NUM_ROWS
     if HAS_NUM_VALID_ROWS:
@@ -486,31 +472,19 @@ def _copy_rows_to_peer_ptrs_kernel_{str(dtype).replace('.', '_')}(
         src_row = tl.load(src_rows + row, mask=row_mask, other=0)
     dst_rank = tl.load(dst_ranks + row, mask=row_mask, other=-1)
     dst_row = tl.load(dst_rows + row, mask=row_mask, other=0)
+    dst_rank_mask = row_mask & (dst_rank >= 0)
     values = tl.load(
         src
         + src_row[:, None] * SRC_ROW_STRIDE
         + col[None, :] * SRC_COL_STRIDE,
         mask=mask,
     )
-    dst_base = tl.load(dst_ptrs + dst_rank, mask=row_mask, other=0)
+    dst_base = tl.load(dst_ptrs + dst_rank, mask=dst_rank_mask, other=0)
     dst_byte_offset = (
-        (dst_row[:, None] * DST_ROW_STRIDE + col[None, :]) * {element_size}
+        (dst_row[:, None] * DST_ROW_STRIDE + col[None, :]) * DST_ELEMENT_SIZE
     )
-    dst_ptr = (dst_base[:, None] + dst_byte_offset).to(tl.pointer_type({dtype_name}))
-    tl.store(dst_ptr, values, mask=mask & (dst_rank[:, None] >= 0))
-"""
-    filename = f"<torchtitan_minimal_async_ep_copy_rows_to_peer_ptrs_{dtype}>"
-    lines = source.splitlines(keepends=True)
-    linecache.cache[filename] = (len(source), None, lines, filename)
-    namespace = {
-        "triton": triton,
-        "tl": tl,
-    }
-    exec(compile(source, filename, "exec"), namespace)
-    kernel_name = f"_copy_rows_to_peer_ptrs_kernel_{str(dtype).replace('.', '_')}"
-    kernel = namespace[kernel_name]
-    _copy_rows_to_peer_ptrs_kernel_cache[dtype] = kernel
-    return kernel
+    dst_ptr = (dst_base[:, None] + dst_byte_offset).to(tl.pointer_type(DST_DTYPE))
+    tl.store(dst_ptr, values, mask=mask & dst_rank_mask[:, None])
 
 
 def copy_full_counts_to_peers(
@@ -522,7 +496,14 @@ def copy_full_counts_to_peers(
     num_experts: int,
     dst_ptrs: torch.Tensor,
 ) -> None:
-    block_size = 1024
+    if counts.dtype != torch.int64:
+        raise ValueError(f"counts must be torch.int64, got {counts.dtype}.")
+    if len(dsts) != ep_size:
+        raise ValueError(f"expected {ep_size} count buffers, got {len(dsts)}.")
+    if dsts[0].dtype != torch.int64:
+        raise ValueError(f"destination count buffers must be torch.int64, got {dsts[0].dtype}.")
+
+    block_size = _COUNT_COPY_BLOCK_SIZE
     grid = (ep_size, triton.cdiv(num_experts, block_size))
     _copy_full_counts_to_peer_ptrs_kernel[grid](
         counts,
@@ -531,6 +512,7 @@ def copy_full_counts_to_peers(
         EP_SIZE=ep_size,
         NUM_EXPERTS=num_experts,
         DST_ROW_STRIDE=dsts[0].stride(0),
+        COUNT_ELEMENT_SIZE=_INT64_ELEMENT_SIZE,
         BLOCK_SIZE=block_size,
     )
 
@@ -547,8 +529,8 @@ def active_swiglu_forward(
     """
     out = torch.empty_like(gate)
 
-    block_m = 4
-    block_n = min(2048, triton.next_power_of_2(gate.shape[1]))
+    block_m = _SWIGLU_BLOCK_M
+    block_n = min(_MAX_BLOCK_N, triton.next_power_of_2(gate.shape[1]))
     grid = (triton.cdiv(gate.shape[0], block_m), triton.cdiv(gate.shape[1], block_n))
     _active_swiglu_forward_kernel[grid](
         gate,
@@ -578,8 +560,8 @@ def active_swiglu_backward(
     grad_gate = torch.empty_like(gate)
     grad_up = torch.empty_like(up)
 
-    block_m = 4
-    block_n = min(2048, triton.next_power_of_2(gate.shape[1]))
+    block_m = _SWIGLU_BLOCK_M
+    block_n = min(_MAX_BLOCK_N, triton.next_power_of_2(gate.shape[1]))
     grid = (triton.cdiv(gate.shape[0], block_m), triton.cdiv(gate.shape[1], block_n))
     _active_swiglu_backward_kernel[grid](
         grad_out,
@@ -621,10 +603,15 @@ def copy_rows_to_peers(
     src_rows: torch.Tensor | None = None,
     num_valid_rows: torch.Tensor | None = None,
 ) -> None:
-    block_n = min(2048, triton.next_power_of_2(num_cols))
+    if len(dsts) != ep_size:
+        raise ValueError(f"expected {ep_size} destination buffers, got {len(dsts)}.")
+
+    block_n = min(_MAX_BLOCK_N, triton.next_power_of_2(num_cols))
     grid = (triton.cdiv(num_rows, block_m), triton.cdiv(num_cols, block_n))
-    kernel = _make_copy_rows_to_peer_ptrs_kernel(src.dtype)
-    kernel[grid](
+    dst_dtype = _HIDDEN_ROW_DTYPES.get(src.dtype)
+    if dst_dtype is None:
+        raise ValueError(f"Unsupported MinimalAsyncEP row-copy dtype: {src.dtype}.")
+    _copy_rows_to_peer_ptrs_kernel[grid](
         src,
         dst_ptrs,
         dst_ranks,
@@ -636,6 +623,8 @@ def copy_rows_to_peers(
         SRC_ROW_STRIDE=src.stride(0),
         SRC_COL_STRIDE=src.stride(1),
         DST_ROW_STRIDE=dsts[0].stride(0),
+        DST_DTYPE=dst_dtype,
+        DST_ELEMENT_SIZE=src.element_size(),
         HAS_NUM_VALID_ROWS=num_valid_rows is not None,
         HAS_SRC_ROWS=src_rows is not None,
         BLOCK_M=block_m,
@@ -659,7 +648,7 @@ def fill_dispatch_metadata(
         dtype=torch.int64,
     )
     dst_rows = torch.empty_like(dst_ranks)
-    block_size = 256
+    block_size = _METADATA_BLOCK_SIZE
     grid = (
         counts.numel(),
         triton.cdiv(max_tokens_per_segment, block_size),
@@ -672,7 +661,6 @@ def fill_dispatch_metadata(
         dst_rows,
         NUM_EXPERTS=counts.numel(),
         NUM_LOCAL_EXPERTS=num_local_experts,
-        MAX_TOKENS_PER_SEGMENT=max_tokens_per_segment,
         BLOCK_SIZE=block_size,
         num_warps=4,
     )
@@ -696,7 +684,7 @@ def fill_combine_metadata(
         dtype=torch.int64,
     )
     dst_rows = torch.empty_like(dst_ranks)
-    block_size = 256
+    block_size = _METADATA_BLOCK_SIZE
     grid = (
         segment_lens.numel(),
         triton.cdiv(max_tokens_per_segment, block_size),
@@ -711,11 +699,14 @@ def fill_combine_metadata(
         EP_SIZE=ep_size,
         NUM_LOCAL_EXPERTS=num_local_experts,
         NUM_EXPERTS=ep_size * num_local_experts,
-        MAX_TOKENS_PER_SEGMENT=max_tokens_per_segment,
         BLOCK_SIZE=block_size,
         num_warps=4,
     )
-    return dst_ranks, dst_rows, (output_starts[-1:] + segment_lens[-1:]).to(torch.int64)
+    return (
+        dst_ranks,
+        dst_rows,
+        (output_starts[-1:] + segment_lens[-1:]).to(torch.int64),
+    )
 
 
 def invert_flat_indices(
@@ -725,7 +716,7 @@ def invert_flat_indices(
 ) -> torch.Tensor:
     slot_to_row = flat_indices.new_empty(num_rows)
 
-    block_size = 1024
+    block_size = _COUNT_COPY_BLOCK_SIZE
     _invert_flat_indices_kernel[(triton.cdiv(num_rows, block_size),)](
         flat_indices,
         slot_to_row,
@@ -751,7 +742,7 @@ def reduce_topk_slots(
         device=routed_output.device,
         dtype=routed_output.dtype,
     )
-    block_n = min(2048, triton.next_power_of_2(num_cols))
+    block_n = min(_MAX_BLOCK_N, triton.next_power_of_2(num_cols))
     grid = (num_tokens, triton.cdiv(num_cols, block_n))
     _reduce_topk_slots_kernel[grid](
         routed_output,
@@ -790,7 +781,7 @@ def expand_topk_grad(
         device=grad_out.device,
         dtype=dtype,
     )
-    block_n = min(2048, triton.next_power_of_2(num_cols))
+    block_n = min(_MAX_BLOCK_N, triton.next_power_of_2(num_cols))
     grid = (num_rows, triton.cdiv(num_cols, block_n))
     _expand_topk_grad_kernel[grid](
         grad_out,
