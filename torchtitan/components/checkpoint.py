@@ -234,12 +234,14 @@ class CheckpointManager(Configurable):
 
         initial_load_in_hf: bool = False
         """
-        Enable the use of HuggingFace's safetensors format for checkpointing. The option
-        is only used when `initial_load_path` is specified. This will load checkpoints
-        in HF's model definition and safetensors format instead of the default
-        torchtitan model definition and DCP format, after necessary model state dict
-        transformation. `initial_load_model_only` must be true because safetensors
-        doesn't support saving non-tensors. The default value is False.
+        Enable the use of HuggingFace's safetensors format for checkpointing. This will
+        load checkpoints in HF's model definition and safetensors format instead of the
+        default torchtitan model definition and DCP format, after necessary model state
+        dict transformation.
+        If `initial_load_path` is not provided, this option will look for weights
+        in `sd_adapter.hf_assets_path`. `initial_load_model_only` must be True
+        because safetensors doesn't support saving non-tensors.
+        The default value is False.
         """
 
         initial_load_in_hf_quantized: bool = False
@@ -372,13 +374,8 @@ class CheckpointManager(Configurable):
                     raise ValueError(
                         f"initial_load_path must be absolute: {self.initial_load_path}"
                     )
-            if self.initial_load_in_hf and not (
-                self.initial_load_path and self.initial_load_model_only
-            ):
-                raise ValueError(
-                    "initial_load_in_hf requires both initial_load_path "
-                    "and initial_load_model_only."
-                )
+            if self.initial_load_in_hf and not self.initial_load_model_only:
+                raise ValueError("initial_load_in_hf requires initial_load_model_only.")
             if self.initial_load_in_hf_quantized and not (
                 self.initial_load_in_hf and self.initial_load_path
             ):
@@ -1079,7 +1076,7 @@ class CheckpointManager(Configurable):
     def _should_purge(self) -> bool:
         """Whether this rank should purge stale checkpoints.
 
-        Extracted so subclasses (e.g. FTCheckpointManager) can add
+        Extracted so subclasses (e.g. TorchFTCheckpointManager) can add
         additional guards (like participating_rank) without duplicating
         the purge loop in _purge_stale_checkpoints.
         """

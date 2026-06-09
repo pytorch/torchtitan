@@ -10,17 +10,17 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.validate import Validator
 from torchtitan.config import ActivationCheckpointConfig, CommConfig, TrainingConfig
-from torchtitan.experiments.ft.checkpoint import FTCheckpointManager
-from torchtitan.experiments.ft.config.job_config import FaultTolerance
-from torchtitan.experiments.ft.optimizer import FTOptimizersContainer
-from torchtitan.experiments.ft.trainer import FaultTolerantTrainer
+from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
+from torchtitan.experiments.torchft.config.job_config import FaultTolerance
+from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
+from torchtitan.experiments.torchft.trainer import FaultTolerantTrainer
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.tools.profiler import Profiler
 
 from . import model_registry
 
 
-def llama3_ft_debugmodel() -> FaultTolerantTrainer.Config:
+def llama3_torchft_debugmodel() -> FaultTolerantTrainer.Config:
     return FaultTolerantTrainer.Config(
         loss=CrossEntropyLoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
@@ -32,7 +32,7 @@ def llama3_ft_debugmodel() -> FaultTolerantTrainer.Config:
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel"),
-        optimizer=FTOptimizersContainer.Config(
+        optimizer=TorchFTOptimizersContainer.Config(
             param_groups=default_adamw(lr=8e-4).param_groups
         ),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -47,7 +47,7 @@ def llama3_ft_debugmodel() -> FaultTolerantTrainer.Config:
             steps=100,
         ),
         dataloader=HuggingFaceTextDataLoader.Config(),
-        checkpoint=FTCheckpointManager.Config(
+        checkpoint=TorchFTCheckpointManager.Config(
             interval=10,
             last_save_model_only=False,
         ),
