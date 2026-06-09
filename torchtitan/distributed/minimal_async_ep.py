@@ -210,7 +210,7 @@ def init_buffer(
     )
 
 
-def _copy_rows_to_peers_cuda(
+def _copy_rows_to_peers_and_wait_cuda(
     x: torch.Tensor,
     dst_ranks: torch.Tensor,
     dst_rows: torch.Tensor,
@@ -221,6 +221,13 @@ def _copy_rows_to_peers_cuda(
     src_rows: torch.Tensor | None = None,
     num_valid_rows: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """Copy rows through symmetric memory and wait before returning.
+
+    MinimalAsyncEP exposes synchronous custom-op boundaries: callers receive a
+    readable buffer, not an async handle. This keeps the operator interface
+    simple for graph capture, but means this backend does not provide
+    microbatch communication overlap.
+    """
     assert _buffer_state is not None
 
     buffer_index = _buffer_state.hidden_recv_buffer_index
@@ -263,20 +270,25 @@ def _wait_ready(handle: Any, channel: int) -> None:
     """EP-group barrier: ensure every peer has finished writing into this
     rank's symmetric receive buffer before the buffer is read.
 
+    This wait intentionally happens before custom ops return tensors that are
+    consumed by later compute. MinimalAsyncEP is a synchronous, CUDA-graphable
+    backend and does not expose a separate async handle for microbatch overlap.
+
     Issues a single fused ``barrier`` kernel that signals and polls all peers
     concurrently. This was previously a Python loop of ``2 * (ep_size - 1)``
     per-peer ``put_signal`` / ``wait_signal`` kernels, all serialized and fully
     exposed on the critical path (each ``wait_signal`` its own spin-wait
-    kernel) -- the dominant MinimalAsyncEP comm cost once CPU-launch overhead is removed
-    by CUDA graphs / compiled steps.
+    kernel) -- the dominant MinimalAsyncEP comm cost once CPU-launch overhead
+    is removed by CUDA graphs / compiled steps.
     """
     handle.barrier(channel=channel)
 
 
-def _copy_all_counts_to_peers_cuda(
+def _copy_all_counts_to_peers_and_wait_cuda(
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
     ep_size: int,
 ) -> torch.Tensor:
+    """Copy this rank's expert counts to all peers and wait for peer counts."""
     assert _buffer_state is not None
 
     num_experts = num_local_tokens_per_expert_E.numel()
@@ -288,6 +300,7 @@ def _copy_all_counts_to_peers_cuda(
         num_experts=num_experts,
         dst_ptrs=_buffer_state.counts_recv_peer_ptrs,
     )
+    _wait_counts_ready()
     return _buffer_state.counts_recv_buffer
 
 
@@ -368,7 +381,7 @@ def _dispatch_to_experts(
     dispatch_dst_rows: torch.Tensor,
     num_routed_rows: int,
 ) -> torch.Tensor:
-    hidden_recv_buffer = _copy_rows_to_peers_cuda(
+    hidden_recv_buffer = _copy_rows_to_peers_and_wait_cuda(
         x_ND,
         dispatch_dst_ranks,
         dispatch_dst_rows,
@@ -386,7 +399,7 @@ def _combine_to_origin(
     combine_num_valid_rows: torch.Tensor,
     num_routed_rows: int,
 ) -> torch.Tensor:
-    combined = _copy_rows_to_peers_cuda(
+    combined = _copy_rows_to_peers_and_wait_cuda(
         x_RD,
         combine_dst_ranks,
         combine_dst_rows,
@@ -501,11 +514,10 @@ def dispatch_metadata(
     # Mirrors AllToAllTokenDispatcher's count exchange: each rank starts with
     # counts for its local tokens over all global experts, then learns how many
     # tokens every peer will send to each of this rank's local experts.
-    all_tokens_per_expert_RE = _copy_all_counts_to_peers_cuda(  # noqa: N806
+    all_tokens_per_expert_RE = _copy_all_counts_to_peers_and_wait_cuda(  # noqa: N806
         num_local_tokens_per_expert_E,
         ep_size,
     )
-    _wait_counts_ready()
 
     # Instead of materializing an all-to-all rank-major receive tensor and then
     # calling _permute(), compute the final E-major receive rows directly.
@@ -596,7 +608,7 @@ def dispatch_forward(
     num_routed_rows = E_row_to_token_N.numel()
     # This direct copy corresponds to AllToAllTokenDispatcher's token all-to-all;
     # dispatch_dst_rows already point at the post-_permute E-major layout.
-    hidden_recv_buffer = _copy_rows_to_peers_cuda(
+    hidden_recv_buffer = _copy_rows_to_peers_and_wait_cuda(
         dispatch_input,
         dispatch_dst_ranks,
         dispatch_dst_rows,
