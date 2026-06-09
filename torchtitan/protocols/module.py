@@ -23,6 +23,7 @@ from torch.utils._pytree import tree_map
 from torchtitan.config import Configurable
 from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
 from torchtitan.distributed.spmd_types import (
+    current_mesh,
     redistribute_spmd_per_axis,
     set_current_spmd_mesh,
     _validate_spmd_redistributions,
@@ -570,6 +571,7 @@ class Module(nn.Module, Configurable):
                     continue
                 value = redistribute_spmd_per_axis(
                     value,
+                    current_mesh(),
                     src_spmd_layout.per_axis_spmd_types(),
                     dst_spmd_layout.per_axis_spmd_types(),
                 )
@@ -645,6 +647,7 @@ class Module(nn.Module, Configurable):
                 return outputs
             return redistribute_spmd_per_axis(
                 outputs,
+                current_mesh(),
                 out_src.per_axis_spmd_types(),
                 out_dst.per_axis_spmd_types(),
             )
