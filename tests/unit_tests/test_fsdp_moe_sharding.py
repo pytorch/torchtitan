@@ -13,60 +13,48 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torchtitan.models.llama4.model import compute_moe_hidden_dim, Llama4Model
-from torchtitan.models.llama4.parallelize import apply_fsdp
+from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
+from torchtitan.models.qwen3.model import Qwen3Model
 
 
-def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
-    """Build a tiny Llama4Model with a configurable number of experts."""
-    from torchtitan.models.common import ComplexRoPE, compute_ffn_hidden_dim
+def _build_qwen3_moe_model(num_experts: int = 8) -> Qwen3Model:
+    """Build a tiny Qwen3 MoE model with a configurable number of experts."""
+    from torchtitan.models.common import CosSinRoPE, Embedding, Linear, RMSNorm
 
-    # Use the standard debugmodel config but override num_experts.
-    # Rebuild layers with the requested num_experts.
-    from torchtitan.models.llama4 import _build_llama4_layers
+    # Use a tiny variant of the standard MoE debug config, overriding
+    # num_experts to exercise the expert-sharding branches.
+    from torchtitan.models.qwen3 import _build_qwen3_moe_layers
 
     dim = 256
-    n_heads = 16
+    head_dim = 128
     n_layers = 4
-    moe_hidden_dim = compute_moe_hidden_dim(dim)
+    vocab_size = 2048
 
-    from torchtitan.models.common.nn_modules import Embedding, Linear, RMSNorm
-
-    config = Llama4Model.Config(
+    config = Qwen3Model.Config(
+        vocab_size=vocab_size,
         dim=dim,
-        vocab_size=2048,
-        tok_embeddings=Embedding.Config(num_embeddings=2048, embedding_dim=dim),
         norm=RMSNorm.Config(normalized_shape=dim),
-        lm_head=Linear.Config(in_features=dim, out_features=2048),
-        layers=_build_llama4_layers(
+        tok_embeddings=Embedding.Config(num_embeddings=vocab_size, embedding_dim=dim),
+        lm_head=Linear.Config(in_features=dim, out_features=vocab_size),
+        layers=_build_qwen3_moe_layers(
             n_layers=n_layers,
             dim=dim,
-            n_heads=n_heads,
-            n_kv_heads=None,
-            hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
-            moe_hidden_dim=moe_hidden_dim,
+            n_heads=16,
+            n_kv_heads=8,
+            head_dim=head_dim,
+            moe_hidden_dim=768,
             num_experts=num_experts,
-            every_n_layers_nope=4,
-            interleave_moe_layer_step=1,
-            fixed_attn_block_size=256,
-            attn_backend="flex",
-            shared_experts_hidden_dim=None,
+            # top_k must not exceed num_experts (router selects top_k of them).
+            top_k=min(8, num_experts),
+            attn_backend="sdpa",
             moe_comm_backend="standard",
-            non_blocking_capacity_factor=None,
-            rope=ComplexRoPE.Config(
-                dim=dim // n_heads,
-                max_seq_len=2048,
-                theta=500000,
-                scaling="llama",
-                scaling_factor=16.0,
-                high_freq_factor=1.0,
-            ),
+            rope=CosSinRoPE.Config(dim=head_dim, max_seq_len=4096, theta=1000000.0),
         ),
     )
-    return Llama4Model(config)
+    return Qwen3Model(config)
 
 
-def _get_expert_shard_dim(model: Llama4Model) -> int | None:
+def _get_expert_shard_dim(model: Qwen3Model) -> int | None:
     """Return the shard dim used for expert params, or None if not sharded."""
     for layer in model.layers.values():
         if layer.moe_enabled:
@@ -79,7 +67,7 @@ def _get_expert_shard_dim(model: Llama4Model) -> int | None:
 
 
 class TestApplyFsdpMoESharding(DTensorTestBase):
-    """Test apply_fsdp expert sharding behavior with ep_degree=1 and ep_degree>1."""
+    """Test apply_fsdp_to_decoder expert sharding behavior with ep_degree=1 and ep_degree>1."""
 
     @property
     def world_size(self):
@@ -89,9 +77,9 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
     def test_no_ep_fsdp_gt_num_experts_shards_dim1(self):
         """ep_degree=1, fsdp_size(8) > num_experts(4) → Shard(1)."""
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
-        model = _build_llama4_model(num_experts=4).to(self.device_type)
+        model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
 
-        apply_fsdp(
+        apply_fsdp_to_decoder(
             model,
             dp_mesh,
             param_dtype=torch.bfloat16,
@@ -106,9 +94,9 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
     def test_no_ep_fsdp_le_num_experts_shards_dim0(self):
         """ep_degree=1, fsdp_size(8) <= num_experts(8) → Shard(0)."""
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
-        model = _build_llama4_model(num_experts=8).to(self.device_type)
+        model = _build_qwen3_moe_model(num_experts=8).to(self.device_type)
 
-        apply_fsdp(
+        apply_fsdp_to_decoder(
             model,
             dp_mesh,
             param_dtype=torch.bfloat16,
@@ -127,9 +115,9 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
             self.device_type, (4, 2), mesh_dim_names=("efsdp", "ep")
         )
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
-        model = _build_llama4_model(num_experts=4).to(self.device_type)
+        model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
 
-        apply_fsdp(
+        apply_fsdp_to_decoder(
             model,
             dp_mesh,
             param_dtype=torch.bfloat16,

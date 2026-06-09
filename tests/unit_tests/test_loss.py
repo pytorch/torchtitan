@@ -382,7 +382,8 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                     self.assertTrue(torch.equal(local_loss, wrapper_loss.to_local()))
 
                     # compare grad_logits; easier to wrap DTensor -> full_tensor for check.
-                    wrapper_loss.backward()
+                    with loss_parallel():
+                        wrapper_loss.backward()
                     local_loss.backward()
                     local_grad_dtensor = DTensor.from_local(
                         local_logits.grad,
@@ -441,7 +442,7 @@ class TestChunkedCELoss(unittest.TestCase):
         labels = torch.randint(0, V, (B, L))
         labels[0, 1] = IGNORE_INDEX
         labels[1, 3] = IGNORE_INDEX
-        global_valid_tokens = (labels != IGNORE_INDEX).sum().float()
+        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
 
         # Standard path: lm_head + ce_loss + backward
         hidden_std = hidden_states.detach().requires_grad_(True)
@@ -492,7 +493,7 @@ class TestChunkedCELoss(unittest.TestCase):
         torch.manual_seed(42)
         B, L, D, V = 2, 8, 32, 64
         labels = torch.randint(0, V, (B, L))
-        global_valid_tokens = (labels != IGNORE_INDEX).sum().float()
+        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
         hidden_states = torch.randn(B, L, D)
 
         losses = []
