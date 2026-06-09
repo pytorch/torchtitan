@@ -42,7 +42,6 @@ from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_uti
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
-    preserve_buffers_spmd,
     set_spmd_backend,
 )
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
@@ -353,12 +352,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 del model
 
                 for m in self.model_parts:
-                    with preserve_buffers_spmd(m):
-                        m.to_empty(device=init_device)
-                        with torch.no_grad():
-                            # TODO: Change this back to init_weights once
-                            # autoparallel contains the wrap_init_states
-                            cast(BaseModel, m).init_weights(buffer_device=buffer_device)
+                    m.to_empty(device=init_device)
+                    with torch.no_grad():
+                        # TODO: Change this back to init_weights once
+                        # autoparallel contains the wrap_init_states
+                        cast(BaseModel, m).init_weights(buffer_device=buffer_device)
                     m.train()
 
                 # confirm that user will be able to view loss metrics on the console
@@ -381,12 +379,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
-                with preserve_buffers_spmd(model):
-                    model.to_empty(device=init_device)
-                    with torch.no_grad():
-                        # TODO: Change this back to init_weights once
-                        # autoparallel contains the wrap_init_states
-                        cast(BaseModel, model).init_weights(buffer_device=buffer_device)
+                model.to_empty(device=init_device)
+                with torch.no_grad():
+                    # TODO: Change this back to init_weights once
+                    # autoparallel contains the wrap_init_states
+                    cast(BaseModel, model).init_weights(buffer_device=buffer_device)
                 model.train()
 
                 self.model_parts = [model]
@@ -569,15 +566,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
     @sl.log_trace_span("post_dataloading_process")
     def post_dataloading_process(
-        self,
-        input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        dict[str, torch.Tensor],
-        dict[str, Any],
-    ]:
+        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
         """
         Post-processing hook after data loading and before model forward pass.
 
@@ -596,9 +586,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             labels: Target labels for the batch.
 
         Returns:
-            A tuple of
-            (inputs, labels, extra_inputs, extra_kwargs)
-            where:
+            A tuple of (inputs, labels, extra_inputs, extra_kwargs) where:
                 - inputs: Main input tensor extracted from input_dict["input"].
                 - labels: Target labels (unchanged from input parameter).
                 - extra_inputs: Dict of auxiliary input tensors from input_dict
@@ -686,12 +674,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
-        (
-            inputs,
-            labels,
-            extra_inputs,
-            extra_kwargs,
-        ) = self.post_dataloading_process(input_dict, labels)
+        inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
+            input_dict, labels
+        )
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call

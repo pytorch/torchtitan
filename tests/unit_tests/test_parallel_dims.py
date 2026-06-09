@@ -27,9 +27,9 @@ from torchtitan.distributed.parallel_dims import (
     unfold_dp_axes,
 )
 from torchtitan.distributed.spmd_types import (
-    _shard_spmd_state,
-    _validate_spmd_redistributions,
-    redistribute_spmd_per_axis,
+    spmd_validate_redistributions,
+    spmd_distribute_tensor,
+    spmd_redistribute_per_axis,
     spmd_layout_to_dtensor_placements,
 )
 from torchtitan.models.common.decoder_sharding import (
@@ -283,7 +283,7 @@ class TestSpmdLayout(DTensorTestBase):
     def test_rejects_partition_spec_reorder_redistribute(self):
         """((DP, CP), None) -> ((CP, DP), None) not supported by a single redistribute call."""
         with self.assertRaises(ValueError) as cm:
-            _validate_spmd_redistributions(
+            spmd_validate_redistributions(
                 ShardingConfig(
                     out_src_shardings=SpmdLayout(
                         {
@@ -309,7 +309,7 @@ class TestSpmdLayout(DTensorTestBase):
     def test_rejects_multi_axis_redistribute(self):
         """Redistributing multiple mesh axes is unsupported."""
         with self.assertRaises(ValueError) as cm:
-            _validate_spmd_redistributions(
+            spmd_validate_redistributions(
                 ShardingConfig(
                     in_src_shardings={
                         "x": SpmdLayout(
@@ -334,7 +334,7 @@ class TestSpmdLayout(DTensorTestBase):
 
     @with_comms
     def test_partition_spec_order_controls_state_shard(self):
-        """Test _shard_spmd_state follows PartitionSpec order.
+        """Test spmd_distribute_tensor follows PartitionSpec order.
 
         ``(DP, CP)`` and ``(CP, DP)`` both shard dim 0 across the same 2x2
         mesh, but assign different global slices to ranks. This verifies local
@@ -359,7 +359,7 @@ class TestSpmdLayout(DTensorTestBase):
                     partition_spec=spmd.PartitionSpec(axis_order, None),
                 )
 
-                local_weight = _shard_spmd_state(global_weight.clone(), mesh, layout)
+                local_weight = spmd_distribute_tensor(global_weight.clone(), mesh, layout)
 
                 axis_ranks = {
                     MeshAxisName.DP: mesh.get_local_rank("dp"),
@@ -379,9 +379,9 @@ class TestSpmdLayout(DTensorTestBase):
                 torch.testing.assert_close(local_weight, expected)
 
     @with_comms
-    def test_redistribute_spmd_per_axis_allgather(self):
+    def test_spmd_redistribute_per_axis_allgather(self):
         """
-        Test redistribute_spmd_per_axis performs seq-dim allgather.
+        Test spmd_redistribute_per_axis performs seq-dim allgather.
         src: dense SP placement (V + PartitionSpec)
         dst: dense activation w/ I@TP
         """
@@ -396,7 +396,7 @@ class TestSpmdLayout(DTensorTestBase):
 
         comm_mode = CommDebugMode()
         with comm_mode:
-            result = redistribute_spmd_per_axis(
+            result = spmd_redistribute_per_axis(
                 x,
                 mesh,
                 src.per_axis_spmd_types(),
