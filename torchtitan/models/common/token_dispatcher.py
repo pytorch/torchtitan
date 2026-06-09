@@ -850,7 +850,6 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
         assert self.ep_mesh is not None, "ep_mesh must be set before dispatch"
         ep_group = self.ep_mesh.get_group()
-        num_local_experts = self.num_experts // ep_group.size()
 
         (
             _num_tokens_per_expert_E,
@@ -869,8 +868,6 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             token_indices_experts_sorted_N,
             flat_indices_experts_sorted_N,
             routed_scores_N,
-            x_TD.shape[0],
-            num_local_experts,
             ep_group,
         )
 
@@ -895,8 +892,6 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     ) -> torch.Tensor:
         """Combine tokens via MinimalAsyncEP."""
         del x_TD
-        if self.sp_size != 1:
-            raise ValueError("MinimalAsyncEPTokenDispatcher requires sp_size == 1.")
 
         # pyrefly: ignore [bad-argument-type]
         return combine_tokens(routed_output_RD, metadata.state)
