@@ -12,7 +12,7 @@ The symmetric-memory allocation is explicit and must happen before dispatch.
 """
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -512,15 +512,14 @@ def _invert_flat_indices_fake(
 
 
 @torch.library.custom_op(
-    "minimal_async_ep::dispatch_forward",
+    "minimal_async_ep::dispatch_metadata",
     mutates_args=(),
     device_types="cuda",
 )
-def _dispatch_forward_impl(
-    dispatch_input: torch.Tensor,
+def _dispatch_metadata_impl(
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
-    token_indices_experts_sorted_N: torch.Tensor,  # noqa: N803
-    num_tokens: int,
+    num_routed_tokens: int,
+    receive_capacity: int,
     ep_size: int,
 ) -> tuple[
     torch.Tensor,
@@ -529,17 +528,11 @@ def _dispatch_forward_impl(
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
-    torch.Tensor,
 ]:
-    """Dispatch tokens to local experts through the EP process group."""
-    num_experts = num_local_tokens_per_expert_E.numel()
+    """Exchange counts and build dispatch/combine routing metadata."""
     num_local_tokens_per_expert_E = num_local_tokens_per_expert_E.to(
         torch.int64
     ).contiguous()
-    num_routed_tokens = token_indices_experts_sorted_N.numel()
-    top_k = num_routed_tokens // num_tokens
-    slot_size = num_tokens * min(top_k, num_experts // ep_size)
-    receive_capacity = ep_size * slot_size
 
     # Mirrors AllToAllTokenDispatcher's count exchange: each rank starts with
     # counts for its local tokens over all global experts, then learns how many
@@ -552,20 +545,60 @@ def _dispatch_forward_impl(
 
     # Instead of materializing an all-to-all rank-major receive tensor and then
     # calling _permute(), compute the final expert-major receive rows directly.
-    (
-        dispatch_dst_ranks,
-        dispatch_dst_rows,
-        combine_dst_ranks,
-        combine_dst_rows,
-        combine_num_valid_rows,
-        tokens_per_expert_e,
-    ) = _compute_direct_metadata(
+    return _compute_direct_metadata(
         num_local_tokens_per_expert_E,
         all_tokens_per_expert_RE,
         num_routed_tokens,
         receive_capacity,
         ep_size,
     )
+
+
+@_dispatch_metadata_impl.register_fake
+def _dispatch_metadata_fake(
+    num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
+    num_routed_tokens: int,
+    receive_capacity: int,
+    ep_size: int,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    num_local_experts = num_local_tokens_per_expert_E.shape[0] // ep_size
+    dispatch_dst_ranks = num_local_tokens_per_expert_E.new_empty(num_routed_tokens)
+    dispatch_dst_rows = num_local_tokens_per_expert_E.new_empty(num_routed_tokens)
+    combine_dst_ranks = num_local_tokens_per_expert_E.new_empty(receive_capacity)
+    combine_dst_rows = num_local_tokens_per_expert_E.new_empty(receive_capacity)
+    combine_num_valid_rows = num_local_tokens_per_expert_E.new_empty(1)
+    tokens_per_expert = num_local_tokens_per_expert_E.new_empty(num_local_experts)
+    return (
+        dispatch_dst_ranks,
+        dispatch_dst_rows,
+        combine_dst_ranks,
+        combine_dst_rows,
+        combine_num_valid_rows,
+        tokens_per_expert,
+    )
+
+
+@torch.library.custom_op(
+    "minimal_async_ep::dispatch_forward",
+    mutates_args=(),
+    device_types="cuda",
+)
+def _dispatch_forward_impl(
+    dispatch_input: torch.Tensor,
+    dispatch_dst_ranks: torch.Tensor,
+    dispatch_dst_rows: torch.Tensor,
+    token_indices_experts_sorted_N: torch.Tensor,  # noqa: N803
+    receive_capacity: int,
+) -> torch.Tensor:
+    """Dispatch token-ordered rows to local experts using precomputed metadata."""
+    num_routed_tokens = token_indices_experts_sorted_N.numel()
     # This direct copy corresponds to AllToAllTokenDispatcher's token all-to-all;
     # dispatch_dst_rows already point at the post-_permute expert-major layout.
     hidden_recv_buffer = _copy_rows_to_peers_cuda(
@@ -578,56 +611,21 @@ def _dispatch_forward_impl(
         num_warps=8,
         src_rows=token_indices_experts_sorted_N,
     )
-    hidden_RD = hidden_recv_buffer[:receive_capacity, : dispatch_input.shape[1]]
-    return (
-        hidden_RD,
-        tokens_per_expert_e,
-        dispatch_dst_ranks,
-        dispatch_dst_rows,
-        combine_dst_ranks,
-        combine_dst_rows,
-        combine_num_valid_rows,
-    )
+    return hidden_recv_buffer[:receive_capacity, : dispatch_input.shape[1]]
 
 
 @_dispatch_forward_impl.register_fake
 def _dispatch_forward_fake(
     dispatch_input: torch.Tensor,
-    num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
+    dispatch_dst_ranks: torch.Tensor,
+    dispatch_dst_rows: torch.Tensor,
     token_indices_experts_sorted_N: torch.Tensor,  # noqa: N803
-    num_tokens: int,
-    ep_size: int,
-) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-]:
-    num_local_experts = num_local_tokens_per_expert_E.shape[0] // ep_size
-    num_routed_tokens = token_indices_experts_sorted_N.numel()
-    top_k = num_routed_tokens // num_tokens
-    out_tokens = cast(
-        int, num_tokens * ep_size * torch.sym_min(top_k, num_local_experts)
-    )
-    hidden = dispatch_input.new_empty(out_tokens, dispatch_input.shape[1])
-    tokens_per_expert = dispatch_input.new_empty(num_local_experts, dtype=torch.int64)
-    dispatch_dst_ranks = token_indices_experts_sorted_N.new_empty(num_routed_tokens)
-    dispatch_dst_rows = token_indices_experts_sorted_N.new_empty(num_routed_tokens)
-    combine_dst_ranks = token_indices_experts_sorted_N.new_empty(out_tokens)
-    combine_dst_rows = token_indices_experts_sorted_N.new_empty(out_tokens)
-    combine_num_valid_rows = token_indices_experts_sorted_N.new_empty(1)
-    return (
-        hidden,
-        tokens_per_expert,
-        dispatch_dst_ranks,
-        dispatch_dst_rows,
-        combine_dst_ranks,
-        combine_dst_rows,
-        combine_num_valid_rows,
-    )
+    receive_capacity: int,
+) -> torch.Tensor:
+    del dispatch_dst_ranks
+    del dispatch_dst_rows
+    del token_indices_experts_sorted_N
+    return dispatch_input.new_empty(receive_capacity, dispatch_input.shape[1])
 
 
 @torch.library.custom_op(
@@ -899,36 +897,23 @@ class _MinimalAsyncEPDispatch(torch.autograd.Function):
     def forward(
         ctx,
         dispatch_input: torch.Tensor,
-        num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
+        dispatch_dst_ranks: torch.Tensor,
+        dispatch_dst_rows: torch.Tensor,
+        combine_dst_ranks: torch.Tensor,
+        combine_dst_rows: torch.Tensor,
+        combine_num_valid_rows: torch.Tensor,
         token_indices_experts_sorted_N: torch.Tensor,  # noqa: N803
         slot_to_row_N: torch.Tensor,  # noqa: N803
         num_tokens: int,
-        ep_size: int,
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-    ]:
-        outputs = _dispatch_forward_impl(
+        receive_capacity: int,
+    ) -> torch.Tensor:
+        hidden = _dispatch_forward_impl(
             dispatch_input,
-            num_local_tokens_per_expert_E,
+            dispatch_dst_ranks,
+            dispatch_dst_rows,
             token_indices_experts_sorted_N,
-            num_tokens,
-            ep_size,
+            receive_capacity,
         )
-        (
-            _hidden,
-            _tokens_per_expert,
-            _dispatch_dst_ranks,
-            _dispatch_dst_rows,
-            combine_dst_ranks,
-            combine_dst_rows,
-            combine_num_valid_rows,
-        ) = outputs
 
         ctx.num_routed_tokens = token_indices_experts_sorted_N.numel()
         ctx.num_tokens = num_tokens
@@ -939,7 +924,7 @@ class _MinimalAsyncEPDispatch(torch.autograd.Function):
             combine_num_valid_rows,
             slot_to_row_N,
         )
-        return outputs
+        return hidden
 
     @staticmethod
     # pyrefly: ignore [bad-override]
@@ -969,7 +954,7 @@ class _MinimalAsyncEPDispatch(torch.autograd.Function):
                 ctx.top_k,
             )
 
-        return grad_input, None, None, None, None, None
+        return grad_input, None, None, None, None, None, None, None, None, None
 
 
 def _combine_backward(ctx, grad_out, grad_routed_output_extra):
@@ -1151,26 +1136,40 @@ def dispatch_tokens(
     if routed_scores_N.dtype != dispatch_input.dtype:
         routed_scores_N = routed_scores_N.to(dispatch_input.dtype)
 
-    slot_to_row_N = invert_flat_indices(  # noqa: N806
-        flat_indices_experts_sorted_N,
-        num_rows=flat_indices_experts_sorted_N.numel(),
-    )
+    top_k = num_routed_tokens // num_tokens
+    slot_size = num_tokens * min(top_k, num_experts // ep_size)
+    receive_capacity = ep_size * slot_size
 
     (
-        hidden,
-        tokens_per_expert,
         dispatch_dst_ranks,
         dispatch_dst_rows,
         combine_dst_ranks,
         combine_dst_rows,
         combine_num_valid_rows,
-    ) = _MinimalAsyncEPDispatch.apply(
-        dispatch_input,
+        tokens_per_expert,
+    ) = _dispatch_metadata_impl(
         num_local_tokens_per_expert_E,
+        num_routed_tokens,
+        receive_capacity,
+        ep_size,
+    )
+
+    slot_to_row_N = invert_flat_indices(  # noqa: N806
+        flat_indices_experts_sorted_N,
+        num_rows=num_routed_tokens,
+    )
+
+    hidden = _MinimalAsyncEPDispatch.apply(
+        dispatch_input,
+        dispatch_dst_ranks,
+        dispatch_dst_rows,
+        combine_dst_ranks,
+        combine_dst_rows,
+        combine_num_valid_rows,
         token_indices_experts_sorted_N,
         slot_to_row_N,
         num_tokens,
-        ep_size,
+        receive_capacity,
     )
 
     metadata = MinimalAsyncEPDispatchMetadata(
@@ -1183,7 +1182,7 @@ def dispatch_tokens(
         slot_to_row=slot_to_row_N,
         routed_scores=routed_scores_N,
         num_tokens=num_tokens,
-        top_k=flat_indices_experts_sorted_N.numel() // num_tokens,
+        top_k=top_k,
     )
     return hidden, tokens_per_expert, metadata
 
