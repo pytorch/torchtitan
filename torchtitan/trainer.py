@@ -714,7 +714,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         else:
             # Non-PP forward / backward
             assert len(model_parts) == 1
-
             with self.train_context():
                 pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
                 # Under non-full_dtensor, labels stay as plain tensors. See
