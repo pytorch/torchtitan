@@ -152,7 +152,7 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
         )
         # 3D MRoPE positions (1, S, 3); positions=None → single document.
         mrope_positions = MultiModalCollator._build_mrope_positions(
-            mrope_builder,
+            mrope_builder,  # pyrefly: ignore [bad-argument-type]
             hf_in["input_ids"],
             grid_thw.unsqueeze(0),
             None,

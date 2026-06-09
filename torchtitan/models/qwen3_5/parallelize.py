@@ -27,10 +27,11 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
-
+from torchtitan.distributed.fsdp import (
+    apply_fsdp_to_decoder,
+    get_fsdp_reshard_after_forward_policy,
+)
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.llama4.parallelize import apply_fsdp
 from torchtitan.tools.logging import logger
 
 
@@ -77,7 +78,7 @@ def parallelize_qwen3_5(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    if parallelism.full_dtensor:
+    if parallelism.spmd_backend == "full_dtensor":
         raise NotImplementedError("full_dtensor is not supported yet.")
 
     model_compile_enabled = (
@@ -147,8 +148,8 @@ def parallelize_qwen3_5(
         )
         edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
-    apply_fsdp(
-        model,
+    apply_fsdp_to_decoder(
+        model,  # pyrefly: ignore [bad-argument-type]
         dp_mesh,
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],

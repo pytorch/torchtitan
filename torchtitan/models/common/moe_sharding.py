@@ -238,11 +238,16 @@ def set_moe_sharding_config(
     # model's own sharding code.
     shared = moe_cfg.shared_experts
     if shared is not None:
-        sp_layout = Shard(1) if enable_sp else Replicate()
-        shared_input_layout = Replicate() if not enable_ep else sp_layout
+        # Shared-expert input matches the MoE input: sequence-parallel under
+        # EP+SP (Shard(1) on seq, ordered via partition_spec), else Replicate.
+        shared_input = (
+            dense_sequence_parallel_placement()
+            if enable_ep and enable_sp
+            else dense_activation_placement(tp=spmd.R)
+        )
         shared.sharding_config = ShardingConfig(
-            in_src_shardings={"x": dense_activation_placement(tp=shared_input_layout)},
-            in_dst_shardings={"x": dense_activation_placement(tp=Replicate())},
+            in_src_shardings={"x": shared_input},
+            in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
         )
 
         shared.w1.sharding_config = _shared_expert_colwise_config(

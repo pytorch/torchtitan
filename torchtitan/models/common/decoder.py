@@ -79,7 +79,6 @@ class Decoder(BaseModel):
 
         @property
         def max_seq_len(self) -> int:
-            # Llama4/iRoPE can have NoPE layers with ``rope=None``; use the
             # first layer that carries RoPE to expose the model context length.
             for layer_cfg in self.layers:
                 attention_cfg = getattr(layer_cfg, "attention", None)

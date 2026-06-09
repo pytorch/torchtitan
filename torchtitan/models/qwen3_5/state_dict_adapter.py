@@ -190,6 +190,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                 hf_value = value
                 # Linear weight (out, C*T*H*W) → Conv3d weight (out, C, T, H, W)
                 if tt_key == "vision_encoder.patch_embed.weight":
+                    # pyrefly: ignore [missing-attribute]
                     encoder = self.model_config.vision_encoder
                     hf_value = value.reshape(
                         value.shape[0],
@@ -286,6 +287,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     hf_abstract_key
                     == "model.language_model.layers.{}.linear_attn.in_proj_qkv.weight"
                 ):
+                    # pyrefly: ignore [missing-attribute]
                     dn = self.model_config.layers[int(idx)].delta_net
                     kd = dn.in_proj_q.out_features
                     vd = dn.in_proj_v.out_features
@@ -300,6 +302,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     hf_abstract_key
                     == "model.language_model.layers.{}.linear_attn.conv1d.weight"
                 ):
+                    # pyrefly: ignore [missing-attribute]
                     dn = self.model_config.layers[int(idx)].delta_net
                     kd = dn.in_proj_q.out_features
                     vd = dn.in_proj_v.out_features
