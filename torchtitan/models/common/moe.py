@@ -382,10 +382,11 @@ class MoE(Module):
         T = B * L
         sp_size = getattr(self.experts.token_dispatcher, "sp_size", 1)
         pad_tokens = (-T) % sp_size
-        # Padding is logically appended to the flattened global token tail, but
-        # we do not physically pad this DTensor. Cat along Shard(1) would
-        # unshard the sequence dimension. GroupedExperts receives only the
-        # count metadata needed for dispatch/combine shape math.
+        # Padding is logically appended to the flattened global sequence tail,
+        # not to a specific SP rank. This lets combine() infer each SP rank's
+        # start/end offsets from the uniform padded shard length; for example,
+        # if T < sp_size, only the first T ranks have real tokens. No padded
+        # token is materialized or routed.
         num_local_tokens_after_padding = (T + pad_tokens) // sp_size
 
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
