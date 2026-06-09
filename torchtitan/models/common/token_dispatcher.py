@@ -801,16 +801,22 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
 class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     """Token dispatcher using MinimalAsyncEP for constrained EP communication.
 
-    This first integration supports EP with ``sp_size == 1`` only. TP/SP, CP,
-    PP, padding, and async combine overlap are intentionally out of scope.
+    This first integration supports EP with ``sp_size == 1`` and
+    ``score_before_experts=False`` only. TP/SP, CP, PP, padding, and async
+    combine overlap are intentionally out of scope.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(LocalTokenDispatcher.Config):
-        pass
+        score_before_experts: bool = False
 
     def __init__(self, config: Config):
         super().__init__(config)
+        if self.score_before_experts:
+            raise ValueError(
+                "MinimalAsyncEPTokenDispatcher only supports "
+                "score_before_experts=False."
+            )
         self.ep_mesh: DeviceMesh | None = None
         self.sp_size: int = 1
 
@@ -845,7 +851,6 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         assert self.ep_mesh is not None, "ep_mesh must be set before dispatch"
         ep_group = self.ep_mesh.get_group()
         num_local_experts = self.num_experts // ep_group.size()
-        input_is_token_ordered = not self.score_before_experts
 
         (
             _num_tokens_per_expert_E,
@@ -855,18 +860,8 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         )
         token_indices_experts_sorted_N = flat_indices_experts_sorted_N // self.top_k
 
-        if self.score_before_experts:
-            topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[
-                flat_indices_experts_sorted_N
-            ]
-            dispatch_input = (
-                x_TD[token_indices_experts_sorted_N].to(torch.float32)
-                * topk_scores_experts_sorted_N.reshape(-1, 1)
-            ).to(x_TD.dtype)
-            routed_scores_N = None
-        else:
-            dispatch_input = x_TD
-            routed_scores_N = topk_scores_TK.view(-1)
+        dispatch_input = x_TD
+        routed_scores_N = topk_scores_TK.view(-1)
 
         hidden_states_RD, tokens_per_expert_E, state = dispatch_tokens(
             dispatch_input,
@@ -877,8 +872,6 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             x_TD.shape[0],
             num_local_experts,
             ep_group,
-            input_is_token_ordered=input_is_token_ordered,
-            routed_scores_are_slot_ordered=routed_scores_N is not None,
         )
 
         metadata = DeepEPDispatchMetadata(state=state)

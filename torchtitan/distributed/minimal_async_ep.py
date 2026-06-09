@@ -12,7 +12,7 @@ The symmetric-memory allocation is explicit and must happen before dispatch.
 """
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
@@ -71,7 +71,6 @@ class MinimalAsyncEPDispatchMetadata:
     flat_indices_experts_sorted: torch.Tensor
     slot_to_row: torch.Tensor
     routed_scores: torch.Tensor | None = None
-    routed_scores_are_slot_ordered: bool = False
     num_tokens: int = 0
     top_k: int = 0
 
@@ -523,7 +522,6 @@ def _dispatch_forward_impl(
     token_indices_experts_sorted_N: torch.Tensor,  # noqa: N803
     num_tokens: int,
     ep_size: int,
-    input_is_token_ordered: bool,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -578,7 +576,7 @@ def _dispatch_forward_impl(
         num_routed_tokens,
         block_m=4,
         num_warps=8,
-        src_rows=token_indices_experts_sorted_N if input_is_token_ordered else None,
+        src_rows=token_indices_experts_sorted_N,
     )
     hidden_RD = hidden_recv_buffer[:receive_capacity, : dispatch_input.shape[1]]
     return (
@@ -599,7 +597,6 @@ def _dispatch_forward_fake(
     token_indices_experts_sorted_N: torch.Tensor,  # noqa: N803
     num_tokens: int,
     ep_size: int,
-    input_is_token_ordered: bool,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -609,13 +606,14 @@ def _dispatch_forward_fake(
     torch.Tensor,
     torch.Tensor,
 ]:
-    del input_is_token_ordered
     num_local_experts = num_local_tokens_per_expert_E.shape[0] // ep_size
-    top_k = token_indices_experts_sorted_N.numel() // num_tokens
-    out_tokens = num_tokens * ep_size * torch.sym_min(top_k, num_local_experts)
+    num_routed_tokens = token_indices_experts_sorted_N.numel()
+    top_k = num_routed_tokens // num_tokens
+    out_tokens = cast(
+        int, num_tokens * ep_size * torch.sym_min(top_k, num_local_experts)
+    )
     hidden = dispatch_input.new_empty(out_tokens, dispatch_input.shape[1])
     tokens_per_expert = dispatch_input.new_empty(num_local_experts, dtype=torch.int64)
-    num_routed_tokens = token_indices_experts_sorted_N.numel()
     dispatch_dst_ranks = token_indices_experts_sorted_N.new_empty(num_routed_tokens)
     dispatch_dst_rows = token_indices_experts_sorted_N.new_empty(num_routed_tokens)
     combine_dst_ranks = token_indices_experts_sorted_N.new_empty(out_tokens)
@@ -648,7 +646,6 @@ def _combine_impl(
     flat_indices_experts_sorted_N: torch.Tensor,  # noqa: N803
     routed_scores_N: torch.Tensor,  # noqa: N803
     has_scores: bool,
-    scores_are_slot_ordered: bool,
     num_tokens: int,
     top_k: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -670,7 +667,7 @@ def _combine_impl(
         routed_scores_N if has_scores else None,
         num_tokens=num_tokens,
         top_k=top_k,
-        scores_are_slot_ordered=scores_are_slot_ordered,
+        scores_are_slot_ordered=True,
     )
     return out_TD, routed_output_ND
 
@@ -687,22 +684,18 @@ def _combine_fake(
     flat_indices_experts_sorted_N: torch.Tensor,  # noqa: N803
     routed_scores_N: torch.Tensor,  # noqa: N803
     has_scores: bool,
-    scores_are_slot_ordered: bool,
     num_tokens: int,
     top_k: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    del (
-        dispatch_dst_ranks,
-        dispatch_dst_rows,
-        combine_dst_ranks,
-        combine_dst_rows,
-        combine_num_valid_rows,
-        slot_to_row_N,
-        routed_scores_N,
-        has_scores,
-        scores_are_slot_ordered,
-        top_k,
-    )
+    del dispatch_dst_ranks
+    del dispatch_dst_rows
+    del combine_dst_ranks
+    del combine_dst_rows
+    del combine_num_valid_rows
+    del slot_to_row_N
+    del routed_scores_N
+    del has_scores
+    del top_k
     return (
         x.new_empty(num_tokens, x.shape[1]),
         x.new_empty(flat_indices_experts_sorted_N.numel(), x.shape[1]),
@@ -748,7 +741,6 @@ def _dispatch_backward_impl(
     num_routed_tokens: int,
     num_tokens: int,
     top_k: int,
-    input_is_token_ordered: bool,
 ) -> torch.Tensor:
     grad_routed_input = _combine_to_origin(
         grad_hidden,
@@ -757,15 +749,13 @@ def _dispatch_backward_impl(
         combine_num_valid_rows,
         num_routed_tokens,
     )
-    if input_is_token_ordered:
-        return reduce_topk_slots(
-            grad_routed_input,
-            slot_to_row_N,
-            None,
-            num_tokens=num_tokens,
-            top_k=top_k,
-        )
-    return grad_routed_input
+    return reduce_topk_slots(
+        grad_routed_input,
+        slot_to_row_N,
+        None,
+        num_tokens=num_tokens,
+        top_k=top_k,
+    )
 
 
 @_dispatch_backward_impl.register_fake
@@ -778,17 +768,14 @@ def _dispatch_backward_fake(
     num_routed_tokens: int,
     num_tokens: int,
     top_k: int,
-    input_is_token_ordered: bool,
 ) -> torch.Tensor:
-    del (
-        combine_dst_ranks,
-        combine_dst_rows,
-        combine_num_valid_rows,
-        slot_to_row_N,
-        top_k,
-    )
-    rows = num_tokens if input_is_token_ordered else num_routed_tokens
-    return grad_hidden.new_empty(rows, grad_hidden.shape[1])
+    del combine_dst_ranks
+    del combine_dst_rows
+    del combine_num_valid_rows
+    del slot_to_row_N
+    del num_routed_tokens
+    del top_k
+    return grad_hidden.new_empty(num_tokens, grad_hidden.shape[1])
 
 
 @torch.library.custom_op(
@@ -807,7 +794,6 @@ def _combine_backward_impl(
     has_grad_out: bool,
     has_grad_routed_output_extra: bool,
     has_scores: bool,
-    scores_are_slot_ordered: bool,
     routed_scores_requires_grad: bool,
     top_k: int,
     receive_capacity: int,
@@ -822,7 +808,7 @@ def _combine_backward_impl(
             routed_scores_N if has_scores else None,
             top_k=top_k,
             dtype=grad_out.dtype,
-            scores_are_slot_ordered=scores_are_slot_ordered,
+            scores_are_slot_ordered=True,
         )
         if has_scores and routed_scores_requires_grad:
             grad_scores = topk_scores_grad(
@@ -831,7 +817,7 @@ def _combine_backward_impl(
                 flat_indices_experts_sorted_N,
                 top_k=top_k,
                 dtype=routed_scores_N.dtype,
-                scores_are_slot_ordered=scores_are_slot_ordered,
+                scores_are_slot_ordered=True,
             )
 
     if has_grad_routed_output_extra:
@@ -866,21 +852,17 @@ def _combine_backward_fake(
     has_grad_out: bool,
     has_grad_routed_output_extra: bool,
     has_scores: bool,
-    scores_are_slot_ordered: bool,
     routed_scores_requires_grad: bool,
     top_k: int,
     receive_capacity: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    del (
-        grad_routed_output_extra,
-        dispatch_dst_ranks,
-        dispatch_dst_rows,
-        flat_indices_experts_sorted_N,
-        saved_routed_output_ND,
-        has_grad_routed_output_extra,
-        scores_are_slot_ordered,
-        top_k,
-    )
+    del grad_routed_output_extra
+    del dispatch_dst_ranks
+    del dispatch_dst_rows
+    del flat_indices_experts_sorted_N
+    del saved_routed_output_ND
+    del has_grad_routed_output_extra
+    del top_k
     grad_scores_shape = (
         routed_scores_N.shape
         if has_grad_out and has_scores and routed_scores_requires_grad
@@ -922,7 +904,6 @@ class _MinimalAsyncEPDispatch(torch.autograd.Function):
         slot_to_row_N: torch.Tensor,  # noqa: N803
         num_tokens: int,
         ep_size: int,
-        input_is_token_ordered: bool,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -938,7 +919,6 @@ class _MinimalAsyncEPDispatch(torch.autograd.Function):
             token_indices_experts_sorted_N,
             num_tokens,
             ep_size,
-            input_is_token_ordered,
         )
         (
             _hidden,
@@ -953,7 +933,6 @@ class _MinimalAsyncEPDispatch(torch.autograd.Function):
         ctx.num_routed_tokens = token_indices_experts_sorted_N.numel()
         ctx.num_tokens = num_tokens
         ctx.top_k = token_indices_experts_sorted_N.numel() // num_tokens
-        ctx.input_is_token_ordered = input_is_token_ordered
         ctx.save_for_backward(
             combine_dst_ranks,
             combine_dst_rows,
@@ -988,10 +967,9 @@ class _MinimalAsyncEPDispatch(torch.autograd.Function):
                 ctx.num_routed_tokens,
                 ctx.num_tokens,
                 ctx.top_k,
-                ctx.input_is_token_ordered,
             )
 
-        return grad_input, None, None, None, None, None, None
+        return grad_input, None, None, None, None, None
 
 
 def _combine_backward(ctx, grad_out, grad_routed_output_extra):
@@ -1023,7 +1001,6 @@ def _combine_backward(ctx, grad_out, grad_routed_output_extra):
             grad_out is not None,
             grad_routed_output_extra is not None,
             ctx.has_scores,
-            ctx.scores_are_slot_ordered,
             ctx.routed_scores_requires_grad,
             ctx.top_k,
             ctx.receive_capacity,
@@ -1044,7 +1021,6 @@ def _combine_backward(ctx, grad_out, grad_routed_output_extra):
         None,
         None,
         None,
-        None,
     )
 
 
@@ -1060,13 +1036,11 @@ def _combine_setup_context(ctx, inputs, output):
         flat_indices_experts_sorted_N,
         routed_scores_N,
         has_scores,
-        scores_are_slot_ordered,
         _num_tokens,
         top_k,
     ) = inputs
     _, routed_output_ND = output
     ctx.has_scores = has_scores
-    ctx.scores_are_slot_ordered = scores_are_slot_ordered
     ctx.top_k = top_k
     ctx.receive_capacity = x.shape[0]
     ctx.routed_scores_requires_grad = routed_scores_N.requires_grad
@@ -1129,9 +1103,6 @@ def dispatch_tokens(
     num_tokens: int,
     num_local_experts: int,
     group: dist.ProcessGroup,
-    *,
-    input_is_token_ordered: bool = False,
-    routed_scores_are_slot_ordered: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, MinimalAsyncEPDispatchMetadata]:
     """Dispatch tokens to experts via MinimalAsyncEP."""
     if _hidden_recv_buffers is None or _rendezvous_handle is None:
@@ -1154,20 +1125,30 @@ def dispatch_tokens(
         raise ValueError(
             f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size})."
         )
-    if flat_indices_experts_sorted_N.numel() > _max_routed_tokens:
+    num_routed_tokens = flat_indices_experts_sorted_N.numel()
+    if num_routed_tokens > _max_routed_tokens:
         raise RuntimeError(
             f"MinimalAsyncEP buffer max_routed_tokens ({_max_routed_tokens}) "
             "is smaller "
-            f"than routed input rows ({flat_indices_experts_sorted_N.numel()})."
+            f"than routed input rows ({num_routed_tokens})."
         )
-    if token_indices_experts_sorted_N.numel() != flat_indices_experts_sorted_N.numel():
+    if token_indices_experts_sorted_N.numel() != num_routed_tokens:
         raise ValueError(
             "token_indices_experts_sorted_N and flat_indices_experts_sorted_N "
             "must have the same length, got "
-            f"{token_indices_experts_sorted_N.numel()} and "
-            f"{flat_indices_experts_sorted_N.numel()}."
+            f"{token_indices_experts_sorted_N.numel()} and {num_routed_tokens}."
         )
-    if routed_scores_N is not None and routed_scores_N.dtype != dispatch_input.dtype:
+    if dispatch_input.shape[0] != num_tokens:
+        raise ValueError(
+            "MinimalAsyncEP expects token-ordered dispatch_input with one row per "
+            f"token, got {dispatch_input.shape[0]} rows for {num_tokens} tokens."
+        )
+    if routed_scores_N is None:
+        raise ValueError(
+            "MinimalAsyncEP requires routed_scores_N because it only supports "
+            "score_before_experts=False."
+        )
+    if routed_scores_N.dtype != dispatch_input.dtype:
         routed_scores_N = routed_scores_N.to(dispatch_input.dtype)
 
     slot_to_row_N = invert_flat_indices(  # noqa: N806
@@ -1190,7 +1171,6 @@ def dispatch_tokens(
         slot_to_row_N,
         num_tokens,
         ep_size,
-        input_is_token_ordered,
     )
 
     metadata = MinimalAsyncEPDispatchMetadata(
@@ -1202,7 +1182,6 @@ def dispatch_tokens(
         flat_indices_experts_sorted=flat_indices_experts_sorted_N,
         slot_to_row=slot_to_row_N,
         routed_scores=routed_scores_N,
-        routed_scores_are_slot_ordered=routed_scores_are_slot_ordered,
         num_tokens=num_tokens,
         top_k=flat_indices_experts_sorted_N.numel() // num_tokens,
     )
@@ -1233,7 +1212,6 @@ def combine_tokens(
         metadata.flat_indices_experts_sorted,
         routed_scores_N,
         has_scores,
-        metadata.routed_scores_are_slot_ordered,
         metadata.num_tokens,
         metadata.top_k,
     )
