@@ -68,24 +68,6 @@ def _validate_minimal_async_ep_config(
             f"expert_parallel_degree={parallel_dims.ep}."
         )
 
-
-def _init_minimal_async_ep_buffer(
-    model: DeepSeekV3Model,
-    *,
-    dispatcher_config: MinimalAsyncEPTokenDispatcher.Config,
-    parallel_dims: ParallelDims,
-    training: TrainingConfig,
-) -> None:
-    minimal_async_ep.init_buffer(
-        group=parallel_dims.get_mesh("ep").get_group(),
-        hidden_dim=model.config.dim,
-        tokens_per_rank=training.local_batch_size * training.seq_len,
-        num_local_experts=dispatcher_config.num_experts // parallel_dims.ep,
-        top_k=dispatcher_config.top_k,
-        dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-        device=torch.device(device_type, device_module.current_device()),
-    )
-
 def _maybe_init_minimal_async_ep_buffer(
     model: DeepSeekV3Model,
     *,
@@ -115,11 +97,14 @@ def _maybe_init_minimal_async_ep_buffer(
         parallel_dims=parallel_dims,
         parallelism=parallelism,
     )
-    _init_minimal_async_ep_buffer(
-        model,
-        dispatcher_config=dispatcher_config,
-        parallel_dims=parallel_dims,
-        training=training,
+    minimal_async_ep.init_buffer(
+        group=parallel_dims.get_mesh("ep").get_group(),
+        hidden_dim=model.config.dim,
+        tokens_per_rank=training.local_batch_size * training.seq_len,
+        num_local_experts=dispatcher_config.num_experts // parallel_dims.ep,
+        top_k=dispatcher_config.top_k,
+        dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+        device=torch.device(device_type, device_module.current_device()),
     )
 
 

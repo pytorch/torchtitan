@@ -723,7 +723,7 @@ def invert_flat_indices(
     *,
     num_rows: int,
 ) -> torch.Tensor:
-    slot_to_row = torch.empty_like(flat_indices)
+    slot_to_row = flat_indices.new_empty(num_rows)
 
     block_size = 1024
     _invert_flat_indices_kernel[(triton.cdiv(num_rows, block_size),)](
