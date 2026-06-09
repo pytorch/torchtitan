@@ -526,11 +526,11 @@ class PolicyTrainer(Actor, Configurable):
         from the source's GPU memory".
 
         """
-        from monarch.rdma import is_rdma_available
+        from monarch.rdma import is_ibverbs_available
 
         await ts.put_state_dict(
             self.model.state_dict(),
             "model_state_dict",
-            direct_rdma=is_rdma_available(),
+            direct_rdma=is_ibverbs_available(),
             transfer_dtype=self._transfer_dtype,
         )
