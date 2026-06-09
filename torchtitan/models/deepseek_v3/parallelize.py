@@ -30,6 +30,25 @@ from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 from torchtitan.tools.utils import device_module, device_type
 
 
+def _get_minimal_async_ep_dispatcher_config(
+    model: DeepSeekV3Model,
+) -> MinimalAsyncEPTokenDispatcher.Config | None:
+    """Return the MinimalAsyncEP config selected through the model spec.
+
+    ``model_registry(..., moe_comm_backend="minimal_async_ep")`` lowers the
+    backend choice into the MoE token-dispatcher config stored in
+    ``ModelSpec.model``. At parallelize time that config is the source of truth.
+    """
+    moe_config = next((l.moe for l in model.config.layers if l.moe is not None), None)
+    if moe_config is None:
+        return None
+
+    dispatcher_config = moe_config.experts.token_dispatcher
+    if isinstance(dispatcher_config, MinimalAsyncEPTokenDispatcher.Config):
+        return dispatcher_config
+    return None
+
+
 def _validate_minimal_async_ep_config(
     dispatcher_config: MinimalAsyncEPTokenDispatcher.Config,
     *,
@@ -77,12 +96,8 @@ def _maybe_init_minimal_async_ep_buffer(
     ac_config: ActivationCheckpointConfig,
     memory_policy: str | None = None,
 ) -> None:
-    moe_config = next((l.moe for l in model.config.layers if l.moe is not None), None)
-    if moe_config is None:
-        return
-
-    dispatcher_config = moe_config.experts.token_dispatcher
-    if not isinstance(dispatcher_config, MinimalAsyncEPTokenDispatcher.Config):
+    dispatcher_config = _get_minimal_async_ep_dispatcher_config(model)
+    if dispatcher_config is None:
         return
 
     if ac_config.mode != "full" and memory_policy != "full":
