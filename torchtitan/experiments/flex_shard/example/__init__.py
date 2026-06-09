@@ -4,6 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from .fp8_ragged_shard import (
+    blockwise_dequant_weight,
+    blockwise_quant_weight,
+    blockwise_transpose,
+    Fp8BlockwiseGroupedRaggedShard,
+    Fp8TwoOrientationGroupedRaggedShard,
+    make_fp8_blockwise_grouped_ragged_placement_fn,
+    make_fp8_two_orientation_grouped_ragged_placement_fn,
+    promote_to_square_block,
+)
 from .owned import Owned, param_boundary_placements
 from .ragged_shard import (
     GroupedRaggedShard,
@@ -15,13 +25,21 @@ from .ragged_shard import (
 from .shard import per_param_placements, Shard
 
 __all__ = [
+    "blockwise_dequant_weight",
+    "blockwise_quant_weight",
+    "blockwise_transpose",
+    "Fp8BlockwiseGroupedRaggedShard",
+    "Fp8TwoOrientationGroupedRaggedShard",
     "GroupedRaggedShard",
+    "make_fp8_blockwise_grouped_ragged_placement_fn",
+    "make_fp8_two_orientation_grouped_ragged_placement_fn",
     "make_grouped_ragged_placement_fn",
     "make_ragged_placement_fn",
     "Owned",
     "param_boundary_placements",
     "per_param_ragged_placements",
     "per_param_placements",
+    "promote_to_square_block",
     "RaggedShard",
     "Shard",
 ]
