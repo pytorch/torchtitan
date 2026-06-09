@@ -934,8 +934,6 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         token_indices_experts_sorted_N = flat_indices_experts_sorted_N // self.top_k
 
         routed_scores_N = topk_scores_TK.view(-1)
-        if routed_scores_N.dtype != x_TD.dtype:
-            routed_scores_N = routed_scores_N.to(x_TD.dtype)
 
         ep_size = ep_group.size()
         num_tokens = x_TD.shape[0]
