@@ -46,7 +46,7 @@ _counts_recv_handle: Any = None
 _counts_recv_peer_buffers: list[torch.Tensor] | None = None
 _counts_recv_peer_ptrs: torch.Tensor | None = None
 _group: dist.ProcessGroup | None = None
-_max_tokens_per_rank: int = 0
+_tokens_per_rank: int = 0
 
 _HIDDEN_READY_CHANNEL = 0
 _COUNTS_READY_CHANNEL = 0
@@ -89,7 +89,7 @@ class MinimalAsyncEPDispatchMetadata:
 def init_buffer(
     group: dist.ProcessGroup,
     hidden_dim: int,
-    max_tokens_per_rank: int,
+    tokens_per_rank: int,
     num_local_experts: int,
     top_k: int,
     dtype: torch.dtype,
@@ -101,11 +101,11 @@ def init_buffer(
     global _hidden_recv_buffer_index
     global _counts_recv_buffer, _counts_recv_handle, _counts_recv_peer_buffers
     global _counts_recv_peer_ptrs
-    global _group, _max_tokens_per_rank
+    global _group, _tokens_per_rank
 
     device = torch.device(device)
     max_routed_tokens = (
-        group.size() * max_tokens_per_rank * min(top_k, num_local_experts)
+        group.size() * tokens_per_rank * min(top_k, num_local_experts)
     )
     num_experts = group.size() * num_local_experts
     needs_init = (
@@ -121,7 +121,7 @@ def init_buffer(
         or _hidden_recv_buffers[0].shape[1] < hidden_dim
         or _hidden_recv_buffers[0].shape[0] < max_routed_tokens
         or _counts_recv_buffer.shape[1] < num_experts
-        or _max_tokens_per_rank < max_tokens_per_rank
+        or _tokens_per_rank < tokens_per_rank
         or _hidden_recv_buffers[0].dtype != dtype
         or _hidden_recv_buffers[0].device != device
     )
@@ -129,10 +129,10 @@ def init_buffer(
         return
 
     logger.info(
-        "Initializing MinimalAsyncEP buffer: hidden_dim=%d, max_tokens_per_rank=%d, "
+        "Initializing MinimalAsyncEP buffer: hidden_dim=%d, tokens_per_rank=%d, "
         "top_k=%d, num_local_experts=%d, ep_size=%d, max_routed_tokens=%d",
         hidden_dim,
-        max_tokens_per_rank,
+        tokens_per_rank,
         top_k,
         num_local_experts,
         group.size(),
@@ -203,7 +203,7 @@ def init_buffer(
         )
 
     _group = group
-    _max_tokens_per_rank = max_tokens_per_rank
+    _tokens_per_rank = tokens_per_rank
     _hidden_recv_buffer_index = 0
 
 
@@ -294,7 +294,7 @@ def _copy_all_counts_to_peers_cuda(
         num_experts=num_experts,
         dst_ptrs=_counts_recv_peer_ptrs,
     )
-    return _counts_recv_buffer[:ep_size, :num_experts]
+    return _counts_recv_buffer
 
 
 def _compute_direct_metadata(
@@ -338,7 +338,7 @@ def _compute_direct_metadata(
         local_count_starts_E,
         num_routed_tokens=num_routed_rows,
         num_local_experts=num_local_experts,
-        max_tokens_per_segment=_max_tokens_per_rank,
+        max_tokens_per_segment=_tokens_per_rank,
     )
 
     segment_lens = counts_sde[:, rank, :].t().reshape(-1)
@@ -355,7 +355,7 @@ def _compute_direct_metadata(
         ep_size=ep_size,
         num_local_experts=num_local_experts,
         receive_capacity=receive_capacity,
-        max_tokens_per_segment=_max_tokens_per_rank,
+        max_tokens_per_segment=_tokens_per_rank,
     )
 
     return (
@@ -375,6 +375,7 @@ def _dispatch_to_experts(
     num_routed_rows: int,
     receive_capacity: int,
 ) -> torch.Tensor:
+    del receive_capacity
     hidden_recv_buffer = _copy_rows_to_peers_cuda(
         x_ND,
         dispatch_dst_ranks,
@@ -383,7 +384,7 @@ def _dispatch_to_experts(
         block_m=4,
         num_warps=8,
     )
-    return hidden_recv_buffer[:receive_capacity, : x_ND.shape[1]]
+    return hidden_recv_buffer
 
 
 def _combine_to_origin(
@@ -536,6 +537,7 @@ def dispatch_forward(
     receive_capacity: int,
 ) -> torch.Tensor:
     """Dispatch E-major routed rows using source token-row indices."""
+    del receive_capacity
     num_routed_rows = E_row_to_token_N.numel()
     # This direct copy corresponds to AllToAllTokenDispatcher's token all-to-all;
     # dispatch_dst_rows already point at the post-_permute E-major layout.
@@ -548,7 +550,7 @@ def dispatch_forward(
         num_warps=8,
         src_rows=E_row_to_token_N,
     )
-    return hidden_recv_buffer[:receive_capacity, : dispatch_input.shape[1]]
+    return hidden_recv_buffer
 
 
 @dispatch_forward.register_fake
