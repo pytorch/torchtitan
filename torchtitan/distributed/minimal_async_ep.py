@@ -20,7 +20,7 @@ import torch.distributed._symmetric_memory as symm_mem
 from torch.utils._python_dispatch import _disable_current_modes
 
 from torchtitan.distributed.minimal_async_ep_kernels import (
-    active_swiglu_backward,
+    active_swiglu_backward as active_swiglu_backward_kernel,
     active_swiglu_forward,
     copy_full_counts_to_peers,
     copy_rows_to_peers,
@@ -471,7 +471,7 @@ def _combine_to_origin(
     mutates_args=(),
     device_types="cuda",
 )
-def _active_swiglu_impl(
+def active_swiglu(
     gate: torch.Tensor,
     up: torch.Tensor,
     active_rows: torch.Tensor,
@@ -480,8 +480,8 @@ def _active_swiglu_impl(
     return active_swiglu_forward(gate, up, active_rows)
 
 
-@_active_swiglu_impl.register_fake
-def _active_swiglu_fake(
+@active_swiglu.register_fake
+def active_swiglu_fake(
     gate: torch.Tensor,
     up: torch.Tensor,
     active_rows: torch.Tensor,
@@ -495,7 +495,7 @@ def _active_swiglu_fake(
     mutates_args=(),
     device_types="cuda",
 )
-def _invert_flat_indices_impl(
+def invert_flat_indices(
     flat_indices: torch.Tensor,
     num_rows: int,
 ) -> torch.Tensor:
@@ -503,8 +503,8 @@ def _invert_flat_indices_impl(
     return _invert_flat_indices(flat_indices, num_rows=num_rows)
 
 
-@_invert_flat_indices_impl.register_fake
-def _invert_flat_indices_fake(
+@invert_flat_indices.register_fake
+def invert_flat_indices_fake(
     flat_indices: torch.Tensor,
     num_rows: int,
 ) -> torch.Tensor:
@@ -516,7 +516,7 @@ def _invert_flat_indices_fake(
     mutates_args=(),
     device_types="cuda",
 )
-def _dispatch_metadata_impl(
+def dispatch_metadata(
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
     num_routed_tokens: int,
     receive_capacity: int,
@@ -554,8 +554,8 @@ def _dispatch_metadata_impl(
     )
 
 
-@_dispatch_metadata_impl.register_fake
-def _dispatch_metadata_fake(
+@dispatch_metadata.register_fake
+def dispatch_metadata_fake(
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
     num_routed_tokens: int,
     receive_capacity: int,
@@ -590,7 +590,7 @@ def _dispatch_metadata_fake(
     mutates_args=(),
     device_types="cuda",
 )
-def _dispatch_forward_impl(
+def dispatch_forward(
     dispatch_input: torch.Tensor,
     dispatch_dst_ranks: torch.Tensor,
     dispatch_dst_rows: torch.Tensor,
@@ -614,8 +614,8 @@ def _dispatch_forward_impl(
     return hidden_recv_buffer[:receive_capacity, : dispatch_input.shape[1]]
 
 
-@_dispatch_forward_impl.register_fake
-def _dispatch_forward_fake(
+@dispatch_forward.register_fake
+def dispatch_forward_fake(
     dispatch_input: torch.Tensor,
     dispatch_dst_ranks: torch.Tensor,
     dispatch_dst_rows: torch.Tensor,
@@ -633,7 +633,7 @@ def _dispatch_forward_fake(
     mutates_args=(),
     device_types="cuda",
 )
-def _combine_impl(
+def combine(
     x: torch.Tensor,
     dispatch_dst_ranks: torch.Tensor,
     dispatch_dst_rows: torch.Tensor,
@@ -670,8 +670,8 @@ def _combine_impl(
     return out_TD, routed_output_ND
 
 
-@_combine_impl.register_fake
-def _combine_fake(
+@combine.register_fake
+def combine_fake(
     x: torch.Tensor,
     dispatch_dst_ranks: torch.Tensor,
     dispatch_dst_rows: torch.Tensor,
@@ -705,17 +705,17 @@ def _combine_fake(
     mutates_args=(),
     device_types="cuda",
 )
-def _active_swiglu_backward_impl(
+def active_swiglu_backward(
     grad_out: torch.Tensor,
     gate: torch.Tensor,
     up: torch.Tensor,
     active_rows: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return active_swiglu_backward(grad_out, gate, up, active_rows)
+    return active_swiglu_backward_kernel(grad_out, gate, up, active_rows)
 
 
-@_active_swiglu_backward_impl.register_fake
-def _active_swiglu_backward_fake(
+@active_swiglu_backward.register_fake
+def active_swiglu_backward_fake(
     grad_out: torch.Tensor,
     gate: torch.Tensor,
     up: torch.Tensor,
@@ -730,7 +730,7 @@ def _active_swiglu_backward_fake(
     mutates_args=(),
     device_types="cuda",
 )
-def _dispatch_backward_impl(
+def dispatch_backward(
     grad_hidden: torch.Tensor,
     combine_dst_ranks: torch.Tensor,
     combine_dst_rows: torch.Tensor,
@@ -756,8 +756,8 @@ def _dispatch_backward_impl(
     )
 
 
-@_dispatch_backward_impl.register_fake
-def _dispatch_backward_fake(
+@dispatch_backward.register_fake
+def dispatch_backward_fake(
     grad_hidden: torch.Tensor,
     combine_dst_ranks: torch.Tensor,
     combine_dst_rows: torch.Tensor,
@@ -781,7 +781,7 @@ def _dispatch_backward_fake(
     mutates_args=(),
     device_types="cuda",
 )
-def _combine_backward_impl(
+def combine_backward(
     grad_out: torch.Tensor,
     grad_routed_output_extra: torch.Tensor,
     dispatch_dst_ranks: torch.Tensor,
@@ -838,8 +838,8 @@ def _combine_backward_impl(
     return grad_x, grad_scores
 
 
-@_combine_backward_impl.register_fake
-def _combine_backward_fake(
+@combine_backward.register_fake
+def combine_backward_fake(
     grad_out: torch.Tensor,
     grad_routed_output_extra: torch.Tensor,
     dispatch_dst_ranks: torch.Tensor,
@@ -872,11 +872,11 @@ def _combine_backward_fake(
     )
 
 
-def _active_swiglu_backward(ctx, grad_out):
+def active_swiglu_autograd_backward(ctx, grad_out):
     if grad_out is None:
         return None, None, None
     gate, up, active_rows = ctx.saved_tensors
-    grad_gate, grad_up = torch.ops.minimal_async_ep.active_swiglu_backward(
+    grad_gate, grad_up = active_swiglu_backward(
         grad_out,
         gate,
         up,
@@ -885,13 +885,13 @@ def _active_swiglu_backward(ctx, grad_out):
     return grad_gate, grad_up, None
 
 
-def _active_swiglu_setup_context(ctx, inputs, output):
+def active_swiglu_setup_context(ctx, inputs, output):
     del output
     gate, up, active_rows = inputs
     ctx.save_for_backward(gate, up, active_rows)
 
 
-class _MinimalAsyncEPDispatch(torch.autograd.Function):
+class MinimalAsyncEPDispatch(torch.autograd.Function):
     @staticmethod
     # pyrefly: ignore [bad-override]
     def forward(
@@ -907,7 +907,7 @@ class _MinimalAsyncEPDispatch(torch.autograd.Function):
         num_tokens: int,
         receive_capacity: int,
     ) -> torch.Tensor:
-        hidden = _dispatch_forward_impl(
+        hidden = dispatch_forward(
             dispatch_input,
             dispatch_dst_ranks,
             dispatch_dst_rows,
@@ -943,7 +943,7 @@ class _MinimalAsyncEPDispatch(torch.autograd.Function):
 
         grad_input = None
         if grad_hidden is not None:
-            grad_input = _dispatch_backward_impl(
+            grad_input = dispatch_backward(
                 grad_hidden,
                 combine_dst_ranks,
                 combine_dst_rows,
@@ -957,7 +957,7 @@ class _MinimalAsyncEPDispatch(torch.autograd.Function):
         return grad_input, None, None, None, None, None, None, None, None, None
 
 
-def _combine_backward(ctx, grad_out, grad_routed_output_extra):
+def combine_autograd_backward(ctx, grad_out, grad_routed_output_extra):
     (
         dispatch_dst_ranks,
         dispatch_dst_rows,
@@ -975,7 +975,7 @@ def _combine_backward(ctx, grad_out, grad_routed_output_extra):
             if grad_routed_output_extra is not None
             else grad_out_arg.new_empty(0)
         )
-        grad_x, grad_scores_tensor = torch.ops.minimal_async_ep.combine_backward(
+        grad_x, grad_scores_tensor = combine_backward(
             grad_out_arg,
             grad_routed_output_extra_arg,
             dispatch_dst_ranks,
@@ -1009,7 +1009,7 @@ def _combine_backward(ctx, grad_out, grad_routed_output_extra):
     )
 
 
-def _combine_setup_context(ctx, inputs, output):
+def combine_setup_context(ctx, inputs, output):
     (
         x,
         dispatch_dst_ranks,
@@ -1043,19 +1043,12 @@ def _combine_setup_context(ctx, inputs, output):
     )
 
 
-_active_swiglu_impl.register_autograd(
-    _active_swiglu_backward, setup_context=_active_swiglu_setup_context
+active_swiglu.register_autograd(
+    active_swiglu_autograd_backward, setup_context=active_swiglu_setup_context
 )
-_combine_impl.register_autograd(_combine_backward, setup_context=_combine_setup_context)
-
-
-def active_swiglu(
-    gate: torch.Tensor,
-    up: torch.Tensor,
-    active_rows: torch.Tensor,
-) -> torch.Tensor:
-    """Compute ``silu(gate) * up`` while skipping padded MinimalAsyncEP rows."""
-    return torch.ops.minimal_async_ep.active_swiglu(gate, up, active_rows)
+combine.register_autograd(
+    combine_autograd_backward, setup_context=combine_setup_context
+)
 
 
 def expert_counting_sort(
@@ -1068,15 +1061,6 @@ def expert_counting_sort(
         topk_expert_ids,
         num_experts=num_experts,
     )
-
-
-def invert_flat_indices(
-    flat_indices: torch.Tensor,
-    *,
-    num_rows: int,
-) -> torch.Tensor:
-    """Invert flat top-k slot indices without exposing raw Triton calls."""
-    return torch.ops.minimal_async_ep.invert_flat_indices(flat_indices, num_rows)
 
 
 def dispatch_tokens(
@@ -1147,19 +1131,22 @@ def dispatch_tokens(
         combine_dst_rows,
         combine_num_valid_rows,
         tokens_per_expert,
-    ) = _dispatch_metadata_impl(
+    ) = dispatch_metadata(
         num_local_tokens_per_expert_E,
         num_routed_tokens,
         receive_capacity,
         ep_size,
     )
 
+    # Invert the expert-sorted slot permutation for combine. Example:
+    # flat_indices_experts_sorted_N=[2, 0, 3, 1] means routed row 0 came
+    # from slot 2, so slot_to_row_N=[1, 3, 0, 2] maps slot 2 back to row 0.
     slot_to_row_N = invert_flat_indices(  # noqa: N806
         flat_indices_experts_sorted_N,
-        num_rows=num_routed_tokens,
+        num_routed_tokens,
     )
 
-    hidden = _MinimalAsyncEPDispatch.apply(
+    hidden = MinimalAsyncEPDispatch.apply(
         dispatch_input,
         dispatch_dst_ranks,
         dispatch_dst_rows,
@@ -1200,7 +1187,7 @@ def combine_tokens(
         if metadata.routed_scores is not None
         else hidden_states.new_empty(0)
     )
-    out_TD, _routed_output_ND = torch.ops.minimal_async_ep.combine(  # noqa: N806
+    out_TD, _routed_output_ND = combine(  # noqa: N806
         hidden_states,
         metadata.dispatch_dst_ranks,
         metadata.dispatch_dst_rows,
