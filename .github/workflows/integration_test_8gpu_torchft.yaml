@@ -4,13 +4,13 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'torchtitan/experiments/ft/**'
+      - 'torchtitan/experiments/torchft/**'
       - 'torchtitan/components/checkpoint.py'
       - '.github/workflows/integration_test_8gpu_torchft.yaml'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
-      - 'torchtitan/experiments/ft/**'
+      - 'torchtitan/experiments/torchft/**'
       - 'torchtitan/components/checkpoint.py'
       - '.github/workflows/integration_test_8gpu_torchft.yaml'
   schedule:
@@ -77,7 +77,6 @@ jobs:
         fi
 
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
-        python -m pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
@@ -86,6 +85,6 @@ jobs:
         RUST_BACKTRACE=1 torchft_lighthouse --min_replicas 1 --quorum_tick_ms 100 --join_timeout_ms 10000 > /dev/null 2>&1 &
         echo "ft_integration_test"
         # Getting error - Cuda failure 217 'peer access is not supported between these two devices'
-        python -m torchtitan.experiments.ft.tests.integration_tests $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+        python -m torchtitan.experiments.torchft.tests.integration_tests $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
         # pkill -9 torchft_lighthouse
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint

@@ -12,8 +12,8 @@ from typing import Literal
 import torch
 import torch._inductor.config
 from torchtitan.components.quantization import QuantizationConverter
-from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability

@@ -6,13 +6,14 @@
 
 from typing import TYPE_CHECKING
 
-from torch.distributed.tensor import Placement, Replicate, Shard
+import spmd_types as spmd
 
 from torchtitan.models.common.attention import GQAttention
 
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
+    dense_sequence_parallel_placement,
     norm_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
@@ -26,10 +27,10 @@ if TYPE_CHECKING:
     from torchtitan.models.qwen3.model import Qwen3Model, Qwen3TransformerBlock
 
 
-_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, Placement] = {
-    "w1": Shard(1),
-    "w2": Shard(2),
-    "w3": Shard(1),
+_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
+    "w1_EFD": spmd.S(1),
+    "w2_EDF": spmd.S(2),
+    "w3_EFD": spmd.S(1),
 }
 
 
@@ -83,18 +84,22 @@ def _set_qwen3_layer_sharding(
     # QK norms: shard on head dim (dim=2) — independent of SP.
     if attention.qk_norm is not None:
         attention.qk_norm.sharding_config = ShardingConfig(
-            state_shardings={"weight": dense_param_placement(tp=Replicate())},
-            in_src_shardings={"input": dense_activation_placement(tp=Shard(2))},
-            in_dst_shardings={"input": dense_activation_placement(tp=Shard(2))},
-            out_dst_shardings=dense_activation_placement(tp=Shard(2)),
+            state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+            in_src_shardings={"input": dense_activation_placement(tp=spmd.S(2))},
+            in_dst_shardings={"input": dense_activation_placement(tp=spmd.S(2))},
+            out_dst_shardings=dense_activation_placement(tp=spmd.S(2)),
         )
 
     # Dense FFN (non-MoE layers only)
     if layer_cfg.feed_forward is not None:
-        attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
+        attn_x_layout = (
+            dense_sequence_parallel_placement()
+            if enable_sp
+            else dense_activation_placement(tp=spmd.R)
+        )
         set_dense_ffn_sharding(
             layer_cfg.feed_forward,
-            attn_x_placement=attn_x_placement,
+            attn_x_layout=attn_x_layout,
             enable_sp=enable_sp,
         )
 

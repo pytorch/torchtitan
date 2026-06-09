@@ -63,93 +63,128 @@ class GptOssGroupedExperts(Module):
         self.num_experts = num_experts
         self.swiglu_limit = config.swiglu_limit
 
-        self.mlp1_weight = nn.Parameter(
+        self.mlp1_weight_EGD = nn.Parameter(
             torch.empty((num_experts, hidden_dim * 2, dim))
         )  # (num_experts, out_dim, in_dim)
-        self.mlp1_bias = nn.Parameter(torch.empty((num_experts, hidden_dim * 2)))
-        self.mlp2_weight = nn.Parameter(
+        self.mlp1_bias_EG = nn.Parameter(torch.empty((num_experts, hidden_dim * 2)))
+        self.mlp2_weight_EDF = nn.Parameter(
             torch.empty((num_experts, dim, hidden_dim))
         )  # (num_experts, out_dim, in_dim)
-        self.mlp2_bias = nn.Parameter(torch.empty((num_experts, dim)))
+        self.mlp2_bias_ED = nn.Parameter(torch.empty((num_experts, dim)))
 
         self.token_dispatcher = config.token_dispatcher.build()
 
     def _experts_forward(
         self,
-        x: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor,
+        x_RD: torch.Tensor,
+        num_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
-        """Raw expert computation without dispatch/combine."""
-        if isinstance(self.mlp1_weight, DTensor):
+        """Raw expert computation without dispatch/combine.
+
+        Shape suffixes here describe logical grouped-mm inputs, not physical
+        sharding. Under EP, E may be a local shard of experts; under TP,
+        expert weights shard hidden dimensions instead; under SP, R may be a
+        local token shard. Keep logical capital suffixes here to avoid encoding
+        a specific parallel layout in these local tensor names.
+        """
+        if isinstance(self.mlp1_weight_EGD, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            mlp1_weight = self.mlp1_weight.to_local()
+            mlp1_weight_EGD = self.mlp1_weight_EGD.to_local()
             # pyrefly: ignore [missing-attribute]
-            mlp1_bias = self.mlp1_bias.to_local()
+            mlp1_bias_EG = self.mlp1_bias_EG.to_local()
             # pyrefly: ignore [missing-attribute]
-            mlp2_weight = self.mlp2_weight.to_local()
+            mlp2_weight_EDF = self.mlp2_weight_EDF.to_local()
             # pyrefly: ignore [missing-attribute]
-            mlp2_bias = self.mlp2_bias.to_local()
+            mlp2_bias_ED = self.mlp2_bias_ED.to_local()
         else:
-            mlp1_weight = self.mlp1_weight
-            mlp1_bias = self.mlp1_bias
-            mlp2_weight = self.mlp2_weight
-            mlp2_bias = self.mlp2_bias
+            mlp1_weight_EGD = self.mlp1_weight_EGD
+            mlp1_bias_EG = self.mlp1_bias_EG
+            mlp2_weight_EDF = self.mlp2_weight_EDF
+            mlp2_bias_ED = self.mlp2_bias_ED
 
         # Determine tp_degree from device mesh if available
         tp_degree = 1
-        if isinstance(self.mlp1_weight, DTensor):
-            mesh_dim_names = self.mlp1_weight.device_mesh.mesh_dim_names
+        if isinstance(self.mlp1_weight_EGD, DTensor):
+            mesh_dim_names = self.mlp1_weight_EGD.device_mesh.mesh_dim_names
             # pyrefly: ignore[not-iterable]
             if "tp" in mesh_dim_names:
                 # pyrefly: ignore [missing-attribute]
                 tp_dim_idx = mesh_dim_names.index("tp")
-                tp_degree = self.mlp1_weight.device_mesh.size(tp_dim_idx)
+                tp_degree = self.mlp1_weight_EGD.device_mesh.size(tp_dim_idx)
 
-        offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
-        # Pad num_tokens_per_expert with tail slack so that repeat_interleave
-        # with output_size=x.shape[0] directly produces a static-shaped output,
+        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
+        # Pad num_tokens_per_expert_E with tail slack so that repeat_interleave
+        # with output_size=x_RD.shape[0] directly produces a static-shaped output,
         # avoiding the D2H sync that repeat_interleave incurs without output_size.
         tail_slack = (
-            (x.shape[0] - offsets[-1]).unsqueeze(0).to(num_tokens_per_expert.dtype)
+            (x_RD.shape[0] - offsets_E[-1])
+            .unsqueeze(0)
+            .to(num_tokens_per_expert_E.dtype)
         )
+        # shape (E+1,): E expert counts + 1 tail slack for padding
         num_tokens_per_expert_long = torch.cat(
-            [num_tokens_per_expert, tail_slack]
+            [num_tokens_per_expert_E, tail_slack]
         ).long()
 
-        h = torch._grouped_mm(
-            x.bfloat16(), mlp1_weight.transpose(-2, -1).bfloat16(), offs=offsets
+        # G = gate+up dimension (2*F)
+        h_RG = torch._grouped_mm(
+            x_RD.bfloat16(),
+            mlp1_weight_EGD.transpose(-2, -1).bfloat16(),
+            offs=offsets_E,
         )
 
-        b1 = torch.cat([mlp1_bias, mlp1_bias.new_zeros(1, mlp1_bias.shape[-1])])
-        b1 = b1.repeat_interleave(
-            num_tokens_per_expert_long, dim=0, output_size=x.shape[0]
+        b1 = torch.cat(
+            [mlp1_bias_EG, mlp1_bias_EG.new_zeros(1, mlp1_bias_EG.shape[-1])]
         )
-        h = h + b1.to(h.dtype)
+        b1_RG = b1.repeat_interleave(
+            num_tokens_per_expert_long, dim=0, output_size=x_RD.shape[0]
+        )
+        h_RG = h_RG + b1_RG.to(h_RG.dtype)
 
-        h = swiglu(h, limit=self.swiglu_limit)
-        h = torch._grouped_mm(h, mlp2_weight.transpose(-2, -1).bfloat16(), offs=offsets)
+        h_RF = swiglu(h_RG, limit=self.swiglu_limit)
+        h_RD = torch._grouped_mm(
+            h_RF, mlp2_weight_EDF.transpose(-2, -1).bfloat16(), offs=offsets_E
+        )
 
         # Apply custom autograd function to scale bias in forward but not in backward
-        b2 = torch.cat([mlp2_bias, mlp2_bias.new_zeros(1, mlp2_bias.shape[-1])])
-        b2 = b2.repeat_interleave(
-            num_tokens_per_expert_long, dim=0, output_size=x.shape[0]
+        b2 = torch.cat(
+            [mlp2_bias_ED, mlp2_bias_ED.new_zeros(1, mlp2_bias_ED.shape[-1])]
         )
-        b2 = ScaleBiasForward.apply(b2, tp_degree)
-        return h + b2.to(h.dtype)
+        b2_RD = b2.repeat_interleave(
+            num_tokens_per_expert_long, dim=0, output_size=x_RD.shape[0]
+        )
+        b2_RD = ScaleBiasForward.apply(b2_RD, tp_degree)
+        return h_RD + b2_RD.to(h_RD.dtype)
 
     def forward(
         self,
-        x: torch.Tensor,
-        top_scores: torch.Tensor,
-        selected_experts_indices: torch.Tensor,
+        x_BLD: torch.Tensor,
+        topk_scores_BLK: torch.Tensor,
+        topk_expert_ids_BLK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add."""
-        routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
-            x, top_scores, selected_experts_indices
+        B, L, D = x_BLD.shape
+        K = topk_scores_BLK.size(-1)
+        T = B * L
+        x_TD = x_BLD.view(T, D)
+        topk_scores_TK = topk_scores_BLK.view(T, K)
+        topk_expert_ids_TK = topk_expert_ids_BLK.view(T, K)
+        (
+            routed_input_RD,
+            num_global_tokens_per_local_expert_e,
+            metadata,
+        ) = self.token_dispatcher.dispatch(
+            x_TD, topk_scores_TK, topk_expert_ids_TK, num_local_tokens_per_expert_E
         )
-        routed_output = self._experts_forward(routed_input, num_tokens_local)
-        return self.token_dispatcher.combine(routed_output, metadata, x)
+        routed_output_RD = self._experts_forward(
+            routed_input_RD, num_global_tokens_per_local_expert_e
+        )
+        out_TD = self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
+        # won't cause _StridedShard in the downstream view (e.g., CP is used).
+        return out_TD.view(B, -1, D)
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize experts and wire dispatcher meshes.

@@ -11,7 +11,7 @@ import torch
 from torch.utils.flop_counter import FlopCounterMode
 from torchtitan.config import ActivationCheckpointConfig as ACConfig
 from torchtitan.distributed.activation_checkpoint import apply_ac
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module, ModuleDict
 
 

@@ -23,11 +23,10 @@ from torchtitan.models.common.attention import (
     get_sliding_window_mask_mod,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
+from torchtitan.models.common.nn_modules import Linear
+from torchtitan.models.common.rope import RoPE
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
-from torchtitan.tools.logging import logger
 
 
 class Attention(BaseAttention):
@@ -46,8 +45,8 @@ class Attention(BaseAttention):
         inner_attention: Module.Config = dataclasses.field(
             default_factory=FlexAttention.Config
         )
-        mask_type: str = "causal"
         sliding_window_size: int = 128
+        rope: RoPE.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -68,12 +67,12 @@ class Attention(BaseAttention):
             config.inner_attention, FlexAttention.Config
         ), "gpt-oss only supports FlexAttention"
         self.inner_attention = config.inner_attention.build()
+        self.rope = config.rope.build()
 
     def forward(
         self,
         x: torch.Tensor,
-        freqs_cis: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_masks: AttentionMasksType,
         positions: torch.Tensor | None = None,
     ):
         """
@@ -81,7 +80,6 @@ class Attention(BaseAttention):
 
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
-            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies for rope embedding.
             attention_masks: Attention mask (BlockMask).
             positions: Optional position indices (unused, for API compatibility).
 
@@ -92,7 +90,7 @@ class Attention(BaseAttention):
 
         q, k, v = self.qkv_linear(x)
 
-        q, k = apply_rotary_emb_cos_sin(q, k, freqs_cis, positions)
+        q, k = self.rope(q, k, positions)
 
         assert isinstance(attention_masks, BlockMask), attention_masks
         # FlexAttention handles transpose internally; returns (bs, seq, heads, dim)
@@ -143,7 +141,6 @@ class GptOssTransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
@@ -152,7 +149,6 @@ class GptOssTransformerBlock(TransformerBlock):
 
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
-            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
             attention_masks (AttentionMasksType): a dict of BlockMasks.
             positions: Optional position indices.
 
@@ -168,7 +164,7 @@ class GptOssTransformerBlock(TransformerBlock):
             layer_mask = attention_masks.get("basic_mask", None)
         assert layer_mask is not None
 
-        x = x + self.attention(self.attention_norm(x), freqs_cis, layer_mask, positions)
+        x = x + self.attention(self.attention_norm(x), layer_mask, positions)
         x = x + self.moe(self.ffn_norm(x))
         return x
 
@@ -186,32 +182,11 @@ class GptOssModel(Decoder):
         def update_from_config(
             self,
             *,
-            trainer_config,
+            config,
             **kwargs,
         ) -> None:
-            training = trainer_config.training
-            parallelism = trainer_config.parallelism
-            seq_len = training.seq_len
-            if seq_len > self.rope.max_seq_len:
-                logger.warning(
-                    f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
-                )
-
-            # Sync rope max_seq_len
-            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
-
-            tp = parallelism.tensor_parallel_degree
-            if tp > 1:
-                n_heads = self.layers[0].attention.n_heads
-                n_kv_heads = self.layers[0].attention.n_kv_heads
-                if n_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
-                    )
-                if n_kv_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
-                    )
+            Decoder.Config.update_from_config(self, config=config, **kwargs)
+            parallelism = config.parallelism
 
             from torchtitan.models.gpt_oss.sharding import set_gpt_oss_sharding_config
 
@@ -242,22 +217,17 @@ class GptOssModel(Decoder):
         self,
         positions: torch.Tensor,
     ) -> AttentionMasksType:
-        basic_mask_mods = []
         attn_cfg = self.config.layers[0].attention
         assert isinstance(attn_cfg, Attention.Config)
         sliding_window_mask_mods = [
             get_sliding_window_mask_mod(attn_cfg.sliding_window_size)
         ]
         seq_len = positions.shape[1]
-        match attn_cfg.mask_type:
-            case "causal":
-                B = 1
-                basic_mask_mods.append(get_causal_mask_mod())
-            case "block_causal":
-                B = positions.shape[0]
-                basic_mask_mods.append(get_document_mask_mod(positions))
-            case _:
-                raise ValueError(f"Unknown attention mask type: {attn_cfg.mask_type}")
+        basic_mask_mods = [
+            get_causal_mask_mod(),
+            get_document_mask_mod(positions),
+        ]
+        B = positions.shape[0]
 
         # create basic attention mask: causal or block_causal
         basic_mask = create_attention_mask(

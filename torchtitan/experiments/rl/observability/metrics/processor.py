@@ -55,6 +55,7 @@ class MetricsProcessor(Configurable):
             default_factory=lambda: [
                 "loss/mean",
                 "loss/ratio/clipped_frac",
+                "bit_wise/logprob_diff/max",
                 "reward/_mean",
                 "reward/_max",
                 "reward/zero_std_frac",

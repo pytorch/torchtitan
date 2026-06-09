@@ -20,13 +20,13 @@ from typing import Any
 
 import torch
 import torch.fx as fx
+from torch._dynamo.graph_deduplication import _stable_topological_sort
 from torch._inductor.fx_passes.bucketing import (
     BucketMode,
     is_all_gather_into_tensor as is_all_gather,
     is_wait_tensor,
 )
 from torch._inductor.fx_passes.overlap_manual_scheduling import (
-    _move_overlap_nodes,
     manual_overlap_bucketing,
     ManualOverlapScheduler,
 )
@@ -64,47 +64,60 @@ def is_wait_tensor_from_fsdp(node: torch.fx.Node) -> bool:
 _EXTRA_FSDP_PG_REGISTRY: dict[str, str] = {}
 
 
-def _get_or_create_extra_fsdp_pg(source_pg_name: str) -> str:
-    """Return the extra PG name for ``source_pg_name``, creating it once.
-
-    The extra PG is a new NCCL process group with the same ranks as the source
-    FSDP PG but a different communicator (and therefore a different CUDA stream).
-    """
+def _get_or_create_extra_pg(
+    source_pg_name: str,
+    registry: dict[str, str],
+    *,
+    group_desc: str,
+    high_priority: bool = False,
+) -> str:
     import torch.distributed as dist
 
-    if source_pg_name in _EXTRA_FSDP_PG_REGISTRY:
-        return _EXTRA_FSDP_PG_REGISTRY[source_pg_name]
+    if source_pg_name in registry:
+        return registry[source_pg_name]
 
     source_pg = dist.distributed_c10d._resolve_process_group(source_pg_name)
     ranks = dist.get_process_group_ranks(source_pg)
-    extra_pg = dist.new_group(
-        ranks=ranks, group_desc="fsdp_extra", use_local_synchronization=True
+    pg_options = (
+        dist.ProcessGroupNCCL.Options(is_high_priority_stream=True)
+        if high_priority and hasattr(dist, "ProcessGroupNCCL")
+        else None
     )
-    _EXTRA_FSDP_PG_REGISTRY[source_pg_name] = extra_pg.group_name
+    extra_pg = dist.new_group(
+        ranks=ranks,
+        backend="nccl" if pg_options is not None else None,
+        pg_options=pg_options,
+        group_desc=group_desc,
+        use_local_synchronization=True,
+    )
+    registry[source_pg_name] = extra_pg.group_name
     logger.info(
-        f"Created extra FSDP PG (source: {source_pg_name}, "
-        f"extra: {extra_pg.group_name})"
+        f"Created extra {group_desc} PG (source: {source_pg_name}, "
+        f"extra: {extra_pg.group_name}, high_priority={high_priority})"
     )
     return extra_pg.group_name
 
 
-def overlap_fsdp_ag_rs_pass(
+def _get_or_create_extra_fsdp_pg(source_pg_name: str) -> str:
+    """Return an extra FSDP PG with the same ranks and a distinct NCCL stream."""
+    return _get_or_create_extra_pg(
+        source_pg_name,
+        _EXTRA_FSDP_PG_REGISTRY,
+        group_desc="fsdp_extra",
+    )
+
+
+def reassign_collective_pgs_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
 ) -> torch.fx.GraphModule:
-    """
-    Reassign FSDP all-gather nodes to extra NCCL process groups for
-    AG/RS overlap in backward.
+    """Reassign collectives to dedicated NCCL process groups.
 
-    Discovers all distinct FSDP PGs by inspecting the graph (e.g. one for
-    FSDP, another for expert-FSDP), creates an extra NCCL PG over the same
-    ranks for each (giving it a separate CUDA stream), and rewrites every
-    all-gather to the corresponding extra PG. This separates all-gathers
-    from reduce-scatters onto different streams, enabling AG/RS overlap in
-    backward.
-
-    No-op when the graph has no FSDP all-gathers. Must be applied BEFORE
-    bucketing passes so bucketed all-gathers inherit the new PG name.
+    Each PG runs on its own CUDA stream, so moving a collective to an extra PG
+    (same ranks) lets it overlap with the collectives left on the original PG --
+    e.g. all-gathers overlapping reduce-scatters in backward, or isolating EP
+    collectives. No-op without targeted collectives; run before bucketing so
+    bucketed collectives inherit the new PG.
     """
     source_pg_names: OrderedSet[str] = OrderedSet()
     for node in gm.graph.nodes:
@@ -119,13 +132,13 @@ def overlap_fsdp_ag_rs_pass(
         pg: _get_or_create_extra_fsdp_pg(pg) for pg in source_pg_names
     }
 
-    count = 0
+    ag_count = 0
     for node in gm.graph.nodes:
         if is_all_gather(node) and node.args[2] in pg_mapping:
             # AG args: (input_tensor, group_size, group_name)
             node.args = (node.args[0], node.args[1], pg_mapping[node.args[2]])
-            count += 1
-    if count > 0:
+            ag_count += 1
+    if ag_count > 0:
         for source, target in pg_mapping.items():
             logger.info(f"Rewrote all-gather node(s) from PG {source} to PG {target}")
     gm.recompile()
@@ -218,6 +231,7 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
             if bwd_nodes:
                 self.bucketer.manual_bucket_collectives(nodes=bwd_nodes)
 
+        _stable_topological_sort(self.graph, {})
         self.graph.lint()
         self.nodes = list(self.graph.nodes)
         self.in_degree = Counter(user for node in self.nodes for user in node.users)
@@ -232,9 +246,7 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
         self._schedule_rs_prefetch(overlap_deps)
         self._schedule_ag_prefetch(overlap_deps)
 
-        _move_overlap_nodes(
-            self.graph, overlap_deps, self.bucketer.bucketed_node_types
-        )
+        _stable_topological_sort(self.graph, overlap_deps)
         self.graph.lint()
 
         if self.insert_overlap_deps:
@@ -368,7 +380,6 @@ def joint_transformer_block_bucketing_reordering_pass(
     module_bucket_plans: list[list[str] | str],
     insert_overlap_deps: bool = False,
     bucket_mode: BucketMode | None = None,
-    enable_fsdp_ag_rs_overlap: bool = False,
 ) -> torch.fx.GraphModule:
     """Run joint-graph manual bucketing and reordering.
 
@@ -376,6 +387,9 @@ def joint_transformer_block_bucketing_reordering_pass(
     ``torch._inductor.fx_passes.overlap_manual_scheduling.manual_overlap_bucketing``.
     Buckets forward all-gathers, backward all-gathers, and backward reduce-scatters
     of each module into separate buckets per transformer block and emits prefetching.
+
+    Run ``reassign_collective_pgs_pass`` first to put collectives on dedicated
+    streams; bucketed collectives inherit the new PGs.
 
     Args:
         gm: joint forward+backward graph module.
@@ -387,14 +401,7 @@ def joint_transformer_block_bucketing_reordering_pass(
             ``preserve_node_ordering`` after the topological sort.
         bucket_mode: bucket mode forwarded to the underlying bucketer;
             defaults to ``"custom_ops"`` via the parent class.
-        enable_fsdp_ag_rs_overlap: when ``True``, run ``overlap_fsdp_ag_rs_pass``
-            on ``gm`` before bucketing so that bucketed all-gathers inherit
-            the extra FSDP PG name and run on a separate CUDA stream from
-            reduce-scatters. No-op when the graph contains no FSDP
-            all-gathers.
     """
-    if enable_fsdp_ag_rs_overlap:
-        gm = overlap_fsdp_ag_rs_pass(gm, example_inputs)
 
     def _stack_fn(node: torch.fx.Node) -> list[tuple[str, type]]:
         fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
