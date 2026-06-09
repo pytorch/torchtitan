@@ -27,10 +27,10 @@ from torchtitan.distributed.parallel_dims import (
     unfold_dp_axes,
 )
 from torchtitan.distributed.spmd_types import (
-    spmd_validate_redistributions,
     spmd_distribute_tensor,
-    spmd_redistribute_per_axis,
     spmd_layout_to_dtensor_placements,
+    spmd_redistribute_per_axis,
+    spmd_validate_redistributions,
 )
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
@@ -359,7 +359,9 @@ class TestSpmdLayout(DTensorTestBase):
                     partition_spec=spmd.PartitionSpec(axis_order, None),
                 )
 
-                local_weight = spmd_distribute_tensor(global_weight.clone(), mesh, layout)
+                local_weight = spmd_distribute_tensor(
+                    global_weight.clone(), mesh, layout
+                )
 
                 axis_ranks = {
                     MeshAxisName.DP: mesh.get_local_rank("dp"),
