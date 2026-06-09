@@ -66,7 +66,12 @@ jobs:
         pip config --user set global.progress_bar off
 
         # Pre-install torch's pure-python deps from the in-cluster pypi-cache for speed.
-        python -m pip install filelock typing-extensions "setuptools<82" sympy networkx jinja2 fsspec numpy
+        # spmd_types is a hard dependency of the torch nightly wheel; pre-install it
+        # here (from the reachable in-cluster cache) so the torch install below --
+        # which clears PIP_EXTRA_INDEX_URL -- does not try to fetch it from the public
+        # PyPI (files.pythonhosted.org), which this runner cannot reach. Pin matches
+        # the version torch nightly requires.
+        python -m pip install filelock typing-extensions "setuptools<82" sympy networkx jinja2 fsspec numpy spmd_types==0.2.0
         # Clear PIP_EXTRA_INDEX_URL so the default cpu index can't supply a +cpu torch.
         python -m pip uninstall -y torch
         PIP_EXTRA_INDEX_URL= python -m pip install --pre \
