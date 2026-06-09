@@ -17,7 +17,7 @@ This demonstrates:
    in the controller.
 
 Command to run:
-python3 torchtitan/experiments/rl/train.py \
+python3 -m torchtitan.experiments.rl.train \
     --module rl --config rl_grpo_qwen3_0_6b \
     --hf_assets_path=<path_to_model_checkpoint>
 """

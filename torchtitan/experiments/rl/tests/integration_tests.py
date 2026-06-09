@@ -102,7 +102,7 @@ def run_single_test(
     """Run a single RL integration test.
 
     Unlike the standard run_tests which uses ``./run_train.sh`` (torchrun),
-    this runs ``python train.py`` directly since the RL script manages
+    this runs the RL training module directly since the RL script manages
     its own distributed setup via Monarch.
     """
     test_name = test_flavor.test_name
@@ -111,7 +111,8 @@ def run_single_test(
     for override_arg in test_flavor.override_args:
         cmd_parts = [
             "python",
-            "torchtitan/experiments/rl/train.py",
+            "-m",
+            "torchtitan.experiments.rl.train",
             f"--dump_folder {dump_folder}",
         ]
         if hf_assets_path:
