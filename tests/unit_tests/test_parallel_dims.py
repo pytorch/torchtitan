@@ -17,8 +17,8 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.config.configs import ParallelismConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.models.llama3 import model_registry
-from torchtitan.models.llama3.parallelize import apply_fsdp
 
 
 class TestParallelDimsValidation(unittest.TestCase):
@@ -626,7 +626,7 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
         ref_optim = torch.optim.Adam(ref_model.parameters(), lr=1e-4)
 
         dp_mesh = init_device_mesh(self.device_type, (1,))
-        apply_fsdp(
+        apply_fsdp_to_decoder(
             model,
             dp_mesh,
             param_dtype=torch.bfloat16,

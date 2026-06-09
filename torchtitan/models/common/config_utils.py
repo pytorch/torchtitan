@@ -69,7 +69,7 @@ def make_gqa_config(
     wqkv_param_init: dict[str, Callable],
     wo_param_init: dict[str, Callable],
     inner_attention: Module.Config,
-    rope: RoPE.Config | None,
+    rope: RoPE.Config,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
     fuse_qkv: bool = False,
@@ -79,7 +79,7 @@ def make_gqa_config(
     """Build a fully-specified GQAttention.Config."""
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
-    rope = dataclasses.replace(rope) if rope is not None else None
+    rope = dataclasses.replace(rope)
 
     if fuse_qkv:
         qkv = FusedQKVLinear.Config(

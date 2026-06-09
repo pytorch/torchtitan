@@ -123,7 +123,7 @@ def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
 def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     """Standard GQA attention (``qkv_linear``/``wo``) TP sharding.
 
-    Shared by llama3, qwen3, and llama4 -- all three have a GQA block whose
+    Shared by llama3 and qwen3 -- both have a GQA block whose
     ``forward(x, ...)`` takes ``x`` (per-SP layout, gathered to Replicate
     internally) and uses the attention layer's local RoPE cache.
 
@@ -207,7 +207,7 @@ def set_dense_ffn_sharding(
 ) -> None:
     """Standard dense FFN (``w1``/``w2``/``w3``) TP sharding.
 
-    Shared by llama3, qwen3, llama4, and deepseek_v3. ``attn_x_placement``
+    Shared by llama3, qwen3, and deepseek_v3. ``attn_x_placement``
     should match the layout that the layer's attention block emits so the
     FFN's input wrap is a no-op redistribute when placements already agree.
     """
