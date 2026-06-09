@@ -948,7 +948,7 @@ class TestTraceDTensor(unittest.TestCase):
                 f"{name} should have been migrated to CUDA",
             )
 
-        gm = cudagraph_pass(gm, traced.example_inputs, is_forward=True)
+        gm = cudagraph_pass(gm, traced.example_inputs)
         real_x = torch.zeros(4, dtype=torch.float32, device=self.DEVICE)
         expected = f({}, real_x.clone())
         for _ in range(3):
@@ -1364,20 +1364,6 @@ class TestTraceModels(unittest.TestCase):
                     f"{node.name} missing compile_with_inductor annotation",
                 )
 
-    def test_llama4(self):
-        from torchtitan.models.llama4 import llama4_configs
-        from torchtitan.models.llama4.model import Llama4Model
-
-        config = llama4_configs["debugmodel"](
-            attn_backend="flex", moe_comm_backend="standard"
-        )
-        self._run_model_test(
-            Llama4Model,
-            config,
-            use_attn_masks=True,
-            use_regional_inductor=True,
-        )
-
     # TODO: Fix scatter() dtype mismatch — scatter_add expects self.dtype == src.dtype
     # but GptOss produces mismatched dtypes during tracing.
     @unittest.skip("scatter(): Expected self.dtype to be equal to src.dtype")
@@ -1621,20 +1607,6 @@ class TestTraceFSDP(FSDPTest):
             attn_backend="sdpa", moe_comm_backend="standard"
         )
         self._run_fsdp_model_test(DeepSeekV3Model, config)
-
-    def test_llama4_fsdp(self):
-        from torchtitan.models.llama4 import llama4_configs
-        from torchtitan.models.llama4.model import Llama4Model
-
-        config = llama4_configs["debugmodel"](
-            attn_backend="flex", moe_comm_backend="standard"
-        )
-        self._run_fsdp_model_test(
-            Llama4Model,
-            config,
-            use_attn_masks=True,
-            use_regional_inductor=True,
-        )
 
     # TODO: Fix scatter() dtype mismatch — same root cause as TestTraceModels.test_gpt_oss.
     @unittest.skip("scatter(): Expected self.dtype to be equal to src.dtype")

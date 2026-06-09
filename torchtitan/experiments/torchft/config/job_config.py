@@ -7,14 +7,14 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from torchtitan.experiments.ft.manager import FTManager
+from torchtitan.experiments.torchft.manager import TorchFTManager
 from torchtitan.protocols.model_spec import ModelSpec
 
 
 @dataclass(kw_only=True, slots=True)
-class FaultTolerance(FTManager.Config):
+class FaultTolerance(TorchFTManager.Config):
     """
-    Extends FTManager.Config to also support Streaming DiLoCo
+    Extends TorchFTManager.Config to also support Streaming DiLoCo
     """
 
     sync_steps: int = 5

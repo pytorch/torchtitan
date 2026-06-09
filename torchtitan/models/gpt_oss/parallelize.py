@@ -15,17 +15,15 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
+from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.full_dtensor import (
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
     validate_config,
 )
 from torchtitan.models.gpt_oss.model import GptOssModel
-from torchtitan.models.llama4.parallelize import apply_fsdp
-from torchtitan.tools.logging import logger
 
 
-# Adapted from llama4/infra/parallelize.py
 def parallelize_gptoss(
     model: GptOssModel,
     *,
@@ -47,7 +45,7 @@ def parallelize_gptoss(
         compile_config.enable and "model" in compile_config.components
     )
 
-    if parallelism.full_dtensor:
+    if parallelism.spmd_backend == "full_dtensor":
         validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)
     else:
@@ -73,20 +71,26 @@ def parallelize_gptoss(
     if model_compile_enabled:
         apply_compile(model, compile_config)
 
-    if parallelism.full_dtensor:
+    if parallelism.spmd_backend == "full_dtensor":
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
         edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
     else:
-        dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
-        assert dp_mesh is not None
+        dp_mesh_names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
         dp_mesh_dims = None
         edp_mesh = None
         edp_mesh_dims = None
         if parallel_dims.ep_enabled:
-            edp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "efsdp"])
-            assert edp_mesh is not None
+            edp_mesh_names = (
+                ["dp_replicate", "efsdp"]
+                if parallel_dims.dp_replicate_enabled
+                else ["efsdp"]
+            )
+            edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
-    apply_fsdp(
+    apply_fsdp_to_decoder(
         model,
         dp_mesh,
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
@@ -96,17 +100,9 @@ def parallelize_gptoss(
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
-        enable_symm_mem=parallelism.enable_fsdp_symm_mem,
         dp_mesh_dims=dp_mesh_dims,
         edp_mesh_dims=edp_mesh_dims,
+        enable_symm_mem=parallelism.enable_fsdp_symm_mem,
     )
-
-    logger.info("Applied fully_shard to the model")
-
-    if parallel_dims.cp_enabled:
-        logger.info("Applied Context Parallel to the model")
-
-    if training.enable_cpu_offload:
-        logger.info("Applied CPU Offloading to the model")
 
     return model
