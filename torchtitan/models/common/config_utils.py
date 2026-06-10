@@ -19,7 +19,6 @@ from torchtitan.models.common.attention import (
     FusedQKVLinear,
     GQAttention,
     QKVLinear,
-    ScaledDotProductAttention,
     VarlenAttention,
 )
 from torchtitan.models.common.feed_forward import FeedForward
@@ -37,12 +36,18 @@ from torchtitan.protocols.module import Module
 
 def get_attention_config(
     backend: str,
-) -> tuple[Module.Config, str]:
-    """Map backend string to (inner_attention config, mask_type)."""
-    if backend == "sdpa":
-        return ScaledDotProductAttention.Config(), "causal"
-    elif backend == "flex":
-        return FlexAttention.Config(), "block_causal"
+) -> Module.Config:
+    """Map backend string to an inner_attention config.
+
+    Language models always use block_causal masking (the dataloaders always
+    emit per-document positions), so every backend here is a masked attention
+    backend. ``ScaledDotProductAttention`` only supports a boolean ``is_causal``
+    flag and cannot consume per-document positions, so it is not a valid
+    language-model backend (it remains available for Flux, which builds it
+    directly).
+    """
+    if backend == "flex":
+        return FlexAttention.Config()
     elif backend == "flex_flash":
         from torchtitan.tools.utils import has_cuda_capability
 
@@ -50,14 +55,16 @@ def get_attention_config(
             raise ValueError(
                 "Flash backend of FlexAttention is only supported on Hopper or Blackwell"
             )
-        return (
-            FlexAttention.Config(
-                block_size=(256, 128), kernel_options={"BACKEND": "FLASH"}
-            ),
-            "block_causal",
+        return FlexAttention.Config(
+            block_size=(256, 128), kernel_options={"BACKEND": "FLASH"}
         )
     elif backend == "varlen":
-        return VarlenAttention.Config(), "block_causal"
+        return VarlenAttention.Config()
+    elif backend == "sdpa":
+        raise ValueError(
+            "sdpa is no longer supported for language models; positions are "
+            "always available so use flex, flex_flash, or varlen."
+        )
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
@@ -73,7 +80,6 @@ def make_gqa_config(
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
     fuse_qkv: bool = False,
-    mask_type: str = "causal",
     qk_norm: RMSNorm.Config | None = None,
 ) -> GQAttention.Config:
     """Build a fully-specified GQAttention.Config."""
@@ -120,7 +126,6 @@ def make_gqa_config(
         ),
         qk_norm=qk_norm,
         inner_attention=inner_attention,
-        mask_type=mask_type,
         rope=rope,
     )
 

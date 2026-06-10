@@ -48,6 +48,7 @@ from torchtitan.experiments.rl.rollout import (
     RolloutTurn,
 )
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
+from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
 from torchtitan.experiments.rl.types import Episode
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
@@ -174,7 +175,7 @@ class RLTrainer(Configurable):
 
     Example:
 
-        cfg = config_registry.rl_grpo_qwen3_0_6b()
+        cfg = config_registry.rl_grpo_qwen3_0_6b_varlen()
         trainer = cfg.build()
         await trainer.setup_async()
         await trainer.train()
@@ -219,6 +220,11 @@ class RLTrainer(Configurable):
 
         log_samples: bool = False
         """Log first completion per episode during training and validation."""
+
+        rollout_recorder: RolloutSampleRecorder.Config = field(
+            default_factory=RolloutSampleRecorder.Config
+        )
+        """JSONL recorder to save sampled rollouts to disk for further inspection and debugging."""
 
         compile: CompileConfig = field(default_factory=CompileConfig)
         """torch.compile config shared by trainer and generator."""
@@ -300,6 +306,9 @@ class RLTrainer(Configurable):
             config.batcher, pad_id=self.renderer._tokenizer.eos_token_id
         )
         self._rollouter: Rollouter = config.rollouter.build()
+        self.rollout_recorder = config.rollout_recorder.build(
+            dump_dir=config.dump_folder
+        )
 
     async def close(self):
         """Best-effort: tear down actors, close metric backends, then stop proc meshes."""
@@ -805,8 +814,12 @@ class RLTrainer(Configurable):
     # TODO: we currently determine num_validation_samples
     # but what if i want to run the entire dataset?
     @sl.log_trace_span("validate")
-    async def validate(self) -> list[m.Metric]:
+    async def validate(self, *, step: int) -> list[m.Metric]:
         """Run greedy validation on held-out prompts.
+
+        Args:
+            step: Training step this validation pass belongs to (0 for the
+                pre-training pass); tagged into logged rollout samples.
 
         Returns:
             Validation rollout metrics, generation metrics, and validation
@@ -822,13 +835,16 @@ class RLTrainer(Configurable):
             num_groups=num_samples,
             group_size=1,
             sampling=greedy,
-            step=0,
+            step=step,
             group_offset=0,
         )
         rollouts = [rollout for group in rollout_groups for rollout in group.rollouts]
 
         if self.config.log_samples:
             _log_samples(rollout_groups)
+        self.rollout_recorder.record(
+            step=step, is_validation=True, rollout_groups=rollout_groups
+        )
 
         validation_metrics.append(
             m.Metric("validation/num_samples", m.NoReduce(float(len(rollouts))))
@@ -845,7 +861,7 @@ class RLTrainer(Configurable):
 
         # collect validation metrics before training
         # so we can compare before/after
-        pre_validation_metrics = await self.validate()
+        pre_validation_metrics = await self.validate(step=0)
         self.metrics_processor.log(
             step=0,
             metrics=pre_validation_metrics,
@@ -904,6 +920,9 @@ class RLTrainer(Configurable):
 
             if self.config.log_samples:
                 _log_samples(rollout_groups)
+            self.rollout_recorder.record(
+                step=step, is_validation=False, rollout_groups=rollout_groups
+            )
 
             # --- train ---
             t_train_start = time.perf_counter()
@@ -996,7 +1015,7 @@ class RLTrainer(Configurable):
                 step=step, metrics=step_metrics, is_validation=False
             )
 
-        post_validation_metrics = await self.validate()
+        post_validation_metrics = await self.validate(step=num_steps)
         self.metrics_processor.log(
             step=num_steps,
             metrics=post_validation_metrics,
