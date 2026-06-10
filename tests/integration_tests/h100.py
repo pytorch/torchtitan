@@ -49,6 +49,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             "FSDP symmetric memory",
             "fsdp_symm_mem",
             ngpu=2,
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [

@@ -14,6 +14,7 @@ from torch.nn.attention import (
     current_flash_attention_impl,
 )
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
+from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import warn_once
 from torchtitan.tools.utils import has_cuda_capability
@@ -285,6 +286,8 @@ class VLLMAttentionWrapper(Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        *,
+        attention_masks: AttentionMasksType | None = None,
         **kwargs,
     ) -> torch.Tensor:
         """Run vLLM paged attention on local (non-DTensor) tensors.
@@ -298,6 +301,12 @@ class VLLMAttentionWrapper(Module):
             ``(batch, seq_len, num_heads * head_dim)`` — ready for
             ``output.view(bs, seqlen, -1)`` in GQAttention.forward
         """
+        if attention_masks is not None:
+            raise ValueError(
+                "VLLMAttentionWrapper does not support attention_masks; vLLM "
+                "manages causal masking and the KV-cache internally."
+            )
+
         batch_size, seq_len, _, head_dim = q.shape
 
         # vllm attention expects (bs*seqlen, n_heads, head_dim)
