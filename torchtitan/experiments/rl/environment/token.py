@@ -75,7 +75,7 @@ class TokenEnv(Configurable):
 
     Example:
 
-        env = TokenEnv.Config().build(message_env=SumDigitsEnv(...), renderer=renderer)
+        env = TokenEnv.Config().build(message_env=MyMessageEnv(...), renderer=renderer)
         env_output = await env.init()
         while not env_output.status.is_terminal():
             completion = await generator.generate([env_output.next_prompt_token_ids])
