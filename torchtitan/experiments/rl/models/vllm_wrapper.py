@@ -227,8 +227,13 @@ class VLLMModelWrapper(Module):
         # Materialize model on GPU — only allocates local shards (not full
         # model) thanks to EP/TP DTensor sharding applied above.
         self.model.to_empty(device=vllm_config.device_config.device)
+        # HF checkpoints do not necessarily contain every TorchTitan buffer
+        # (for example MoE expert_bias_E).
+        # TODO: When checkpoint doesn't contains expert_bias_E, check the config
+        # should use loss based load balancing strategy.
+        with torch.no_grad():
+            self.model.init_weights(buffer_device=None)
         self._maybe_initial_load_weights()
-
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """vLLM required API.

@@ -382,8 +382,18 @@ class MoE(Module):
         the GroupedExperts boundary.
         """
         B, L, D = x_BLD.shape
-        T = B * L
         sp_size = getattr(self.experts.token_dispatcher, "sp_size", 1)
+
+        # EP routes over sequence-parallel token shards. Very short decode
+        # forwards cannot shard across all SP ranks, so pad to ``sp_size`` and
+        # trim before returning. This is a no-op for training/prefill and EP-off;
+        # padded tokens only affect the inference-only load-balance counter.
+        seq_pad = sp_size - L if L < sp_size else 0
+        if seq_pad:
+            x_BLD = F.pad(x_BLD, (0, 0, 0, seq_pad))
+            L = L + seq_pad
+
+        T = B * L
         pad_tokens = (-T) % sp_size
         # Padding is logically appended to the flattened global sequence tail,
         # not to a specific SP rank. This lets combine() infer each SP rank's
@@ -479,6 +489,10 @@ class MoE(Module):
 
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD
+
+        if seq_pad:
+            # Drop the tokens padded on for SP sharding, restoring (B, L, D).
+            out_BLD = out_BLD[:, : L - seq_pad, :]
         return out_BLD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
