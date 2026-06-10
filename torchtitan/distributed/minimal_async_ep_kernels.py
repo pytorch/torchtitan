@@ -483,7 +483,7 @@ def _copy_rows_to_peer_ptrs_kernel(
     tl.store(dst_ptr, values, mask=mask & dst_rank_mask[:, None])
 
 
-def copy_full_counts_to_peers(
+def copy_full_counts_to_peers_kernel(
     counts: torch.Tensor,
     dsts: list[torch.Tensor],
     *,
@@ -497,7 +497,10 @@ def copy_full_counts_to_peers(
     if len(dsts) != ep_size:
         raise ValueError(f"expected {ep_size} count buffers, got {len(dsts)}.")
     if dsts[0].dtype != torch.int64:
-        raise ValueError(f"destination count buffers must be torch.int64, got {dsts[0].dtype}.")
+        raise ValueError(
+            "destination count buffers must be torch.int64, "
+            f"got {dsts[0].dtype}."
+        )
 
     block_size = _COUNT_COPY_BLOCK_SIZE
     grid = (ep_size, triton.cdiv(num_experts, block_size))
@@ -512,7 +515,7 @@ def copy_full_counts_to_peers(
     )
 
 
-def active_swiglu_forward(
+def active_swiglu_forward_kernel(
     gate: torch.Tensor,
     up: torch.Tensor,
     active_rows: torch.Tensor,
@@ -546,7 +549,7 @@ def active_swiglu_forward(
     return out
 
 
-def active_swiglu_backward(
+def active_swiglu_backward_kernel(
     grad_out: torch.Tensor,
     gate: torch.Tensor,
     up: torch.Tensor,
@@ -583,7 +586,7 @@ def active_swiglu_backward(
     return grad_gate, grad_up
 
 
-def copy_rows_to_peers(
+def copy_rows_to_peers_kernel(
     src: torch.Tensor,
     dsts: list[torch.Tensor],
     dst_ranks: torch.Tensor,
@@ -627,7 +630,7 @@ def copy_rows_to_peers(
     )
 
 
-def fill_dispatch_metadata(
+def fill_dispatch_metadata_kernel(
     counts: torch.Tensor,
     local_dest_offsets: torch.Tensor,
     local_count_starts: torch.Tensor,
@@ -661,7 +664,7 @@ def fill_dispatch_metadata(
     return dst_ranks, dst_rows
 
 
-def fill_combine_metadata(
+def fill_combine_metadata_kernel(
     segment_lens: torch.Tensor,
     output_starts: torch.Tensor,
     source_input_starts: torch.Tensor,
@@ -703,7 +706,7 @@ def fill_combine_metadata(
     )
 
 
-def invert_flat_indices(
+def invert_flat_indices_kernel(
     flat_indices: torch.Tensor,
     *,
     num_rows: int,
@@ -720,7 +723,7 @@ def invert_flat_indices(
     return slot_to_row
 
 
-def reduce_topk_slots(
+def reduce_topk_slots_kernel(
     routed_output: torch.Tensor,
     slot_to_row: torch.Tensor,
     scores: torch.Tensor | None,
@@ -757,7 +760,7 @@ def reduce_topk_slots(
     return out
 
 
-def expand_topk_grad(
+def expand_topk_grad_kernel(
     grad_out: torch.Tensor,
     flat_indices: torch.Tensor,
     scores: torch.Tensor | None,
@@ -797,7 +800,7 @@ def expand_topk_grad(
     return grad_routed
 
 
-def topk_scores_grad(
+def topk_scores_grad_kernel(
     routed_output: torch.Tensor,
     grad_out: torch.Tensor,
     flat_indices: torch.Tensor,

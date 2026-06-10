@@ -19,16 +19,16 @@ import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 
 from torchtitan.distributed.minimal_async_ep_kernels import (
-    active_swiglu_backward as active_swiglu_backward_kernel,
-    active_swiglu_forward,
-    copy_full_counts_to_peers,
-    copy_rows_to_peers,
-    expand_topk_grad,
-    fill_combine_metadata,
-    fill_dispatch_metadata,
-    invert_flat_indices as _invert_flat_indices,
-    reduce_topk_slots,
-    topk_scores_grad,
+    active_swiglu_backward_kernel,
+    active_swiglu_forward_kernel,
+    copy_full_counts_to_peers_kernel,
+    copy_rows_to_peers_kernel,
+    expand_topk_grad_kernel,
+    fill_combine_metadata_kernel,
+    fill_dispatch_metadata_kernel,
+    invert_flat_indices_kernel,
+    reduce_topk_slots_kernel,
+    topk_scores_grad_kernel,
 )
 from torchtitan.tools.logging import logger
 
@@ -228,7 +228,7 @@ def _copy_rows_to_peers_and_wait_cuda(
     hidden_recv_peer_buffers = _buffer_state.hidden_recv_peer_buffers[buffer_index]
     hidden_recv_peer_ptrs = _buffer_state.hidden_recv_peer_ptrs[buffer_index]
 
-    copy_rows_to_peers(
+    copy_rows_to_peers_kernel(
         x,
         hidden_recv_peer_buffers,
         dst_ranks,
@@ -281,7 +281,7 @@ def _copy_all_counts_to_peers_and_wait_cuda(
     assert _buffer_state is not None
 
     num_experts = num_local_tokens_per_expert_E.numel()
-    copy_full_counts_to_peers(
+    copy_full_counts_to_peers_kernel(
         num_local_tokens_per_expert_E,
         _buffer_state.counts_recv_peer_buffers,
         rank=_buffer_state.group.rank(),
@@ -327,14 +327,18 @@ def _compute_direct_metadata(
         expert_starts_de + source_prefix_sde[rank]
     ).reshape(num_experts)
     local_count_ends_E = num_local_tokens_per_expert_E.cumsum(0)  # noqa: N806
-    local_count_starts_E = local_count_ends_E - num_local_tokens_per_expert_E  # noqa: N806
-    dispatch_dst_ranks_N, dispatch_dst_rows_N = fill_dispatch_metadata(  # noqa: N806
-        num_local_tokens_per_expert_E,
-        local_dest_offsets_E,
-        local_count_starts_E,
-        num_routed_tokens=num_routed_rows,
-        num_local_experts=num_local_experts,
-        max_tokens_per_segment=_buffer_state.tokens_per_rank,
+    local_count_starts_E = (  # noqa: N806
+        local_count_ends_E - num_local_tokens_per_expert_E
+    )
+    dispatch_dst_ranks_N, dispatch_dst_rows_N = (  # noqa: N806
+        fill_dispatch_metadata_kernel(
+            num_local_tokens_per_expert_E,
+            local_dest_offsets_E,
+            local_count_starts_E,
+            num_routed_tokens=num_routed_rows,
+            num_local_experts=num_local_experts,
+            max_tokens_per_segment=_buffer_state.tokens_per_rank,
+        )
     )
 
     segment_lens = counts_sde[:, rank, :].t().reshape(-1)
@@ -343,15 +347,17 @@ def _compute_direct_metadata(
     source_input_starts_RE = (  # noqa: N806
         all_tokens_per_expert_RE.cumsum(1) - all_tokens_per_expert_RE
     )
-    combine_dst_ranks, combine_dst_rows, combine_num_valid_rows = fill_combine_metadata(
-        segment_lens,
-        output_starts,
-        source_input_starts_RE,
-        ep_rank=rank,
-        ep_size=ep_size,
-        num_local_experts=num_local_experts,
-        receive_capacity=receive_capacity,
-        max_tokens_per_segment=_buffer_state.tokens_per_rank,
+    combine_dst_ranks, combine_dst_rows, combine_num_valid_rows = (
+        fill_combine_metadata_kernel(
+            segment_lens,
+            output_starts,
+            source_input_starts_RE,
+            ep_rank=rank,
+            ep_size=ep_size,
+            num_local_experts=num_local_experts,
+            receive_capacity=receive_capacity,
+            max_tokens_per_segment=_buffer_state.tokens_per_rank,
+        )
     )
 
     return (
@@ -408,7 +414,7 @@ def _combine_to_origin(
     mutates_args=(),
     device_types="cuda",
 )
-def active_swiglu(
+def active_swiglu_op(
     gate: torch.Tensor,
     up: torch.Tensor,
     active_rows: torch.Tensor,
@@ -425,11 +431,11 @@ def active_swiglu(
         ``(R_max, F)`` output. Rows ``[:R]`` are defined; rows ``[R:]`` are
         unspecified because grouped-mm offsets skip receive-capacity padding.
     """
-    return active_swiglu_forward(gate, up, active_rows)
+    return active_swiglu_forward_kernel(gate, up, active_rows)
 
 
-@active_swiglu.register_fake
-def active_swiglu_fake(
+@active_swiglu_op.register_fake
+def active_swiglu_op_fake(
     gate: torch.Tensor,
     up: torch.Tensor,
     active_rows: torch.Tensor,
@@ -437,42 +443,7 @@ def active_swiglu_fake(
     return torch.empty_like(gate)
 
 
-@torch.library.custom_op(
-    "minimal_async_ep::invert_flat_indices",
-    mutates_args=(),
-    device_types="cuda",
-)
-def invert_flat_indices(
-    flat_indices: torch.Tensor,
-    num_rows: int,
-) -> torch.Tensor:
-    """Invert the routed-row permutation.
-
-    Args:
-        flat_indices: ``(N,)`` mapping E-major routed rows to T-major top-k
-            slots.
-        num_rows: ``N`` routed rows.
-
-    Returns:
-        ``(N,)`` mapping T-major top-k slots to E-major routed rows.
-    """
-    return _invert_flat_indices(flat_indices, num_rows=num_rows)
-
-
-@invert_flat_indices.register_fake
-def invert_flat_indices_fake(
-    flat_indices: torch.Tensor,
-    num_rows: int,
-) -> torch.Tensor:
-    return flat_indices.new_empty(num_rows)
-
-
-@torch.library.custom_op(
-    "minimal_async_ep::dispatch_metadata",
-    mutates_args=(),
-    device_types="cuda",
-)
-def dispatch_metadata(
+def _dispatch_metadata(
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
     num_routed_rows: int,
     receive_capacity: int,
@@ -523,10 +494,15 @@ def dispatch_metadata(
     )
 
 
-@dispatch_metadata.register_fake
-def dispatch_metadata_fake(
+@torch.library.custom_op(
+    "minimal_async_ep::dispatch",
+    mutates_args=(),
+    device_types="cuda",
+)
+def dispatch_op(
+    dispatch_input: torch.Tensor,
+    topk_expert_ids_TK: torch.Tensor,  # noqa: N803
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
-    num_routed_rows: int,
     receive_capacity: int,
     ep_size: int,
 ) -> tuple[
@@ -536,72 +512,57 @@ def dispatch_metadata_fake(
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
 ]:
-    num_local_experts = num_local_tokens_per_expert_E.shape[0] // ep_size
-    dispatch_dst_ranks = num_local_tokens_per_expert_E.new_empty(
-        num_routed_rows,
-        dtype=torch.int64,
+    """Build MinimalAsyncEP metadata and dispatch rows to expert-owner ranks.
+
+    Args:
+        dispatch_input: ``(T, D)`` local token rows.
+        topk_expert_ids_TK: ``(T, K)`` global expert ids.
+        num_local_tokens_per_expert_E: ``(E,)`` counts for this rank's token
+            shard over all global experts.
+        receive_capacity: ``R_max`` static receive-buffer row capacity.
+        ep_size: ``EP`` expert-parallel group size.
+
+    Returns:
+        ``hidden_states`` plus all tensor metadata needed by combine and
+        backward.
+    """
+    T_row_to_expert_N = topk_expert_ids_TK.reshape(-1)  # noqa: N806
+    num_routed_rows = T_row_to_expert_N.numel()
+    E_row_to_T_row_N = torch.argsort(  # noqa: N806
+        T_row_to_expert_N,
+        stable=True,
     )
-    dispatch_dst_rows = num_local_tokens_per_expert_E.new_empty(
-        num_routed_rows,
-        dtype=torch.int64,
-    )
-    combine_dst_ranks = num_local_tokens_per_expert_E.new_empty(
-        receive_capacity,
-        dtype=torch.int64,
-    )
-    combine_dst_rows = num_local_tokens_per_expert_E.new_empty(
-        receive_capacity,
-        dtype=torch.int64,
-    )
-    combine_num_valid_rows = num_local_tokens_per_expert_E.new_empty(
-        1,
-        dtype=torch.int64,
-    )
-    tokens_per_expert = num_local_tokens_per_expert_E.new_empty(
-        num_local_experts,
-        dtype=torch.int64,
-    )
-    return (
+    top_k = topk_expert_ids_TK.shape[1]
+    E_row_to_token_N = E_row_to_T_row_N // top_k  # noqa: N806
+    (
         dispatch_dst_ranks,
         dispatch_dst_rows,
         combine_dst_ranks,
         combine_dst_rows,
         combine_num_valid_rows,
-        tokens_per_expert,
+        num_tokens_per_local_expert_e,
+    ) = _dispatch_metadata(
+        num_local_tokens_per_expert_E,
+        num_routed_rows,
+        receive_capacity,
+        ep_size,
     )
 
+    # Invert the E-major permutation for combine. Example:
+    # E_row_to_T_row_N=[2, 0, 3, 1] means E-major row 0 came
+    # from T-major row 2, so T_row_to_E_row_N=[1, 3, 0, 2].
+    T_row_to_E_row_N = invert_flat_indices_kernel(  # noqa: N806
+        E_row_to_T_row_N,
+        num_rows=num_routed_rows,
+    )
 
-@torch.library.custom_op(
-    "minimal_async_ep::dispatch_forward",
-    mutates_args=(),
-    device_types="cuda",
-)
-def dispatch_forward(
-    dispatch_input: torch.Tensor,
-    dispatch_dst_ranks: torch.Tensor,
-    dispatch_dst_rows: torch.Tensor,
-    E_row_to_token_N: torch.Tensor,  # noqa: N803
-    receive_capacity: int,
-) -> torch.Tensor:
-    """Dispatch local token rows to expert-owner ranks.
-
-    Args:
-        dispatch_input: ``(T, D)`` local token rows.
-        dispatch_dst_ranks, dispatch_dst_rows: ``(N,)`` destination rank and
-            receive row for each E-major routed row.
-        E_row_to_token_N: ``(N,)`` maps E-major routed rows to source token
-            rows in ``dispatch_input``.
-        receive_capacity: ``R_max`` static receive-buffer row capacity.
-
-    Returns:
-        ``(R_max, D)`` local expert-major receive buffer. Rows beyond the
-        active received row count are padding.
-    """
-    num_routed_rows = E_row_to_token_N.numel()
     # This direct copy corresponds to AllToAllTokenDispatcher's token all-to-all;
     # dispatch_dst_rows already point at the post-_permute E-major layout.
-    hidden_recv_buffer = _copy_rows_to_peers_and_wait_cuda(
+    hidden_states = _copy_rows_to_peers_and_wait_cuda(
         dispatch_input,
         dispatch_dst_ranks,
         dispatch_dst_rows,
@@ -610,26 +571,61 @@ def dispatch_forward(
         num_warps=8,
         src_rows=E_row_to_token_N,
     )
-    return hidden_recv_buffer
+    return (
+        hidden_states,
+        dispatch_dst_ranks,
+        dispatch_dst_rows,
+        combine_dst_ranks,
+        combine_dst_rows,
+        combine_num_valid_rows,
+        E_row_to_T_row_N,
+        T_row_to_E_row_N,
+        num_tokens_per_local_expert_e,
+    )
 
 
-@dispatch_forward.register_fake
-def dispatch_forward_fake(
+@dispatch_op.register_fake
+def dispatch_op_fake(
     dispatch_input: torch.Tensor,
-    dispatch_dst_ranks: torch.Tensor,
-    dispatch_dst_rows: torch.Tensor,
-    E_row_to_token_N: torch.Tensor,  # noqa: N803
+    topk_expert_ids_TK: torch.Tensor,  # noqa: N803
+    num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
     receive_capacity: int,
-) -> torch.Tensor:
-    return dispatch_input.new_empty(receive_capacity, dispatch_input.shape[1])
+    ep_size: int,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    num_routed_rows = topk_expert_ids_TK.numel()
+    num_local_experts = num_local_tokens_per_expert_E.shape[0] // ep_size
+    return (
+        dispatch_input.new_empty(receive_capacity, dispatch_input.shape[1]),
+        topk_expert_ids_TK.new_empty(num_routed_rows, dtype=torch.int64),
+        topk_expert_ids_TK.new_empty(num_routed_rows, dtype=torch.int64),
+        topk_expert_ids_TK.new_empty(receive_capacity, dtype=torch.int64),
+        topk_expert_ids_TK.new_empty(receive_capacity, dtype=torch.int64),
+        topk_expert_ids_TK.new_empty(1, dtype=torch.int64),
+        topk_expert_ids_TK.new_empty(num_routed_rows, dtype=torch.int64),
+        topk_expert_ids_TK.new_empty(num_routed_rows, dtype=torch.int64),
+        num_local_tokens_per_expert_E.new_empty(
+            num_local_experts,
+            dtype=torch.int64,
+        ),
+    )
 
 
 @torch.library.custom_op(
-    "minimal_async_ep::combine_forward",
+    "minimal_async_ep::combine",
     mutates_args=(),
     device_types="cuda",
 )
-def combine_forward(
+def combine_op(
     x: torch.Tensor,
     dispatch_dst_ranks: torch.Tensor,
     dispatch_dst_rows: torch.Tensor,
@@ -671,7 +667,7 @@ def combine_forward(
         combine_num_valid_rows,
         E_row_to_T_row_N.numel(),
     )
-    out_TD = reduce_topk_slots(  # noqa: N806
+    out_TD = reduce_topk_slots_kernel(  # noqa: N806
         routed_output_ND,
         T_row_to_E_row_N,
         routed_scores_N,
@@ -682,8 +678,8 @@ def combine_forward(
     return out_TD, routed_output_ND
 
 
-@combine_forward.register_fake
-def combine_forward_fake(
+@combine_op.register_fake
+def combine_op_fake(
     x: torch.Tensor,
     dispatch_dst_ranks: torch.Tensor,
     dispatch_dst_rows: torch.Tensor,
@@ -710,7 +706,7 @@ def combine_forward_fake(
     mutates_args=(),
     device_types="cuda",
 )
-def active_swiglu_backward(
+def active_swiglu_backward_op(
     grad_out: torch.Tensor,
     gate: torch.Tensor,
     up: torch.Tensor,
@@ -729,8 +725,8 @@ def active_swiglu_backward(
     return active_swiglu_backward_kernel(grad_out, gate, up, active_rows)
 
 
-@active_swiglu_backward.register_fake
-def active_swiglu_backward_fake(
+@active_swiglu_backward_op.register_fake
+def active_swiglu_backward_op_fake(
     grad_out: torch.Tensor,
     gate: torch.Tensor,
     up: torch.Tensor,
@@ -744,7 +740,7 @@ def active_swiglu_backward_fake(
     mutates_args=(),
     device_types="cuda",
 )
-def dispatch_backward(
+def dispatch_backward_op(
     grad_hidden: torch.Tensor,
     combine_dst_ranks: torch.Tensor,
     combine_dst_rows: torch.Tensor,
@@ -777,7 +773,7 @@ def dispatch_backward(
         combine_num_valid_rows,
         num_routed_rows,
     )
-    return reduce_topk_slots(
+    return reduce_topk_slots_kernel(
         grad_routed_input,
         T_row_to_E_row_N,
         None,
@@ -786,8 +782,8 @@ def dispatch_backward(
     )
 
 
-@dispatch_backward.register_fake
-def dispatch_backward_fake(
+@dispatch_backward_op.register_fake
+def dispatch_backward_op_fake(
     grad_hidden: torch.Tensor,
     combine_dst_ranks: torch.Tensor,
     combine_dst_rows: torch.Tensor,
@@ -805,7 +801,7 @@ def dispatch_backward_fake(
     mutates_args=(),
     device_types="cuda",
 )
-def combine_backward(
+def combine_backward_op(
     grad_out: torch.Tensor,
     dispatch_dst_ranks: torch.Tensor,
     dispatch_dst_rows: torch.Tensor,
@@ -825,7 +821,7 @@ def combine_backward(
             slots.
         routed_scores_N: ``(N,)`` T-major routed scores.
         saved_routed_output_ND: ``(N, D)`` origin-rank E-major routed output
-            rows from ``combine_forward``.
+            rows from ``combine``.
         top_k: ``K`` routed rows per token.
         receive_capacity: ``R_max`` static receive-buffer row capacity.
 
@@ -833,7 +829,7 @@ def combine_backward(
         ``grad_x``: ``(R_max, D)`` gradient for expert output rows.
         ``grad_scores``: ``(N,)`` gradient for routed scores.
     """
-    grad_routed_output = expand_topk_grad(
+    grad_routed_output = expand_topk_grad_kernel(
         grad_out,
         E_row_to_T_row_N,
         routed_scores_N,
@@ -841,7 +837,7 @@ def combine_backward(
         dtype=grad_out.dtype,
         scores_are_slot_ordered=True,
     )
-    grad_scores = topk_scores_grad(
+    grad_scores = topk_scores_grad_kernel(
         saved_routed_output_ND,
         grad_out,
         E_row_to_T_row_N,
@@ -859,8 +855,8 @@ def combine_backward(
     return grad_x, grad_scores
 
 
-@combine_backward.register_fake
-def combine_backward_fake(
+@combine_backward_op.register_fake
+def combine_backward_op_fake(
     grad_out: torch.Tensor,
     dispatch_dst_ranks: torch.Tensor,
     dispatch_dst_rows: torch.Tensor,
@@ -878,7 +874,7 @@ def combine_backward_fake(
 
 def active_swiglu_autograd_backward(ctx, grad_out):
     gate, up, active_rows = ctx.saved_tensors
-    grad_gate, grad_up = active_swiglu_backward(
+    grad_gate, grad_up = active_swiglu_backward_op(
         grad_out,
         gate,
         up,
@@ -892,159 +888,128 @@ def active_swiglu_setup_context(ctx, inputs, output):
     ctx.save_for_backward(gate, up, active_rows)
 
 
-class MinimalAsyncEPDispatch(torch.autograd.Function):
-    @staticmethod
-    # pyrefly: ignore [bad-override]
-    def forward(
-        ctx,
-        dispatch_input: torch.Tensor,
-        dispatch_dst_ranks: torch.Tensor,
-        dispatch_dst_rows: torch.Tensor,
-        combine_dst_ranks: torch.Tensor,
-        combine_dst_rows: torch.Tensor,
-        combine_num_valid_rows: torch.Tensor,
-        E_row_to_token_N: torch.Tensor,  # noqa: N803
-        T_row_to_E_row_N: torch.Tensor,  # noqa: N803
-        num_tokens: int,
-        receive_capacity: int,
-    ) -> torch.Tensor:
-        hidden = dispatch_forward(
-            dispatch_input,
-            dispatch_dst_ranks,
-            dispatch_dst_rows,
-            E_row_to_token_N,
-            receive_capacity,
-        )
+def dispatch_setup_context(ctx, inputs, output):
+    dispatch_input, topk_expert_ids_TK, *_ = inputs  # noqa: N806
+    (
+        _hidden_states,
+        _dispatch_dst_ranks,
+        _dispatch_dst_rows,
+        combine_dst_ranks,
+        combine_dst_rows,
+        combine_num_valid_rows,
+        _E_row_to_T_row_N,
+        T_row_to_E_row_N,
+        _num_tokens_per_local_expert_e,
+    ) = output
+    ctx.num_routed_rows = topk_expert_ids_TK.numel()
+    ctx.num_tokens = dispatch_input.shape[0]
+    ctx.top_k = topk_expert_ids_TK.shape[1]
+    ctx.save_for_backward(
+        combine_dst_ranks,
+        combine_dst_rows,
+        combine_num_valid_rows,
+        T_row_to_E_row_N,
+    )
 
-        ctx.num_routed_rows = E_row_to_token_N.numel()
-        ctx.num_tokens = num_tokens
-        ctx.top_k = E_row_to_token_N.numel() // num_tokens
-        ctx.save_for_backward(
-            combine_dst_ranks,
-            combine_dst_rows,
-            combine_num_valid_rows,
-            T_row_to_E_row_N,
-        )
-        return hidden
 
-    @staticmethod
-    # pyrefly: ignore [bad-override]
-    def backward(
-        ctx,
+def dispatch_autograd_backward(ctx, grad_hidden, *unused_grads):
+    (
+        combine_dst_ranks,
+        combine_dst_rows,
+        combine_num_valid_rows,
+        T_row_to_E_row_N,
+    ) = ctx.saved_tensors
+
+    grad_input = dispatch_backward_op(
         grad_hidden,
-        *unused_grads,
-    ):
-        (
-            combine_dst_ranks,
-            combine_dst_rows,
-            combine_num_valid_rows,
-            T_row_to_E_row_N,
-        ) = ctx.saved_tensors
+        combine_dst_ranks,
+        combine_dst_rows,
+        combine_num_valid_rows,
+        T_row_to_E_row_N,
+        ctx.num_routed_rows,
+        ctx.num_tokens,
+        ctx.top_k,
+    )
 
-        grad_input = dispatch_backward(
-            grad_hidden,
-            combine_dst_ranks,
-            combine_dst_rows,
-            combine_num_valid_rows,
-            T_row_to_E_row_N,
-            ctx.num_routed_rows,
-            ctx.num_tokens,
-            ctx.top_k,
-        )
-
-        return grad_input, None, None, None, None, None, None, None, None, None
+    return grad_input, None, None, None, None
 
 
-class MinimalAsyncEPCombine(torch.autograd.Function):
-    @staticmethod
-    # pyrefly: ignore [bad-override]
-    def forward(
-        ctx,
-        hidden_states: torch.Tensor,
-        dispatch_dst_ranks: torch.Tensor,
-        dispatch_dst_rows: torch.Tensor,
-        combine_dst_ranks: torch.Tensor,
-        combine_dst_rows: torch.Tensor,
-        combine_num_valid_rows: torch.Tensor,
-        T_row_to_E_row_N: torch.Tensor,  # noqa: N803
-        E_row_to_T_row_N: torch.Tensor,  # noqa: N803
-        routed_scores_N: torch.Tensor,  # noqa: N803
-        num_tokens: int,
-        top_k: int,
-    ) -> torch.Tensor:
-        combined, routed_output_ND = combine_forward(  # noqa: N806
-            hidden_states,
-            dispatch_dst_ranks,
-            dispatch_dst_rows,
-            combine_dst_ranks,
-            combine_dst_rows,
-            combine_num_valid_rows,
-            T_row_to_E_row_N,
-            E_row_to_T_row_N,
-            routed_scores_N,
-            num_tokens,
-            top_k,
-        )
+def combine_setup_context(ctx, inputs, output):
+    (
+        hidden_states,
+        dispatch_dst_ranks,
+        dispatch_dst_rows,
+        _combine_dst_ranks,
+        _combine_dst_rows,
+        _combine_num_valid_rows,
+        _T_row_to_E_row_N,
+        E_row_to_T_row_N,
+        routed_scores_N,
+        _num_tokens,
+        top_k,
+    ) = inputs
+    _combined, routed_output_ND = output
+    ctx.top_k = top_k
+    ctx.receive_capacity = hidden_states.shape[0]
+    ctx.save_for_backward(
+        dispatch_dst_ranks,
+        dispatch_dst_rows,
+        E_row_to_T_row_N,
+        routed_scores_N,
+        routed_output_ND,
+    )
 
-        ctx.top_k = top_k
-        ctx.receive_capacity = hidden_states.shape[0]
-        ctx.save_for_backward(
-            dispatch_dst_ranks,
-            dispatch_dst_rows,
-            E_row_to_T_row_N,
-            routed_scores_N,
-            routed_output_ND,
-        )
-        return combined
 
-    @staticmethod
-    # pyrefly: ignore [bad-override]
-    def backward(
-        ctx,
+def combine_autograd_backward(ctx, grad_out, grad_routed_output):
+    (
+        dispatch_dst_ranks,
+        dispatch_dst_rows,
+        E_row_to_T_row_N,
+        routed_scores_N,
+        routed_output_ND,
+    ) = ctx.saved_tensors
+    grad_x, grad_scores = combine_backward_op(
         grad_out,
-    ):
-        (
-            dispatch_dst_ranks,
-            dispatch_dst_rows,
-            E_row_to_T_row_N,
-            routed_scores_N,
-            routed_output_ND,
-        ) = ctx.saved_tensors
-        grad_x, grad_scores = combine_backward(
-            grad_out,
-            dispatch_dst_ranks,
-            dispatch_dst_rows,
-            E_row_to_T_row_N,
-            routed_scores_N,
-            routed_output_ND,
-            ctx.top_k,
-            ctx.receive_capacity,
-        )
+        dispatch_dst_ranks,
+        dispatch_dst_rows,
+        E_row_to_T_row_N,
+        routed_scores_N,
+        routed_output_ND,
+        ctx.top_k,
+        ctx.receive_capacity,
+    )
 
-        return (
-            grad_x,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            grad_scores,
-            None,
-            None,
-        )
+    return (
+        grad_x,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        grad_scores,
+        None,
+        None,
+    )
 
 
-active_swiglu.register_autograd(
+active_swiglu_op.register_autograd(
     active_swiglu_autograd_backward, setup_context=active_swiglu_setup_context
+)
+dispatch_op.register_autograd(
+    dispatch_autograd_backward,
+    setup_context=dispatch_setup_context,
+)
+combine_op.register_autograd(
+    combine_autograd_backward,
+    setup_context=combine_setup_context,
 )
 
 __all__ = [
-    "MinimalAsyncEPCombine",
-    "MinimalAsyncEPDispatch",
     "MinimalAsyncEPDispatchMetadata",
-    "active_swiglu",
+    "active_swiglu_op",
+    "combine_op",
+    "dispatch_op",
     "init_buffer",
-    "invert_flat_indices",
 ]
