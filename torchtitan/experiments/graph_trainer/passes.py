@@ -141,6 +141,7 @@ def compile_time_passes(
             apply_cpu_offload_pass,
             prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
             defer_n_layers=config.compile.cpu_offload_defer_n_layers,
+            enable_view_replay=config.compile.cpu_offload_view_replay,
         ),
         selective_activation_remat_pass,
         # Run before bucketing so bucketed collectives inherit the dedicated PG.
