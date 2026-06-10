@@ -20,7 +20,7 @@ from torchtitan.models.common.rope import (
     CosSinRoPE,
     RoPE,
 )
-from torchtitan.models.qwen3_vl.rope import MRoPE
+from torchtitan.models.qwen3_5.rope import MRoPE
 
 
 class TestApplyRotaryEmbCosSin(unittest.TestCase):
@@ -173,11 +173,11 @@ class TestMRoPECache(unittest.TestCase):
             max_seq_len=8,
             mrope_section=[2, 1, 1],
         ).build()
+        # (batch, seq, 3): per-token [temporal, height, width] positions.
         position_ids = torch.tensor(
             [
-                [[0, 1, 2], [3, 4, 5]],  # temporal
-                [[1, 2, 3], [4, 5, 6]],  # height
-                [[2, 3, 4], [5, 6, 7]],  # width
+                [[0, 1, 2], [1, 2, 3], [2, 3, 4]],  # batch 0
+                [[3, 4, 5], [4, 5, 6], [5, 6, 7]],  # batch 1
             ]
         )
         xq = torch.randn(bsz, seqlen, n_heads, head_dim)
@@ -206,7 +206,6 @@ class TestPerLayerRoPECache(unittest.TestCase):
             ),
             wo=Linear.Config(in_features=dim, out_features=dim),
             inner_attention=ScaledDotProductAttention.Config(),
-            mask_type="causal",
             rope=ComplexRoPE.Config(dim=head_dim, max_seq_len=16),
         ).build()
 
@@ -219,7 +218,7 @@ class TestPerLayerRoPECache(unittest.TestCase):
     def test_decoder_builds_distinct_rope_modules_per_attention_layer(self):
         from torchtitan.models.llama3 import llama3_configs
 
-        model = llama3_configs["debugmodel"]("sdpa").build()
+        model = llama3_configs["debugmodel"]("flex").build()
         layer_ropes = [layer.attention.rope for layer in model.layers.values()]
 
         self.assertTrue(all(isinstance(rope, RoPE) for rope in layer_ropes))
@@ -228,7 +227,7 @@ class TestPerLayerRoPECache(unittest.TestCase):
     def test_decoder_builds_distinct_rope_configs_per_attention_layer(self):
         from torchtitan.models.llama3 import llama3_configs
 
-        cfg = llama3_configs["debugmodel"]("sdpa")
+        cfg = llama3_configs["debugmodel"]("flex")
         layer_rope_cfgs = [layer.attention.rope for layer in cfg.layers]
 
         self.assertEqual(
@@ -254,7 +253,7 @@ class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
         """Build a minimal Llama3 debug config."""
         from torchtitan.models.llama3 import llama3_configs
 
-        return llama3_configs["debugmodel"]("sdpa")
+        return llama3_configs["debugmodel"]("flex")
 
     def test_rejects_oversized_seq_len(self):
         cfg = self._make_config()
