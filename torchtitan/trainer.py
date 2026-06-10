@@ -107,18 +107,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             # Pretraining inputs are shaped by TrainingConfig.seq_len when
             # sequence_parallel is applied
-            # TODO: PolicyTrainer.TrainingConfig should not own seq_len.
-            # Move pretraining batch shape fields to Dataloader.Config.BatchConfig.
-            sp_degree = self.parallelism.tensor_parallel_degree
-            if (
-                self.parallelism.enable_sequence_parallel
-                and sp_degree > 1
-                and self.training.seq_len % sp_degree != 0
-            ):
-                raise ValueError(
-                    f"Training sequence length ({self.training.seq_len}) must be "
-                    f"divisible by sequence parallel degree ({sp_degree})."
-                )
+            if self.parallelism.enable_sequence_parallel:
+                sp_degree = self.parallelism.tensor_parallel_degree
+                if sp_degree > 1 and self.training.seq_len % sp_degree != 0:
+                    raise ValueError(
+                        f"Training sequence length ({self.training.seq_len}) must be "
+                        f"divisible by sequence parallel degree ({sp_degree})."
+                    )
 
         def to_dict(self) -> dict[str, Any]:
             d = {}
