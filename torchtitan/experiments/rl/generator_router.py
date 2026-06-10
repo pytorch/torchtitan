@@ -19,15 +19,15 @@ from typing import Any
 from torchtitan.config import Configurable
 
 
-class _GenState(Enum):
-    """Lifecycle state that controls whether a generator can receive routes."""
+class _GeneratorState(Enum):
+    """Lifecycle state controlling routability; ``SYNCING`` is only entered when draining (i.e. hot-swap is off)."""
 
     SERVING = auto()
     SYNCING = auto()
 
 
 @dataclass(kw_only=True, slots=True)
-class GeneratorHandle:
+class _GeneratorHandle:
     """Controller-side metadata for one generator mesh."""
 
     actor: Any
@@ -36,7 +36,7 @@ class GeneratorHandle:
     reserved_load: int = 0
     """Controller-side estimate of in-flight routed generation work."""
 
-    state: _GenState = _GenState.SERVING
+    state: _GeneratorState = _GeneratorState.SERVING
     """Current routing lifecycle state for this generator."""
 
     idle: asyncio.Event = field(default_factory=asyncio.Event)
@@ -47,7 +47,7 @@ class GeneratorHandle:
 class RoutingContext:
     """Routing metadata for one generation request."""
 
-    est_cost: int = 1
+    estimated_cost: int = 1
     """Estimated request cost used by load-aware routing strategies."""
 
 
@@ -67,8 +67,8 @@ class RoutingStrategy(Configurable, ABC):
     def choose(
         self,
         routing_ctx: RoutingContext,
-        candidates: Sequence[GeneratorHandle],
-    ) -> GeneratorHandle:
+        candidates: Sequence[_GeneratorHandle],
+    ) -> _GeneratorHandle:
         """Choose one generator from the (non-empty) serving candidates."""
 
 
@@ -86,8 +86,8 @@ class RoundRobinRoutingStrategy(RoutingStrategy):
     def choose(
         self,
         routing_ctx: RoutingContext,
-        candidates: Sequence[GeneratorHandle],
-    ) -> GeneratorHandle:
+        candidates: Sequence[_GeneratorHandle],
+    ) -> _GeneratorHandle:
         """Return the next serving generator in round-robin order."""
 
         del routing_ctx
@@ -104,8 +104,8 @@ class LeastLoadedRoutingStrategy(RoutingStrategy):
     def choose(
         self,
         routing_ctx: RoutingContext,
-        candidates: Sequence[GeneratorHandle],
-    ) -> GeneratorHandle:
+        candidates: Sequence[_GeneratorHandle],
+    ) -> _GeneratorHandle:
         """Return the serving generator with the lowest reserved load."""
 
         del routing_ctx
@@ -133,7 +133,12 @@ class GeneratorRouter(Configurable):
         hot_swap: bool = False
         """When True, pulls model's state dict concurrently with in-flight
         generation (no draining). When False, each generator is drained before
-        its pull."""
+        its pull.
+
+        Draining only waits for a generator's in-flight ``route`` call (one
+        turn) to finish; between turns of a multi-turn rollout the generator is
+        idle, so a weight sync may land mid-rollout and successive turns can run
+        under different policy versions."""
 
     def __init__(
         self,
@@ -143,7 +148,7 @@ class GeneratorRouter(Configurable):
     ):
         self._config = config
         self._generators = [
-            GeneratorHandle(actor=generator) for generator in generators
+            _GeneratorHandle(actor=generator) for generator in generators
         ]
         if not self._generators:
             raise ValueError("GeneratorRouter requires at least one generator")
@@ -152,37 +157,37 @@ class GeneratorRouter(Configurable):
 
         self._strategy = config.strategy.build()
         self._serving = asyncio.Event()
-        self._refresh_serving()
+        self._refresh_serving_status()
 
-    def _candidates(self) -> list[GeneratorHandle]:
+    def _candidates(self) -> list[_GeneratorHandle]:
         """Return generator handles that are currently routable."""
 
-        return [h for h in self._generators if h.state is _GenState.SERVING]
+        return [h for h in self._generators if h.state is _GeneratorState.SERVING]
 
-    def _refresh_serving(self) -> None:
-        """Update the event that tracks whether any generator can serve work."""
+    def _refresh_serving_status(self) -> None:
+        """Update whether any generator can serve; only changes while draining (i.e. hot-swap is off)."""
 
         if self._candidates():
             self._serving.set()
         else:
             self._serving.clear()
 
-    def _set_state(self, h: GeneratorHandle, state: _GenState) -> None:
+    def _set_state(self, h: _GeneratorHandle, state: _GeneratorState) -> None:
         """Move a generator between serving and syncing states."""
 
         h.state = state
-        self._refresh_serving()
+        self._refresh_serving_status()
 
-    def _reserve(self, h: GeneratorHandle, cost: int) -> None:
+    def _reserve(self, h: _GeneratorHandle, cost: int) -> None:
         """Reserve estimated generation work on a handle before dispatch."""
 
         if cost < 0:
-            raise ValueError(f"route est_cost must be non-negative, got {cost}")
+            raise ValueError(f"route estimated_cost must be non-negative, got {cost}")
         if h.reserved_load == 0:
             h.idle.clear()
         h.reserved_load += cost
 
-    def _release(self, h: GeneratorHandle, cost: int) -> None:
+    def _release(self, h: _GeneratorHandle, cost: int) -> None:
         """Release estimated generation work after a routed call finishes."""
 
         h.reserved_load -= cost
@@ -205,11 +210,11 @@ class GeneratorRouter(Configurable):
         candidates = self._candidates()
         assert candidates, "serving event was set with no serving generators"
         h = self._strategy.choose(routing_ctx, candidates)
-        self._reserve(h, routing_ctx.est_cost)
+        self._reserve(h, routing_ctx.estimated_cost)
         try:
             return await getattr(h.actor, method).call(*args, **kwargs)
         finally:
-            self._release(h, routing_ctx.est_cost)
+            self._release(h, routing_ctx.estimated_cost)
 
     async def fanout(
         self,
@@ -234,10 +239,7 @@ class GeneratorRouter(Configurable):
             ``return_exceptions`` is True.
         """
         return await asyncio.gather(
-            *[
-                getattr(h.actor, method).call(*args, **kwargs)
-                for h in self._generators
-            ],
+            *[getattr(h.actor, method).call(*args, **kwargs) for h in self._generators],
             return_exceptions=return_exceptions,
         )
 
@@ -248,7 +250,7 @@ class GeneratorRouter(Configurable):
             policy_version: Trainer policy version whose state dict to pull.
         """
 
-        async def _pull_one(h: GeneratorHandle) -> None:
+        async def _pull_one(h: _GeneratorHandle) -> None:
             if self._config.hot_swap:
                 # Hot swap: pull concurrently with in-flight generation, without
                 # draining. Whether the pull is genuinely concurrent and safe is
@@ -257,12 +259,12 @@ class GeneratorRouter(Configurable):
             else:
                 # Drain: stop routing to this generator and wait for in-flight
                 # work to finish before pulling, then re-admit it.
-                self._set_state(h, _GenState.SYNCING)
+                self._set_state(h, _GeneratorState.SYNCING)
                 try:
                     await h.idle.wait()
                     await h.actor.pull_model_state_dict.call(policy_version)
                 finally:
-                    self._set_state(h, _GenState.SERVING)
+                    self._set_state(h, _GeneratorState.SERVING)
 
         # Start the pulls in parallel. Technically we could do rolling sync to
         # maintain availability during weight sync, but that's not a priority

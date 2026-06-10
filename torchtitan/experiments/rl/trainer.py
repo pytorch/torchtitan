@@ -34,6 +34,7 @@ from torchtitan.experiments.rl.actors.generator import (
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import Batcher
 from torchtitan.experiments.rl.environment import TokenEnv, TokenEnvOutput
+from torchtitan.experiments.rl.generator_router import GeneratorRouter, RoutingContext
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout import (
@@ -47,7 +48,6 @@ from torchtitan.experiments.rl.rollout import (
 )
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
-from torchtitan.experiments.rl.generator_router import GeneratorRouter, RoutingContext
 from torchtitan.experiments.rl.types import Episode
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
@@ -443,9 +443,7 @@ class RLTrainer(Configurable):
                     stop_token_ids=self._stop_token_ids,
                 )
                 generators.append(generator)
-            self.generator_router = config.generator_router.build(
-                generators=generators
-            )
+            self.generator_router = config.generator_router.build(generators=generators)
 
         # Initialize TorchStore for weight sync between trainer and generator.
         # StorageVolumes are spawned on the trainer mesh so they are colocated
@@ -580,7 +578,7 @@ class RLTrainer(Configurable):
                     request_ids=request_ids,
                     sampling_config=sampling,
                     metrics_prefix=generation_metrics_prefix,
-                    routing_ctx=RoutingContext(est_cost=len(prompt_token_ids)),
+                    routing_ctx=RoutingContext(estimated_cost=len(prompt_token_ids)),
                 )
             )
             returned_ids = [completion.request_id for completion in completions]
