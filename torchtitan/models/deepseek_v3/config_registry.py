@@ -67,6 +67,24 @@ def deepseek_v3_debugmodel_hybridep() -> Trainer.Config:
     return config
 
 
+def deepseek_v3_debugmodel_minimal_async_ep() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    config.model_spec = model_registry(
+        "debugmodel",
+        moe_comm_backend="minimal_async_ep",
+    )
+    config.parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=1,
+        data_parallel_shard_degree=1,
+        tensor_parallel_degree=1,
+        context_parallel_degree=1,
+        pipeline_parallel_degree=1,
+        expert_parallel_degree=1,
+        enable_sequence_parallel=False,
+    )
+    return config
+
+
 def deepseek_v3_16b() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
@@ -96,6 +114,36 @@ def deepseek_v3_16b() -> Trainer.Config:
         ),
         compile=CompileConfig(enable=True, components=["loss"]),
     )
+
+
+def deepseek_v3_16b_hybridep() -> Trainer.Config:
+    config = deepseek_v3_16b()
+    config.model_spec = model_registry(
+        "16B",
+        attn_backend="flex",
+        moe_comm_backend="hybridep",
+        non_blocking_capacity_factor=1.0,
+    )
+    return config
+
+
+def deepseek_v3_16b_minimal_async_ep() -> Trainer.Config:
+    config = deepseek_v3_16b()
+    config.model_spec = model_registry(
+        "16B",
+        attn_backend="flex",
+        moe_comm_backend="minimal_async_ep",
+    )
+    config.parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=1,
+        data_parallel_shard_degree=1,
+        tensor_parallel_degree=1,
+        context_parallel_degree=1,
+        pipeline_parallel_degree=1,
+        expert_parallel_degree=1,
+        enable_sequence_parallel=False,
+    )
+    return config
 
 
 def deepseek_v3_671b() -> Trainer.Config:
