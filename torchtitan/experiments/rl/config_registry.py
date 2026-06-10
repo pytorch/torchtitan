@@ -26,7 +26,11 @@ from torchtitan.config import (
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
-from torchtitan.experiments.rl.examples.sum_digits import SumDigitsRollouter
+from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
+from torchtitan.experiments.rl.generator_router import (
+    GeneratorRouter,
+    RoundRobinRoutingStrategy,
+)
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.trainer import GRPOLoss, RLTrainer
@@ -78,9 +82,12 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
         num_groups_per_rollout_batch=5,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        rollouter=SumDigitsRollouter.Config(),
+        rollouter=AlphabetSortRollouter.Config(),
         group_size=group_size,
-        renderer=RendererConfig(name="qwen3", enable_thinking=True),
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        generator_router=GeneratorRouter.Config(
+            strategy=RoundRobinRoutingStrategy.Config()
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
@@ -132,11 +139,10 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
         num_steps=10,
         num_groups_per_rollout_batch=5,
         num_validation_samples=20,
-        # TODO: add aot_eager compiling overall, today it doesn't work because
-        # we are missing mechanism to scoop Flex region to plug in inductor backend support
-        rollouter=SumDigitsRollouter.Config(),
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        rollouter=AlphabetSortRollouter.Config(),
         group_size=group_size,
-        renderer=RendererConfig(name="qwen3", enable_thinking=True),
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
@@ -216,9 +222,9 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         num_groups_per_rollout_batch=5,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        rollouter=SumDigitsRollouter.Config(),
+        rollouter=AlphabetSortRollouter.Config(),
         group_size=group_size,
-        renderer=RendererConfig(name="qwen3", enable_thinking=True),
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
@@ -272,9 +278,9 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
         num_groups_per_rollout_batch=5,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        rollouter=SumDigitsRollouter.Config(),
+        rollouter=AlphabetSortRollouter.Config(),
         group_size=group_size,
-        renderer=RendererConfig(name="qwen3", enable_thinking=True),
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
@@ -317,7 +323,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
+def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
     """On-policy GRPO config for Qwen3-0.6B (4 GPUs: 2 gen + 2 train).
 
     Enables deterministic + batch-invariant mode for true on-policy RL training.
@@ -331,9 +337,9 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
         num_groups_per_rollout_batch=5,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        rollouter=SumDigitsRollouter.Config(),
+        rollouter=AlphabetSortRollouter.Config(),
         group_size=group_size,
-        renderer=RendererConfig(name="qwen3", enable_thinking=True),
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),

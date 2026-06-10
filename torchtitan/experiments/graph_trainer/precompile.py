@@ -145,7 +145,11 @@ class PrecompiledFxTraceArtifact:
     output_subclass_layouts: dict[int, SubclassLayout]
     output_spec: pytree.TreeSpec
     tensor_input_indices: list[int]
-    user_inputs_spec: pytree.TreeSpec
+    # user_inputs_spec is intentionally omitted: it can contain
+    # FlexAttention _MaskModWrapper objects that are not picklable,
+    # and the mask_mod is already compiled into standalone Inductor
+    # HOPs (AOTCompiledArtifact) baked into serialized_gm. The spec
+    # is only used for optional runtime validation in run_traced().
     config_fingerprint: ConfigFingerprint = ConfigFingerprint("")
 
     @classmethod
@@ -185,7 +189,6 @@ class PrecompiledFxTraceArtifact:
             output_subclass_layouts=traced_result.output_subclass_layouts,
             output_spec=traced_result.output_spec,
             tensor_input_indices=traced_result.tensor_input_indices,
-            user_inputs_spec=traced_result.user_inputs_spec,
             config_fingerprint=config_fingerprint or ConfigFingerprint(""),
         )
 
@@ -209,12 +212,16 @@ class PrecompiledFxTraceArtifact:
         gm = GraphPickler.loads(self.serialized_gm, fake_mode)
         gm.recompile()
 
+        # Provide a minimal dummy spec since user_inputs_spec is not
+        # serialized (see comment on the dataclass field above).
+        dummy_spec = pytree.tree_flatten(((), {}))[1]
+
         return TracedResult(
             gm=gm,
             example_inputs=(),
             num_flat_inputs=self.num_flat_inputs,
             input_subclass_layouts=self.input_subclass_layouts,
-            user_inputs_spec=self.user_inputs_spec,
+            user_inputs_spec=dummy_spec,
             tensor_input_indices=self.tensor_input_indices,
             num_flat_outputs=self.num_flat_outputs,
             output_subclass_layouts=self.output_subclass_layouts,
