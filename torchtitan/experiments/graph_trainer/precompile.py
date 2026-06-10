@@ -125,6 +125,64 @@ def _validate_config_fingerprint(
 _FX_TRACE_ARTIFACT_KEY = "fx_trace_default"
 
 
+def _hoist_graph_device_to_current(gm: torch.fx.GraphModule) -> None:
+    """Remap a precompiled graph's baked CUDA device to the current device.
+
+    The artifact is traced on one rank (cuda:0) but loaded on every rank's real
+    device (cuda:{local_rank}) when running without --virtual-local-rank. The
+    inductor-compiled regions already resolve the device at runtime
+    (config.runtime_device_index), but the eager FX graph still holds baked
+    references: constant ``get_attr`` tensors materialized on cuda:0 and
+    ``device=cuda:0`` kwargs/args on factory ops. Both must move to the current
+    device or eager ops mix tensors across devices (e.g. SDPA mask on cuda:0 vs
+    activations on cuda:1). Caller must have set the current device first.
+    """
+    if not torch.cuda.is_available():
+        return
+    target = torch.device("cuda", torch.cuda.current_device())
+
+    def _is_cuda_tensor(t: object) -> bool:
+        return isinstance(t, torch.Tensor) and t.device.type == "cuda"
+
+    def _remap_device(value: object) -> object:
+        # Handle both torch.device and string ("cuda" / "cuda:0") forms, and
+        # recurse into list/tuple args (e.g. factory ops with nested device).
+        if isinstance(value, torch.device) and value.type == "cuda":
+            return target
+        if isinstance(value, str) and value.startswith("cuda"):
+            return str(target)
+        if isinstance(value, (list, tuple)):
+            return type(value)(_remap_device(v) for v in value)
+        return value
+
+    for module in gm.modules():
+        if not isinstance(module, torch.fx.GraphModule):
+            continue
+        # Move baked CUDA tensors onto the current device across all three
+        # stores: plain-attribute constants (make_fx setattr), registered
+        # buffers, and parameters.
+        for name, attr in list(module.__dict__.items()):
+            if _is_cuda_tensor(attr):
+                setattr(module, name, attr.to(target))
+        for name, buf in list(module._buffers.items()):
+            if _is_cuda_tensor(buf):
+                module._buffers[name] = buf.to(target)
+        for name, par in list(module._parameters.items()):
+            if _is_cuda_tensor(par):
+                module._parameters[name] = torch.nn.Parameter(
+                    par.data.to(target), requires_grad=par.requires_grad
+                )
+        # Rewrite device= literals on factory ops (kwargs and args).
+        for node in module.graph.nodes:
+            if node.kwargs and "device" in node.kwargs:
+                node.kwargs = {
+                    **node.kwargs,
+                    "device": _remap_device(node.kwargs["device"]),
+                }
+            if node.args:
+                node.args = tuple(_remap_device(a) for a in node.args)
+
+
 @dataclass
 class PrecompiledFxTraceArtifact:
     """Serialized form of a TracedResult for aot_fx_trace precompilation.
@@ -207,6 +265,7 @@ class PrecompiledFxTraceArtifact:
             shape_env=torch.fx.experimental.symbolic_shapes.ShapeEnv(),
         )
         gm = GraphPickler.loads(self.serialized_gm, fake_mode)
+        _hoist_graph_device_to_current(gm)
         gm.recompile()
 
         return TracedResult(

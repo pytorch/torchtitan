@@ -250,6 +250,63 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
                 )
 
 
+class TestHoistGraphDeviceToCurrent(unittest.TestCase):
+    """_hoist_graph_device_to_current moves baked devices to the current one."""
+
+    @unittest.skipIf(
+        not torch.cuda.is_available() or torch.cuda.device_count() < 2,
+        "needs >=2 CUDA devices to observe a cross-device move",
+    )
+    def test_moves_all_tensor_stores_and_device_literals(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            _hoist_graph_device_to_current,
+        )
+
+        prev = torch.cuda.current_device()
+        try:
+            torch.cuda.set_device(0)
+            target = torch.device("cuda", 0)
+            src = torch.device("cuda", 1)
+
+            g = torch.fx.Graph()
+            g.get_attr("_tensor_constant0")
+            g.call_function(
+                torch.ops.aten.empty.memory_format,
+                ([2],),
+                {"device": torch.device("cuda", 1)},
+            )
+            g.call_function(
+                torch.ops.aten.empty.memory_format, ([2],), {"device": "cuda:1"}
+            )
+            g.output(())
+            gm = torch.fx.GraphModule(
+                {"_tensor_constant0": torch.zeros(3, device=src)}, g
+            )
+            gm.register_buffer("buf", torch.ones(2, device=src))
+            gm.register_parameter(
+                "par", torch.nn.Parameter(torch.ones(2, device=src))
+            )
+
+            _hoist_graph_device_to_current(gm)
+
+            # All three tensor stores moved to the current device.
+            self.assertEqual(gm._tensor_constant0.device, target)
+            self.assertEqual(gm.buf.device, target)
+            self.assertEqual(gm.par.device, target)
+            # Both torch.device and string device kwargs remapped to current.
+            for node in gm.graph.nodes:
+                if node.op == "call_function" and "device" in (node.kwargs or {}):
+                    dev = node.kwargs["device"]
+                    idx = (
+                        dev.index
+                        if isinstance(dev, torch.device)
+                        else int(str(dev).split(":")[1])
+                    )
+                    self.assertEqual(idx, 0)
+        finally:
+            torch.cuda.set_device(prev)
+
+
 class TestCudagraphPass(unittest.TestCase):
     """Test cudagraph_pass behavior."""
 

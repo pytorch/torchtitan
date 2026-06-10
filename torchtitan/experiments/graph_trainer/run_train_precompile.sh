@@ -6,11 +6,15 @@
 # LICENSE file in the root directory of this source tree.
 
 # Dedicated training script for graph_trainer with CooR precompile support.
-# Passes --virtual-local-rank to torchrun so that every worker sees
-# LOCAL_RANK=0 and uses cuda:0. torchrun isolates each worker's GPU via
-# CUDA_VISIBLE_DEVICES, so cuda:0 maps to a different physical GPU per
-# worker. This is required when loading a CooR-precompiled artifact,
-# because the artifact was compiled on a single process targeting cuda:0.
+#
+# Each worker runs on its real device (cuda:{local_rank}) with all GPUs
+# visible. A CooR artifact is compiled on one rank (cuda:0) but is device
+# hoisted: inductor regions resolve the device at runtime
+# (config.runtime_device_index) and the eager FX graph's baked constants are
+# remapped to the current device at load. This replaces the old
+# --virtual-local-rank hack (which masqueraded every rank as cuda:0 via
+# CUDA_VISIBLE_DEVICES) and is required for features like symmetric memory
+# that need peer GPUs visible.
 
 set -ex
 
@@ -21,6 +25,5 @@ CONFIG=${CONFIG:-"graph_trainer_llama3_debugmodel"}
 
 PYTORCH_ALLOC_CONF="expandable_segments:True" \
 torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
---virtual-local-rank \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
 -m torchtitan.train --module ${MODULE} --config ${CONFIG} "$@"

@@ -173,6 +173,11 @@ class GraphTrainer(Trainer):
             model, compile_config, self.parallel_dims
         )
 
+        # Device correctness for the hoisted artifact comes from the base
+        # Trainer's set_device(self.device) at init plus the artifact's own
+        # runtime device resolution (config.runtime_device_index), which makes
+        # Triton kernel handles bind to the current device at first launch. No
+        # extra device context is needed here.
         self._traced_step = precompile_fx_trace_load(
             storage,
             expected_fingerprint=config_fingerprint,

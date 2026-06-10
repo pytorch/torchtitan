@@ -104,9 +104,15 @@ def regional_inductor_pass(
     tracing_ctx = torch._guards.TracingContext(fake_mode)
 
     if serializable:
+        import torch.distributed.config as _dist_config
+
         with (
             torch._guards.tracing(tracing_ctx),
             torch._functorch.config.patch("force_autograd_cache", True),
+            # Serializable (precompile) artifacts may load on a different rank's
+            # device. Resolve the CUDA device at runtime so a one-rank-compiled
+            # artifact runs on cuda:{local_rank} without --virtual-local-rank.
+            ic.patch(runtime_device_index=_dist_config.compile_on_one_rank),
         ):
             result = regional_inductor(gm, example_inputs)
         from torch._inductor.output_code import RegionalOutputCode
@@ -284,7 +290,21 @@ def full_inductor_compilation_pass(
     # AOT autograd (via ``standalone_compile``) reorders the gm and breaks
     # fwd/bwd interleaving, blowing up the baseline schedule. Re-enable
     # Inductor's reorder pass (disabled globally in ``compile.py``) to fix.
-    with ic.patch(reorder_for_peak_memory=True):
+    #
+    # Under compile_on_one_rank (CooR precompile), make the generated wrapper
+    # resolve the CUDA device at runtime so the single artifact can load on any
+    # rank's real device (cuda:{local_rank}) without the --virtual-local-rank
+    # hack that masquerades every rank as cuda:0 (which breaks symm-mem).
+    import torch.distributed.config as _dist_config
+
+    with ic.patch(
+        reorder_for_peak_memory=True,
+        # Resolve the CUDA device at runtime so the one-rank-compiled artifact
+        # loads on any rank's real device (drops the --virtual-local-rank hack).
+        # This is baked into the artifact's inductor_meta and also makes inductor
+        # skip the static CUDA launcher (which would pin cubins to one device).
+        runtime_device_index=_dist_config.compile_on_one_rank,
+    ):
         result = regional_inductor_pass(gm, example_inputs)
 
     # Carry the pre-collapse cudagraph verdict forward via gm.meta. The
