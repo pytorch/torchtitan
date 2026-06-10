@@ -16,11 +16,9 @@ from torch.distributed.tensor import DeviceMesh
 
 from torchtitan.config import Configurable
 from torchtitan.distributed.minimal_async_ep import (
-    MinimalAsyncEPCombine,
-    MinimalAsyncEPDispatch,
     MinimalAsyncEPDispatchMetadata,
-    dispatch_metadata,
-    invert_flat_indices,
+    combine_op as minimal_async_ep_combine_op,
+    dispatch_op as minimal_async_ep_dispatch_op,
 )
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 
@@ -930,20 +928,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         assert self.ep_mesh is not None, "ep_mesh must be set before dispatch"
         ep_group = self.ep_mesh.get_group()
 
-        # [NOTE: Routed rows]
-        # T_ means token-major order; E_ means expert-major order.
-        # Flattening topk_expert_ids_TK gives N = T * K T-major routed rows:
-        # row j corresponds to token j // K and top-k choice j % K.
-        # Sorting T-major row ids by expert id creates E-major routed rows.
-        # We track row mappings instead of materializing routed_input_ND.
-        T_row_to_expert_N = topk_expert_ids_TK.reshape(-1)  # noqa: N806
-        num_routed_rows = T_row_to_expert_N.numel()
-        E_row_to_T_row_N = torch.argsort(  # noqa: N806
-            T_row_to_expert_N, stable=True
-        )
         top_k = self.top_k
-        E_row_to_token_N = E_row_to_T_row_N // top_k  # noqa: N806
-
         routed_scores_N = topk_scores_TK.view(-1)
 
         ep_size = ep_group.size()
@@ -956,38 +941,21 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         receive_capacity = ep_size * num_receive_rows_per_source_rank
 
         (
+            hidden_states_RD,
             dispatch_dst_ranks,  # local E-major row -> destination EP rank
             dispatch_dst_rows,  # local E-major row -> destination receive row
             combine_dst_ranks,  # received row -> origin EP rank; length R_max
             combine_dst_rows,  # received row -> origin E-major row; length R_max
             combine_num_valid_rows,  # actual received rows, device-side scalar
+            E_row_to_T_row_N,  # local E-major row -> local T-major row
+            T_row_to_E_row_N,  # local T-major row -> local E-major row
             num_tokens_per_local_expert_e,  # local expert -> active row count
-        ) = dispatch_metadata(
+        ) = minimal_async_ep_dispatch_op(
+            x_TD,
+            topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
-            num_routed_rows,
             receive_capacity,
             ep_size,
-        )
-
-        # Invert the E-major permutation for combine. Example:
-        # E_row_to_T_row_N=[2, 0, 3, 1] means E-major row 0 came
-        # from T-major row 2, so T_row_to_E_row_N=[1, 3, 0, 2].
-        T_row_to_E_row_N = invert_flat_indices(  # noqa: N806
-            E_row_to_T_row_N,
-            num_routed_rows,
-        )
-
-        hidden_states_RD = MinimalAsyncEPDispatch.apply(
-            x_TD,
-            dispatch_dst_ranks,
-            dispatch_dst_rows,
-            combine_dst_ranks,
-            combine_dst_rows,
-            combine_num_valid_rows,
-            E_row_to_token_N,
-            T_row_to_E_row_N,
-            num_tokens,
-            receive_capacity,
         )
 
         state = MinimalAsyncEPDispatchMetadata(
@@ -1015,7 +983,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     ) -> torch.Tensor:
         """Combine tokens via MinimalAsyncEP."""
         state = cast(MinimalAsyncEPDispatchMetadata, metadata.state)
-        return MinimalAsyncEPCombine.apply(
+        combined_TD, _routed_output_ND = minimal_async_ep_combine_op(  # noqa: N806
             routed_output_RD,
             state.dispatch_dst_ranks,
             state.dispatch_dst_rows,
@@ -1028,3 +996,4 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             state.num_tokens,
             state.top_k,
         )
+        return combined_TD
