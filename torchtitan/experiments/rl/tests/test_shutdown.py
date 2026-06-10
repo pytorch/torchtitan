@@ -12,6 +12,7 @@ import pytest
 from torchtitan.experiments.rl import train
 from torchtitan.experiments.rl.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.batcher import Batcher
+from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
 
 
 class _FakeRLTrainer:
@@ -88,6 +89,7 @@ def _make_stub_rl_trainer():
         batcher = Batcher.Config()
         metrics = m.MetricsProcessor.Config()
         dump_folder = "/tmp/test_rl"
+        rollout_recorder = RolloutSampleRecorder.Config()
         hf_assets_path = "./tests/assets/tokenizer"
         # __init__ builds these too; stub them so construction does no real work.
         renderer = SimpleNamespace(
