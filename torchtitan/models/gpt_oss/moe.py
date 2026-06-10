@@ -163,6 +163,8 @@ class GptOssGroupedExperts(Module):
         topk_scores_BLK: torch.Tensor,
         topk_expert_ids_BLK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
+        *,
+        num_local_tokens_after_padding: int,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add."""
         B, L, D = x_BLD.shape
@@ -181,7 +183,16 @@ class GptOssGroupedExperts(Module):
         routed_output_RD = self._experts_forward(
             routed_input_RD, num_global_tokens_per_local_expert_e
         )
-        return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+
+        out_TD = self.token_dispatcher.combine(
+            routed_output_RD,
+            metadata,
+            x_TD,
+            num_local_tokens_after_padding=num_local_tokens_after_padding,
+        )
+        # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
+        # won't cause _StridedShard in the downstream view (e.g., CP is used).
+        return out_TD.view(B, -1, D)
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize experts and wire dispatcher meshes.

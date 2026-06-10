@@ -15,7 +15,6 @@ from typing import Any, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
-import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
@@ -29,9 +28,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "annotate_input_spmd_types",
-    "current_mesh",
-    "mesh_size",
-    "preserve_buffers_spmd",
+    "current_spmd_mesh",
+    "spmd_mesh_size",
     "spmd_distribute_tensor",
     "spmd_redistribute_per_axis",
     "spmd_validate_redistributions",
@@ -51,7 +49,7 @@ def set_spmd_backend(spmd_backend: str) -> None:
     _spmd_backend = spmd_backend
 
 
-def _mesh_stack() -> list[DeviceMesh | None]:
+def _spmd_mesh_stack() -> list[DeviceMesh | None]:
     stack = getattr(_MESH_TLS, "mesh_stack", None)
     if stack is None:
         stack = []
@@ -59,19 +57,19 @@ def _mesh_stack() -> list[DeviceMesh | None]:
     return stack
 
 
-def current_mesh() -> DeviceMesh | None:
+def current_spmd_mesh() -> DeviceMesh | None:
     """Return the current runtime mesh, or ``None`` if unset."""
     if _spmd_backend != "spmd_types":
         return None
-    stack = _mesh_stack()
+    stack = _spmd_mesh_stack()
     if not stack:
         return None
     return stack[-1]
 
 
-def mesh_size(axis_name: str) -> int:
+def spmd_mesh_size(axis_name: str) -> int:
     """Return the size of a mesh axis, or 1 if not active."""
-    mesh = current_mesh()
+    mesh = current_spmd_mesh()
     if mesh is None:
         return 1
     names = mesh.mesh_dim_names or ()
@@ -81,44 +79,13 @@ def mesh_size(axis_name: str) -> int:
 
 
 @contextlib.contextmanager
-def preserve_buffers_spmd(model: nn.Module) -> Iterator[None]:
-    """
-    Preserve spmd types annotations on buffers across reinitialization.
-
-    trainer.py calls m.to_empty(); m.init_weights().
-    Pre-initialization, each param/buffer contains SPMD annotations on its own mesh axes
-    (e.g. dense/sparse). We do not attempt to set any specific mesh and propagate types,
-    and instead just save/restore whatever pre-init mesh & placements each buffer had.
-
-    Note: param re-annotation is handled by FSDP; FSDP is applied before weight-init,
-    and handles param unsharding + re-annotation at compute time.
-    """
-    if _spmd_backend != "spmd_types":
-        yield
-        return
-
-    saved = {
-        fqn: (dict(spmd.get_local_type(buf)), spmd.get_partition_spec(buf))
-        for fqn, buf in model.named_buffers()
-        if spmd.has_local_type(buf)
-    }
-    try:
-        yield
-    finally:
-        for fqn, buf in model.named_buffers():
-            if fqn in saved and not spmd.has_local_type(buf):
-                local_type, partition_spec = saved[fqn]
-                spmd.assert_type(buf, local_type, partition_spec=partition_spec)
-
-
-@contextlib.contextmanager
 def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
     """Set TorchTitan and spmd_types current mesh state for one runtime region."""
     if _spmd_backend != "spmd_types":
         yield
         return
 
-    stack = _mesh_stack()
+    stack = _spmd_mesh_stack()
     stack.append(mesh)
     if mesh is None:
         try:

@@ -207,21 +207,15 @@ def _precompile_aot_fx_trace(
         * parallel_dims.cp
     )
     dummy_global_valid_tokens = float(global_batch_size * seq_len)
-    extra_inputs: dict[str, torch.Tensor] = {}
     extra_kwargs: dict[str, Any] = {}
 
     if isinstance(model_config, Decoder.Config) and model_config.layers:
         attn_config = model_config.layers[0].attention
         inner_attention = attn_config.inner_attention
 
-        if attn_config.mask_type == "block_causal":
-            positions = torch.arange(
-                0, dummy_inputs.shape[1], dtype=torch.int32, device=dummy_inputs.device
-            ).expand(dummy_inputs.shape)
-        else:
-            positions = torch.arange(
-                dummy_inputs.shape[1], dtype=torch.int32, device=dummy_inputs.device
-            ).repeat(dummy_inputs.shape[0], 1)
+        positions = torch.arange(
+            0, dummy_inputs.shape[1], dtype=torch.int32, device=dummy_inputs.device
+        ).expand(dummy_inputs.shape)
 
         if isinstance(inner_attention, (FlexAttention.Config, VarlenAttention.Config)):
             extra_kwargs["attention_masks"] = cast(Decoder, model).get_attention_masks(
@@ -262,7 +256,6 @@ def _precompile_aot_fx_trace(
             dummy_inputs,
             dummy_labels,
             dummy_global_valid_tokens,
-            extra_inputs,
             extra_kwargs,
         )
     logger.info(

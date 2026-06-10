@@ -28,6 +28,8 @@ from torch.nn.attention.flex_attention import (
 from torch.nn.attention.varlen import varlen_attn
 
 import spmd_types as spmd
+
+from torchtitan.distributed.compile import maybe_regional_inductor
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
@@ -220,16 +222,20 @@ class FlexAttention(Module):
     ):
         """Run compiled FlexAttention outside SPMD typechecking."""
         with spmd.no_typecheck():
-            out, aux = FlexAttention._compiled_flex_attn(
-                q,
-                k,
-                v,
-                block_mask=attention_masks,
-                scale=scale,
-                enable_gqa=enable_gqa,
-                return_aux=AuxRequest(lse=return_lse),
-                kernel_options=self.kernel_options,
-            )
+            # Mark the flex region so that, when the enclosing model is compiled
+            # with a non-inductor backend, regional_inductor scoops just this
+            # region into an inductor sub-compile (see distributed/compile.py).
+            with maybe_regional_inductor(FlexAttention.inductor_configs):
+                out, aux = FlexAttention._compiled_flex_attn(
+                    q,
+                    k,
+                    v,
+                    block_mask=attention_masks,
+                    scale=scale,
+                    enable_gqa=enable_gqa,
+                    return_aux=AuxRequest(lse=return_lse),
+                    kernel_options=self.kernel_options,
+                )
         if spmd.is_type_checking():
             out_type = spmd.get_local_type(q)
             spmd.assert_type(out, out_type)
@@ -243,7 +249,7 @@ class FlexAttention(Module):
         k: torch.Tensor,
         v: torch.Tensor,
         *,
-        attention_masks: BlockMask | None = None,
+        attention_masks: BlockMask,
         score_mod: _score_mod_signature | None = None,
         scale: float | None = None,
         return_lse: bool = False,
@@ -251,8 +257,8 @@ class FlexAttention(Module):
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert isinstance(
-            attention_masks, (BlockMask, type(None))
-        ), f"attention_masks must be instance of BlockMask or None, got {type(attention_masks)}"
+            attention_masks, BlockMask
+        ), f"attention_masks must be instance of BlockMask, got {type(attention_masks)}"
 
         # Transpose to (bs, heads, seq, dim) for flex_attention
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
@@ -312,11 +318,17 @@ class ScaledDotProductAttention(Module):
         k: torch.Tensor,
         v: torch.Tensor,
         *,
+        attention_masks: AttentionMasksType | None = None,
         scale: float | None = None,
         enable_gqa: bool = False,
         is_causal: bool = True,
         **kwargs,
     ) -> torch.Tensor:
+        if attention_masks is not None:
+            raise ValueError(
+                "ScaledDotProductAttention does not support attention_masks; it "
+                "only supports causal/non-causal attention via is_causal."
+            )
         # Transpose to (bs, heads, seq, dim) for SDPA
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
         with sdpa_kernel(self.sdpa_backends, set_priority=True):
@@ -565,26 +577,9 @@ class BaseAttention(Module):
     class Config(Module.Config):
         n_heads: int
         inner_attention: Module.Config
-        mask_type: str
 
         def __post_init__(self):
             assert self.n_heads > 0, "n_heads must be > 0"
-            assert isinstance(self.inner_attention, Module.Config), (
-                f"inner_attention must be a Module.Config, "
-                f"got {type(self.inner_attention)}"
-            )
-            assert self.mask_type in [
-                "causal",
-                "block_causal",
-            ], f"mask_type must be one of ['causal', 'block_causal'], got {self.mask_type}"
-            if (
-                isinstance(self.inner_attention, ScaledDotProductAttention.Config)
-                and self.mask_type == "block_causal"
-            ):
-                raise ValueError(
-                    "mask_type 'block_causal' is not supported with "
-                    "ScaledDotProductAttention"
-                )
 
 
 class BaseQKVLinear(Module):
@@ -703,7 +698,6 @@ class GQAttention(BaseAttention):
         n_kv_heads: int | None = None
         head_dim: int | None = None
         inner_attention: Module.Config
-        mask_type: str = "causal"
         rope: RoPE.Config
 
     def __init__(self, config: Config):
