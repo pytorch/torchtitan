@@ -94,6 +94,7 @@ class PathTrainer(Trainer):
             global_samples = dist_utils.dist_sum(local_samples, parallel_dims.get_mesh("batch"))
         else:
             global_samples = local_samples.float()
+        global_samples = torch.as_tensor(global_samples, dtype=torch.float32, device=self.device)
 
         accumulated_losses = []
         metric_sums: dict[str, torch.Tensor] = {}
@@ -140,7 +141,10 @@ class PathTrainer(Trainer):
             global_avg_loss = global_max_loss = float(loss.detach().item())
             global_samples_seen = self.ntokens_seen
 
-        path_metrics = {f"path/{k}": float((v / global_samples).detach().item()) for k, v in metric_sums.items()}
+        path_metrics = {
+            f"path/{k}": float((torch.as_tensor(v, dtype=torch.float32, device=self.device) / global_samples).item())
+            for k, v in metric_sums.items()
+        }
         extra_metrics = {"n_samples_seen": global_samples_seen, **lr_metrics, **path_metrics}
         self.metrics_processor.log(
             self.step,
@@ -149,3 +153,9 @@ class PathTrainer(Trainer):
             float(grad_norm.item()),
             extra_metrics=extra_metrics,
         )
+
+    def close(self) -> None:
+        self.dataloader.close()
+        if self.config.validator.enable:
+            self.validator.close()
+        super().close()

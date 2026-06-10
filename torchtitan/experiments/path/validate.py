@@ -73,40 +73,48 @@ class PathValidator(BaseValidator):
         amp_dtype = TORCH_DTYPE_MAP[self.config.mixed_precision_param]
         amp_enabled = amp_dtype != torch.float32 and not self.parallel_dims.fsdp_enabled
 
-        total_loss = torch.zeros((), device=device)
-        total_samples = torch.zeros((), device=device)
-        metric_sums: dict[str, torch.Tensor] = {}
-        loss_mesh = self.parallel_dims.get_optional_mesh("loss")
-        for num_steps, (input_dict, targets) in enumerate(self.dataloader):
-            if self.config.steps != -1 and num_steps >= self.config.steps:
-                break
-            self.metrics_processor.ntokens_since_last_log += next(iter(input_dict.values())).shape[0]
-            input_dict = {k: v.to(device) for k, v in input_dict.items()}
-            targets = {k: v.to(device) for k, v in targets.items()}
-            local_samples = torch.tensor(next(iter(input_dict.values())).shape[0], dtype=torch.float32, device=device)
-            global_samples = (
-                dist_utils.dist_sum(local_samples, self.parallel_dims.get_mesh("batch"))
-                if self.parallel_dims.dp_enabled
-                else local_samples
-            )
+        try:
+            total_loss = torch.zeros((), device=device)
+            total_samples = torch.zeros((), device=device)
+            metric_sums: dict[str, torch.Tensor] = {}
+            loss_mesh = self.parallel_dims.get_optional_mesh("loss")
+            for num_steps, (input_dict, targets) in enumerate(self.dataloader):
+                if self.config.steps != -1 and num_steps >= self.config.steps:
+                    break
+                self.metrics_processor.ntokens_since_last_log += next(iter(input_dict.values())).shape[0]
+                input_dict = {k: v.to(device) for k, v in input_dict.items()}
+                targets = {k: v.to(device) for k, v in targets.items()}
+                local_samples = torch.tensor(next(iter(input_dict.values())).shape[0], dtype=torch.float32, device=device)
+                global_samples = (
+                    dist_utils.dist_sum(local_samples, self.parallel_dims.get_mesh("batch"))
+                    if self.parallel_dims.dp_enabled
+                    else local_samples
+                )
 
-            with self.validation_context(), torch.autocast(device.type, dtype=amp_dtype, enabled=amp_enabled):
-                pred = model_parts[0](input_dict)
-                loss_vec, metrics = self.loss_fn(pred, targets)
+                with self.validation_context(), torch.autocast(device.type, dtype=amp_dtype, enabled=amp_enabled):
+                    pred = model_parts[0](input_dict)
+                    loss_vec, metrics = self.loss_fn(pred, targets)
 
-            loss_sum = loss_vec.float().sum()
-            batch_metric_sums = {k: v.float().sum() for k, v in metrics.items() if k != "loss"}
-            if self.parallel_dims.dp_cp_enabled:
-                loss_sum = dist_utils.dist_sum(loss_sum, loss_mesh)
-                batch_metric_sums = {k: dist_utils.dist_sum(v, loss_mesh) for k, v in batch_metric_sums.items()}
-            total_loss += loss_sum
-            total_samples += global_samples
-            for name, value in batch_metric_sums.items():
-                metric_sums[name] = metric_sums.get(name, torch.zeros((), device=device)) + value
+                loss_sum = loss_vec.float().sum()
+                batch_metric_sums = {k: v.float().sum() for k, v in metrics.items() if k != "loss"}
+                if self.parallel_dims.dp_cp_enabled:
+                    loss_sum = dist_utils.dist_sum(loss_sum, loss_mesh)
+                    batch_metric_sums = {k: dist_utils.dist_sum(v, loss_mesh) for k, v in batch_metric_sums.items()}
+                total_loss += loss_sum
+                total_samples += global_samples
+                for name, value in batch_metric_sums.items():
+                    metric_sums[name] = metric_sums.get(name, torch.zeros((), device=device)) + value
 
-        loss = float((total_loss / total_samples).item())
-        extra_metrics = {f"validation_metrics/path/{k}": float((v / total_samples).item()) for k, v in metric_sums.items()}
-        self.metrics_processor.log_validation(loss=loss, step=step, extra_metrics=extra_metrics)
+            samples = torch.as_tensor(total_samples, dtype=torch.float32, device=device)
+            loss = float((torch.as_tensor(total_loss, dtype=torch.float32, device=device) / samples).item())
+            extra_metrics = {
+                f"validation_metrics/path/{k}": float((torch.as_tensor(v, dtype=torch.float32, device=device) / samples).item())
+                for k, v in metric_sums.items()
+            }
+            self.metrics_processor.log_validation(loss=loss, step=step, extra_metrics=extra_metrics)
+        finally:
+            for model in model_parts:
+                model.train()
 
-        for model in model_parts:
-            model.train()
+    def close(self) -> None:
+        self.dataloader.close()

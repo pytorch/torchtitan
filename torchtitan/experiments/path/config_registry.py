@@ -72,7 +72,7 @@ def model_registry() -> ModelSpec:
 
 
 def path() -> PathTrainer.Config:
-    steps = 1024
+    steps = 512*10
     mixed_precision_param = "bfloat16"
     return PathTrainer.Config(
         loss=PathLoss.Config(),
@@ -83,7 +83,7 @@ def path() -> PathTrainer.Config:
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=round(steps * 0.1),
             total_steps=steps,
-            decay_ratio=0.9,
+            decay_ratio=0.5,
             decay_type="cosine",
             min_lr_factor=0.0,
         ),
@@ -112,7 +112,7 @@ def path() -> PathTrainer.Config:
         metrics=MetricsProcessor.Config(log_freq=10, enable_reporterv2=True),
         validator=PathValidator.Config(
             enable=True,
-            freq=2,
+            freq=512,
             steps=32,
             dataloader=_dataloader_config(split="val"),
             mixed_precision_param=mixed_precision_param,

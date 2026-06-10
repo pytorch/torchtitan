@@ -52,6 +52,8 @@ class PathDataLoader(BaseDataLoader):
         self.dp_rank = dp_rank
         self.local_rank = int(os.environ.get("LOCAL_RANK", dp_rank))
         self.local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", dp_world_size))
+        node_rank = int(os.environ.get("GROUP_RANK", dp_rank // self.local_world_size))
+        run_id = os.environ.get("REPORTERV2_TRAINING_ID") or "path"
         val = config.split != "train"
         val_shuffle_size = local_batch_size * validation_steps * self.local_world_size
         shuffle_size = val_shuffle_size if val else config.shuffle_size
@@ -83,13 +85,27 @@ class PathDataLoader(BaseDataLoader):
             global_rank=dp_rank,
             local_world_size=self.local_world_size,
             global_world_size=dp_world_size,
-            queue_name=f"path-{config.split}-rank{dp_rank}",
+            queue_name=f"{run_id}-{config.split}-node{node_rank}",
         )
         self.loader = DataLoader(dataset, loader_config)
+        self._iterator: Any | None = None
 
     def __iter__(self) -> Iterator[tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]]:
-        for inputs, targets in self.loader:
-            yield inputs, targets
+        iterator = iter(self.loader)
+        self._iterator = iterator
+        try:
+            for inputs, targets in iterator:
+                yield inputs, targets
+        finally:
+            iterator.close()
+            if self._iterator is iterator:
+                self._iterator = None
+
+    def close(self) -> None:
+        if self._iterator is not None:
+            self._iterator.close()
+            self._iterator = None
+        self.loader._shutdown_workers()
 
     def state_dict(self) -> dict[str, int]:
         return {}
