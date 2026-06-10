@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import functools
 import re
 from collections import defaultdict
 from collections.abc import Callable, Iterator
@@ -15,14 +14,15 @@ import torch
 import torch.distributed.tensor
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
-from torch.distributed.checkpoint.state_dict import (
-    get_optimizer_state_dict,
-    set_optimizer_state_dict,
-    StateDictOptions,
-)
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import Replicate
 from torch.optim import Optimizer
+from torchtitan.components.checkpoint_utils import (
+    canonical_fqn,
+    get_flat_optim_state_dict,
+    init_optim_state,
+    load_flat_optim_state_dict,
+)
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
@@ -156,21 +156,28 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         Each parameter is assigned to the first matching ParamGroupConfig pattern.
         Returns a dict mapping optimizer name to a list of param group dicts.
 
-        Each param group dict includes a ``pattern`` key with the regex pattern
-        string for logging.
+        Each group also carries a ``param_names`` list (canonical FQNs aligned
+        with ``params``) so PyTorch records the names on the group; the checkpoint
+        utilities use those names to build FQN-keyed optimizer state dicts.
+
+        Each param group dict also carries a ``pattern`` key (the regex string)
+        for logging. The caller pops it before constructing the optimizer so it
+        does not leak into the saved optimizer state dict.
         """
         result: dict[str, list[dict[str, Any]]] = defaultdict(list)
         claimed: set[str] = set()  # first-match-wins
 
         for pg in param_group_configs:
             pattern = re.compile(pg.pattern)
-            matched = []
+            params: list[nn.Parameter] = []
+            param_names: list[str] = []
             for name, param in model.named_parameters():
                 if param.requires_grad and name not in claimed and pattern.search(name):
-                    matched.append(param)
+                    params.append(param)
+                    param_names.append(canonical_fqn(name))
                     claimed.add(name)
 
-            if not matched:
+            if not params:
                 raise ValueError(
                     f"Optimizer param_groups pattern '{pg.pattern}' "
                     f"matched no parameters"
@@ -178,7 +185,8 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
             result[pg.optimizer_name].append(
                 {
-                    "params": matched,
+                    "params": params,
+                    "param_names": param_names,
                     "pattern": pg.pattern,
                     **impl_kwargs,
                     **pg.optimizer_kwargs,
@@ -193,17 +201,20 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         all_params = []
         self.optimizers = []
         self.model_parts = model_parts
-        # Maps each optimizer to its model part (for state_dict/load_state_dict)
-        self._model_part_indices: list[int] = []
+        # (optimizer, model_part_index, patterns) collected only for logging.
+        summary: list[tuple[Optimizer, int, list[str]]] = []
 
         for part_idx, model in enumerate(self.model_parts):
             groups_by_opt_name = self._build_param_groups(
                 model, param_group_configs, impl_kwargs
             )
             for opt_name, opt_param_groups in groups_by_opt_name.items():
-                opt_cls = self._resolve_optimizer_cls(opt_name)
-                self.optimizers.append(opt_cls(opt_param_groups))
-                self._model_part_indices.append(part_idx)
+                # Pattern is logging-only; pop it so the optimizer never stores
+                # it (which would put it in the saved optimizer state dict).
+                patterns = [group.pop("pattern") for group in opt_param_groups]
+                optimizer = self._resolve_optimizer_cls(opt_name)(opt_param_groups)
+                self.optimizers.append(optimizer)
+                summary.append((optimizer, part_idx, patterns))
                 for group in opt_param_groups:
                     all_params.extend(group["params"])
 
@@ -212,10 +223,15 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         if config.implementation == "fused_opt_states_bf16":
             self._register_bf16_optimizer_state_hook()
         self._post_init(all_params)
-        self._log_summary()
+        self._log_summary(summary)
 
-    def _log_summary(self) -> None:
-        """Log a summary of optimizer assignments."""
+    def _log_summary(self, summary: list[tuple[Optimizer, int, list[str]]]) -> None:
+        """Log a summary of optimizer assignments.
+
+        ``summary`` carries the per-optimizer model-part index and regex patterns
+        gathered at construction time, so the container does not need to keep a
+        persistent optimizer-to-model-part mapping.
+        """
         _KEY_KWARGS = {
             "lr",
             "weight_decay",
@@ -226,13 +242,11 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             "fused",
             "foreach",
         }
-        for i, opt in enumerate(self.optimizers):
-            opt_name = type(opt).__name__
-            part_idx = self._model_part_indices[i]
-            for group in opt.param_groups:
+        for optimizer, part_idx, patterns in summary:
+            opt_name = type(optimizer).__name__
+            for group, pattern in zip(optimizer.param_groups, patterns):
                 num_params = len(group["params"])
                 kwargs = {k: v for k, v in group.items() if k in _KEY_KWARGS}
-                pattern = group["pattern"]
                 logger.info(
                     f"Optimizer {opt_name} (model_part={part_idx}): "
                     f"{num_params} params [{pattern}] {kwargs}"
@@ -277,24 +291,25 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             optimizer.zero_grad(set_to_none=set_to_none)
 
     def state_dict(self) -> dict[str, Any]:
-        func = functools.partial(
-            get_optimizer_state_dict,
-            options=StateDictOptions(flatten_optimizer_state_dict=True),
-        )
-        result = {}
-        for opt, part_idx in zip(self.optimizers, self._model_part_indices):
-            sd = func(self.model_parts[part_idx], opt)
-            result.update(sd)
+        """Return a flat, FQN-keyed optimizer state dict for all optimizers.
+
+        Side effect: if an optimizer's state has not been created yet (no training
+        step taken), ``init_optim_state`` materializes it with a zero-gradient,
+        zero-lr step before reading. The step leaves parameters unchanged, and the
+        call is a no-op once state exists.
+        """
+        result: dict[str, Any] = {}
+        for optim in self.optimizers:
+            init_optim_state(optim)
+            result.update(get_flat_optim_state_dict(optim))
         return result
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        func = functools.partial(
-            set_optimizer_state_dict,
-            optim_state_dict=state_dict,
-            options=StateDictOptions(flatten_optimizer_state_dict=True),
-        )
-        for opt, part_idx in zip(self.optimizers, self._model_part_indices):
-            func(self.model_parts[part_idx], opt)
+        # init_optim_state must run first: the unflatten step reads each
+        # optimizer's live state to learn which state tensors to expect.
+        for optim in self.optimizers:
+            init_optim_state(optim)
+            load_flat_optim_state_dict(optim, state_dict)
 
     def _post_init(self, all_params: list[nn.Parameter]) -> None:
         # We need to call Optimizer.__init__() to initialize some necessary optimizer

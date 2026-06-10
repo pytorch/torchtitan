@@ -34,14 +34,15 @@ NOTE (checkpoint compatibility) — this module checkpoints its own ``w13``
 parameter (FQN ``...feed_forward.w13``); it is **not** interchangeable with stock
 ``FeedForward`` checkpoints (``w1.weight`` / ``w3.weight``). A checkpoint saved
 with this override only loads back into a run that also uses it, and vice-versa.
-torchtitan's checkpointing uses DCP ``get_model_state_dict`` /
-``set_model_state_dict``, which resolve every state-dict key back to a real
-module attribute for DTensor/FSDP handling. A module-level ``state_dict`` hook
-that fabricates ``w1``/``w3`` keys is therefore bypassed and in fact errors
-(``'FusedSwiGLU' object has no attribute 'w1'``). Cross-layout interop with stock
+torchtitan's checkpointing uses ``canonical_model_state_dict`` /
+``load_canonical_model_state_dict`` (thin wrappers over ``nn.Module.state_dict``
+and ``load_state_dict`` that strip compile/AC prefixes), so every state-dict key
+must map to a real module parameter. A module-level ``state_dict`` hook that
+fabricates ``w1``/``w3`` keys cannot round-trip: the load side has no
+``w1``/``w3`` parameter to write into. Cross-layout interop with stock
 checkpoints requires a model-level ``BaseStateDictAdapter`` (the same mechanism
 used for HF conversion), which operates on the flat key→tensor dict after
-``get_model_state_dict``. The override mechanism does not yet expose a hook to
+``canonical_model_state_dict``. The override mechanism does not yet expose a hook to
 contribute such an adapter; a candidate design (an optional
 ``state_dict_translator`` on ``@override`` feeding ``from_hf``/``to_hf``) is
 tracked in https://github.com/pytorch/torchtitan/issues/3569. See ``OVERRIDE.md``
