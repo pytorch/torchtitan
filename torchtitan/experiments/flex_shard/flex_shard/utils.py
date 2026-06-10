@@ -133,7 +133,14 @@ def _set_param_on_module(
     module = root_module
     for part in parts[:-1]:
         module = getattr(module, part)
-    setattr(module, parts[-1], param)
+    param_name = parts[-1]
+    wrapped = module._modules.get("_checkpoint_wrapped_module")
+    if wrapped is not None and param_name not in module._parameters:
+        module = wrapped
+    if param_name in module._parameters:
+        module._parameters[param_name] = param
+    else:
+        setattr(module, param_name, param)
 
 
 def _get_managed_named_params(
