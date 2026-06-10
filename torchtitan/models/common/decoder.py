@@ -157,8 +157,8 @@ class Decoder(BaseModel):
                 if layer_cfg.moe is not None:
                     from torchtitan.models.common.token_dispatcher import (
                         DeepEPTokenDispatcher,
-                        MinimalAsyncEPTokenDispatcher,
                         HybridEPTokenDispatcher,
+                        MinimalAsyncEPTokenDispatcher,
                     )
 
                     token_dispatcher_cfg = layer_cfg.moe.experts.token_dispatcher

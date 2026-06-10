@@ -16,9 +16,9 @@ from torch.distributed.tensor import DeviceMesh
 
 from torchtitan.config import Configurable
 from torchtitan.distributed.minimal_async_ep import (
-    MinimalAsyncEPDispatchMetadata,
     combine_op as minimal_async_ep_combine_op,
     dispatch_op as minimal_async_ep_dispatch_op,
+    MinimalAsyncEPDispatchMetadata,
 )
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 
@@ -935,9 +935,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         num_tokens = x_TD.shape[0]
         num_local_experts = num_local_tokens_per_expert_E.numel() // ep_size
         # TODO(xmfan): make this capacity configurable by user
-        num_receive_rows_per_source_rank = num_tokens * min(
-            top_k, num_local_experts
-        )
+        num_receive_rows_per_source_rank = num_tokens * min(top_k, num_local_experts)
         receive_capacity = ep_size * num_receive_rows_per_source_rank
 
         (

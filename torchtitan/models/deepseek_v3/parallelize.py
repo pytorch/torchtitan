@@ -13,8 +13,7 @@ from torchtitan.config import (
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
-from torchtitan.distributed import ParallelDims
-from torchtitan.distributed import minimal_async_ep
+from torchtitan.distributed import minimal_async_ep, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
@@ -86,6 +85,7 @@ def _validate_minimal_async_ep_config(
             f"data_parallel_shard_degree={parallel_dims.dp_shard}, "
             f"expert_parallel_degree={parallel_dims.ep}."
         )
+
 
 def _maybe_init_minimal_async_ep_buffer(
     model: DeepSeekV3Model,

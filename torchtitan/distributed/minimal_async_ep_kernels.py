@@ -469,9 +469,7 @@ def _copy_rows_to_peer_ptrs_kernel(
     dst_row = tl.load(dst_rows + row, mask=row_mask, other=0)
     dst_rank_mask = row_mask & (dst_rank >= 0)
     values = tl.load(
-        src
-        + src_row[:, None] * SRC_ROW_STRIDE
-        + col[None, :] * SRC_COL_STRIDE,
+        src + src_row[:, None] * SRC_ROW_STRIDE + col[None, :] * SRC_COL_STRIDE,
         mask=mask,
     )
     dst_base = tl.load(dst_ptrs + dst_rank, mask=dst_rank_mask, other=0)
@@ -498,8 +496,7 @@ def copy_full_counts_to_peers_kernel(
         raise ValueError(f"expected {ep_size} count buffers, got {len(dsts)}.")
     if dsts[0].dtype != torch.int64:
         raise ValueError(
-            "destination count buffers must be torch.int64, "
-            f"got {dsts[0].dtype}."
+            "destination count buffers must be torch.int64, " f"got {dsts[0].dtype}."
         )
 
     block_size = _COUNT_COPY_BLOCK_SIZE

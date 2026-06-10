@@ -106,9 +106,7 @@ def init_buffer(
     global _buffer_state
 
     device = torch.device(device)
-    max_routed_tokens = (
-        group.size() * tokens_per_rank * min(top_k, num_local_experts)
-    )
+    max_routed_tokens = group.size() * tokens_per_rank * min(top_k, num_local_experts)
     num_experts = group.size() * num_local_experts
     assert _buffer_state is None
 
@@ -330,15 +328,16 @@ def _compute_direct_metadata(
     local_count_starts_E = (  # noqa: N806
         local_count_ends_E - num_local_tokens_per_expert_E
     )
-    dispatch_dst_ranks_N, dispatch_dst_rows_N = (  # noqa: N806
-        fill_dispatch_metadata_kernel(
-            num_local_tokens_per_expert_E,
-            local_dest_offsets_E,
-            local_count_starts_E,
-            num_routed_tokens=num_routed_rows,
-            num_local_experts=num_local_experts,
-            max_tokens_per_segment=_buffer_state.tokens_per_rank,
-        )
+    (
+        dispatch_dst_ranks_N,
+        dispatch_dst_rows_N,
+    ) = fill_dispatch_metadata_kernel(  # noqa: N806
+        num_local_tokens_per_expert_E,
+        local_dest_offsets_E,
+        local_count_starts_E,
+        num_routed_tokens=num_routed_rows,
+        num_local_experts=num_local_experts,
+        max_tokens_per_segment=_buffer_state.tokens_per_rank,
     )
 
     segment_lens = counts_sde[:, rank, :].t().reshape(-1)
@@ -347,17 +346,19 @@ def _compute_direct_metadata(
     source_input_starts_RE = (  # noqa: N806
         all_tokens_per_expert_RE.cumsum(1) - all_tokens_per_expert_RE
     )
-    combine_dst_ranks, combine_dst_rows, combine_num_valid_rows = (
-        fill_combine_metadata_kernel(
-            segment_lens,
-            output_starts,
-            source_input_starts_RE,
-            ep_rank=rank,
-            ep_size=ep_size,
-            num_local_experts=num_local_experts,
-            receive_capacity=receive_capacity,
-            max_tokens_per_segment=_buffer_state.tokens_per_rank,
-        )
+    (
+        combine_dst_ranks,
+        combine_dst_rows,
+        combine_num_valid_rows,
+    ) = fill_combine_metadata_kernel(
+        segment_lens,
+        output_starts,
+        source_input_starts_RE,
+        ep_rank=rank,
+        ep_size=ep_size,
+        num_local_experts=num_local_experts,
+        receive_capacity=receive_capacity,
+        max_tokens_per_segment=_buffer_state.tokens_per_rank,
     )
 
     return (

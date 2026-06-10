@@ -240,9 +240,7 @@ def make_token_dispatcher_config(
         )
     elif comm_backend == "minimal_async_ep":
         if score_before_experts:
-            raise ValueError(
-                "minimal_async_ep requires score_before_experts=False."
-            )
+            raise ValueError("minimal_async_ep requires score_before_experts=False.")
         return MinimalAsyncEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
