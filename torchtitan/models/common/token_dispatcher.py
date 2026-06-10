@@ -300,8 +300,8 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             output_splits_list = output_splits.tolist()
 
         # All-to-all dispatch tokens to EP ranks.
-        routed_input = all_to_all_single(
-            routed_input,
+        routed_input_RD = all_to_all_single(
+            routed_input_ND,
             output_splits_list,
             input_splits_list,
             self.ep_mesh,
@@ -439,8 +439,8 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
         # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
         # on the NCCL stream and won't block until the tensor is accessed.
-        routed_output = all_to_all_single(
-            routed_output,
+        routed_output_RD = all_to_all_single(
+            routed_output_RD,
             metadata.input_splits,
             metadata.output_splits,
             self.ep_mesh,

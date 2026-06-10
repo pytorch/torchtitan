@@ -562,7 +562,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     @sl.log_trace_span("post_dataloading_process")
     def post_dataloading_process(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """
         Post-processing hook after data loading and before model forward pass.
 
@@ -581,31 +581,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             labels: Target labels for the batch.
 
         Returns:
-            A tuple of (inputs, labels, extra_inputs, extra_kwargs) where:
+            A tuple of (inputs, labels, extra_kwargs) where:
                 - inputs: Main input tensor extracted from input_dict["input"].
                 - labels: Target labels (unchanged from input parameter).
-                - extra_inputs: Dict of auxiliary input tensors from input_dict
-                    (excluding "input" and "positions"). These are passed to the
-                    model forward but are NOT forwarded across pipeline parallel
-                    stages.
-                - extra_kwargs: Dict of additional keyword arguments for model
-                    forward (positions, attention_masks). These ARE forwarded
-                    across all pipeline parallel stages.
-
-        Note:
-            The distinction between extra_inputs and extra_kwargs is important for
-            pipeline parallelism: extra_kwargs are forwarded to all pipeline stages,
-            while extra_inputs are only available to the first stage. Positions
-            always go into extra_kwargs so every stage can apply RoPE correctly.
+                - extra_kwargs: Additional keyword arguments for the model forward
+                    (e.g. positions, attention_masks), forwarded to every
+                    pipeline-parallel stage.
         """
         inputs = input_dict["input"]
-        extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
-        # extra_kwargs are forwarded to all PP stages; extra_inputs are only
-        # available to the first stage.  Positions go into extra_kwargs so
-        # every stage can apply RoPE correctly.
-        extra_kwargs: dict[str, Any] = {}
+        # Everything else becomes a model-forward kwarg, forwarded to all PP
+        # stages by the schedule. positions is read here so we can build masks.
+        extra_kwargs: dict[str, Any] = {
+            k: v for k, v in input_dict.items() if k != "input"
+        }
 
-        positions = extra_inputs.pop("positions", None)
+        positions = extra_kwargs.get("positions", None)
 
         # positions and attention_masks are optional (Decoder.forward defaults
         # both to None). Build attention masks only for the masked backends
@@ -614,7 +604,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # tests) still receives positions for RoPE but no masks — it relies on
         # is_causal instead.
         if isinstance(self.model_config, Decoder.Config) and positions is not None:
-            inner_attention = self.model_config.layers[0].attention.inner_attention
+            inner_attention = getattr(
+                self.model_config.first_attention, "inner_attention", None
+            )
             if isinstance(
                 inner_attention, (FlexAttention.Config, VarlenAttention.Config)
             ):
@@ -622,8 +614,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 extra_kwargs["attention_masks"] = model.get_attention_masks(
                     positions=positions,
                 )
-
-        extra_kwargs["positions"] = positions
 
         if self.parallel_dims.cp_enabled:
             inputs, labels, extra_kwargs = prepare_context_parallel_input(
@@ -644,7 +634,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
 
-        return inputs, labels, extra_inputs, extra_kwargs
+        return inputs, labels, extra_kwargs
 
     @sl.log_trace_span("fwd_bwd")
     def forward_backward_step(
@@ -657,9 +647,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
-        inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
-            input_dict, labels
-        )
+        inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
@@ -671,7 +659,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 if self.pp_has_first_stage:
                     self.pp_schedule.step(
                         inputs,
-                        **extra_inputs,
                         **extra_kwargs,
                         target=targets,
                         losses=losses,
@@ -699,7 +686,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             # Non-PP forward / backward
             assert len(model_parts) == 1
             with self.train_context():
-                pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                pred = model_parts[0](inputs, **extra_kwargs)
                 # Under non-full_dtensor, labels stay as plain tensors. See
                 # ``cross_entropy_loss`` for why pred must also be plain.
                 # Remove once non-full_dtensor is no longer supported.

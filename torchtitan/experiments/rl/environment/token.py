@@ -10,7 +10,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 
-from renderers import Message, Renderer, ToolSpec
+from renderers import Message, ParsedToolCall, Renderer, ToolCallParseStatus, ToolSpec
 
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.environment.message import MessageEnv
@@ -176,7 +176,37 @@ class TokenEnv(Configurable):
         if parsed.reasoning_content:
             completion_message["reasoning_content"] = parsed.reasoning_content
         if parsed.tool_calls:
-            completion_message["tool_calls"] = parsed.tool_calls
+            tool_calls = []
+            for tool_call in parsed.tool_calls:
+                if isinstance(tool_call, dict):
+                    tool_calls.append(tool_call)
+                    continue
+                if not isinstance(tool_call, ParsedToolCall):
+                    raise TypeError(
+                        f"Unsupported tool call type: {type(tool_call).__name__}"
+                    )
+                if (
+                    tool_call.status is not ToolCallParseStatus.OK
+                    or tool_call.name is None
+                ):
+                    continue
+
+                normalized_tool_call = {
+                    "type": "function",
+                    "function": {
+                        "name": tool_call.name,
+                        "arguments": (
+                            tool_call.arguments
+                            if tool_call.arguments is not None
+                            else {}
+                        ),
+                    },
+                }
+                if tool_call.id is not None:
+                    normalized_tool_call["id"] = tool_call.id
+                tool_calls.append(normalized_tool_call)
+            if tool_calls:
+                completion_message["tool_calls"] = tool_calls
 
         # Truncated / aborted: the response is final and partial. Keep it for
         # partial-reward grading and debugging; don't step the env on it.
