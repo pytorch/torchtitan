@@ -210,8 +210,8 @@ class VLLMGenerator(Actor, Configurable):
         """Debug and determinism settings."""
 
         def __post_init__(self):
-            # VLLMGenerator only supports TP. vLLM handles its own parallelism;
-            # we only apply TP via the core parallelize function.
+            # VLLMGenerator supports TP plus MoE EP. vLLM handles its own
+            # process groups, and the wrapper applies the model parallelisms.
             p = self.parallelism
             if p.data_parallel_replicate_degree != 1:
                 raise ValueError(
@@ -227,11 +227,6 @@ class VLLMGenerator(Actor, Configurable):
                 raise ValueError(
                     f"Generator does not support context parallelism, "
                     f"got cp={p.context_parallel_degree}"
-                )
-            if p.expert_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support expert parallelism, "
-                    f"got ep={p.expert_parallel_degree}"
                 )
             if p.enable_sequence_parallel:
                 raise ValueError(

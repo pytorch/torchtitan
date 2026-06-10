@@ -124,6 +124,7 @@ class VLLMModelWrapper(Module):
 
         assert vllm_config is not None, "vllm_config is required"
 
+        # PP and CP are not supported on this inference path. User-facing
         # validation lives in Generator.Config.__post_init__; these are
         # internal invariants — by the time we get here, parallelism has
         # already been validated.
