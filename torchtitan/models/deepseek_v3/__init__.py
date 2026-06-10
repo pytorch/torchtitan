@@ -95,7 +95,7 @@ def _make_dsv3_attn_config(
     When q_lora_rank == 0, sets wq (not wq_a/wq_b).
     When q_lora_rank > 0, sets wq_a/wq_b (not wq).
     """
-    inner_attention, mask_type = get_attention_config(attn_backend)
+    inner_attention = get_attention_config(attn_backend)
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
 
     if q_lora_rank == 0:
@@ -153,7 +153,6 @@ def _make_dsv3_attn_config(
             param_init=_depth_init(layer_id),
         ),
         inner_attention=inner_attention,
-        mask_type=mask_type,
         rope=dataclasses.replace(rope),
     )
 
@@ -540,7 +539,7 @@ deepseekv3_configs = {
 
 def model_registry(
     flavor: str,
-    attn_backend: str = "sdpa",
+    attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,

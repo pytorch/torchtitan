@@ -67,18 +67,6 @@ def deepseek_v3_debugmodel_hybridep() -> Trainer.Config:
     return config
 
 
-def deepseek_v3_debugmodel_flex_attn() -> Trainer.Config:
-    config = deepseek_v3_debugmodel()
-    config.model_spec = model_registry("debugmodel", attn_backend="flex")
-    return config
-
-
-def deepseek_v3_debugmodel_flex_attn_ep() -> Trainer.Config:
-    config = deepseek_v3_debugmodel()
-    config.model_spec = model_registry("debugmodel", attn_backend="flex")
-    return config
-
-
 def deepseek_v3_16b() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),

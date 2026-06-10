@@ -13,9 +13,7 @@ from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.qwen3.config_registry import (
     qwen3_14b,
     qwen3_debugmodel,
-    qwen3_debugmodel_flex,
     qwen3_moe_debug,
-    qwen3_moe_debug_ep,
 )
 from torchtitan.trainer import Trainer
 
@@ -28,20 +26,8 @@ def graph_trainer_qwen3_debugmodel() -> GraphTrainer.Config:
     return config
 
 
-def graph_trainer_qwen3_debugmodel_flex_attn() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(qwen3_debugmodel_flex(), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
-    return config
-
-
 def graph_trainer_qwen3_debugmodel_moe() -> GraphTrainer.Config:
     config = to_graph_trainer_config(qwen3_moe_debug(), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
-    return config
-
-
-def graph_trainer_qwen3_debugmodel_moe_ep() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(qwen3_moe_debug_ep(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 
@@ -63,7 +49,7 @@ def qwen3_debugmodel_ce_loss() -> Trainer.Config:
     return config
 
 
-def qwen3_moe_debug_ep_ce_loss() -> Trainer.Config:
-    config = qwen3_moe_debug_ep()
+def qwen3_moe_debug_ce_loss() -> Trainer.Config:
+    config = qwen3_moe_debug()
     config.loss = CrossEntropyLoss.Config()
     return config
