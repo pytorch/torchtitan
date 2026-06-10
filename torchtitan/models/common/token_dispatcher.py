@@ -599,7 +599,6 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         self.ep_mesh = ep_mesh
         if tp_mesh is not None:
             self.sp_size = tp_mesh.size()
-            # pyrefly: ignore [bad-assignment]
             self.sp_rank = tp_mesh._sym_get_coordinate(0)
 
     # pyrefly: ignore [bad-override]
@@ -741,7 +740,6 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
         self.ep_mesh = ep_mesh
         if tp_mesh is not None:
             self.sp_size = tp_mesh.size()
-            # pyrefly: ignore [bad-assignment]
             self.sp_rank = tp_mesh._sym_get_coordinate(0)
 
     # pyrefly: ignore [bad-override]
