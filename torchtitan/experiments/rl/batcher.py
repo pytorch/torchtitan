@@ -182,27 +182,15 @@ class Batcher(Configurable):
                 step_batches.append(self.collate(packed_rows[start:end]))
             microbatches.append(step_batches)
 
-        # TODO: Optimize rollout collection to reduce wasted episodes.
-        # Currently the controller estimates token counts without padded
-        # tokens, which can overshoot because packing adds prompt tokens
-        # and padding. Track packing metrics to monitor waste.
-        #
-        # Fraction of the batch's token slots that are right-pad (not real content). This is the
-        # packing waste only — NOT the trained-token fraction, which is far lower because prompt
-        # and env tokens are real content but never trained.
         total_token_slots = len(packed_rows) * self.seq_len
-        content_tokens = sum(sum(row["seq_lens"]) for row in packed_rows)
+        non_padded_tokens = sum(sum(row["seq_lens"]) for row in packed_rows)
         pct_pad_in_batch = (
-            (total_token_slots - content_tokens) / total_token_slots
+            (total_token_slots - non_padded_tokens) / total_token_slots
             if total_token_slots > 0
             else 0.0
         )
         packing_metrics = [
             m.Metric("batcher/pct_pad_in_batch", m.NoReduce(pct_pad_in_batch)),
-            m.Metric(
-                "batcher/num_packed_rows",
-                m.NoReduce(float(len(packed_rows))),
-            ),
             m.Metric(
                 "batcher/num_rows_wasted",
                 m.NoReduce(float(max(0, num_rows_before_truncate - len(packed_rows)))),

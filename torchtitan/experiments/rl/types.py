@@ -32,18 +32,13 @@ class Completion:
     """vLLM `CompletionOutput.finish_reason` ("stop" | "length" | "abort")"""
 
     metrics: list[m.Metric] = field(default_factory=list)
-    """Per-generation metrics measured by the generator (latencies, output tokens); the
+    """Per-generation metrics measured by the generator (latencies); the
     controller attaches them to the rollout turn."""
 
 
 @dataclass(kw_only=True, slots=True)
 class Episode:
-    """One packed training sequence + GRPO advantage, ready for collation into a batch.
-
-    A multi-turn rollout packs into ONE episode: the turn-0 prompt, then each assistant
-    completion interleaved with the env replies; `loss_mask` trains only the assistant tokens.
-    One rollout yields >1 episode only when the env edited history mid-rollout (see
-    `rollout_to_episodes`, which branches there).
+    """A single processed multi-turn rollout, ready for training.
 
     Example (single-turn): token_ids=[P, P, a, a], loss_mask=[0, 0, 1, 1],
                            logprobs=[0, 0, l, l], advantage=[0, 0, A, A]
