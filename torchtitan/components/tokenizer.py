@@ -91,6 +91,29 @@ class BaseTokenizer(ABC, Configurable):
         return self._chat_template.render(messages=messages, **kwargs)
 
 
+class NoOpTokenizer(BaseTokenizer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseTokenizer.Config):
+        pass
+
+    def __init__(
+        self,
+        config: Config | None = None,
+        *,
+        tokenizer_path: str | None = None,
+    ) -> None:
+        super().__init__()
+
+    def encode(self, *args, **kwargs) -> list[int]:
+        return []
+
+    def decode(self, *args, **kwargs) -> str:
+        return ""
+
+    def get_vocab_size(self) -> int:
+        return 0
+
+
 class HuggingFaceTokenizer(BaseTokenizer):
     """
     A tokenizer wrapper that handles BOS/EOS token inference and encoding.
