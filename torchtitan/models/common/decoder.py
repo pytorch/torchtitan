@@ -168,18 +168,6 @@ class Decoder(BaseModel):
                         f"length {max_seq_len}."
                     )
 
-                # Pretraining inputs are shaped by TrainingConfig.seq_len when
-                # sequence_parallel is applied
-                sp_degree = parallelism.tensor_parallel_degree
-                if (
-                    parallelism.enable_sequence_parallel
-                    and sp_degree > 1
-                    and seq_len % sp_degree != 0
-                ):
-                    raise ValueError(
-                        f"Training sequence length ({seq_len}) must be "
-                        f"divisible by sequence parallel degree ({sp_degree})."
-                    )
 
                 for layer_cfg in self.layers:
                     attention_cfg = getattr(layer_cfg, "attention", None)

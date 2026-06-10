@@ -158,19 +158,14 @@ class LocalTokenDispatcher(Configurable):
             routed_output_RD: ``(R, D)`` expert outputs
             metadata: LocalDispatchMetadata from dispatch()
             x_TD: ``(T, D)`` original input tokens
-            num_local_tokens_after_padding: Local token count to use for the
-                combined output after logical padding. MoE padding passes this
-                count without materializing pad rows.
+            num_local_tokens_after_padding: Unused for local dispatch; kept
+                for a shared dispatcher combine signature.
 
         Returns:
-            out_TD: ``(num_local_tokens_after_padding, D)`` combined output.
+            out_TD: ``(T, D)`` combined output.
         """
-        out_TD = torch.zeros(
-            num_local_tokens_after_padding,
-            x_TD.shape[-1],
-            device=x_TD.device,
-            dtype=x_TD.dtype,
-        )
+        del num_local_tokens_after_padding
+        out_TD = torch.zeros_like(x_TD)
 
         if not self.score_before_experts:
             routed_output_RD = (
