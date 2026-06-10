@@ -110,18 +110,7 @@ def init_buffer(
         group.size() * tokens_per_rank * min(top_k, num_local_experts)
     )
     num_experts = group.size() * num_local_experts
-    needs_init = (
-        _buffer_state is None
-        or _buffer_state.group != group
-        or _buffer_state.hidden_recv_buffers[0].shape[1] < hidden_dim
-        or _buffer_state.hidden_recv_buffers[0].shape[0] < max_routed_tokens
-        or _buffer_state.counts_recv_buffer.shape[1] < num_experts
-        or _buffer_state.tokens_per_rank < tokens_per_rank
-        or _buffer_state.hidden_recv_buffers[0].dtype != dtype
-        or _buffer_state.hidden_recv_buffers[0].device != device
-    )
-    if not needs_init:
-        return
+    assert _buffer_state is None
 
     logger.info(
         "Initializing MinimalAsyncEP buffer: hidden_dim=%d, tokens_per_rank=%d, "
