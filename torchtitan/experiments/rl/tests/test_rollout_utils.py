@@ -28,6 +28,7 @@ def _turn(
         completion_token_ids=completion_token_ids,
         completion_logprobs=[-0.1] * len(completion_token_ids),
         policy_version=version,
+        version_intervals=[(0, version)],
         completion_message={"role": "assistant", "content": content},
     )
 
@@ -59,6 +60,28 @@ def test_single_turn_packs_one_episode() -> None:
     # advantage on the two completion tokens, 0.0 on the prompt
     assert episode.advantage == [0.0, 0.0, 0.5, 0.5]
     assert episode.sample_id == rollout.sample_id
+    # one interval at the completion offset (token 2), at the turn's sampling version
+    assert episode.version_intervals == [(2, 2)]
+
+
+def test_packs_version_intervals_at_completion_offsets() -> None:
+    # Two turns sampled at different versions (a weight swap landed between them); the packed
+    # episode records each completion's version at its offset in the packed sequence, so the
+    # off-policy filter sees the oldest (turn-0) version.
+    rollout = _scored_rollout(
+        [
+            _turn(prompt_token_ids=[1, 2], completion_token_ids=[4, 5], version=3),
+            _turn(
+                prompt_token_ids=[1, 2, 4, 5, 9], completion_token_ids=[7], version=4
+            ),
+        ],
+        reward=1.0,
+        advantage=0.5,
+    )
+    [episode] = rollout_to_episodes(rollout)
+    assert episode.token_ids == [1, 2, 4, 5, 9, 7]
+    # turn-0 completion opens at offset 2 (v3); turn-1 completion at offset 5 (v4)
+    assert episode.version_intervals == [(2, 3), (5, 4)]
 
 
 def test_multiturn_with_growing_prefix_packs_into_one_episode() -> None:

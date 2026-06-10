@@ -593,6 +593,15 @@ class VLLMGenerator(Actor, Configurable):
                                 prompt=engine_input,
                                 params=self._build_sampling_params(request.sampling),
                             )
+                            # Stamp the admission (sampling) version. A pull takes priority over
+                            # STEP in `_decide_next_action`, so by here `policy_version` already
+                            # reflects any just-applied swap. Only rank 0 holds the futures.
+                            # TODO(async): record exact in-turn swap boundaries (a mid-decode pull
+                            #   splits this into >1 interval); FINAL_ONLY output hides per-step counts.
+                            if self._tp_rank == 0:
+                                self._generation_futures[
+                                    request.request_id
+                                ].version_intervals = [(0, self.policy_version)]
 
                 # Barrier (NCCL): a burst of steps (then loop back for a new decision)
                 # This gives the generator time to buffer some new requests to balance out
@@ -673,15 +682,19 @@ class VLLMGenerator(Actor, Configurable):
                         metric_type(inflight_at_completion),
                     )
                 )
-
+            # Attribute the completion to the version it was ADMITTED (sampled) at, not the
+            # current `self.policy_version` (a mid-flight hotswap may have advanced it): the
+            # off-policy filter must see the oldest version the tokens were sampled at.
+            admission_version = generation_future.version_intervals[0][1]
             generation_future.future.set_result(
                 Completion(
-                    policy_version=self.policy_version,
+                    policy_version=admission_version,
                     request_id=request_output.request_id,
                     token_ids=list(completion_output.token_ids),
                     token_logprobs=token_logprobs,
                     finish_reason=completion_output.finish_reason,
                     metrics=metrics,
+                    version_intervals=generation_future.version_intervals,
                 )
             )
 
@@ -846,10 +859,12 @@ class CloseRequest:
 class GenerationFuture:
     """A generation request's future the loop resolves with its `Completion`. `metrics_prefix`
     namespaces the per-generation metrics built at completion (e.g. "generator" vs
-    "validation_generator")."""
+    "validation_generator"). `version_intervals` records the policy version the request was
+    admitted (sampled) at (see `Completion`)."""
 
     future: asyncio.Future[Completion]
     metrics_prefix: str
+    version_intervals: list[tuple[int, int]] = field(default_factory=list)
 
 
 class LoopAction(enum.Enum):
