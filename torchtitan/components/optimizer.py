@@ -119,6 +119,11 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
     optimizers: list[T]
     model_parts: list[nn.Module]
+    # Regex patterns per optimizer (aligned with ``optimizers``); each entry is
+    # the list of patterns for that optimizer's param groups. Kept here, off the
+    # optimizer param groups, so they feed logging and lr metrics without leaking
+    # into the saved optimizer state dict.
+    _param_group_patterns: list[list[str]]
 
     @staticmethod
     def _resolve_optimizer_cls(name: str) -> type:
@@ -201,8 +206,10 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         all_params = []
         self.optimizers = []
         self.model_parts = model_parts
-        # (optimizer, model_part_index, patterns) collected only for logging.
-        summary: list[tuple[Optimizer, int, list[str]]] = []
+        self._param_group_patterns = []
+        # Model-part index per optimizer, only for the construction-time summary
+        # log. Not persisted: state_dict no longer needs this mapping.
+        model_part_per_optimizer: list[int] = []
 
         for part_idx, model in enumerate(self.model_parts):
             groups_by_opt_name = self._build_param_groups(
@@ -214,7 +221,8 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                 patterns = [group.pop("pattern") for group in opt_param_groups]
                 optimizer = self._resolve_optimizer_cls(opt_name)(opt_param_groups)
                 self.optimizers.append(optimizer)
-                summary.append((optimizer, part_idx, patterns))
+                self._param_group_patterns.append(patterns)
+                model_part_per_optimizer.append(part_idx)
                 for group in opt_param_groups:
                     all_params.extend(group["params"])
 
@@ -223,14 +231,13 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         if config.implementation == "fused_opt_states_bf16":
             self._register_bf16_optimizer_state_hook()
         self._post_init(all_params)
-        self._log_summary(summary)
+        self._log_summary(model_part_per_optimizer)
 
-    def _log_summary(self, summary: list[tuple[Optimizer, int, list[str]]]) -> None:
+    def _log_summary(self, model_part_per_optimizer: list[int]) -> None:
         """Log a summary of optimizer assignments.
 
-        ``summary`` carries the per-optimizer model-part index and regex patterns
-        gathered at construction time, so the container does not need to keep a
-        persistent optimizer-to-model-part mapping.
+        ``model_part_per_optimizer`` is gathered at construction time, so the
+        container does not need to persist an optimizer-to-model-part mapping.
         """
         _KEY_KWARGS = {
             "lr",
@@ -242,7 +249,9 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             "fused",
             "foreach",
         }
-        for optimizer, part_idx, patterns in summary:
+        for optimizer, part_idx, patterns in zip(
+            self.optimizers, model_part_per_optimizer, self._param_group_patterns
+        ):
             opt_name = type(optimizer).__name__
             for group, pattern in zip(optimizer.param_groups, patterns):
                 num_params = len(group["params"])

@@ -31,10 +31,6 @@ from torch.distributed.checkpoint.state_dict_saver import (
     AsyncSaveResponse,
 )
 from torch.distributed.checkpoint.stateful import Stateful
-from torchtitan.components.checkpoint_utils import (
-    canonical_model_state_dict,
-    load_canonical_model_state_dict,
-)
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
@@ -86,11 +82,11 @@ class ModelWrapper(Stateful):
         self.cached_state_dict = self._get_state_dict()
 
     def _get_state_dict(self) -> dict[str, Any]:
-        return {
-            k: v
-            for model in self.model
-            for k, v in canonical_model_state_dict(model).items()
-        }
+        # model.state_dict() keys are already canonical FQNs: torchtitan compiles
+        # in place (no _orig_mod prefix) and the activation checkpoint wrapper
+        # strips its own _checkpoint_wrapped_module prefix via a state_dict hook,
+        # so no key cleaning is needed here.
+        return {k: v for model in self.model for k, v in model.state_dict().items()}
 
     def state_dict(self) -> dict[str, Any]:
         return self.cached_state_dict
@@ -98,8 +94,10 @@ class ModelWrapper(Stateful):
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         # strict=False because state_dict is the flattened checkpoint dict, which
         # mixes model FQN keys with non-model keys (optimizer, lr_scheduler, ...).
+        # The activation checkpoint wrapper's load hook re-adds its prefix, so the
+        # canonical keys here match the live module keys.
         for model in self.model:
-            load_canonical_model_state_dict(model, state_dict, strict=False)
+            model.load_state_dict(state_dict, strict=False)
         # Refresh the cache so state_dict() reflects the freshly loaded values.
         self.cached_state_dict = self._get_state_dict()
 
@@ -152,10 +150,9 @@ class CheckpointManager(Configurable):
     Then when reloading, only one stage can restore its optimizer states, others will
     error.
 
-        The solution to this problem is optimizer flattening (see PR #127071
-        https://github.com/pytorch/pytorch/pull/127071). TorchTitan's
-        OptimizersContainer flattens optimizer state dicts to FQN-keyed flat dicts
-        using the utilities in torchtitan/components/checkpoint_utils.py.
+        The solution to this problem is optimizer flattening.
+        TorchTitan's OptimizersContainer flattens optimizer state dicts to FQN-keyed
+        flat dicts using the utilities in torchtitan/components/checkpoint_utils.py.
 
     2. With complex PP schedules, we have multiple model chunks per pp rank. This
     compounds challenge (1) by also requiring us to reason about multiple 'optim'

@@ -9,32 +9,31 @@
 These utilities are a focused replacement for the parts of
 ``torch.distributed.checkpoint.state_dict`` that TorchTitan actually needs.
 The upstream APIs (``get_model_state_dict``, ``set_optimizer_state_dict``, ...)
-carry a lot of complexity from legacy FSDP1/DDP support that does not apply to
-TorchTitan. The functions here operate directly on ``nn.Module`` and
-``torch.optim.Optimizer`` state dicts and only exist because of distributed
-checkpointing; they are model-agnostic and optimizer-agnostic, and are good
-candidates for upstreaming back to PyTorch.
+carry a lot of complexity from legacy FSDP1/DDP support and many features
+that does not apply to TorchTitan. The functions here operate directly on
+``nn.Module`` and ``torch.optim.Optimizer`` state dicts and only exist because of
+distributed checkpointing; they are model-agnostic and optimizer-agnostic.
 
-There are two groups of helpers:
+The helpers are:
 
-- Model: ``canonical_model_state_dict`` / ``load_canonical_model_state_dict``
-  strip wrapper prefixes (``_orig_mod``, ``_checkpoint_wrapped_module``) so the
-  saved keys match the original module FQNs regardless of compile/AC wrapping.
-- Optimizer: ``get_flat_optim_state_dict`` / ``load_flat_optim_state_dict``
-  convert between an optimizer's native (integer-indexed) state dict and a flat,
-  FQN-keyed dict that DCP can save and reshard. ``init_optim_state`` materializes
-  optimizer state and is a precondition for both.
+- ``canonical_fqn`` strips wrapper prefixes (``_orig_mod``,
+  ``_checkpoint_wrapped_module``) from a single FQN. The model state dict is
+  already canonical -- in-place ``torch.compile`` adds no prefix and the
+  activation-checkpoint wrapper strips its own prefix via a state_dict hook -- but
+  ``nn.Module.named_parameters()`` is not, so optimizer construction uses this to
+  produce FQN-keyed optimizer state that matches the model keys.
+- ``get_flat_optim_state_dict`` / ``load_flat_optim_state_dict`` convert between
+  an optimizer's native (integer-indexed) state dict and a flat, FQN-keyed dict
+  that DCP can save and reshard. ``init_optim_state`` materializes optimizer
+  state and is a precondition for both.
 """
 
 from typing import Any
 
 import torch
-import torch.nn as nn
 
 __all__ = [
     "canonical_fqn",
-    "canonical_model_state_dict",
-    "load_canonical_model_state_dict",
     "init_optim_state",
     "get_flat_optim_state_dict",
     "load_flat_optim_state_dict",
@@ -54,64 +53,6 @@ def canonical_fqn(name: str, prefixes: tuple[str, ...] = _WRAPPER_PREFIXES) -> s
     ``layers.0._checkpoint_wrapped_module.attention.wq.weight``.
     """
     return ".".join(p for p in name.split(".") if p not in prefixes)
-
-
-def canonical_model_state_dict(
-    model: nn.Module,
-    *,
-    prefixes: tuple[str, ...] = _WRAPPER_PREFIXES,
-    **kwargs: Any,
-) -> dict[str, Any]:
-    """Return ``model.state_dict()`` with wrapper prefixes stripped from keys."""
-    return {
-        canonical_fqn(k, prefixes): v for k, v in model.state_dict(**kwargs).items()
-    }
-
-
-def load_canonical_model_state_dict(
-    model: nn.Module,
-    state_dict: dict[str, Any],
-    *,
-    prefixes: tuple[str, ...] = _WRAPPER_PREFIXES,
-    strict: bool = True,
-    **kwargs: Any,
-) -> None:
-    """Load a canonical-keyed state dict into a possibly-wrapped model.
-
-    The model's live keys may carry wrapper prefixes (``_orig_mod`` etc.), while
-    ``state_dict`` is keyed by canonical FQNs. This builds the
-    ``canonical -> live`` mapping from the model's own keys and remaps the
-    checkpoint before calling ``model.load_state_dict``.
-
-    When ``strict`` is True, mismatches are reported in canonical-key terms,
-    which is more readable than the wrapped keys PyTorch would otherwise report.
-    """
-    canonical_to_live: dict[str, str] = {
-        canonical_fqn(key, prefixes): key for key in model.state_dict(keep_vars=True)
-    }
-
-    remapped: dict[str, Any] = {}
-    unexpected_keys: list[str] = []
-    for key, value in state_dict.items():
-        if key in canonical_to_live:
-            remapped[canonical_to_live[key]] = value
-        else:
-            unexpected_keys.append(key)
-
-    if strict:
-        if unexpected_keys:
-            raise KeyError(
-                f"State dict has {len(unexpected_keys)} key(s) with no matching "
-                f"model parameter (after stripping {prefixes}): {unexpected_keys}"
-            )
-        missing_keys = sorted(k for k in canonical_to_live if k not in state_dict)
-        if missing_keys:
-            raise KeyError(
-                f"State dict is missing {len(missing_keys)} model parameter(s) "
-                f"(after stripping {prefixes}): {missing_keys}"
-            )
-
-    model.load_state_dict(remapped, strict=strict, **kwargs)
 
 
 def init_optim_state(optim: torch.optim.Optimizer) -> None:

@@ -7,21 +7,28 @@
 """Contract test for model and optimizer state dict keys (llama3 debugmodel).
 
 Verifies the key contract that distributed checkpointing relies on:
-- ModelWrapper.state_dict() strips wrapper prefixes (_orig_mod,
-  _checkpoint_wrapped_module) so keys are canonical FQNs.
-- OptimizersContainer.state_dict() is keyed by FQN as state.{fqn}.{state_name}
-  and param_groups.{fqn}.{key}, matching the model's parameter FQNs.
+- ModelWrapper.state_dict() is keyed by canonical FQNs. This holds without any
+  key cleaning because model.state_dict() is already canonical: the activation
+  checkpoint wrapper strips its own _checkpoint_wrapped_module prefix via a
+  state_dict hook, and torchtitan applies torch.compile in place (no _orig_mod).
+- OptimizersContainer.state_dict() is keyed as state.{fqn}.{state_name} and
+  param_groups.{fqn}.{key}, matching the model FQNs. The optimizer is built from
+  named_parameters(), which (unlike state_dict()) keeps the wrapper prefix, so
+  canonical_fqn must strip it during construction.
 - The flatten/unflatten round-trip preserves optimizer state values exactly.
 
-Ground-truth keys are derived from the model itself (robust to model evolution),
-while a few hard-coded structural anchors catch unexpected model refactors. This
-runs on CPU using torch.compile(backend="eager") to introduce the _orig_mod.
-prefixes without needing a GPU.
+The test wraps each layer with the activation checkpoint wrapper to reproduce the
+prefix asymmetry on CPU (named_parameters prefixed, state_dict clean), and derives
+ground-truth keys from the unwrapped model plus a few hard-coded structural
+anchors that catch unexpected model refactors.
 """
 
 import unittest
 
 import torch
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    checkpoint_wrapper as ptd_checkpoint_wrapper,
+)
 
 from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.components.checkpoint_utils import (
@@ -32,6 +39,8 @@ from torchtitan.components.checkpoint_utils import (
 from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.model import Llama3Model
+
+_WRAPPER_PREFIX = "_checkpoint_wrapped_module"
 
 # AdamW creates these per-parameter state tensors (no amsgrad).
 _ADAMW_STATE_NAMES = ("step", "exp_avg", "exp_avg_sq")
@@ -60,6 +69,17 @@ def _build_debugmodel() -> Llama3Model:
     return model
 
 
+def _wrap_layers_with_ac(model: Llama3Model) -> None:
+    """Wrap each transformer block with the AC wrapper, in place (like apply_ac).
+
+    This makes named_parameters() carry the _checkpoint_wrapped_module prefix
+    while state_dict() stays clean (the wrapper strips it via a state_dict hook).
+    """
+    layers = model.get_submodule("layers")
+    for layer_id, block in list(layers.named_children()):
+        layers.register_module(layer_id, ptd_checkpoint_wrapper(block))
+
+
 def _debugmodel_optimizer_config() -> OptimizersContainer.Config:
     # for-loop keeps the test on CPU (no fused/foreach CUDA path).
     return OptimizersContainer.Config(
@@ -81,32 +101,48 @@ def _debugmodel_optimizer_config() -> OptimizersContainer.Config:
 
 class TestStateDictKeys(unittest.TestCase):
     def setUp(self) -> None:
-        # Ground-truth canonical keys come from the uncompiled model.
+        # Ground-truth canonical keys come from the unwrapped model.
         model = _build_debugmodel()
         self.clean_state_keys = set(model.state_dict().keys())
         self.clean_param_fqns = {
             name for name, p in model.named_parameters() if p.requires_grad
         }
-        # torch.compile (eager backend, no GPU) introduces _orig_mod. prefixes.
-        self.compiled_parts = [torch.compile(model, backend="eager")]
+        # Wrapping introduces the _checkpoint_wrapped_module prefix on
+        # named_parameters() but not on state_dict() (stripped by a hook).
+        _wrap_layers_with_ac(model)
+        self.model_parts = [model]
 
     def test_model_structure_anchors(self) -> None:
         """The debugmodel exposes the expected, well-known parameter FQNs."""
         for anchor in _TOP_LEVEL_ANCHORS + _LAYER0_ANCHORS:
             self.assertIn(anchor, self.clean_param_fqns)
 
+    def test_ac_prefix_only_on_named_parameters(self) -> None:
+        """named_parameters() keeps the AC prefix; state_dict() is already clean.
+
+        This is the asymmetry that justifies cleaning FQNs for the optimizer but
+        not for the model state dict.
+        """
+        model = self.model_parts[0]
+        self.assertTrue(
+            any(_WRAPPER_PREFIX in n for n, _ in model.named_parameters()),
+            "expected the AC wrapper prefix on named_parameters()",
+        )
+        self.assertFalse(
+            any(_WRAPPER_PREFIX in k for k in model.state_dict()),
+            "model.state_dict() should already be free of the AC wrapper prefix",
+        )
+
     def test_model_state_dict_keys_are_canonical(self) -> None:
-        """ModelWrapper strips wrapper prefixes to recover canonical FQNs."""
-        keys = set(ModelWrapper(self.compiled_parts).state_dict().keys())
+        """ModelWrapper.state_dict() yields canonical FQNs with no cleaning."""
+        keys = set(ModelWrapper(self.model_parts).state_dict().keys())
         for key in keys:
+            self.assertNotIn(_WRAPPER_PREFIX, key)
             self.assertNotIn("_orig_mod", key)
-            self.assertNotIn("_checkpoint_wrapped_module", key)
         self.assertEqual(keys, self.clean_state_keys)
 
     def test_optimizer_state_dict_keys(self) -> None:
-        optimizers = _debugmodel_optimizer_config().build(
-            model_parts=self.compiled_parts
-        )
+        optimizers = _debugmodel_optimizer_config().build(model_parts=self.model_parts)
         optim_sd = optimizers.state_dict()
 
         state_keys = {k for k in optim_sd if k.startswith("state.")}
@@ -127,20 +163,16 @@ class TestStateDictKeys(unittest.TestCase):
         self.assertFalse(any(k.endswith(".pattern") for k in pg_keys))
 
     def test_optimizer_state_dict_roundtrip_keys(self) -> None:
-        optimizers = _debugmodel_optimizer_config().build(
-            model_parts=self.compiled_parts
-        )
+        optimizers = _debugmodel_optimizer_config().build(model_parts=self.model_parts)
         optim_sd = optimizers.state_dict()
         optimizers.load_state_dict(optim_sd)
         self.assertEqual(set(optim_sd.keys()), set(optimizers.state_dict().keys()))
 
     def test_flat_optim_roundtrip_values(self) -> None:
         """get/load_flat_optim_state_dict preserve state values exactly."""
-        optimizers = _debugmodel_optimizer_config().build(
-            model_parts=self.compiled_parts
-        )
+        optimizers = _debugmodel_optimizer_config().build(model_parts=self.model_parts)
         # Populate optimizer state with non-zero values via a real step.
-        for p in self.compiled_parts[0].parameters():
+        for p in self.model_parts[0].parameters():
             if p.requires_grad:
                 p.grad = torch.randn_like(p)
         optimizers.step()
@@ -150,9 +182,9 @@ class TestStateDictKeys(unittest.TestCase):
             flat.update(get_flat_optim_state_dict(optim))
 
         # Load into a fresh container (second model, matching FQNs).
-        optimizers2 = _debugmodel_optimizer_config().build(
-            model_parts=[_build_debugmodel()]
-        )
+        model2 = _build_debugmodel()
+        _wrap_layers_with_ac(model2)
+        optimizers2 = _debugmodel_optimizer_config().build(model_parts=[model2])
         for optim in optimizers2.optimizers:
             init_optim_state(optim)
             load_flat_optim_state_dict(optim, flat)
