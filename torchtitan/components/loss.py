@@ -284,7 +284,7 @@ class BaseLoss(ABC, Configurable):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor | None = None,
+        global_valid_tokens: float | None = None,
     ) -> torch.Tensor:
         loss = self.fn(pred, labels)
         if global_valid_tokens is not None:
@@ -496,7 +496,7 @@ class ChunkedCELoss(BaseLoss):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor | None = None,
+        global_valid_tokens: float | None = None,
     ) -> torch.Tensor:
         """Compute chunked cross-entropy loss.
 

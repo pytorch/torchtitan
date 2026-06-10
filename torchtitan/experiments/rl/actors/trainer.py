@@ -160,6 +160,8 @@ class PolicyTrainer(Actor, Configurable):
         output_dir: str,
     ):
         init_logger()
+        if not config.dump_folder:
+            config.dump_folder = output_dir
         sl.init_structured_logger(
             source="rl_trainer",
             output_dir=output_dir,
@@ -187,7 +189,10 @@ class PolicyTrainer(Actor, Configurable):
         set_batch_invariance(config.debug.batch_invariant)
 
         with sl.log_trace_span("torch_distributed_init"):
-            world_size = dist_utils.init_distributed(config.comm)
+            world_size = dist_utils.init_distributed(
+                config.comm,
+                base_folder=output_dir,
+            )
 
         self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
 
@@ -264,9 +269,14 @@ class PolicyTrainer(Actor, Configurable):
 
     @endpoint
     async def close(self) -> None:
-        """Destroy the worker's torch.distributed process group."""
-        if torch.distributed.is_initialized():
-            torch.distributed.destroy_process_group()
+        """Close actor-local resources before the process mesh stops.
+
+        The trainer does not own the distributed process group lifecycle here:
+        Monarch created it for the actor mesh, and ``ProcMesh.stop()`` performs
+        the final teardown. Destroying it from this endpoint can race with mesh
+        shutdown and hang at process exit.
+        """
+        logger.debug("PolicyTrainer close requested; ProcMesh.stop owns PG teardown.")
 
     @sl.log_trace_span("build_model")
     def _build_model(

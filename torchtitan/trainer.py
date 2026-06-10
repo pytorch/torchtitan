@@ -37,6 +37,7 @@ from torchtitan.config.configs import (
     ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.config.override import apply_overrides, OverrideConfig
 from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 
@@ -97,6 +98,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         comm: CommConfig = field(default_factory=CommConfig)
         validator: Validator.Config = field(default_factory=Validator.Config)
         debug: DebugConfig = field(default_factory=DebugConfig)
+        override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
 
         def __post_init__(self):
@@ -236,6 +238,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config=config,
         )
         self.model_config = model_config
+
+        # Apply overrides to the full config tree, before any component is
+        # built. The model config is reached via ModelSpec.traverse. Model
+        # overrides must run after update_from_config above (it sets sharding
+        # config on the pre-override modules); all other components (optimizer,
+        # loss, dataloader, …) are built later in __init__.
+        if config.override.imports:
+            apply_overrides(config.override, config)
 
         logger.info(f"Building {model_spec.name} {model_spec.flavor}")
 
@@ -597,19 +607,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         positions = extra_inputs.pop("positions", None)
 
-        if isinstance(self.model_config, Decoder.Config):
-            attn_config = self.model_config.layers[0].attention
-            inner_attention = attn_config.inner_attention
-
-            if attn_config.mask_type == "block_causal":
-                assert (
-                    positions is not None
-                ), "block_causal mask requires per-document positions from the dataloader"
-            else:
-                positions = torch.arange(
-                    inputs.shape[1], dtype=torch.int32, device=inputs.device
-                ).repeat(inputs.shape[0], 1)
-
+        # positions and attention_masks are optional (Decoder.forward defaults
+        # both to None). Build attention masks only for the masked backends
+        # (Flex/Varlen), which is where get_attention_masks is defined. A
+        # maskless backend (e.g. the SDPA config used by the graph_trainer
+        # tests) still receives positions for RoPE but no masks — it relies on
+        # is_causal instead.
+        if isinstance(self.model_config, Decoder.Config) and positions is not None:
+            inner_attention = self.model_config.layers[0].attention.inner_attention
             if isinstance(
                 inner_attention, (FlexAttention.Config, VarlenAttention.Config)
             ):
@@ -647,7 +652,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         *,
         input_dict: dict[str, torch.Tensor],
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor,
+        global_valid_tokens: float,
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
@@ -734,12 +739,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # All-reduce to get global token count across DP ranks
         # Move to GPU for distributed communication
-        local_valid_tokens = local_valid_tokens.to(self.device)
         if parallel_dims.dp_enabled:
             batch_mesh = parallel_dims.get_mesh("batch")
-            global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
+            global_valid_tokens = dist_utils.dist_sum(
+                local_valid_tokens.to(self.device), batch_mesh
+            )
         else:
-            global_valid_tokens = local_valid_tokens.float()
+            global_valid_tokens = float(local_valid_tokens.item())
 
         # Process each microbatch: move to GPU, forward/backward, then free
         accumulated_losses = []
@@ -753,7 +759,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             loss = self.forward_backward_step(
                 input_dict=input_dict,
                 labels=labels,
-                # pyrefly: ignore [bad-argument-type]
                 global_valid_tokens=global_valid_tokens,
             )
             accumulated_losses.append(loss.detach())
