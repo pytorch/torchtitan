@@ -109,6 +109,7 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b_min
     --parallelism.tensor_parallel_degree=1 \
     --parallelism.expert_parallel_degree=4 \
     --training.steps 20 \
+    --training.local_batch_size 16 \
     --dataloader.dataset c4_test \
     --compile.debug_graph_passes \
     --profiler.enable_profiling \

@@ -407,3 +407,76 @@ All **11** graph passes took **95.061 s**. `regional_inductor` 72.35 s;
   `_StridedShard` fix); the commit lands the `fsdp_passes.py` + `passes.py`
   changes only.
 - Bitwise FSDP-order match is the explicit goal of #3590 — verify against eager.
+
+---
+
+## Run 6 — batch size 16 (Run 5 config, local_batch_size 4 → 16)
+
+**Date:** 2026-06-10
+**Branch:** `graph_trainer/dsv3_scaling`
+**Branch state at run:** identical to Run 5 (run-script + #3419 + #3248 + #3561 +
+#3590 + `cudagraph.py` force). EP-overlap / #3548 not yet applied.
+**Launcher:** `./run_graph_trainer_dsv3.sh` with `--training.local_batch_size 16`
+(now in the committed launcher); MinimalAsyncEP, cudagraph enabled + forced,
+`TORCHINDUCTOR_COMPILE_THREADS=8`.
+
+> ⛔ **CORRECTNESS UNVERIFIED** — same stack of caveats as Run 5 (chunked loss,
+> MinimalAsyncEP, forced cudagraph, eager FSDP-order). Needs eager `loss_compare`.
+> Loss is **not** directly comparable across batch sizes (different tokens/step).
+
+### Change vs Run 5
+`local_batch_size` 4 → **16** (global batch 32 → **128**). MinimalAsyncEP buffer
+resized: `tokens_per_rank=65536`, `max_routed_tokens=1572864`. Everything else
+identical. (Intermediate B=8 data is folded into the scaling table below.)
+
+### Results (B=16)
+| step | loss | grad_norm | memory | tps | tflops | mfu |
+|-----:|------|-----------|--------|-----|--------|-----|
+| 1 | 11.99964 | 1.6201 | 61.28 GiB (64.45%) | 267 | 4.84 | 0.49% |
+| 10 | 9.10102 | 5.9849 | 61.28 GiB (64.45%) | 11,100 | 200.98 | 20.32% |
+| 20 | 7.12763 | 3.4668 | 57.82 GiB (60.82%) | 11,264 | 203.94 | 20.62% |
+
+**Batch-size scaling** (MinimalAsyncEP + forced cudagraph + #3590, steady-state):
+| batch (local / global) | mem | step-10 mfu | step-20 mfu | step-20 tps |
+|---|---|---|---|---|
+| B=4 / 32 (Run 5) | ~36 GiB | 16.68% | 16.74% | 9,145 |
+| B=8 / 64 | ~45 GiB | 18.25% | 19.13% | 10,447 |
+| **B=16 / 128** | **~61 GiB** | **20.32%** | **20.62%** | **11,264** |
+
+MFU and throughput scale up cleanly with batch (16.7% → 19.1% → 20.6% mfu;
+9.1k → 10.4k → 11.3k tps), while memory grows sublinearly thanks to
+`memory_policy=full` recompute (~36 → ~45 → ~61 GiB). At B=16 we use ~61 GiB /
+95 GiB — still headroom. **Numerics unverified — see caveat.**
+
+### Compile pipeline
+All **11** graph passes took **163.95 s** (autotuning grows with batch shapes;
+`regional_inductor` 141.38 s). Forced cudagraph applied (312 `_grouped_mm`).
+
+### Artifacts
+| artifact | link |
+|---|---|
+| run log (pastry) | https://www.internalfb.com/intern/paste/P2372682804/ |
+| profiler trace (perfetto, rank0 iter 10) | https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fbahuang_1a31696b-bd0c-46a4-9aa4-f94f1fbe8436_rank0_trace.json.gz |
+| tlparse logs (manifold, **temporary** `.tmp` path) | https://manifold.edge.x2p.facebook.net/v0/read/tree/logs/.tmpIuV0JC/index.html?bucketName=tlparse_reports&apiKey=tlparse_reports-key&withPayload=1&timeoutMsec=10000 |
+
+#### Per-pass before/after graph diffs
+| pass | diff |
+|---|---|
+| eliminate_dead_code | https://www.internalfb.com/intern/diffing/?before_paste_number=2372680823&after_paste_number=2372680990&selected_tab=plain_diff |
+| canonicalize_graph | https://www.internalfb.com/intern/diffing/?before_paste_number=2372680607&after_paste_number=2372680702&selected_tab=plain_diff |
+| tag_with_memory_policy | https://www.internalfb.com/intern/diffing/?before_paste_number=2372682275&after_paste_number=2372682375&selected_tab=plain_diff |
+| selective_activation_remat | https://www.internalfb.com/intern/diffing/?before_paste_number=2372682005&after_paste_number=2372682159&selected_tab=plain_diff |
+| reassign_collective_pgs | https://www.internalfb.com/intern/diffing/?before_paste_number=2372681461&after_paste_number=2372681613&selected_tab=plain_diff |
+| joint_transformer_block_bucketing_reordering | https://www.internalfb.com/intern/diffing/?before_paste_number=2372681174&after_paste_number=2372681305&selected_tab=plain_diff |
+| annotate_flex_attention_for_regional_inductor | https://www.internalfb.com/intern/diffing/?before_paste_number=2372680367&after_paste_number=2372680494&selected_tab=plain_diff |
+| regional_inductor | https://www.internalfb.com/intern/diffing/?before_paste_number=2372681734&after_paste_number=2372681866&selected_tab=plain_diff |
+
+#### Standalone artifacts
+| artifact | paste |
+|---|---|
+| activation_memory_policy | https://www.internalfb.com/intern/paste/P2372682419/ |
+| fx_compute_nodes_runtime_estimation | https://www.internalfb.com/intern/paste/P2372682512/ |
+
+### Notes
+- `--training.local_batch_size 16` is now in the committed launcher.
+- ~61 GiB / 95 GiB at B=16 — room to push further (B≈24) if desired.
