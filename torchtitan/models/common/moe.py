@@ -119,7 +119,11 @@ class GroupedExperts(Module):
             num_global_tokens_per_local_expert_e,
             metadata,
         ) = self.token_dispatcher.dispatch(
-            x_TD, topk_scores_TK, topk_expert_ids_TK, num_local_tokens_per_expert_E
+            x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
+            input_shape_BLD=(B, L, D),
         )
         routed_output_RD = self._experts_forward(
             routed_input_RD, num_global_tokens_per_local_expert_e
