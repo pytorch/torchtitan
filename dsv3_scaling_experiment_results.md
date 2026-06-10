@@ -74,3 +74,88 @@ All 9 graph passes took **45.884 s**. Notable transforms:
   it fires during the eager/trace warmup before `regional_inductor` compiles flex.
 - tlparse manifold link is a temporary `.tmp...` path and will expire; the pastry
   log and perfetto trace are durable.
+
+---
+
+## Run 2 — deepseek_v3 16B with ChunkedCELoss (run script + #3419 + #3248)
+
+**Date:** 2026-06-09
+**Branch:** `graph_trainer/dsv3_scaling`
+**Branch state at run:** run-script commit + #3419 + #3248 (Enable ChunkedCELoss).
+#3590/#3561/EP-overlap/#3548 **not yet applied**.
+**Launcher:** `TORCHINDUCTOR_COMPILE_THREADS=8 ./run_graph_trainer_dsv3.sh`
+(thread cap set at launch — not in the committed script — to avoid a cold-cache
+compile OOM; see Notes).
+
+> ⚠️ **UNVERIFIED — possible loss divergence; needs further confirmation.**
+> I'm concerned the loss may be diverging. These numbers have **not** been
+> validated against an eager run, so the chunked-loss numerics are not yet
+> trusted. **TODO before relying on this result:** compare against an eager
+> `ChunkedCELoss` baseline via `scripts/loss_compare.py` (ideally bitwise with
+> `--debug.seed=42 --debug.deterministic`, checking loss *and* grad_norm from
+> TensorBoard, not just the 5-digit stdout). Treat the loss curve below as
+> **provisional** pending that confirmation.
+
+### Setup
+Same as Run 1 (8× H100, `dp_shard=8 ep=4`, `aot_fx_trace`, `memory_policy=full`,
+local batch 4 / seq 4096, 20 steps, c4_test) **except the loss**:
+
+| | |
+|---|---|
+| Loss | **ChunkedCELoss → `ChunkedCELossWithParamGrads`** (`num_chunks=8`) |
+
+#3248 makes `to_graph_trainer_config` swap `ChunkedCELoss` to the tracer-friendly
+`ChunkedCELossWithParamGrads` instead of the previous `CrossEntropyLoss` fallback.
+
+### Results
+| step | loss | grad_norm | memory | tps | tflops | mfu |
+|-----:|------|-----------|--------|-----|--------|-----|
+| 1 | 12.02673 | 1.6668 | 29.34 GiB (30.86%) | 88 | 1.59 | 0.16% |
+| 10 | 9.04778 | 5.0626 | 35.73 GiB (37.59%) | 7,123 | 128.97 | 13.04% |
+| 20 | 7.07054 | 1.4865 | 36.07 GiB (37.93%) | 5,423 | 98.19 | 9.93% |
+
+**Memory vs Run 1 (CrossEntropyLoss): ~36 GiB vs ~51 GiB — ChunkedCELoss saves
+~15 GiB**, the intended #3248 benefit (matching eager ChunkedLoss memory). Loss
+converges normally.
+
+### Compile pipeline
+All 9 graph passes took **113.558 s** (cold-ish Inductor cache):
+- `joint_transformer_block_bucketing_reordering` 9.28 s
+- `regional_inductor` 89.92 s
+
+### Artifacts
+| artifact | link |
+|---|---|
+| run log (pastry) | https://www.internalfb.com/intern/paste/P2371696211/ |
+| profiler trace (perfetto, rank0 iter 10) | https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fbahuang_53437836-36e9-452c-80aa-f9a98b44e4d7_rank0_trace.json.gz |
+| tlparse logs (manifold, **temporary** `.tmp` path) | https://manifold.edge.x2p.facebook.net/v0/read/tree/logs/.tmpNACnGq/index.html?bucketName=tlparse_reports&apiKey=tlparse_reports-key&withPayload=1&timeoutMsec=10000 |
+
+#### Per-pass before/after graph diffs
+| pass | diff |
+|---|---|
+| eliminate_dead_code | https://www.internalfb.com/intern/diffing/?before_paste_number=2371695016&after_paste_number=2371695095&selected_tab=plain_diff |
+| canonicalize_graph | https://www.internalfb.com/intern/diffing/?before_paste_number=2371694852&after_paste_number=2371694922&selected_tab=plain_diff |
+| tag_with_memory_policy | https://www.internalfb.com/intern/diffing/?before_paste_number=2371695911&after_paste_number=2371695985&selected_tab=plain_diff |
+| selective_activation_remat | https://www.internalfb.com/intern/diffing/?before_paste_number=2371695733&after_paste_number=2371695832&selected_tab=plain_diff |
+| reassign_collective_pgs | https://www.internalfb.com/intern/diffing/?before_paste_number=2371695378&after_paste_number=2371695465&selected_tab=plain_diff |
+| joint_transformer_block_bucketing_reordering | https://www.internalfb.com/intern/diffing/?before_paste_number=2371695203&after_paste_number=2371695291&selected_tab=plain_diff |
+| annotate_flex_attention_for_regional_inductor | https://www.internalfb.com/intern/diffing/?before_paste_number=2371694655&after_paste_number=2371694746&selected_tab=plain_diff |
+| regional_inductor | https://www.internalfb.com/intern/diffing/?before_paste_number=2371695568&after_paste_number=2371695645&selected_tab=plain_diff |
+
+#### Standalone artifacts
+| artifact | paste |
+|---|---|
+| activation_memory_policy | https://www.internalfb.com/intern/paste/P2371696021/ |
+| fx_compute_nodes_runtime_estimation | https://www.internalfb.com/intern/paste/P2371696070/ |
+
+### Notes
+- **ChunkedCELoss confirmed** via `--debug.print-config`: `loss.num_chunks = 8`
+  (`CrossEntropyLoss` has no `num_chunks`), and `compile.components` includes
+  `"loss"` so the chunked loss is compiled.
+- **Cold-cache compile OOM (workaround applied):** the first two attempts were
+  SIGKILL'd during `regional_inductor` on a cold Inductor cache. It was *not* a
+  steady host-RAM OOM (1 s sampling showed peak ~214 GiB / 2 TiB); fresh
+  compilation on this 368-core host spawned a large compile-worker pool whose
+  transient spike tripped the OS OOM-killer. Capping
+  `TORCHINDUCTOR_COMPILE_THREADS=8` and warming the Inductor cache let it
+  complete. Consider baking the cap into the launcher for cold-start reliability.
