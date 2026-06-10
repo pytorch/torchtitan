@@ -10,9 +10,7 @@ These utilities are a focused replacement for the parts of
 ``torch.distributed.checkpoint.state_dict`` that TorchTitan actually needs.
 The upstream APIs (``get_model_state_dict``, ``set_optimizer_state_dict``, ...)
 carry a lot of complexity from legacy FSDP1/DDP support and many features
-that does not apply to TorchTitan. The functions here operate directly on
-``nn.Module`` and ``torch.optim.Optimizer`` state dicts and only exist because of
-distributed checkpointing; they are model-agnostic and optimizer-agnostic.
+that do not apply to TorchTitan.
 
 The helpers are:
 
