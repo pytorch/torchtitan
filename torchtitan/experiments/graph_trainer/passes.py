@@ -43,6 +43,7 @@ from torchtitan.experiments.graph_trainer.debug_utils import (
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     joint_transformer_block_bucketing_reordering_pass,
+    reassign_collective_pgs_pass,
 )
 from torchtitan.experiments.graph_trainer.inductor_passes import (
     annotate_flex_attention_for_regional_inductor_pass,
@@ -118,11 +119,10 @@ def compile_time_passes(
     cudagraph is excluded because it needs to re-capture the graph into
     an in-memory CUDA graph at runtime.
 
-    ``joint_transformer_block_bucketing_reordering_pass`` optionally runs
-    ``overlap_fsdp_ag_rs_pass`` first (gated by
-    ``compile.enable_fsdp_ag_rs_overlap``) so that forward+backward
-    all-gathers end up on a separate CUDA stream from reduce-scatters
-    (enabling AG/RS overlap in backward).
+    ``reassign_collective_pgs_pass`` runs just before bucketing to place
+    collectives on dedicated process groups / streams (bucketing then inherits
+    the new PGs). Disable with
+    ``--compile.disable_passes reassign_collective_pgs_pass``.
     """
     from torchtitan.experiments.graph_trainer.common_utils import (
         get_default_transformer_block_buckets,
@@ -143,10 +143,11 @@ def compile_time_passes(
             defer_n_layers=config.compile.cpu_offload_defer_n_layers,
         ),
         selective_activation_remat_pass,
+        # Run before bucketing so bucketed collectives inherit the dedicated PG.
+        reassign_collective_pgs_pass,
         functools.partial(
             joint_transformer_block_bucketing_reordering_pass,
             module_bucket_plans=get_default_transformer_block_buckets(n_layers),
-            enable_fsdp_ag_rs_overlap=config.compile.enable_fsdp_ag_rs_overlap,
         ),
     ]
     if config.parallelism.enable_async_tensor_parallel:

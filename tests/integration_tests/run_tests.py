@@ -128,7 +128,7 @@ def run_single_test(
     else:
         gpu_env_prefix = ""
 
-    for idx, override_arg in enumerate(test_flavor.override_args):
+    for override_arg in test_flavor.override_args:
         cmd = ""
         if module is not None:
             cmd += f"MODULE={module} "
@@ -145,15 +145,6 @@ def run_single_test(
         cmd += " " + dump_folder_arg
         if override_arg:
             cmd += " " + " ".join(override_arg)
-
-        # save checkpoint (idx == 0) and load it for generation (idx == 1)
-        if test_name == "test_generate" and idx == 1:
-            cmd = (
-                f"{gpu_env_prefix}NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
-                f"CHECKPOINT_DIR={output_dir}/{test_name}/checkpoint/step-10 "
-                "PROMPT='What is the meaning of life?' "
-                f"./scripts/generate/run_llama_generate.sh --out > {output_dir}/{test_name}/generated_output.json"
-            )
 
         start_ts = time.strftime("%Y-%m-%d %H:%M:%S")
         result = _run_cmd(cmd, timeout=test_flavor.timeout)

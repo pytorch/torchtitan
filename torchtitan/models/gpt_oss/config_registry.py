@@ -59,12 +59,6 @@ def gpt_oss_debugmodel() -> Trainer.Config:
     )
 
 
-def gpt_oss_debugmodel_ep() -> Trainer.Config:
-    config = gpt_oss_debugmodel()
-    config.model_spec = model_registry("debugmodel")
-    return config
-
-
 def gpt_oss_20b() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
