@@ -521,9 +521,15 @@ def get_moe_model_nparams_and_flops(
         nparams_for_matmul = nparams_dense + nparams_sparse_active
     else:
         nparams_for_matmul = nparams_dense - nparams_embedding + nparams_sparse_active
+    # Only full attention layers contribute the quadratic O(L²) FLOPs
+    # term. Hybrid models mix full attention with linear attention
+    # layers whose block leaves ``attention=None``; standard decoders carry
+    # full attention on every layer, so this counts all of them.
+    num_full_attn = sum(
+        1 for l in model_config.layers if getattr(l, "attention", None) is not None
+    )
     num_flops_per_token = (
-        6 * nparams_for_matmul
-        + 6 * len(model_config.layers) * n_heads * head_dims * seq_len
+        6 * nparams_for_matmul + 6 * num_full_attn * n_heads * head_dims * seq_len
     )
 
     return nparams, num_flops_per_token

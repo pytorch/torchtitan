@@ -70,8 +70,8 @@ def make_fwd_bwd_step(model, loss_fn):
     to thread its parameters/buffers as static graph inputs.
     """
 
-    def fwd_bwd_step(inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs):
-        pred = model(inputs, **extra_inputs, **extra_kwargs)
+    def fwd_bwd_step(inputs, labels, global_valid_tokens, extra_kwargs):
+        pred = model(inputs, **extra_kwargs)
         # The loss function is not a submodule of the model, so
         # annotate_module_fqns won't tag it. Annotate it here so that
         # downstream passes (bucketing, SAC, kernel annotations) can
@@ -130,9 +130,7 @@ class GraphTrainer(Trainer):
         assert len(self.model_parts) == 1
         model = self.model_parts[0]
 
-        inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
-            input_dict, labels
-        )
+        inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
         # remove_duplicate=False to preserve duplicate parameter entries
         # from weight tying (e.g. shared embedding/output weights).
         params = [
@@ -146,7 +144,6 @@ class GraphTrainer(Trainer):
             labels,
             global_valid_tokens,
             params,
-            extra_inputs,
             extra_kwargs,
         )
 
@@ -185,7 +182,6 @@ class GraphTrainer(Trainer):
         labels: torch.Tensor,
         global_valid_tokens: float,
         params: list[torch.Tensor],
-        extra_inputs: dict[str, torch.Tensor],
         extra_kwargs: dict[str, Any],
     ) -> torch.Tensor:
         maybe_register_blockmask_pytree_node()
@@ -199,7 +195,6 @@ class GraphTrainer(Trainer):
                         inputs,
                         labels,
                         global_valid_tokens,
-                        extra_inputs,
                         extra_kwargs,
                     )
 
@@ -221,7 +216,6 @@ class GraphTrainer(Trainer):
                 inputs,
                 labels,
                 global_valid_tokens,
-                extra_inputs,
                 extra_kwargs,
             )
         loss = outputs[0]
