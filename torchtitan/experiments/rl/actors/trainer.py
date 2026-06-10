@@ -269,9 +269,14 @@ class PolicyTrainer(Actor, Configurable):
 
     @endpoint
     async def close(self) -> None:
-        """Destroy the worker's torch.distributed process group."""
-        if torch.distributed.is_initialized():
-            torch.distributed.destroy_process_group()
+        """Close actor-local resources before the process mesh stops.
+
+        The trainer does not own the distributed process group lifecycle here:
+        Monarch created it for the actor mesh, and ``ProcMesh.stop()`` performs
+        the final teardown. Destroying it from this endpoint can race with mesh
+        shutdown and hang at process exit.
+        """
+        logger.debug("PolicyTrainer close requested; ProcMesh.stop owns PG teardown.")
 
     @sl.log_trace_span("build_model")
     def _build_model(
