@@ -588,11 +588,17 @@ def cudagraph_pass(
         )
 
     if not is_cudagraph_compatible(gm):
+        # FORCED (debug): capture anyway instead of skipping. This bypasses the
+        # safety gate to exercise the MinimalAsyncEP + full-cudagraph path --
+        # non-cudagraphable ops (pure-CPU / data-dependent shape / device sync)
+        # may crash at capture or replay stale results. Log the offenders so the
+        # real incompatibility is visible. TODO: revert once root-caused.
+        offenders = [n for n in gm.graph.nodes if not is_cudagraphable(n)]
         logger.warning(
-            "Skipping cudagraph: graph is not compatible after all preceding "
-            "passes. Use --compile.disable_passes cudagraph_pass to silence."
+            "FORCING cudagraph despite %d non-cudagraphable node(s): %s",
+            len(offenders),
+            [(n.name, str(n.target)) for n in offenders[:30]],
         )
-        return gm
 
     if static_input_indices is None:
         static_input_indices = get_static_input_indices(gm, is_forward)
