@@ -474,8 +474,9 @@ class MoE(Module):
             # uses the same stride for global token offsets. The input was not
             # physically padded, so trim the logical tail padding before
             # restoring the original (B, L, D) shape.
-            out_TD = out_TD[:T]
-        out_BLD = out_TD.view(B, L, D)
+            out_TD = out_BLD.view(-1, D)
+            out_BLD = out_TD[:T].view(B, L, D)
+
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD
         return out_BLD
