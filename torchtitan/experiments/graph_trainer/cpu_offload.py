@@ -415,7 +415,6 @@ def apply_cpu_offload_pass(
     *,
     prefetch_lookahead: int = 1,
     defer_n_layers: int = 1,
-    enable_view_replay: bool = False,
 ) -> torch.fx.GraphModule:
     """Insert ao offload/reload/wait_tensor ops for nodes tagged ``MUST_CPU_OFFLOAD``.
 
@@ -459,11 +458,6 @@ def apply_cpu_offload_pass(
         )
         direct_bwd_users = [u for u in node.users if _is_backward_node(u)]
         replay_views, view_bwd_redirects = _collect_view_replay_info(node)
-        if view_bwd_redirects and not enable_view_replay:
-            raise ValueError(
-                f"Node {node.name} has backward consumers through view ops "
-                f"but cpu_offload_view_replay is disabled"
-            )
         all_bwd_users = direct_bwd_users + [u for _, u in view_bwd_redirects]
         if not all_bwd_users:
             continue
@@ -541,7 +535,12 @@ def apply_cpu_offload_pass(
         with gm.graph.inserting_before(info.first_bwd_consumer):
             reload_node = gm.graph.call_function(
                 torch.ops.ao.reload.default,
-                args=(wait_offload_node, device),
+                args=(
+                    wait_offload_node,
+                    device,
+                    list(val.size()),
+                    list(val.stride()),
+                ),
             )
             reload_node.meta.update(src_meta)
             reload_node.meta["val"] = val

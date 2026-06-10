@@ -568,32 +568,8 @@ class TestCpuOffloadPass(TestCase):
         graph.output(bwd)
         return torch.fx.GraphModule(torch.nn.Module(), graph)
 
-    def test_view_chain_not_offloaded_without_replay(self):
-        """Without view replay, nodes with only view-chain backward users are skipped."""
-        from torchtitan.experiments.graph_trainer.cpu_offload import (
-            apply_cpu_offload_pass,
-            tag_all_offloadable_activations,
-        )
-
-        gm = self._build_view_chain_graph()
-        tag_all_offloadable_activations(gm)
-        gm = apply_cpu_offload_pass(gm, enable_view_replay=False)
-
-        offload_ops = [
-            n
-            for n in gm.graph.nodes
-            if n.op == "call_function" and n.target is torch.ops.ao.offload.default
-        ]
-        view_ops = [
-            n
-            for n in gm.graph.nodes
-            if n.op == "call_function" and n.target is torch.ops.aten.view.default
-        ]
-        self.assertEqual(len(offload_ops), 0, "No offloads without view replay")
-        self.assertEqual(len(view_ops), 1, "Only the original forward view")
-
     def test_view_chain_offloaded_with_replay(self):
-        """With view replay, the base tensor is offloaded and views are replayed in backward."""
+        """View replay offloads the base tensor and replays views in backward."""
         from torchtitan.experiments.graph_trainer.cpu_offload import (
             apply_cpu_offload_pass,
             tag_all_offloadable_activations,
@@ -601,7 +577,7 @@ class TestCpuOffloadPass(TestCase):
 
         gm = self._build_view_chain_graph()
         tag_all_offloadable_activations(gm)
-        gm = apply_cpu_offload_pass(gm, enable_view_replay=True)
+        gm = apply_cpu_offload_pass(gm)
 
         offload_ops = [
             n
@@ -875,7 +851,7 @@ class TestCpuOffloadPass(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         tag_all_offloadable_activations(gm)
-        gm = apply_cpu_offload_pass(gm, enable_view_replay=True)
+        gm = apply_cpu_offload_pass(gm)
 
         # Both view and reshape should be replayed in backward
         bwd_views = [
