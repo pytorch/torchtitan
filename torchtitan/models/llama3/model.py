@@ -69,6 +69,7 @@ class Llama3Model(Decoder):
             config,
             **kwargs,
         ) -> None:
+            Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
 
             if parallelism.context_parallel_degree > 1 and isinstance(
@@ -86,7 +87,6 @@ class Llama3Model(Decoder):
                 loss_parallel=not parallelism.disable_loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
             )
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
