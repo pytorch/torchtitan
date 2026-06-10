@@ -46,7 +46,9 @@ def _build_qwen3_moe_model(num_experts: int = 8) -> Qwen3Model:
             num_experts=num_experts,
             # top_k must not exceed num_experts (router selects top_k of them).
             top_k=min(8, num_experts),
-            attn_backend="sdpa",
+            # This test only checks expert-param sharding (no forward), so the
+            # attention backend is irrelevant; use the default flex backend
+            attn_backend="flex",
             moe_comm_backend="standard",
             rope=CosSinRoPE.Config(dim=head_dim, max_seq_len=4096, theta=1000000.0),
         ),

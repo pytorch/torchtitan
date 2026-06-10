@@ -19,7 +19,7 @@ from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
-from torchtitan.distributed.spmd_types import current_mesh, mesh_size
+from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -545,12 +545,12 @@ class ChunkedCELoss(BaseLoss):
         invariant on TP, matching the eventual ChunkedCELoss output.
         """
         total_loss = reference.new_zeros((), dtype=torch.float32)
-        mesh = current_mesh()
+        mesh = current_spmd_mesh()
         if mesh is None or not spmd.is_type_checking():
             return total_loss
 
         for axis_name, dst in {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}.items():
-            if mesh_size(axis_name) == 1:
+            if spmd_mesh_size(axis_name) == 1:
                 continue
             total_loss = spmd.reinterpret(
                 total_loss,
@@ -563,12 +563,12 @@ class ChunkedCELoss(BaseLoss):
 
     def reinterpret_data_axes(self, chunk_loss: torch.Tensor) -> torch.Tensor:
         """Mark per-chunk losses as partial on active data axes."""
-        mesh = current_mesh()
+        mesh = current_spmd_mesh()
         if mesh is None or not spmd.is_type_checking():
             return chunk_loss
 
         for axis_name in ("dp", "cp"):
-            if mesh_size(axis_name) == 1:
+            if spmd_mesh_size(axis_name) == 1:
                 continue
             chunk_loss = spmd.reinterpret(
                 chunk_loss,
@@ -627,8 +627,8 @@ class ChunkedCELoss(BaseLoss):
                     )
 
                 logits = lm_head(h_chunk)
-                if current_mesh() is not None and self.loss_parallel:
-                    mesh = current_mesh()
+                if current_spmd_mesh() is not None and self.loss_parallel:
+                    mesh = current_spmd_mesh()
                     assert mesh is not None
                     chunk_loss = _LossParallelCrossEntropy.apply(
                         logits,
@@ -646,7 +646,7 @@ class ChunkedCELoss(BaseLoss):
                 if requires_grad:
                     backward_context = (
                         spmd.no_typecheck()
-                        if current_mesh() is not None
+                        if current_spmd_mesh() is not None
                         else contextlib.nullcontext()
                     )
                     with backward_context:
@@ -667,7 +667,7 @@ class ChunkedCELoss(BaseLoss):
                 lm_head.set_requires_gradient_sync(True, recurse=False)
                 lm_head.reshard()
 
-        if grad_buffer is not None and current_mesh() is not None:
+        if grad_buffer is not None and current_spmd_mesh() is not None:
             spmd.assert_type(
                 grad_buffer,
                 dict(spmd.get_local_type(h_detached)),

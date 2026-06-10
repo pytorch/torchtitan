@@ -34,6 +34,7 @@ class MultiModalCollator:
     temporal_patch_size: int
     spatial_merge_size: int
     tokenizer: MultiModalTokenizer
+    build_mrope_positions: bool
 
     def collate_images(
         self, all_images: list[torch.Tensor]
@@ -133,6 +134,171 @@ class MultiModalCollator:
 
         return input_ids[:, :-1], labels[:, 1:], positions[:, :-1]
 
+    def _build_mrope_positions(
+        self,
+        tokens: torch.Tensor,
+        grid_thw: torch.Tensor | None,
+        grid_thw_videos: torch.Tensor | None,
+        positions: torch.Tensor | None,
+        *,
+        image_token_id: int,
+        video_token_id: int,
+    ) -> torch.Tensor:
+        """Build 3D (temporal, height, width) MRoPE position IDs per token.
+
+        Returns ``(batch, seq_len, 3)`` — batch/seq leading (like the 2D
+        ``positions``) so pipeline-parallel microbatching chunks the batch dim
+        and context parallel can shard the seq dim, with the 3 T/H/W coords as
+        the last (feature) axis. Runs here on CPU data workers, off the GPU
+        training path.
+
+        Args:
+            tokens: (batch, seq_len) token IDs.
+            grid_thw: (num_images, 3) image grid dims, or None.
+            grid_thw_videos: (num_videos, 3) video grid dims, or None.
+            positions: (batch, seq_len) per-token positions; document
+                boundaries are detected where positions reset.
+            image_token_id: Placeholder token ID marking image positions.
+            video_token_id: Placeholder token ID marking video positions.
+
+        Returns:
+            (batch, seq_len, 3) MRoPE position IDs.
+        """
+        # Expand each video [T, H, W] into T rows of [1, H, W] so each frame is
+        # treated like an image; temporal position comes from frame ordering.
+        if grid_thw_videos is not None:
+            grid_thw_videos = torch.repeat_interleave(
+                grid_thw_videos, grid_thw_videos[:, 0], dim=0
+            )
+            grid_thw_videos[:, 0] = 1
+
+        spatial_merge_size = self.spatial_merge_size
+
+        batch_size, seq_len = tokens.shape
+        mrope_positions = torch.zeros(
+            batch_size, seq_len, 3, dtype=tokens.dtype, device=tokens.device
+        )
+
+        if positions is not None:
+            resets = positions[:, 1:] < positions[:, :-1]  # (batch, seq_len-1)
+        # First token of each consecutive vision region (image or video).
+        vision_mask = (tokens == image_token_id) | (tokens == video_token_id)
+        prev_vision = torch.cat(
+            [torch.zeros_like(vision_mask[:, :1]), vision_mask[:, :-1]], dim=1
+        )
+        batch_vision_starts = vision_mask & ~prev_vision  # (batch, seq_len)
+        grid_cache: dict[tuple[int, int, int], torch.Tensor] = {}
+
+        image_index, video_index = 0, 0
+        # With sample packing, each sample may contain multiple documents.
+        for sample_i in range(batch_size):
+            llm_pos_ids_list: list[torch.Tensor] = []
+
+            if positions is not None:
+                # pyrefly: ignore [unbound-name]
+                reset_indices = torch.where(resets[sample_i])[0] + 1
+                doc_starts = [0] + reset_indices.tolist()
+                doc_ranges = [
+                    (
+                        doc_starts[d],
+                        doc_starts[d + 1] if d + 1 < len(doc_starts) else seq_len,
+                    )
+                    for d in range(len(doc_starts))
+                ]
+            else:
+                doc_ranges = [(0, seq_len)]
+
+            sample_tokens = tokens[sample_i]
+            sample_vision_starts = torch.where(batch_vision_starts[sample_i])[
+                0
+            ].tolist()
+            vision_start_index = 0
+
+            for doc_start, doc_end in doc_ranges:
+                doc_pos_ids_list: list[torch.Tensor] = []
+
+                doc_vision_starts: list[int] = []
+                while (
+                    vision_start_index < len(sample_vision_starts)
+                    and sample_vision_starts[vision_start_index] < doc_end
+                ):
+                    doc_vision_starts.append(sample_vision_starts[vision_start_index])
+                    vision_start_index += 1
+
+                pair_cursor = doc_start
+                for vision_start in doc_vision_starts:
+                    if sample_tokens[vision_start] == image_token_id:
+                        # pyrefly: ignore [unsupported-operation]
+                        t, h, w = grid_thw[image_index]
+                        image_index += 1
+                    else:
+                        # pyrefly: ignore [unsupported-operation]
+                        t, h, w = grid_thw_videos[video_index]
+                        video_index += 1
+
+                    llm_grid_t, llm_grid_h, llm_grid_w = (
+                        int(t.item()),
+                        int(h.item()) // spatial_merge_size,
+                        int(w.item()) // spatial_merge_size,
+                    )
+                    text_len = vision_start - pair_cursor
+
+                    pos_id_offset = (
+                        doc_pos_ids_list[-1].max() + 1
+                        if len(doc_pos_ids_list) > 0
+                        else 0
+                    )
+                    # [text tokens] — sequential positions, identical on all 3 axes.
+                    doc_pos_ids_list.append(
+                        torch.arange(text_len).view(1, -1).expand(3, -1) + pos_id_offset
+                    )
+                    # [vision tokens] — 3D grid positions (T, H, W).
+                    grid_key = (llm_grid_t, llm_grid_h, llm_grid_w)
+                    if grid_key not in grid_cache:
+                        hw = llm_grid_h * llm_grid_w
+                        t_index = (
+                            torch.arange(llm_grid_t)
+                            .view(-1, 1)
+                            .expand(-1, hw)
+                            .flatten()
+                        )
+                        h_index = (
+                            torch.arange(llm_grid_h)
+                            .view(1, -1, 1)
+                            .expand(llm_grid_t, -1, llm_grid_w)
+                            .flatten()
+                        )
+                        w_index = (
+                            torch.arange(llm_grid_w)
+                            .view(1, 1, -1)
+                            .expand(llm_grid_t, llm_grid_h, -1)
+                            .flatten()
+                        )
+                        grid_cache[grid_key] = torch.stack([t_index, h_index, w_index])
+                    doc_pos_ids_list.append(
+                        grid_cache[grid_key] + text_len + pos_id_offset
+                    )
+                    pair_cursor = vision_start + llm_grid_t * llm_grid_h * llm_grid_w
+
+                # Trailing [text tokens] after the last text/vision pair.
+                if pair_cursor < doc_end:
+                    pos_id_offset = (
+                        doc_pos_ids_list[-1].max() + 1
+                        if len(doc_pos_ids_list) > 0
+                        else 0
+                    )
+                    text_len = doc_end - pair_cursor
+                    doc_pos_ids_list.append(
+                        torch.arange(text_len).view(1, -1).expand(3, -1) + pos_id_offset
+                    )
+
+                llm_pos_ids_list.extend(doc_pos_ids_list)
+
+            # llm_pos_ids_list is (3, segment_len); concat -> (3, seq), then transpose
+            mrope_positions[sample_i] = torch.cat(llm_pos_ids_list, dim=1).T
+
+        return mrope_positions
+
     def __call__(
         self, batch: list[dict[str, Any]]
     ) -> tuple[dict[str, torch.Tensor | None], torch.Tensor]:
@@ -185,6 +351,19 @@ class MultiModalCollator:
                 for name in self.tokenizer.TOKEN_FIELDS
             },
         }
+
+        if self.build_mrope_positions and (
+            grids is not None or video_grids is not None
+        ):
+            special_tokens = input_dict["special_tokens"]
+            input_dict["mrope_positions"] = self._build_mrope_positions(
+                input_ids,
+                grids,
+                video_grids,
+                positions,
+                image_token_id=special_tokens["image_id"],
+                video_token_id=special_tokens["video_id"],
+            )
 
         # pyrefly: ignore [bad-return]
         return input_dict, labels
