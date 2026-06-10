@@ -460,8 +460,6 @@ def get_moe_model_nparams_and_flops(
     n_heads: int,
     head_dims: int,
     seq_len: int,
-    *,
-    num_full_attn: int | None = None,
 ) -> tuple[int, int]:
     """
     Calculate nparams and nflops for MoE models.
@@ -472,11 +470,6 @@ def get_moe_model_nparams_and_flops(
         n_heads: The number of attention heads.
         head_dims: The sum of qk and v head dimensions.
         seq_len: The sequence length in training configs.
-        num_full_attn: For hybrid models that mix full (O(L²))
-            attention with linear (O(L)) attention, the number of layers using
-            softmax attention. Only these layers contribute the quadratic
-            attention FLOPs term. If None (default), all layers are assumed to
-            use full attention.
 
     Returns:
         Tuple of (nparams, num_flops_per_token):
@@ -528,8 +521,13 @@ def get_moe_model_nparams_and_flops(
         nparams_for_matmul = nparams_dense + nparams_sparse_active
     else:
         nparams_for_matmul = nparams_dense - nparams_embedding + nparams_sparse_active
-    if num_full_attn is None:
-        num_full_attn = len(model_config.layers)
+    # Only full attention layers contribute the quadratic O(L²) FLOPs
+    # term. Hybrid models mix full attention with linear attention
+    # layers whose block leaves ``attention=None``; standard decoders carry
+    # full attention on every layer, so this counts all of them.
+    num_full_attn = sum(
+        1 for l in model_config.layers if getattr(l, "attention", None) is not None
+    )
     num_flops_per_token = (
         6 * nparams_for_matmul + 6 * num_full_attn * n_heads * head_dims * seq_len
     )

@@ -32,7 +32,6 @@ from torchtitan.distributed.fsdp import (
     get_fsdp_reshard_after_forward_policy,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.tools.logging import logger
 
 
 def _apply_fsdp_to_vision_encoder(
@@ -160,11 +159,6 @@ def parallelize_qwen3_5(
         edp_mesh=edp_mesh,
     )
 
-    logger.info("Applied fully_shard to the Qwen3.5 model")
-
-    if training.enable_cpu_offload:
-        logger.info("Applied CPU Offloading to the Qwen3.5 model")
-
     return model
 
 
@@ -200,7 +194,10 @@ def pipeline_qwen3_5(
         fqn_per_part = _generate_llm_fqn_per_model_part(
             num_virtual_stages, num_layers, input_weight, output_weight
         )
-        # Vision encoder lives on the first stage alongside tok_embeddings
+        # Vision encoder lives on the first stage alongside tok_embeddings. This
+        # adds load to stage 0 that the auto split doesn't model (input_weight
+        # only accounts for tok_embeddings); for a heavy vision encoder, bump
+        # parallelism.pipeline_parallel_first_stage_less_layers to rebalance.
         if hasattr(model, "vision_encoder") and model.vision_encoder is not None:
             fqn_per_part[0].insert(0, "vision_encoder")
         parallelism = dataclasses.replace(

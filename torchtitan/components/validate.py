@@ -141,7 +141,7 @@ class Validator(BaseValidator):
         input_dict: dict[str, torch.Tensor],
         labels: torch.Tensor,
         model_parts: list[nn.Module],
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """
         Post-processing hook after data loading and before model forward pass.
 
@@ -157,27 +157,17 @@ class Validator(BaseValidator):
             model_parts: List of model parts for accessing model methods.
 
         Returns:
-            A tuple of (inputs, labels, extra_inputs, extra_kwargs) where:
+            A tuple of (inputs, labels, extra_kwargs) where:
                 - inputs: Main input tensor extracted from input_dict["input"].
                 - labels: Target labels (potentially modified by CP sharding).
-                - extra_inputs: Dict of auxiliary input tensors (all keys except
-                    "input" from input_dict). These are passed to the model forward
-                    but are NOT forwarded across pipeline parallel stages.
-                - extra_kwargs: Dict of additional keyword arguments for model forward.
-                    These ARE forwarded across pipeline parallel stages. Contains
-                    attention_masks if flex attention is enabled.
-
-        Note:
-            The distinction between extra_inputs and extra_kwargs is important for
-            pipeline parallelism: extra_kwargs are forwarded to all pipeline stages,
-            while extra_inputs are only available to the first stage.
+                - extra_kwargs: Additional keyword arguments for the model forward
+                    (e.g. positions, attention_masks), forwarded to every
+                    pipeline-parallel stage.
         """
         inputs = input_dict["input"]
-        extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
-        # For arguments, like attention_masks, we have to put them in a separate
-        # dict as extra_inputs are not forwarded to other stages in PP, but
-        # extra_kwargs are.
-        extra_kwargs: dict[str, Any] = {}
+        extra_kwargs: dict[str, Any] = {
+            k: v for k, v in input_dict.items() if k != "input"
+        }
 
         # TODO: deduplicate with Trainer.post_dataloading_process which has
         # the same logic; extract a shared function to prevent further drift.
@@ -185,26 +175,16 @@ class Validator(BaseValidator):
         # both RoPE and block_causal attention masking.
         model_config = getattr(model_parts[0], "config", None)
 
-        positions = extra_inputs.pop("positions", None)
+        positions = extra_kwargs.get("positions", None)
         # positions and attention_masks are optional (Decoder.forward defaults
         # both to None). Build masks only for the masked backends (Flex/Varlen),
         # which is where get_attention_masks is defined. A maskless backend (the
         # SDPA config used by the graph_trainer tests) still receives positions
         # for RoPE but no masks — it relies on is_causal instead.
-        mrope_positions = extra_inputs.pop("mrope_positions", None)
-        if isinstance(model_config, Decoder.Config):
-            attn_config = model_config.layers[0].attention
-            inner_attention = attn_config.inner_attention
-
-            if attn_config.mask_type == "block_causal":
-                assert (
-                    positions is not None
-                ), "block_causal mask requires per-document positions from the dataloader"
-            else:
-                positions = torch.arange(
-                    inputs.shape[1], dtype=torch.int32, device=inputs.device
-                ).repeat(inputs.shape[0], 1)
-
+        if isinstance(model_config, Decoder.Config) and positions is not None:
+            inner_attention = getattr(
+                model_config.first_attention, "inner_attention", None
+            )
             if isinstance(
                 inner_attention, (FlexAttention.Config, VarlenAttention.Config)
             ):
@@ -212,10 +192,6 @@ class Validator(BaseValidator):
                 extra_kwargs["attention_masks"] = model.get_attention_masks(
                     positions=positions,
                 )
-
-        extra_kwargs["positions"] = positions
-        if mrope_positions is not None:
-            extra_kwargs["mrope_positions"] = mrope_positions
 
         if self.parallel_dims.cp_enabled:
             inputs, labels, extra_kwargs = prepare_context_parallel_input(
@@ -232,7 +208,7 @@ class Validator(BaseValidator):
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
 
-        return inputs, labels, extra_inputs, extra_kwargs
+        return inputs, labels, extra_kwargs
 
     @sl.log_trace_span("eval")
     @torch.no_grad()
@@ -284,7 +260,7 @@ class Validator(BaseValidator):
                 global_valid_tokens = float(local_valid_tokens.item())
 
             # Process data (extract inputs, handle attention masks, CP sharding)
-            inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
+            inputs, labels, extra_kwargs = self.post_dataloading_process(
                 input_dict, labels, model_parts
             )
 
@@ -300,7 +276,6 @@ class Validator(BaseValidator):
                     if self.pp_has_first_stage:
                         self.pp_schedule.eval(
                             inputs,
-                            **extra_inputs,
                             **extra_kwargs,
                             target=targets,
                             losses=losses,
@@ -323,7 +298,7 @@ class Validator(BaseValidator):
             else:
                 with self.validation_context():
                     assert len(model_parts) == 1
-                    predictions = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                    predictions = model_parts[0](inputs, **extra_kwargs)
                     loss_sum = self.loss_fn(predictions, labels)
 
             accumulated_losses.append(loss_sum.detach() / global_valid_tokens)

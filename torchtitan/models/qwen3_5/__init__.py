@@ -206,7 +206,7 @@ def _qwen35_attention_config(
     layer_id: int,
 ) -> Qwen35Attention.Config:
     """Build a fully-specified Qwen35Attention.Config."""
-    inner_attention, mask_type = get_attention_config(attn_backend)
+    inner_attention = get_attention_config(attn_backend)
     return Qwen35Attention.Config(
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
@@ -236,7 +236,6 @@ def _qwen35_attention_config(
         q_norm=_offset_norm(head_dim),
         k_norm=_offset_norm(head_dim),
         inner_attention=inner_attention,
-        mask_type=mask_type,
     )
 
 
@@ -1088,7 +1087,7 @@ qwen3_5_configs = {
 
 def model_registry(
     flavor: str,
-    attn_backend: str = "sdpa",
+    attn_backend: str = "flex",
     moe_comm_backend: str | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:

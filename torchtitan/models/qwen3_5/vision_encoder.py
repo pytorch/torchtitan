@@ -432,6 +432,7 @@ class Qwen35VisionEncoder(Module):
         self.spatial_merge_size = config.spatial_merge_size
         self.spatial_merge_unit = config.spatial_merge_size**2
 
+        # Patches are pre-extracted by the collator, so Linear replaces Conv3d (equivalent at full-patch kernel size).
         self.patch_embed = config.patch_embed_proj.build()
 
         # nn.Parameter (not nn.Embedding) because we interpolate the weight directly

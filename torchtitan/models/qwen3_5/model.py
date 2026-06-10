@@ -376,7 +376,6 @@ class Qwen35Attention(BaseAttention):
         q_norm: OffsetRMSNorm.Config
         k_norm: OffsetRMSNorm.Config
         inner_attention: Module.Config
-        mask_type: str = "causal"
 
     def __init__(self, config: Config):
         super().__init__()
@@ -580,19 +579,17 @@ class Qwen35Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            attn_cfg = self.first_attn_config
+            attn_cfg = self.first_attention
             # pyrefly: ignore [missing-attribute]
             n_heads = attn_cfg.n_heads
             # pyrefly: ignore [missing-attribute]
             head_dim = attn_cfg.head_dim
-            num_full_attn = sum(1 for l in self.layers if l.attention is not None)
             return get_moe_model_nparams_and_flops(
                 self,
                 model,
                 n_heads,
                 2 * head_dim,
                 seq_len,
-                num_full_attn=num_full_attn,
             )
 
     def __init__(self, config: Config):

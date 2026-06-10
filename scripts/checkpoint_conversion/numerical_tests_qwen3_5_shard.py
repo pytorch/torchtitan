@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -32,7 +33,7 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.qwen3_5 import qwen3_5_configs
+from torchtitan.models.qwen3_5 import Qwen35Model, qwen3_5_configs
 from torchtitan.models.qwen3_5.parallelize import parallelize_qwen3_5
 
 CONFIGS = [
@@ -116,13 +117,17 @@ def run_worker(args):
     tokens = torch.randint(0, 248320, (1, seq_len), device="cuda")
     dist.broadcast(tokens, src=0)
 
-    # Text-only inputs
+    # Text-only inputs: plain sequential positions. The flex backend requires a
+    # BlockMask, which the trainer normally builds in post_dataloading_process;
+    # build it here directly since we call the model outside the trainer.
     positions = torch.arange(seq_len, device="cuda").unsqueeze(0)
+    attention_masks = cast(Qwen35Model, model).get_attention_masks(positions=positions)
 
     with torch.no_grad():
         output = model(
             tokens,
             positions=positions,
+            attention_masks=attention_masks,
             special_tokens={"image_id": 248056, "video_id": 248057},
         )
 
