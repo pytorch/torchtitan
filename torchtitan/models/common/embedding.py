@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.spmd_types import current_mesh, mesh_size
+from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.protocols.module import Module
 
 
@@ -30,7 +30,7 @@ class Embedding(nn.Embedding, Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Runs vocab-parallel embedding when the current mesh has a TP axis."""
         weight = self.weight
-        tp_size = mesh_size("tp")
+        tp_size = spmd_mesh_size("tp")
         if tp_size == 1 or isinstance(weight, DTensor):
             return F.embedding(
                 input,
@@ -42,7 +42,7 @@ class Embedding(nn.Embedding, Module):
                 self.sparse,
             )
 
-        mesh = current_mesh()
+        mesh = current_spmd_mesh()
         assert mesh is not None
         tp_pg = mesh.get_group("tp")
         chunk_size = (self.num_embeddings + tp_size - 1) // tp_size

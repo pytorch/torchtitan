@@ -6,8 +6,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,8 +23,7 @@ from torch.utils._pytree import tree_map
 from torchtitan.config import Configurable
 from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
 from torchtitan.distributed.spmd_types import (
-    current_mesh,
-    preserve_buffers_spmd,
+    current_spmd_mesh,
     spmd_distribute_tensor,
     spmd_redistribute_per_axis,
     set_current_spmd_mesh,
@@ -100,7 +100,7 @@ class Module(nn.Module, Configurable):
             for name, buf in self._buffers.items()
             if isinstance(buf, DTensor)
         }
-        with preserve_buffers_spmd(self):
+        with self._preserve_buffer_spmd_types():
             self._init_self_buffers(buffer_device=buffer_device)
         for name, (mesh, placements) in dtensor_meta.items():
             new_buf = self._buffers.get(name)
@@ -115,8 +115,37 @@ class Module(nn.Module, Configurable):
 
     def _apply(self, fn, recurse=True):
         """Override to preserve annotations across model.to_empty() in trainer.py"""
-        with preserve_buffers_spmd(self):
+        with self._preserve_buffer_spmd_types():
             return super()._apply(fn, recurse=recurse)
+
+    @contextlib.contextmanager
+    def _preserve_buffer_spmd_types(self) -> Iterator[None]:
+        """
+        Preserve SPMD type annotations on buffers across reinitialization.
+
+        ``to_empty()`` and ``_init_self_buffers()`` re-materialize buffer data,
+        clobbering over SPMD annotations. Instead of attempting to typecheck over
+        this, we save-restore annotations on their respective mesh axes.
+        """
+        saved = {
+            fqn: SpmdLayout(
+                axis_types=spmd.get_local_type(buf),
+                partition_spec=spmd.get_partition_spec(buf),
+            )
+            for fqn, buf in self.named_buffers()
+            if spmd.has_local_type(buf)
+        }
+        try:
+            yield
+        finally:
+            for fqn, buf in self.named_buffers():
+                if fqn in saved and not spmd.has_local_type(buf):
+                    layout = saved[fqn]
+                    spmd.assert_type(
+                        buf,
+                        layout.axis_types,
+                        partition_spec=layout.partition_spec,
+                    )
 
     def _init_self_parameters(self) -> None:
         """Initialize this module's own direct parameters.
@@ -243,7 +272,7 @@ class Module(nn.Module, Configurable):
 
         if parallel_dims.spmd_backend == "spmd_types":
             spmd_validate_redistributions(self._sharding_config)
-        self._shard_states(parallel_dims)
+        self._distribute_states(parallel_dims)
         self._cache_pos_arg_names()
         fn = self._maybe_wrap_with_local_region(self.forward, parallel_dims)
 
@@ -254,7 +283,7 @@ class Module(nn.Module, Configurable):
 
         self.forward = forward_with_redistribution
 
-    def _spmd_register_state(
+    def _spmd_distribute_state(
         self,
         parallel_dims: ParallelDims,
         name: str,
@@ -289,7 +318,7 @@ class Module(nn.Module, Configurable):
                 layout.partition_spec,
             )
 
-    def _shard_states(self, parallel_dims: ParallelDims) -> None:
+    def _distribute_states(self, parallel_dims: ParallelDims) -> None:
         """Distribute params and buffers per ``state_shardings``.
 
         Each entry resolves its own mesh via ``resolve_mesh``, so different
@@ -308,7 +337,7 @@ class Module(nn.Module, Configurable):
                     "in sharding_config.state_shardings."
                 )
             if parallel_dims.spmd_backend == "spmd_types":
-                self._spmd_register_state(
+                self._spmd_distribute_state(
                     parallel_dims,
                     name,
                     param,
@@ -351,7 +380,7 @@ class Module(nn.Module, Configurable):
                 # by ``init_states`` later; nothing to distribute yet.
                 continue
             if parallel_dims.spmd_backend == "spmd_types":
-                self._spmd_register_state(
+                self._spmd_distribute_state(
                     parallel_dims,
                     name,
                     buffer,
@@ -529,7 +558,7 @@ class Module(nn.Module, Configurable):
                     continue
                 value = spmd_redistribute_per_axis(
                     value,
-                    current_mesh(),
+                    current_spmd_mesh(),
                     src_spmd_layout.per_axis_spmd_types(),
                     dst_spmd_layout.per_axis_spmd_types(),
                 )
@@ -605,7 +634,7 @@ class Module(nn.Module, Configurable):
                 return outputs
             return spmd_redistribute_per_axis(
                 outputs,
-                current_mesh(),
+                current_spmd_mesh(),
                 out_src.per_axis_spmd_types(),
                 out_dst.per_axis_spmd_types(),
             )

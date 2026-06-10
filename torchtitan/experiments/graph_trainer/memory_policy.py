@@ -303,7 +303,8 @@ def _sac_and_offload_memory_policy_pass(
     """SAC + CPU offload: apply default SAC, then offload within budget."""
     _default_memory_policy_pass(gm, config=config)
     tag_all_offloadable_activations(
-        gm, cpu_budget_gb=config.compile.cpu_offload_budget_gb
+        gm,
+        cpu_budget_gb=config.compile.cpu_offload_budget_gb,
     )
     return gm
 
