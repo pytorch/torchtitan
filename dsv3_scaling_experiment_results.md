@@ -332,3 +332,78 @@ non-cudagraphable node(s)` then `Applied cudagraph pass.`
   flag) — not a blanket bypass.
 - MinimalAsyncEP buffer init confirmed; `TORCHINDUCTOR_COMPILE_THREADS=8`
   cold-cache mitigation as before.
+
+---
+
+## Run 5 — + #3590 Match Eager FSDP bucket order (MinimalAsyncEP + forced cudagraph + #3590)
+
+**Date:** 2026-06-09
+**Branch:** `graph_trainer/dsv3_scaling`
+**Branch state at run:** run-script + #3419 + #3248 + #3561 + **#3590** + the
+`cudagraph.py` force. EP-overlap / #3548 not yet applied.
+**Launcher:** `./run_graph_trainer_dsv3.sh` (MinimalAsyncEP, cudagraph enabled +
+forced, `TORCHINDUCTOR_COMPILE_THREADS=8`).
+
+> ⛔ **CORRECTNESS UNVERIFIED.** Carries forward every prior caveat (chunked loss,
+> MinimalAsyncEP, forced cudagraph past the `_grouped_mm` gate). **#3590's whole
+> purpose is a *bitwise* match with eager FSDP2 reduce-scatter bucket order**, so
+> it specifically needs an eager `loss_compare` (`--debug.seed=42
+> --debug.deterministic`, loss + grad_norm) to confirm. Provisional.
+
+### What #3590 adds
+`joint_transformer_block_bucketing_reordering_pass` now packs FSDP buckets in
+**eager FSDP2 first-seen parameter order** (`FSDPParamOrderBucketer` +
+`get_fsdp_param_module_order(traced_result.state_fqns)`) instead of graph
+execution order. MinimalAsyncEP buffer init + forced cudagraph (312
+`_grouped_mm`) both confirmed, same as Run 4.
+
+### Setup
+Identical to Run 4 (MinimalAsyncEP + forced cudagraph, 8× H100, `dp_shard=8 ep=4`,
+`aot_fx_trace`, `memory_policy=full`, ChunkedCELoss, B=4 / seq 4096, 20 steps,
+c4_test) **plus #3590** (eager FSDP bucket ordering).
+
+### Results
+| step | loss | grad_norm | memory | tps | tflops | mfu |
+|-----:|------|-----------|--------|-----|--------|-----|
+| 1 | 12.02874 | 1.6549 | 36.22 GiB (38.10%) | 109 | 1.97 | 0.20% |
+| 10 | 9.17541 | 8.9794 | 36.28 GiB (38.16%) | 9,110 | 164.94 | 16.68% |
+| 20 | 7.15267 | 1.7885 | 36.28 GiB (38.16%) | 9,145 | 165.57 | 16.74% |
+
+Perf matches Run 4 (~16.7% mfu, tps ~9.1k) — expected, since #3590 changes bucket
+*order* (for eager bitwise match), not the amount of work. Loss in the same band.
+**Numerics unverified — see caveat.**
+
+### Compile pipeline
+All **11** graph passes took **95.061 s**. `regional_inductor` 72.35 s;
+`cudagraph_pass` forced + applied.
+
+### Artifacts
+| artifact | link |
+|---|---|
+| run log (pastry) | https://www.internalfb.com/intern/paste/P2372034462/ |
+| profiler trace (perfetto, rank0 iter 10) | https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fbahuang_2361ec10-8c5b-4504-91b4-9d11d8501b34_rank0_trace.json.gz |
+| tlparse logs (manifold, **temporary** `.tmp` path) | https://manifold.edge.x2p.facebook.net/v0/read/tree/logs/.tmpqSCN8V/index.html?bucketName=tlparse_reports&apiKey=tlparse_reports-key&withPayload=1&timeoutMsec=10000 |
+
+#### Per-pass before/after graph diffs
+| pass | diff |
+|---|---|
+| eliminate_dead_code | https://www.internalfb.com/intern/diffing/?before_paste_number=2372033030&after_paste_number=2372033136&selected_tab=plain_diff |
+| canonicalize_graph | https://www.internalfb.com/intern/diffing/?before_paste_number=2372032890&after_paste_number=2372032965&selected_tab=plain_diff |
+| tag_with_memory_policy | https://www.internalfb.com/intern/diffing/?before_paste_number=2372034105&after_paste_number=2372034195&selected_tab=plain_diff |
+| selective_activation_remat | https://www.internalfb.com/intern/diffing/?before_paste_number=2372033826&after_paste_number=2372033969&selected_tab=plain_diff |
+| reassign_collective_pgs | https://www.internalfb.com/intern/diffing/?before_paste_number=2372033370&after_paste_number=2372033465&selected_tab=plain_diff |
+| joint_transformer_block_bucketing_reordering | https://www.internalfb.com/intern/diffing/?before_paste_number=2372033222&after_paste_number=2372033299&selected_tab=plain_diff |
+| annotate_flex_attention_for_regional_inductor | https://www.internalfb.com/intern/diffing/?before_paste_number=2372032751&after_paste_number=2372032811&selected_tab=plain_diff |
+| regional_inductor | https://www.internalfb.com/intern/diffing/?before_paste_number=2372033579&after_paste_number=2372033700&selected_tab=plain_diff |
+
+#### Standalone artifacts
+| artifact | paste |
+|---|---|
+| activation_memory_policy | https://www.internalfb.com/intern/paste/P2372034223/ |
+| fx_compute_nodes_runtime_estimation | https://www.internalfb.com/intern/paste/P2372034308/ |
+
+### Notes
+- #3590's `models/utils.py` hunk was a no-op here (main already has the
+  `_StridedShard` fix); the commit lands the `fsdp_passes.py` + `passes.py`
+  changes only.
+- Bitwise FSDP-order match is the explicit goal of #3590 — verify against eager.

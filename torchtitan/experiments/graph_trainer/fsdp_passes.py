@@ -28,6 +28,7 @@ from torch._inductor.fx_passes.bucketing import (
 from torch._inductor.fx_passes.overlap_manual_scheduling import (
     _move_overlap_nodes,
     manual_overlap_bucketing,
+    ManualOverlapPreservingBucketer,
     ManualOverlapScheduler,
 )
 from torch._inductor.fx_passes.overlap_scheduling import (
@@ -175,6 +176,40 @@ def transformer_block_bucketing_reordering_pass(
     return gm
 
 
+def get_fsdp_param_module_order(state_fqns: list[str]) -> dict[str, int]:
+    """Return module order matching FSDP2's first-seen parameter order."""
+    order: dict[str, int] = {}
+    for fqn in state_fqns:
+        if "." not in fqn:
+            continue
+        module_fqn = fqn.rsplit(".", 1)[0]
+        order.setdefault(module_fqn, len(order))
+    return order
+
+
+class FSDPParamOrderBucketer(ManualOverlapPreservingBucketer):
+    """Pack FSDP buckets in Eager FSDP2 parameter order."""
+
+    def __init__(
+        self,
+        *args: Any,
+        fsdp_param_module_order: dict[str, int] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.fsdp_param_module_order = fsdp_param_module_order or {}
+
+    def _param_order_key(self, node: fx.Node) -> tuple[int, int]:
+        module_fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
+        param_idx = self.fsdp_param_module_order.get(module_fqn, len(self.node_idx))
+        return (param_idx, self.node_idx[node])
+
+    def _bucket_group(self, coll_nodes: list[fx.Node]) -> None:
+        if self.fsdp_param_module_order:
+            coll_nodes = sorted(coll_nodes, key=self._param_order_key)
+        return super()._bucket_group(coll_nodes)
+
+
 class JointManualOverlapScheduler(ManualOverlapScheduler):
     """Manual overlap scheduler for joint forward+backward graphs.
 
@@ -210,6 +245,7 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
         is_backward_fn: Callable[[fx.Node], bool],
         module_stack_fn: Callable[[fx.Node], list[tuple[str, type[Any]]]],
         bucket_mode: BucketMode | None = None,
+        fsdp_param_module_order: dict[str, int] | None = None,
     ) -> None:
         super().__init__(
             gm,
@@ -219,6 +255,14 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
             bucket_mode=bucket_mode,
         )
         self._is_backward_fn = is_backward_fn
+        effective_bucket_mode = self.bucketer.bucket_mode
+        self.bucketer = FSDPParamOrderBucketer(
+            graph=self.graph,
+            collective_info=self.collective_info,
+            scheduled=OrderedSet(self.graph.nodes),
+            bucket_mode=effective_bucket_mode,
+            fsdp_param_module_order=fsdp_param_module_order,
+        )
 
     def _manual_bucket_collectives(self) -> None:
         """Bucket per module, splitting by direction to keep fwd/bwd buckets disjoint."""
@@ -381,6 +425,7 @@ def joint_transformer_block_bucketing_reordering_pass(
     module_bucket_plans: list[list[str] | str],
     insert_overlap_deps: bool = False,
     bucket_mode: BucketMode | None = None,
+    fsdp_param_module_order: dict[str, int] | None = None,
 ) -> torch.fx.GraphModule:
     """Run joint-graph manual bucketing and reordering.
 
@@ -402,6 +447,8 @@ def joint_transformer_block_bucketing_reordering_pass(
             ``preserve_node_ordering`` after the topological sort.
         bucket_mode: bucket mode forwarded to the underlying bucketer;
             defaults to ``"custom_ops"`` via the parent class.
+        fsdp_param_module_order: module order derived from traced parameter
+            FQNs, used to pack FSDP buckets like Eager FSDP2.
     """
 
     def _stack_fn(node: torch.fx.Node) -> list[tuple[str, type]]:
@@ -417,6 +464,7 @@ def joint_transformer_block_bucketing_reordering_pass(
         is_backward_fn=_is_backward_node,
         module_stack_fn=_stack_fn,
         bucket_mode=bucket_mode,
+        fsdp_param_module_order=fsdp_param_module_order,
     ).run()
     overlapped_gm.recompile()
     return overlapped_gm
