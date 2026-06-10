@@ -15,10 +15,13 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from collections.abc import Iterable
+from dataclasses import dataclass
 
 from torchtitan.experiments.rl.batcher import Batcher
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import Episode, TrainingBatch
+from torchtitan.observability import structured_logger as sl
 
 
 def earliest_version(episode: Episode) -> int:
@@ -34,6 +37,24 @@ def earliest_version(episode: Episode) -> int:
     if not episode.version_intervals:
         return episode.policy_version
     return min(version for _start, version in episode.version_intervals)
+
+
+@dataclass(frozen=True, slots=True)
+class PackedEpisodeBatch:
+    """One packed batch for the trainer: grad-accum microbatches, their global-token normalizer,
+    and the rollout/episode/buffer metrics that ride out with this batch.
+
+    Example:
+
+        batch = await buffer.get_batch(train_version=3)
+        if batch is None:  # buffer closed and drained
+            return
+        await trainer.forward_backward.call(batch.microbatches[0], batch.num_global_valid_tokens)
+    """
+
+    microbatches: list[list[TrainingBatch]]  # [grad_accum_steps][dp_degree]
+    num_global_valid_tokens: int
+    metrics: list[m.Metric]
 
 
 class EpisodeBuffer:
@@ -56,8 +77,8 @@ class EpisodeBuffer:
         buffer = EpisodeBuffer(
             batcher=batcher, dp_degree=2, max_offpolicy_steps=1, max_buffered_batches=2
         )
-        await buffer.put(episodes, metrics, train_version=3)                       # producer
-        microbatches, num_valid, metrics = await buffer.get_batch(train_version=3)  # consumer
+        await buffer.put(episodes, metrics, train_version=3)        # producer
+        batch = await buffer.get_batch(train_version=3)             # consumer -> PackedEpisodeBatch
     """
 
     def __init__(
@@ -87,6 +108,9 @@ class EpisodeBuffer:
         self._cv = asyncio.Condition()
         self._closed = False
         self._num_dropped_stale = 0
+        # Stale drops since the last consumed batch; the numerator of `buffer/stale_drop_rate`,
+        # reset each `get_batch` so the rate is per-step, not cumulative.
+        self._num_dropped_stale_since_last_get = 0
 
     def _episode_tokens(self, episode: Episode) -> int:
         # A packed episode contributes `len(token_ids) - 1` unpadded tokens (the [:-1]/[1:]
@@ -115,6 +139,38 @@ class EpisodeBuffer:
         # The staleness-drop rule, named once: an episode is on-policy enough to keep iff its
         # oldest token is within `max_offpolicy_steps` versions of the consumer's `train_version`.
         return train_version - earliest_version(episode) <= self._max_offpolicy_steps
+
+    def _fresh_episodes(
+        self, episodes: Iterable[Episode], *, train_version: int
+    ) -> tuple[list[Episode], int]:
+        # Split `episodes` into the fresh ones (to keep, in order) and the count to drop as stale,
+        # by the single `_is_fresh` rule. Shared by both drop sites: `put` (incoming episodes) and
+        # `_drop_stale_buffered_episodes` (the whole buffer at consume time).
+        fresh: list[Episode] = []
+        dropped = 0
+        for episode in episodes:
+            if self._is_fresh(episode, train_version):
+                fresh.append(episode)
+            else:
+                dropped += 1
+        return fresh, dropped
+
+    def _record_stale_drops(self, dropped: int) -> None:
+        self._num_dropped_stale += dropped
+        self._num_dropped_stale_since_last_get += dropped
+
+    def _drop_stale_buffered_episodes(self, *, train_version: int) -> int:
+        # Consume-time re-drop over the WHOLE buffer: episodes banked ahead age as `train_version`
+        # advances, so a buffered episode that was fresh at `put` can be stale now. Frees space ->
+        # notify the producer. (`put` itself only filters the incoming episodes, not the backlog.)
+        fresh, dropped = self._fresh_episodes(
+            self._episodes, train_version=train_version
+        )
+        if dropped:
+            self._episodes = deque(fresh)
+            self._record_stale_drops(dropped)
+            self._cv.notify_all()
+        return dropped
 
     def _peel_one_batch(self) -> list[Episode]:
         # Peel episodes from the front (oldest first, FIFO) up to the batcher's packed-row budget,
@@ -164,26 +220,25 @@ class EpisodeBuffer:
             train_version: The consumer's current policy version, for the staleness drop.
         """
         async with self._cv:
-            for episode in episodes:
-                if self._is_fresh(episode, train_version):
-                    self._episodes.append(episode)
-                else:
-                    self._num_dropped_stale += 1
+            # Admit only the fresh incoming episodes; the backlog is re-checked at consume time
+            # (`_drop_stale_buffered_episodes`), which is what lets banked batches age in place.
+            fresh, dropped = self._fresh_episodes(episodes, train_version=train_version)
+            self._episodes.extend(fresh)
+            self._record_stale_drops(dropped)
             self._pending_metrics.extend(metrics)
             self._cv.notify_all()  # wake the consumer: a full batch may be ready now
             # Backpressure: park until the buffer drops below the depth bound, so the producer
             # banks at most `max_buffered_batches` ahead (not arbitrarily far).
             await self._cv.wait_for(lambda: self._closed or not self._at_capacity())
 
-    async def get_batch(
-        self, *, train_version: int
-    ) -> tuple[list[list[TrainingBatch]], int, list[m.Metric]] | None:
+    @sl.log_trace_span("get_batch")
+    async def get_batch(self, *, train_version: int) -> PackedEpisodeBatch | None:
         """Block until a full batch of fresh episodes is buffered, then pack + return ONE batch.
 
-        Returns `(microbatches, num_global_valid_tokens, metrics)`, or `None` ONLY when closed
-        and drained — a transient all-stale round re-waits for a top-up rather than returning
-        `None`. Episodes that went stale (against `train_version`) while waiting are re-dropped
-        here before packing. `metrics` carries the rollout/episode metrics plus staleness/depth.
+        Returns a `PackedEpisodeBatch`, or `None` ONLY when closed and drained; a transient
+        all-stale round re-waits for a top-up rather than returning `None`. Episodes that went
+        stale (against `train_version`) while waiting are re-dropped here before packing. The
+        returned metrics carry the rollout/episode metrics plus staleness/depth.
         """
         async with self._cv:
             while True:
@@ -191,17 +246,9 @@ class EpisodeBuffer:
                 # the trainer-idle time the perf audit measures) — or the buffer is closed.
                 await self._cv.wait_for(lambda: self._closed or self._has_full_batch())
                 # Re-check staleness at consume time: train_version may have advanced while the
-                # episodes waited (a swap landed, or they aged while banked), so buffered
-                # episodes can now be stale. This is where the staleness drop does real work.
-                kept = deque(
-                    episode
-                    for episode in self._episodes
-                    if self._is_fresh(episode, train_version)
-                )
-                self._num_dropped_stale += len(self._episodes) - len(kept)
-                if len(kept) < len(self._episodes):
-                    self._episodes = kept
-                    self._cv.notify_all()  # freed space: let the producer bank more
+                # episodes waited (a swap landed, or they aged while banked), so buffered episodes
+                # can now be stale. This is where the staleness drop does real work.
+                self._drop_stale_buffered_episodes(train_version=train_version)
                 if self._has_full_batch():
                     break
                 if self._closed:
@@ -214,9 +261,19 @@ class EpisodeBuffer:
             batch = (
                 self._peel_one_batch()
             )  # a full batch (the loop only breaks once full)
+            dropped_since_get = self._num_dropped_stale_since_last_get
+            self._num_dropped_stale_since_last_get = 0
             metrics = self._pending_metrics
             self._pending_metrics = []
             self._cv.notify_all()  # wake the producer: backpressure released
+        # Fraction of episodes lost to staleness since the last batch (drops / (drops + consumed)).
+        # ~0 is healthy; high means the producer is banking faster than the trainer consumes.
+        consumed = len(batch)
+        stale_drop_rate = (
+            dropped_since_get / (dropped_since_get + consumed)
+            if dropped_since_get + consumed
+            else 0.0
+        )
         staleness = [train_version - earliest_version(episode) for episode in batch]
         metrics += [
             m.Metric("buffer/staleness", m.Mean.from_list(staleness)),
@@ -224,6 +281,7 @@ class EpisodeBuffer:
             m.Metric(
                 "buffer/dropped_stale", m.NoReduce(float(self._num_dropped_stale))
             ),
+            m.Metric("buffer/stale_drop_rate", m.NoReduce(stale_drop_rate)),
             # Depth (measured before peeling): how many batches the producer banked ahead. ~0
             # means the producer is starving the trainer; near max_buffered_batches means it is
             # comfortably ahead and the trainer should rarely idle.
@@ -240,14 +298,22 @@ class EpisodeBuffer:
         #   ready-batch queue so the trainer never waits on packing at all. Needs a drop-at-consume
         #   staleness re-check, since a speculatively packed batch's train version isn't fixed
         #   until the trainer advances.
-        (
-            microbatches,
-            num_global_valid_tokens,
-            packing_metrics,
-        ) = await asyncio.to_thread(
+        microbatches, num_global_valid_tokens, packing_metrics = await self._pack_batch(
+            batch
+        )
+        return PackedEpisodeBatch(
+            microbatches=microbatches,
+            num_global_valid_tokens=num_global_valid_tokens,
+            metrics=metrics + packing_metrics,
+        )
+
+    @sl.log_trace_span("_pack_batch")
+    async def _pack_batch(
+        self, batch: list[Episode]
+    ) -> tuple[list[list[TrainingBatch]], int, list[m.Metric]]:
+        return await asyncio.to_thread(
             self._batcher.batch, batch, dp_degree=self._dp_degree
         )
-        return microbatches, num_global_valid_tokens, metrics + packing_metrics
 
     async def close(self) -> None:
         """Mark the buffer closed and wake everyone, so blocked put/get_batch return."""
