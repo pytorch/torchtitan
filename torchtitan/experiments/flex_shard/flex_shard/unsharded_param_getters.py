@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import inspect
 import sys
 from dataclasses import dataclass, field
 from typing import Any
@@ -109,14 +110,22 @@ def _install_module_unsharded_param_getters(
     global _unsharded_param_getter_class_counter
     _unsharded_param_getter_class_counter += 1
 
-    def _make_flex_shard_param_getter(unsharded_param_slot: UnshardedParamSlot):
+    def _make_flex_shard_param_getter(
+        param_name: str,
+        unsharded_param_slot: UnshardedParamSlot,
+    ):
         def get_flex_shard_param(self):
-            return unsharded_param_slot.get_unsharded_param()
+            try:
+                return unsharded_param_slot.get_unsharded_param()
+            except RuntimeError:
+                if _is_state_dict_introspection():
+                    return self._parameters[param_name]
+                raise
 
         return get_flex_shard_param
 
     param_name_to_property = {
-        param_name: property(_make_flex_shard_param_getter(state))
+        param_name: property(_make_flex_shard_param_getter(param_name, state))
         for param_name, state in unsharded_param_slots.items()
     }
     module_cls = type(
@@ -126,6 +135,15 @@ def _install_module_unsharded_param_getters(
     )
     module.__class__ = module_cls
     sys.modules[module_cls.__module__].__dict__[module_cls.__name__] = module_cls
+
+
+def _is_state_dict_introspection() -> bool:
+    """Return whether a missing unsharded param read is state-dict metadata lookup."""
+    for frame_info in inspect.stack(context=0)[2:]:
+        module_name = frame_info.frame.f_globals.get("__name__", "")
+        if module_name == "torch.distributed.checkpoint.state_dict":
+            return True
+    return False
 
 
 def _raise_missing_eager_bucket_unshard(slot: UnshardedParamSlot) -> None:

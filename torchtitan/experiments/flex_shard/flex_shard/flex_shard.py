@@ -41,6 +41,8 @@ __all__ = [
 
 
 _SHARDED_BUCKET_STORAGES_ATTR = "_sharded_bucket_storages"
+_MODULE_PARAM_SLOTS_ATTR = "_flex_shard_module_param_slots"
+_EAGER_HOOKS_INSTALLED_ATTR = "_flex_shard_eager_hooks_installed"
 
 
 class FlexShardModule:
@@ -50,6 +52,12 @@ class FlexShardModule:
     def sharded_bucket_storages(self) -> list[ShardedBucketStorage]:
         """All bucket storage objects, one per bucket."""
         return getattr(self, _SHARDED_BUCKET_STORAGES_ATTR)
+
+    def to_empty(self, *, device, recurse: bool = True):
+        """Materialize FlexShard bucket storage when meta modules are initialized."""
+        result = super().to_empty(device=device, recurse=recurse)
+        _materialize_flex_shard_after_to_empty(self)
+        return result
 
 
 def flex_shard(
@@ -137,6 +145,7 @@ def flex_shard(
         fqn_to_bucket_spec,
         inputs.device,
     )
+    setattr(module, _MODULE_PARAM_SLOTS_ATTR, module_param_slots)
     _install_unsharded_param_getters(module_param_slots)
 
     # Reshard-after-forward: in eager mode, wrap each layer in checkpoint with
@@ -147,8 +156,9 @@ def flex_shard(
         _apply_reshard_after_forward(module, reshard_bucket_storages)
 
     # Install bucket unshard hooks for eager mode when the storage layout
-    # supports one collective per bucket.
-    _install_bucket_unshard_hooks(bucket_storages, module_param_slots)
+    # supports one collective per bucket. Meta modules are materialized later by
+    # TorchTitan's Trainer.to_empty() path, so defer hook installation until then.
+    _install_flex_shard_runtime_if_materialized(module)
 
     return module
 
@@ -187,10 +197,57 @@ def _attach_flex_shard_module_state(
 ) -> None:
     """Attach FlexShard ownership state and mixin accessors to a module."""
     setattr(module, _SHARDED_BUCKET_STORAGES_ATTR, bucket_storages)
+    setattr(module, _EAGER_HOOKS_INSTALLED_ATTR, False)
 
     cls = type(module)
     if not issubclass(cls, FlexShardModule):
-        module.__class__ = type(cls.__name__, (cls, FlexShardModule), {})
+        module.__class__ = type(cls.__name__, (FlexShardModule, cls), {})
+
+
+def _materialize_flex_shard_after_to_empty(module: nn.Module) -> None:
+    """Rebuild sharded param views after nn.Module.to_empty() materialization."""
+    bucket_storages = getattr(module, _SHARDED_BUCKET_STORAGES_ATTR, None)
+    if bucket_storages is None:
+        return
+
+    materialized_device: torch.device | None = None
+    for _, param in module.named_parameters(recurse=True):
+        if param.device.type != "meta":
+            materialized_device = param.device
+            break
+    if materialized_device is None:
+        return
+
+    for bucket_storage in bucket_storages:
+        if bucket_storage.byte_storage.device.type == "meta":
+            bucket_storage._byte_storage = torch.empty(
+                bucket_storage.total_bytes,
+                dtype=torch.uint8,
+                device=materialized_device,
+            )
+        elif bucket_storage.byte_storage.device != materialized_device:
+            bucket_storage._byte_storage = torch.empty(
+                bucket_storage.total_bytes,
+                dtype=torch.uint8,
+                device=materialized_device,
+            )
+        bucket_storage.install_sharded_params(bucket_storage.byte_storage.device)
+
+    _install_flex_shard_runtime_if_materialized(module)
+
+
+def _install_flex_shard_runtime_if_materialized(module: nn.Module) -> None:
+    """Install eager hooks once all bucket storage has real CUDA backing."""
+    if getattr(module, _EAGER_HOOKS_INSTALLED_ATTR, False):
+        return
+
+    bucket_storages = getattr(module, _SHARDED_BUCKET_STORAGES_ATTR)
+    if any(storage.byte_storage.device.type == "meta" for storage in bucket_storages):
+        return
+
+    module_param_slots = getattr(module, _MODULE_PARAM_SLOTS_ATTR)
+    _install_bucket_unshard_hooks(bucket_storages, module_param_slots)
+    setattr(module, _EAGER_HOOKS_INSTALLED_ATTR, True)
 
 
 @dataclass(frozen=True)
