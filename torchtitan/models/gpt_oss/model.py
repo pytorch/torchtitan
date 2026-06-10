@@ -45,7 +45,6 @@ class Attention(BaseAttention):
         inner_attention: Module.Config = dataclasses.field(
             default_factory=FlexAttention.Config
         )
-        mask_type: str = "causal"
         sliding_window_size: int = 128
         rope: RoPE.Config
 
@@ -73,7 +72,7 @@ class Attention(BaseAttention):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_masks: AttentionMasksType,
         positions: torch.Tensor | None = None,
     ):
         """
@@ -218,22 +217,17 @@ class GptOssModel(Decoder):
         self,
         positions: torch.Tensor,
     ) -> AttentionMasksType:
-        basic_mask_mods = []
         attn_cfg = self.config.layers[0].attention
         assert isinstance(attn_cfg, Attention.Config)
         sliding_window_mask_mods = [
             get_sliding_window_mask_mod(attn_cfg.sliding_window_size)
         ]
         seq_len = positions.shape[1]
-        match attn_cfg.mask_type:
-            case "causal":
-                B = 1
-                basic_mask_mods.append(get_causal_mask_mod())
-            case "block_causal":
-                B = positions.shape[0]
-                basic_mask_mods.append(get_document_mask_mod(positions))
-            case _:
-                raise ValueError(f"Unknown attention mask type: {attn_cfg.mask_type}")
+        basic_mask_mods = [
+            get_causal_mask_mod(),
+            get_document_mask_mod(positions),
+        ]
+        B = positions.shape[0]
 
         # create basic attention mask: causal or block_causal
         basic_mask = create_attention_mask(

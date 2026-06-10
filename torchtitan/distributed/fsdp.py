@@ -89,6 +89,7 @@ def apply_fsdp_to_decoder(
     ep_degree: int = 1,
     edp_mesh: DeviceMesh | None = None,
     dp_mesh_dims: "DataParallelMeshDims | None" = None,
+    edp_mesh_dims: "DataParallelMeshDims | None" = None,
     enable_symm_mem: bool = False,
 ):
     """
@@ -127,6 +128,8 @@ def apply_fsdp_to_decoder(
             naming contract between ``fully_shard`` and torchtitan is not
             strong enough to infer safely, and an explicit declaration
             avoids silent miscategorization when new mesh axes appear.
+        edp_mesh_dims: Sibling of ``dp_mesh_dims`` for the sparse SPMD mesh
+            used by routed experts. ``None`` outside full_dtensor.
         enable_symm_mem (bool): Whether to enable symmetric-memory FSDP
             communication.
     """
@@ -227,25 +230,23 @@ def apply_fsdp_to_decoder(
                 # ep_degree > 1: per-param mesh
                 from torch.distributed.fsdp._fully_shard._fsdp_common import (
                     FSDPMeshInfo,
-                    HSDPMeshInfo,
                     ShardPlacementResult,
+                )
+                from torch.distributed.fsdp._fully_shard._fsdp_init import (
+                    _get_mesh_info,
                 )
 
                 assert edp_mesh is not None
 
-                def _get_fsdp_mesh_info(mesh: DeviceMesh) -> FSDPMeshInfo:
-                    if mesh.ndim == 1:
-                        return FSDPMeshInfo(mesh=mesh, shard_mesh_dim=0)
-                    if mesh.ndim == 2:
-                        return HSDPMeshInfo(
-                            mesh=mesh, replicate_mesh_dim=0, shard_mesh_dim=1
-                        )
-                    raise ValueError(
-                        f"Expected 1D or 2D FSDP mesh, got {mesh.ndim}D mesh."
-                    )
-
-                edp_mesh_info = _get_fsdp_mesh_info(edp_mesh)
-                dp_mesh_info = _get_fsdp_mesh_info(dp_mesh)
+                # Delegate to FSDP2's mesh-info builder. Under full_dtensor
+                # (mesh_dims set) it extracts and FLATTENS the DP submesh from
+                # the full SPMD mesh.
+                edp_mesh_info = _get_mesh_info(edp_mesh, edp_mesh_dims)
+                dp_mesh_info = _get_mesh_info(dp_mesh, dp_mesh_dims)
+                # _get_mesh_info is typed to the DataParallelMeshInfo base; with
+                # a shard dim it always yields FSDPMeshInfo/HSDPMeshInfo.
+                assert isinstance(edp_mesh_info, FSDPMeshInfo)
+                assert isinstance(dp_mesh_info, FSDPMeshInfo)
 
                 def _shard_placement_fn(
                     param: nn.Parameter,

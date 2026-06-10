@@ -230,14 +230,31 @@ def set_moe_sharding_config(
     # Router gate: dense-family TP plan with Partial output grad.
     moe_cfg.router.gate.sharding_config = _router_gate_config(enable_ep=enable_ep)
 
-    # Shared experts: optional. Use Partial-flow variants so the
-    # Partial->sp_layout reduce only happens once at the MoE boundary.
-    if getattr(moe_cfg, "shared_experts", None) is not None:
-        moe_cfg.shared_experts.w1.sharding_config = _shared_expert_colwise_config(
+    # Shared experts: SwiGLU FFN run in parallel with the routed experts.
+    # Gather x to Replicate ONCE at the module boundary so w1/w3 share it (their
+    # per-linear input redistributions become no-ops). w2 (rowwise) keeps the
+    # output Partial; the Partial->sp_layout reduce happens once at the MoE
+    # boundary. Model-specific shared-expert extras are sharded by that
+    # model's own sharding code.
+    shared = moe_cfg.shared_experts
+    if shared is not None:
+        # Shared-expert input matches the MoE input: sequence-parallel under
+        # EP+SP (Shard(1) on seq, ordered via partition_spec), else Replicate.
+        shared_input = (
+            dense_sequence_parallel_placement()
+            if enable_ep and enable_sp
+            else dense_activation_placement(tp=spmd.R)
+        )
+        shared.sharding_config = ShardingConfig(
+            in_src_shardings={"x": shared_input},
+            in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
+        )
+
+        shared.w1.sharding_config = _shared_expert_colwise_config(
             enable_ep=enable_ep, enable_sp=enable_sp
         )
-        moe_cfg.shared_experts.w2.sharding_config = _shared_expert_rowwise_config()
-        moe_cfg.shared_experts.w3.sharding_config = _shared_expert_colwise_config(
+        shared.w2.sharding_config = _shared_expert_rowwise_config()
+        shared.w3.sharding_config = _shared_expert_colwise_config(
             enable_ep=enable_ep, enable_sp=enable_sp
         )
 
