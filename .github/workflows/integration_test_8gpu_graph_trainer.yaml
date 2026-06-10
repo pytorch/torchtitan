@@ -52,8 +52,14 @@ jobs:
 
         pip config --user set global.progress_bar off
 
+        # torch nightly now depends on cuda-toolkit[...] extras (e.g.
+        # nvidia-curand==10.4.0.35) whose wheels live on PyPI, not on the pytorch
+        # nightly index. --index-url *replaces* the default PyPI index, so add it
+        # back via --extra-index-url or pip cannot resolve those cuda deps.
         python -m pip install --force-reinstall --pre \
-          torch --index-url https://download.pytorch.org/whl/nightly/cu130
+          torch \
+          --index-url https://download.pytorch.org/whl/nightly/cu130 \
+          --extra-index-url https://pypi.org/simple
         python -m pip install git+https://github.com/meta-pytorch/autoparallel.git
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"

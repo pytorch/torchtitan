@@ -17,8 +17,8 @@ This demonstrates:
    in the controller.
 
 Command to run:
-python3 torchtitan/experiments/rl/train.py \
-    --module rl --config rl_grpo_qwen3_0_6b \
+python3 -m torchtitan.experiments.rl.train \
+    --module rl --config rl_grpo_qwen3_0_6b_varlen \
     --hf_assets_path=<path_to_model_checkpoint>
 """
 
@@ -195,7 +195,7 @@ async def main():
         )
         await rl_trainer.setup_async(
             trainer_mesh=trainer_mesh,
-            generator_mesh=generator_mesh,
+            generator_meshes=[generator_mesh],
         )
         await rl_trainer.train()
     except (KeyboardInterrupt, asyncio.CancelledError):
