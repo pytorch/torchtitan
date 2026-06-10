@@ -168,7 +168,6 @@ class Decoder(BaseModel):
                         f"length {max_seq_len}."
                     )
 
-
                 for layer_cfg in self.layers:
                     attention_cfg = getattr(layer_cfg, "attention", None)
                     if attention_cfg is not None:
