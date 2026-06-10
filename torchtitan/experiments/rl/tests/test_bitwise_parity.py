@@ -22,12 +22,12 @@ Three tests:
 
 By transitivity of test 2 and test 3: trainer == vLLM decode.
 
-Run:
-    torchrun --nproc_per_node=1 -m pytest \
-        torchtitan/experiments/rl/tests/test_bitwise_parity.py -v
+Run each backend in a separate torchrun invocation:
+    torchrun --nproc_per_node=2 -m pytest \
+        torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityVarlen -v
 
     torchrun --nproc_per_node=2 -m pytest \
-        torchtitan/experiments/rl/tests/test_bitwise_parity.py -v
+        torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityFlex -v
 """
 
 import gc
@@ -60,8 +60,8 @@ from torchtitan.distributed.utils import (
 )
 from torchtitan.experiments.rl.actors.trainer import compute_logprobs
 from torchtitan.experiments.rl.config_registry import (
-    rl_grpo_qwen3_0_6b_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
+    rl_grpo_qwen3_0_6b_varlen_batch_invariant,
 )
 from torchtitan.experiments.rl.models.vllm_registry import (
     registry_to_vllm,
@@ -219,7 +219,7 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
     engine_kwargs["max_model_len"] = config.model_spec.model.max_seq_len
-    max_num_seqs = config.num_groups_per_rollout_batch * gen_config.sampling.n
+    max_num_seqs = config.num_groups_per_rollout_batch * config.group_size
     engine_kwargs["max_num_seqs"] = max_num_seqs
     vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
@@ -514,7 +514,7 @@ class BitwiseParityTestBase(unittest.TestCase):
     PROMPT_LENGTH = 150
     MAX_GEN_TOKENS = 50
 
-    config_fn = staticmethod(rl_grpo_qwen3_0_6b_batch_invariant)
+    config_fn = staticmethod(rl_grpo_qwen3_0_6b_varlen_batch_invariant)
     attn_backend: str = "varlen"
 
     # Shared across all tests in the class (built once in setUpClass)
@@ -693,7 +693,7 @@ class TestBitwiseParityVarlen(BitwiseParityTestBase):
     """Bitwise parity tests using varlen attention."""
 
     __test__ = True
-    config_fn = staticmethod(rl_grpo_qwen3_0_6b_batch_invariant)
+    config_fn = staticmethod(rl_grpo_qwen3_0_6b_varlen_batch_invariant)
     attn_backend = "varlen"
 
 

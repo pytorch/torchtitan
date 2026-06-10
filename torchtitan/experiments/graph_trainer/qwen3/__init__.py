@@ -11,19 +11,22 @@ from torchtitan.models.qwen3 import qwen3_configs
 from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
 from torchtitan.protocols.model_spec import ModelSpec
 
+from ..common_utils import build_decoder_config_for_backend
 from .model import GraphTrainerQwen3Model
 from .parallelize import parallelize_qwen3
 
 
 def model_registry(
     flavor: str,
-    attn_backend: str = "sdpa",
+    attn_backend: str = "flex",
     moe_comm_backend: str | None = None,
 ) -> ModelSpec:
-    kwargs = dict(attn_backend=attn_backend)
+    kwargs = {}
     if moe_comm_backend is not None:
         kwargs["moe_comm_backend"] = moe_comm_backend
-    base = qwen3_configs[flavor](**kwargs)
+    base = build_decoder_config_for_backend(
+        qwen3_configs[flavor], attn_backend, **kwargs
+    )
     config = GraphTrainerQwen3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}
     )

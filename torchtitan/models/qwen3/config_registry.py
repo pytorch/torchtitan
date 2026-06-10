@@ -90,35 +90,6 @@ def qwen3_debugmodel_moe_param_groups() -> Trainer.Config:
     return config
 
 
-def qwen3_debugmodel_flex() -> Trainer.Config:
-    return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
-        hf_assets_path="./tests/assets/tokenizer",
-        metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel", attn_backend="flex"),
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
-        optimizer=default_adamw(lr=8e-4),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=2,
-            decay_ratio=0.8,
-            decay_type="linear",
-            min_lr_factor=0.0,
-        ),
-        training=TrainingConfig(
-            local_batch_size=8,
-            seq_len=2048,
-            steps=10,
-        ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
-    )
-
-
 def qwen3_debugmodel_flex_flash() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
@@ -354,12 +325,6 @@ def qwen3_moe_debug() -> Trainer.Config:
             mode="selective",
         ),
     )
-
-
-def qwen3_moe_debug_ep() -> Trainer.Config:
-    config = qwen3_moe_debug()
-    config.model_spec = model_registry("debugmodel_moe")
-    return config
 
 
 def sft_qwen3_8b_math() -> Trainer.Config:
