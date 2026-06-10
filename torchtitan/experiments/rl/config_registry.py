@@ -329,11 +329,9 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
 
 
 def rl_grpo_qwen3_moe_debug_ep() -> RLTrainer.Config:
-    """Debug MoE config with EP+TP on generator (4 GPUs: 2 gen + 2 train).
+    """Debug MoE config with EP+TP on generator (8 GPUs: 4 gen + 4 train).
 
-    Generator uses TP=2 for dense layers and EP=2 for MoE experts.
-    The RL loop auto-rebuilds the model spec with AllToAllTokenDispatcher
-    when generator EP > 1.
+    Generator uses TP=4 for dense layers and EP=4 for MoE experts.
     """
     group_size = 8
     return RLTrainer.Config(
@@ -361,9 +359,10 @@ def rl_grpo_qwen3_moe_debug_ep() -> RLTrainer.Config:
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
-                tensor_parallel_degree=1,
+                tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 disable_loss_parallel=True,
+                expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=False,
@@ -379,11 +378,11 @@ def rl_grpo_qwen3_moe_debug_ep() -> RLTrainer.Config:
             cudagraph=VLLMCudagraphConfig(enable=False),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
-                tensor_parallel_degree=2,
+                tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
-                expert_parallel_degree=2,
+                expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -399,10 +398,6 @@ def rl_grpo_qwen3_moe_debug_ep_batch_invariant() -> RLTrainer.Config:
     """Batch-invariant MoE EP config for bitwise parity testing (8 GPUs).
 
     Trainer: TP=4, EP=4 (4 GPUs). Generator: TP=4, EP=4 (4 GPUs).
-
-    Uses the bundled Qwen3 tokenizer assets without weights. vLLM reads the
-    model config through TorchTitan's custom config parser, and trainer
-    checkpointing stays disabled, so no checkpoint is needed.
     """
     group_size = 8
     return RLTrainer.Config(
@@ -415,7 +410,7 @@ def rl_grpo_qwen3_moe_debug_ep_batch_invariant() -> RLTrainer.Config:
         num_validation_samples=20,
         # MoE EP all-to-all path issues unpinned D2H copies that block
         # torch.compile and CUDA graph capture; disable both.
-        compile=CompileConfig(enable=False, backend="aot_eager"),
+        compile=CompileConfig(enable=False),
         rollouter=AlphabetSortRollouter.Config(),
         group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
@@ -478,11 +473,11 @@ def rl_grpo_qwen3_30b_a3b() -> RLTrainer.Config:
     group_size = 8
     return RLTrainer.Config(
         model_spec=model_registry("30B-A3B", attn_backend="varlen"),
-        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-30B-A3B",
+        hf_assets_path="/data/users/jianiw/model/Qwen3-30B-A3B",
         num_steps=10,
         num_groups_per_rollout_batch=5,
         num_validation_samples=20,
-        compile=CompileConfig(enable=True, backend="aot_eager"),
+        compile=CompileConfig(enable=False),
         rollouter=AlphabetSortRollouter.Config(),
         group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
@@ -501,6 +496,7 @@ def rl_grpo_qwen3_30b_a3b() -> RLTrainer.Config:
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=4,
                 disable_loss_parallel=True,
+                expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -512,6 +508,7 @@ def rl_grpo_qwen3_30b_a3b() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
+            cudagraph=VLLMCudagraphConfig(enable=False),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=4,
@@ -540,7 +537,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
     return RLTrainer.Config(
         model_spec=model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
-        num_steps=10,
+        num_steps=5,
         num_groups_per_rollout_batch=5,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
