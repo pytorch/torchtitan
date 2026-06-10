@@ -36,24 +36,25 @@ class Completion:
     controller attaches them to the rollout turn."""
 
 
-# TODO: rename `Episode` -> `TrainingSample`
-# and `rollout_to_episode` -> `rollout_to_training_sample`
 @dataclass(kw_only=True, slots=True)
 class Episode:
-    """Training sample: a flattened Rollout + GRPO advantage, ready for collation into a batch.
+    """One packed training sequence + GRPO advantage, ready for collation into a batch.
 
-    An Episode is a single (prompt, completion) pair. One Rollout currently yields one Episode
-    (its last completion); see `rollout_to_episode`'s TODO for proper multi-turn packing.
+    A multi-turn rollout packs into ONE episode: the turn-0 prompt, then each assistant
+    completion interleaved with the env replies; `loss_mask` trains only the assistant tokens.
+    One rollout yields >1 episode only when the env edited history mid-rollout (see
+    `rollout_to_episodes`, which branches there).
+
+    Example (single-turn): token_ids=[P, P, a, a], loss_mask=[0, 0, 1, 1],
+                           logprobs=[0, 0, l, l], advantage=[0, 0, A, A]
     """
 
     policy_version: int
     sample_id: str
-    prompt_token_ids: list[int]
-    completion_text: str
-    completion_token_ids: list[int]
-    completion_logprobs: list[float]
-    reward: float
-    advantage: float
+    token_ids: list[int]  # [L] packed prompt + completions + env replies
+    loss_mask: list[bool]  # [L] True on assistant tokens to train
+    logprobs: list[float]  # [L] generator logprobs; 0.0 where loss_mask is False
+    advantage: list[float]  # [L] advantage on assistant tokens, 0.0 elsewhere
 
 
 @dataclass(kw_only=True, slots=True)

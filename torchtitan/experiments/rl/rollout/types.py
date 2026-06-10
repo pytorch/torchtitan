@@ -44,7 +44,7 @@ class RolloutStatus(StrEnum):
 class RolloutTurn:
     """Full per-turn snapshot: the prompt fed to the generator + the sampled completion +
     the env's reply, in both token and message space. Rubrics score it and
-    `rollout_to_episode` flattens the rollout into training tokens."""
+    `rollout_to_episodes` packs the rollout into training tokens."""
 
     # TODO: add a `logs` field (raw prompt/response text, finish_reason, timings)
     # so a turn can be dumped and inspected without re-deriving from tokens.

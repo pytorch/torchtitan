@@ -34,7 +34,7 @@ from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout import (
     last_completion_text,
     prepare_rollout_metrics,
-    rollout_to_episode,
+    rollout_to_episodes,
     RolloutGroup,
 )
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
@@ -194,7 +194,7 @@ class RLTrainer(Configurable):
         """Message-to-token renderer config."""
 
         log_samples: bool = False
-        """Log first completion per episode during training and validation."""
+        """Log first completion per rollout during training and validation."""
 
         rollout_recorder: RolloutSampleRecorder.Config = field(
             default_factory=RolloutSampleRecorder.Config
@@ -542,6 +542,10 @@ class RLTrainer(Configurable):
         # Mean-baseline advantage per group
         episodes: list[Episode] = []
         group_stds: list[float] = []
+        # Episodes a rollout packs into: 1 when the trajectory shares one prefix,
+        # >1 when the env edited history mid-rollout and `rollout_to_episodes` branched.
+        branches_per_rollout: list[float] = []
+        advantages_per_rollout: list[float] = []
         for group in rollout_groups:
             # Drop the whole group if any sibling has no trainable tokens; we need at
             # least one turn with assistant tokens per rollout to build an episode (and
@@ -560,27 +564,31 @@ class RLTrainer(Configurable):
             group_mean = sum(rewards) / len(rewards)
             group_stds.append(statistics.pstdev(rewards))
 
-            # Center the advantage per rollout; each rollout flattens into one episode.
+            # Center the advantage per rollout; each rollout packs into one or more episodes.
             for rollout in group.rollouts:
                 rollout.advantage = rollout.reward - group_mean
-                episodes.append(rollout_to_episode(rollout))
+                rollout_episodes = rollout_to_episodes(rollout)
+                episodes.extend(rollout_episodes)
+                branches_per_rollout.append(float(len(rollout_episodes)))
+                advantages_per_rollout.append(rollout.advantage)
 
         num_groups = len(rollout_groups)
         zero_std_frac = (
             sum(1 for s in group_stds if s == 0.0) / num_groups if num_groups else 0.0
         )
+        # Rollout reward rides `rollout_reward` (see `prepare_rollout_metrics`); here we emit
+        # only the GRPO-specific signals — advantage, per-group reward std, zero-std fraction.
         episode_metrics: list[m.Metric] = [
-            m.Metric(
-                "reward",
-                m.SummaryStats.from_list([ep.reward for ep in episodes]),
-            ),
-            m.Metric(
-                "advantage",
-                m.SummaryStats.from_list([ep.advantage for ep in episodes]),
-            ),
+            m.Metric("advantage", m.SummaryStats.from_list(advantages_per_rollout)),
             m.Metric("reward/group_std", m.Mean.from_list(group_stds)),
             m.Metric("reward/group_std", m.Max.from_list(group_stds)),
             m.Metric("reward/zero_std_frac", m.NoReduce(zero_std_frac)),
+            m.Metric(
+                "rollout/branches_per_rollout", m.Mean.from_list(branches_per_rollout)
+            ),
+            m.Metric(
+                "rollout/branches_per_rollout", m.Max.from_list(branches_per_rollout)
+            ),
         ]
 
         # Per-rollout policy versions. We log max/min in case episodes come
@@ -694,12 +702,17 @@ class RLTrainer(Configurable):
                 )
                 rollout_groups.extend(new_rollout_groups)
                 rollout_metrics.extend(new_metrics)
-                # Both prompt length and completion length are counted.
+                # Count the packed training tokens per rollout. A multi-turn rollout's turns
+                # share a growing prefix (turn n's prompt holds all prior turns), so summing
+                # per-turn would multiply-count that prefix; the packed episode is the full
+                # conversation = the last turn's prompt + completion.
                 collected_tokens += sum(
-                    len(t.prompt_token_ids) + len(t.completion_token_ids) - 1
+                    len(rollout.turns[-1].prompt_token_ids)
+                    + len(rollout.turns[-1].completion_token_ids)
+                    - 1
                     for group in new_rollout_groups
-                    for r in group.rollouts
-                    for t in r.turns
+                    for rollout in group.rollouts
+                    if rollout.turns
                 )
                 group_offset += num_groups
 
@@ -767,10 +780,7 @@ class RLTrainer(Configurable):
                 break
 
             # --- Prepare metrics ---
-            total_tokens = sum(
-                len(ep.prompt_token_ids) + len(ep.completion_token_ids)
-                for ep in episodes
-            )
+            total_tokens = sum(len(episode.token_ids) for episode in episodes)
 
             step_metrics: list[m.Metric] = []
 
@@ -797,6 +807,11 @@ class RLTrainer(Configurable):
             ]:
                 step_metrics.append(m.Metric(key, m.NoReduce(value)))
 
+            # TODO(perf-metrics): this is trainer tokens / WHOLE step — a goodput that folds in
+            #   rollout + weight-sync idle (the trainer sits idle ~87% of the step). Split into
+            #   per-component active throughput (total_tokens/t_train_s; generated_tokens/t_rollout_s)
+            #   vs goodput (.../t_step_s); the active-vs-goodput gap is the sync idle bubble. The
+            #   rollout's generated_tokens must sum ALL collected rollouts, not just the kept batch.
             step_metrics.append(
                 m.Metric("perf/tokens_per_second", m.NoReduce(total_tokens / t_step_s))
             )

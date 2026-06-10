@@ -668,18 +668,20 @@ class VLLMGenerator(Actor, Configurable):
             metrics = _prepare_generation_request_metrics(
                 request_output, prefix=metrics_prefix
             )
-            # Derivable from completion_token_ids; emitted here to keep generation telemetry together.
+            # Engine concurrency gauge: requests in flight when this one completes (+1 for the
+            # just-popped request). Uses the request's own prefix so validation requests land
+            # under `validation_generator/`. Max = peak concurrency; Mean = average as requests drain.
+            inflight_at_completion = float(len(self._inflight_requests) + 1)
             metrics.append(
                 m.Metric(
-                    f"{metrics_prefix}/output_tokens",
-                    m.Sum(float(len(completion_output.token_ids))),
+                    f"{metrics_prefix}/inflight_at_completion",
+                    m.Max(inflight_at_completion),
                 )
             )
-            # Engine concurrency gauge, observed when this request resolves.
             metrics.append(
                 m.Metric(
-                    "generator/inflight_at_completion",
-                    m.Max(float(len(self._inflight_requests) + 1)),  # +1 due to .pop
+                    f"{metrics_prefix}/inflight_at_completion",
+                    m.Mean(inflight_at_completion),
                 )
             )
             inflight.future.set_result(

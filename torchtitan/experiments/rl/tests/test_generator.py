@@ -117,12 +117,12 @@ def test_complete_finished_requests_resolves_future_with_completion():
         assert completion.policy_version == 7
         # The request is popped from the in-flight map.
         assert generator._inflight_requests == {}
-        # The per-generation metrics ride on the completion (output_tokens among them).
+        # The per-generation metrics ride on the completion.
         assert (
             m.MetricsProcessor._aggregate_metrics(completion.metrics)[
-                "generator/output_tokens/sum"
+                "generator/inflight_at_completion/max"
             ]
-            == 2
+            == 1
         )
 
     asyncio.run(main())

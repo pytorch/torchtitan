@@ -24,41 +24,80 @@ def last_completion_text(rollout: Rollout) -> str:
     return completion_text(rollout.turns[-1]) if rollout.turns else ""
 
 
-def rollout_to_episode(rollout: Rollout) -> Episode:
-    """Flatten a scored `Rollout` into ONE training `Episode`.
+def rollout_to_episodes(rollout: Rollout) -> list[Episode]:
+    """Pack a scored `Rollout` into training episodes.
 
-    Trains on the rollout's last turn that produced a completion — whose prompt already holds
-    the full conversation history — with the rollout's trajectory reward/advantage. A single-turn
-    rollout yields the obvious `(prompt, completion)` pair.
+    A rollout's turns share a GROWING PREFIX: the env builds turn n's prompt with
+    `renderer.bridge_to_next_turn`, whose contract guarantees
+    `turn[n].prompt == turn[n-1].prompt + turn[n-1].completion + env_reply`. So the whole
+    trajectory packs into ONE episode — the turn-0 prompt, then each turn's completion (trained)
+    interleaved with the env replies (not trained). We open a NEW episode only where that prefix
+    breaks (an env edited/compacted history, or a re-render that re-tokenized the prefix
+    differently); every episode shares the rollout's advantage.
 
-    Example:
+    Example (3 turns, prefix holds -> 1 episode):
 
-        rollout_to_episode(rollout)
-        # -> Episode(prompt_token_ids=last_turn_prompt, completion_token_ids=last_turn_completion,
-        #            reward=1.0, advantage=0.3, ...)
+        turn0: prompt=[P]             completion=[a0]   #  P  -> mask 0,  a0 -> mask 1
+        turn1: prompt=[P,a0,E1]       completion=[a1]   #  E1 -> mask 0,  a1 -> mask 1
+        turn2: prompt=[P,a0,E1,a1,E2] completion=[a2]   #  E2 -> mask 0,  a2 -> mask 1
+        # -> [Episode(token_ids=[P,a0,E1,a1,E2,a2], loss_mask=[0,1,0,1,0,1],
+        #                    logprobs=[0,l0,0,l1,0,l2], advantage=...)]
     """
-    # TODO(prefix-matching): a multi-turn rollout's turns share a growing prefix, so the whole
-    #   trajectory should pack into ONE sequence (loss-masking each assistant turn) rather than
-    #   training only the last turn. Branch into multiple Episodes only where a turn's prompt
-    #   diverges from the previous turn's prompt+completion (e.g. the env edited/compacted
-    #   history), since those turns no longer share a prefix.
-    trainable_turns = [
-        rollout_turn
-        for rollout_turn in rollout.turns
-        if rollout_turn.completion_token_ids
-    ]
-    last_turn = trainable_turns[-1]
-    advantage = rollout.advantage if rollout.advantage is not None else 0.0
-    return Episode(
-        policy_version=last_turn.policy_version,
-        sample_id=rollout.sample_id,
-        prompt_token_ids=last_turn.prompt_token_ids,
-        completion_text=completion_text(last_turn),
-        completion_token_ids=last_turn.completion_token_ids,
-        completion_logprobs=last_turn.completion_logprobs,
-        reward=rollout.reward,
-        advantage=advantage,
-    )
+    rollout_advantage = rollout.advantage if rollout.advantage is not None else 0.0
+    episodes: list[Episode] = []
+    prev_prompt_and_completion: list[int] = []
+
+    for rollout_turn in rollout.turns:
+        # Prompt-only turns (e.g. the prompt went over budget) have nothing to train on.
+        if not rollout_turn.completion_token_ids:
+            continue
+
+        # Open a new episode on the first turn, or wherever the growing prefix breaks (history
+        # was edited / re-tokenized); otherwise extend the current episode.
+        prompt = rollout_turn.prompt_token_ids
+        extends_prev = (
+            prompt[: len(prev_prompt_and_completion)] == prev_prompt_and_completion
+        )
+        if not episodes or not extends_prev:
+            episodes.append(
+                Episode(
+                    # TODO(async): carry per-token version_intervals across the pack so a
+                    #   completion that straddles a weight swap is graded against the right version.
+                    policy_version=rollout_turn.policy_version,
+                    sample_id=(
+                        rollout.sample_id
+                        if not episodes
+                        else f"{rollout.sample_id}/branch={len(episodes)}"
+                    ),
+                    token_ids=[],
+                    loss_mask=[],
+                    logprobs=[],
+                    advantage=[],
+                )
+            )
+            # The whole prompt opens this episode.
+            prefix_len = 0
+        else:
+            # Only the env-reply suffix is new.
+            prefix_len = len(prev_prompt_and_completion)
+
+        # Untrained prefix delta (the prompt or the new env reply), then the trained completion.
+        episode = episodes[-1]
+        prompt_delta = prompt[prefix_len:]
+        episode.token_ids += prompt_delta
+        episode.loss_mask += [False] * len(prompt_delta)
+        episode.logprobs += [0.0] * len(prompt_delta)
+        episode.advantage += [0.0] * len(prompt_delta)
+        episode.token_ids += rollout_turn.completion_token_ids
+        episode.loss_mask += [True] * len(rollout_turn.completion_token_ids)
+        episode.logprobs += rollout_turn.completion_logprobs
+        episode.advantage += [rollout_advantage] * len(
+            rollout_turn.completion_token_ids
+        )
+
+        prev_prompt_and_completion = prompt + rollout_turn.completion_token_ids
+
+    return episodes
 
 
 def prepare_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metric]:
@@ -80,6 +119,7 @@ def prepare_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
 
     truncated = [float(r.status.is_truncated()) for r in rollouts]
     rewards = [r.reward for r in rollouts if r.reward is not None]
+    num_turns = [float(len(rollout.turns)) for rollout in rollouts]
 
     out: list[m.Metric] = [
         m.Metric(f"{prefix}/response_length", m.Mean.from_list(completion_lens)),
@@ -88,6 +128,8 @@ def prepare_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
         m.Metric(f"{prefix}/prompt_length", m.Max.from_list(prompt_lens)),
         m.Metric(f"{prefix}/total_length", m.Mean.from_list(total_lens)),
         m.Metric(f"{prefix}/total_length", m.Max.from_list(total_lens)),
+        m.Metric(f"{prefix}/num_turns", m.Mean.from_list(num_turns)),
+        m.Metric(f"{prefix}/num_turns", m.Max.from_list(num_turns)),
         m.Metric(f"{prefix}/truncation_rate", m.Mean.from_list(truncated)),
         m.Metric(f"{prefix}_reward", m.SummaryStats.from_list(rewards)),
     ]
