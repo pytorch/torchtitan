@@ -20,8 +20,8 @@ import pytest
 from vllm.sampling_params import RequestOutputKind
 
 from torchtitan.experiments.rl.actors.generator import (
-    _InflightRequest,
     _prepare_generation_request_metrics,
+    GenerationFuture,
     SamplingConfig,
     VLLMGenerator,
 )
@@ -79,10 +79,10 @@ def _generator():
     """A bare generator (no __init__ / engine build) with just the CB state set."""
     generator = VLLMGenerator.__new__(VLLMGenerator)
     generator._engine = _FakeEngine()
-    generator._tp_rank = 0
+    generator._rank = 0
     generator.policy_version = 7
     generator._stop_token_ids = []
-    generator._inflight_requests = {}
+    generator._generation_futures = {}
     generator.config = SimpleNamespace(
         sampling=SamplingConfig(temperature=0.0, top_p=1.0, max_tokens=4),
         debug=SimpleNamespace(seed=None),
@@ -93,15 +93,15 @@ def _generator():
 # --- completion (token-out) ---
 
 
-def test_complete_finished_requests_resolves_future_with_completion():
+def test_resolve_finished_requests_resolves_future_with_completion():
     async def main():
         generator = _generator()
         future = asyncio.get_running_loop().create_future()
-        generator._inflight_requests = {
-            "r0": _InflightRequest(future=future, metrics_prefix="generator")
+        generator._generation_futures = {
+            "r0": GenerationFuture(future=future, metrics_prefix="generator")
         }
 
-        generator._complete_finished_requests(
+        generator._resolve_finished_requests(
             [
                 _request_output(
                     outputs=[_sample(token_ids=(10, 11), finish_reason="length")]
@@ -116,7 +116,7 @@ def test_complete_finished_requests_resolves_future_with_completion():
         assert completion.finish_reason == "length"
         assert completion.policy_version == 7
         # The request is popped from the in-flight map.
-        assert generator._inflight_requests == {}
+        assert generator._generation_futures == {}
         # The per-generation metrics ride on the completion.
         assert (
             m.MetricsProcessor._aggregate_metrics(completion.metrics)[
@@ -128,12 +128,12 @@ def test_complete_finished_requests_resolves_future_with_completion():
     asyncio.run(main())
 
 
-def test_complete_finished_requests_noop_on_followers():
+def test_resolve_finished_requests_noop_on_followers():
     # Followers hold no futures, so completion is a no-op (it returns before touching outputs).
     generator = _generator()
-    generator._tp_rank = 1
-    generator._complete_finished_requests([_request_output(request_id="r0")])
-    assert generator._inflight_requests == {}
+    generator._rank = 1
+    generator._resolve_finished_requests([_request_output(request_id="r0")])
+    assert generator._generation_futures == {}
 
 
 # --- SamplingParams contract (must match the batched path exactly) ---

@@ -19,7 +19,7 @@ class Completion:
 
         Completion(policy_version=7, request_id="r0", token_ids=[12, 9],
                    token_logprobs=[-0.2, -1.1], finish_reason="stop",
-                   metrics=[Metric("generator/output_tokens", ...)])
+                   metrics=[Metric("generator/queue_time_ms", ...)])
     """
 
     policy_version: int

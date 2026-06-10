@@ -12,7 +12,6 @@ import gc
 import logging
 import math
 import os
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 import torch
@@ -180,7 +179,7 @@ class VLLMGenerator(Actor, Configurable):
     Notice that vLLM `engine.step`, which is a TP collective, and the request-intake are decoupled, so a new request
     can join mid-flight, instead of waiting for the current batch to drain.
 
-    One tick, TP=2, after the controller fired generate(p0) and generate(p1):
+    One loop iteration, TP=2, after the controller fired generate(p0) and generate(p1):
 
         # request intake in `generate` takes a prompt, puts in a queue, releases control back to the controller
         generate(p0): enqueue p0, await future0   ┐ rank 0 owns the queue + futures
@@ -196,8 +195,8 @@ class VLLMGenerator(Actor, Configurable):
 
         # resolve the future, waking up `generate` so it returns the result to the controller.
         # Note that p1 can be done before p0. The result is per request, not per batch.
-        rank 0   _complete_finished_requests -> p1 done? future1.set_result(Completion)
-        rank 1   _complete_finished_requests -> no-op (holds no futures)
+        rank 0   _resolve_finished_requests -> p1 done? future1.set_result(Completion)
+        rank 1   _resolve_finished_requests -> no-op (holds no futures)
 
     A weight sync rides the same loop: `pull_model_state_dict` queues a `LoopDecision(LoopAction.PULL_WEIGHTS)` applied
     between step bursts. The engine does NOT drain in-flight requests first ("hotswap"). This behavior can be changed
@@ -250,6 +249,14 @@ class VLLMGenerator(Actor, Configurable):
         each newly-arrived request triggers its own prefill; >1 buffers arrivals over the burst
         so several admit (and prefill) together. Higher also amortizes the per-burst broadcast,
         at the cost of a new request waiting a few more steps before it is admitted."""
+
+        reset_prefix_cache_on_weight_sync: bool = True
+        """Affects requests admitted AFTER the pull: clears the prefix-cache table so they prefill
+        fresh instead of reusing a prefix cached under the old weights. Leaves running requests alone."""
+
+        reset_running_requests_on_weight_sync: bool = False
+        """Affects requests ALREADY running at the pull: preempts them and recomputes their KV under
+        the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only."""
 
         def __post_init__(self):
             # VLLMGenerator only supports TP. vLLM handles its own parallelism;
@@ -403,16 +410,15 @@ class VLLMGenerator(Actor, Configurable):
         self._broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
         self._condition = asyncio.Condition()  # Signals to wake up when there is work
 
-        # Rank 0 adds requests to this queue on `generate` calls.
-        self._queued_requests: list[PendingRequest] = []
+        # Engine-loop INBOX (rank 0): requests the controller submits; the loop reads them to decide.
+        self._queued_generation_requests: list[GenerationRequest] = []
+        self._weight_pull_request: WeightPullRequest | None = None
+        self._close_request: CloseRequest | None = None
 
-        # Rank 0 uses it as a placeholder for engine_loop futures
-        self._inflight_requests: dict[str, _InflightRequest] = {}
-
-        # Rank 0 changes the state of these variables on weigh sync pull calls
-        # and on close (shutdown) calls, which signals the engine_loop to act.
-        self._pending_pull: PendingPull | None = None
-        self._close_requested = False
+        # RANK-0 OUTBOX: futures the loop resolves so the awaiting endpoint returns.
+        # (close has no future here: its completion handle is `_engine_loop_task`.)
+        self._generation_futures: dict[str, GenerationFuture] = {}
+        self._pull_weight_future: asyncio.Future[int] | None = None
 
         # Async task to drive the engine_loop
         self._engine_loop_task: asyncio.Task | None = None
@@ -477,7 +483,7 @@ class VLLMGenerator(Actor, Configurable):
             completion = await generator.generate.call(
                 [1, 2, 3], request_id="step=3/group=0/sample=0/turn=0",
             )
-            # rank 0 -> Completion(token_ids=[...], metrics=[Metric("generator/output_tokens", ...)]);
+            # rank 0 -> Completion(token_ids=[...], metrics=[Metric("generator/queue_time_ms", ...)]);
             # followers -> None
         """
 
@@ -494,7 +500,7 @@ class VLLMGenerator(Actor, Configurable):
 
         # `condition` wakes the engine loop, if asleep, when a new request is added.
         async with self._condition:
-            if request_id in self._inflight_requests:
+            if request_id in self._generation_futures:
                 raise ValueError(f"request_id {request_id!r} is already in flight")
 
             # A placeholder future for the engine loop to resolve with this request's Completion.
@@ -503,13 +509,13 @@ class VLLMGenerator(Actor, Configurable):
             ] = asyncio.get_running_loop().create_future()
 
             # Register the future before enqueueing; the engine loop resolves it.
-            self._inflight_requests[request_id] = _InflightRequest(
+            self._generation_futures[request_id] = GenerationFuture(
                 future=future, metrics_prefix=metrics_prefix
             )
 
             # Add the request to the queue; the engine loop will admit + process it.
-            self._queued_requests.append(
-                PendingRequest(
+            self._queued_generation_requests.append(
+                GenerationRequest(
                     request_id=request_id,
                     prompt_token_ids=prompt_token_ids,
                     sampling=sampling,
@@ -518,7 +524,7 @@ class VLLMGenerator(Actor, Configurable):
             # Wakes the engine loop only if it is idle in `_decide_next_action`.
             self._condition.notify_all()
 
-        # Await to release the control while the future is not ready, so other requests can come in
+        # Await outside the lock so other generate / pull calls can proceed meanwhile.
         return await future
 
     async def _ensure_engine_loop(self) -> None:
@@ -594,23 +600,12 @@ class VLLMGenerator(Actor, Configurable):
                         break
                     with torch.no_grad():
                         request_outputs = self._engine.step()
-                    self._complete_finished_requests(request_outputs)
+                    self._resolve_finished_requests(request_outputs)
                     await asyncio.sleep(0)  # let pending generate() calls enqueue
 
         except Exception as exc:
-            logger.exception("engine loop crashed; failing all in-flight requests")
-
-            # resolve all request futures.
-            for inflight in self._inflight_requests.values():
-                if not inflight.future.done():
-                    inflight.future.set_exception(exc)
-            self._inflight_requests.clear()
-
-            # Resolve `pull_model_state_dict` future.
-            if self._pending_pull is not None:
-                if not self._pending_pull.future.done():
-                    self._pending_pull.future.set_exception(exc)
-                self._pending_pull = None
+            logger.exception("engine loop crashed; failing all outstanding futures")
+            self._fail_outstanding_futures(exc)
             raise
 
     async def _decide_next_action(self) -> LoopDecision:
@@ -621,36 +616,45 @@ class VLLMGenerator(Actor, Configurable):
         # Notice that In-flight requests keep the condition as true, so there is need no notify.
         async with self._condition:
             await self._condition.wait_for(
-                lambda: self._close_requested
-                or self._pending_pull is not None
-                or self._queued_requests
+                lambda: self._close_request is not None
+                or self._weight_pull_request is not None
+                or self._queued_generation_requests
                 or self._engine.has_unfinished_requests()
             )
 
-            if self._close_requested:
+            if self._close_request is not None:
                 return LoopDecision(action=LoopAction.CLOSE, requests=[])
 
             # A weight pull takes priority over admitting new requests.
-            if self._pending_pull is not None:
+            if self._weight_pull_request is not None:
                 return LoopDecision(
                     action=LoopAction.PULL_WEIGHTS,
                     requests=[],
-                    pull_version=self._pending_pull.version,
+                    pull_version=self._weight_pull_request.version,
                 )
 
             # STEP: admit whatever is queued (may be empty -> just keep stepping in-flight work).
-            requests, self._queued_requests = self._queued_requests, []
+            requests, self._queued_generation_requests = (
+                self._queued_generation_requests,
+                [],
+            )
             return LoopDecision(action=LoopAction.STEP, requests=requests)
 
-    def _complete_finished_requests(self, request_outputs: list[RequestOutput]) -> None:
+    def _resolve_finished_requests(self, request_outputs: list[RequestOutput]) -> None:
         """RANK 0: resolve each finished request's future with its `Completion` (metrics included)."""
         if self._rank != 0:
             return  # other ranks hold no futures
 
         for request_output in request_outputs:
-            inflight = self._inflight_requests.pop(request_output.request_id)
-            metrics_prefix = inflight.metrics_prefix
-            completion_output = request_output.outputs[0]  # n=1: one sample per request
+            generation_future = self._generation_futures.pop(request_output.request_id)
+            metrics_prefix = generation_future.metrics_prefix
+            # Sanity check to avoid unwanted behavior.
+            if len(request_output.outputs) != 1:
+                raise ValueError(
+                    f"expected n=1 (one sample per request), got "
+                    f"{len(request_output.outputs)} for {request_output.request_id}"
+                )
+            completion_output = request_output.outputs[0]
             token_logprobs = [
                 next(iter(logprob_dict.values())).logprob
                 for logprob_dict in completion_output.logprobs
@@ -659,7 +663,7 @@ class VLLMGenerator(Actor, Configurable):
                 request_output, prefix=metrics_prefix
             )
             # +1 for the just-popped request
-            inflight_at_completion = float(len(self._inflight_requests) + 1)
+            inflight_at_completion = float(len(self._generation_futures) + 1)
             for metric_type in [m.Max, m.Mean]:
                 metrics.append(
                     m.Metric(
@@ -668,7 +672,7 @@ class VLLMGenerator(Actor, Configurable):
                     )
                 )
 
-            inflight.future.set_result(
+            generation_future.future.set_result(
                 Completion(
                     policy_version=self.policy_version,
                     request_id=request_output.request_id,
@@ -678,6 +682,19 @@ class VLLMGenerator(Actor, Configurable):
                     metrics=metrics,
                 )
             )
+
+    def _fail_outstanding_futures(self, exc: BaseException) -> None:
+        """Fail every unresolved future"""
+        for generation_future in self._generation_futures.values():
+            if not generation_future.future.done():
+                generation_future.future.set_exception(exc)
+        self._generation_futures.clear()
+
+        if self._pull_weight_future is not None:
+            if not self._pull_weight_future.done():
+                self._pull_weight_future.set_exception(exc)
+            self._pull_weight_future = None
+            self._weight_pull_request = None
 
     def _build_sampling_params(self, sampling: SamplingConfig) -> SamplingParams:
         """Translate a `SamplingConfig` into vLLM `SamplingParams` (n=1; seed from debug)."""
@@ -710,21 +727,22 @@ class VLLMGenerator(Actor, Configurable):
         if self._rank != 0:
             return
 
-        # A placeholder the engine loop resolves once the pull has been applied.
+        # A placeholder future for the engine loop to resolve once the pull has been applied.
         pull_applied: asyncio.Future[int] = asyncio.get_running_loop().create_future()
 
-        # `condition` wakes the engine loop when a pull is queued.
+        # `condition` wakes the engine loop, if asleep, when a pull is queued.
         async with self._condition:
-            self._pending_pull = PendingPull(version=version, future=pull_applied)
+            self._weight_pull_request = WeightPullRequest(version=version)
+            self._pull_weight_future = pull_applied
             self._condition.notify_all()  # wakes the engine loop only if it is idle
 
-        # release control back to the controller
+        # Await outside the lock so other generate / pull calls can proceed meanwhile.
         await pull_applied
 
     @sl.log_trace_span("pull_weights_copy")
     async def _pull_weights(self, version: int) -> None:
-        """ALL RANKS: collectively copy the latest weights from TorchStore, drop the prefix
-        cache (so no new request reuses an old-weight prefix), and bump the policy version.
+        """ALL RANKS: collectively copy the latest weights from TorchStore, optionally drop the
+        prefix cache (so no new request reuses an old-weight prefix), and bump the policy version.
         """
         # TODO: with >1 generator, trainer should probably use direct_rdma=False (CPU-staged, fanout-safe)
         # is_rdma_available() is a hardware probe, not a fanout signal.
@@ -736,20 +754,26 @@ class VLLMGenerator(Actor, Configurable):
             direct_rdma=is_rdma_available(),
         )
         self.policy_version = version
-        self._engine.reset_prefix_cache()
+        if self.config.reset_prefix_cache_on_weight_sync:
+            # TODO(async): under hot-swap, prefer per-token weight-version tracking over a full
+            # cache drop (see the version_intervals TODO in rollout/utils.py:rollout_to_episodes).
+            self._engine.reset_prefix_cache(
+                reset_running_requests=self.config.reset_running_requests_on_weight_sync,
+            )
         gc.collect()
 
         # Rank 0 holds the pull's future. Until this is resolved,
-        # no new requests are admittedor processed.
-        if self._rank == 0 and self._pending_pull is not None:
-            self._pending_pull.future.set_result(version)
-            self._pending_pull = None
+        # no new requests are admitted or processed.
+        if self._rank == 0 and self._pull_weight_future is not None:
+            self._pull_weight_future.set_result(version)
+            self._pull_weight_future = None
+            self._weight_pull_request = None
 
     @endpoint
     async def close(self) -> None:
         """Stop the engine loop, then release the vLLM engine.
 
-        Rank 0 sets `_close_requested=True` and notifies the engine_loop to quit the while-loop.
+        Rank 0 sets `_close_request` and notifies the engine_loop to quit the while-loop.
         Any futures the loop left unresolved are then failed, so awaiting callers get an
         exception instead of hanging.
 
@@ -760,7 +784,7 @@ class VLLMGenerator(Actor, Configurable):
         """
         if self._rank == 0:
             async with self._condition:
-                self._close_requested = True
+                self._close_request = CloseRequest()
                 self._condition.notify_all()  # wake the loop so it returns CLOSE
 
         # Let the engine loop process the shutdown.
@@ -773,18 +797,9 @@ class VLLMGenerator(Actor, Configurable):
 
         # The loop has stopped; fail any futures it left unresolved so awaiting callers get an
         # exception instead of hanging.
-        for inflight in self._inflight_requests.values():
-            if not inflight.future.done():
-                inflight.future.set_exception(
-                    RuntimeError("generator closed before the request finished")
-                )
-        self._inflight_requests.clear()
-        if self._pending_pull is not None:
-            if not self._pending_pull.future.done():
-                self._pending_pull.future.set_exception(
-                    RuntimeError("generator closed before the weight pull applied")
-                )
-            self._pending_pull = None
+        self._fail_outstanding_futures(
+            RuntimeError("generator closed before the request finished")
+        )
 
         # Shut down engine parts
         if self._engine is not None:
@@ -798,8 +813,11 @@ class VLLMGenerator(Actor, Configurable):
 # ===================== helpers =====================
 
 
+# ---- Engine-loop inbox: requests the controller submits (picklable; broadcast in LoopDecision). ----
+
+
 @dataclass(kw_only=True, slots=True)
-class PendingRequest:
+class GenerationRequest:
     """One queued `generate` call awaiting admission to the engine."""
 
     request_id: str
@@ -808,26 +826,32 @@ class PendingRequest:
 
 
 @dataclass(kw_only=True, slots=True)
-class _InflightRequest:
-    """An admitted request future the loop will resolve. `metrics_prefix` namespaces the
-    per-generation metrics built at completion (e.g. "generator" vs "validation_generator").
-    """
+class WeightPullRequest:
+    """A queued weight pull: the policy `version` to copy from TorchStore."""
+
+    version: int
+
+
+@dataclass(kw_only=True, slots=True)
+class CloseRequest:
+    """A queued shutdown signal (no payload); the engine loop returns CLOSE when it sees one."""
+
+
+# ---- Rank-0 outbox: the future the loop resolves per generation. ----
+
+
+@dataclass(kw_only=True, slots=True)
+class GenerationFuture:
+    """A generation request's future the loop resolves with its `Completion`. `metrics_prefix`
+    namespaces the per-generation metrics built at completion (e.g. "generator" vs
+    "validation_generator")."""
 
     future: asyncio.Future[Completion]
     metrics_prefix: str
 
 
-@dataclass(kw_only=True, slots=True)
-class PendingPull:
-    """A queued weight pull: the requested `version` + the future the engine loop resolves
-    once the pull has been applied (so the awaiting `pull_model_state_dict` returns)."""
-
-    version: int
-    future: asyncio.Future[int]
-
-
 class LoopAction(enum.Enum):
-    """What the engine loop does this tick (rank 0 decides; the choice is broadcast to all)."""
+    """What the engine loop does each loop iteration (rank 0 decides; the choice is broadcast to all)."""
 
     STEP = "step"
     # run a burst of engine.step(); first admit any newly-queued requests.
@@ -841,17 +865,13 @@ class LoopAction(enum.Enum):
 
 @dataclass(kw_only=True, slots=True)
 class LoopDecision:
-    """The per-tick decision rank 0 broadcasts so every rank acts identically.
+    """The per-iteration decision rank 0 broadcasts so every rank acts identically.
     This is broadcasted (pickled) in the engine_loop"""
 
     action: LoopAction
 
-    requests: list[PendingRequest] | None = None
+    requests: list[GenerationRequest] | None = None
     # requests to admit before a STEP burst (empty unless any queued)
 
     pull_version: int | None = None
     # set iff action is PULL_WEIGHTS
-
-
-# What `RLTrainer` binds and hands a `Rollouter`: await one prompt -> Completion (or None on followers).
-GenerateFn = Callable[..., Awaitable[Completion | None]]

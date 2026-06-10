@@ -16,6 +16,7 @@ from renderers import Renderer
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.environment import MessageEnv, TokenEnv
 from torchtitan.experiments.rl.rollout.types import (
+    GenerateFn,
     Rollout,
     RolloutGroup,
     RolloutStatus,
@@ -25,7 +26,7 @@ from torchtitan.experiments.rl.rubrics import Rubric, RubricOutput
 
 if TYPE_CHECKING:
     # Type-only: importing the generator module here would pull in vLLM at import time.
-    from torchtitan.experiments.rl.actors.generator import GenerateFn, SamplingConfig
+    from torchtitan.experiments.rl.actors.generator import SamplingConfig
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ def _sample_id(group_id: str, sample_idx: int) -> str:
 
 
 class Rollouter(Configurable):
-    """Turns a problem (train/val datasets, the `MessageEnv` to build per example, and a
+    """Turns a problem (train/val datasets, the `MessageEnv` to build per sample, and a
     `Rubric`) into scored rollouts — the RL training data.
 
     Like a `Dataloader` turns a `Dataset` into training batches, a `Rollouter`
@@ -54,7 +55,7 @@ class Rollouter(Configurable):
 
         sample = rollouter.get_training_sample()        # one sample from the dataset
         group = await rollouter.run_group_rollouts(     # build envs, drive turns, score
-            generate=generate, example=sample, group_id="step=3/group=0",
+            generate_fn=generate_fn, sample=sample, group_id="step=3/group=0",
             group_size=N, sampling=sampling, renderer=renderer)
 
     `MessageEnv` works in messages; `TokenEnv` (what `make_env_group` returns)
@@ -154,8 +155,8 @@ class Rollouter(Configurable):
     async def run_group_rollouts(
         self,
         *,
-        generate: GenerateFn,
-        example: object,
+        generate_fn: GenerateFn,
+        sample: object,
         group_id: str,
         group_size: int,
         sampling: SamplingConfig,
@@ -163,14 +164,14 @@ class Rollouter(Configurable):
     ) -> RolloutGroup:
         """Roll out and score one prompt group.
 
-        Builds `group_size` sibling envs from one example and drives them concurrently;
-        each sibling drives its own `generate` calls, so the generator coalesces a whole
+        Builds `group_size` sibling envs from one sample and drives them concurrently;
+        each sibling drives its own `generate_fn` calls, so the generator coalesces a whole
         group's calls into one continuous batch. Then `score_group` fills each reward.
 
         Args:
-            generate: Async callable bound to one generator (Monarch hidden); a rollout
+            generate_fn: Async callable bound to one generator (Monarch hidden); a rollout
                 awaits it once per turn.
-            example: Dataset example shared by the group.
+            sample: Dataset sample shared by the group.
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
             sampling: Sampling config for every generate call in the group.
@@ -180,7 +181,7 @@ class Rollouter(Configurable):
             One scored `RolloutGroup`.
         """
         envs = self.make_env_group(
-            sample=example, group_size=group_size, renderer=renderer
+            sample=sample, group_size=group_size, renderer=renderer
         )
         # The group owns the envs' lifecycle: close them once all siblings finish (or one
         # raises / the group is cancelled), so a single rollout never closes its own env.
@@ -188,7 +189,7 @@ class Rollouter(Configurable):
             rollouts = await asyncio.gather(
                 *(
                     self.run_single_rollout(
-                        generate=generate,
+                        generate_fn=generate_fn,
                         env=env,
                         sampling=sampling,
                         group_id=group_id,
@@ -199,7 +200,7 @@ class Rollouter(Configurable):
             )
         finally:
             await asyncio.gather(*(env.close() for env in envs), return_exceptions=True)
-        outputs = await self.score_group(rollouts, example)
+        outputs = await self.score_group(rollouts, sample)
         for rollout, output in zip(rollouts, outputs, strict=True):
             rollout.reward = output.reward
             rollout.reward_breakdown = output.reward_breakdown
@@ -208,21 +209,21 @@ class Rollouter(Configurable):
     async def run_single_rollout(
         self,
         *,
-        generate: GenerateFn,
+        generate_fn: GenerateFn,
         env: TokenEnv,
         sampling: SamplingConfig,
         group_id: str,
         sample_idx: int,
     ) -> Rollout:
-        """Drive one env to a terminal state via its own `generate` calls.
+        """Drive one env to a terminal state via its own `generate_fn` calls.
 
-        Loops `generate -> env.step` until the env is terminal (env `done`, length /
+        Loops `generate_fn -> env.step` until the env is terminal (env `done`, length /
         parse / timeout, or prompt overflow). Single-turn envs end after one step; a
         runaway env is cut off at `_MAX_TURNS`. On any error the rollout keeps the turns
         gathered so far, marked ERROR; the controller scores it afterward via `score_group`.
 
         Args:
-            generate: Async callable bound to one generator (Monarch hidden).
+            generate_fn: Async callable bound to one generator (Monarch hidden).
             env: The env for this rollout; `run_group_rollouts` closes it.
             sampling: Sampling config for every generate call.
             group_id: Group id, prefixed onto each turn's `request_id` so all of a group's
@@ -237,7 +238,7 @@ class Rollouter(Configurable):
         try:
             step = await env.init()
             while not step.status.is_terminal() and len(turns) < _MAX_TURNS:
-                completion = await generate(
+                completion = await generate_fn(
                     step.next_prompt_token_ids,
                     request_id=f"{group_id}/sample={sample_idx}/turn={len(turns)}",
                     sampling_config=sampling,

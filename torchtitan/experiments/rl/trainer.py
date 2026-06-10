@@ -442,7 +442,7 @@ class RLTrainer(Configurable):
         )
         rollout_metrics_prefix = "validation" if is_validation else "rollout"
 
-        async def generate(prompt_token_ids, *, request_id, sampling_config=None):
+        async def generate_fn(prompt_token_ids, *, request_id, sampling_config=None):
             result = await self.generator.generate.call(
                 prompt_token_ids,
                 request_id=request_id,
@@ -455,10 +455,10 @@ class RLTrainer(Configurable):
         # request still in flight in the long-lived continuous-batching engine.
         group_prefix = "val/" if is_validation else ""
 
-        # Sample one example per group, then run every group's rollouts concurrently.
+        # Draw one dataset sample per group, then run every group's rollouts concurrently.
         # TODO: "sample" is too confusing. e.g. is this a training sample?
         # A rollout sample? Lets find a better name
-        examples = [
+        samples = [
             (
                 self._rollouter.get_validation_sample()
                 if is_validation
@@ -469,14 +469,14 @@ class RLTrainer(Configurable):
         group_results = await asyncio.gather(
             *(
                 self._rollouter.run_group_rollouts(
-                    generate=generate,
-                    example=example,
+                    generate_fn=generate_fn,
+                    sample=sample,
                     group_id=f"{group_prefix}step={step}/group={group_offset + i}",
                     group_size=group_size,
                     sampling=sampling,
                     renderer=self.renderer,
                 )
-                for i, example in enumerate(examples)
+                for i, sample in enumerate(samples)
             ),
             return_exceptions=True,
         )
@@ -576,13 +576,15 @@ class RLTrainer(Configurable):
         zero_std_frac = (
             sum(1 for s in group_stds if s == 0.0) / num_groups if num_groups else 0.0
         )
-        # Rollout reward rides `rollout_reward` (see `prepare_rollout_metrics`); here we emit
-        # only the GRPO-specific signals — advantage, per-group reward std, zero-std fraction.
+        # All reward keys ride `rollout_reward` (mean/max/etc. from `prepare_rollout_metrics`);
+        # here we add the GRPO-specific ones — advantage, per-group reward std, zero-std fraction.
+        # TODO: we need a better consolidation on where rollout metrics should be computed
+        # as of now, it is scattered between rollouter, generator, controller.
         episode_metrics: list[m.Metric] = [
             m.Metric("advantage", m.SummaryStats.from_list(advantages_per_rollout)),
-            m.Metric("reward/group_std", m.Mean.from_list(group_stds)),
-            m.Metric("reward/group_std", m.Max.from_list(group_stds)),
-            m.Metric("reward/zero_std_frac", m.NoReduce(zero_std_frac)),
+            m.Metric("rollout_reward/group_std", m.Mean.from_list(group_stds)),
+            m.Metric("rollout_reward/group_std", m.Max.from_list(group_stds)),
+            m.Metric("rollout_reward/zero_std_frac", m.NoReduce(zero_std_frac)),
             m.Metric(
                 "rollout/branches_per_rollout", m.Mean.from_list(branches_per_rollout)
             ),

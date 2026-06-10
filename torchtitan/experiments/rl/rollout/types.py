@@ -6,16 +6,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
 from renderers import Message
 
 from torchtitan.experiments.rl.observability import metrics as m
+from torchtitan.experiments.rl.types import Completion
 
 
 _TRUNCATED = frozenset({"truncated_length", "truncated_prompt_too_long"})
 _ERROR = frozenset({"error_parse", "error_timeout", "error_abort", "error"})
+
+
+# The Rollouter's seam to a generator: await one prompt -> one Completion (None on follower ranks).
+# The controller binds one (see RLTrainer._collect_rollouts).
+GenerateFn = Callable[..., Awaitable[Completion | None]]
 
 
 class RolloutStatus(StrEnum):

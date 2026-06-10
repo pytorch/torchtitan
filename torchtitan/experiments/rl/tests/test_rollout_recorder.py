@@ -179,7 +179,7 @@ def test_turn_metrics_are_excluded_not_serialized(tmp_path) -> None:
     from torchtitan.experiments.rl.observability import metrics as m
 
     turn = _turn(completion_logprobs=[-0.5, -1.5])
-    turn.metrics = [m.Metric("generator/output_tokens", m.Sum(2.0))]
+    turn.metrics = [m.Metric("generator/queue_time_ms", m.Mean(2.0))]
     rollout = Rollout(
         group_id="step=1/group=0",
         sample_id="step=1/group=0/sample=0",

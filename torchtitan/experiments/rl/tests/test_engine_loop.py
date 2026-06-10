@@ -15,11 +15,12 @@ from __future__ import annotations
 import asyncio
 
 from torchtitan.experiments.rl.actors.generator import (
+    CloseRequest,
+    GenerationRequest,
     LoopAction,
-    PendingPull,
-    PendingRequest,
     SamplingConfig,
     VLLMGenerator,
+    WeightPullRequest,
 )
 
 
@@ -34,22 +35,22 @@ class _FakeEngine:
 def _bare_generator(
     *,
     close_requested: bool = False,
-    pending_pull: PendingPull | None = None,
-    pending: list[PendingRequest] | None = None,
+    weight_pull_request: WeightPullRequest | None = None,
+    pending: list[GenerationRequest] | None = None,
     unfinished: bool = False,
 ) -> VLLMGenerator:
     # Bypass __init__ (which builds the vLLM engine); set only the loop's state.
     generator = object.__new__(VLLMGenerator)
     generator._condition = asyncio.Condition()
-    generator._close_requested = close_requested
-    generator._pending_pull = pending_pull
-    generator._queued_requests = pending or []
+    generator._close_request = CloseRequest() if close_requested else None
+    generator._weight_pull_request = weight_pull_request
+    generator._queued_generation_requests = pending or []
     generator._engine = _FakeEngine(unfinished=unfinished)
     return generator
 
 
-def _request() -> PendingRequest:
-    return PendingRequest(
+def _request() -> GenerationRequest:
+    return GenerationRequest(
         request_id="r0",
         prompt_token_ids=[1, 2],
         sampling=SamplingConfig(),
@@ -63,14 +64,16 @@ def test_closing_returns_close() -> None:
 
 def test_pull_takes_precedence_over_queued_requests() -> None:
     request = _request()
-    pull = PendingPull(version=5, future=None)
-    generator = _bare_generator(pending_pull=pull, pending=[request])
+    pull = WeightPullRequest(version=5)
+    generator = _bare_generator(weight_pull_request=pull, pending=[request])
     decision = asyncio.run(generator._decide_next_action())
     assert decision.action is LoopAction.PULL_WEIGHTS and decision.pull_version == 5
-    # `_pending_pull` is NOT cleared at decide — the PULL_WEIGHTS branch clears it after applying;
-    # the single-threaded loop can't re-decide before then, so the predicate won't re-fire.
-    assert generator._pending_pull is pull
-    assert generator._queued_requests == [request]  # NOT consumed — pull runs first
+    # `_weight_pull_request` is NOT cleared at decide — the PULL_WEIGHTS branch clears it after
+    # applying; the single-threaded loop can't re-decide before then, so the predicate won't re-fire.
+    assert generator._weight_pull_request is pull
+    assert generator._queued_generation_requests == [
+        request
+    ]  # NOT consumed — pull runs first
 
 
 def test_step_drains_the_queue() -> None:
@@ -78,7 +81,7 @@ def test_step_drains_the_queue() -> None:
     generator = _bare_generator(pending=[request])
     decision = asyncio.run(generator._decide_next_action())
     assert decision.action is LoopAction.STEP and decision.requests == [request]
-    assert generator._queued_requests == []  # drained into the decision
+    assert generator._queued_generation_requests == []  # drained into the decision
 
 
 def test_step_with_empty_queue_when_only_in_flight_work_remains() -> None:

@@ -122,6 +122,9 @@ def prepare_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
     num_turns = [float(len(rollout.turns)) for rollout in rollouts]
 
     out: list[m.Metric] = [
+        m.Metric(f"{prefix}/output_tokens", m.Mean.from_list(completion_lens)),
+        m.Metric(f"{prefix}/output_tokens", m.Std.from_list(completion_lens)),
+        m.Metric(f"{prefix}/output_tokens", m.Max.from_list(completion_lens)),
         m.Metric(f"{prefix}/response_length", m.Mean.from_list(completion_lens)),
         m.Metric(f"{prefix}/response_length", m.Max.from_list(completion_lens)),
         m.Metric(f"{prefix}/prompt_length", m.Mean.from_list(prompt_lens)),
