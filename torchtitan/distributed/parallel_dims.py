@@ -193,6 +193,7 @@ class ParallelDims:
             # flattened ``fsdp``); keep alive at size 1 so ``fully_shard``
             # can install MixedPrecisionPolicy and FSDP can discriminate
             # the DP submesh on TP/DDP/PP-only.
+            return True
         if name == "dp_replicate":  # TODO(jianiw): check if this is needed
             # Always keep dp_replicate mesh so replicate() / fully_shard()
             # can use it for data parallel replication even at degree 1.
