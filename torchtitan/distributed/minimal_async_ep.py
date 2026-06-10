@@ -399,7 +399,8 @@ def _combine_to_origin(
     combine_num_valid_rows: torch.Tensor,
     num_routed_rows: int,
 ) -> torch.Tensor:
-    combined = _copy_rows_to_peers_and_wait_cuda(
+    """Copy active local rows back to origin ranks as logical ``(N, D)`` rows."""
+    origin_recv_buffer = _copy_rows_to_peers_and_wait_cuda(
         x_RD,
         combine_dst_ranks,
         combine_dst_rows,
@@ -407,7 +408,10 @@ def _combine_to_origin(
         block_m=4,
         num_valid_rows=combine_num_valid_rows,
     )
-    return combined[:num_routed_rows, : x_RD.shape[1]]
+    # The symmetric buffer is sized for the maximum receive capacity. Combine
+    # only writes origin-rank routed rows ``[0:N]`` and downstream reductions
+    # should not see capacity padding or unused trailing columns.
+    return origin_recv_buffer.narrow(0, 0, num_routed_rows).narrow(1, 0, x_RD.shape[1])
 
 
 @torch.library.custom_op(
