@@ -331,28 +331,41 @@ def rl_grpo_qwen3_moe_debug_ep() -> RLTrainer.Config:
     Generate the debug checkpoint with:
         python scripts/create_debug_moe_ckpt.py
     """
+    group_size = 8
     return RLTrainer.Config(
         model_spec=model_registry("debugmodel_moe", attn_backend="varlen"),
-        hf_assets_path="/tmp/debug_moe_ckpt",
+        hf_assets_path="tests/assets/tokenizer",
         num_steps=5,
+        num_groups_per_rollout_batch=5,
+        num_validation_samples=20,
         # MoE EP all-to-all path issues unpinned D2H copies that block
         # torch.compile and CUDA graph capture; disable both.
         compile=CompileConfig(enable=False),
-        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
-        validation_env=SumDigitsEnv.Config(
-            seed=99, correctness_reward=1.0, format_reward=0.3
+        rollouter=AlphabetSortRollouter.Config(),
+        group_size=group_size,
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        batcher=Batcher.Config(
+            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
         ),
         trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=8e-4),
+            optimizer=default_adamw(lr=8e-4),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
             ),
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
+                disable_loss_parallel=True,
                 expert_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=False,
+                interval=10,
+                last_save_model_only=False,
             ),
             loss=GRPOLoss.Config(),
         ),
@@ -362,10 +375,14 @@ def rl_grpo_qwen3_moe_debug_ep() -> RLTrainer.Config:
             # piecewise/full graph capture rejects.
             cudagraph=VLLMCudagraphConfig(enable=False),
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
                 expert_parallel_degree=2,
             ),
+            checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 temperature=1.0,
                 top_p=0.95,
@@ -384,25 +401,27 @@ def rl_grpo_qwen3_moe_debug_ep_batch_invariant() -> RLTrainer.Config:
     model config through TorchTitan's custom config parser, and trainer
     checkpointing stays disabled, so no checkpoint is needed.
     """
-    debug_config = DebugConfig(
-        batch_invariant=True,
-        deterministic=True,
-    )
+    group_size = 8
     return RLTrainer.Config(
         model_spec=model_registry(
             "debugmodel_moe", attn_backend="varlen", moe_comm_backend="standard"
         ),
         hf_assets_path="tests/assets/tokenizer",
         num_steps=5,
+        num_groups_per_rollout_batch=5,
+        num_validation_samples=20,
         # MoE EP all-to-all path issues unpinned D2H copies that block
         # torch.compile and CUDA graph capture; disable both.
         compile=CompileConfig(enable=False, backend="aot_eager"),
-        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
-        validation_env=SumDigitsEnv.Config(
-            seed=99, correctness_reward=1.0, format_reward=0.3
+        rollouter=AlphabetSortRollouter.Config(),
+        group_size=group_size,
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        batcher=Batcher.Config(
+            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
         ),
         trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=8e-4),
+            optimizer=default_adamw(lr=8e-4),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
@@ -415,24 +434,32 @@ def rl_grpo_qwen3_moe_debug_ep_batch_invariant() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
-            debug=debug_config,
+            checkpoint=CheckpointManager.Config(
+                enable=False,
+                interval=10,
+                last_save_model_only=False,
+            ),
+            debug=_BATCH_INVARIANT_DEBUG,
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             cudagraph=VLLMCudagraphConfig(enable=False),
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
+            checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 temperature=1.0,
                 top_p=0.95,
                 max_tokens=50,
             ),
-            debug=debug_config,
+            debug=_BATCH_INVARIANT_DEBUG,
         ),
     )
 
@@ -445,37 +472,56 @@ def rl_grpo_qwen3_30b_a3b() -> RLTrainer.Config:
 
     Note: Qwen3-30B-A3B has 4 KV heads, so TP degree cannot exceed 4.
     """
+    group_size = 8
     return RLTrainer.Config(
         model_spec=model_registry("30B-A3B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-30B-A3B",
         num_steps=10,
+        num_groups_per_rollout_batch=5,
+        num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
+        rollouter=AlphabetSortRollouter.Config(),
+        group_size=group_size,
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        batcher=Batcher.Config(
+            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
+        ),
         trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=1e-6),
+            optimizer=default_adamw(lr=1e-6),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
             ),
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
-                tensor_parallel_degree=8,
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=4,
                 disable_loss_parallel=True,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
             ),
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            cudagraph=VLLMCudagraphConfig(enable=True),
             parallelism=ParallelismConfig(
-                tensor_parallel_degree=8,
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
-                expert_parallel_degree=8,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
+                expert_parallel_degree=4,
             ),
+            checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
-                n=8,
                 temperature=0.8,
                 top_p=0.95,
-                max_tokens=100,
+                max_tokens=700,
             ),
         ),
     )
