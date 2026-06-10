@@ -20,7 +20,7 @@ from torchtitan.models.common.rope import (
     CosSinRoPE,
     RoPE,
 )
-from torchtitan.models.qwen3_vl.rope import MRoPE
+from torchtitan.models.qwen3_5.rope import MRoPE
 
 
 class TestApplyRotaryEmbCosSin(unittest.TestCase):
@@ -173,11 +173,11 @@ class TestMRoPECache(unittest.TestCase):
             max_seq_len=8,
             mrope_section=[2, 1, 1],
         ).build()
+        # (batch, seq, 3): per-token [temporal, height, width] positions.
         position_ids = torch.tensor(
             [
-                [[0, 1, 2], [3, 4, 5]],  # temporal
-                [[1, 2, 3], [4, 5, 6]],  # height
-                [[2, 3, 4], [5, 6, 7]],  # width
+                [[0, 1, 2], [1, 2, 3], [2, 3, 4]],  # batch 0
+                [[3, 4, 5], [4, 5, 6], [5, 6, 7]],  # batch 1
             ]
         )
         xq = torch.randn(bsz, seqlen, n_heads, head_dim)

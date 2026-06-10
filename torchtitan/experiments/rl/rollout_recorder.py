@@ -109,7 +109,7 @@ class RolloutSampleRecorder(Configurable):
         return {
             "group_id": rollout.group_id,
             "sample_id": rollout.sample_id,
-            "status": rollout.status,
+            "status": rollout.status.value,
             "reward": rollout.reward,
             "reward_breakdown": rollout.reward_breakdown,
             "advantage": rollout.advantage,

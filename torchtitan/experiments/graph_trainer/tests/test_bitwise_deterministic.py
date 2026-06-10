@@ -210,7 +210,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
         global_valid_tokens = torch.tensor(
             BATCH_SIZE * SEQ_LEN, dtype=torch.float, device="cuda"
         )
-        extra_inputs: dict[str, torch.Tensor] = {}
         extra_kwargs: dict[str, object] = {
             "positions": self.positions,
             **self._get_extra_kwargs(model),
@@ -222,7 +221,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             self.inputs,
             self.labels,
             global_valid_tokens,
-            extra_inputs,
             extra_kwargs,
         )
 
@@ -284,7 +282,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 self.inputs,
                 self.labels,
                 global_valid_tokens,
-                extra_inputs,
                 extra_kwargs,
             )
             loss = outputs[0]

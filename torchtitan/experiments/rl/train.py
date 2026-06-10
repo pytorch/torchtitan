@@ -195,7 +195,7 @@ async def main():
         )
         await rl_trainer.setup_async(
             trainer_mesh=trainer_mesh,
-            generator_mesh=generator_mesh,
+            generator_meshes=[generator_mesh],
         )
         await rl_trainer.train()
     except (KeyboardInterrupt, asyncio.CancelledError):
