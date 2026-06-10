@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import torch
+
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -11,7 +13,7 @@ from torchtitan.config import (
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import minimal_async_ep, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
@@ -22,9 +24,106 @@ from torchtitan.distributed.full_dtensor import (
     validate_config,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
+from torchtitan.tools.utils import device_module, device_type
 
 
+def _get_minimal_async_ep_dispatcher_config(
+    model: DeepSeekV3Model,
+) -> MinimalAsyncEPTokenDispatcher.Config | None:
+    """Return the MinimalAsyncEP config selected through the model spec.
+
+    ``model_registry(..., moe_comm_backend="minimal_async_ep")`` lowers the
+    backend choice into the MoE token-dispatcher config stored in
+    ``ModelSpec.model``. At parallelize time that config is the source of truth.
+    """
+    moe_config = next((l.moe for l in model.config.layers if l.moe is not None), None)
+    if moe_config is None:
+        return None
+
+    dispatcher_config = moe_config.experts.token_dispatcher
+    if isinstance(dispatcher_config, MinimalAsyncEPTokenDispatcher.Config):
+        return dispatcher_config
+    return None
+
+
+def _validate_minimal_async_ep_config(
+    dispatcher_config: MinimalAsyncEPTokenDispatcher.Config,
+    *,
+    parallel_dims: ParallelDims,
+    parallelism: ParallelismConfig,
+) -> None:
+    if parallelism.spmd_backend == "full_dtensor":
+        raise ValueError("MinimalAsyncEP does not support full_dtensor SPMD.")
+    if parallel_dims.ep <= 1:
+        raise ValueError("MinimalAsyncEP requires expert_parallel_degree > 1.")
+    if dispatcher_config.num_experts % parallel_dims.ep != 0:
+        raise ValueError(
+            f"MinimalAsyncEP num_experts ({dispatcher_config.num_experts}) must be "
+            f"divisible by expert_parallel_degree ({parallel_dims.ep})."
+        )
+    if parallel_dims.tp != 1:
+        raise ValueError(
+            "MinimalAsyncEP does not support tensor or sequence parallelism."
+        )
+    if parallelism.enable_sequence_parallel:
+        raise ValueError("MinimalAsyncEP does not support sequence parallelism.")
+    if parallel_dims.cp != 1:
+        raise ValueError("MinimalAsyncEP does not support context parallelism.")
+    if parallel_dims.pp != 1:
+        raise ValueError("MinimalAsyncEP does not support pipeline parallelism.")
+    if parallel_dims.dp_replicate != 1:
+        raise ValueError(
+            "MinimalAsyncEP requires data_parallel_replicate_degree == 1. Got "
+            f"{parallel_dims.dp_replicate}."
+        )
+    if parallel_dims.dp_shard % parallel_dims.ep != 0:
+        raise ValueError(
+            "MinimalAsyncEP requires data_parallel_shard_degree to be a multiple "
+            "of expert_parallel_degree. Got "
+            f"data_parallel_shard_degree={parallel_dims.dp_shard}, "
+            f"expert_parallel_degree={parallel_dims.ep}."
+        )
+
+
+def _maybe_init_minimal_async_ep_buffer(
+    model: DeepSeekV3Model,
+    *,
+    parallel_dims: ParallelDims,
+    training: TrainingConfig,
+    parallelism: ParallelismConfig,
+    ac_config: ActivationCheckpointConfig,
+    memory_policy: str | None = None,
+) -> None:
+    dispatcher_config = _get_minimal_async_ep_dispatcher_config(model)
+    if dispatcher_config is None:
+        return
+
+    if ac_config.mode != "full" and memory_policy != "full":
+        raise ValueError(
+            "MinimalAsyncEP requires full recompute: set "
+            "--activation_checkpoint.mode full for eager training or "
+            "--compile.memory_policy full for graph_trainer."
+        )
+
+    _validate_minimal_async_ep_config(
+        dispatcher_config,
+        parallel_dims=parallel_dims,
+        parallelism=parallelism,
+    )
+    minimal_async_ep.init_buffer(
+        group=parallel_dims.get_mesh("ep").get_group(),
+        hidden_dim=model.config.dim,
+        tokens_per_rank=training.local_batch_size * training.seq_len,
+        num_local_experts=dispatcher_config.num_experts // parallel_dims.ep,
+        top_k=dispatcher_config.top_k,
+        dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+        device=torch.device(device_type, device_module.current_device()),
+    )
+
+
+# Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
     model: DeepSeekV3Model,
     *,
@@ -41,6 +140,13 @@ def parallelize_deepseekv3(
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
+    _maybe_init_minimal_async_ep_buffer(
+        model,
+        parallel_dims=parallel_dims,
+        training=training,
+        parallelism=parallelism,
+        ac_config=ac_config,
+    )
 
     if parallelism.spmd_backend == "full_dtensor":
         validate_config(parallel_dims, model)
