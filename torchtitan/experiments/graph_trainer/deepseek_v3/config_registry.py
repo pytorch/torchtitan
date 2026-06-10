@@ -84,7 +84,7 @@ def graph_trainer_deepseek_v3_671b() -> GraphTrainer.Config:
 # CrossEntropyLoss; this wrapper applies the same swap to the eager baseline
 # so loss_compare runs apples-to-apples.
 # TODO: Remove once graph_trainer supports ChunkedCELoss.
-def deepseek_v3_debugmodel_ep_ce_loss() -> Trainer.Config:
+def deepseek_v3_debugmodel_ce_loss() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
     config.loss = CrossEntropyLoss.Config()
     return config
