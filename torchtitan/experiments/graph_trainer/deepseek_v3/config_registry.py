@@ -15,6 +15,7 @@ from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_16b_minimal_async_ep,
     deepseek_v3_671b,
     deepseek_v3_debugmodel,
+    deepseek_v3_debugmodel_minimal_async_ep,
 )
 from torchtitan.trainer import Trainer
 
@@ -41,6 +42,15 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
         moe_comm_backend="hybridep",
         non_blocking_capacity_factor=1.0,
     )
+    return config
+
+
+def graph_trainer_deepseek_v3_debugmodel_minimal_async_ep() -> GraphTrainer.Config:
+    config = to_graph_trainer_config(
+        deepseek_v3_debugmodel_minimal_async_ep(),
+        model_registry,
+    )
+    config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 
 
@@ -86,5 +96,11 @@ def graph_trainer_deepseek_v3_671b() -> GraphTrainer.Config:
 # TODO: Remove once graph_trainer supports ChunkedCELoss.
 def deepseek_v3_debugmodel_ce_loss() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
+    config.loss = CrossEntropyLoss.Config()
+    return config
+
+
+def deepseek_v3_debugmodel_minimal_async_ep_ce_loss() -> Trainer.Config:
+    config = deepseek_v3_debugmodel_minimal_async_ep()
     config.loss = CrossEntropyLoss.Config()
     return config
