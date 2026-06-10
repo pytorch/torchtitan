@@ -59,6 +59,7 @@ class Qwen3VLModel(Qwen3Model):
             config,
             **kwargs,
         ) -> None:
+            Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
 
             from torchtitan.models.qwen3_vl.sharding import set_qwen3_vl_sharding_config
@@ -68,7 +69,6 @@ class Qwen3VLModel(Qwen3Model):
                 loss_parallel=not parallelism.disable_loss_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
