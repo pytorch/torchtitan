@@ -77,7 +77,7 @@ def _build_llama3_layers(
     attn_backend: str,
 ) -> list[TransformerBlock.Config]:
     """Build a list of per-layer TransformerBlock configs with depth-scaled inits."""
-    inner_attention, mask_type = get_attention_config(attn_backend)
+    inner_attention = get_attention_config(attn_backend)
     layers = []
     for layer_id in range(n_layers):
         layers.append(
@@ -94,7 +94,6 @@ def _build_llama3_layers(
                     wo_param_init=_depth_init(layer_id),
                     inner_attention=inner_attention,
                     fuse_qkv=fuse_qkv,
-                    mask_type=mask_type,
                     rope=rope,
                 ),
                 feed_forward=make_ffn_config(
@@ -373,7 +372,7 @@ llama3_configs = {
 
 def model_registry(
     flavor: str,
-    attn_backend: str = "sdpa",
+    attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     config = llama3_configs[flavor](attn_backend=attn_backend)

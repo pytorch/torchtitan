@@ -209,7 +209,7 @@ def _build_qwen3_vl_layers(
     rope: RoPE.Config,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for dense Qwen3-VL models with depth-scaled inits."""
-    inner_attention, mask_type = get_attention_config(attn_backend)
+    inner_attention = get_attention_config(attn_backend)
     layers = []
     for layer_id in range(n_layers):
         layers.append(
@@ -224,7 +224,6 @@ def _build_qwen3_vl_layers(
                     wqkv_param_init=_LINEAR_INIT,
                     wo_param_init=_depth_init(layer_id),
                     inner_attention=inner_attention,
-                    mask_type=mask_type,
                     rope=rope,
                     qk_norm=_qwen3_vl_norm(head_dim),
                 ),
@@ -255,7 +254,7 @@ def _build_qwen3_vl_moe_layers(
     rope: RoPE.Config,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for MoE Qwen3-VL models with depth-scaled inits."""
-    inner_attention, mask_type = get_attention_config(attn_backend)
+    inner_attention = get_attention_config(attn_backend)
     layers = []
     for layer_id in range(n_layers):
         layers.append(
@@ -270,7 +269,6 @@ def _build_qwen3_vl_moe_layers(
                     wqkv_param_init=_LINEAR_INIT,
                     wo_param_init=_depth_init(layer_id),
                     inner_attention=inner_attention,
-                    mask_type=mask_type,
                     rope=rope,
                     qk_norm=_qwen3_vl_norm(head_dim),
                 ),
@@ -628,7 +626,7 @@ qwen3_vl_configs = {
 
 def model_registry(
     flavor: str,
-    attn_backend: str = "sdpa",
+    attn_backend: str = "flex",
     moe_comm_backend: str | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:

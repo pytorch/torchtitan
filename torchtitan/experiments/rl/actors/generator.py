@@ -544,25 +544,15 @@ class VLLMGenerator(Actor, Configurable):
     async def close(self) -> None:
         """Release the vLLM engine.
 
-        vLLM's sync ``LLMEngine`` (what we use) has no public ``shutdown``
-        method; only the async ``AsyncLLM`` does. We tear it down by
-        plumbing through its components in the same order ``AsyncLLM``
-        uses internally:
-
-        1. ``renderer.shutdown()`` — closes thread pools and the
-           multimodal-processor cache.
-        2. ``engine_core.shutdown()`` — stops the model worker and the
-           scheduler.
-
-        We intentionally skip ``cleanup_dist_env_and_memory()`` here:
-        with ``external_launcher``, vLLM reuses the process group that
-        Monarch created. Destroying it here would prevent Monarch's
-        ``mesh.stop()`` from completing its own collective teardown.
+        With ``external_launcher``, vLLM reuses the process group and actor
+        lifetime that Monarch owns. Calling vLLM's internal
+        ``engine_core.shutdown()`` can block while Monarch is also trying to
+        stop the same actor mesh, so this endpoint only closes renderer-local
+        resources and leaves process teardown to ``ProcMesh.stop()``.
         """
         if self._engine is not None:
             renderer = getattr(self._engine, "renderer", None)
-            try:
-                if renderer is not None:
-                    renderer.shutdown()
-            finally:
-                self._engine.engine_core.shutdown()
+            if renderer is not None:
+                logger.info("Shutting down vLLM renderer")
+                renderer.shutdown()
+            self._engine = None
