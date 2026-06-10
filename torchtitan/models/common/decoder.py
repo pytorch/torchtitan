@@ -78,8 +78,30 @@ class Decoder(BaseModel):
         enable_weight_tying: bool = False
 
         @property
+        def first_attention(self) -> BaseAttention.Config | None:
+            """Attention config of the first layer that has one, else None.
+
+            Hybrid models (linear + full attention) don't carry an attention
+            config on every layer, so callers needing attention metadata (TP
+            validation, FLOPs, mask type) look up the first full-attention
+            layer rather than assuming ``layers[0]``.
+            """
+            return next(
+                (
+                    layer.attention
+                    for layer in self.layers
+                    if layer.attention is not None
+                ),
+                None,
+            )
+
+        @property
         def max_seq_len(self) -> int:
-            return self.layers[0].attention.rope.max_seq_len
+            # The first full-attention layer's RoPE defines the context length.
+            rope_cfg = getattr(self.first_attention, "rope", None)
+            if rope_cfg is None:
+                raise ValueError("Decoder config does not define RoPE max_seq_len.")
+            return rope_cfg.max_seq_len
 
         def update_from_config(
             self,
@@ -115,8 +137,8 @@ class Decoder(BaseModel):
                 )
 
             tp = parallelism.tensor_parallel_degree
-            if tp > 1:
-                attention = self.layers[0].attention
+            attention = self.first_attention
+            if tp > 1 and attention is not None:
                 n_heads = attention.n_heads
                 n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
                 if n_heads % tp != 0:
@@ -131,7 +153,7 @@ class Decoder(BaseModel):
                     )
 
             for layer_cfg in self.layers:
-                if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
+                if layer_cfg.moe is not None:
                     from torchtitan.models.common.token_dispatcher import (
                         DeepEPTokenDispatcher,
                         HybridEPTokenDispatcher,
@@ -273,8 +295,12 @@ class Decoder(BaseModel):
     def get_attention_masks(
         self,
         positions: torch.Tensor,
-    ) -> AttentionMasksType:
-        attn_config = self.config.layers[0].attention
+    ) -> AttentionMasksType | None:
+        attn_config = self.config.first_attention
+        if attn_config is None:
+            # No full-attention layers (e.g. a pure linear-attention model, or a
+            # pipeline stage holding only linear-attention blocks) → no masks.
+            return None
         inner_attn = attn_config.inner_attention
         if isinstance(inner_attn, FlexAttention.Config):
             return self._create_flex_attention_mask_for_document(positions, attn_config)

@@ -25,6 +25,7 @@ from .decoder import Decoder, TransformerBlock
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .moe import MoE
 from .nn_modules import (
+    Conv1d,
     Conv2d,
     Embedding,
     GELU,
@@ -38,6 +39,7 @@ from .nn_modules import (
 from .rope import ComplexRoPE, CosSinRoPE, RoPE
 
 __all__ = [
+    "Conv1d",
     "Conv2d",
     "ComplexRoPE",
     "CosSinRoPE",
