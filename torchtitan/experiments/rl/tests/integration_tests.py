@@ -7,9 +7,9 @@
 """
 Integration tests for the RL unified workstream.
 
-Runs the full GRPO training loop (simple_grpo.py) with different
+Runs the full GRPO training loop (train.py) with different
 parallelism configurations. Uses OverrideDefinitions from the shared
-test infrastructure but with a custom runner since simple_grpo.py is
+test infrastructure but with a custom runner since train.py is
 a Monarch script (run with ``python``, not ``torchrun``).
 
 Usage:
@@ -33,11 +33,13 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module rl",
-                    "--config rl_grpo_qwen3_0_6b",
+                    "--config rl_grpo_qwen3_0_6b_varlen",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
-                    "--generator.sampling.n 2",
-                    "--batcher.batch.seq_len 256",
+                    "--group_size 2",
+                    "--batcher.batch.seq_len 1024",
+                    "--renderer.enable-thinking False",
+                    "--generator.sampling.max_tokens 256",
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
                     "--compile.no-enable",
@@ -53,11 +55,13 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module rl",
-                    "--config rl_grpo_qwen3_0_6b",
+                    "--config rl_grpo_qwen3_0_6b_varlen",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
-                    "--generator.sampling.n 2",
-                    "--batcher.batch.seq_len 256",
+                    "--group_size 2",
+                    "--batcher.batch.seq_len 1024",
+                    "--renderer.enable-thinking False",
+                    "--generator.sampling.max_tokens 256",
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
                     "--metrics.no-enable-wandb",
@@ -76,8 +80,11 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module rl",
-                    "--config rl_grpo_qwen3_0_6b_batch_invariant",
-                    "--batcher.batch.seq_len 256",
+                    "--config rl_grpo_qwen3_0_6b_varlen_batch_invariant",
+                    "--group_size 2",
+                    "--batcher.batch.seq_len 1024",
+                    "--renderer.enable-thinking False",
+                    "--generator.sampling.max_tokens 256",
                     "--metrics.no-enable-wandb",
                 ],
             ],
@@ -102,7 +109,7 @@ def run_single_test(
     """Run a single RL integration test.
 
     Unlike the standard run_tests which uses ``./run_train.sh`` (torchrun),
-    this runs ``python simple_grpo.py`` directly since the RL script manages
+    this runs the RL training module directly since the RL script manages
     its own distributed setup via Monarch.
     """
     test_name = test_flavor.test_name
@@ -111,7 +118,8 @@ def run_single_test(
     for override_arg in test_flavor.override_args:
         cmd_parts = [
             "python",
-            "torchtitan/experiments/rl/grpo.py",
+            "-m",
+            "torchtitan.experiments.rl.train",
             f"--dump_folder {dump_folder}",
         ]
         if hf_assets_path:

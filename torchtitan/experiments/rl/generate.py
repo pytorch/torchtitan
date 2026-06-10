@@ -25,7 +25,7 @@ from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.logger import init_logger
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b
+from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b_varlen
 
 
 logger = init_logger(__name__)
@@ -33,7 +33,7 @@ logger = init_logger(__name__)
 
 def generate():
 
-    config = rl_grpo_qwen3_0_6b()
+    config = rl_grpo_qwen3_0_6b_varlen()
     gen_config = config.generator
     model_path = config.hf_assets_path
 
@@ -79,7 +79,7 @@ def generate():
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
         attention_backend="CUSTOM",
     )
-    max_num_seqs = config.num_prompts_per_step * gen_config.sampling.n
+    max_num_seqs = config.num_groups_per_rollout_batch * config.group_size
     engine_kwargs["max_num_seqs"] = max_num_seqs
     vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,

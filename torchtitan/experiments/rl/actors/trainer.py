@@ -32,7 +32,7 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingBatch
-from torchtitan.models.common.attention import create_varlen_metadata_for_document
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
@@ -160,6 +160,8 @@ class PolicyTrainer(Actor, Configurable):
         output_dir: str,
     ):
         init_logger()
+        if not config.dump_folder:
+            config.dump_folder = output_dir
         sl.init_structured_logger(
             source="rl_trainer",
             output_dir=output_dir,
@@ -187,7 +189,10 @@ class PolicyTrainer(Actor, Configurable):
         set_batch_invariance(config.debug.batch_invariant)
 
         with sl.log_trace_span("torch_distributed_init"):
-            world_size = dist_utils.init_distributed(config.comm)
+            world_size = dist_utils.init_distributed(
+                config.comm,
+                base_folder=output_dir,
+            )
 
         self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
 
@@ -264,9 +269,14 @@ class PolicyTrainer(Actor, Configurable):
 
     @endpoint
     async def close(self) -> None:
-        """Destroy the worker's torch.distributed process group."""
-        if torch.distributed.is_initialized():
-            torch.distributed.destroy_process_group()
+        """Close actor-local resources before the process mesh stops.
+
+        The trainer does not own the distributed process group lifecycle here:
+        Monarch created it for the actor mesh, and ``ProcMesh.stop()`` performs
+        the final teardown. Destroying it from this endpoint can race with mesh
+        shutdown and hang at process exit.
+        """
+        logger.debug("PolicyTrainer close requested; ProcMesh.stop owns PG teardown.")
 
     @sl.log_trace_span("build_model")
     def _build_model(
@@ -289,12 +299,13 @@ class PolicyTrainer(Actor, Configurable):
             Model with random-initialized weights.
         """
 
-        # TODO: Also support flex attention backend later.
         from torchtitan.models.common.attention import VarlenAttention
 
+        inner_attn = model_spec.model.layers[0].attention.inner_attention
         assert isinstance(
-            model_spec.model.layers[0].attention.inner_attention, VarlenAttention.Config
-        ), "Only varlen attention backend is allowed."
+            model_spec.model.layers[0].attention.inner_attention,
+            (VarlenAttention.Config, FlexAttention.Config),
+        ), "Only varlen and flex attention backends are allowed."
 
         # Fill sharding configs on the config BEFORE build via the
         # model-agnostic `update_from_config` hook (RL's trainer bypasses
@@ -406,7 +417,7 @@ class PolicyTrainer(Actor, Configurable):
         generator_logprobs = local_batch.generator_logprobs.to(device)
         advantages = local_batch.advantages.to(device)
 
-        attention_masks = create_varlen_metadata_for_document(positions)
+        attention_masks = model.get_attention_masks(positions)
 
         with sl.log_trace_span("model_forward"):
             logits = model(
@@ -423,7 +434,6 @@ class PolicyTrainer(Actor, Configurable):
                 num_global_valid_tokens=num_global_valid_tokens,
             )
 
-        self.optimizers.zero_grad()
         with sl.log_trace_span("model_backward"):
             loss.backward()
 
@@ -455,7 +465,7 @@ class PolicyTrainer(Actor, Configurable):
     async def optim_step(self) -> OptimStepOutput:
         """Clip gradients, step optimizer + LR scheduler, return updated state."""
         # TODO: Accept optional optimizer params (e.g. learning rate)
-        # to allow controller-owned schedules (see Tinker API).
+        # to allow controller-owned schedules.
 
         # capture LR before step
         current_lrs = self.lr_schedulers.schedulers[0].get_last_lr()
@@ -477,6 +487,7 @@ class PolicyTrainer(Actor, Configurable):
         with sl.log_trace_span("optim"):
             self.optimizers.step()
             self.lr_schedulers.step()
+            self.optimizers.zero_grad()
 
         self.policy_version += 1
 

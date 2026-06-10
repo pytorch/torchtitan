@@ -49,30 +49,34 @@ def run_loss_compare(
     Returns:
         True if the assertion passed, False otherwise.
     """
-    cmd = [
-        sys.executable,
-        "scripts/loss_compare.py",
-        ".",
-        ".",
-        f"--baseline-module={baseline_module}",
-        f"--baseline-config={baseline_config}",
-        f"--test-module={test_module}",
-        f"--test-config={test_config}",
-        "--assert-equal",
-        f"--steps={STEPS}",
-        f"--baseline-ngpus={baseline_ngpus}",
-        f"--test-ngpus={test_ngpus}",
-    ]
-    if baseline_options:
-        cmd.append(f"--baseline-options={baseline_options}")
-    if test_options:
-        cmd.append(f"--test-options={test_options}")
+    # Use a temp dump folder instead of loss_compare.py's default ("outputs"),
+    # which is created relative to cwd and is not writable in CI containers.
+    with tempfile.TemporaryDirectory() as job_dump_folder:
+        cmd = [
+            sys.executable,
+            "scripts/loss_compare.py",
+            ".",
+            ".",
+            f"--baseline-module={baseline_module}",
+            f"--baseline-config={baseline_config}",
+            f"--test-module={test_module}",
+            f"--test-config={test_config}",
+            "--assert-equal",
+            f"--steps={STEPS}",
+            f"--baseline-ngpus={baseline_ngpus}",
+            f"--test-ngpus={test_ngpus}",
+            f"--job-dump-folder={job_dump_folder}",
+        ]
+        if baseline_options:
+            cmd.append(f"--baseline-options={baseline_options}")
+        if test_options:
+            cmd.append(f"--test-options={test_options}")
 
-    print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, text=True)
-    if result.returncode != 0:
-        print("loss_compare.py failed")
-    return result.returncode == 0
+        print(f"Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, text=True)
+        if result.returncode != 0:
+            print("loss_compare.py failed")
+        return result.returncode == 0
 
 
 def run_loss_compare_close(
@@ -182,9 +186,9 @@ def _run_deepseek_v3_loss_compare(test_options_extra: str = "") -> bool:
         test_options += f" {test_options_extra}"
     return run_loss_compare(
         baseline_module="graph_trainer.deepseek_v3",
-        baseline_config="deepseek_v3_debugmodel_ep_ce_loss",
+        baseline_config="deepseek_v3_debugmodel_ce_loss",
         test_module="graph_trainer.deepseek_v3",
-        test_config="graph_trainer_deepseek_v3_debugmodel_ep",
+        test_config="graph_trainer_deepseek_v3_debugmodel",
         baseline_options=DSV3_PARALLELISM,
         test_options=test_options,
     )
@@ -225,9 +229,9 @@ def _run_qwen3_moe_loss_compare(test_options_extra: str = "") -> bool:
         test_options += f" {test_options_extra}"
     return run_loss_compare(
         baseline_module="graph_trainer.qwen3",
-        baseline_config="qwen3_moe_debug_ep_ce_loss",
+        baseline_config="qwen3_moe_debug_ce_loss",
         test_module="graph_trainer.qwen3",
-        test_config="graph_trainer_qwen3_debugmodel_moe_ep",
+        test_config="graph_trainer_qwen3_debugmodel_moe",
         baseline_options=QWEN3_MOE_PARALLELISM,
         test_options=test_options,
     )
@@ -240,12 +244,18 @@ AUTOPARALLEL_LLAMA3_PARALLELISM = (
 
 
 def _run_autoparallel_llama3_loss_compare() -> bool:
-    """Run loss_compare for eager llama3 vs graph_trainer AutoParallel llama3."""
+    """Run loss_compare for eager SDPA llama3 vs graph_trainer AutoParallel.
+
+    AutoParallel is unsupported on the default FlexAttention backend (dynamo
+    export flattens the BlockMask), so both sides use the test-only SDPA backend.
+    The eager baseline runs the same SDPA model through GraphTrainer with
+    ``mode=None`` (delegates to the core eager path).
+    """
     return run_loss_compare_close(
-        baseline_module="llama3",
-        baseline_config="llama3_debugmodel_ce_loss",
+        baseline_module="graph_trainer.llama3",
+        baseline_config="graph_trainer_llama3_debugmodel_sdpa_eager",
         test_module="graph_trainer.llama3",
-        test_config="graph_trainer_llama3_debugmodel",
+        test_config="graph_trainer_llama3_debugmodel_sdpa",
         baseline_options=AUTOPARALLEL_LLAMA3_PARALLELISM,
         test_options=(
             f"{AUTOPARALLEL_LLAMA3_PARALLELISM}"
@@ -268,9 +278,9 @@ def _run_autoparallel_deepseek_v3_loss_compare() -> bool:
     """Run loss_compare for eager DeepSeek V3 vs graph_trainer AutoParallel."""
     return run_loss_compare_close(
         baseline_module="graph_trainer.deepseek_v3",
-        baseline_config="deepseek_v3_debugmodel_ep_ce_loss",
+        baseline_config="deepseek_v3_debugmodel_ce_loss",
         test_module="graph_trainer.deepseek_v3",
-        test_config="graph_trainer_deepseek_v3_debugmodel_ep",
+        test_config="graph_trainer_deepseek_v3_debugmodel",
         baseline_options=AUTOPARALLEL_DSV3_PARALLELISM,
         test_options=(
             f"{AUTOPARALLEL_DSV3_PARALLELISM}"
@@ -286,10 +296,6 @@ def _run_autoparallel_deepseek_v3_loss_compare() -> bool:
 class TestGraphTrainerNumerics(unittest.TestCase):
     """Test numerics equivalence between graph_trainer and FSDP2 eager."""
 
-    # TODO: Disabled due to upstream PyTorch nightly DTensor regression.
-    # Sharding propagation fails for aten.mm.default with mixed dtypes
-    # (bf16 activations, f32 weights) on the TP mesh. Re-enable once fixed.
-    @unittest.skip("upstream DTensor mixed-dtype sharding propagation regression")
     def test_dense_llama3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_llama3_loss_compare(test_options_extra="--compile.mode aot_fx_trace"),
@@ -332,10 +338,13 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             ),
         )
 
-    # TODO: Disabled due to upstream PyTorch nightly DTensor regression.
-    # Sharding propagation fails for aten.mm.default with mixed dtypes
-    # (bf16 activations, f32 weights) on the TP mesh. Re-enable once fixed.
-    @unittest.skip("upstream DTensor mixed-dtype sharding propagation regression")
+    @unittest.skip(
+        "Disabled: flaky single-rank crash in DSv3 MoE EP all-to-all. Losses "
+        "match eager bitwise for ~12 steps, then one EP rank hard-crashes; "
+        "root cause unconfirmed (rank traceback isn't captured under "
+        "loss_compare's rank-0-only tee). Re-enable once the crash is "
+        "diagnosed and fixed."
+    )
     def test_moe_dsv3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_deepseek_v3_loss_compare(
@@ -343,19 +352,11 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             ),
         )
 
-    # TODO: Disabled due to upstream PyTorch nightly DTensor regression.
-    # Sharding propagation fails for aten.mm.default with mixed dtypes
-    # (bf16 activations, f32 weights) on the TP mesh. Re-enable once fixed.
-    @unittest.skip("upstream DTensor mixed-dtype sharding propagation regression")
     def test_dense_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_qwen3_loss_compare(test_options_extra="--compile.mode aot_fx_trace"),
         )
 
-    # TODO: Disabled due to upstream PyTorch nightly DTensor regression.
-    # Sharding propagation fails for aten.mm.default with mixed dtypes
-    # (bf16 activations, f32 weights) on the TP mesh. Re-enable once fixed.
-    @unittest.skip("upstream DTensor mixed-dtype sharding propagation regression")
     def test_moe_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_qwen3_moe_loss_compare(
@@ -371,6 +372,11 @@ class TestGraphTrainerNumerics(unittest.TestCase):
 class TestGraphTrainerAutoParallelNumerics(unittest.TestCase):
     """Test graph_trainer AutoParallel numerics equivalence against eager."""
 
+    # AutoParallel runs on the test-only SDPA backend (Decoder.forward lists
+    # positions before attention_masks so input_fn's (tokens, positions) binds
+    # correctly). It is unsupported on the default FlexAttention backend (dynamo
+    # export flattens the BlockMask to (Fake)Tensors and flex_attention fails on
+    # missing BLOCK_SIZE), so both eager baseline and AutoParallel test use SDPA.
     def test_llama3_aot_fx_trace_autoparallel_vs_eager(self):
         self.assertTrue(_run_autoparallel_llama3_loss_compare())
 

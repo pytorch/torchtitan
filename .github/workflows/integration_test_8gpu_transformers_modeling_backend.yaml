@@ -78,7 +78,6 @@ jobs:
         fi
 
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
-        python -m pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 
         # MoE parallelism requires transformers >= 5.0.0 (grouped experts format).
         # Install here rather than in the shared Docker image to avoid affecting

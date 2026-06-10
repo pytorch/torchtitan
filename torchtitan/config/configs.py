@@ -139,8 +139,14 @@ class ParallelismConfig:
     enable_sequence_parallel: bool = True
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
 
-    full_dtensor: bool = False
-    """Whether to use full DTensor mode."""
+    spmd_backend: Literal["default", "full_dtensor", "spmd_types"] = "default"
+    """
+    SPMD backend selector.
+
+    - "default": use the existing TorchTitan parallelism paths.
+    - "full_dtensor": use the existing full DTensor path.
+    - "spmd_types": use the spmd_types path.
+    """
 
     pipeline_parallel_degree: int = 1
     """
@@ -214,6 +220,11 @@ class ParallelismConfig:
     """
 
     def __post_init__(self):
+        if self.spmd_backend not in {"default", "full_dtensor", "spmd_types"}:
+            raise ValueError(
+                "parallelism.spmd_backend must be one of "
+                "'default', 'full_dtensor', or 'spmd_types'."
+            )
         if self.context_parallel_load_balancer == "":
             raise ValueError(
                 "context_parallel_load_balancer cannot be an empty string. "
@@ -221,12 +232,14 @@ class ParallelismConfig:
             )
         if self.enable_fsdp_symm_mem and (
             not torch.cuda.is_available()
-            or torch.version.hip is not None
-            or torch.cuda.get_device_capability() < (9, 0)
+            or (
+                torch.version.hip is None
+                and torch.cuda.get_device_capability() < (9, 0)
+            )
         ):
             raise ValueError(
-                "parallelism.enable_fsdp_symm_mem is only supported on NVIDIA "
-                "GPUs with compute capability 9.0 or newer."
+                "For NVIDIA GPUs, parallelism.enable_fsdp_symm_mem is only supported "
+                "for compute capability 9.0 or newer."
             )
 
     context_parallel_rotate_method: Literal["allgather", "alltoall"] = "allgather"
@@ -365,6 +378,9 @@ class CommConfig:
 class DebugConfig:
     seed: int | None = None
     """Choose the base RNG seed used for training"""
+
+    spmd_typechecking: bool = False
+    """Enable global SPMD type checking; only effective under spmd_backend="spmd_types"."""
 
     deterministic: bool = False
     """Use deterministic algorithms wherever possible, may be slower"""

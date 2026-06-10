@@ -24,18 +24,31 @@ defaults:
     shell: bash -l -eo pipefail {0}
 
 permissions:
-      id-token: write
-      contents: read
+  id-token: write
+  contents: read
 
 jobs:
-  build-test:
+  # Step 1: Dynamically compute the matrix based on conditions
+  set-matrix:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8')
-    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    uses: ./.github/workflows/set-matrix.yaml
     with:
-      runner: linux.aws.h100.8
-      gpu-arch-type: cuda
-      gpu-arch-version: "13.0"
-      docker-image: torchtitan-ubuntu-22.04-clang12
+      runner-cuda: mt-l-bx86iamx-176-1800-h100-8
+      is-experimental: true
+
+  # Step 2: Use the dynamic matrix in the build-test job
+  build-test:
+    needs: set-matrix
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      # Private-ECR image, tagged with the .ci/docker hash from set-matrix.yaml.
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.docker-image }}:${{ needs.set-matrix.outputs.docker-hash }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
       timeout: 45
@@ -52,33 +65,18 @@ jobs:
 
         pip config --user set global.progress_bar off
 
-        python -m pip install --force-reinstall --pre \
-          torch --index-url https://download.pytorch.org/whl/nightly/cu130
-        python -m pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
+        # Pre-install torch's pure-python deps from the in-cluster pypi-cache for speed.
+        python -m pip install filelock typing-extensions "setuptools<82" sympy networkx jinja2 fsspec numpy
+        # Clear PIP_EXTRA_INDEX_URL so the default cpu index can't supply a +cpu torch.
+        python -m pip uninstall -y torch
+        PIP_EXTRA_INDEX_URL= python -m pip install --pre \
+          torch --index-url ${{ matrix.index-url }}
         python -m pip install git+https://github.com/meta-pytorch/autoparallel.git
 
-        sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
-        sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
+        mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
-        # Dependencies for DeepEP compilation (NVSHMEM needs libcudacxx, IB headers).
-        sudo apt-get update -qq && sudo apt-get install -y -qq rdma-core libibverbs1 libmlx5-1 libibverbs-dev
-
-        # CCCL headers live under include/cccl/ in CUDA 13+ — symlink so
-        # NVSHMEM's #include "cuda/std/tuple" resolves correctly.
-        sudo ln -sf /usr/local/cuda/include/cccl/cuda /usr/local/cuda/include/cuda
-
-        # Install DeepEP for HybridEP integration test.
-        # Pinned to a known-good commit on the hybrid-ep branch to avoid
-        # breakage from upstream changes. Update the commit hash when
-        # upgrading to a newer DeepEP version.
-        # Non-fatal: DeepEP may fail to compile against newer PyTorch
-        # nightlies (ABI changes). HybridEP tests are skipped when
-        # DeepEP is unavailable.
-        DEEPEP_COMMIT=1b8f467
-        git clone --branch hybrid-ep https://github.com/deepseek-ai/deepep.git /tmp/deepep
-        pushd /tmp/deepep && git checkout $DEEPEP_COMMIT
-        CUDA_HOME=/usr/local/cuda TORCH_CUDA_ARCH_LIST="9.0" pip install --no-build-isolation -e . || echo "WARNING: DeepEP installation failed; HybridEP tests will be skipped"
-        popd
+        # Install DeepEP for HybridEP integration test
+        bash /install_deepep.sh
 
         # Disable Nvlink Sharp. The CI machine seems to be in unstable state to support
         # NVLS according to several CI runs.

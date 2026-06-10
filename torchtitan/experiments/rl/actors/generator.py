@@ -26,6 +26,7 @@ from torchtitan.experiments.rl.models.vllm_registry import (
 )
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import Completion
+from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools.logging import init_logger
@@ -151,9 +152,6 @@ class VLLMCudagraphConfig:
 class SamplingConfig:
     """Sampling parameters passed to vLLM's SamplingParams."""
 
-    n: int = 8
-    """Number of completions to generate per prompt (vLLM SamplingParams.n)."""
-
     temperature: float = 0.8
     """Sampling temperature. 0.0 = greedy, higher = more random."""
 
@@ -257,6 +255,7 @@ class VLLMGenerator(Actor, Configurable):
         compile_config: CompileConfig,
         max_num_seqs: int,
         output_dir: str,
+        stop_token_ids: list[int],
     ):
         init_logger()
         sl.init_structured_logger(
@@ -274,8 +273,12 @@ class VLLMGenerator(Actor, Configurable):
         # the upper bound for concurrent sequences, determines KV-cache
         # block allocation (and therefore GPU memory usage), and bounds
         # the CUDA graph capture sizes.  Always computed by the caller
-        # (RLTrainer) as num_prompts_per_step * sampling.n.
+        # (RLTrainer) as num_groups_per_rollout_batch * group_size.
         self._max_num_seqs = max_num_seqs
+
+        # Renderer role-boundary stop tokens (e.g. Qwen3 `<|im_end|>`), injected by the
+        # controller;
+        self._stop_token_ids = stop_token_ids
 
         # Register TorchTitan model + parser with vLLM
         registry_to_vllm(
@@ -286,9 +289,13 @@ class VLLMGenerator(Actor, Configurable):
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
-        os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
-        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+        inner_attn = model_spec.model.layers[0].attention.inner_attention
+        assert isinstance(
+            inner_attn,
+            (VarlenAttention.Config, FlexAttention.Config),
+        ), "Only varlen and flex attention backends are allowed."
 
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
         set_batch_invariance(config.debug.batch_invariant)
 
         self._set_determinism(config.debug)
@@ -316,12 +323,16 @@ class VLLMGenerator(Actor, Configurable):
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=not config.cudagraph.enable,
             attention_config=AttentionConfig(
-                backend=AttentionBackendEnum.CUSTOM,
+                backend=(
+                    AttentionBackendEnum.FLEX_ATTENTION
+                    if isinstance(inner_attn, FlexAttention.Config)
+                    else AttentionBackendEnum.CUSTOM
+                ),
             ),
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
         )
-        engine_kwargs["max_model_len"] = model_spec.model.rope.max_seq_len
+        engine_kwargs["max_model_len"] = model_spec.model.max_seq_len
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
         # FA2 requires block_size to be a multiple of 256
         if not has_cuda_capability(9, 0):
@@ -379,17 +390,19 @@ class VLLMGenerator(Actor, Configurable):
         self,
         tokenized_prompts: list[list[int]],
         *,
+        request_ids: list[str],
         sampling_config: SamplingConfig | None = None,
         metrics_prefix: str = "generator",
     ) -> tuple[list[Completion], list[m.Metric]]:
         """Generate completions and generator metrics for tokenized prompts.
 
         Takes ``tokenized_prompts`` as ``[num_prompts][prompt_tokens]``.
-        Returns completions as ``[num_prompts * n]`` plus generator metrics,
-        where ``n`` is the resolved ``SamplingConfig.n`` completions per prompt.
+        Returns completions in the same order as ``request_ids`` plus generator
+        metrics.
 
         Args:
             tokenized_prompts: Tokenized prompts shaped ``[num_prompts][prompt_tokens]``.
+            request_ids: One id per prompt echoed on each ``Completion.request_id``.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig. ``seed`` always comes from
                 ``config.debug.seed`` (not part of SamplingConfig).
@@ -410,11 +423,19 @@ class VLLMGenerator(Actor, Configurable):
                 temperature=_sampling_config.temperature,
                 top_p=_sampling_config.top_p,
                 max_tokens=_sampling_config.max_tokens,
-                n=_sampling_config.n,
+                n=1,  # group_size pre-expands prompts; the RL loop always samples n=1
+                stop_token_ids=self._stop_token_ids or None,
                 seed=self.config.debug.seed,
                 logprobs=1,
                 output_kind=RequestOutputKind.FINAL_ONLY,
             )
+
+            if len(request_ids) != len(tokenized_prompts):
+                raise ValueError(
+                    f"got {len(request_ids)} request_ids for {len(tokenized_prompts)} prompts"
+                )
+            if len(set(request_ids)) != len(request_ids):
+                raise ValueError(f"request_ids must be unique; got {request_ids}")
 
             # render_cmpl is vLLM's input-pipeline entry.
             # The tokenize step is a no-op for already-tokenized prompts. The
@@ -423,9 +444,11 @@ class VLLMGenerator(Actor, Configurable):
             engine_inputs = self._engine.renderer.render_cmpl(
                 [{"prompt_token_ids": ids} for ids in tokenized_prompts]
             )
-            for i, engine_input in enumerate(engine_inputs):
+            for engine_input, request_id in zip(
+                engine_inputs, request_ids, strict=True
+            ):
                 self._engine.add_request(
-                    request_id=str(i),
+                    request_id=request_id,
                     prompt=engine_input,
                     params=sampling_params,
                 )
@@ -435,15 +458,14 @@ class VLLMGenerator(Actor, Configurable):
                 while self._engine.has_unfinished_requests():
                     all_outputs.extend(self._engine.step())
 
-            # vLLM may return requests out of order; sort by the integer
-            # request_id we assigned so prompt_idx lines up with the input.
-            all_outputs.sort(key=lambda o: int(o.request_id))
+            # Return completions in caller input order; the controller maps positionally.
+            request_order = {request_id: i for i, request_id in enumerate(request_ids)}
+            all_outputs.sort(key=lambda output: request_order[output.request_id])
 
             completions: list[Completion] = []
             generation_metrics: list[m.Metric] = []
             output_token_counts: list[int] = []
             for output in all_outputs:
-                prompt_idx = int(output.request_id)
                 generation_metrics.extend(
                     _prepare_generation_request_metrics(output, prefix=metrics_prefix)
                 )
@@ -456,8 +478,7 @@ class VLLMGenerator(Actor, Configurable):
                     completions.append(
                         Completion(
                             policy_version=self.policy_version,
-                            prompt_idx=prompt_idx,
-                            text=sample.text,
+                            request_id=output.request_id,
                             token_ids=sample.token_ids,
                             token_logprobs=per_token_logprobs,
                             finish_reason=sample.finish_reason,
@@ -516,25 +537,15 @@ class VLLMGenerator(Actor, Configurable):
     async def close(self) -> None:
         """Release the vLLM engine.
 
-        vLLM's sync ``LLMEngine`` (what we use) has no public ``shutdown``
-        method; only the async ``AsyncLLM`` does. We tear it down by
-        plumbing through its components in the same order ``AsyncLLM``
-        uses internally:
-
-        1. ``renderer.shutdown()`` — closes thread pools and the
-           multimodal-processor cache.
-        2. ``engine_core.shutdown()`` — stops the model worker and the
-           scheduler.
-
-        We intentionally skip ``cleanup_dist_env_and_memory()`` here:
-        with ``external_launcher``, vLLM reuses the process group that
-        Monarch created. Destroying it here would prevent Monarch's
-        ``mesh.stop()`` from completing its own collective teardown.
+        With ``external_launcher``, vLLM reuses the process group and actor
+        lifetime that Monarch owns. Calling vLLM's internal
+        ``engine_core.shutdown()`` can block while Monarch is also trying to
+        stop the same actor mesh, so this endpoint only closes renderer-local
+        resources and leaves process teardown to ``ProcMesh.stop()``.
         """
         if self._engine is not None:
             renderer = getattr(self._engine, "renderer", None)
-            try:
-                if renderer is not None:
-                    renderer.shutdown()
-            finally:
-                self._engine.engine_core.shutdown()
+            if renderer is not None:
+                logger.info("Shutting down vLLM renderer")
+                renderer.shutdown()
+            self._engine = None

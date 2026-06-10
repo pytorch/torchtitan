@@ -30,11 +30,9 @@ from torch.nn.attention.varlen import varlen_attn
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
-from torchtitan.models.common.rope import (
-    apply_rotary_emb_complex,
-    apply_rotary_emb_cos_sin,
-)
+from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
+from torchtitan.tools.utils import round_up
 
 
 __all__ = [
@@ -50,6 +48,7 @@ __all__ = [
     "create_varlen_metadata_for_document",
     "get_causal_mask_mod",
     "get_document_mask_mod",
+    "get_efficient_causal_mask_mod_for_packed_document",
     "get_fixed_block_mask_mod",
     "get_sliding_window_mask_mod",
 ]
@@ -213,7 +212,7 @@ class FlexAttention(Module):
         k: torch.Tensor,
         v: torch.Tensor,
         *,
-        attention_masks: BlockMask | None = None,
+        attention_masks: BlockMask,
         score_mod: _score_mod_signature | None = None,
         scale: float | None = None,
         return_lse: bool = False,
@@ -221,8 +220,8 @@ class FlexAttention(Module):
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert isinstance(
-            attention_masks, (BlockMask, type(None))
-        ), f"attention_masks must be instance of BlockMask or None, got {type(attention_masks)}"
+            attention_masks, BlockMask
+        ), f"attention_masks must be instance of BlockMask, got {type(attention_masks)}"
 
         # Transpose to (bs, heads, seq, dim) for flex_attention
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
@@ -283,11 +282,17 @@ class ScaledDotProductAttention(Module):
         k: torch.Tensor,
         v: torch.Tensor,
         *,
+        attention_masks: AttentionMasksType | None = None,
         scale: float | None = None,
         enable_gqa: bool = False,
         is_causal: bool = True,
         **kwargs,
     ) -> torch.Tensor:
+        if attention_masks is not None:
+            raise ValueError(
+                "ScaledDotProductAttention does not support attention_masks; it "
+                "only supports causal/non-causal attention via is_causal."
+            )
         # Transpose to (bs, heads, seq, dim) for SDPA
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
         with sdpa_kernel(self.sdpa_backends, set_priority=True):
@@ -335,6 +340,82 @@ def get_document_mask_mod(positions: torch.Tensor) -> _mask_mod_signature:
         return doc_ids[b, q_idx] == doc_ids[b, kv_idx]
 
     return document_mask
+
+
+def get_efficient_causal_mask_mod_for_packed_document(
+    positions: torch.Tensor,
+) -> _mask_mod_signature:
+    """Creates an efficient document mask to compose with a causal mask.
+
+    This uses the same convention as get_document_mask_mod: per-token positions
+    reset to 0 at each packed document boundary and then increase by 1 within the
+    document. It is a manually tuned FlexAttention/FlexFlash fast path for
+    causal packed-document masking, which is why it coexists with the generic
+    document-id mask.
+
+    For ``batch_size == 1``, the causal mask supplies the upper bound,
+    ``kv_idx <= q_idx``, and this mask supplies the lower bound,
+    ``doc_start[q_idx] <= kv_idx``. For ``batch_size > 1``, the causal mask
+    supplies the lower bound, ``kv_idx <= q_idx``, and this mask supplies the
+    upper bound, ``q_idx <= doc_end[kv_idx]``. A query in the next document
+    cannot attend to a key in the previous document because that key's
+    ``doc_end`` is before the query.
+
+    The result is same-document causal masking. This mask is not intended for
+    non-causal use.
+    """
+    batch_size, seq_len = positions.shape
+    if batch_size == 1:
+        document_starts = positions[0] == 0
+        document_id = torch.cumsum(document_starts.int(), dim=0).to(torch.int32) - 1
+        token_idx = torch.arange(seq_len, device=positions.device, dtype=torch.int32)
+        offsets = torch.full(
+            (round_up(seq_len + 1, 128),),
+            seq_len,
+            device=positions.device,
+            dtype=torch.int32,
+        )
+        offsets.scatter_(
+            0,
+            torch.where(
+                document_starts, document_id, torch.full_like(document_id, seq_len)
+            ).to(torch.int64),
+            torch.where(
+                document_starts, token_idx, torch.full_like(token_idx, seq_len)
+            ),
+        )
+
+        def packed_document_mask(
+            b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+        ) -> torch.Tensor:
+            return kv_idx >= offsets[document_id[q_idx]]
+
+        return packed_document_mask
+
+    document_starts = positions == 0
+    document_id = torch.cumsum(document_starts.int(), dim=1).to(torch.int32) - 1
+    token_idx = torch.arange(
+        seq_len, device=positions.device, dtype=torch.int32
+    ).expand_as(positions)
+    next_doc_start = torch.full(
+        (batch_size, seq_len), seq_len, device=positions.device, dtype=torch.int32
+    )
+    next_doc = document_starts & (document_id > 0)
+    next_doc_start.scatter_(
+        1,
+        torch.where(
+            next_doc, document_id - 1, torch.full_like(document_id, seq_len - 1)
+        ).to(torch.int64),
+        torch.where(next_doc, token_idx, torch.full_like(token_idx, seq_len)),
+    )
+    doc_end_by_token = next_doc_start.gather(1, document_id.to(torch.int64)) - 1
+
+    def packed_document_mask(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        return q_idx <= doc_end_by_token[b, kv_idx]
+
+    return packed_document_mask
 
 
 def get_fixed_block_mask_mod(fixed_block_size: int) -> _mask_mod_signature:
@@ -460,26 +541,9 @@ class BaseAttention(Module):
     class Config(Module.Config):
         n_heads: int
         inner_attention: Module.Config
-        mask_type: str
 
         def __post_init__(self):
             assert self.n_heads > 0, "n_heads must be > 0"
-            assert isinstance(self.inner_attention, Module.Config), (
-                f"inner_attention must be a Module.Config, "
-                f"got {type(self.inner_attention)}"
-            )
-            assert self.mask_type in [
-                "causal",
-                "block_causal",
-            ], f"mask_type must be one of ['causal', 'block_causal'], got {self.mask_type}"
-            if (
-                isinstance(self.inner_attention, ScaledDotProductAttention.Config)
-                and self.mask_type == "block_causal"
-            ):
-                raise ValueError(
-                    "mask_type 'block_causal' is not supported with "
-                    "ScaledDotProductAttention"
-                )
 
 
 class BaseQKVLinear(Module):
@@ -597,10 +661,8 @@ class GQAttention(BaseAttention):
         qk_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None
-        use_rope: bool = True
         inner_attention: Module.Config
-        mask_type: str = "causal"
-        rope_backend: str = "complex"  # "complex" or "cos_sin"
+        rope: RoPE.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -614,8 +676,7 @@ class GQAttention(BaseAttention):
             else config.dim // config.n_heads
         )
         self.enable_gqa = self.n_heads > self.n_kv_heads
-        self.use_rope = config.use_rope
-        self.rope_backend = config.rope_backend
+        self.rope = config.rope.build()
 
         # Pluggable QKV projection
         self.qkv_linear = config.qkv_linear.build()
@@ -635,7 +696,6 @@ class GQAttention(BaseAttention):
     def forward(
         self,
         x: torch.Tensor,
-        rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -649,18 +709,7 @@ class GQAttention(BaseAttention):
             xk = self.k_norm(xk)
 
         # Apply rotary embeddings
-        if self.use_rope:
-            if self.rope_backend == "cos_sin":
-                xq, xk = apply_rotary_emb_cos_sin(xq, xk, rope_cache, positions)
-            else:
-                xq, xk = apply_rotary_emb_complex(
-                    xq, xk, freqs_cis=rope_cache, positions=positions
-                )
-
-        # Handle iRoPE dict masks (Llama4)
-        if isinstance(attention_masks, dict):
-            mask_key = "rope" if self.use_rope else "nope"
-            attention_masks = attention_masks[mask_key]
+        xq, xk = self.rope(xq, xk, positions)
 
         output = self.inner_attention(
             xq,

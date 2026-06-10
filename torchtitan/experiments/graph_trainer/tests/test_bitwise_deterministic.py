@@ -80,6 +80,10 @@ class BitwiseDeterministicBase(unittest.TestCase):
     model_registry: Callable
     annotate_model: Callable
     model_flavor: str
+    # The unsuffixed subclasses use SDPA (a test-only backend that exercises the
+    # backend-agnostic graph machinery — precompile serialization, codegen,
+    # determinism — without FlexAttention's unpicklable, non-tensor BlockMask).
+    # The *FlexAttn subclasses override this to "flex".
     attn_backend: str = "sdpa"
 
     def setUp(self):
@@ -206,7 +210,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
         global_valid_tokens = torch.tensor(
             BATCH_SIZE * SEQ_LEN, dtype=torch.float, device="cuda"
         )
-        extra_inputs: dict[str, torch.Tensor] = {}
         extra_kwargs: dict[str, object] = {
             "positions": self.positions,
             **self._get_extra_kwargs(model),
@@ -218,7 +221,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             self.inputs,
             self.labels,
             global_valid_tokens,
-            extra_inputs,
             extra_kwargs,
         )
 
@@ -234,7 +236,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
                     cpu_offload_prefetch_n_layers=1,
                     cpu_offload_defer_n_layers=1,
                     cpu_offload_budget_gb=100.0,
-                    enable_fsdp_ag_rs_overlap=False,
                 ),
                 parallelism=SimpleNamespace(
                     pipeline_parallel_degree=1,
@@ -281,7 +282,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 self.inputs,
                 self.labels,
                 global_valid_tokens,
-                extra_inputs,
                 extra_kwargs,
             )
             loss = outputs[0]
@@ -353,6 +353,11 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
 
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
+        if self.attn_backend == "flex":
+            # FlexAttention's BlockMask mask_mod closures are Python code objects
+            # that pickle.dumps cannot serialize. The SDPA subclasses cover this
+            # path (SDPA carries no such object).
+            self.skipTest("FlexAttention graphs contain unpicklable code objects")
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
 
@@ -395,11 +400,11 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.4749956130981445""")
         assert_expected_inline(
             model_hash,
-            """89942c2acb1be82c69efe87338ba248dd16b5dab4c5d410877e890c796dec89f""",
+            """edaec1177d073cf99a24433a6381b23282bfbfe306c40cefcea5d4efaf14cd0a""",
         )
         assert_expected_inline(
             grad_hash,
-            """2cc6dbc2a86a68cff84ff4087e73479da2ebec5929528f94f4958ba0f2eca3eb""",
+            """ce80bf7a7186d63eb6231d684ecefe7a7846f1bc63c8fde794fefd462e9c2c5d""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -411,6 +416,11 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
 
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
+        if self.attn_backend == "flex":
+            # FlexAttention's BlockMask mask_mod closures are Python code objects
+            # that pickle.dumps cannot serialize. The SDPA subclasses cover this
+            # path (SDPA carries no such object).
+            self.skipTest("FlexAttention graphs contain unpicklable code objects")
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
 
@@ -433,7 +443,7 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
 
 
 class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
-    """Bitwise determinism tests for Llama3 with FlexAttention (debugmodel_flex_attn).
+    """Bitwise determinism tests for Llama3 with FlexAttention (debugmodel).
 
     aot_fx_trace compiles FlexAttention HOPs via regional_inductor into fused
     Triton kernels and produces bitwise identical results to eager.
@@ -458,11 +468,11 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.961757183074951""")
         assert_expected_inline(
             model_hash,
-            """bc9fbc09b6f14f4cb1e1f75a691da0a4be5905cb0e02f9c29512c268dc43ff81""",
+            """2cc38288f1641b058a56a1930af77dcb33c91fb12176cfdb59f436c9a2b3addd""",
         )
         assert_expected_inline(
             grad_hash,
-            """66b847a7f479b464c883e1cce759d4b38d7a78f3c319463b8402710b69ac4530""",
+            """9163c0f93a0a8dbf02208dae3ee0b427a97e3dd39e83b84847d2ed4b4e2bc495""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -471,9 +481,13 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
-    @unittest.skip("FlexAttention graphs contain unpicklable code objects")
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
+        if self.attn_backend == "flex":
+            # FlexAttention's BlockMask mask_mod closures are Python code objects
+            # that pickle.dumps cannot serialize. The SDPA subclasses cover this
+            # path (SDPA carries no such object).
+            self.skipTest("FlexAttention graphs contain unpicklable code objects")
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
 
@@ -496,7 +510,7 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
 
 
 class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
-    """Bitwise determinism tests for DSv3 with FlexAttention (debugmodel_flex_attn).
+    """Bitwise determinism tests for DSv3 with FlexAttention (debugmodel).
 
     aot_fx_trace compiles FlexAttention HOPs via regional_inductor into fused
     Triton kernels and produces bitwise identical results to eager.
@@ -521,11 +535,11 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.4749956130981445""")
         assert_expected_inline(
             model_hash,
-            """bb0a4727f4c2120af1c98451a0890eb1220ee1d123bec3ce65818d0669e7c541""",
+            """d2670e9bf949d83c446bcce1ca468a23eda98c83c0cac83eafb15ddebde3c234""",
         )
         assert_expected_inline(
             grad_hash,
-            """16c5442f06bc283431e48c4bcd2498fa3c849351815668b72ce1c76095f22277""",
+            """e90a28b41bdae0de5d1db20de40998b0508866efed561cce4373e595626e8e7a""",
         )
 
     # TODO: FlexAttention compilation exceeds resource limits on pre-Hopper GPUs.
@@ -540,9 +554,13 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
-    @unittest.skip("FlexAttention graphs contain unpicklable code objects")
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
+        if self.attn_backend == "flex":
+            # FlexAttention's BlockMask mask_mod closures are Python code objects
+            # that pickle.dumps cannot serialize. The SDPA subclasses cover this
+            # path (SDPA carries no such object).
+            self.skipTest("FlexAttention graphs contain unpicklable code objects")
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
 
@@ -590,11 +608,11 @@ class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.297995567321777""")
         assert_expected_inline(
             model_hash,
-            """81697f98f47d153b64d35719b42f7d2de6d1e7436a1c1c3cf79415aef3b8e2de""",
+            """c4f3d5d6a4dacffc82a0845ef620dcbdb053d9785ce64b8dd5b5e181f4fe2d1b""",
         )
         assert_expected_inline(
             grad_hash,
-            """bb6d6fb73d9796843ce78d40966ed78a1479fbc8e26dc824e4e1dd77b7cbfaa5""",
+            """b24c4d0201f11a825bbf49269592968ffd53d5b52bc0486bcacafae91e90eee3""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -606,6 +624,11 @@ class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
 
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
+        if self.attn_backend == "flex":
+            # FlexAttention's BlockMask mask_mod closures are Python code objects
+            # that pickle.dumps cannot serialize. The SDPA subclasses cover this
+            # path (SDPA carries no such object).
+            self.skipTest("FlexAttention graphs contain unpicklable code objects")
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
 
@@ -653,11 +676,11 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.297987461090088""")
         assert_expected_inline(
             model_hash,
-            """4d79b03cf9eaee53df27befad54d3db9177f2127a658e0c8140a02565926ea50""",
+            """85240276507f93d2dbc8b09d5dad5f86623bcd49423abe64fba787b74d7f6d81""",
         )
         assert_expected_inline(
             grad_hash,
-            """cf4a8c8a0f1ce6ae836fc6a01f608e4d21821abf1f7e4804ec7da3c6f803d1af""",
+            """74877b0fa386c66c3154e0371adb86c9255527f0d48fb623feb7ee70ee79d409""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -666,9 +689,13 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
-    @unittest.skip("FlexAttention graphs contain unpicklable code objects")
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
+        if self.attn_backend == "flex":
+            # FlexAttention's BlockMask mask_mod closures are Python code objects
+            # that pickle.dumps cannot serialize. The SDPA subclasses cover this
+            # path (SDPA carries no such object).
+            self.skipTest("FlexAttention graphs contain unpicklable code objects")
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
 

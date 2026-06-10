@@ -43,10 +43,12 @@ class GraphTrainerCompileConfig(CompileConfig):
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
-    memory_policy: Literal["default", "eager", "sac_and_offload"] = "default"
+    memory_policy: Literal["default", "full", "eager", "sac_and_offload"] = "default"
     """
     Memory optimization policy for activation management (SAC, offload).
         default: SAC — save all compute-intensive ops and FSDP all_gathers.
+        full: full recompute — only layer outputs are saved. Mirrors
+            eager's full AC (checkpoint_wrapper with no context_fn).
         eager: SAC alternating mm ops between save/recompute, matching the
             eager AC policy in torchtitan.distributed.activation_checkpoint.
         sac_and_offload: SAC + CPU offload — apply default SAC first,
@@ -83,12 +85,6 @@ class GraphTrainerCompileConfig(CompileConfig):
     cpu_offload_budget_gb: float = 100.0
     """Maximum CPU memory budget (in GB per rank) for offloaded activations.
     Tensors are selected largest-first until the budget is exhausted."""
-
-    enable_fsdp_ag_rs_overlap: bool = False
-    """When True, run ``overlap_fsdp_ag_rs_pass``. The pass moves backward
-    FSDP all-gathers onto a separate CUDA stream from reduce-scatters so the
-    two collectives can overlap. It is a no-op when the graph contains no
-    FSDP all-gathers."""
 
     precompile_artifact_dir: str = ""
     """

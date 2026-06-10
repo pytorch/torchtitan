@@ -79,7 +79,14 @@ class GptOssGroupedExperts(Module):
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
-        """Raw expert computation without dispatch/combine."""
+        """Raw expert computation without dispatch/combine.
+
+        Shape suffixes here describe logical grouped-mm inputs, not physical
+        sharding. Under EP, E may be a local shard of experts; under TP,
+        expert weights shard hidden dimensions instead; under SP, R may be a
+        local token shard. Keep logical capital suffixes here to avoid encoding
+        a specific parallel layout in these local tensor names.
+        """
         if isinstance(self.mlp1_weight_EGD, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
@@ -155,6 +162,7 @@ class GptOssGroupedExperts(Module):
         x_BLD: torch.Tensor,
         topk_scores_BLK: torch.Tensor,
         topk_expert_ids_BLK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add."""
         B, L, D = x_BLD.shape
@@ -165,13 +173,18 @@ class GptOssGroupedExperts(Module):
         topk_expert_ids_TK = topk_expert_ids_BLK.view(T, K)
         (
             routed_input_RD,
-            num_tokens_per_expert_E,
+            num_global_tokens_per_local_expert_e,
             metadata,
-        ) = self.token_dispatcher.dispatch(x_TD, topk_scores_TK, topk_expert_ids_TK)
-        routed_output_RD = self._experts_forward(
-            routed_input_RD, num_tokens_per_expert_E
+        ) = self.token_dispatcher.dispatch(
+            x_TD, topk_scores_TK, topk_expert_ids_TK, num_local_tokens_per_expert_E
         )
-        return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        routed_output_RD = self._experts_forward(
+            routed_input_RD, num_global_tokens_per_local_expert_e
+        )
+        out_TD = self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
+        # won't cause _StridedShard in the downstream view (e.g., CP is used).
+        return out_TD.view(B, -1, D)
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize experts and wire dispatcher meshes.

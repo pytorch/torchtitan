@@ -126,7 +126,6 @@ def set_determinism(
     """
     if debug_config.deterministic:
         logger.info("Deterministic algorithm enabled (expect perf degradation).")
-        torch.use_deterministic_algorithms(True)
         torch.use_deterministic_algorithms(
             True, warn_only=debug_config.deterministic_warn_only
         )
@@ -417,6 +416,11 @@ def init_distributed(
         prefix = comm_config.save_traces_file_prefix
         os.makedirs(dump_dir, exist_ok=True)
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/{prefix}")
+
+    # disable autograd multithreading, to enable TLS DeviceMesh stack for spmd_types backend.
+    # this is needed for AC functionality; multi-threaded autograd means BWD threads performing recompute,
+    # cannot access PGs, e.g. current_mesh().get_group("tp") to perform the collectives they need.
+    torch.autograd.set_multithreading_enabled(False)
 
     device_id: torch.device | None = None
     if comm_config.mode == "torchcomms":

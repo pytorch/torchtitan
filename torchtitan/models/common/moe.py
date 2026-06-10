@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
@@ -55,14 +56,21 @@ class GroupedExperts(Module):
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
-        """Raw expert computation without dispatch/combine."""
+        """Raw expert computation without dispatch/combine.
+
+        Shape suffixes here describe logical grouped-mm inputs, not physical
+        sharding. Under EP, E may be a local shard of experts; under TP,
+        expert weights shard hidden dimensions instead; under SP, R may be a
+        local token shard. Keep logical capital suffixes here to avoid encoding
+        a specific parallel layout in these local tensor names.
+        """
         if isinstance(self.w1_EFD, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
             w1_EFD = self.w1_EFD.to_local()
-            # pyrefly: ignore [missing-attribute]
+            assert isinstance(self.w2_EDF, DTensor)
             w2_EDF = self.w2_EDF.to_local()
-            # pyrefly: ignore [missing-attribute]
+            assert isinstance(self.w3_EFD, DTensor)
             w3_EFD = self.w3_EFD.to_local()
         else:
             w1_EFD = self.w1_EFD
@@ -92,6 +100,7 @@ class GroupedExperts(Module):
         x_BLD: torch.Tensor,
         topk_scores_BLK: torch.Tensor,
         topk_expert_ids_BLK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
@@ -107,13 +116,18 @@ class GroupedExperts(Module):
         topk_expert_ids_TK = topk_expert_ids_BLK.view(T, K)
         (
             routed_input_RD,
-            num_tokens_per_expert_E,
+            num_global_tokens_per_local_expert_e,
             metadata,
-        ) = self.token_dispatcher.dispatch(x_TD, topk_scores_TK, topk_expert_ids_TK)
-        routed_output_RD = self._experts_forward(
-            routed_input_RD, num_tokens_per_expert_E
+        ) = self.token_dispatcher.dispatch(
+            x_TD, topk_scores_TK, topk_expert_ids_TK, num_local_tokens_per_expert_E
         )
-        return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        routed_output_RD = self._experts_forward(
+            routed_input_RD, num_global_tokens_per_local_expert_e
+        )
+        out_TD = self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
+        # won't cause _StridedShard in the downstream view (e.g., CP is used).
+        return out_TD.view(B, -1, D)
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize expert weights, then wire EP/TP meshes on the dispatcher
@@ -231,7 +245,7 @@ class TokenChoiceTopKRouter(Module):
         Returns:
             topk_scores_BLK: Routing scores ``(B, L, K)``.
             topk_expert_ids_BLK: Expert indices ``(B, L, K)``.
-            num_tokens_per_expert_E: Token counts per expert ``(E,)``.
+            scores_BLE: Full routing scores ``(B, L, E)``.
         """
         # Compute gate in float32 to help stability of expert load balancing.
         with torch.autocast(device_type=x_BLD.device.type, dtype=torch.float32):
@@ -274,15 +288,11 @@ class TokenChoiceTopKRouter(Module):
             topk_scores_BLK = topk_scores_BLK / denominator
         topk_scores_BLK = topk_scores_BLK * self.route_scale
 
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert_E = torch.histc(
-            topk_expert_ids_BLK.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
+        return (
+            topk_scores_BLK,
+            topk_expert_ids_BLK,
+            scores_BLE,
         )
-
-        return topk_scores_BLK, topk_expert_ids_BLK, num_tokens_per_expert_E
 
 
 class MoE(Module):
@@ -360,15 +370,50 @@ class MoE(Module):
         operates on DTensors — the DTensor→local conversion happens at
         the GroupedExperts boundary.
         """
-        B, L, D = x_BLD.shape
-
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
-        # num_tokens_per_expert_E shape (E,)
+        # scores_BLE shape (B, L, E)
         (
             topk_scores_BLK,
             topk_expert_ids_BLK,
-            num_tokens_per_expert_E,
+            scores_BLE,
         ) = self.router(x_BLD, self.expert_bias_E)
+
+        # Build routing map with scatter. scatter_ does not support mixed
+        # local Tensor / DTensor arguments, so run the scatter on local tensors
+        # under local_map when router outputs are DTensors.
+        # TODO: Remove this local_map workaround once DTensor sharding
+        # propagation supports scatter with mixed Tensor / DTensor arguments.
+        def _generate_routing_map(
+            scores_BLE: torch.Tensor,
+            topk_expert_ids_BLK: torch.Tensor,
+        ) -> torch.Tensor:
+            return torch.zeros_like(scores_BLE, dtype=torch.bool).scatter_(
+                -1,
+                topk_expert_ids_BLK,
+                True,
+            )
+
+        if isinstance(topk_expert_ids_BLK, DTensor):
+            assert isinstance(
+                scores_BLE, DTensor
+            ), "scores_BLE and topk_expert_ids_BLK should both be DTensors"
+            generate_routing_map = local_map(
+                _generate_routing_map,
+                in_placements=(
+                    scores_BLE.placements,
+                    topk_expert_ids_BLK.placements,
+                ),
+                out_placements=(scores_BLE.placements,),
+                device_mesh=scores_BLE.device_mesh,
+            )
+        else:
+            generate_routing_map = _generate_routing_map
+
+        routing_map_BLE = generate_routing_map(
+            scores_BLE,
+            topk_expert_ids_BLK,  # pyrefly: ignore [bad-argument-count]
+        )
+        num_local_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
 
         # tokens_per_expert_E will be used to update the expert bias for load balancing,
         # and also to count the expert usage.
@@ -376,9 +421,14 @@ class MoE(Module):
         #       first in the forward pass, and then in the backward pass. However, this has no
         #       effect on the expert bias update thanks to the torch.sign() operator.
         with torch.no_grad():
-            self.tokens_per_expert_E.add_(num_tokens_per_expert_E)
+            self.tokens_per_expert_E.add_(num_local_tokens_per_expert_E)
 
-        out_TD = self.experts(x_BLD, topk_scores_BLK, topk_expert_ids_BLK)
+        out_BLD = self.experts(
+            x_BLD,
+            topk_scores_BLK,
+            topk_expert_ids_BLK,
+            num_local_tokens_per_expert_E,
+        )
 
         # shared_experts runs in parallel with deepep combine communication.
         shared_out_BLD = (
@@ -396,13 +446,15 @@ class MoE(Module):
 
             sync_combine()
 
-        out_BLD = out_TD.view(B, L, D)
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD
         return out_BLD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
-        assert isinstance(buffer_device, torch.device)
+        if buffer_device is None:
+            # After ``to_empty()``, the existing buffer records the target device.
+            # Reinitialize MoE counters there when no explicit buffer device is passed.
+            buffer_device = self.tokens_per_expert_E.device
 
         with torch.device(buffer_device):
             self.tokens_per_expert_E = torch.zeros(

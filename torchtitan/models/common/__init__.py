@@ -12,6 +12,7 @@ from .attention import (
     FusedQKVLinear,
     get_causal_mask_mod,
     get_document_mask_mod,
+    get_efficient_causal_mask_mod_for_packed_document,
     get_fixed_block_mask_mod,
     get_sliding_window_mask_mod,
     GQAttention,
@@ -24,6 +25,7 @@ from .decoder import Decoder, TransformerBlock
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .moe import MoE
 from .nn_modules import (
+    Conv1d,
     Conv2d,
     Embedding,
     GELU,
@@ -34,15 +36,13 @@ from .nn_modules import (
     RMSNorm,
     SiLU,
 )
-from .rope import (
-    apply_rotary_emb_complex,
-    apply_rotary_emb_cos_sin,
-    apply_rotary_emb_single_complex,
-    RoPE,
-)
+from .rope import ComplexRoPE, CosSinRoPE, RoPE
 
 __all__ = [
+    "Conv1d",
     "Conv2d",
+    "ComplexRoPE",
+    "CosSinRoPE",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
     "Decoder",
@@ -54,6 +54,7 @@ __all__ = [
     "GELU",
     "get_causal_mask_mod",
     "get_document_mask_mod",
+    "get_efficient_causal_mask_mod_for_packed_document",
     "get_fixed_block_mask_mod",
     "get_sliding_window_mask_mod",
     "GQAttention",
@@ -70,8 +71,5 @@ __all__ = [
     "TransformerBlock",
     "VarlenAttention",
     "VarlenMetadata",
-    "apply_rotary_emb_complex",
-    "apply_rotary_emb_cos_sin",
-    "apply_rotary_emb_single_complex",
     "compute_ffn_hidden_dim",
 ]

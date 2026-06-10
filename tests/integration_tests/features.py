@@ -50,13 +50,11 @@ def _is_pp_only(variant: tuple[str, ...], ngpu: int) -> bool:
 
 
 def _enable_full_dtensor(t: OverrideDefinitions) -> OverrideDefinitions:
-    """Inject ``--parallelism.full_dtensor`` into every variant.
+    """Inject ``--parallelism.spmd_backend full_dtensor`` into every variant.
 
     All features.py tests run under full_dtensor except PP-only variants
     (see ``_is_pp_only``) and CP + compile variants (upstream symint
     limitation); legacy non-full_dtensor coverage lives in models.py.
-    CP variants also switch to FlexAttention config because
-    full_dtensor + CP is not supported with SDPA / Varlen.
     """
     new_args = []
     for variant in t.override_args:
@@ -64,9 +62,7 @@ def _enable_full_dtensor(t: OverrideDefinitions) -> OverrideDefinitions:
         has_cp = any("context_parallel_degree" in arg for arg in variant)
         has_compile = any("compile.enable" in arg for arg in variant)
         if not _is_pp_only(variant, t.ngpu) and not (has_cp and has_compile):
-            prefix.append("--parallelism.full_dtensor")
-        if has_cp:
-            prefix.append("--module llama3 --config llama3_debugmodel_flex_attn")
+            prefix.append("--parallelism.spmd_backend full_dtensor")
         new_args.append(tuple(prefix) + tuple(variant))
     return dataclasses.replace(t, override_args=tuple(new_args))
 
@@ -218,6 +214,18 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "Checkpoint Integration Test - Save Model Only bf16",
             "last_save_model_only_bf16",
         ),
+        # TODO: Disabled with the FlexAttention default (SDPA is no longer a
+        # language-model backend). Zero-bubble / multi schedules split backward
+        # and call torch's stage_backward_input, which runs
+        # _get_grad_fn_or_grad_acc (t.requires_grad) over every stage input —
+        # including the forwarded FlexAttention BlockMask, which is not a Tensor
+        # ("'BlockMask' object has no attribute 'requires_grad'"). Full-backward
+        # schedules (1F1B/GPipe/Interleaved1F1B) are unaffected. Re-enable once
+        # stage_backward_input skips non-tensor stage inputs upstream.
+        # (VarlenAttention's tensor-based metadata would sidestep this, but
+        # varlen requires flash_attn_interface/FA3, which the core integration
+        # CI does not install; SDPA is no longer a core LM backend. So the
+        # upstream stage_backward_input fix is the path here.)
         OverrideDefinitions(
             [
                 [
@@ -229,6 +237,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "PP looped zero bubble test",
             "pp_looped_zero_bubble",
             ngpu=4,
+            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -241,6 +250,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "PP zero bubble test (v shaped)",
             "pp_zbv",
             ngpu=2,
+            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -353,6 +363,10 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "pp_looped_1f1b",
             ngpu=4,
         ),
+        # TODO: Disabled for the same reason as the zero-bubble PP tests above:
+        # the custom CSV schedule splits backward (separate input-grad step),
+        # so stage_backward_input chokes on the forwarded FlexAttention
+        # BlockMask. Re-enable once stage_backward_input skips non-tensor inputs.
         OverrideDefinitions(
             [
                 [
@@ -365,11 +379,12 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "PP with custom pipeline schedule loaded from CSV file",
             "pp_custom_csv",
             ngpu=2,
+            disabled=True,
         ),
         OverrideDefinitions(
             [
                 [
-                    "--optimizer.name AdamW --optimizer.implementation foreach",
+                    "--optimizer.implementation foreach",
                 ]
             ],
             "Foreach Optimizer Test",
@@ -379,7 +394,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--optimizer.name AdamW --optimizer.implementation fused_opt_states_bf16",
+                    "--optimizer.implementation fused_opt_states_bf16",
                 ]
             ],
             "BF16 Optimizer States Test",
@@ -492,19 +507,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable",
-                ],
-                [
-                    # placeholder for the generation script's generate step
-                ],
-            ],
-            "Generation script test",
-            "test_generate",
-            ngpu=2,
-        ),
-        OverrideDefinitions(
-            [
-                [
                     "--parallelism.fsdp_reshard_after_forward always",
                 ],
             ],
@@ -575,32 +577,19 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "dataloader_kwargs",
             ngpu=2,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--override.imports torchtitan.overrides.fused_swiglu",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "Override: swap FeedForward with fused SwiGLU (FSDP2 + TP2)",
+            "override_fused_swiglu",
+            ngpu=4,
+        ),
         # NOTE: below are tests which require config change that cannot be done
         #       via CLI overrides, so remain llama3 specific
-        OverrideDefinitions(
-            [
-                [
-                    "--module llama3 --config llama3_debugmodel_flex_attn",
-                    "--parallelism.data_parallel_shard_degree=4",
-                    "--activation_checkpoint.mode='full'",
-                ]
-            ],
-            "FSDP+FLEX_ATTN",
-            "fsdp+flex_attn",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module llama3 --config llama3_debugmodel_flex_attn",
-                    "--parallelism.data_parallel_shard_degree=4",
-                    "--activation_checkpoint.mode=selective",
-                ]
-            ],
-            "FSDP + FLEX + per op SAC",
-            "fsdp+flex_attn+per_op_sac",
-            ngpu=4,
-        ),
         OverrideDefinitions(
             [
                 [
@@ -614,28 +603,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=4,
             skip_rocm_test=True,
         ),
-        # NOTE: temporarily disable due to test hanging in CI
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--module llama3 --config llama3_debugmodel_opt_in_bwd",
-        #             "--checkpoint.enable",
-        #             "--parallelism.tensor_parallel_degree=2",
-        #             "--parallelism.context_parallel_degree=2",
-        #             "--training.enable_cpu_offload",
-        #         ],
-        #         [
-        #             "--module llama3 --config llama3_debugmodel_opt_in_bwd",
-        #             "--parallelism.tensor_parallel_degree=2",
-        #             "--parallelism.context_parallel_degree=2",
-        #             "--parallelism.data_parallel_replicate_degree=2",
-        #             "--training.enable_cpu_offload",
-        #         ],
-        #     ],
-        #     "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
-        #     "cpu_offload+opt_in_bwd+TP+DP+CP",
-        #     ngpu=8,
-        # ),
         OverrideDefinitions(
             [
                 [
@@ -661,6 +628,10 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "torchcomms_3d_dp+cp+pp+compile",
             ngpu=8,
             skip_rocm_test=True,
+            # NotImplementedError: new_group cannot delegate to split_group
+            # with use_local_synchronization=True; split_group requires all
+            # ranks in the parent group to participate.
+            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -676,6 +647,9 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "torchcomms_3d_dp+tp+pp+compile",
             ngpu=8,
             skip_rocm_test=True,
+            # torchcomms-managed TP PG not registered in c10d;
+            # resolve fails under compile
+            disabled=True,
         ),
         OverrideDefinitions(
             [

@@ -16,7 +16,6 @@ from torch.testing._internal.common_fsdp import FSDPTest
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedCELossWithParamGrads,
 )
-
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
@@ -668,13 +667,23 @@ class TestReparametrizeOptimizer(unittest.TestCase):
     DTYPE = torch.float32
 
     def test_titan_optimizers_container(self):
-        from torchtitan.components.optimizer import OptimizersContainer
+        from torchtitan.components.optimizer import (
+            OptimizersContainer,
+            ParamGroupConfig,
+        )
 
         torch.manual_seed(0)
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         container = OptimizersContainer(
             OptimizersContainer.Config(
-                name="AdamW", lr=1e-3, implementation="for-loop"
+                param_groups=[
+                    ParamGroupConfig(
+                        pattern=r".*",
+                        optimizer_name="AdamW",
+                        optimizer_kwargs={"lr": 1e-3},
+                    )
+                ],
+                implementation="for-loop",
             ),
             model_parts=[model],
         )
@@ -939,7 +948,7 @@ class TestTraceDTensor(unittest.TestCase):
                 f"{name} should have been migrated to CUDA",
             )
 
-        gm = cudagraph_pass(gm, traced.example_inputs, is_forward=True)
+        gm = cudagraph_pass(gm, traced.example_inputs)
         real_x = torch.zeros(4, dtype=torch.float32, device=self.DEVICE)
         expected = f({}, real_x.clone())
         for _ in range(3):
@@ -1078,6 +1087,46 @@ class TestMetadataPropagation(unittest.TestCase):
         )
 
 
+# Large head_dims (qwen3 head_dim=128, deepseek qk_head_dim=192) run in bf16:
+# the FlexAttention Triton kernel's fp32 shared-memory footprint exceeds the
+# H100 default limit (~99KB) -> "InductorError: out of resource:
+# triton_tem_fused_flex_attention". bf16 halves the smem so the kernel fits.
+# SDPA never hit this; it only surfaced once flex became the default LM backend.
+# llama3 (head_dim 16) is small enough to stay in fp32.
+
+
+def _disable_flex_autotune():
+    """Disable FlexAttention max_autotune; returns the originals to restore.
+
+    max_autotune searches flex block sizes that exceed the H100 shared-memory
+    limit for larger head_dims (qwen3 head_dim=128, deepseek qk_head_dim=192),
+    raising ``InductorError: out of resource: triton_tem_fused_flex_attention``.
+    Disabling it falls back to the default block config (which fits) and keeps
+    the eager vs regional-inductor kernels consistent. Mirrors
+    ``test_bitwise_deterministic.setUp``.
+    """
+    from torch.nn.attention.flex_attention import flex_attention
+
+    from torchtitan.models.common.attention import FlexAttention
+
+    orig = (FlexAttention.inductor_configs, FlexAttention._compiled_flex_attn)
+    FlexAttention.inductor_configs = {
+        **FlexAttention.inductor_configs,
+        "max_autotune": False,
+        "coordinate_descent_tuning": False,
+    }
+    FlexAttention._compiled_flex_attn = torch.compile(
+        flex_attention, options=FlexAttention.inductor_configs
+    )
+    return orig
+
+
+def _restore_flex_autotune(orig):
+    from torchtitan.models.common.attention import FlexAttention
+
+    FlexAttention.inductor_configs, FlexAttention._compiled_flex_attn = orig
+
+
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestTraceModels(unittest.TestCase):
     DEVICE = "cuda"
@@ -1090,8 +1139,10 @@ class TestTraceModels(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(42)
         torch.use_deterministic_algorithms(True)
+        self._flex_orig = _disable_flex_autotune()
 
     def tearDown(self):
+        _restore_flex_autotune(self._flex_orig)
         torch.use_deterministic_algorithms(False)
 
     def _run_bitwise_test(
@@ -1162,10 +1213,12 @@ class TestTraceModels(unittest.TestCase):
         model_config,
         use_attn_masks=False,
         use_regional_inductor=False,
+        dtype=None,
     ):
+        dtype = dtype or self.DTYPE
         vocab_size = model_config.vocab_size
-        model_ref = create_model(config_cls, model_config, self.DEVICE, self.DTYPE)
-        model_test = create_model(config_cls, model_config, self.DEVICE, self.DTYPE)
+        model_ref = create_model(config_cls, model_config, self.DEVICE, dtype)
+        model_test = create_model(config_cls, model_config, self.DEVICE, dtype)
         model_test.load_state_dict(model_ref.state_dict())
         tokens = torch.randint(
             0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device=self.DEVICE
@@ -1184,7 +1237,13 @@ class TestTraceModels(unittest.TestCase):
             attn_masks = create_attention_mask(
                 get_causal_mask_mod(), 1, None, self.SEQ_LEN, self.SEQ_LEN
             )
-            fwd_args = (tokens, attn_masks)
+            # Decoder.forward is (tokens, positions, attention_masks). Pass
+            # explicit sequential positions (make_fx can't trace a None
+            # placeholder) so the BlockMask lands in the attention_masks slot.
+            positions = torch.arange(self.SEQ_LEN, device=self.DEVICE).repeat(
+                self.BATCH_SIZE, 1
+            )
+            fwd_args = (tokens, positions, attn_masks)
 
         self._run_bitwise_test(
             model_ref,
@@ -1199,31 +1258,51 @@ class TestTraceModels(unittest.TestCase):
     def test_llama3(self):
         from torchtitan.models.llama3 import llama3_configs, Llama3Model
 
-        config = llama3_configs["debugmodel"](attn_backend="sdpa")
-        self._run_model_test(Llama3Model, config)
+        config = llama3_configs["debugmodel"](attn_backend="flex")
+        self._run_model_test(
+            Llama3Model, config, use_attn_masks=True, use_regional_inductor=True
+        )
 
     def test_qwen3(self):
         from torchtitan.models.qwen3 import qwen3_configs
         from torchtitan.models.qwen3.model import Qwen3Model
 
-        config = qwen3_configs["debugmodel"](attn_backend="sdpa")
-        self._run_model_test(Qwen3Model, config)
+        config = qwen3_configs["debugmodel"](attn_backend="flex")
+        self._run_model_test(
+            Qwen3Model,
+            config,
+            use_attn_masks=True,
+            use_regional_inductor=True,
+            dtype=torch.bfloat16,
+        )
 
     def test_qwen3_moe(self):
         from torchtitan.models.qwen3 import qwen3_configs
         from torchtitan.models.qwen3.model import Qwen3Model
 
-        config = qwen3_configs["debugmodel_moe"](attn_backend="sdpa")
-        self._run_model_test(Qwen3Model, config)
+        config = qwen3_configs["debugmodel_moe"](attn_backend="flex")
+        self._run_model_test(
+            Qwen3Model,
+            config,
+            use_attn_masks=True,
+            use_regional_inductor=True,
+            dtype=torch.bfloat16,
+        )
 
     def test_deepseek_v3(self):
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
         config = deepseekv3_configs["debugmodel"](
-            attn_backend="sdpa", moe_comm_backend="standard"
+            attn_backend="flex", moe_comm_backend="standard"
         )
-        self._run_model_test(DeepSeekV3Model, config)
+        self._run_model_test(
+            DeepSeekV3Model,
+            config,
+            use_attn_masks=True,
+            use_regional_inductor=True,
+            dtype=torch.bfloat16,
+        )
 
     def test_deepseek_v3_flex_attention(self):
         """Tests if we can propagate fwd node metadata reliably through backward.
@@ -1240,7 +1319,7 @@ class TestTraceModels(unittest.TestCase):
             get_document_mask_mod,
         )
         from torchtitan.models.common.nn_modules import Linear, RMSNorm
-        from torchtitan.models.common.rope import RoPE
+        from torchtitan.models.common.rope import ComplexRoPE
         from torchtitan.models.deepseek_v3.model import Attention as DSAttention
 
         dim = 64
@@ -1267,10 +1346,14 @@ class TestTraceModels(unittest.TestCase):
                         qk_nope_head_dim=qk_nope_head_dim,
                         qk_rope_head_dim=rope_dim,
                         v_head_dim=v_head_dim,
+                        rope=ComplexRoPE.Config(
+                            dim=rope_dim,
+                            max_seq_len=seq_len,
+                            scaling="none",
+                        ),
                         q_norm=RMSNorm.Config(normalized_shape=1),
                         kv_norm=RMSNorm.Config(normalized_shape=kv_lora_rank),
                         inner_attention=FlexAttention.Config(),
-                        mask_type="block_causal",
                         wq=Linear.Config(
                             in_features=dim,
                             out_features=n_heads * qk_head_dim,
@@ -1289,24 +1372,16 @@ class TestTraceModels(unittest.TestCase):
                         ),
                     ),
                 )
-                self.rope = RoPE(
-                    RoPE.Config(
-                        dim=rope_dim,
-                        max_seq_len=seq_len,
-                        backend="complex",
-                        scaling="none",
-                    )
-                )
                 self.proj = nn.Linear(dim, vocab_size)
 
             def init_states(self, buffer_device=None):
-                self.rope._init_self_buffers(
+                self.attn.rope._init_self_buffers(
                     buffer_device=buffer_device or torch.device("cuda")
                 )
 
             def forward(self, tokens, block_mask):
                 x = self.embed(tokens)
-                x = self.attn(x, self.rope.cache, block_mask)
+                x = self.attn(x, block_mask)
                 return self.proj(x)
 
         model = TinyFlexMLA().to(device=self.DEVICE, dtype=self.DTYPE)
@@ -1357,20 +1432,6 @@ class TestTraceModels(unittest.TestCase):
                     custom,
                     f"{node.name} missing compile_with_inductor annotation",
                 )
-
-    def test_llama4(self):
-        from torchtitan.models.llama4 import llama4_configs
-        from torchtitan.models.llama4.model import Llama4Model
-
-        config = llama4_configs["debugmodel"](
-            attn_backend="flex", moe_comm_backend="standard"
-        )
-        self._run_model_test(
-            Llama4Model,
-            config,
-            use_attn_masks=True,
-            use_regional_inductor=True,
-        )
 
     # TODO: Fix scatter() dtype mismatch — scatter_add expects self.dtype == src.dtype
     # but GptOss produces mismatched dtypes during tracing.
@@ -1459,7 +1520,7 @@ class TestTraceModels(unittest.TestCase):
         maybe_register_blockmask_pytree_node()
 
         def forward(tokens, attn_masks):
-            return model(tokens, attn_masks)
+            return model(tokens, attention_masks=attn_masks)
 
         traced = minimal_fx_tracer(forward, module=model)(tokens, attn_masks)
 
@@ -1511,6 +1572,7 @@ class TestTraceFSDP(FSDPTest):
         use_attn_masks=False,
         attn_masks=None,
         use_regional_inductor=False,
+        dtype=torch.float32,
     ):
         from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
 
@@ -1518,10 +1580,14 @@ class TestTraceFSDP(FSDPTest):
         torch.cuda.manual_seed(42)
         torch.use_deterministic_algorithms(True)
         self._setup()
+        # FSDPTest.setUp runs in the parent, so disable flex max_autotune here
+        # (in the child process) to keep flex kernels within the H100 shared
+        # memory limit. No restore needed: each rank is a fresh subprocess.
+        _disable_flex_autotune()
         fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
 
-        model_ref = create_model(config_cls, model_config, "cuda", torch.float32)
-        model_test = create_model(config_cls, model_config, "cuda", torch.float32)
+        model_ref = create_model(config_cls, model_config, "cuda", dtype)
+        model_test = create_model(config_cls, model_config, "cuda", dtype)
         model_test.load_state_dict(model_ref.state_dict())
         model_ref = data_parallel(model_ref, device_mesh=fsdp_mesh, mode="fully_shard")
         model_test = data_parallel(
@@ -1532,9 +1598,13 @@ class TestTraceFSDP(FSDPTest):
         seq_len = 128
         tokens = torch.randint(0, vocab_size, (2, seq_len), device="cuda")
         labels = torch.randint(0, vocab_size, (2, seq_len), device="cuda")
+        # Decoder.forward is (tokens, positions, attention_masks). Pass explicit
+        # sequential positions (make_fx can't trace a None placeholder) so the
+        # BlockMask lands in the attention_masks slot.
+        positions = torch.arange(seq_len, device="cuda").repeat(2, 1)
 
         if attn_masks is not None:
-            fwd_args = (tokens, attn_masks)
+            fwd_args = (tokens, positions, attn_masks)
         elif use_attn_masks:
             from torchtitan.models.common.attention import (
                 create_attention_mask,
@@ -1544,7 +1614,7 @@ class TestTraceFSDP(FSDPTest):
             attn_masks = create_attention_mask(
                 get_causal_mask_mod(), 1, None, seq_len, seq_len
             )
-            fwd_args = (tokens, attn_masks)
+            fwd_args = (tokens, positions, attn_masks)
         else:
             fwd_args = (tokens,)
 
@@ -1597,37 +1667,37 @@ class TestTraceFSDP(FSDPTest):
     def test_llama3_fsdp(self):
         from torchtitan.models.llama3 import llama3_configs, Llama3Model
 
-        config = llama3_configs["debugmodel"](attn_backend="sdpa")
-        self._run_fsdp_model_test(Llama3Model, config)
+        config = llama3_configs["debugmodel"](attn_backend="flex")
+        self._run_fsdp_model_test(
+            Llama3Model, config, use_attn_masks=True, use_regional_inductor=True
+        )
 
     def test_qwen3_fsdp(self):
         from torchtitan.models.qwen3 import qwen3_configs
         from torchtitan.models.qwen3.model import Qwen3Model
 
-        config = qwen3_configs["debugmodel"](attn_backend="sdpa")
-        self._run_fsdp_model_test(Qwen3Model, config)
+        config = qwen3_configs["debugmodel"](attn_backend="flex")
+        self._run_fsdp_model_test(
+            Qwen3Model,
+            config,
+            use_attn_masks=True,
+            use_regional_inductor=True,
+            dtype=torch.bfloat16,
+        )
 
     def test_deepseek_v3_fsdp(self):
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
         config = deepseekv3_configs["debugmodel"](
-            attn_backend="sdpa", moe_comm_backend="standard"
-        )
-        self._run_fsdp_model_test(DeepSeekV3Model, config)
-
-    def test_llama4_fsdp(self):
-        from torchtitan.models.llama4 import llama4_configs
-        from torchtitan.models.llama4.model import Llama4Model
-
-        config = llama4_configs["debugmodel"](
             attn_backend="flex", moe_comm_backend="standard"
         )
         self._run_fsdp_model_test(
-            Llama4Model,
+            DeepSeekV3Model,
             config,
             use_attn_masks=True,
             use_regional_inductor=True,
+            dtype=torch.bfloat16,
         )
 
     # TODO: Fix scatter() dtype mismatch — same root cause as TestTraceModels.test_gpt_oss.
@@ -1685,7 +1755,7 @@ class TestTraceContextParallel(FSDPTest):
         import torch.distributed as dist
 
         from torchtitan.experiments.graph_trainer.llama3.config_registry import (
-            graph_trainer_llama3_debugmodel,
+            graph_trainer_llama3_debugmodel_sdpa,
         )
         from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 
@@ -1698,7 +1768,7 @@ class TestTraceContextParallel(FSDPTest):
         trainer = None
         try:
             with tempfile.TemporaryDirectory() as dump_folder:
-                config = graph_trainer_llama3_debugmodel()
+                config = graph_trainer_llama3_debugmodel_sdpa()
                 config.dump_folder = dump_folder
                 config.training.local_batch_size = 2
                 config.training.seq_len = 128
@@ -1726,8 +1796,19 @@ class TestTraceContextParallel(FSDPTest):
                     (config.training.local_batch_size, config.training.seq_len),
                     device=trainer.device,
                 )
+                # The dataloader always supplies per-document positions, which
+                # drive RoPE (SDPA itself is maskless and uses is_causal).
+                positions = (
+                    torch.arange(
+                        config.training.seq_len,
+                        device=trainer.device,
+                        dtype=torch.int32,
+                    )
+                    .unsqueeze(0)
+                    .expand(config.training.local_batch_size, config.training.seq_len)
+                )
                 trainer.forward_backward_step(
-                    input_dict={"input": tokens},
+                    input_dict={"input": tokens, "positions": positions},
                     labels=labels,
                     global_valid_tokens=torch.tensor(
                         labels.numel(), device=trainer.device
@@ -1784,6 +1865,12 @@ class TestTraceContextParallel(FSDPTest):
             else:
                 os.environ["LOCAL_RANK"] = old_local_rank
 
+    # Pinned to the SDPA backend: this validates CP all_gather-before-SDPA
+    # codegen, which requires the scaled_dot_product op. The default
+    # FlexAttention backend has no SDPA op and flex + CP is unsupported anyway
+    # (torch's _create_cp_block_mask requires seq_len divisible by 2 *
+    # BLOCK_SIZE, here 128 < 256; see the aot_fx_trace_llama3_fsdp_tp_cp
+    # integration flavor). SDPA has native CP support and emits the SDPA op.
     def test_llama3_cp_only_codegen_all_gather_before_sdpa(self):
         cp_trace = self._trace_llama3_step_code(
             dp_shard_degree=1,
@@ -1814,7 +1901,7 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
         from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
         from torchtitan.models.llama3 import llama3_configs, Llama3Model
 
-        config = llama3_configs["debugmodel"](attn_backend="sdpa")
+        config = llama3_configs["debugmodel"](attn_backend="flex")
         torch.manual_seed(42)
         torch.cuda.manual_seed(42)
         prev_deterministic = torch.are_deterministic_algorithms_enabled()
@@ -1845,13 +1932,22 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
             tokens = torch.randint(0, config.vocab_size, (2, 128), device="cuda")
             labels = torch.randint(0, config.vocab_size, (2, 128), device="cuda")
 
+            from torchtitan.models.common.attention import (
+                create_attention_mask,
+                get_causal_mask_mod,
+            )
+
+            attention_masks = create_attention_mask(
+                get_causal_mask_mod(), 1, None, 128, 128
+            )
+
             def run_backward(model):
-                logits = model(tokens)
+                logits = model(tokens, attention_masks=attention_masks)
                 loss = get_loss(logits, labels)
                 loss.backward()
 
             def run_grad(model):
-                logits = model(tokens)
+                logits = model(tokens, attention_masks=attention_masks)
                 loss = get_loss(logits, labels)
                 params = [p for p in model.parameters() if p.requires_grad]
                 grads = torch.autograd.grad(loss, params)

@@ -54,13 +54,10 @@ class Qwen3TransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
-        x = x + self.attention(
-            self.attention_norm(x), freqs_cis, attention_masks, positions
-        )
+        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
 
         if self.moe_enabled:
             x = x + self.moe(self.ffn_norm(x))
@@ -81,7 +78,6 @@ class Qwen3Model(Decoder):
     class Config(Decoder.Config):
         dim: int = 1024
         vocab_size: int = 151936
-        enable_weight_tying: bool = False
 
         def update_from_config(
             self,
@@ -98,11 +94,6 @@ class Qwen3Model(Decoder):
                 raise NotImplementedError(
                     "Context Parallel only supports SDPA and FlexAttention. "
                     "Varlen attention is not supported with CP."
-                )
-
-            if self.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
-                raise NotImplementedError(
-                    "Weight tying is not supported with Pipeline Parallel."
                 )
 
             from torchtitan.models.qwen3.sharding import set_qwen3_sharding_config
@@ -127,23 +118,3 @@ class Qwen3Model(Decoder):
                 2 * self.layers[0].attention.head_dim,
                 seq_len,
             )
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.enable_weight_tying = config.enable_weight_tying
-
-        if self.enable_weight_tying:
-            self.tok_embeddings.weight = self.lm_head.weight
-
-    def init_states(
-        self,
-        *,
-        buffer_device: torch.device | None = None,
-    ) -> None:
-        if self.enable_weight_tying:
-            # Re-tie before init: on meta device the __init__ tying may
-            # not have worked correctly.
-            assert self.tok_embeddings is not None and self.lm_head is not None
-            self.tok_embeddings.weight = self.lm_head.weight
-
-        super().init_states(buffer_device=buffer_device)
