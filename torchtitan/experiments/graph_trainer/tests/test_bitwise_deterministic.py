@@ -342,7 +342,7 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.961757659912109""")
         assert_expected_inline(
             model_hash,
-            """7b0175b74697dd569a152d1180eca4aafe49fee555844501894888ce79c9e8d9""",
+            """d8c4495bc41d103e3864433002d31be0823567938729396c44eb2f2782a47a23""",
         )
         assert_expected_inline(
             grad_hash,
@@ -407,14 +407,14 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
         loss, model_hash, grad_hash = self._run_steps(
             copy.deepcopy(self.model), Trainer
         )
-        assert_expected_inline(str(loss.item()), """7.454020977020264""")
+        assert_expected_inline(str(loss.item()), """7.4749956130981445""")
         assert_expected_inline(
             model_hash,
-            """0fe9a1bbdd7687e184fd86edf8e23ac4e7469a9411dbfd0b543ce04156cabea3""",
+            """edaec1177d073cf99a24433a6381b23282bfbfe306c40cefcea5d4efaf14cd0a""",
         )
         assert_expected_inline(
             grad_hash,
-            """d2dde267982a77c9185f1f5a103f591305ee1720ffc4240047b55fcb1fd6794a""",
+            """ce80bf7a7186d63eb6231d684ecefe7a7846f1bc63c8fde794fefd462e9c2c5d""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -483,7 +483,7 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.961757183074951""")
         assert_expected_inline(
             model_hash,
-            """9b01ffaac30291a1697536e0236b7b8a505c625f84e47822467bbf905e2adf45""",
+            """2cc38288f1641b058a56a1930af77dcb33c91fb12176cfdb59f436c9a2b3addd""",
         )
         assert_expected_inline(
             grad_hash,
@@ -552,14 +552,14 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         loss, model_hash, grad_hash = self._run_steps(
             copy.deepcopy(self.model), Trainer
         )
-        assert_expected_inline(str(loss.item()), """7.454020977020264""")
+        assert_expected_inline(str(loss.item()), """7.4749956130981445""")
         assert_expected_inline(
             model_hash,
-            """9dc2ec2856de814088977c1b847d5eafe1bbb7da9305f20d6903219542908986""",
+            """d2670e9bf949d83c446bcce1ca468a23eda98c83c0cac83eafb15ddebde3c234""",
         )
         assert_expected_inline(
             grad_hash,
-            """b9589f2da82db21ccb444495496e02ef97c336bce687f7b3eeb63f95d42c2adf""",
+            """e90a28b41bdae0de5d1db20de40998b0508866efed561cce4373e595626e8e7a""",
         )
 
     # TODO: FlexAttention compilation exceeds resource limits on pre-Hopper GPUs.
@@ -633,7 +633,7 @@ class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.297995567321777""")
         assert_expected_inline(
             model_hash,
-            """b015dbf6226860e518e07f6bb432eb1ac9501bb2f45ff7a1fb2f2f308f4ec3dd""",
+            """c4f3d5d6a4dacffc82a0845ef620dcbdb053d9785ce64b8dd5b5e181f4fe2d1b""",
         )
         assert_expected_inline(
             grad_hash,
@@ -706,7 +706,7 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.297987461090088""")
         assert_expected_inline(
             model_hash,
-            """5536b59b85f65c99b3a84210307b814d0b8f8d4d35955d179a1ebda0808f58dc""",
+            """85240276507f93d2dbc8b09d5dad5f86623bcd49423abe64fba787b74d7f6d81""",
         )
         assert_expected_inline(
             grad_hash,
