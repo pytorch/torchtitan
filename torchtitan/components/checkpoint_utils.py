@@ -16,10 +16,10 @@ distributed checkpointing; they are model-agnostic and optimizer-agnostic.
 
 The helpers are:
 
-- ``canonical_fqn`` strips wrapper prefixes (``_orig_mod``,
-  ``_checkpoint_wrapped_module``) from a single FQN. The model state dict is
-  already canonical -- in-place ``torch.compile`` adds no prefix and the
-  activation-checkpoint wrapper strips its own prefix via a state_dict hook -- but
+- ``canonical_fqn`` strips the activation-checkpoint wrapper segment
+  (``_checkpoint_wrapped_module``) from a single FQN. The model state dict is
+  already canonical -- ``torch.compile`` is applied in place (no segment) and the
+  activation-checkpoint wrapper strips its own segment via a state_dict hook -- but
   ``nn.Module.named_parameters()`` is not, so optimizer construction uses this to
   produce FQN-keyed optimizer state that matches the model keys.
 - ``get_flat_optim_state_dict`` / ``load_flat_optim_state_dict`` convert between
@@ -39,18 +39,18 @@ __all__ = [
     "load_flat_optim_state_dict",
 ]
 
-# Wrapper segments inserted by torch.compile (``_orig_mod``) and activation
-# checkpointing (``_checkpoint_wrapped_module``). They can appear at any level
-# of the FQN and are not part of the canonical model contract.
-_WRAPPER_PREFIXES: tuple[str, ...] = ("_orig_mod", "_checkpoint_wrapped_module")
+# Segment inserted by the activation checkpoint wrapper (checkpoint_wrapper) in
+# named_parameters(). It can appear at any level of the FQN and is not part of the
+# canonical model contract. torch.compile is applied in place and adds no segment.
+_WRAPPER_PREFIXES: tuple[str, ...] = ("_checkpoint_wrapped_module",)
 
 
 def canonical_fqn(name: str, prefixes: tuple[str, ...] = _WRAPPER_PREFIXES) -> str:
     """Strip wrapper segments from a dotted FQN.
 
-    The segments may appear at any level, e.g.
-    ``layers.0._orig_mod.attention.wq.weight`` or
-    ``layers.0._checkpoint_wrapped_module.attention.wq.weight``.
+    A segment may appear at any level, e.g.
+    ``layers.0._checkpoint_wrapped_module.attention.wq.weight`` ->
+    ``layers.0.attention.wq.weight``.
     """
     return ".".join(p for p in name.split(".") if p not in prefixes)
 

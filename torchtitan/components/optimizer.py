@@ -155,21 +155,22 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         model: nn.Module,
         param_group_configs: list[ParamGroupConfig],
         impl_kwargs: dict[str, Any],
-    ) -> dict[str, list[dict[str, Any]]]:
+    ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]]]:
         """Build PyTorch param groups from model parameters, partitioned by optimizer.
 
         Each parameter is assigned to the first matching ParamGroupConfig pattern.
-        Returns a dict mapping optimizer name to a list of param group dicts.
 
-        Each group also carries a ``param_names`` list (canonical FQNs aligned
-        with ``params``) so PyTorch records the names on the group; the checkpoint
-        utilities use those names to build FQN-keyed optimizer state dicts.
+        Returns two dicts keyed by optimizer name and aligned by index: the param
+        group dicts to pass to the optimizer constructor, and the regex pattern of
+        each group. Patterns are returned separately (not stored on the group) so
+        they stay out of the saved optimizer state dict; they are logging-only.
 
-        Each param group dict also carries a ``pattern`` key (the regex string)
-        for logging. The caller pops it before constructing the optimizer so it
-        does not leak into the saved optimizer state dict.
+        Each param group dict carries a ``param_names`` list (canonical FQNs
+        aligned with ``params``) so PyTorch records the names on the group; the
+        checkpoint utilities use those names to build FQN-keyed optimizer state.
         """
-        result: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        patterns: dict[str, list[str]] = defaultdict(list)
         claimed: set[str] = set()  # first-match-wins
 
         for pg in param_group_configs:
@@ -188,17 +189,17 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                     f"matched no parameters"
                 )
 
-            result[pg.optimizer_name].append(
+            groups[pg.optimizer_name].append(
                 {
                     "params": params,
                     "param_names": param_names,
-                    "pattern": pg.pattern,
                     **impl_kwargs,
                     **pg.optimizer_kwargs,
                 }
             )
+            patterns[pg.optimizer_name].append(pg.pattern)
 
-        return result
+        return groups, patterns
 
     def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
         impl_kwargs = self._build_impl_kwargs(config)
@@ -207,21 +208,18 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         self.optimizers = []
         self.model_parts = model_parts
         self._param_group_patterns = []
-        # Model-part index per optimizer, only for the construction-time summary
-        # log. Not persisted: state_dict no longer needs this mapping.
+
+        # Model-part index per optimizer, only for the log summary.
         model_part_per_optimizer: list[int] = []
 
         for part_idx, model in enumerate(self.model_parts):
-            groups_by_opt_name = self._build_param_groups(
+            groups_by_opt_name, patterns_by_opt_name = self._build_param_groups(
                 model, param_group_configs, impl_kwargs
             )
             for opt_name, opt_param_groups in groups_by_opt_name.items():
-                # Pattern is logging-only; pop it so the optimizer never stores
-                # it (which would put it in the saved optimizer state dict).
-                patterns = [group.pop("pattern") for group in opt_param_groups]
                 optimizer = self._resolve_optimizer_cls(opt_name)(opt_param_groups)
                 self.optimizers.append(optimizer)
-                self._param_group_patterns.append(patterns)
+                self._param_group_patterns.append(patterns_by_opt_name[opt_name])
                 model_part_per_optimizer.append(part_idx)
                 for group in opt_param_groups:
                     all_params.extend(group["params"])
@@ -234,11 +232,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         self._log_summary(model_part_per_optimizer)
 
     def _log_summary(self, model_part_per_optimizer: list[int]) -> None:
-        """Log a summary of optimizer assignments.
-
-        ``model_part_per_optimizer`` is gathered at construction time, so the
-        container does not need to persist an optimizer-to-model-part mapping.
-        """
+        """Log a summary of optimizer assignments."""
         _KEY_KWARGS = {
             "lr",
             "weight_decay",

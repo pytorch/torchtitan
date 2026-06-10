@@ -82,10 +82,10 @@ class ModelWrapper(Stateful):
         self.cached_state_dict = self._get_state_dict()
 
     def _get_state_dict(self) -> dict[str, Any]:
-        # model.state_dict() keys are already canonical FQNs: torchtitan compiles
-        # in place (no _orig_mod prefix) and the activation checkpoint wrapper
-        # strips its own _checkpoint_wrapped_module prefix via a state_dict hook,
-        # so no key cleaning is needed here.
+        # model.state_dict() keys are already canonical FQNs: torchtitan applies
+        # torch.compile in place (it adds no wrapper segment) and the activation
+        # checkpoint wrapper strips its own _checkpoint_wrapped_module segment via a
+        # state_dict hook, so no key cleaning is needed here.
         return {k: v for model in self.model for k, v in model.state_dict().items()}
 
     def state_dict(self) -> dict[str, Any]:

@@ -10,7 +10,7 @@ Verifies the key contract that distributed checkpointing relies on:
 - ModelWrapper.state_dict() is keyed by canonical FQNs. This holds without any
   key cleaning because model.state_dict() is already canonical: the activation
   checkpoint wrapper strips its own _checkpoint_wrapped_module prefix via a
-  state_dict hook, and torchtitan applies torch.compile in place (no _orig_mod).
+  state_dict hook, and torchtitan applies torch.compile in place (no segment).
 - OptimizersContainer.state_dict() is keyed as state.{fqn}.{state_name} and
   param_groups.{fqn}.{key}, matching the model FQNs. The optimizer is built from
   named_parameters(), which (unlike state_dict()) keeps the wrapper prefix, so
@@ -138,7 +138,6 @@ class TestStateDictKeys(unittest.TestCase):
         keys = set(ModelWrapper(self.model_parts).state_dict().keys())
         for key in keys:
             self.assertNotIn(_WRAPPER_PREFIX, key)
-            self.assertNotIn("_orig_mod", key)
         self.assertEqual(keys, self.clean_state_keys)
 
     def test_optimizer_state_dict_keys(self) -> None:

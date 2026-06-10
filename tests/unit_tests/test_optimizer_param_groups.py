@@ -66,7 +66,7 @@ def _get_default_groups(model, config):
     """Helper: build param groups and return the AdamW optimizer's groups."""
     impl_kwargs = OptimizersContainer._build_impl_kwargs(config)
     param_groups = config.param_groups
-    groups_by_opt = OptimizersContainer._build_param_groups(
+    groups_by_opt, _ = OptimizersContainer._build_param_groups(
         model, param_groups, impl_kwargs
     )
     return groups_by_opt.get("AdamW", [])
@@ -276,7 +276,7 @@ class TestParamGroupConfig(unittest.TestCase):
             ],
         )
         impl_kwargs = OptimizersContainer._build_impl_kwargs(config)
-        groups_by_opt = OptimizersContainer._build_param_groups(
+        groups_by_opt, _ = OptimizersContainer._build_param_groups(
             model, config.param_groups, impl_kwargs
         )
 
