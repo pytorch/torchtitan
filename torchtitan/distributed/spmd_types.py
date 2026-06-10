@@ -130,6 +130,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
         # from the innermost position. For example, (DP) -> (DP, CP) is valid
         # when CP is the changed axis, but (DP) -> (CP, DP) changes shard order.
         changed_axis = changed_axes[0] if changed_axes else None
+        # pyrefly: ignore [bad-argument-type]
         for dim, (src_entry, dst_entry) in enumerate(zip(src_spec, dst_spec)):
             src_axes = (
                 ()
