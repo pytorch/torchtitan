@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import auto, Enum
@@ -49,6 +50,10 @@ class RoutingContext:
 
     estimated_cost: int = 1
     """Estimated request cost used by load-aware routing strategies."""
+
+    session_id: str | None = None
+    """Stable session key used by sticky routing strategies; None means the
+    request is unpinned and uses fallback routing without session affinity."""
 
 
 class RoutingStrategy(Configurable, ABC):
@@ -110,6 +115,54 @@ class LeastLoadedRoutingStrategy(RoutingStrategy):
 
         del routing_ctx
         return min(candidates, key=lambda h: h.reserved_load)
+
+
+class StickySessionRoutingStrategy(RoutingStrategy):
+    """Keep requests from the same session on the same generator."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        max_sessions: int = 4096
+        """Maximum number of session-to-generator assignments to retain,
+        evicting least-recently-used sessions first."""
+
+        fallback_strategy: RoutingStrategy.Config = field(
+            default_factory=LeastLoadedRoutingStrategy.Config
+        )
+        """Routing strategy used for new sessions and requests without a session."""
+
+    def __init__(self, config: Config):
+        if config.max_sessions <= 0:
+            raise ValueError(
+                f"max_sessions must be positive, got {config.max_sessions}"
+            )
+        self._max_sessions = config.max_sessions
+        self._fallback_strategy = config.fallback_strategy.build()
+        self._sessions: OrderedDict[str, _GeneratorHandle] = OrderedDict()
+
+    def choose(
+        self,
+        routing_ctx: RoutingContext,
+        candidates: Sequence[_GeneratorHandle],
+    ) -> _GeneratorHandle:
+        """Return the session's assigned generator, or assign a new one."""
+
+        if routing_ctx.session_id is None:
+            return self._fallback_strategy.choose(routing_ctx, candidates)
+
+        sticky_generator = self._sessions.get(routing_ctx.session_id)
+        if sticky_generator is not None and any(
+            h is sticky_generator for h in candidates
+        ):
+            self._sessions.move_to_end(routing_ctx.session_id)
+            return sticky_generator
+
+        chosen = self._fallback_strategy.choose(routing_ctx, candidates)
+        self._sessions[routing_ctx.session_id] = chosen
+        self._sessions.move_to_end(routing_ctx.session_id)
+        if len(self._sessions) > self._max_sessions:
+            self._sessions.popitem(last=False)
+        return chosen
 
 
 class GeneratorRouter(Configurable):
