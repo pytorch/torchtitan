@@ -9,7 +9,6 @@ import torch
 
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.tokenizer import BaseTokenizer
-from xx.ml_tools.constants.model import ModelInputs
 
 
 class PathDataLoader(BaseDataLoader):
@@ -90,13 +89,7 @@ class PathDataLoader(BaseDataLoader):
 
     def __iter__(self) -> Iterator[tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]]:
         for inputs, targets in self.loader:
-            yield {
-                "input": inputs[ModelInputs.IMG],
-                ModelInputs.BIG_IMG: inputs[ModelInputs.BIG_IMG],
-                ModelInputs.DESIRE: inputs[ModelInputs.DESIRE],
-                ModelInputs.TRAFFIC: inputs[ModelInputs.TRAFFIC],
-                ModelInputs.ACTION_T: inputs[ModelInputs.ACTION_T],
-            }, targets
+            yield inputs, targets
 
     def state_dict(self) -> dict[str, int]:
         return {}

@@ -3,7 +3,6 @@ from __future__ import annotations
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 
@@ -40,7 +39,7 @@ class PathTrainer(Trainer):
                 input_dict, targets = next(data_iterator)
             except StopIteration as ex:
                 raise DataloaderExhaustedError() from ex
-            self.metrics_processor.ntokens_since_last_log += input_dict["input"].shape[0]
+            self.metrics_processor.ntokens_since_last_log += next(iter(input_dict.values())).shape[0]
             self.metrics_processor.data_loading_times.append(time.perf_counter() - data_load_start)
             yield input_dict, targets
 
@@ -49,11 +48,9 @@ class PathTrainer(Trainer):
         self,
         input_dict: dict[str, torch.Tensor],
         labels: dict[str, torch.Tensor],
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor], dict[str, torch.Tensor], dict[str, Any]]:
-        inputs = input_dict["input"]
-        extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
-        self.ntokens_seen += inputs.shape[0]
-        return inputs, labels, extra_inputs, {}
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        self.ntokens_seen += next(iter(input_dict.values())).shape[0]
+        return input_dict, labels
 
     @sl.log_trace_span("fwd_bwd")
     def forward_backward_step(
@@ -63,12 +60,12 @@ class PathTrainer(Trainer):
         labels: dict[str, torch.Tensor],
         global_samples: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(input_dict, labels)
+        inputs, labels = self.post_dataloading_process(input_dict, labels)
         assert len(self.model_parts) == 1
         amp_dtype = TORCH_DTYPE_MAP[self.config.training.mixed_precision_param]
         amp_enabled = amp_dtype != torch.float32 and not self.parallel_dims.fsdp_enabled
         with self.train_context(), torch.autocast(self.device.type, dtype=amp_dtype, enabled=amp_enabled):
-            pred = self.model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+            pred = self.model_parts[0](inputs)
             loss_vec, metrics = self.loss_fn(pred, labels)
             loss = loss_vec.sum() / global_samples
             del pred
@@ -88,7 +85,7 @@ class PathTrainer(Trainer):
         for _ in range(self.gradient_accumulation_steps):
             with sl.log_trace_span("fetching_batch"):
                 input_dict, targets = next(data_iterator)
-                local_samples += input_dict["input"].shape[0]
+                local_samples += next(iter(input_dict.values())).shape[0]
                 microbatches.append((input_dict, targets))
         sl.log_trace_scalar({"local_samples": int(local_samples)})
 

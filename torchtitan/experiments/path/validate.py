@@ -55,6 +55,14 @@ class PathValidator(BaseValidator):
         self.metrics_processor = metrics_processor
         self.seq_len = seq_len
         self.local_batch_size = local_batch_size
+        self.dataloader = self.config.dataloader.build(
+            dp_world_size=self.dp_world_size,
+            dp_rank=self.dp_rank,
+            tokenizer=self.tokenizer,
+            seq_len=self.seq_len,
+            local_batch_size=self.local_batch_size,
+            validation_steps=self.config.steps,
+        )
 
     @torch.no_grad()
     def validate(self, model_parts: list[nn.Module], step: int) -> None:
@@ -64,26 +72,18 @@ class PathValidator(BaseValidator):
         device = next(model_parts[0].parameters()).device
         amp_dtype = TORCH_DTYPE_MAP[self.config.mixed_precision_param]
         amp_enabled = amp_dtype != torch.float32 and not self.parallel_dims.fsdp_enabled
-        dataloader = self.config.dataloader.build(
-            dp_world_size=self.dp_world_size,
-            dp_rank=self.dp_rank,
-            tokenizer=self.tokenizer,
-            seq_len=self.seq_len,
-            local_batch_size=self.local_batch_size,
-            validation_steps=self.config.steps,
-        )
 
         total_loss = torch.zeros((), device=device)
         total_samples = torch.zeros((), device=device)
         metric_sums: dict[str, torch.Tensor] = {}
         loss_mesh = self.parallel_dims.get_optional_mesh("loss")
-        for num_steps, (input_dict, targets) in enumerate(dataloader):
+        for num_steps, (input_dict, targets) in enumerate(self.dataloader):
             if self.config.steps != -1 and num_steps >= self.config.steps:
                 break
-            self.metrics_processor.ntokens_since_last_log += input_dict["input"].shape[0]
+            self.metrics_processor.ntokens_since_last_log += next(iter(input_dict.values())).shape[0]
             input_dict = {k: v.to(device) for k, v in input_dict.items()}
             targets = {k: v.to(device) for k, v in targets.items()}
-            local_samples = torch.tensor(input_dict["input"].shape[0], dtype=torch.float32, device=device)
+            local_samples = torch.tensor(next(iter(input_dict.values())).shape[0], dtype=torch.float32, device=device)
             global_samples = (
                 dist_utils.dist_sum(local_samples, self.parallel_dims.get_mesh("batch"))
                 if self.parallel_dims.dp_enabled
@@ -91,10 +91,7 @@ class PathValidator(BaseValidator):
             )
 
             with self.validation_context(), torch.autocast(device.type, dtype=amp_dtype, enabled=amp_enabled):
-                pred = model_parts[0](
-                    input_dict["input"],
-                    **{k: v for k, v in input_dict.items() if k != "input"},
-                )
+                pred = model_parts[0](input_dict)
                 loss_vec, metrics = self.loss_fn(pred, targets)
 
             loss_sum = loss_vec.float().sum()

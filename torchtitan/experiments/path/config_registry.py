@@ -109,10 +109,10 @@ def path() -> PathTrainer.Config:
         checkpoint=_checkpoint_config(),
         activation_checkpoint=ActivationCheckpointConfig(mode="none"),
         compile=CompileConfig(enable=False, components=["model"]),
-        metrics=MetricsProcessor.Config(log_freq=10),
+        metrics=MetricsProcessor.Config(log_freq=10, enable_reporterv2=True),
         validator=PathValidator.Config(
             enable=True,
-            freq=100,
+            freq=2,
             steps=32,
             dataloader=_dataloader_config(split="val"),
             mixed_precision_param=mixed_precision_param,
@@ -124,13 +124,11 @@ def path() -> PathTrainer.Config:
 def path_debug() -> PathTrainer.Config:
     config = path()
     config.training.local_batch_size = 1
-    config.training.steps = 2
+    config.training.steps = 10
     config.lr_scheduler.warmup_steps = 0
-    config.lr_scheduler.total_steps = 2
+    config.lr_scheduler.total_steps = 10
     config.metrics.log_freq = 1
-    config.dataloader.limit = 1
-    config.validator.enable = False
-    config.validator.dataloader.limit = 1
+    config.dataloader.shuffle_size = 1000
     return config
 
 
@@ -188,7 +186,7 @@ def _model_config() -> PathModel.Config:
     )
 
 
-def _dataloader_config(*, split: str, limit: int | None = None) -> PathDataLoader.Config:
+def _dataloader_config(*, split: str) -> PathDataLoader.Config:
     base = XXPathDatasetConfig()
     return PathDataLoader.Config(
         dataset=DEFAULT_BIG_TRAIN_LIST,
@@ -200,7 +198,7 @@ def _dataloader_config(*, split: str, limit: int | None = None) -> PathDataLoade
         fps=base.fps,
         pipeline_dir=base.pipeline_dir,
         plan_only=base.plan_only,
-        limit=limit if limit is not None else base.limit,
+        limit=base.limit,
         n_frames=base.n_frames,
         rgb=base.rgb,
         unvision=base.unvision,

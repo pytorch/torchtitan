@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 import torch.nn as nn
@@ -391,21 +390,22 @@ class PathModel(BaseModel):
 
     def forward(
         self,
-        img: torch.Tensor,
-        big_img: torch.Tensor,
-        desire_pulse: torch.Tensor,
-        traffic_convention: torch.Tensor,
-        action_t: torch.Tensor,
-        **kwargs: Any,
+        inputs: dict[str, torch.Tensor] | torch.Tensor,
+        big_img: torch.Tensor | None = None,
+        desire_pulse: torch.Tensor | None = None,
+        traffic_convention: torch.Tensor | None = None,
+        action_t: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
+        if isinstance(inputs, torch.Tensor):
+            inputs = {
+                ModelInputs.IMG: inputs,
+                ModelInputs.BIG_IMG: big_img,
+                ModelInputs.DESIRE: desire_pulse,
+                ModelInputs.TRAFFIC: traffic_convention,
+                ModelInputs.ACTION_T: action_t,
+            }
+        img = inputs[ModelInputs.IMG]
         b, t, *_ = img.shape
-        inputs = {
-            ModelInputs.IMG: img,
-            ModelInputs.BIG_IMG: big_img,
-            ModelInputs.DESIRE: desire_pulse,
-            ModelInputs.TRAFFIC: traffic_convention,
-            ModelInputs.ACTION_T: action_t,
-        }
         vision_inputs = {
             name: rearrange(inputs[name], "b t c h w -> (b t) c h w", b=b, t=t)
             for name in self.config.vision.input_frame_names
@@ -414,9 +414,9 @@ class PathModel(BaseModel):
         features = rearrange(features, "(b t) c -> b t c", b=b, t=t)
         return self.point_policy(features) | self.temporal_policy(
             features,
-            desire_pulse,
-            traffic_convention,
-            action_t,
+            inputs[ModelInputs.DESIRE],
+            inputs[ModelInputs.TRAFFIC],
+            inputs[ModelInputs.ACTION_T],
         )
 
 
