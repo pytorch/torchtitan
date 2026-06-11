@@ -19,7 +19,12 @@ from torchtitan.models.qwen3.model import Qwen3Model
 
 def _build_qwen3_moe_model(num_experts: int = 8) -> Qwen3Model:
     """Build a tiny Qwen3 MoE model with a configurable number of experts."""
-    from torchtitan.models.common import CosSinRoPE, Embedding, Linear, RMSNorm
+    from torchtitan.models.common import (
+        CosSinRoPE,
+        Linear,
+        RMSNorm,
+        Embedding,
+    )
 
     # Use a tiny variant of the standard MoE debug config, overriding
     # num_experts to exercise the expert-sharding branches.
