@@ -4,7 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -12,8 +15,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.protocols.module import Module
+
+if TYPE_CHECKING:
+    from torchtitan.distributed import ParallelDims
 
 
 class Embedding(nn.Embedding, Module):
@@ -26,12 +31,18 @@ class Embedding(nn.Embedding, Module):
 
     def __init__(self, config: Config):
         super().__init__(config.num_embeddings, config.embedding_dim)
+        self.tp_group: dist.ProcessGroup | None = None
+
+    def parallelize(self, parallel_dims: "ParallelDims") -> None:
+        tp_mesh = parallel_dims.get_optional_mesh("tp")
+        if tp_mesh is not None:
+            self.tp_group = tp_mesh.get_group("tp")
+        super().parallelize(parallel_dims)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        """Runs vocab-parallel embedding when the current mesh has a TP axis."""
+        """Runs vocab-parallel embedding when the module has a TP group."""
         weight = self.weight
-        tp_size = spmd_mesh_size("tp")
-        if tp_size == 1 or isinstance(weight, DTensor):
+        if self.tp_group is None:
             return F.embedding(
                 input,
                 weight,
@@ -42,9 +53,11 @@ class Embedding(nn.Embedding, Module):
                 self.sparse,
             )
 
-        mesh = current_spmd_mesh()
-        assert mesh is not None
-        tp_pg = mesh.get_group("tp")
+        # TODO(pianpwk): Once DTensor backend is removed, delete ``tp_group`` and
+        # use ``current_spmd_mesh().get_group("tp")`` here instead.
+        tp_pg = self.tp_group
+        tp_size = dist.get_world_size(tp_pg)
+        weight = weight.to_local() if isinstance(weight, DTensor) else weight
         chunk_size = (self.num_embeddings + tp_size - 1) // tp_size
         offset = dist.get_rank(tp_pg) * chunk_size
         mask = (input >= offset) & (input < offset + weight.shape[0])

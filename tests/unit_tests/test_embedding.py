@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torch.distributed.tensor.placement_types import _MaskPartial
 import unittest
 from dataclasses import dataclass
 from functools import partial
@@ -14,7 +15,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from spmd_types.checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import distribute_tensor, Replicate, Shard
+from torch.distributed.tensor import (
+    distribute_tensor,
+    Replicate,
+    Shard,
+)
+from torch.distributed.tensor.placement_types import _MaskPartial
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -24,7 +30,7 @@ from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_ba
 from torchtitan.models.common.embedding import Embedding
 
 
-class TestEmbedding(unittest.TestCase):
+class TestEmbeddingConfig(unittest.TestCase):
     """Tests for the Embedding class used in the codebase."""
 
     def test_config_build(self):
@@ -99,7 +105,7 @@ class TestEmbedding(unittest.TestCase):
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 
 
-class TestVocabParallelEmbedding(DTensorTestBase):
+class TestEmbedding(DTensorTestBase):
     @property
     def world_size(self):
         return 4
@@ -127,25 +133,30 @@ class TestVocabParallelEmbedding(DTensorTestBase):
                         (3, 16),
                         device=self.device_type,
                     )
+
+                    # Native DTensor embedding is the bitwise oracle for the
+                    # local masked implementation, but it uses MaskPartial
+                    # internally before the final redistribution.
                     weight_dtensor = distribute_tensor(global_weight, mesh, (Shard(0),))
                     tokens_dtensor = distribute_tensor(
                         global_tokens, mesh, (Replicate(),)
                     )
-
-                    # DTensor embedding is the bitwise oracle for local MaskPartial.
+                    full_output = F.embedding(global_tokens, global_weight)
                     expected_placement = Shard(1) if enable_sp else Replicate()
-                    dtensor_output = F.embedding(tokens_dtensor, weight_dtensor)
-                    dtensor_output = dtensor_output.redistribute(
+                    native_dtensor_output = F.embedding(tokens_dtensor, weight_dtensor)
+                    self.assertTrue(isinstance(native_dtensor_output.placements[0], _MaskPartial))
+                    dtensor_output = native_dtensor_output.redistribute(
                         placements=(expected_placement,)
                     )
 
-                    # Run the manual MaskPartial implementation on local tensors.
+                    # Setup the manual vocab-parallel embedding.
                     embedding = Embedding(
                         Embedding.Config(
                             num_embeddings=vocab_size,
                             embedding_dim=32,
                         )
                     ).to(self.device_type)
+                    embedding.tp_group = tp_group
                     embedding.weight = nn.Parameter(weight_dtensor.to_local())
                     local_tokens = tokens_dtensor.to_local()
 
@@ -180,10 +191,10 @@ class TestVocabParallelEmbedding(DTensorTestBase):
                     self.assertTrue(
                         torch.equal(local_output, dtensor_output.to_local())
                     )
-                    full_output = F.embedding(global_tokens, global_weight)
-                    self.assertTrue(
-                        torch.equal(dtensor_output.full_tensor(), full_output)
-                    )
+                    if not enable_sp:
+                        self.assertTrue(
+                            torch.equal(local_output, full_output)
+                        )
 
 
 if __name__ == "__main__":
