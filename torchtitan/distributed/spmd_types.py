@@ -75,9 +75,9 @@ def spmd_mesh_size(axis_name: str) -> int:
 @contextlib.contextmanager
 def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
     """Set TorchTitan and spmd_types current mesh state for one runtime region."""
-    assert get_spmd_backend() == "spmd_types", (
-        "set_current_spmd_mesh() is only valid under spmd_types backend"
-    )
+    assert (
+        get_spmd_backend() == "spmd_types"
+    ), "set_current_spmd_mesh() is only valid under spmd_types backend"
 
     stack = _spmd_mesh_stack()
     stack.append(mesh)
@@ -89,7 +89,6 @@ def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
             assert popped is mesh
         return
 
-    # pyrefly: ignore [bad-argument-type]
     with spmd.set_current_mesh(mesh):
         try:
             yield
@@ -372,7 +371,6 @@ def spmd_distribute_tensor(
         if axis_size > 1:
             tensor = spmd.shard(
                 tensor,
-                # pyrefly: ignore [bad-argument-type]
                 mesh.get_group(axis),
                 src=spmd.I,
                 dst=spmd.S(dim),
