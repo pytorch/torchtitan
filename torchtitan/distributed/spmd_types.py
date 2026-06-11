@@ -18,6 +18,8 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
+from torchtitan.distributed.utils import get_spmd_backend
+
 # Avoid circular import: protocols.__init__ imports module.py, which imports us.
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import (
@@ -34,19 +36,11 @@ __all__ = [
     "spmd_redistribute_per_axis",
     "spmd_validate_redistributions",
     "set_current_spmd_mesh",
-    "set_spmd_backend",
     "spmd_layout_to_dtensor_placements",
 ]
 
 
 _MESH_TLS = local()
-_spmd_backend = "default"
-
-
-def set_spmd_backend(spmd_backend: str) -> None:
-    """Set the backend that controls whether current-mesh context is active."""
-    global _spmd_backend
-    _spmd_backend = spmd_backend
 
 
 def _spmd_mesh_stack() -> list[DeviceMesh | None]:
@@ -59,7 +53,7 @@ def _spmd_mesh_stack() -> list[DeviceMesh | None]:
 
 def current_spmd_mesh() -> DeviceMesh | None:
     """Return the current runtime mesh, or ``None`` if unset."""
-    if _spmd_backend != "spmd_types":
+    if get_spmd_backend() != "spmd_types":
         return None
     stack = _spmd_mesh_stack()
     if not stack:
@@ -81,9 +75,9 @@ def spmd_mesh_size(axis_name: str) -> int:
 @contextlib.contextmanager
 def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
     """Set TorchTitan and spmd_types current mesh state for one runtime region."""
-    if _spmd_backend != "spmd_types":
-        yield
-        return
+    assert get_spmd_backend() == "spmd_types", (
+        "set_current_spmd_mesh() is only valid under spmd_types backend"
+    )
 
     stack = _spmd_mesh_stack()
     stack.append(mesh)
@@ -95,6 +89,7 @@ def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
             assert popped is mesh
         return
 
+    # pyrefly: ignore [bad-argument-type]
     with spmd.set_current_mesh(mesh):
         try:
             yield
@@ -251,7 +246,6 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
         # from the innermost position. For example, (DP) -> (DP, CP) is valid
         # when CP is the changed axis, but (DP) -> (CP, DP) changes shard order.
         changed_axis = changed_axes[0] if changed_axes else None
-        # pyrefly: ignore [bad-argument-type]
         for dim, (src_entry, dst_entry) in enumerate(zip(src_spec, dst_spec)):
             src_axes = (
                 ()
@@ -378,6 +372,7 @@ def spmd_distribute_tensor(
         if axis_size > 1:
             tensor = spmd.shard(
                 tensor,
+                # pyrefly: ignore [bad-argument-type]
                 mesh.get_group(axis),
                 src=spmd.I,
                 dst=spmd.S(dim),
