@@ -23,6 +23,9 @@ from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
     GraphTrainerDeepSeekV3Model,
 )
+from torchtitan.models.deepseek_v3.parallelize import (
+    _maybe_init_minimal_async_ep_buffer,
+)
 from torchtitan.tools.logging import logger
 
 
@@ -68,6 +71,15 @@ def parallelize_deepseekv3(
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
         """
+
+    _maybe_init_minimal_async_ep_buffer(
+        model,
+        parallel_dims=parallel_dims,
+        training=training,
+        parallelism=parallelism,
+        ac_config=ac_config,
+        memory_policy=getattr(compile_config, "memory_policy", None),
+    )
 
     if parallel_dims.cp_enabled:
         apply_cp_to_attention(model, parallel_dims)
