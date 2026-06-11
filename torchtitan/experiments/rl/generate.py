@@ -12,7 +12,7 @@ This script uses the RL unified config_registry to configure both
 the vLLM engine and sampling parameters.
 
 Run: torchrun --nproc_per_node=4 \
-      torchtitan/experiments/rl/generate.py --config rl_grpo_qwen3_30b_a3b
+      torchtitan/experiments/rl/generate.py --config rl_grpo_qwen3_30b_a3b_varlen
 """
 from __future__ import annotations
 

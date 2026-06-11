@@ -177,6 +177,7 @@ class TokenEnv(Configurable):
             completion_message["reasoning_content"] = parsed.reasoning_content
         if parsed.tool_calls:
             completion_message["tool_calls"] = parsed.tool_calls
+
         # Truncated / aborted: the response is final and partial. Keep it for
         # partial-reward grading and debugging; don't step the env on it.
         # TODO: check if we should step the env on an incomplete message
