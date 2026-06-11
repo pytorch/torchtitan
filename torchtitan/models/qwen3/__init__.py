@@ -13,7 +13,7 @@ import torch.nn as nn
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     CosSinRoPE,
-    Embedding,
+    VocabParallelEmbedding,
     Linear,
     RoPE,
     TransformerBlock,
@@ -195,7 +195,7 @@ def _debugmodel(attn_backend: str) -> Qwen3Model.Config:
         dim=dim,
         norm=_qwen3_norm(dim),
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
@@ -232,7 +232,7 @@ def _debugmodel_fused_qkv(attn_backend: str) -> Qwen3Model.Config:
         dim=dim,
         norm=_qwen3_norm(dim),
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
@@ -270,7 +270,7 @@ def _0_6b(attn_backend: str) -> Qwen3Model.Config:
         dim=dim,
         norm=_qwen3_norm(dim),
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
@@ -307,7 +307,7 @@ def _1_7b(attn_backend: str) -> Qwen3Model.Config:
         dim=dim,
         norm=_qwen3_norm(dim),
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
@@ -344,7 +344,7 @@ def _4b(attn_backend: str) -> Qwen3Model.Config:
         dim=dim,
         norm=_qwen3_norm(dim),
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
@@ -380,7 +380,7 @@ def _8b(attn_backend: str) -> Qwen3Model.Config:
         vocab_size=vocab_size,
         dim=dim,
         norm=_qwen3_norm(dim),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         lm_head=Linear.Config(
@@ -414,7 +414,7 @@ def _14b(attn_backend: str) -> Qwen3Model.Config:
         vocab_size=vocab_size,
         dim=dim,
         norm=_qwen3_norm(dim),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         lm_head=Linear.Config(
@@ -448,7 +448,7 @@ def _32b(attn_backend: str) -> Qwen3Model.Config:
         vocab_size=vocab_size,
         dim=dim,
         norm=_qwen3_norm(dim),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         lm_head=Linear.Config(
@@ -488,7 +488,7 @@ def _debugmodel_moe(
         vocab_size=vocab_size,
         dim=dim,
         norm=_qwen3_norm(dim),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         lm_head=Linear.Config(
@@ -528,7 +528,7 @@ def _30b_a3b(
         vocab_size=vocab_size,
         dim=dim,
         norm=_qwen3_norm(dim),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         lm_head=Linear.Config(
@@ -568,7 +568,7 @@ def _235b_a22b(
         vocab_size=vocab_size,
         dim=dim,
         norm=_qwen3_norm(dim),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         lm_head=Linear.Config(

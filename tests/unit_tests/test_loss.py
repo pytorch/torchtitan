@@ -401,13 +401,31 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                     )
 
 
+class _FakeDecoder(nn.Module):
+    """Minimal Decoder-like model for testing ChunkedCELoss."""
+
+    def __init__(self, dim: int, vocab_size: int):
+        super().__init__()
+        self.output = nn.Linear(dim, vocab_size, bias=False)
+        # Make it look like a Decoder to ChunkedCELoss
+        self.layers = nn.ModuleDict()
+        self.tok_embeddings = None
+        self.norm = None
+
+    def forward(self, tokens, skip_lm_head=False):
+        if skip_lm_head:
+            return tokens  # return hidden states directly
+        return self.output(tokens)
+
+
 class TestChunkedCELoss(unittest.TestCase):
-    def _make_lm_head_and_loss(self, dim=32, vocab_size=64, num_chunks=4):
-        """Create an lm_head and ChunkedCELoss for testing."""
-        lm_head = nn.Linear(dim, vocab_size, bias=False)
+    def _make_model_and_loss(self, dim=32, vocab_size=64, num_chunks=4):
+        """Create a fake Decoder and ChunkedCELoss for testing."""
+        model = _FakeDecoder(dim, vocab_size)
         chunked_loss = ChunkedCELoss(ChunkedCELoss.Config(num_chunks=num_chunks))
-        chunked_loss.lm_head = lm_head
-        return lm_head, chunked_loss
+        # Bypass isinstance(model, Decoder) check for unit testing
+        chunked_loss.lm_head = model.output
+        return model, chunked_loss
 
     def test_numerical_equivalence(self):
         """ChunkedCELoss must produce the same loss and gradients as the standard path."""
@@ -415,11 +433,11 @@ class TestChunkedCELoss(unittest.TestCase):
         B, L, D, V = 2, 8, 32, 64
         num_chunks = 4
 
-        lm_head_std, _ = self._make_lm_head_and_loss(D, V, num_chunks)
-        lm_head_chunked, chunked_loss = self._make_lm_head_and_loss(D, V, num_chunks)
+        model_std, _ = self._make_model_and_loss(D, V, num_chunks)
+        model_chunked, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
 
         # Share the same lm_head weights
-        lm_head_chunked.load_state_dict(lm_head_std.state_dict())
+        model_chunked.output.load_state_dict(model_std.output.state_dict())
 
         hidden_states = torch.randn(B, L, D, requires_grad=True)
         labels = torch.randint(0, V, (B, L))
@@ -429,12 +447,12 @@ class TestChunkedCELoss(unittest.TestCase):
 
         # Standard path: lm_head + ce_loss + backward
         hidden_std = hidden_states.detach().requires_grad_(True)
-        logits_std = lm_head_std(hidden_std)
+        logits_std = model_std.output(hidden_std)
         loss_std = cross_entropy_loss(logits_std, labels)
         scaled_loss_std = loss_std / global_valid_tokens
         scaled_loss_std.backward()
         grad_std = hidden_std.grad.clone()
-        lm_head_grad_std = lm_head_std.weight.grad.clone()
+        lm_head_grad_std = model_std.output.weight.grad.clone()
 
         # Chunked path
         hidden_chunked = hidden_states.detach().requires_grad_(True)
@@ -442,7 +460,7 @@ class TestChunkedCELoss(unittest.TestCase):
         loss_chunked = chunked_loss(hidden_chunked, labels, global_valid_tokens)
         loss_chunked.backward()
         grad_chunked = hidden_chunked.grad.clone()
-        lm_head_grad_chunked = lm_head_chunked.weight.grad.clone()
+        lm_head_grad_chunked = model_chunked.output.weight.grad.clone()
 
         # Verify loss values match
         torch.testing.assert_close(
@@ -481,12 +499,12 @@ class TestChunkedCELoss(unittest.TestCase):
 
         losses = []
         for num_chunks in [1, 2, 4, 8]:
-            lm_head, chunked_loss = self._make_lm_head_and_loss(D, V, num_chunks)
+            model, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
             # Use same lm_head weights
             if losses:
-                lm_head.load_state_dict(ref_state_dict)
+                model.output.load_state_dict(ref_state_dict)
             else:
-                ref_state_dict = lm_head.state_dict()
+                ref_state_dict = model.output.state_dict()
 
             h = hidden_states.detach().requires_grad_(True)
 
@@ -585,11 +603,11 @@ class TestChunkedCELossSPMD(DTensorTestBase):
         num_chunks = 2
         mesh = init_device_mesh(
             self.device_type,
-            (2,),
-            mesh_dim_names=("tp",),
+            (1, 1, 2),
+            mesh_dim_names=("dp", "cp", "tp"),
         )
-        (tp_rank,) = mesh.get_coordinate()
-        (tp_degree,) = mesh.shape
+        _, _, tp_rank = mesh.get_coordinate()
+        _, _, tp_degree = mesh.shape
 
         # init states, labels, test IGNORE_INDEX
         hidden_states = torch.randn(B, L, D, device=self.device_type)
