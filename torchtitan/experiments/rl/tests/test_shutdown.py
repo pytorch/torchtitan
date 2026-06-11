@@ -12,6 +12,7 @@ import pytest
 from torchtitan.experiments.rl import train
 from torchtitan.experiments.rl.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.batcher import Batcher
+from torchtitan.experiments.rl.generator_router import GeneratorRouter
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
 
 
@@ -23,7 +24,7 @@ class _FakeRLTrainer:
         self.events = []
         self.instances.append(self)
 
-    async def setup_async(self, *, trainer_mesh=None, generator_mesh=None):
+    async def setup_async(self, *, trainer_mesh=None, generator_meshes=None):
         self.events.append("setup")
         if getattr(self.config, "fail_setup", False):
             raise RuntimeError("setup failed")
@@ -159,7 +160,7 @@ def test_rl_trainer_shutdown_is_noop_before_meshes_spawn():
     asyncio.run(trainer.close())
 
     assert trainer.trainer is None
-    assert trainer.generator is None
+    assert trainer.generator_router is None
     assert trainer._proc_meshes == []
 
 
@@ -208,11 +209,18 @@ class _StubMesh:
         self._events.append(self._name)
 
 
+def _set_generator_router(rl_trainer, generators):
+    rl_trainer.generator_router = GeneratorRouter(
+        GeneratorRouter.Config(),
+        generators=generators,
+    )
+
+
 def test_shutdown_calls_actor_close_before_mesh_stop():
     events: list[str] = []
     rl_trainer = _make_stub_rl_trainer()
     rl_trainer.trainer = _StubActor("trainer.close", events)
-    rl_trainer.generator = _StubActor("generator.close", events)
+    _set_generator_router(rl_trainer, [_StubActor("generator.close", events)])
     rl_trainer._proc_meshes = [
         _StubMesh("mesh.stop[0]", events),
         _StubMesh("mesh.stop[1]", events),
@@ -229,14 +237,60 @@ def test_shutdown_calls_actor_close_before_mesh_stop():
     assert rl_trainer._proc_meshes == []
 
 
+def test_shutdown_closes_all_generators():
+    events: list[str] = []
+    rl_trainer = _make_stub_rl_trainer()
+    rl_trainer.trainer = _StubActor("trainer.close", events)
+    _set_generator_router(
+        rl_trainer,
+        [
+            _StubActor("generator[0].close", events),
+            _StubActor("generator[1].close", events),
+        ],
+    )
+    rl_trainer._proc_meshes = [_StubMesh("mesh.stop[0]", events)]
+
+    asyncio.run(rl_trainer.close())
+
+    assert events == [
+        "trainer.close",
+        "generator[0].close",
+        "generator[1].close",
+        "mesh.stop[0]",
+    ]
+
+
 def test_shutdown_continues_after_actor_close_failure():
     events: list[str] = []
     rl_trainer = _make_stub_rl_trainer()
     rl_trainer.trainer = _StubActor("trainer.close", events, raises=True)
-    rl_trainer.generator = _StubActor("generator.close", events)
+    _set_generator_router(rl_trainer, [_StubActor("generator.close", events)])
     rl_trainer._proc_meshes = [_StubMesh("mesh.stop[0]", events)]
 
     asyncio.run(rl_trainer.close())
 
     # trainer.close raised, but every later step still ran.
     assert events == ["trainer.close", "generator.close", "mesh.stop[0]"]
+
+
+def test_shutdown_continues_after_generator_close_failure():
+    events: list[str] = []
+    rl_trainer = _make_stub_rl_trainer()
+    rl_trainer.trainer = _StubActor("trainer.close", events)
+    _set_generator_router(
+        rl_trainer,
+        [
+            _StubActor("generator[0].close", events, raises=True),
+            _StubActor("generator[1].close", events),
+        ],
+    )
+    rl_trainer._proc_meshes = [_StubMesh("mesh.stop[0]", events)]
+
+    asyncio.run(rl_trainer.close())
+
+    assert events == [
+        "trainer.close",
+        "generator[0].close",
+        "generator[1].close",
+        "mesh.stop[0]",
+    ]
