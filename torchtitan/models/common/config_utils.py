@@ -239,8 +239,6 @@ def make_token_dispatcher_config(
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         )
     elif comm_backend == "minimal_async_ep":
-        if score_before_experts:
-            raise ValueError("minimal_async_ep requires score_before_experts=False.")
         return MinimalAsyncEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,

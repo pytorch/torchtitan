@@ -72,15 +72,6 @@ def parallelize_deepseekv3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
         """
 
-    _maybe_init_minimal_async_ep_buffer(
-        model,
-        parallel_dims=parallel_dims,
-        training=training,
-        parallelism=parallelism,
-        ac_config=ac_config,
-        memory_policy=getattr(compile_config, "memory_policy", None),
-    )
-
     if parallel_dims.cp_enabled:
         apply_cp_to_attention(model, parallel_dims)
 
@@ -100,6 +91,14 @@ def parallelize_deepseekv3(
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         model.parallelize(parallel_dims)
+
+    _maybe_init_minimal_async_ep_buffer(
+        model,
+        parallel_dims=parallel_dims,
+        training=training,
+        ac_config=ac_config,
+        memory_policy=getattr(compile_config, "memory_policy", None),
+    )
 
     if parallel_dims.tp_enabled:
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))

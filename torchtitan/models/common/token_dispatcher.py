@@ -18,6 +18,7 @@ from torchtitan.config import Configurable
 from torchtitan.distributed.minimal_async_ep import (
     combine_op as minimal_async_ep_combine_op,
     dispatch_op as minimal_async_ep_dispatch_op,
+    init_buffer as minimal_async_ep_init_buffer,
     MinimalAsyncEPDispatchMetadata,
 )
 from torchtitan.ops.scatter_add import deterministic_scatter_add
@@ -71,6 +72,10 @@ class LocalTokenDispatcher(Configurable):
     ) -> None:
         """No-op for the EP=1 dispatcher. Subclasses override."""
         del ep_mesh, tp_mesh
+
+    def validate_parallel_dims(self, parallel_dims) -> None:
+        """Validate dispatcher-specific parallelism constraints."""
+        del parallel_dims
 
     def _local_reorder(
         self,
@@ -851,15 +856,36 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     class Config(LocalTokenDispatcher.Config):
         score_before_experts: bool = False
 
+        def __post_init__(self):
+            if self.score_before_experts:
+                raise ValueError(
+                    "MinimalAsyncEPTokenDispatcher.Config requires "
+                    "score_before_experts=False."
+                )
+
     def __init__(self, config: Config):
         super().__init__(config)
-        if self.score_before_experts:
-            raise ValueError(
-                "MinimalAsyncEPTokenDispatcher only supports "
-                "score_before_experts=False."
-            )
         self.ep_mesh: DeviceMesh | None = None
         self.sp_size: int = 1
+
+    def validate_parallel_dims(self, parallel_dims) -> None:
+        if parallel_dims.spmd_backend == "full_dtensor":
+            raise ValueError("MinimalAsyncEP does not support full_dtensor SPMD.")
+        if parallel_dims.ep <= 1:
+            raise ValueError("MinimalAsyncEP requires expert_parallel_degree > 1.")
+        if self.num_experts % parallel_dims.ep != 0:
+            raise ValueError(
+                f"MinimalAsyncEP num_experts ({self.num_experts}) must be "
+                f"divisible by expert_parallel_degree ({parallel_dims.ep})."
+            )
+        if parallel_dims.tp != 1:
+            raise ValueError(
+                "MinimalAsyncEP does not support tensor or sequence parallelism."
+            )
+        if parallel_dims.cp != 1:
+            raise ValueError("MinimalAsyncEP does not support context parallelism.")
+        if parallel_dims.pp != 1:
+            raise ValueError("MinimalAsyncEP does not support pipeline parallelism.")
 
     def wire_meshes(
         self,
@@ -880,6 +906,28 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             )
         self.ep_mesh = ep_mesh
         self.sp_size = 1
+
+    def init_buffer(
+        self,
+        *,
+        hidden_dim: int,
+        tokens_per_rank: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        """Initialize MinimalAsyncEP's process-local symmetric-memory buffer."""
+        if self.ep_mesh is None:
+            raise ValueError("MinimalAsyncEPTokenDispatcher requires an EP mesh.")
+        ep_size = self.ep_mesh.size()
+        minimal_async_ep_init_buffer(
+            group=self.ep_mesh.get_group(),
+            hidden_dim=hidden_dim,
+            tokens_per_rank=tokens_per_rank,
+            num_local_experts=self.num_experts // ep_size,
+            top_k=self.top_k,
+            dtype=dtype,
+            device=device,
+        )
 
     # pyrefly: ignore [bad-override]
     def dispatch(
