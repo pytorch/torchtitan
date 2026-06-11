@@ -101,8 +101,18 @@ _mxfp8_experts_cache: dict[type, type] = {}
 def _get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
     """Get or create an MXFP8-quantized subclass of *parent_cls*.
 
-    Works for any ``GroupedExperts`` subclass (e.g. gpt-oss variants).
-    The returned class has a proper ``_owner`` set by ``__init_subclass__``.
+    Works for any experts module exposing the ``_grouped_mm`` seam (the common
+    ``GroupedExperts`` and ``GptOssGroupedExperts``). The returned class has a
+    proper ``_owner`` set by ``__init_subclass__``.
+
+    The subclass overrides ``_grouped_mm`` to call torchao's
+    ``_quantize_then_scaled_grouped_mm`` directly, performing dynamic MXFP8
+    quantization of both operands inside the forward. This replaces the previous
+    weight-wrapper-subclass approach (``MXFP8TrainingWeightWrapperTensor``) whose
+    quantization lived in ``__torch_function__`` and was therefore invisible to
+    make_fx-based tracers like graph_trainer. The computation is identical — the
+    same ``_quantize_then_scaled_grouped_mm`` torchao called from the wrapper —
+    but issued from traceable forward code.
     """
     if parent_cls in _mxfp8_experts_cache:
         return _mxfp8_experts_cache[parent_cls]
@@ -120,14 +130,17 @@ def _get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
                 MXFP8TrainingOpConfig,
                 MXFP8TrainingRecipe,
             )
-            from torchao.quantization.quant_api import quantize_
 
             recipe = MXFP8TrainingRecipe(config.recipe_name)
-            mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
-            quantize_(
-                self,
-                config=mxfp8_op_config,
-                filter_fn=lambda mod, _fqn: isinstance(mod, GroupedExperts),
+            self._mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
+
+        def _grouped_mm(self, A, B_t, offs):
+            from torchao.prototype.moe_training.utils import (
+                _quantize_then_scaled_grouped_mm,
+            )
+
+            return _quantize_then_scaled_grouped_mm(
+                A, B_t, config=self._mxfp8_op_config, offs=offs
             )
 
     MXFP8GroupedExperts.__name__ = f"MXFP8{parent_cls.__name__}"

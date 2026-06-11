@@ -80,20 +80,32 @@ class GroupedExperts(Module):
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
 
         h_RF = F.silu(
-            torch._grouped_mm(
+            self._grouped_mm(
                 x_RD.bfloat16(),
                 w1_EFD.bfloat16().transpose(-2, -1),
-                offs=offsets_E,
+                offsets_E,
             )
         )
-        h_RF = h_RF * torch._grouped_mm(
+        h_RF = h_RF * self._grouped_mm(
             x_RD.bfloat16(),
             w3_EFD.bfloat16().transpose(-2, -1),
-            offs=offsets_E,
+            offsets_E,
         )
-        return torch._grouped_mm(
-            h_RF, w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
+        return self._grouped_mm(
+            h_RF, w2_EDF.bfloat16().transpose(-2, -1), offsets_E
         ).type_as(x_RD)
+
+    def _grouped_mm(
+        self, A: torch.Tensor, B_t: torch.Tensor, offs: torch.Tensor
+    ) -> torch.Tensor:
+        """Grouped matmul of ``A @ B_t`` with per-expert token offsets.
+
+        Overridable seam for low-precision variants (e.g. the MXFP8 converter
+        swaps this for a dynamically-quantized scaled grouped GEMM). Keeping the
+        op here — rather than behind a tensor-subclass ``__torch_function__`` —
+        means it is captured by FX tracers such as graph_trainer's make_fx path.
+        """
+        return torch._grouped_mm(A, B_t, offs=offs)
 
     def forward(
         self,

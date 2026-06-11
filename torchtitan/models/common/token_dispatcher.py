@@ -492,9 +492,11 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
     a multiple of ``pad_multiple``. This alignment is required by FP8/MXFP8
     quantized grouped GEMM kernels (e.g. 16 for FP8, 32 for MXFP8).
 
-    Requires EP to be enabled (ep_mesh must be set). Raises ValueError
-    if ep_mesh is None, since quantized grouped GEMMs need padded token
-    groups which are only produced by the EP permute_and_pad path.
+    Works with EP enabled (all-to-all dispatch + padded permute) and with
+    EP=1 (``ep_mesh is None``), where it skips the all-to-all and only applies
+    the local padded permute. The padding is what the quantized grouped GEMM
+    needs; the all-to-all is orthogonal, so EP=1 is supported for single-GPU
+    debugging / numerics by running ``permute_and_pad`` with ``ep_degree=1``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -508,14 +510,66 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
     def dispatch(
         self, x_TD, topk_scores_TK, topk_expert_ids_TK, num_local_tokens_per_expert_E
     ):
-        if self.ep_mesh is None:
-            raise ValueError(
-                "TorchAOTokenDispatcher requires expert parallelism (ep_mesh must be set). "
-                "Quantized grouped GEMMs need padded token groups, which requires EP>1. "
+        if self.ep_mesh is not None:
+            return super().dispatch(
+                x_TD, topk_scores_TK, topk_expert_ids_TK, num_local_tokens_per_expert_E
             )
-        return super().dispatch(
-            x_TD, topk_scores_TK, topk_expert_ids_TK, num_local_tokens_per_expert_E
+
+        # EP=1: no all-to-all. Locally reorder tokens to expert-sorted order,
+        # then apply the padded permute so the quantized grouped GEMM sees
+        # token groups aligned to pad_multiple. _permute reads ep_size=1 when
+        # ep_mesh is None, so num_local_tokens_per_expert_E is already the
+        # full per-expert count.
+        (
+            routed_input_ND,
+            token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N,
+        ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
+
+        (
+            input_shape,
+            routed_input_RD,
+            permuted_indices,
+            num_tokens_per_local_expert_padded_e,
+        ) = self._permute(routed_input_ND, num_local_tokens_per_expert_E)
+
+        metadata = AllToAllDispatchMetadata(
+            token_indices_experts_sorted_N=token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
+            input_shape=input_shape,
+            permuted_indices=permuted_indices,
+            # Unused in the EP=1 combine path (no all-to-all to reverse).
+            input_splits=[],
+            output_splits=[],
         )
+        return routed_input_RD, num_tokens_per_local_expert_padded_e, metadata
+
+    def combine(self, routed_output_RD, metadata, x_TD):
+        if self.ep_mesh is not None:
+            return super().combine(routed_output_RD, metadata, x_TD)
+
+        # EP=1: strip the padding (via _unpermute) to recover expert-sorted
+        # order, then apply the local score + scatter_add used by the EP=1
+        # path. Mirrors LocalTokenDispatcher.combine, plus the unpad.
+        assert isinstance(metadata, AllToAllDispatchMetadata)
+        routed_output_RD = self._unpermute(
+            routed_output_RD, metadata.input_shape, metadata.permuted_indices
+        )
+
+        out_TD = torch.zeros_like(x_TD)
+        if not self.score_before_experts:
+            routed_output_RD = (
+                routed_output_RD.to(torch.float32)
+                * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
+            ).to(routed_output_RD.dtype)
+
+        dim = x_TD.shape[-1]
+        out_TD = deterministic_scatter_add(
+            out_TD,
+            metadata.token_indices_experts_sorted_N.reshape(-1, 1).expand(-1, dim),
+            routed_output_RD,
+        )
+        return out_TD
 
     def _permute(
         self,
@@ -530,8 +584,9 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         # implementation of GroupedExperts, as it does not need padding.
         from torchao.prototype.moe_training.ep.permute import permute_and_pad
 
-        # pyrefly: ignore [missing-attribute]
-        ep_size = self.ep_mesh.size()
+        # ep_size=1 when EP is disabled: permute_and_pad then only pads token
+        # groups (rank-major == expert-major for a single rank).
+        ep_size = self.ep_mesh.size() if self.ep_mesh is not None else 1
         e = num_global_tokens_per_local_expert_E.shape[0] // ep_size
 
         (

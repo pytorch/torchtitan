@@ -123,6 +123,12 @@ class GraphTrainer(Trainer):
         # Run post-init hook for the active pass pipeline
         POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
 
+        # TODO(temporary debug): confirm quantization converters swapped the
+        # expert modules (e.g. GroupedExperts -> MXFP8GroupedExperts). Remove.
+        for name, mod in self.model_parts[0].named_modules():
+            if "experts" in name.lower():
+                logger.info(f"[mxfp8 debug] {name}: {type(mod).__name__}")
+
     def forward_backward_step(
         self,
         *,
