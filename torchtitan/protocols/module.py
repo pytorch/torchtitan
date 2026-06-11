@@ -456,10 +456,10 @@ class Module(nn.Module, Configurable):
             out_named = [out_src]
         # in_grad_placements may contain None for non-tensor args; filter
         # them out for mesh resolution -- local_map passes None through.
-        grad_named: list[SpmdLayout | None] = list(lm.in_grad_placements)
+        grad_named = lm.in_grad_placements
 
         resolved_mesh = parallel_dims.resolve_shared_mesh(
-            in_named + out_named + grad_named
+            in_named + out_named + (grad_named if grad_named else [])
         )
         if resolved_mesh is None:
             return fn
@@ -467,14 +467,19 @@ class Module(nn.Module, Configurable):
         out_placements: tuple[tuple[Placement, ...], ...] = tuple(
             resolve_placements(p, resolved_mesh) for p in out_named
         )
+        in_grad_placements = (
+            tuple(
+                resolve_placements(p, resolved_mesh) if p is not None else None
+                for p in grad_named
+            )
+            if grad_named is not None
+            else None
+        )
         return local_map(
             fn,
             in_placements=tuple(resolve_placements(p, resolved_mesh) for p in in_named),
             out_placements=out_placements,
-            in_grad_placements=tuple(
-                resolve_placements(p, resolved_mesh) if p is not None else None
-                for p in grad_named
-            ),
+            in_grad_placements=in_grad_placements,
             device_mesh=resolved_mesh,
         )
 

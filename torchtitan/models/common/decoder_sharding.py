@@ -236,11 +236,7 @@ def set_dense_ffn_sharding(
 
 
 def set_decoder_sharding_config(
-    config,
-    *,
-    loss_parallel: bool,
-    enable_sp: bool,
-    spmd_backend: str = "default",
+    config, *, loss_parallel: bool, enable_sp: bool
 ) -> None:
     """Set sharding on root-level configs only: ``tok_embeddings``, ``norm``,
     and ``output``.
@@ -260,17 +256,21 @@ def set_decoder_sharding_config(
     )
     loss_tp = spmd.S(-1) if loss_parallel else spmd.I
 
-    embed_src = dense_activation_placement(tp=spmd.P)
+    embed_out_src = dense_activation_placement(tp=spmd.P)
+    embed_input = SpmdLayout(
+        {
+            DP: spmd.S(0),
+            CP: spmd.S(1),
+            TP: spmd.R,
+        }
+    )
     config.tok_embeddings.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
-        in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
-        out_src_shardings=embed_src,
+        in_src_shardings={"input": embed_input},
+        in_dst_shardings={"input": embed_input},
+        out_src_shardings=embed_out_src,
         out_dst_shardings=activation_layout,
-        # spmd_types backend relies on local SPMD + manual vocab-parallel embedding impl.
-        local_map=LocalMapConfig(in_grad_placements=(None,))
-        if spmd_backend == "spmd_types"
-        else None,
+        local_map=LocalMapConfig(in_grad_placements=None),
     )
     config.norm.sharding_config = norm_config(enable_sp=enable_sp)
 
