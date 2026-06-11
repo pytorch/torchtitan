@@ -159,3 +159,85 @@ All 9 graph passes took **113.558 s** (cold-ish Inductor cache):
   transient spike tripped the OS OOM-killer. Capping
   `TORCHINDUCTOR_COMPILE_THREADS=8` and warming the Inductor cache let it
   complete. Consider baking the cap into the launcher for cold-start reliability.
+
+---
+
+## Run 3 — deepseek_v3 16B with MinimalAsyncEP (run script + #3419 + #3248 + #3561)
+
+**Date:** 2026-06-09
+**Branch:** `graph_trainer/dsv3_scaling`
+**Branch state at run:** run-script + #3419 + #3248 + #3561 (MinimalAsyncEP).
+#3590 / EP-overlap / #3548 **not yet applied**.
+**Launcher:** `TORCHINDUCTOR_COMPILE_THREADS=8 ./run_graph_trainer_dsv3.sh` with
+`CONFIG=graph_trainer_deepseek_v3_16b_minimal_async_ep` (the committed script's
+generic `graph_trainer_deepseek_v3_16b` was temporarily switched to the
+MinimalAsyncEP variant for this run).
+
+> ⚠️ **UNVERIFIED — numerics not validated.** Same loss-divergence concern as
+> Run 2, and MinimalAsyncEP is a **new sync-free MoE dispatcher** — its numerics
+> need an eager comparison (eager `deepseek_v3_16b_minimal_async_ep` via
+> `scripts/loss_compare.py`, ideally bitwise with `--debug.seed=42
+> --debug.deterministic`, loss *and* grad_norm) before this result can be
+> trusted. Treat the loss curve below as **provisional.**
+
+### MinimalAsyncEP confirmed in use
+Symmetric-memory buffer init logged at startup (proves the sync-free dispatcher
+is active, not a fallback):
+`Initializing MinimalAsyncEP buffer: hidden_dim=2048, tokens_per_rank=16384,
+top_k=6, num_local_experts=16, ep_size=4, max_routed_tokens=393216`.
+
+### Setup
+Same as Run 2 (8× H100, `dp_shard=8 ep=4`, `aot_fx_trace`, `memory_policy=full`,
+ChunkedCELoss, B=4 / seq 4096, 20 steps, c4_test) **except the MoE dispatcher**:
+
+| | |
+|---|---|
+| MoE dispatcher | **MinimalAsyncEPTokenDispatcher** (sync-free EP via symmetric memory) |
+| Config | `graph_trainer_deepseek_v3_16b_minimal_async_ep` |
+
+### Results
+| step | loss | grad_norm | memory | tps | tflops | mfu |
+|-----:|------|-----------|--------|-----|--------|-----|
+| 1 | 12.09197 | 1.6856 | 29.34 GiB (30.86%) | 95 | 1.72 | 0.17% |
+| 10 | 9.10410 | 6.9499 | 36.06 GiB (37.93%) | 8,221 | 148.84 | 15.05% |
+| 20 | 7.21462 | 8.1240 | 36.06 GiB (37.93%) | 5,504 | 99.66 | 10.08% |
+
+Loss converges; memory ~36 GiB (same band as Run 2). step-10 mfu 15.05%
+(vs Run 2's 13.04%). **Numerics unverified — see caveat above.**
+
+### Compile pipeline
+All 9 graph passes took **94.834 s** (`TORCHINDUCTOR_COMPILE_THREADS=8`; cold
+Inductor cache for the new MinimalAsyncEP / offset-aware swiglu kernels):
+- `joint_transformer_block_bucketing_reordering` 9.25 s
+- `regional_inductor` 74.05 s
+
+### Artifacts
+| artifact | link |
+|---|---|
+| run log (pastry) | https://www.internalfb.com/intern/paste/P2371964742/ |
+| profiler trace (perfetto, rank0 iter 10) | https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fbahuang_de493592-0d3f-40da-9376-ab01153b39e9_rank0_trace.json.gz |
+| tlparse logs (manifold, **temporary** `.tmp` path) | https://manifold.edge.x2p.facebook.net/v0/read/tree/logs/.tmpd3wvEW/index.html?bucketName=tlparse_reports&apiKey=tlparse_reports-key&withPayload=1&timeoutMsec=10000 |
+
+#### Per-pass before/after graph diffs
+| pass | diff |
+|---|---|
+| eliminate_dead_code | https://www.internalfb.com/intern/diffing/?before_paste_number=2371964059&after_paste_number=2371964141&selected_tab=plain_diff |
+| canonicalize_graph | https://www.internalfb.com/intern/diffing/?before_paste_number=2371963719&after_paste_number=2371963790&selected_tab=plain_diff |
+| tag_with_memory_policy | https://www.internalfb.com/intern/diffing/?before_paste_number=2371964490&after_paste_number=2371964578&selected_tab=plain_diff |
+| selective_activation_remat | https://www.internalfb.com/intern/diffing/?before_paste_number=2371964352&after_paste_number=2371964417&selected_tab=plain_diff |
+| annotate_flex_attention_for_regional_inductor | https://www.internalfb.com/intern/diffing/?before_paste_number=2371963554&after_paste_number=2371963641&selected_tab=plain_diff |
+| regional_inductor | https://www.internalfb.com/intern/diffing/?before_paste_number=2371964223&after_paste_number=2371964281&selected_tab=plain_diff |
+
+#### Standalone artifacts
+| artifact | paste |
+|---|---|
+| activation_memory_policy | https://www.internalfb.com/intern/paste/P2371964600/ |
+
+### Notes
+- MinimalAsyncEP parallelism requirements satisfied: `ep=4>1`, `tp=1`,
+  `dp_shard=8 % ep=0`, no CP/PP/sequence-parallel, `memory_policy=full`, and
+  `spmd_backend=default` (MinimalAsyncEP rejects `full_dtensor`).
+- Cold-cache compile mitigation as in Run 2 (`TORCHINDUCTOR_COMPILE_THREADS=8`);
+  the MinimalAsyncEP / swiglu kernels are new, so their first compile is cold.
+- The committed launcher still uses `graph_trainer_deepseek_v3_16b`; the
+  MinimalAsyncEP config was set only for this run.
