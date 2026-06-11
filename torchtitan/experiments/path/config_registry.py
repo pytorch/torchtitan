@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from functools import partial
 
 import torch.nn as nn
@@ -74,6 +75,9 @@ def model_registry() -> ModelSpec:
 def path() -> PathTrainer.Config:
     steps = 512*10
     mixed_precision_param = "bfloat16"
+    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
+    world_size = int(os.environ.get("WORLD_SIZE", str(local_world_size)))
+    num_nodes = int(os.environ.get("GROUP_WORLD_SIZE", str(world_size // local_world_size)))
     return PathTrainer.Config(
         loss=PathLoss.Config(),
         model_spec=model_registry(),
@@ -98,8 +102,8 @@ def path() -> PathTrainer.Config:
             mixed_precision_reduce="float32",
         ),
         parallelism=ParallelismConfig(
-            data_parallel_replicate_degree=1,
-            data_parallel_shard_degree=-1,
+            data_parallel_replicate_degree=num_nodes,
+            data_parallel_shard_degree=local_world_size,
             tensor_parallel_degree=1,
             context_parallel_degree=1,
             pipeline_parallel_degree=1,
