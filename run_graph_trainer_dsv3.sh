@@ -99,7 +99,33 @@ tlp ()
 # logged automatically.
 {
 
-# --- DeepSeek-v3 16B (regular EP, non-MinimalAsyncEP) ---
+# Run mode: graph = graph_trainer (the fix); eager = eager Trainer baseline.
+# Both use the SAME model / parallelism / batch / recompute so the graph run
+# (Run 7) and the eager run (Run 8) are directly comparable. Select with
+# `MODE=eager ./run_graph_trainer_dsv3.sh` (default: graph).
+MODE="${MODE:-graph}"
+
+if [ "$MODE" = "eager" ]; then
+# --- DeepSeek-v3 16B EAGER baseline (FSDP2 + full activation checkpointing) ---
+# The eager Trainer reference that the graph_trainer path (Run 7) is bitwise-
+# matched to. There is no aot_fx_trace graph here, so there are no graph-pass
+# tlparse diffs -- tlparse captures only the loss torch.compile; the profiler
+# trace and CUDA memory snapshot are the meaningful artifacts.
+NGPU=8 MODULE=deepseek_v3 CONFIG=deepseek_v3_16b TORCHINDUCTOR_COMPILE_THREADS=8 tlp ./run_train.sh \
+    --parallelism.data_parallel_shard_degree=8 \
+    --parallelism.tensor_parallel_degree=1 \
+    --parallelism.expert_parallel_degree=4 \
+    --training.steps 20 \
+    --training.local_batch_size 16 \
+    --dataloader.dataset c4_test \
+    --activation_checkpoint.mode full \
+    --profiler.enable_profiling \
+    --profiler.profile_freq 10 \
+    --profiler.enable_memory_snapshot \
+    --dump_folder "$PROFILE_DIR" \
+    --debug.print-config
+else
+# --- DeepSeek-v3 16B (regular EP, non-MinimalAsyncEP) graph_trainer ---
 # Benchmarks the eager-comparable graph_trainer path with the lm_head chunked-loss
 # coalescing fix (PR #3636), which makes this path bitwise-identical to the eager
 # Trainer. cudagraph is disabled: regular EP's _grouped_mm / all-to-all are not
@@ -122,6 +148,7 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b TOR
     --dump_folder "$PROFILE_DIR" \
     --debug.print-config \
     --compile.memory_policy full
+fi
 
 echo "Run log saved to $LOG_FILE"
 
