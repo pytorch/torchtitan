@@ -183,7 +183,7 @@ class Rollouter(Configurable):
             # produce the rollouts
             rollouts = await asyncio.gather(
                 *(
-                    self.run_single_rollout(
+                    self._run_single_rollout(
                         generate_fn=generate_fn,
                         env=env,
                         sampling=sampling,
@@ -207,7 +207,7 @@ class Rollouter(Configurable):
 
         return RolloutGroup(group_id=group_id, rollouts=rollouts)
 
-    async def run_single_rollout(
+    async def _run_single_rollout(
         self,
         *,
         generate_fn: GenerateFn,
@@ -221,14 +221,15 @@ class Rollouter(Configurable):
 
         For custom logic, users can override this method.
 
+
         Args:
             generate_fn: Async callable that runs one generation; keeps the rollouter
                 decoupled from the generator actor.
             env: The env for this rollout; `run_group_rollouts` closes it.
             sampling: Sampling config for every generate call.
             group_id: The GRPO group id.
-            rollout_id: Stable id for this rollout, unique within the group. Passed as the sticky
-                `session_id` (so all turns pin to one generator) and stored as `Rollout.sample_id`
+            rollout_id: Stable id for this rollout, unique within the group; the per-turn
+                `request_id` prefix, and stored as `Rollout.sample_id`.
 
         Returns:
             One unscored `Rollout` (reward filled later by the controller).
@@ -243,7 +244,6 @@ class Rollouter(Configurable):
                 completion = await generate_fn(
                     prompt_token_ids=step.next_prompt_token_ids,
                     request_id=f"{rollout_id}/turn={len(turns)}",
-                    session_id=rollout_id,  # sticky
                     sampling_config=sampling,
                 )
 

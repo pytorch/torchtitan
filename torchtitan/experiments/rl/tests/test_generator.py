@@ -7,9 +7,9 @@
 """Unit tests for the `VLLMGenerator` continuous-batching mechanics.
 
 Exercises the per-request pieces in isolation with a fake vLLM engine — no Monarch,
-no GPU, no real model, and no broadcast (the engine loop's broadcast/step is a TP
-collective, tested separately in `test_engine_loop.py`). Covers admission (token-in),
-completion (token-out + the metrics that ride with it),
+no GPU, no real model, and no broadcast (the engine loop's broadcast/step is a TP collective,
+not unit-tested here; `test_engine_loop.py` covers the decision logic in `_decide_next_action`).
+Covers completion (token-out + the metrics that ride with it),
 the SamplingParams contract, and the vLLM metric timing math.
 """
 
@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 from vllm.sampling_params import RequestOutputKind
 
+from torchtitan.config import DebugConfig, ParallelismConfig
 from torchtitan.experiments.rl.actors.generator import (
     _prepare_generation_request_metrics,
     GenerationFuture,
@@ -93,7 +94,7 @@ def _generator():
 # --- completion (token-out) ---
 
 
-def test_resolve_finished_requests_resolves_future_with_completion():
+def test_process_finished_requests_resolves_future_with_completion():
     async def main():
         generator = _generator()
         future = asyncio.get_running_loop().create_future()
@@ -101,7 +102,7 @@ def test_resolve_finished_requests_resolves_future_with_completion():
             "r0": GenerationFuture(future=future, metrics_prefix="generator")
         }
 
-        generator._resolve_finished_requests(
+        generator._process_finished_requests(
             [
                 _request_output(
                     outputs=[_sample(token_ids=(10, 11), finish_reason="length")]
@@ -120,7 +121,7 @@ def test_resolve_finished_requests_resolves_future_with_completion():
         # The per-generation metrics ride on the completion.
         assert (
             m.MetricsProcessor._aggregate_metrics(completion.metrics)[
-                "generator/inflight_at_completion/max"
+                "generator/inflight_requests_at_completion/max"
             ]
             == 1
         )
@@ -128,11 +129,11 @@ def test_resolve_finished_requests_resolves_future_with_completion():
     asyncio.run(main())
 
 
-def test_resolve_finished_requests_noop_on_followers():
+def test_process_finished_requests_noop_on_followers():
     # Followers hold no futures, so completion is a no-op (it returns before touching outputs).
     generator = _generator()
     generator._rank = 1
-    generator._resolve_finished_requests([_request_output(request_id="r0")])
+    generator._process_finished_requests([_request_output(request_id="r0")])
     assert generator._generation_futures == {}
 
 
@@ -148,7 +149,7 @@ def test_build_sampling_params_matches_contract():
     assert params.temperature == 0.3 and params.top_p == 0.9
     assert params.max_tokens == 64
     assert params.n == 1
-    assert params.logprobs == 1
+    assert params.logprobs == 0
     assert params.output_kind == RequestOutputKind.FINAL_ONLY
     assert params.stop_token_ids == [99]
 
@@ -179,3 +180,46 @@ def test_decode_metrics_absent_for_single_generated_token():
     assert "generator/prefill_time_ms" in keys
     assert "generator/decode_time_ms" not in keys
     assert "generator/inter_token_latency_ms" not in keys
+
+
+# --- config guards (weight-sync invariants) ---
+
+# Parallelism the generator accepts (TP-only); the weight-sync guards run after these checks.
+_TP_ONLY = ParallelismConfig(enable_sequence_parallel=False, disable_loss_parallel=True)
+
+
+def test_batch_invariant_requires_prefix_cache_reset():
+    with pytest.raises(ValueError, match="reset_prefix_cache_on_weight_sync"):
+        VLLMGenerator.Config(
+            parallelism=_TP_ONLY,
+            debug=DebugConfig(batch_invariant=True),
+            reset_prefix_cache_on_weight_sync=False,
+        )
+
+
+def test_reset_running_requests_requires_prefix_cache_reset():
+    with pytest.raises(ValueError, match="reset_prefix_cache_on_weight_sync"):
+        VLLMGenerator.Config(
+            parallelism=_TP_ONLY,
+            reset_running_requests_on_weight_sync=True,
+            reset_prefix_cache_on_weight_sync=False,
+        )
+
+
+def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
+    # Strict drain (hot_swap=False) needs the prefix cache reset so post-pull requests don't reuse old-weight KV.
+    import dataclasses
+
+    from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b_varlen
+
+    config = rl_grpo_qwen3_0_6b_varlen()
+    assert (
+        not config.generator_router.hot_swap
+    )  # default; guard fires only when both are off
+    with pytest.raises(ValueError, match="reset_prefix_cache_on_weight_sync"):
+        dataclasses.replace(
+            config,
+            generator=dataclasses.replace(
+                config.generator, reset_prefix_cache_on_weight_sync=False
+            ),
+        )

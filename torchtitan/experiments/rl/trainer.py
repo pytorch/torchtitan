@@ -98,8 +98,8 @@ class GRPOLoss(Configurable):
         # Per-token importance sampling ratio: π_θ / π_old
         log_ratio = policy_logprobs - generator_logprobs
 
-        # TODO: debug why we get nan when cudagraph is true
-        log_ratio = torch.nan_to_num(log_ratio)
+        # TODO: debug why vLLM+cudagraph emits nan generator logprobs
+        log_ratio = torch.nan_to_num(log_ratio, nan=0.0)
         log_ratio = torch.clamp(log_ratio, -20.0, 20.0)
         ratio = torch.exp(log_ratio)
 
@@ -119,7 +119,7 @@ class GRPOLoss(Configurable):
                     (torch.abs(ratio - clipped_ratio) > 1e-6).float() * loss_mask
                 ).sum()
                 / loss_denominator,
-                # Fraction of response tokens whose generator (vLLM) logprob is nan
+                # Fraction of response tokens whose generator (vLLM) logprob is nan.
                 "loss/generator_logprob_nan_frac": (
                     (~torch.isfinite(generator_logprobs)).float() * loss_mask
                 ).sum()
@@ -249,6 +249,16 @@ class RLTrainer(Configurable):
                         "SP uses reduce-scatter which only supports Ring in NCCL "
                         "and has not been validated for determinism."
                     )
+
+            if (
+                not self.generator_router.hot_swap
+                and not self.generator.reset_prefix_cache_on_weight_sync
+            ):
+                raise ValueError(
+                    "generator_router.hot_swap=False requires "
+                    "generator.reset_prefix_cache_on_weight_sync=True, else requests admitted after a "
+                    "pull reuse KV cached under the old weights."
+                )
 
     def __init__(self, config: Config):
         self.config = config
@@ -469,15 +479,11 @@ class RLTrainer(Configurable):
         group_id_prefix = "val/" if is_validation else ""
 
         # Pass a callable to the rollouter, so it stays decoupled from the generator router
-        async def generate_fn(
-            prompt_token_ids, *, request_id, session_id=None, sampling_config=None
-        ):
-            # TODO: pass session_id into RoutingContext for sticky routing once #3625 lands.
+        async def generate_fn(prompt_token_ids, *, request_id, sampling_config=None):
             result = await self.generator_router.route(
                 "generate",
                 prompt_token_ids,
                 request_id=request_id,
-                session_id=session_id,
                 sampling_config=sampling_config,
                 metrics_prefix=generation_metrics_prefix,
                 routing_ctx=RoutingContext(estimated_cost=len(prompt_token_ids)),
@@ -533,24 +539,24 @@ class RLTrainer(Configurable):
         # TODO: we may also have some metrics at the Rollout level, i.e. not turn specific.
         # TODO: we also need a "logs" field, so that if there were errors/warnings
         # they can be made available for the rollout_logger
-        generation_metrics = [
+        metrics = [
             metric
             for group in rollout_groups
             for rollout in group.rollouts
             for rollout_turn in rollout.turns
             for metric in rollout_turn.metrics
         ]
-        generation_metrics.append(
+        metrics.append(
             m.Metric(
                 f"{rollout_metrics_prefix}/group_failures",
                 m.Sum(float(num_failed_groups)),
             )
         )
-        rollout_metrics = prepare_rollout_metrics(
+        metrics += prepare_rollout_metrics(
             rollout_metrics_prefix,
             [rollout for group in rollout_groups for rollout in group.rollouts],
         )
-        return rollout_groups, rollout_metrics + generation_metrics
+        return rollout_groups, metrics
 
     @staticmethod
     @sl.log_trace_span("_build_episodes")
@@ -716,6 +722,8 @@ class RLTrainer(Configurable):
 
             # num_tokens_target (= global_batch_size * seq_len) is the stop
             # condition for collected tokens before a train step can proceed.
+            # NOTE: consecutive _collect_rollouts calls have a barrier between them (each is awaited to
+            # completion). This behavior will change in async mode.
             num_tokens_target = self.batcher.num_tokens_target(self.trainer_dp_degree)
             while collected_tokens < num_tokens_target:
                 new_rollout_groups, new_metrics = await self._collect_rollouts(

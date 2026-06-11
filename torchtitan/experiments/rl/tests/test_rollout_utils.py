@@ -124,16 +124,3 @@ def test_prompt_only_turn_is_skipped() -> None:
     [episode] = rollout_to_episodes(rollout)
     assert episode.token_ids == [1, 2, 4]
     assert episode.loss_mask == [False, False, True]
-
-
-def test_none_advantage_defaults_to_zero() -> None:
-    rollout = Rollout(
-        group_id="g",
-        sample_id="g/sample=0",
-        status=RolloutStatus.COMPLETED,
-        turns=[_turn(prompt_token_ids=[1, 2], completion_token_ids=[4], version=1)],
-        reward=1.0,
-        advantage=None,
-    )
-    [episode] = rollout_to_episodes(rollout)
-    assert episode.advantage == [0.0, 0.0, 0.0]  # None -> 0.0, broadcast over the token

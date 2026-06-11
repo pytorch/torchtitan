@@ -13,38 +13,46 @@ from torchtitan.experiments.rl.rollout.types import Rollout
 from torchtitan.experiments.rl.types import Episode
 
 
+# TODO: evaluate renaming Episode -> TrainingSample once we align overloaded "sample" names. E.g. Dataset also uses it.
 def rollout_to_episodes(rollout: Rollout) -> list[Episode]:
-    """Transforms a `Rollout` into training episodes.
+    """Pack a scored `Rollout` into training episodes — usually one, or several where its turns branch.
 
-    NOTE: Each rollout may become more than one `Episode`. If `prompt_token_ids` at turn N is not a
-    prefix of turn N+1, indicating history branching, we branch it into two different episodes:
-    one up to turn N, and another one from N+1 history forward. Prefix check is possible because
-    every RolloutTurn.prompt_token_ids carries all history up to that turn.
+    Turns share a growing prefix (each prompt continues the previous prompt + completion), so the whole
+    rollout packs into ONE episode: prompts and env replies are masked out, completions are trained. A new
+    episode (branch) opens wherever that prefix breaks (the env edited/compacted history).
 
-    Example (3 turns):
-        P = prompt; C = completion; E = env reply
-        turn0: prompt=[P]             completion=[C1]   #  P  -> mask 0,  C1 -> mask 1
-        turn1: prompt=[P,C1,E1]       completion=[C2]   #  E1 -> mask 0,  C2 -> mask 1
-        turn2: prompt=[P,C1,E1,C2,E2] completion=[D3]   #  E2 -> mask 0,  C3 -> mask 1
-        # -> [Episode(token_ids=[P,C1,E1,C2,E2,C3], loss_mask=[0,1,0,1,0,1],
-        #                    logprobs=[0,l1,0,l2,0,l3], advantage=...)]
+    Example (5 turns; the env compacts history before turn 3, so the prefix breaks -> 2 episodes).
+    P = prompt; C = completion; E = env reply
+        turn0: prompt=[P1]              completion=[C1]
+        turn1: prompt=[P1,C1,E1]        completion=[C2]
+        turn2: prompt=[P1,C1,E1,C2,E2]  completion=[C3]
+        turn3: prompt=[P2]              completion=[C4]   # history compacted -> prefix breaks
+        turn4: prompt=[P2,C4,E4]        completion=[C5]
+        # -> episode 0: token_ids=[P1,C1,E1,C2,E2,C3], loss_mask=[0,1,0,1,0,1]   sample_id=<rollout id>
+        #    episode 1: token_ids=[P2,C4,E4,C5],        loss_mask=[0,1,0,1]       sample_id=".../branch=1"
     """
-    rollout_advantage = rollout.advantage if rollout.advantage is not None else 0.0
+    rollout_advantage = rollout.advantage
     episodes: list[Episode] = []
     prev_prompt_and_completion: list[int] = []
 
-    for rollout_turn in rollout.turns:
-        # Prompt-only turns (e.g. the prompt went over budget) have nothing to train on.
+    for turn_idx, rollout_turn in enumerate(rollout.turns):
+        # No completion happens on prompt too long, and is only valid on the last turn.
+        # TODO: This seems to happen on the very first turn. Check if we can prefilter it.
         if not rollout_turn.completion_token_ids:
+            if turn_idx != len(rollout.turns) - 1:
+                raise ValueError(
+                    f"rollout {rollout.sample_id!r}: non-final turn {turn_idx} has no completion"
+                )
             continue
 
-        # Open a new episode on the first turn, or wherever the growing prefix breaks (history
-        # was edited / re-tokenized); otherwise extend the current episode.
         prompt = rollout_turn.prompt_token_ids
+        # True when this prompt continues the previous one (prefix-preserving);
+        # False when the env edited history -> open a new episode (branch).
         extends_prev = (
             prompt[: len(prev_prompt_and_completion)] == prev_prompt_and_completion
         )
         if not episodes or not extends_prev:
+            # start a new episode
             episodes.append(
                 Episode(
                     # TODO(async): carry per-token version_intervals in episode
@@ -69,16 +77,12 @@ def rollout_to_episodes(rollout: Rollout) -> list[Episode]:
         # Untrained prefix delta (the prompt or the new env reply), then the trained completion.
         episode = episodes[-1]
         prompt_delta = prompt[prefix_len:]
-        episode.token_ids += prompt_delta
-        episode.loss_mask += [False] * len(prompt_delta)
-        episode.logprobs += [0.0] * len(prompt_delta)
-        episode.advantage += [0.0] * len(prompt_delta)
-        episode.token_ids += rollout_turn.completion_token_ids
-        episode.loss_mask += [True] * len(rollout_turn.completion_token_ids)
-        episode.logprobs += rollout_turn.completion_logprobs
-        episode.advantage += [rollout_advantage] * len(
-            rollout_turn.completion_token_ids
-        )
+        num_delta = len(prompt_delta)
+        num_completion = len(rollout_turn.completion_token_ids)
+        episode.token_ids += prompt_delta + rollout_turn.completion_token_ids
+        episode.loss_mask += [False] * num_delta + [True] * num_completion
+        episode.logprobs += [0.0] * num_delta + rollout_turn.completion_logprobs
+        episode.advantage += [0.0] * num_delta + [rollout_advantage] * num_completion
 
         prev_prompt_and_completion = prompt + rollout_turn.completion_token_ids
 

@@ -36,7 +36,6 @@ class GenerateFn(Protocol):
         prompt_token_ids: list[int],
         *,
         request_id: str,
-        session_id: str | None = None,
         sampling_config: SamplingConfig | None = None,
     ) -> Completion | None:
         """Run one generation.
@@ -44,8 +43,6 @@ class GenerateFn(Protocol):
         Args:
             prompt_token_ids: The tokenized prompt to generate from.
             request_id: Unique per call; identifies the exact turn (e.g. ".../turn=2") in logs.
-            session_id: Same for every turn of one rollout, so a router can keep them on one
-                generator (which reuses the cached prompt). Does nothing with a single generator.
             sampling_config: Optional per-call sampling overrides.
 
         Returns:

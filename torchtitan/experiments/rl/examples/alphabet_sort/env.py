@@ -56,6 +56,7 @@ class AlphabetSortEnv(MessageEnv):
 
     async def step(self, completion_message: Message) -> MessageEnvStepOutput:
         """Introduce the next batch of new names to re-sort, or end the rollout if none are left."""
+        del completion_message  # advance to the next names regardless of the model's reply
         if self._next_turn >= len(self._env_input.new_names_per_turn):
             return MessageEnvStepOutput(done=True)
         turn = self._next_turn

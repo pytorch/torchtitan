@@ -22,6 +22,7 @@ class Completion:
                    metrics=[Metric("generator/queue_time_ms", ...)])
     """
 
+    # TODO(async): change `int` to per-token version intervals when hot-swap in async is enabled.
     policy_version: int
     request_id: str
     """Echoes the id the caller passed to `generate`, so callers can validate

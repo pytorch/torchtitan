@@ -18,9 +18,9 @@ from torchtitan.experiments.rl.actors.generator import (
     CloseRequest,
     GenerationRequest,
     LoopAction,
+    ModelStateDictPullRequest,
     SamplingConfig,
     VLLMGenerator,
-    WeightPullRequest,
 )
 
 
@@ -35,7 +35,7 @@ class _FakeEngine:
 def _bare_generator(
     *,
     close_requested: bool = False,
-    weight_pull_request: WeightPullRequest | None = None,
+    model_state_dict_pull_request: ModelStateDictPullRequest | None = None,
     pending: list[GenerationRequest] | None = None,
     unfinished: bool = False,
 ) -> VLLMGenerator:
@@ -43,7 +43,7 @@ def _bare_generator(
     generator = object.__new__(VLLMGenerator)
     generator._condition = asyncio.Condition()
     generator._close_request = CloseRequest() if close_requested else None
-    generator._weight_pull_request = weight_pull_request
+    generator._model_state_dict_pull_request = model_state_dict_pull_request
     generator._queued_generation_requests = pending or []
     generator._engine = _FakeEngine(unfinished=unfinished)
     return generator
@@ -64,13 +64,16 @@ def test_closing_returns_close() -> None:
 
 def test_pull_takes_precedence_over_queued_requests() -> None:
     request = _request()
-    pull = WeightPullRequest(version=5)
-    generator = _bare_generator(weight_pull_request=pull, pending=[request])
+    pull = ModelStateDictPullRequest(version=5)
+    generator = _bare_generator(model_state_dict_pull_request=pull, pending=[request])
     decision = asyncio.run(generator._decide_next_action())
-    assert decision.action is LoopAction.PULL_WEIGHTS and decision.pull_version == 5
-    # `_weight_pull_request` is NOT cleared at decide — the PULL_WEIGHTS branch clears it after
+    assert (
+        decision.action is LoopAction.PULL_MODEL_STATE_DICT
+        and decision.pull_version == 5
+    )
+    # `_model_state_dict_pull_request` is NOT cleared at decide — the PULL_MODEL_STATE_DICT branch clears it after
     # applying; the single-threaded loop can't re-decide before then, so the predicate won't re-fire.
-    assert generator._weight_pull_request is pull
+    assert generator._model_state_dict_pull_request is pull
     assert generator._queued_generation_requests == [
         request
     ]  # NOT consumed — pull runs first
