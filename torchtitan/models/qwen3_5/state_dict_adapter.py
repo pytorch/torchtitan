@@ -69,7 +69,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
             "model.language_model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.language_model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
             # MoE (grouped 3D format, handled specially in to_hf/from_hf)
-            "model.language_model.layers.{}.mlp.experts.down_proj": "layers.{}.moe.experts.w2",
+            "model.language_model.layers.{}.mlp.experts.down_proj": "layers.{}.moe.experts.w2_EDF",
             "model.language_model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
             # MoE shared expert
             "model.language_model.layers.{}.mlp.shared_expert.gate_proj.weight": "layers.{}.moe.shared_experts.w1.weight",
@@ -124,13 +124,13 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                 # pyrefly: ignore [missing-attribute]
                 layer_num = re.search(r"\d+", tt_key).group(0)
 
-                if tt_abstract_key == "layers.{}.moe.experts.w1":
+                if tt_abstract_key == "layers.{}.moe.experts.w1_EFD":
                     moe_w1_by_layer[layer_num] = value
                     continue
-                elif tt_abstract_key == "layers.{}.moe.experts.w3":
+                elif tt_abstract_key == "layers.{}.moe.experts.w3_EFD":
                     moe_w3_by_layer[layer_num] = value
                     continue
-                elif tt_abstract_key == "layers.{}.moe.experts.w2":
+                elif tt_abstract_key == "layers.{}.moe.experts.w2_EDF":
                     hf_key = (
                         f"model.language_model.layers.{layer_num}.mlp.experts.down_proj"
                     )
@@ -264,10 +264,10 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     == "model.language_model.layers.{}.mlp.experts.gate_up_proj"
                 ):
                     w1_hf, w3_hf = value.chunk(2, dim=-1)
-                    tt_state_dict[f"layers.{idx}.moe.experts.w1"] = w1_hf.transpose(
+                    tt_state_dict[f"layers.{idx}.moe.experts.w1_EFD"] = w1_hf.transpose(
                         -2, -1
                     )
-                    tt_state_dict[f"layers.{idx}.moe.experts.w3"] = w3_hf.transpose(
+                    tt_state_dict[f"layers.{idx}.moe.experts.w3_EFD"] = w3_hf.transpose(
                         -2, -1
                     )
                     continue
@@ -277,7 +277,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     hf_abstract_key
                     == "model.language_model.layers.{}.mlp.experts.down_proj"
                 ):
-                    tt_state_dict[f"layers.{idx}.moe.experts.w2"] = value.transpose(
+                    tt_state_dict[f"layers.{idx}.moe.experts.w2_EDF"] = value.transpose(
                         -2, -1
                     )
                     continue
