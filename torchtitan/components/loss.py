@@ -562,6 +562,7 @@ class ChunkedCELoss(BaseLoss):
         assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
 
         requires_grad = hidden_states.requires_grad
+        h_partition_spec = get_partition_spec(hidden_states)
         with spmd.local():
             hidden_states = hidden_states.detach().requires_grad_(requires_grad)
             h_chunks, label_chunks = self.chunk_states_and_labels(hidden_states, labels)
@@ -640,7 +641,7 @@ class ChunkedCELoss(BaseLoss):
             spmd.assert_type(
                 accumulated_grad,
                 dict(spmd.get_local_type(hidden_states)),
-                partition_spec=get_partition_spec(hidden_states),
+                partition_spec=h_partition_spec,
             )
         return total_loss, accumulated_grad
 
