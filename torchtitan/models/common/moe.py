@@ -145,8 +145,8 @@ class GroupedExperts(Module):
         """Parallelize expert weights, then wire EP/TP meshes on the dispatcher
         so dispatch/combine see the right meshes at runtime."""
         super().parallelize(parallel_dims)
-        # TODO(@pianpwk): With spmd_types and set_current_mesh, replace wire_meshes
-        # with current_mesh calls inside AllToAllTokenDispatcher and
+        # TODO(@pianpwk): With spmd_types and set_current_spmd_mesh, replace wire_meshes
+        # with current_spmd_mesh calls inside AllToAllTokenDispatcher and
         # DeepEPTokenDispatcher.
         self.token_dispatcher.wire_meshes(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
