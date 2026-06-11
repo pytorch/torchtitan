@@ -30,24 +30,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Runaway guard: a healthy multi-turn env terminates well within this many turns.
-_MAX_TURNS = 100
-
 
 class Rollouter(Configurable):
     """Turns a problem (train/val datasets, the `MessageEnv` to build per sample, and a
     `Rubric`) into scored rollouts — the RL training data.
 
     Like a `Dataloader` turns a `Dataset` into training batches, a `Rollouter`
-    turns a problem into rollouts: it builds the envs, the controller drives them against
-    the inference engine, and `score_group` scores the results.
+    turns a problem into rollouts: it builds the envs, drives them against the inference engine
+    (via a `generate_fn` the controller provides), and scores the results with `score_group`.
 
     Subclass only to override specific methods, such as `score_group` for cross-sibling scoring,
     or `make_env_group` for custom logic, such as using a pool of envs instead of creating a new one.
 
-    The flow for one prompt group (the controller passes a `generate` callable bound to
-    one generator; each rollout drives its own `generate` calls, so a whole group's calls
-    coalesce into one continuous batch):
+    The flow for one prompt group: the controller passes a `generate_fn` callable; each rollout
+    drives its own calls, so the generator runs a whole group's calls together in one continuous
+    batch.
 
         sample = rollouter.get_training_sample()        # one sample from the dataset
         group = await rollouter.run_group_rollouts(     # build envs, drive turns, score
@@ -161,14 +158,13 @@ class Rollouter(Configurable):
         """Roll out and score one prompt group.
 
         Builds `group_size` sibling envs from one sample and drives them concurrently;
-        each sibling drives its own `generate_fn` calls, so the generator coalesces a whole
-        group's calls into one continuous batch. Then `score_group` fills each reward.
+        each sibling drives its own `generate_fn` calls, so the generator runs a whole
+        group's calls together in one continuous batch. Then `score_group` fills each reward.
 
         For custom logic, users can override this method.
 
         Args:
-            generate_fn: Async callable bound to one generator (Monarch hidden); a rollout
-                awaits it once per turn.
+            generate_fn: Async callable that returns a Completion given a prompt.
             sample: Dataset sample shared by the group.
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
@@ -241,7 +237,7 @@ class Rollouter(Configurable):
         status = RolloutStatus.ERROR
         try:
             step = await env.init()
-            while not step.status.is_terminal() and len(turns) < _MAX_TURNS:
+            while not step.status.is_terminal():
 
                 # generator call
                 completion = await generate_fn(
