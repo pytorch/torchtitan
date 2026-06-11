@@ -41,10 +41,7 @@ from torchtitan.config.configs import (
 from torchtitan.config.override import apply_overrides, OverrideConfig
 from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
-from torchtitan.distributed.spmd_types import (
-    annotate_input_spmd_types,
-    set_spmd_backend,
-)
+from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
@@ -224,7 +221,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.parallel_dims = parallel_dims = self.init_distributed()
         # TODO(pianpwk): Transitional until the local-SPMD and full-DTensor
         # backends share one runtime mesh/type mechanism.
-        set_spmd_backend(config.parallelism.spmd_backend)
+        dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
 
         # Logging needs to happen after distributed initialized
         config.maybe_log()

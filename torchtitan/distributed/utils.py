@@ -25,12 +25,25 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import CommConfig, DebugConfig
-from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
+
+
+_spmd_backend = "default"
+
+
+def set_spmd_backend(spmd_backend: str) -> None:
+    """Set the active SPMD backend for distributed runtime helpers."""
+    global _spmd_backend
+    _spmd_backend = spmd_backend
+
+
+def get_spmd_backend() -> str:
+    """Return the active SPMD backend."""
+    return _spmd_backend
 
 
 def _dist_reduce(
@@ -340,13 +353,15 @@ def get_train_context(
             if parallel_dims is not None and parallel_dims.spmd_backend == "spmd_types":
                 if not parallel_dims._single_axis_meshes:
                     parallel_dims.build_mesh()
+                from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+
                 stack.enter_context(
                     set_current_spmd_mesh(
                         parallel_dims._global_meshes["spmd_dense_for_fwdbwd"]
                     )
                 )
             if spmd_typechecking:
-                stack.enter_context(spmd.typecheck(local=False))
+                stack.enter_context(spmd._checker.typecheck(local=False))
 
             yield
 
