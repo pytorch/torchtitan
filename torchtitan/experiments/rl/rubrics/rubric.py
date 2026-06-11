@@ -50,6 +50,36 @@ class RewardFn(Configurable, abc.ABC):
         """
 
 
+class RewardCompletionHash(RewardFn):
+    """Small deterministic reward for debug runs with random-init models.
+
+    This is intended for CI configs where task rewards may be all zero because
+    the model has not learned the response format. It should be assigned a low
+    rubric weight alongside the real task reward.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(RewardFn.Config):
+        modulus: int = 11
+        """Bucket count for the checksum reward. Must be greater than 1."""
+
+        def __post_init__(self) -> None:
+            if self.modulus <= 1:
+                raise ValueError(f"modulus must be greater than 1; got {self.modulus}")
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.modulus = config.modulus
+
+    async def __call__(self, rollout: Rollout, env_input: object) -> float:
+        completion_text = "\n".join(
+            (turn.completion_message or {}).get("content") or ""
+            for turn in rollout.turns
+        )
+        checksum = sum(completion_text.encode("utf-8", errors="ignore"))
+        return (checksum % self.modulus) / (self.modulus - 1)
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class RubricOutput:
     """One rollout's reward, as returned by a `Rubric`.
