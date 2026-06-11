@@ -119,6 +119,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
@@ -143,8 +144,7 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
         num_steps=10,
         num_groups_per_rollout_batch=5,
         num_validation_samples=20,
-        # TODO: add aot_eager compiling overall, today it doesn't work because
-        # we are missing mechanism to scoop Flex region to plug in inductor backend support
+        compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
         group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
@@ -175,6 +175,7 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
@@ -313,6 +314,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=8,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
@@ -328,7 +330,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_moe_debug_ep() -> RLTrainer.Config:
+def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
     """Debug MoE config with EP+TP on generator (8 GPUs: 4 gen + 4 train).
 
     Generator uses TP=4 for dense layers and EP=4 for MoE experts.
@@ -394,7 +396,7 @@ def rl_grpo_qwen3_moe_debug_ep() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_moe_debug_ep_batch_invariant() -> RLTrainer.Config:
+def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
     """Batch-invariant MoE EP config for bitwise parity testing (8 GPUs).
 
     Trainer: TP=4, EP=4 (4 GPUs). Generator: TP=4, EP=4 (4 GPUs).
@@ -405,7 +407,7 @@ def rl_grpo_qwen3_moe_debug_ep_batch_invariant() -> RLTrainer.Config:
             "debugmodel_moe", attn_backend="varlen", moe_comm_backend="standard"
         ),
         hf_assets_path="tests/assets/tokenizer",
-        num_steps=5,
+        num_steps=10,
         num_groups_per_rollout_batch=5,
         num_validation_samples=20,
         # MoE EP all-to-all path issues unpinned D2H copies that block
@@ -462,7 +464,7 @@ def rl_grpo_qwen3_moe_debug_ep_batch_invariant() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_30b_a3b() -> RLTrainer.Config:
+def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
     """GRPO training config for Qwen3-30B-A3B MoE (8 GPUs: 4 gen + 4 train).
 
     Generator uses TP=4 for dense layers and EP=4 for MoE experts.
@@ -473,7 +475,7 @@ def rl_grpo_qwen3_30b_a3b() -> RLTrainer.Config:
     group_size = 8
     return RLTrainer.Config(
         model_spec=model_registry("30B-A3B", attn_backend="varlen"),
-        hf_assets_path="/data/users/jianiw/model/Qwen3-30B-A3B",
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-30B-A3B",
         num_steps=10,
         num_groups_per_rollout_batch=5,
         num_validation_samples=20,
@@ -575,6 +577,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,

@@ -75,7 +75,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module rl",
-                    "--config rl_grpo_qwen3_moe_debug_ep",
+                    "--config rl_grpo_qwen3_moe_debug_varlen",
                     "--hf_assets_path tests/assets/tokenizer",
                     "--trainer.parallelism.tensor_parallel_degree 4",
                     "--trainer.parallelism.expert_parallel_degree 4",
@@ -123,7 +123,7 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module rl",
-                    "--config rl_grpo_qwen3_moe_debug_ep_batch_invariant",
+                    "--config rl_grpo_qwen3_moe_debug_varlen_batch_invariant",
                     "--hf_assets_path tests/assets/tokenizer",
                     "--group_size 2",
                     "--batcher.batch.seq_len 1024",
