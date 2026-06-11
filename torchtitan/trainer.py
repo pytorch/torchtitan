@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any, cast
 
+import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
 import tyro
@@ -40,7 +41,10 @@ from torchtitan.config.configs import (
 from torchtitan.config.override import apply_overrides, OverrideConfig
 from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
-
+from torchtitan.distributed.spmd_types import (
+    annotate_input_spmd_types,
+    set_spmd_backend,
+)
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
@@ -105,6 +109,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             if self.debug.batch_invariant:
                 raise ValueError(
                     "Batch-invariant mode is not supported in pre-training."
+                )
+            if (
+                self.parallelism.spmd_backend == "spmd_types"
+                and self.debug.spmd_typechecking
+                and self.parallelism.pipeline_parallel_degree > 1
+            ):
+                # TODO(sanketpurandare): Enable SPMD typechecking under PP.
+                raise ValueError(
+                    "SPMD typechecking is not supported with pipeline parallelism. "
+                    "Validate the same config without PP "
+                    "(--parallelism.pipeline_parallel_degree 1)."
                 )
 
             # Pretraining inputs are shaped by TrainingConfig.seq_len when
@@ -207,6 +222,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
+        # TODO(pianpwk): Transitional until the local-SPMD and full-DTensor
+        # backends share one runtime mesh/type mechanism.
+        set_spmd_backend(config.parallelism.spmd_backend)
 
         # Logging needs to happen after distributed initialized
         config.maybe_log()
@@ -479,7 +497,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         loss_parallel_enabled = (
             parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
         )
-        self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
+        self.train_context = dist_utils.get_train_context(
+            enable_loss_parallel=loss_parallel_enabled,
+            parallel_dims=parallel_dims,
+            spmd_typechecking=(
+                config.parallelism.spmd_backend == "spmd_types"
+                and config.debug.spmd_typechecking
+            ),
+        )
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -633,6 +658,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
+        elif self.config.parallelism.spmd_backend == "spmd_types":
+            inputs, labels, extra_kwargs = annotate_input_spmd_types(
+                self.parallel_dims,
+                inputs,
+                labels,
+                extra_kwargs,
+            )
 
         return inputs, labels, extra_kwargs
 
@@ -698,7 +730,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     pred = pred.to_local()
                 loss = self.loss_fn(pred, labels, global_valid_tokens)
                 del pred
-                loss.backward()
+                with spmd.no_typecheck():
+                    # this propagates types through BWD, causing unnecessary conflicts
+                    # between torch_function and internals (e.g. AC). FWD is sufficient.
+                    loss.backward()
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss

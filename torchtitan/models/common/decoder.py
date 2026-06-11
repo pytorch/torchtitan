@@ -22,8 +22,9 @@ from torchtitan.models.common.attention import (
     VarlenAttention,
 )
 from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.embedding import VocabParallelEmbedding
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.nn_modules import Embedding, Linear, RMSNorm
+from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 
@@ -66,7 +67,7 @@ class Decoder(BaseModel):
         dim: int
         vocab_size: int
         lm_head: Linear.Config
-        tok_embeddings: Embedding.Config
+        tok_embeddings: VocabParallelEmbedding.Config
         norm: RMSNorm.Config
         # TODO(fegin): revisit
         # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
