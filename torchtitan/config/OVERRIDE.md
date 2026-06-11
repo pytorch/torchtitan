@@ -353,45 +353,29 @@ converters, not overrides.
 ## Checkpoint Compatibility
 
 An override that changes a module's parameter layout changes its checkpoint
-FQNs. An override checkpoints whatever real parameters it defines, and is
-interoperable with another checkpoint only when the FQNs match. The fused
-example (`fused_swiglu.py`) defines one `w13` parameter, so it saves/loads
-`...feed_forward.w13` — **not** the stock `w1.weight` / `w3.weight`. A fused
-checkpoint round-trips with another fused run; it is *not* a drop-in for stock
-checkpoints (and vice-versa).
+FQNs. By default an override checkpoints whatever real parameters it defines, so
+a fused module that stores a single `w13` parameter would save/load
+`...feed_forward.w13` rather than the stock `w1.weight` / `w3.weight`.
 
-**Module-level `state_dict` hooks do NOT bridge this** — neither the low-level
-`_save_to_state_dict` / `_load_from_state_dict` nor the public `state_dict()` /
-`load_state_dict()`. It is tempting to present `w13` as `w1.weight` / `w3.weight`
-that way. It works under plain `nn.Module.load_state_dict`, but torchtitan
-checkpoints via DCP `get_model_state_dict` / `set_model_state_dict`, which read
-the keys from `state_dict()` and then run `_get_fqns()` on every key — resolving
-it back to a *real* module attribute via `getattr` (DCP needs the actual param
-object for DTensor/FSDP metadata and in-place load). A fabricated `w1` key has no
-backing attribute, so both paths raise `'FusedSwiGLU' object has no attribute
-'w1'` regardless of which method produced the key. The one escape `_get_fqns`
-offers, `_fqn_modifiers`, only renames/skips an intermediate attribute name; it
-cannot split one parameter into two keys. Do not use this approach.
+**Bridge layout differences with module-level `state_dict` hooks.** A replacement
+module can present its weights in the *stock* layout by registering two hooks:
 
-**The sanctioned mechanism is a model-level `BaseStateDictAdapter`** — the same
-hook used for HF conversion (`Llama3StateDictAdapter`). An adapter transforms the
-flat key→tensor dict *after* `get_model_state_dict`, so it can split `w13` into
-`w1.weight`/`w3.weight` (and recombine on load) without any attribute-resolution
-problem. The catch: the adapter is set on `ModelSpec` (per model), and the
-override mechanism does not expose a hook for an override to contribute one. So
-layout-changing overrides are self-consistent but not stock-compatible — until
-an override-contributed adapter hook exists (see [Future work](#future-work)),
-treat them as checkpoint-incompatible with stock, or pair them with a model whose
-`state_dict_adapter` performs the mapping.
+- `register_state_dict_post_hook` to split/rename its real parameters into the
+  stock FQNs on save, and
+- `register_load_state_dict_pre_hook` to recombine them before the default load,
+  so the real parameter is loaded with normal DTensor/`strict` handling.
 
-A candidate design (tracked in
-[#3569](https://github.com/pytorch/torchtitan/issues/3569)) is to add an optional
-`state_dict_translator` argument to `@override` that is plugged into the model's
-existing `from_hf` / `to_hf` conversion. The override would declare the
-fused↔canonical FQN mapping (e.g. `w13` ↔ `w1.weight`/`w3.weight`) alongside its
-factory, and the adapter would apply it on save/load — letting an override use
-its own internal FQNs while still reading/writing checkpoints in the canonical
-format.
+The fused example (`fused_swiglu.py`) does exactly this: it stores `w13` but
+checkpoints `w1.weight` / `w3.weight`, so its checkpoints are a drop-in for the
+stock `FeedForward` (and for the HF adapter, which targets the stock layout),
+while still accepting a native `w13` key for back-compat. This is the symmetric
+use of the same hook mechanism the activation-checkpoint wrapper uses to strip
+its `_checkpoint_wrapped_module` prefix. (Resolves
+[#3569](https://github.com/pytorch/torchtitan/issues/3569).)
+
+For mappings too complex for module hooks, a model-level `BaseStateDictAdapter`
+(the mechanism used for HF conversion, e.g. `Llama3StateDictAdapter`) remains an
+option; it transforms the flat key->tensor dict from `state_dict()`.
 
 ## Parallelism
 
@@ -497,19 +481,12 @@ or `__init__.py` — that is the point of the design.
 - **Config construction.** Use `derive(cfg, NewConfig, **deltas)` so factories
   don't silently drop fields added to the target later.
 - **Override-specific config.** Via a small custom module; no new config surface.
-- **Checkpoint.** Layout-changing overrides checkpoint their own parameters and
-  are not stock-interoperable; module-level `state_dict` hooks do not work (use a
-  model-level `BaseStateDictAdapter`).
+- **Checkpoint.** Layout-changing overrides can stay stock-interoperable by
+  bridging FQNs with `register_state_dict_post_hook` /
+  `register_load_state_dict_pre_hook` (see Checkpoint Compatibility).
 
 ## Future Work
 
-- **Override-contributed state-dict adapter**
-  ([#3569](https://github.com/pytorch/torchtitan/issues/3569)). A hook so a
-  layout-changing override can register an FQN translation (split/merge params)
-  that plugs into the model's `BaseStateDictAdapter` (`from_hf`/`to_hf`), making
-  it interoperable with stock checkpoints — e.g. an optional
-  `state_dict_translator` argument on `@override`. Until then, such overrides are
-  checkpoint-incompatible with stock.
 - **Predicate `fqns` selector.** A `(fqn, cfg) -> bool` selector to complement
   the glob strings, enabling field/type-based selection (e.g. skipping linears a
   converter already turned into `Float8Linear.Config`).
