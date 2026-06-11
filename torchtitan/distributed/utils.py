@@ -14,12 +14,12 @@ from collections.abc import Iterable
 from datetime import timedelta
 from typing import Protocol, TYPE_CHECKING
 
-import spmd_types as spmd
 import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
 import torch.distributed.tensor._random
 import torch.distributed.tensor.parallel
+from spmd_types.checker import typecheck as spmd_typecheck
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
@@ -361,7 +361,7 @@ def get_train_context(
                     )
                 )
             if spmd_typechecking:
-                stack.enter_context(spmd._checker.typecheck(local=False))
+                stack.enter_context(spmd_typecheck(local=False))
 
             yield
 
