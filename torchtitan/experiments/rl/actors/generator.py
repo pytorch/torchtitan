@@ -104,6 +104,37 @@ def _prepare_generation_request_metrics(
     ]
 
 
+def _force_torch_logprobs_for_batch_invariance() -> None:
+    """Make vLLM's v2 logprob path dispatch ``aten::_log_softmax``.
+
+    The v2 GPU sampler computes per-token logprobs with a fused Triton kernel
+    (``compute_token_logprobs`` -> ``_topk_log_softmax_kernel``) that inlines
+    ``log(softmax(logits))`` and never calls ``aten::_log_softmax``. The
+    batch-invariant overrides installed by ``set_batch_invariance`` therefore
+    never reach it, leaving a ~4e-7 logprob gap against the trainer's
+    ``-F.cross_entropy`` (which does dispatch ``aten::_log_softmax``).
+
+    Swapping the kernel for ``log_softmax`` + gather routes the generator and
+    the trainer through the same overridden op, so logprobs match bit-for-bit.
+    We patch the module attribute (not the re-export in ``v1/sample/sampler``)
+    because the active v2 path resolves ``compute_token_logprobs`` as a global
+    inside ``compute_topk_logprobs``.
+    """
+    import vllm.v1.worker.gpu.sample.logprob as vllm_logprob
+
+    def compute_token_logprobs(
+        logits: torch.Tensor, token_ids: torch.Tensor
+    ) -> torch.Tensor:
+        logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float32)
+        return logprobs.gather(-1, token_ids.to(torch.int64))
+
+    vllm_logprob.compute_token_logprobs = compute_token_logprobs
+    logger.info(
+        "Patched vLLM compute_token_logprobs with log_softmax+gather so the "
+        "batch-invariant aten::_log_softmax override applies to generator logprobs"
+    )
+
+
 @dataclass(kw_only=True, slots=True)
 class VLLMCudagraphConfig:
     """CUDA graph capture settings for the vLLM inference engine.
@@ -363,6 +394,10 @@ class VLLMGenerator(Actor, Configurable):
 
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
         set_batch_invariance(config.debug.batch_invariant)
+        if config.debug.batch_invariant:
+            # The v2 logprob Triton kernel bypasses the aten overrides above;
+            # route it through aten::_log_softmax to match the trainer exactly.
+            _force_torch_logprobs_for_batch_invariance()
 
         self._set_determinism(config.debug)
 
