@@ -9,39 +9,25 @@ from __future__ import annotations
 from collections import defaultdict
 
 from torchtitan.experiments.rl.observability import metrics as m
-from torchtitan.experiments.rl.rollout.types import Rollout, RolloutTurn
+from torchtitan.experiments.rl.rollout.types import Rollout
 from torchtitan.experiments.rl.types import Episode
 
 
-def completion_text(turn: RolloutTurn) -> str:
-    """The turn's completion message text, or `""`."""
-    msg = turn.completion_message
-    return (msg.get("content") or "") if msg else ""
-
-
-def last_completion_text(rollout: Rollout) -> str:
-    """The completion text of the rollout's last turn, or `""`."""
-    return completion_text(rollout.turns[-1]) if rollout.turns else ""
-
-
 def rollout_to_episodes(rollout: Rollout) -> list[Episode]:
-    """Pack a scored `Rollout` into training episodes.
+    """Transforms a `Rollout` into training episodes.
 
-    A rollout's turns share a GROWING PREFIX: the env builds turn n's prompt with
-    `renderer.bridge_to_next_turn`, whose contract guarantees
-    `turn[n].prompt == turn[n-1].prompt + turn[n-1].completion + env_reply`. So the whole
-    trajectory packs into ONE episode — the turn-0 prompt, then each turn's completion (trained)
-    interleaved with the env replies (not trained). We open a NEW episode only where that prefix
-    breaks (an env edited/compacted history, or a re-render that re-tokenized the prefix
-    differently); every episode shares the rollout's advantage.
+    NOTE: Each rollout may become more than one `Episode`. If `prompt_token_ids` at turn N is not a
+    prefix of turn N+1, indicating history branching, we branch it into two different episodes:
+    one up to turn N, and another one from N+1 history forward. Prefix check is possible because
+    every RolloutTurn.prompt_token_ids carries all history up to that turn.
 
-    Example (3 turns, prefix holds -> 1 episode):
-
-        turn0: prompt=[P]             completion=[a0]   #  P  -> mask 0,  a0 -> mask 1
-        turn1: prompt=[P,a0,E1]       completion=[a1]   #  E1 -> mask 0,  a1 -> mask 1
-        turn2: prompt=[P,a0,E1,a1,E2] completion=[a2]   #  E2 -> mask 0,  a2 -> mask 1
-        # -> [Episode(token_ids=[P,a0,E1,a1,E2,a2], loss_mask=[0,1,0,1,0,1],
-        #                    logprobs=[0,l0,0,l1,0,l2], advantage=...)]
+    Example (3 turns):
+        P = prompt; C = completion; E = env reply
+        turn0: prompt=[P]             completion=[C1]   #  P  -> mask 0,  C1 -> mask 1
+        turn1: prompt=[P,C1,E1]       completion=[C2]   #  E1 -> mask 0,  C2 -> mask 1
+        turn2: prompt=[P,C1,E1,C2,E2] completion=[D3]   #  E2 -> mask 0,  C3 -> mask 1
+        # -> [Episode(token_ids=[P,C1,E1,C2,E2,C3], loss_mask=[0,1,0,1,0,1],
+        #                    logprobs=[0,l1,0,l2,0,l3], advantage=...)]
     """
     rollout_advantage = rollout.advantage if rollout.advantage is not None else 0.0
     episodes: list[Episode] = []
@@ -61,8 +47,7 @@ def rollout_to_episodes(rollout: Rollout) -> list[Episode]:
         if not episodes or not extends_prev:
             episodes.append(
                 Episode(
-                    # TODO(async): carry per-token version_intervals across the pack so a
-                    #   completion that straddles a weight swap is graded against the right version.
+                    # TODO(async): carry per-token version_intervals in episode
                     policy_version=rollout_turn.policy_version,
                     sample_id=(
                         rollout.sample_id

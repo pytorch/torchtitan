@@ -32,7 +32,6 @@ from torchtitan.experiments.rl.batcher import Batcher
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout import (
-    last_completion_text,
     prepare_rollout_metrics,
     rollout_to_episodes,
     RolloutGroup,
@@ -97,6 +96,10 @@ class GRPOLoss(Configurable):
         """
         # Per-token importance sampling ratio: π_θ / π_old
         log_ratio = policy_logprobs - generator_logprobs
+
+        # TODO: debug why we get nan when cudagraph is true
+        log_ratio = torch.nan_to_num(log_ratio)
+        log_ratio = torch.clamp(log_ratio, -20.0, 20.0)
         ratio = torch.exp(log_ratio)
 
         clipped_ratio = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
@@ -115,29 +118,14 @@ class GRPOLoss(Configurable):
                     (torch.abs(ratio - clipped_ratio) > 1e-6).float() * loss_mask
                 ).sum()
                 / loss_denominator,
+                # Fraction of response tokens whose generator (vLLM) logprob is nan
+                "loss/generator_logprob_nan_frac": (
+                    (~torch.isfinite(generator_logprobs)).float() * loss_mask
+                ).sum()
+                / loss_denominator,
             }
 
         return loss, metrics
-
-
-def _log_samples(rollout_groups: list[RolloutGroup]) -> None:
-    """Log the first scored, trainable rollout per group for debugging."""
-    for group in rollout_groups:
-        rollout = next(
-            (
-                r
-                for r in group.rollouts
-                if r.reward is not None and r.turns and r.turns[0].completion_token_ids
-            ),
-            None,
-        )
-        if rollout is None:
-            continue
-        logger.info("  [%s] reward=%+.1f", group.group_id, rollout.reward)
-        logger.info(
-            "       A: %s",
-            last_completion_text(rollout)[:300].replace("\n", " ").strip(),
-        )
 
 
 class RLTrainer(Configurable):
@@ -192,9 +180,6 @@ class RLTrainer(Configurable):
 
         renderer: RendererConfig
         """Message-to-token renderer config."""
-
-        log_samples: bool = False
-        """Log first completion per rollout during training and validation."""
 
         rollout_recorder: RolloutSampleRecorder.Config = field(
             default_factory=RolloutSampleRecorder.Config
@@ -437,11 +422,15 @@ class RLTrainer(Configurable):
         Returns:
             Scored rollout groups plus rollout/generator metrics.
         """
+        # Validation ids and metrics prefix
         generation_metrics_prefix = (
             "validation_generator" if is_validation else "generator"
         )
         rollout_metrics_prefix = "validation" if is_validation else "rollout"
 
+        group_id_prefix = "val/" if is_validation else ""
+
+        # Pass a callable to the rollouter, so it is agnostic to the generator machinery
         async def generate_fn(prompt_token_ids, *, request_id, sampling_config=None):
             result = await self.generator.generate.call(
                 prompt_token_ids,
@@ -450,10 +439,6 @@ class RLTrainer(Configurable):
                 metrics_prefix=generation_metrics_prefix,
             )
             return self._get_rank_0_value(result)
-
-        # Validation ids live in their own namespace so they never collide with a train
-        # request still in flight in the long-lived continuous-batching engine.
-        group_prefix = "val/" if is_validation else ""
 
         # Draw one dataset sample per group, then run every group's rollouts concurrently.
         # TODO: "sample" is too confusing. e.g. is this a training sample?
@@ -471,7 +456,7 @@ class RLTrainer(Configurable):
                 self._rollouter.run_group_rollouts(
                     generate_fn=generate_fn,
                     sample=sample,
-                    group_id=f"{group_prefix}step={step}/group={group_offset + i}",
+                    group_id=f"{group_id_prefix}step={step}/group={group_offset + i}",
                     group_size=group_size,
                     sampling=sampling,
                     renderer=self.renderer,
@@ -488,7 +473,7 @@ class RLTrainer(Configurable):
             if isinstance(result, BaseException):
                 logger.error(
                     "group %sstep=%d/group=%d failed; dropping",
-                    group_prefix,
+                    group_id_prefix,
                     step,
                     group_offset + i,
                     exc_info=result,
@@ -500,7 +485,7 @@ class RLTrainer(Configurable):
         # Metrics ride with the rollout: flatten each turn's per-generation metrics, add failures.
         # TODO: it is confusing what metrics belong in the rollout turn and what metrics
         # should be calculated here in the controller. It seems that we should move
-        # all metrics calculation to the rollout loop, so there is no confusion or metric duplication
+        # all metrics calculation to the rollout loop, including advantage calculation.
         # TODO: we may also have some metrics at the Rollout level, i.e. not turn specific.
         # TODO: we also need a "logs" field, so that if there were errors/warnings
         # they can be made available for the rollout_logger
@@ -528,7 +513,7 @@ class RLTrainer(Configurable):
     def _build_episodes(
         rollout_groups: list[RolloutGroup],
     ) -> tuple[list[Episode], list[m.Metric]]:
-        """Build train episodes and GRPO advantages from scored rollout groups.
+        """Build training episodes and GRPO advantages from scored rollout groups.
 
         Centers each group's rewards by its mean, skips rollouts without
         training tokens, and emits reward/advantage metrics.
@@ -542,24 +527,24 @@ class RLTrainer(Configurable):
         # Mean-baseline advantage per group
         episodes: list[Episode] = []
         group_stds: list[float] = []
-        # Episodes a rollout packs into: 1 when the trajectory shares one prefix,
-        # >1 when the env edited history mid-rollout and `rollout_to_episodes` branched.
+
+        # Iteratate over `Rollouts` and produce one or more `Episode`. More than one `Episode`
+        # be available if history of turn N is not a prefix of turn N+1, indicating history branching.
         branches_per_rollout: list[float] = []
         advantages_per_rollout: list[float] = []
         for group in rollout_groups:
-            # Drop the whole group if any sibling has no trainable tokens; we need at
-            # least one turn with assistant tokens per rollout to build an episode (and
-            # the group must stay intact for mean-baseline advantage centering).
-            if any(
+            # Drop the whole group if no sibling has trainable tokens
+            if all(
                 not any(turn.completion_token_ids for turn in rollout.turns)
                 for rollout in group.rollouts
             ):
                 logger.warning(
-                    "group %s has an untrainable rollout; dropping the group",
+                    "group %s has no trainable rollout; dropping the group",
                     group.group_id,
                 )
                 continue
 
+            # TODO: move advantage calculation to Rollouter
             rewards = [rollout.reward for rollout in group.rollouts]
             group_mean = sum(rewards) / len(rewards)
             group_stds.append(statistics.pstdev(rewards))
@@ -573,13 +558,13 @@ class RLTrainer(Configurable):
                 advantages_per_rollout.append(rollout.advantage)
 
         num_groups = len(rollout_groups)
+
+        # TODO: drop groups with zero std
         zero_std_frac = (
             sum(1 for s in group_stds if s == 0.0) / num_groups if num_groups else 0.0
         )
-        # All reward keys ride `rollout_reward` (mean/max/etc. from `prepare_rollout_metrics`);
-        # here we add the GRPO-specific ones — advantage, per-group reward std, zero-std fraction.
-        # TODO: we need a better consolidation on where rollout metrics should be computed
-        # as of now, it is scattered between rollouter, generator, controller.
+
+        # TODO: better consolidate where rollout metrics are computed
         episode_metrics: list[m.Metric] = [
             m.Metric("advantage", m.SummaryStats.from_list(advantages_per_rollout)),
             m.Metric("rollout_reward/group_std", m.Mean.from_list(group_stds)),
@@ -593,8 +578,6 @@ class RLTrainer(Configurable):
             ),
         ]
 
-        # Per-rollout policy versions. We log max/min in case episodes come
-        # from multiple rollout versions.
         policy_versions = [episode.policy_version for episode in episodes]
         if policy_versions:
             episode_metrics.extend(
@@ -638,8 +621,6 @@ class RLTrainer(Configurable):
         )
         rollouts = [rollout for group in rollout_groups for rollout in group.rollouts]
 
-        if self.config.log_samples:
-            _log_samples(rollout_groups)
         self.rollout_recorder.record(
             step=step, is_validation=True, rollout_groups=rollout_groups
         )
@@ -657,8 +638,7 @@ class RLTrainer(Configurable):
         num_groups = self.config.num_groups_per_rollout_batch
         logger.info(f"Pre-training validation; then {num_steps} steps of RL training")
 
-        # collect validation metrics before training
-        # so we can compare before/after
+        # collect validation metrics before training to compare before/after
         pre_validation_metrics = await self.validate(step=0)
         self.metrics_processor.log(
             step=0,
@@ -673,6 +653,7 @@ class RLTrainer(Configurable):
 
         for step in range(1, num_steps + 1):
             sl.set_step(step)
+
             # Propagate the step counter to actors for structured logging.
             self.trainer.sync_log_step.call(step)
             self.generator.sync_log_step.call(step)
@@ -688,10 +669,9 @@ class RLTrainer(Configurable):
             rollout_metrics: list[m.Metric] = []
             collected_tokens = 0
             group_offset = 0
+
             # num_tokens_target (= global_batch_size * seq_len) is the stop
             # condition for collected tokens before a train step can proceed.
-            # NOTE: this is a proxy — packing adds padding to fill fixed-length
-            # rows, so actual token consumption may exceed collected_tokens.
             num_tokens_target = self.batcher.num_tokens_target(self.trainer_dp_degree)
             while collected_tokens < num_tokens_target:
                 new_rollout_groups, new_metrics = await self._collect_rollouts(
@@ -704,10 +684,10 @@ class RLTrainer(Configurable):
                 )
                 rollout_groups.extend(new_rollout_groups)
                 rollout_metrics.extend(new_metrics)
-                # Count the packed training tokens per rollout. A multi-turn rollout's turns
-                # share a growing prefix (turn n's prompt holds all prior turns), so summing
-                # per-turn would multiply-count that prefix; the packed episode is the full
-                # conversation = the last turn's prompt + completion.
+
+                # Count the packed training tokens per rollout. Each turn carries
+                # the full context + new completion, so we only need to count the last.
+                # TODO: do it based on Episodes, not rollout, since 1 rollout -> N episodes.
                 collected_tokens += sum(
                     len(rollout.turns[-1].prompt_token_ids)
                     + len(rollout.turns[-1].completion_token_ids)
@@ -721,8 +701,9 @@ class RLTrainer(Configurable):
             episodes, episode_metrics = self._build_episodes(rollout_groups)
             t_rollout_s = time.perf_counter() - t_rollout_start
 
-            if self.config.log_samples:
-                _log_samples(rollout_groups)
+            # record rollout to jsonl
+            # TODO: also record the env input (e.g. AlphabetSortSample) so the dump carries the
+            # targets/expected answer — today there's no ground truth to judge correctness against.
             self.rollout_recorder.record(
                 step=step, is_validation=False, rollout_groups=rollout_groups
             )
@@ -740,6 +721,7 @@ class RLTrainer(Configurable):
             # "/mean" and "/frac" metrics are pre-normalized by
             # num_global_valid_tokens, so summing reconstructs the global
             # value.  "/max" metrics take the max across microbatches.
+            # TODO: make metrics processing a utility or resolve this in the trainer actor.
             fwd_bwd_metrics: dict[str, float] = {}
             for microbatch in microbatches:
                 with sl.log_trace_span("trainer_forward_backward_call"):
@@ -753,7 +735,7 @@ class RLTrainer(Configurable):
                             fwd_bwd_metrics[k] = v
                         elif k.endswith("/max"):
                             fwd_bwd_metrics[k] = max(fwd_bwd_metrics[k], v)
-                        elif k.endswith(("/mean", "/frac")):
+                        elif k.endswith(("/mean", "/frac", "_mean", "_frac")):
                             fwd_bwd_metrics[k] += v
             with sl.log_trace_span("trainer_optim_step_call"):
                 optim_output = self._get_rank_0_value(
@@ -766,20 +748,18 @@ class RLTrainer(Configurable):
             # --- weight sync ---
             # TODO: we should have `push_model_state_dict` return `trainer_policy_version`
             # instead of having `trainer.optim_step` return it
+
+            # trainer push
             t_push_start = time.perf_counter()
             with sl.log_trace_span("trainer_push_model_state_dict"):
                 await self.trainer.push_model_state_dict.call()
             t_weight_sync_push_s = time.perf_counter() - t_push_start
+
+            # generator pull
             with sl.log_trace_span("generator_pull_model_state_dict"):
-                # The synchronous loop awaited all generates before this step, so the engine is
-                # idle and a direct pull needs no hold.
                 await self.generator.pull_model_state_dict.call(trainer_policy_version)
             t_weight_sync_total_s = time.perf_counter() - t_push_start
             t_step_s = time.perf_counter() - t_step_start
-            # --- divergence check before any logging ---
-            if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
-                logger.error("Loss is NaN/Inf; training diverged")
-                break
 
             # --- Prepare metrics ---
             total_tokens = sum(len(episode.token_ids) for episode in episodes)
@@ -821,6 +801,11 @@ class RLTrainer(Configurable):
             self.metrics_processor.log(
                 step=step, metrics=step_metrics, is_validation=False
             )
+
+            # break if diverged
+            if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
+                logger.error("Loss is NaN/Inf; training diverged")
+                break
 
         post_validation_metrics = await self.validate(step=num_steps)
         self.metrics_processor.log(
