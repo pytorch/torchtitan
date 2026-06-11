@@ -521,8 +521,8 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
         lr = scheduler.schedulers[0].optimizer.param_groups[0]["lr"]
         self.assertAlmostEqual(lr, 1e-3, places=6)
 
-    def test_get_metrics_labels_lr_by_pattern(self):
-        """get_metrics labels each lr by its param-group regex pattern."""
+    def test_get_metrics_reports_lr_per_group(self):
+        """get_metrics reports a learning rate per optimizer param group."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
             implementation="for-loop",
@@ -542,9 +542,8 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
         lr_config = LRSchedulersContainer.Config(warmup_steps=10, decay_type="linear")
         scheduler, _ = self._build_scheduler(config, lr_config, model)
         metrics = scheduler.get_metrics()
-        # Both patterns appear as labels; no reference to a missing 'pattern' key.
-        self.assertIn(r"lr/AdamW_output\.", metrics)
-        self.assertIn("lr/AdamW_.*", metrics)
+        # One AdamW optimizer with two param groups -> indexed lr keys.
+        self.assertEqual(set(metrics), {"lr/AdamW/0", "lr/AdamW/1"})
 
     def test_mixed_optimizer_gets_separate_schedulers(self):
         """Mixed optimizers should each get their own scheduler."""

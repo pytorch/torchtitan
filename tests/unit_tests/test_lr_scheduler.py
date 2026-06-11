@@ -29,8 +29,6 @@ class TestLRScheduler(unittest.TestCase):
         self.optimizer_container = MagicMock(spec=OptimizersContainer)
         self.optimizer_container.__iter__.return_value = iter([self.optimizer])
         self.optimizer_container.__len__.return_value = 1
-        # LRSchedulersContainer reads per-optimizer patterns for lr metric labels.
-        self.optimizer_container._param_group_patterns = [[".*"]]
 
     def create_trainer_config(
         self,

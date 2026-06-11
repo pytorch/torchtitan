@@ -119,11 +119,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
     optimizers: list[T]
     model_parts: list[nn.Module]
-    # Regex patterns per optimizer (aligned with ``optimizers``); each entry is
-    # the list of patterns for that optimizer's param groups. Kept here, off the
-    # optimizer param groups, so they feed logging and lr metrics without leaking
-    # into the saved optimizer state dict.
-    _param_group_patterns: list[list[str]]
 
     @staticmethod
     def _resolve_optimizer_cls(name: str) -> type:
@@ -207,10 +202,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         all_params = []
         self.optimizers = []
         self.model_parts = model_parts
-        self._param_group_patterns = []
-
-        # Model-part index per optimizer, only for the log summary.
-        model_part_per_optimizer: list[int] = []
 
         for part_idx, model in enumerate(self.model_parts):
             groups_by_opt_name, patterns_by_opt_name = self._build_param_groups(
@@ -219,8 +210,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             for opt_name, opt_param_groups in groups_by_opt_name.items():
                 optimizer = self._resolve_optimizer_cls(opt_name)(opt_param_groups)
                 self.optimizers.append(optimizer)
-                self._param_group_patterns.append(patterns_by_opt_name[opt_name])
-                model_part_per_optimizer.append(part_idx)
+                self._log_optimizer(optimizer, part_idx, patterns_by_opt_name[opt_name])
                 for group in opt_param_groups:
                     all_params.extend(group["params"])
 
@@ -229,10 +219,11 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         if config.implementation == "fused_opt_states_bf16":
             self._register_bf16_optimizer_state_hook()
         self._post_init(all_params)
-        self._log_summary(model_part_per_optimizer)
 
-    def _log_summary(self, model_part_per_optimizer: list[int]) -> None:
-        """Log a summary of optimizer assignments."""
+    def _log_optimizer(
+        self, optimizer: Optimizer, part_idx: int, patterns: list[str]
+    ) -> None:
+        """Log one optimizer's param-group assignments (patterns are logging-only)."""
         _KEY_KWARGS = {
             "lr",
             "weight_decay",
@@ -243,17 +234,14 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             "fused",
             "foreach",
         }
-        for optimizer, part_idx, patterns in zip(
-            self.optimizers, model_part_per_optimizer, self._param_group_patterns
-        ):
-            opt_name = type(optimizer).__name__
-            for group, pattern in zip(optimizer.param_groups, patterns):
-                num_params = len(group["params"])
-                kwargs = {k: v for k, v in group.items() if k in _KEY_KWARGS}
-                logger.info(
-                    f"Optimizer {opt_name} (model_part={part_idx}): "
-                    f"{num_params} params [{pattern}] {kwargs}"
-                )
+        opt_name = type(optimizer).__name__
+        for group, pattern in zip(optimizer.param_groups, patterns):
+            num_params = len(group["params"])
+            kwargs = {k: v for k, v in group.items() if k in _KEY_KWARGS}
+            logger.info(
+                f"Optimizer {opt_name} (model_part={part_idx}): "
+                f"{num_params} params [{pattern}] {kwargs}"
+            )
 
     def _validate_params(self, all_params: list[nn.Parameter]) -> None:
         """Verify every trainable param is assigned to exactly one optimizer."""

@@ -201,10 +201,6 @@ class LRSchedulersContainer(Stateful, Configurable):
         ), "Must have at least one optimizer to create LRScheduler"
 
         self.schedulers = [LambdaLR(optimizer, lr_lambda) for optimizer in optimizers]
-        # Per-optimizer regex patterns (aligned with self.schedulers), used as lr
-        # metric labels. Sourced from the container so patterns stay off the
-        # optimizer param groups and out of the saved state dict.
-        self._param_group_patterns = optimizers._param_group_patterns
 
     def __iter__(self) -> Iterator[LRScheduler]:
         return iter(self.schedulers)
@@ -213,12 +209,14 @@ class LRSchedulersContainer(Stateful, Configurable):
         return len(self.schedulers)
 
     def get_metrics(self) -> dict[str, float]:
-        """Return per-param-group learning rates keyed for logging."""
+        """Return learning rates keyed by optimizer (and param-group index)."""
         metrics = {}
-        for scheduler, patterns in zip(self.schedulers, self._param_group_patterns):
+        for scheduler in self.schedulers:
             opt_name = type(scheduler.optimizer).__name__
-            for pattern, lr_val in zip(patterns, scheduler.get_last_lr()):
-                metrics[f"lr/{opt_name}_{pattern}"] = float(lr_val)
+            last_lrs = scheduler.get_last_lr()
+            for i, lr_val in enumerate(last_lrs):
+                key = f"lr/{opt_name}" if len(last_lrs) == 1 else f"lr/{opt_name}/{i}"
+                metrics[key] = float(lr_val)
         return metrics
 
     def step(self) -> None:

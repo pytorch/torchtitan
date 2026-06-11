@@ -4,13 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Minimal state-dict helpers for distributed checkpointing.
+"""State-dict helpers for distributed checkpointing.
 
-These utilities are a focused replacement for the parts of
-``torch.distributed.checkpoint.state_dict`` that TorchTitan actually needs.
-The upstream APIs (``get_model_state_dict``, ``set_optimizer_state_dict``, ...)
-carry a lot of complexity from legacy FSDP1/DDP support and many features
-that do not apply to TorchTitan.
+These utilities operate directly on ``nn.Module`` and ``torch.optim.Optimizer``
+state dicts; they are model-agnostic and optimizer-agnostic.
 
 The helpers are:
 
@@ -63,9 +60,6 @@ def init_optim_state(optim: torch.optim.Optimizer) -> None:
 
     No-op if state already exists or any gradient is set, so it is safe to call
     repeatedly and never disturbs an in-progress training step.
-
-    Adapted from ``torch.distributed.checkpoint.state_dict._init_optim_state`` to
-    drop the dependency on that private API.
     """
     if optim.state:
         return
