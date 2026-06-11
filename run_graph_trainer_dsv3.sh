@@ -99,11 +99,14 @@ tlp ()
 # logged automatically.
 {
 
-# --- DeepSeek-v3 16B MinimalAsyncEP + full cudagraph (FSDP+EP, sync-free MoE) ---
-# TORCHINDUCTOR_COMPILE_THREADS caps Inductor compile-worker parallelism:
-# MinimalAsyncEP's kernels compile cold, and the default worker pool (this host
-# has 368 cores) spikes host RAM enough to OOM-kill regional_inductor without it.
-NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b_minimal_async_ep TORCHINDUCTOR_COMPILE_THREADS=8 tlp ./run_train.sh \
+# --- DeepSeek-v3 16B (regular EP, non-MinimalAsyncEP) ---
+# Benchmarks the eager-comparable graph_trainer path with the lm_head chunked-loss
+# coalescing fix (PR #3636), which makes this path bitwise-identical to the eager
+# Trainer. cudagraph is disabled: regular EP's _grouped_mm / all-to-all are not
+# cudagraphable on H100 (sm_90), and the bitwise verification ran cudagraph-off.
+# TORCHINDUCTOR_COMPILE_THREADS caps Inductor compile-worker parallelism so the
+# cold MoE-kernel compile doesn't spike host RAM and OOM-kill regional_inductor.
+NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b TORCHINDUCTOR_COMPILE_THREADS=8 tlp ./run_train.sh \
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=8 \
     --parallelism.tensor_parallel_degree=1 \
@@ -112,6 +115,7 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b_min
     --training.local_batch_size 16 \
     --dataloader.dataset c4_test \
     --compile.debug_graph_passes \
+    --compile.disable_passes cudagraph_pass \
     --profiler.enable_profiling \
     --profiler.profile_freq 10 \
     --profiler.enable_memory_snapshot \
