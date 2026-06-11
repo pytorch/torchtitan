@@ -13,7 +13,7 @@ import torch.nn as nn
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import (
     CosSinRoPE,
-    Embedding,
+    VocabParallelEmbedding,
     Linear,
     RMSNorm,
     RoPE,
@@ -233,7 +233,7 @@ def _debugmodel(
     return GptOssModel.Config(
         vocab_size=2048,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=2048, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
@@ -274,7 +274,7 @@ def _20b(
     return GptOssModel.Config(
         dim=dim,
         vocab_size=201088,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=201088, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
@@ -315,7 +315,7 @@ def _120b(
     return GptOssModel.Config(
         dim=dim,
         vocab_size=201088,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=201088, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
