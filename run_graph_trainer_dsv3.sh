@@ -99,19 +99,28 @@ tlp ()
 # logged automatically.
 {
 
-# Run mode: graph = graph_trainer (the fix); eager = eager Trainer baseline.
-# Both use the SAME model / parallelism / batch / recompute so the graph run
-# (Run 7) and the eager run (Run 8) are directly comparable. Select with
-# `MODE=eager ./run_graph_trainer_dsv3.sh` (default: graph).
+# Run selectors:
+#   MODE = graph (graph_trainer, the fix) | eager (eager Trainer baseline)
+#   EP   = regular (all-to-all + _grouped_mm) | minimal (MinimalAsyncEP, sync-free)
+# Same model / parallelism / batch / recompute across all four, so graph-vs-eager
+# and regular-vs-minimal are directly comparable:
+#   Run 7  MODE=graph EP=regular     Run 8  MODE=eager EP=regular
+#   Run 9  MODE=graph EP=minimal     Run 10 MODE=eager EP=minimal
+# graph+minimal enables cudagraph (MinimalAsyncEP is sync-free / cudagraphable);
+# graph+regular disables it (regular EP's _grouped_mm / all-to-all aren't
+# cudagraphable on H100). Eager never uses cudagraph.
+# TORCHINDUCTOR_COMPILE_THREADS caps Inductor compile workers so the cold MoE
+# kernel compile doesn't spike host RAM and OOM-kill regional_inductor.
 MODE="${MODE:-graph}"
+EP="${EP:-regular}"
+if [ "$EP" = "minimal" ]; then SUFFIX="_minimal_async_ep"; else SUFFIX=""; fi
 
 if [ "$MODE" = "eager" ]; then
 # --- DeepSeek-v3 16B EAGER baseline (FSDP2 + full activation checkpointing) ---
-# The eager Trainer reference that the graph_trainer path (Run 7) is bitwise-
-# matched to. There is no aot_fx_trace graph here, so there are no graph-pass
-# tlparse diffs -- tlparse captures only the loss torch.compile; the profiler
-# trace and CUDA memory snapshot are the meaningful artifacts.
-NGPU=8 MODULE=deepseek_v3 CONFIG=deepseek_v3_16b TORCHINDUCTOR_COMPILE_THREADS=8 tlp ./run_train.sh \
+# Eager Trainer reference. No aot_fx_trace graph -> no graph-pass tlparse diffs
+# (tlparse covers only the loss torch.compile); the profiler trace and CUDA
+# memory snapshot are the meaningful artifacts.
+NGPU=8 MODULE=deepseek_v3 CONFIG=deepseek_v3_16b${SUFFIX} TORCHINDUCTOR_COMPILE_THREADS=8 tlp ./run_train.sh \
     --parallelism.data_parallel_shard_degree=8 \
     --parallelism.tensor_parallel_degree=1 \
     --parallelism.expert_parallel_degree=4 \
@@ -125,14 +134,9 @@ NGPU=8 MODULE=deepseek_v3 CONFIG=deepseek_v3_16b TORCHINDUCTOR_COMPILE_THREADS=8
     --dump_folder "$PROFILE_DIR" \
     --debug.print-config
 else
-# --- DeepSeek-v3 16B (regular EP, non-MinimalAsyncEP) graph_trainer ---
-# Benchmarks the eager-comparable graph_trainer path with the lm_head chunked-loss
-# coalescing fix (PR #3636), which makes this path bitwise-identical to the eager
-# Trainer. cudagraph is disabled: regular EP's _grouped_mm / all-to-all are not
-# cudagraphable on H100 (sm_90), and the bitwise verification ran cudagraph-off.
-# TORCHINDUCTOR_COMPILE_THREADS caps Inductor compile-worker parallelism so the
-# cold MoE-kernel compile doesn't spike host RAM and OOM-kill regional_inductor.
-NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b TORCHINDUCTOR_COMPILE_THREADS=8 tlp ./run_train.sh \
+# --- DeepSeek-v3 16B graph_trainer (lm_head chunked-loss fix, PR #3636) ---
+if [ "$EP" = "minimal" ]; then CUDAGRAPH_FLAG=""; else CUDAGRAPH_FLAG="--compile.disable_passes cudagraph_pass"; fi
+NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b${SUFFIX} TORCHINDUCTOR_COMPILE_THREADS=8 tlp ./run_train.sh \
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=8 \
     --parallelism.tensor_parallel_degree=1 \
@@ -141,7 +145,7 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b TOR
     --training.local_batch_size 16 \
     --dataloader.dataset c4_test \
     --compile.debug_graph_passes \
-    --compile.disable_passes cudagraph_pass \
+    $CUDAGRAPH_FLAG \
     --profiler.enable_profiling \
     --profiler.profile_freq 10 \
     --profiler.enable_memory_snapshot \
