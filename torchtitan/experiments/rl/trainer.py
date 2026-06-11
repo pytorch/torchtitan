@@ -408,8 +408,8 @@ class RLTrainer(Configurable):
     ) -> tuple[list[RolloutGroup], list[m.Metric]]:
         """Sample examples, run each group's rollouts concurrently, emit metrics.
 
-        Hands each prompt to `Rollouter.run_group_rollouts` with a `GenerateFn` bound to the
-        generator, which returns a RollooutGroup.
+        Hands each prompt to `Rollouter.run_group_rollouts` with a `GenerateFn` that runs one
+        generation, and returns a `RolloutGroup`.
 
         Args:
             is_validation: Sample from the validation dataset (else train).
@@ -430,11 +430,14 @@ class RLTrainer(Configurable):
 
         group_id_prefix = "val/" if is_validation else ""
 
-        # Pass a callable to the rollouter, so it is agnostic to the generator machinery
-        async def generate_fn(prompt_token_ids, *, request_id, sampling_config=None):
+        # Pass a callable to the rollouter, so it stays decoupled from the generator actor
+        async def generate_fn(
+            prompt_token_ids, *, request_id, session_id=None, sampling_config=None
+        ):
             result = await self.generator.generate.call(
                 prompt_token_ids,
                 request_id=request_id,
+                session_id=session_id,
                 sampling_config=sampling_config,
                 metrics_prefix=generation_metrics_prefix,
             )

@@ -460,6 +460,7 @@ class VLLMGenerator(Actor, Configurable):
         prompt_token_ids: list[int],
         *,
         request_id: str,
+        session_id: str | None = None,
         sampling_config: SamplingConfig | None = None,
         metrics_prefix: str = "generator",
     ) -> Completion | None:
@@ -472,6 +473,7 @@ class VLLMGenerator(Actor, Configurable):
         Args:
             prompt_token_ids: One tokenized prompt `[token_ids]`.
             request_id: Unique id for this request, echoed on the `Completion`.
+            session_id: Stable per-rollout id for routing a rollout's turns to the same generator.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig.
             metrics_prefix: Namespace prepended to every metric key on the returned

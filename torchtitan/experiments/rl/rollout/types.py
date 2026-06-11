@@ -6,23 +6,51 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Protocol, TYPE_CHECKING
 
 from renderers import Message
 
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import Completion
 
+if TYPE_CHECKING:
+    # Type-only: importing the generator module here would pull in vLLM at import time.
+    from torchtitan.experiments.rl.actors.generator import SamplingConfig
+
 
 _TRUNCATED = frozenset({"truncated_length", "truncated_prompt_too_long"})
 _ERROR = frozenset({"error_parse", "error_timeout", "error_abort", "error"})
 
 
-# The Rollouter's seam to a generator: await one prompt -> one Completion (None on follower ranks).
-# The controller binds one (see RLTrainer._collect_rollouts).
-GenerateFn = Callable[..., Awaitable[Completion | None]]
+class GenerateFn(Protocol):
+    """Generate one model completion for a prompt.
+
+    The Rollouter calls this once per turn and gets back a `Completion`. It does not need to know
+    how or where generation runs. It can be a monarch actor, a router, an http endpoint, etc.
+    """
+
+    async def __call__(
+        self,
+        prompt_token_ids: list[int],
+        *,
+        request_id: str,
+        session_id: str | None = None,
+        sampling_config: SamplingConfig | None = None,
+    ) -> Completion | None:
+        """Run one generation.
+
+        Args:
+            prompt_token_ids: The tokenized prompt to generate from.
+            request_id: Unique per call; identifies the exact turn (e.g. ".../turn=2") in logs.
+            session_id: Same for every turn of one rollout, so a router can keep them on one
+                generator (which reuses the cached prompt). Does nothing with a single generator.
+            sampling_config: Optional per-call sampling overrides.
+
+        Returns:
+            The generated `Completion`, or `None` if none is produced.
+        """
 
 
 class RolloutStatus(StrEnum):
@@ -89,7 +117,6 @@ class RolloutTurn:
     env_rewards: dict[str, float] = field(default_factory=dict)
     """This turn optional reward signals the env attached; the rubric decides how to use them."""
 
-    # Observability
     metrics: list[m.Metric] = field(default_factory=list)
     """Per-turn metrics produced during rollouts"""
 

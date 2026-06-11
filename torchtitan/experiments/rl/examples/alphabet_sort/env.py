@@ -21,19 +21,14 @@ from torchtitan.experiments.rl.examples.alphabet_sort.data import AlphabetSortSa
 class AlphabetSortEnv(MessageEnv):
     """Runs one AlphabetSort sample as a chat: ask the model to sort a list of names, turn by turn.
 
-    Prompts are copied verbatim from PrimeIntellect's `verifiers` alphabet_sort environment (the
-    same task): `init` asks the model to sort the first batch into an `<alphabetical_sorted>` block;
-    each later `step` adds a batch and asks for the whole list re-sorted into a
-    `<combined_alphabetical_sorted>` block, with the names new that round tagged `// new name!`. Each
-    turn is self-contained (no upfront multi-round preamble); the first `step` shows the combined
-    format with an example, later ones just say "follow the same format". The format example ends
-    with a literal `...` so the model doesn't copy a fixed number of rows. When no batches are left,
-    `step` ends the rollout (so a single-turn sample ends at the first step).
+    `init` asks the model to sort the first batch of names. Each later `step` introduces a new
+    batch of names and asks the model to re-sort the whole list so far, marking the new ones. When
+    no batches are left, `step` ends the rollout (so a single-turn sample ends at the first step).
 
     Example (a 2-turn sample):
 
-        init:  Sort these names ...: MarcChardin, AnaChardin
-        step:  Now sort ALL ...: BobBeck   (re-sort all three, tag BobBeck `// new name!`)
+        init:  sort [MarcChardin, AnaChardin]
+        step:  add [BobBeck], then re-sort all three and mark BobBeck as new
         step:  no names left -> end the rollout
     """
 
@@ -45,7 +40,7 @@ class AlphabetSortEnv(MessageEnv):
         self._env_input = env_input
 
     async def init(self) -> MessageEnvInitOutput:
-        """Ask the model to sort the first batch of names (turn 0)."""
+        """Ask the model to sort the first batch of names."""
         # init asks for turn 0; step asks for turns 1, 2, ... in order
         self._next_turn = 1
         sort_type = "FIRST" if self._env_input.sort_by_first_name else "LAST"

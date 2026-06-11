@@ -34,10 +34,6 @@ logger = logging.getLogger(__name__)
 _MAX_TURNS = 100
 
 
-def _sample_id(group_id: str, sample_idx: int) -> str:
-    return f"{group_id}/sample={sample_idx}"
-
-
 class Rollouter(Configurable):
     """Turns a problem (train/val datasets, the `MessageEnv` to build per sample, and a
     `Rubric`) into scored rollouts — the RL training data.
@@ -145,7 +141,7 @@ class Rollouter(Configurable):
 
         Args:
             rollouts: Sibling rollouts in one prompt group, already stepped.
-            env_input: the env input shared by the group.
+            env_input: the env initial input shared by the group.
 
         Returns:
             One `RubricOutput` per rollout, in input order.
@@ -168,6 +164,8 @@ class Rollouter(Configurable):
         each sibling drives its own `generate_fn` calls, so the generator coalesces a whole
         group's calls into one continuous batch. Then `score_group` fills each reward.
 
+        For custom logic, users can override this method.
+
         Args:
             generate_fn: Async callable bound to one generator (Monarch hidden); a rollout
                 awaits it once per turn.
@@ -180,12 +178,13 @@ class Rollouter(Configurable):
         Returns:
             One scored `RolloutGroup`.
         """
+        # One prompt becomes [env] * group_size.
         envs = self.make_env_group(
             sample=sample, group_size=group_size, renderer=renderer
         )
-        # The group owns the envs' lifecycle: close them once all siblings finish (or one
-        # raises / the group is cancelled), so a single rollout never closes its own env.
+
         try:
+            # produce the rollouts
             rollouts = await asyncio.gather(
                 *(
                     self.run_single_rollout(
@@ -193,17 +192,23 @@ class Rollouter(Configurable):
                         env=env,
                         sampling=sampling,
                         group_id=group_id,
-                        sample_idx=sample_idx,
+                        rollout_id=f"{group_id}/sample={sample_idx}",
                     )
                     for sample_idx, env in enumerate(envs)
                 )
             )
         finally:
+            # close the envs
             await asyncio.gather(*(env.close() for env in envs), return_exceptions=True)
+
+        # score
         outputs = await self.score_group(rollouts, sample)
         for rollout, output in zip(rollouts, outputs, strict=True):
             rollout.reward = output.reward
             rollout.reward_breakdown = output.reward_breakdown
+
+        # TODO: move advantage calculation to here
+
         return RolloutGroup(group_id=group_id, rollouts=rollouts)
 
     async def run_single_rollout(
@@ -213,22 +218,21 @@ class Rollouter(Configurable):
         env: TokenEnv,
         sampling: SamplingConfig,
         group_id: str,
-        sample_idx: int,
+        rollout_id: str,
     ) -> Rollout:
-        """Drive one env to a terminal state via its own `generate_fn` calls.
+        """Produce a single rollout, alternating between env and generator calls,
+        until the env is terminal (env `done`, truncation, errors).
 
-        Loops `generate_fn -> env.step` until the env is terminal (env `done`, length /
-        parse / timeout, or prompt overflow). Single-turn envs end after one step; a
-        runaway env is cut off at `_MAX_TURNS`. On any error the rollout keeps the turns
-        gathered so far, marked ERROR; the controller scores it afterward via `score_group`.
+        For custom logic, users can override this method.
 
         Args:
-            generate_fn: Async callable bound to one generator (Monarch hidden).
+            generate_fn: Async callable that runs one generation; keeps the rollouter
+                decoupled from the generator actor.
             env: The env for this rollout; `run_group_rollouts` closes it.
             sampling: Sampling config for every generate call.
-            group_id: Group id, prefixed onto each turn's `request_id` so all of a group's
-                turns route to the same generator (prefix-cache reuse).
-            sample_idx: Sample index within the group (0..group_size-1).
+            group_id: The GRPO group id.
+            rollout_id: Stable id for this rollout, unique within the group. Passed as the sticky
+                `session_id` (so all turns pin to one generator) and stored as `Rollout.sample_id`
 
         Returns:
             One unscored `Rollout` (reward filled later by the controller).
@@ -238,47 +242,48 @@ class Rollouter(Configurable):
         try:
             step = await env.init()
             while not step.status.is_terminal() and len(turns) < _MAX_TURNS:
+
+                # generator call
                 completion = await generate_fn(
-                    step.next_prompt_token_ids,
-                    request_id=f"{group_id}/sample={sample_idx}/turn={len(turns)}",
+                    prompt_token_ids=step.next_prompt_token_ids,
+                    request_id=f"{rollout_id}/turn={len(turns)}",
+                    session_id=rollout_id,  # sticky
                     sampling_config=sampling,
                 )
+
+                # env call
                 next_step = await env.step(completion)
+
+                # full snapshot of this turn from a token and message perspective
                 turns.append(
                     RolloutTurn(
                         prompt_token_ids=step.next_prompt_token_ids or [],
                         prompt_messages=step.next_prompt_messages or [],
                         completion_token_ids=completion.token_ids,
                         completion_logprobs=completion.token_logprobs,
-                        policy_version=completion.policy_version,
                         completion_message=next_step.completion_message,
                         env_messages=next_step.env_messages,
                         env_rewards=next_step.env_rewards,
+                        policy_version=completion.policy_version,
                         metrics=completion.metrics,
                     )
                 )
+
+                # holds the input for next generation call
                 step = next_step
-            if step.status.is_terminal():
-                status = step.status
-            else:
-                logger.warning(
-                    "rollout %s/sample=%d hit _MAX_TURNS=%d; truncating",
-                    group_id,
-                    sample_idx,
-                    _MAX_TURNS,
-                )
-                status = RolloutStatus.TRUNCATED_LENGTH
+
+            status = step.status
         except Exception:
             logger.exception(
-                "rollout %s/sample=%d failed after %d turn(s); marking ERROR",
-                group_id,
-                sample_idx,
+                "rollout %s failed after %d turn(s); marking ERROR",
+                rollout_id,
                 len(turns),
             )
             status = RolloutStatus.ERROR
+
         return Rollout(
             group_id=group_id,
-            sample_id=_sample_id(group_id, sample_idx),
+            sample_id=rollout_id,
             status=status,
             turns=turns,
         )
