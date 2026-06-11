@@ -20,13 +20,13 @@ from typing import Any
 
 import torch
 import torch.fx as fx
-from torch._dynamo.graph_deduplication import _stable_topological_sort
 from torch._inductor.fx_passes.bucketing import (
     BucketMode,
     is_all_gather_into_tensor as is_all_gather,
     is_wait_tensor,
 )
 from torch._inductor.fx_passes.overlap_manual_scheduling import (
+    _move_overlap_nodes,
     manual_overlap_bucketing,
     ManualOverlapScheduler,
 )
@@ -231,7 +231,6 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
             if bwd_nodes:
                 self.bucketer.manual_bucket_collectives(nodes=bwd_nodes)
 
-        _stable_topological_sort(self.graph, {})
         self.graph.lint()
         self.nodes = list(self.graph.nodes)
         self.in_degree = Counter(user for node in self.nodes for user in node.users)
@@ -246,7 +245,7 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
         self._schedule_rs_prefetch(overlap_deps)
         self._schedule_ag_prefetch(overlap_deps)
 
-        _stable_topological_sort(self.graph, overlap_deps)
+        _move_overlap_nodes(self.graph, overlap_deps, self.bucketer.bucketed_node_types)
         self.graph.lint()
 
         if self.insert_overlap_deps:
