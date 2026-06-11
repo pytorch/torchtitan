@@ -11,7 +11,6 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from autoparallel.api import AutoParallel
-from autoparallel.input_validation import _compute_expected_inputs
 from autoparallel.module_construction import make_parallel_module
 from torch._functorch._aot_autograd.fx_utils import get_plain_input_and_grad_nodes
 from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
@@ -92,8 +91,6 @@ class AutoParallelGraph(AutoParallel):
         sharded_param_dict, sharded_buffer_dict = self._apply_placement_common(
             sharding_placement
         )
-        if sharding_placement is None:
-            sharding_placement = self.sharding_placement
         parallel_model_fn = aot_compile_joint_with_descriptors(
             self.joint_with_descriptors,
             fw_compiler=self.compiler_fn,
@@ -103,21 +100,18 @@ class AutoParallelGraph(AutoParallel):
         graph_param_fqns = list(self.joint_with_descriptors.params_spec)
         graph_buffer_fqns = list(self.joint_with_descriptors.buffers_spec)
 
-        input_nodes = get_plain_input_and_grad_nodes(self.gm.graph)
-        solved_input_placements = []
-        for desc in sorted(input_nodes, key=lambda input_desc: input_desc.idx):
-            node, _grad_node = input_nodes[desc]
-            strategy = sharding_placement[node]
-            solved_input_placements.append(tuple(strategy.output_specs.placements))
-        expected_inputs = _compute_expected_inputs(
-            self._traced_inputs,
-            solved_input_placements,
-            self.mesh,
-        )
+        # Number of plain (user) input placeholders the traced graph expects,
+        # used in forward to detect whether runtime inputs arrived as args alone
+        # or split across args + kwargs. This must match the count baked into the
+        # graph (boxed_args = params + buffers + flat_args), so it is read from
+        # the graph's input nodes rather than via autoparallel's private
+        # _compute_expected_inputs (which had an unstable signature across
+        # versions and was removed from autoparallel main).
+        num_expected_inputs = len(get_plain_input_and_grad_nodes(self.gm.graph))
 
         def forward(self, *args, **kwargs):
             flat_args, _ = torch.utils._pytree.tree_flatten(args)
-            if len(flat_args) != len(expected_inputs):
+            if len(flat_args) != num_expected_inputs:
                 flat_args, _ = torch.utils._pytree.tree_flatten((args, kwargs))
             params = [
                 _local_tensor_with_autograd(
