@@ -27,7 +27,6 @@ def set_llama3_sharding_config(
     *,
     loss_parallel: bool,
     enable_sp: bool,
-    spmd_backend: str = "default",
 ) -> None:
     """Fill ``sharding_config`` on all Llama3 sub-configs.
 
@@ -43,7 +42,6 @@ def set_llama3_sharding_config(
         config,
         loss_parallel=loss_parallel,
         enable_sp=enable_sp,
-        spmd_backend=spmd_backend,
     )
     for layer_cfg in config.layers:
         _set_llama3_layer_sharding(layer_cfg, enable_sp=enable_sp)

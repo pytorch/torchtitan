@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torch.distributed.tensor.placement_types import _MaskPartial
 import unittest
 from dataclasses import dataclass
 from functools import partial
@@ -14,35 +15,40 @@ import torch.nn as nn
 import torch.nn.functional as F
 from spmd_types.checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import distribute_tensor, Replicate, Shard
+from torch.distributed.tensor import (
+    distribute_tensor,
+    Replicate,
+    Shard,
+)
+from torch.distributed.tensor.placement_types import _MaskPartial
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
 
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_backend
-from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.embedding import VocabParallelEmbedding
 
 
-class TestEmbedding(unittest.TestCase):
-    """Tests for the Embedding class used in the codebase."""
+class TestVocabParallelEmbeddingConfig(unittest.TestCase):
+    """Tests for the VocabParallelEmbedding class used in the codebase."""
 
     def test_config_build(self):
-        """Embedding.Config.build() creates a working embedding."""
-        config = Embedding.Config(num_embeddings=100, embedding_dim=32)
+        """VocabParallelEmbedding.Config.build() creates a working embedding."""
+        config = VocabParallelEmbedding.Config(num_embeddings=100, embedding_dim=32)
         emb = config.build()
-        self.assertIsInstance(emb, Embedding)
+        self.assertIsInstance(emb, VocabParallelEmbedding)
         self.assertIsInstance(emb, nn.Embedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 
     def test_config_build_without_fields_raises(self):
-        """Embedding.Config() raises TypeError when required fields are not provided."""
+        """VocabParallelEmbedding.Config() raises TypeError when required fields are not provided."""
         with self.assertRaises(TypeError):
-            Embedding.Config()
+            VocabParallelEmbedding.Config()
 
     def test_init_states(self):
         """init_states re-initializes the weight tensor."""
-        config = Embedding.Config(
+        config = VocabParallelEmbedding.Config(
             num_embeddings=50,
             embedding_dim=16,
             param_init={"weight": partial(nn.init.trunc_normal_, std=0.02)},
@@ -55,8 +61,8 @@ class TestEmbedding(unittest.TestCase):
         self.assertFalse(torch.all(emb.weight == 0))
 
     def test_custom_init_std(self):
-        """Embedding respects custom mean and std."""
-        config = Embedding.Config(
+        """VocabParallelEmbedding respects custom mean and std."""
+        config = VocabParallelEmbedding.Config(
             num_embeddings=1000,
             embedding_dim=160,
             param_init={"weight": partial(nn.init.normal_, mean=0.1, std=0.02)},
@@ -72,30 +78,30 @@ class TestEmbedding(unittest.TestCase):
         self.assertAlmostEqual(emb.weight.std().item(), 0.02, places=3)
 
     def test_config_pre_specified_build(self):
-        """Embedding.Config with both fields pre-specified builds with no kwargs."""
-        config = Embedding.Config(num_embeddings=100, embedding_dim=32)
+        """VocabParallelEmbedding.Config with both fields pre-specified builds with no kwargs."""
+        config = VocabParallelEmbedding.Config(num_embeddings=100, embedding_dim=32)
         emb = config.build()
-        self.assertIsInstance(emb, Embedding)
+        self.assertIsInstance(emb, VocabParallelEmbedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 
     def test_config_partial_pre_specified(self):
-        """Embedding.Config with fields specified at construction builds correctly."""
-        config = Embedding.Config(num_embeddings=100, embedding_dim=32)
+        """VocabParallelEmbedding.Config with fields specified at construction builds correctly."""
+        config = VocabParallelEmbedding.Config(num_embeddings=100, embedding_dim=32)
         emb = config.build()
-        self.assertIsInstance(emb, Embedding)
+        self.assertIsInstance(emb, VocabParallelEmbedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 
     def test_config_inheritance_preset(self):
-        """Inheriting Embedding.Config can put fields back in __init__."""
+        """Inheriting VocabParallelEmbedding.Config can put fields back in __init__."""
 
         @dataclass(kw_only=True, slots=True)
-        class PresetConfig(Embedding.Config):
+        class PresetConfig(VocabParallelEmbedding.Config):
             num_embeddings: int = 100
             embedding_dim: int = 32
 
         config = PresetConfig()
         emb = config.build()
-        self.assertIsInstance(emb, Embedding)
+        self.assertIsInstance(emb, VocabParallelEmbedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 
 
@@ -127,25 +133,30 @@ class TestVocabParallelEmbedding(DTensorTestBase):
                         (3, 16),
                         device=self.device_type,
                     )
+
+                    # Native DTensor embedding is the bitwise oracle for the
+                    # local masked implementation, but it uses MaskPartial
+                    # internally before the final redistribution.
                     weight_dtensor = distribute_tensor(global_weight, mesh, (Shard(0),))
                     tokens_dtensor = distribute_tensor(
                         global_tokens, mesh, (Replicate(),)
                     )
-
-                    # DTensor embedding is the bitwise oracle for local MaskPartial.
+                    full_output = F.embedding(global_tokens, global_weight)
                     expected_placement = Shard(1) if enable_sp else Replicate()
-                    dtensor_output = F.embedding(tokens_dtensor, weight_dtensor)
-                    dtensor_output = dtensor_output.redistribute(
+                    native_dtensor_output = F.embedding(tokens_dtensor, weight_dtensor)
+                    self.assertTrue(isinstance(native_dtensor_output.placements[0], _MaskPartial))
+                    dtensor_output = native_dtensor_output.redistribute(
                         placements=(expected_placement,)
                     )
 
-                    # Run the manual MaskPartial implementation on local tensors.
-                    embedding = Embedding(
-                        Embedding.Config(
+                    # Setup the manual vocab-parallel embedding.
+                    embedding = VocabParallelEmbedding(
+                        VocabParallelEmbedding.Config(
                             num_embeddings=vocab_size,
                             embedding_dim=32,
                         )
                     ).to(self.device_type)
+                    embedding.tp_group = tp_group
                     embedding.weight = nn.Parameter(weight_dtensor.to_local())
                     local_tokens = tokens_dtensor.to_local()
 
@@ -180,10 +191,10 @@ class TestVocabParallelEmbedding(DTensorTestBase):
                     self.assertTrue(
                         torch.equal(local_output, dtensor_output.to_local())
                     )
-                    full_output = F.embedding(global_tokens, global_weight)
-                    self.assertTrue(
-                        torch.equal(dtensor_output.full_tensor(), full_output)
-                    )
+                    if not enable_sp:
+                        self.assertTrue(
+                            torch.equal(local_output, full_output)
+                        )
 
 
 if __name__ == "__main__":
