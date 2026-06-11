@@ -12,7 +12,7 @@ from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import BaseValidator
-from torchtitan.config import ParallelismConfig, TORCH_DTYPE_MAP
+from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 
 from .loss import PathLoss
@@ -70,9 +70,6 @@ class PathValidator(BaseValidator):
             model.eval()
 
         device = next(model_parts[0].parameters()).device
-        amp_dtype = TORCH_DTYPE_MAP[self.config.mixed_precision_param]
-        amp_enabled = amp_dtype != torch.float32 and not self.parallel_dims.fsdp_enabled
-
         try:
             total_loss = torch.zeros((), device=device)
             total_samples = torch.zeros((), device=device)
@@ -91,7 +88,7 @@ class PathValidator(BaseValidator):
                     else local_samples
                 )
 
-                with self.validation_context(), torch.autocast(device.type, dtype=amp_dtype, enabled=amp_enabled):
+                with self.validation_context():
                     pred = model_parts[0](input_dict)
                     loss_vec, metrics = self.loss_fn(pred, targets)
 

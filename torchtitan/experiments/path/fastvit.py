@@ -1181,6 +1181,8 @@ class FastVitStage(nn.Module):
 
 class FastVit(nn.Module):
     fork_feat: torch.jit.Final[bool]
+    pretrained_name = "fastvit_t12.apple_in1k"
+    first_conv_names = ("stem.0.conv_kxk.0.conv", "stem.0.conv_scale.conv")
 
     """
     This class implements `FastViT architecture <https://arxiv.org/pdf/2303.14189.pdf>`_
@@ -1507,6 +1509,9 @@ def checkpoint_filter_fn(state_dict, model):
 
         out_dict[k] = v
     return out_dict
+
+
+FastVit.checkpoint_filter_fn = staticmethod(checkpoint_filter_fn)
 
 
 def _create_fastvit(variant, pretrained=False, **kwargs):

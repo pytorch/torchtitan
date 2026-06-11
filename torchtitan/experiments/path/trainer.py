@@ -3,12 +3,12 @@ from __future__ import annotations
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.onnx_checkpoint import OnnxCheckpointManager
-from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.observability import structured_logger as sl
 from torchtitan.trainer import Trainer
@@ -20,6 +20,7 @@ from .validate import PathValidator
 class PathTrainer(Trainer):
     @dataclass(kw_only=True, slots=True)
     class Config(Trainer.Config):
+        backbone: Literal["fastvit_t12", "convnext_xxlarge"]
         loss: PathLoss.Config
         validator: PathValidator.Config
         checkpoint: OnnxCheckpointManager.Config
@@ -58,16 +59,14 @@ class PathTrainer(Trainer):
         *,
         input_dict: dict[str, torch.Tensor],
         labels: dict[str, torch.Tensor],
-        global_samples: torch.Tensor,
+        local_samples: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         inputs, labels = self.post_dataloading_process(input_dict, labels)
         assert len(self.model_parts) == 1
-        amp_dtype = TORCH_DTYPE_MAP[self.config.training.mixed_precision_param]
-        amp_enabled = amp_dtype != torch.float32 and not self.parallel_dims.fsdp_enabled
-        with self.train_context(), torch.autocast(self.device.type, dtype=amp_dtype, enabled=amp_enabled):
+        with self.train_context():
             pred = self.model_parts[0](inputs)
             loss_vec, metrics = self.loss_fn(pred, labels)
-            loss = loss_vec.sum() / global_samples
+            loss = loss_vec.sum() / local_samples
             del pred
             loss.backward()
         return loss, metrics
@@ -95,6 +94,7 @@ class PathTrainer(Trainer):
         else:
             global_samples = local_samples.float()
         global_samples = torch.as_tensor(global_samples, dtype=torch.float32, device=self.device)
+        global_samples_value = float(global_samples.item())
 
         accumulated_losses = []
         metric_sums: dict[str, torch.Tensor] = {}
@@ -104,7 +104,7 @@ class PathTrainer(Trainer):
             loss, metrics = self.forward_backward_step(
                 input_dict=input_dict,
                 labels=targets,
-                global_samples=global_samples,
+                local_samples=local_samples,
             )
             accumulated_losses.append(loss.detach())
             for name, value in metrics.items():
@@ -130,10 +130,10 @@ class PathTrainer(Trainer):
 
         if parallel_dims.dp_cp_enabled:
             loss_mesh = parallel_dims.get_optional_mesh("loss")
-            local_avg_loss = loss * global_samples / local_samples
+            local_loss_sum = loss * local_samples
             global_avg_loss, global_max_loss, global_samples_seen = (
-                dist_utils.dist_sum(loss.detach(), loss_mesh),
-                dist_utils.dist_max(local_avg_loss.detach(), loss_mesh),
+                dist_utils.dist_sum(local_loss_sum.detach(), loss_mesh) / global_samples_value,
+                dist_utils.dist_max(loss.detach(), loss_mesh),
                 dist_utils.dist_sum(torch.tensor(self.ntokens_seen, dtype=torch.int64, device=self.device), loss_mesh),
             )
             metric_sums = {k: dist_utils.dist_sum(v, loss_mesh) for k, v in metric_sums.items()}

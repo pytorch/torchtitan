@@ -75,15 +75,16 @@ def path() -> PathTrainer.Config:
     steps = 512*10
     mixed_precision_param = "bfloat16"
     return PathTrainer.Config(
+        backbone="fastvit_t12",
         loss=PathLoss.Config(),
         model_spec=model_registry(),
         tokenizer=NoOpTokenizer.Config(),
         dataloader=_dataloader_config(split="train"),
         optimizer=_optimizer_config(),
         lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=round(steps * 0.1),
+            warmup_steps=round(steps * 0.),
             total_steps=steps,
-            decay_ratio=0.5,
+            decay_ratio=0.,
             decay_type="cosine",
             min_lr_factor=0.0,
         ),
@@ -93,7 +94,7 @@ def path() -> PathTrainer.Config:
             seq_len=1,
             steps=steps,
             max_norm=1.0,
-            dtype="bfloat16",
+            dtype="float32",
             mixed_precision_param=mixed_precision_param,
             mixed_precision_reduce="float32",
         ),
@@ -108,7 +109,7 @@ def path() -> PathTrainer.Config:
         ),
         checkpoint=_checkpoint_config(),
         activation_checkpoint=ActivationCheckpointConfig(mode="none"),
-        compile=CompileConfig(enable=False, components=["model"]),
+        compile=CompileConfig(enable=True, components=["model"]),
         metrics=MetricsProcessor.Config(log_freq=10, enable_reporterv2=True),
         validator=PathValidator.Config(
             enable=True,
@@ -119,17 +120,6 @@ def path() -> PathTrainer.Config:
         ),
         debug=DebugConfig(seed=0),
     )
-
-
-def path_debug() -> PathTrainer.Config:
-    config = path()
-    config.training.local_batch_size = 1
-    config.training.steps = 10
-    config.lr_scheduler.warmup_steps = 0
-    config.lr_scheduler.total_steps = 10
-    config.metrics.log_freq = 1
-    config.dataloader.shuffle_size = 1000
-    return config
 
 
 def _model_config() -> PathModel.Config:
@@ -146,8 +136,7 @@ def _model_config() -> PathModel.Config:
             in_channels=in_channels,
             vision_features=vision_features,
             backbone="fastvit_t12",
-            pretrained=False,
-            checkpoint_path=None,
+            pretrained=True,
             act_layer_name="gelu_tanh",
             drop_path_rate=0.2,
             mean=255 / 2,

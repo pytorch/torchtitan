@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 import torch
@@ -9,6 +8,7 @@ from einops import rearrange
 from timm.layers import get_act_layer
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+from torch.distributed.tensor import DTensor, distribute_tensor
 
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -19,10 +19,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import _apply_ac_to_transformer_block
-from torchtitan.distributed.fsdp import (
-    disable_fsdp_gradient_division,
-    enable_fsdp_symm_mem,
-)
+from torchtitan.distributed.fsdp import enable_fsdp_symm_mem
 from torchtitan.models.common import Embedding, LayerNorm, Linear, RMSNorm, SiLU
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.protocols.model import BaseModel
@@ -30,7 +27,7 @@ from torchtitan.protocols.module import Module, ModuleDict, ModuleList, Sequenti
 from torchtitan.tools.logging import logger
 from xx.ml_tools.constants.model import ModelInputs
 
-from . import fastvit
+from . import convnext, fastvit
 
 
 @dataclass(frozen=True)
@@ -300,7 +297,6 @@ class Vision(Module):
         vision_features: int
         backbone: str
         pretrained: bool
-        checkpoint_path: str | None
         act_layer_name: str
         drop_path_rate: float
         mean: float
@@ -309,18 +305,24 @@ class Vision(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
-        if config.backbone != "fastvit_t12":
-            raise ValueError(f"path v1 only supports fastvit_t12, got {config.backbone!r}")
-        if config.checkpoint_path is not None:
-            raise NotImplementedError("FastViT checkpoint loading is intentionally left for a later port slice")
-        self.encoder = fastvit.fastvit_t12(
-            pretrained=config.pretrained,
-            in_chans=config.in_channels,
-            num_classes=config.vision_features,
-            act_layer=get_act_layer(config.act_layer_name),
-            drop_path_rate=config.drop_path_rate,
-            norm_layer=fastvit.AllNorm2d,
-        )
+        if config.backbone == "fastvit_t12":
+            self.encoder = fastvit.fastvit_t12(
+                pretrained=False,
+                in_chans=config.in_channels,
+                num_classes=config.vision_features,
+                act_layer=get_act_layer(config.act_layer_name),
+                drop_path_rate=config.drop_path_rate,
+                norm_layer=fastvit.AllNorm2d,
+            )
+        elif config.backbone == "convnext_xxlarge":
+            self.encoder = convnext.convnext_xxlarge(
+                pretrained=False,
+                in_chans=config.in_channels,
+                num_classes=config.vision_features,
+                drop_path_rate=config.drop_path_rate,
+            )
+        else:
+            raise ValueError(f"unknown path backbone {config.backbone!r}")
         self.register_buffer("_mean", torch.empty(1, config.in_channels, 1, 1), persistent=True)
         self.register_buffer("_std", torch.empty(1, config.in_channels, 1, 1), persistent=True)
 
@@ -328,6 +330,64 @@ class Vision(Module):
         device = buffer_device if buffer_device is not None else self._mean.device
         self._mean = torch.full((1, self.config.in_channels, 1, 1), self.config.mean, device=device)
         self._std = torch.full((1, self.config.in_channels, 1, 1), self.config.std, device=device)
+
+    def load_pretrained(self) -> None:
+        if not self.config.pretrained:
+            return
+
+        state_dict = self._pretrained_state_dict()
+        target_state = self.encoder.state_dict()
+        load_state = {}
+        for name, value in state_dict.items():
+            if name.startswith("head."):
+                continue
+            target = target_state.get(name)
+            if target is None:
+                continue
+            value = self._move_pretrained_value(value, target)
+            if tuple(value.shape) != tuple(target.shape):
+                continue
+            load_state[name] = value
+
+        missing, unexpected = self.encoder.load_state_dict(load_state, strict=False)
+        logger.info(
+            f"Loaded {len(load_state)} {self.config.backbone} tensors from {self._pretrained_name()} "
+            f"({len(missing)} missing, {len(unexpected)} unexpected)"
+        )
+
+    def _pretrained_name(self) -> str:
+        return self.encoder.pretrained_name
+
+    def _pretrained_state_dict(self) -> dict[str, torch.Tensor]:
+        from timm.models._builder import adapt_input_conv, load_state_dict_from_hf
+
+        model_name = self._pretrained_name()
+        state_dict = load_state_dict_from_hf(f"timm/{model_name}", weights_only=True)
+        state_dict = self.encoder.checkpoint_filter_fn(state_dict, self.encoder)
+        if self.config.in_channels != 3:
+            for first_conv in self.encoder.first_conv_names:
+                weight_name = f"{first_conv}.weight"
+                state_dict[weight_name] = adapt_input_conv(self.config.in_channels, state_dict[weight_name])
+        self._adapt_allnorm_state_dict(state_dict, self.encoder.state_dict())
+        return state_dict
+
+    @staticmethod
+    def _adapt_allnorm_state_dict(state_dict: dict[str, torch.Tensor], target_state: dict[str, torch.Tensor]) -> None:
+        to_del = []
+        for name, value in state_dict.items():
+            target = target_state.get(name)
+            if target is not None and tuple(value.shape) != tuple(target.shape) and target.numel() == 1 and value.ndim == 1:
+                # state_dict[name] = value.float().mean().reshape(target.shape)
+                to_del.append(name)
+        for name in to_del:
+            del state_dict[name]
+
+
+    @staticmethod
+    def _move_pretrained_value(value: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if isinstance(target, DTensor):
+            return distribute_tensor(value.to(dtype=target.dtype), target.device_mesh, list(target.placements))
+        return value.to(device=target.device, dtype=target.dtype)
 
     def forward(self, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
         x = torch.cat([inputs[name] for name in self.config.input_frame_names], dim=1)
@@ -344,6 +404,7 @@ class PathModel(BaseModel):
         temporal_policy: TemporalPolicy.Config
 
         def update_from_config(self, *, config, **kwargs) -> None:
+            self.vision.backbone = config.backbone
             parallelism = config.parallelism
             if parallelism.full_dtensor:
                 raise ValueError("path v1 does not support full DTensor")
@@ -374,6 +435,7 @@ class PathModel(BaseModel):
     def init_states(self, *, buffer_device: torch.device | None = None) -> None:
         super().init_states(buffer_device=buffer_device)
         self._init_plain_modules()
+        self.vision.load_pretrained()
 
     def _init_plain_modules(self) -> None:
         for module in self.modules():
@@ -387,6 +449,8 @@ class PathModel(BaseModel):
                 module.apply(module._init_weights)
             elif isinstance(module, fastvit.FastVit):
                 module.apply(module._init_weights)
+            elif isinstance(module, convnext.ConvNeXt):
+                module.init_path_weights()
 
     def forward(
         self,
@@ -503,4 +567,3 @@ def _apply_fsdp(
 
     if enable_symm_mem:
         enable_fsdp_symm_mem(model)
-    disable_fsdp_gradient_division(model)
