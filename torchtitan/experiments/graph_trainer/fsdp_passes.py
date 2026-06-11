@@ -20,13 +20,18 @@ from typing import Any
 
 import torch
 import torch.fx as fx
+from torch._dynamo.graph_deduplication import _stable_topological_sort
 from torch._inductor.fx_passes.bucketing import (
     BucketMode,
     is_all_gather_into_tensor as is_all_gather,
     is_wait_tensor,
 )
+
+try:
+    from torch._inductor.fx_passes.overlap_manual_scheduling import _move_overlap_nodes
+except ImportError:
+    _move_overlap_nodes = None
 from torch._inductor.fx_passes.overlap_manual_scheduling import (
-    _move_overlap_nodes,
     manual_overlap_bucketing,
     ManualOverlapScheduler,
 )
@@ -62,6 +67,19 @@ def is_wait_tensor_from_fsdp(node: torch.fx.Node) -> bool:
 # Each NCCL PG gets its own CUDA stream, so the extra PG is what enables
 # AG/RS overlap in backward.
 _EXTRA_FSDP_PG_REGISTRY: dict[str, str] = {}
+
+
+def _reorder_overlap_nodes(
+    graph: fx.Graph,
+    overlap_deps: dict[fx.Node, OrderedSet[fx.Node]],
+    bucketed_node_types: dict[fx.Node, str],
+) -> None:
+    if _move_overlap_nodes is None:
+        # TODO(ivankobzarev): Remove this fallback once the PyTorch nightly wheel
+        # includes _move_overlap_nodes.
+        _stable_topological_sort(graph, overlap_deps)
+    else:
+        _move_overlap_nodes(graph, overlap_deps, bucketed_node_types)
 
 
 def _get_or_create_extra_pg(
@@ -231,6 +249,9 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
             if bwd_nodes:
                 self.bucketer.manual_bucket_collectives(nodes=bwd_nodes)
 
+        if _move_overlap_nodes is None:
+            _stable_topological_sort(self.graph, {})
+
         self.graph.lint()
         self.nodes = list(self.graph.nodes)
         self.in_degree = Counter(user for node in self.nodes for user in node.users)
@@ -245,7 +266,9 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
         self._schedule_rs_prefetch(overlap_deps)
         self._schedule_ag_prefetch(overlap_deps)
 
-        _move_overlap_nodes(self.graph, overlap_deps, self.bucketer.bucketed_node_types)
+        _reorder_overlap_nodes(
+            self.graph, overlap_deps, self.bucketer.bucketed_node_types
+        )
         self.graph.lint()
 
         if self.insert_overlap_deps:
