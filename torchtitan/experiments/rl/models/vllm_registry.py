@@ -131,6 +131,7 @@ def registry_to_vllm(
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
     checkpoint_config: CheckpointManager.Config,
+    sliding_window: int | None = None,
 ) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
 
@@ -187,6 +188,7 @@ def registry_to_vllm(
                 compile_config=compile_config,
                 checkpoint_config=checkpoint_config,
                 vllm_config=vllm_config,
+                sliding_window=sliding_window,
                 prefix=prefix,
             )
 

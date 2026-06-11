@@ -4,8 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import ClassVar, NamedTuple
 
 import torch
@@ -27,6 +30,8 @@ from torch.nn.attention.flex_attention import (
 )
 from torch.nn.attention.varlen import varlen_attn
 
+from torchtitan.config import Configurable
+
 from torchtitan.distributed.compile import maybe_regional_inductor
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
@@ -41,8 +46,10 @@ __all__ = [
     "BaseQKVLinear",
     "FusedQKVLinear",
     "GQAttention",
+    "MaskMod",
     "QKVLinear",
     "ScaledDotProductAttention",
+    "SlidingWindowMaskMod",
     "VarlenAttention",
     "VarlenMetadata",
     "create_attention_mask",
@@ -180,6 +187,7 @@ class FlexAttention(Module):
     class Config(Module.Config):
         block_size: int | tuple[int, int] = _DEFAULT_SPARSE_BLOCK_SIZE
         kernel_options: dict = field(default_factory=dict)
+        mask_mod: MaskMod.Config | None = None
 
     inductor_configs: ClassVar[dict[str, bool]] = {
         "wrap_inductor_compiled_regions": True,
@@ -450,6 +458,10 @@ def get_fixed_block_mask_mod(fixed_block_size: int) -> _mask_mod_signature:
     return blocked_mask_mod
 
 
+# need to cache so that the mask mod object is the same for each layer
+# vLLM determines whether or not mask mods need to be rebuilt by comparing the object
+# and if block mask gets rebuilt inside the full-graph captured region, it cannot be fully cudagraph-safe
+@lru_cache(maxsize=None)
 def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
     """Creates a sliding window mask that only attends to tokens within a fixed window size.
 
@@ -479,6 +491,29 @@ def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
     sliding_window_mod.__name__ = f"sliding_window_mod_window_size_{window_size}"
 
     return sliding_window_mod
+
+
+class MaskMod(Configurable):
+    """A composable, serializable attention mask modifier for flex attention."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        pass
+
+    def get_mask_mod(self) -> _mask_mod_signature:
+        raise NotImplementedError
+
+
+class SlidingWindowMaskMod(MaskMod):
+    @dataclass(kw_only=True, slots=True)
+    class Config(MaskMod.Config):
+        window_size: int
+
+    def __init__(self, config: Config) -> None:
+        self.window_size = config.window_size
+
+    def get_mask_mod(self) -> _mask_mod_signature:
+        return get_sliding_window_mask_mod(self.window_size)
 
 
 _compiled_create_block_mask = torch.compile(create_block_mask)

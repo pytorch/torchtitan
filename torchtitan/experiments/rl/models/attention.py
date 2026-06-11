@@ -14,7 +14,7 @@ from torch.nn.attention import (
     current_flash_attention_impl,
 )
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import AttentionMasksType, MaskMod
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import warn_once
 from torchtitan.tools.utils import has_cuda_capability
@@ -226,6 +226,9 @@ class VLLMAttentionWrapper(Module):
         num_kv_heads: int
         head_dim: int
         scale: float | None = None
+        mask_mod: MaskMod.Config | None = None
+        sliding_window: int | None = None
+        """Causal sliding-window size"""
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -269,6 +272,8 @@ class VLLMAttentionWrapper(Module):
             vllm_config.cache_config if hasattr(vllm_config, "cache_config") else None
         )
 
+        mask_mod_cfg = config.mask_mod
+
         # TODO: This need to be compatible with Pipeline Parallelism
         layer_id = next(VLLMAttentionWrapper._layer_counter)
         self.vllm_attn = Attention(
@@ -278,8 +283,12 @@ class VLLMAttentionWrapper(Module):
             num_kv_heads=num_kv_heads,
             cache_config=cache_config,
             quant_config=None,
+            per_layer_sliding_window=config.sliding_window,
             prefix=f"model.layers.{layer_id}.attention.inner_attention",
         )
+
+        if mask_mod_cfg is not None and config.sliding_window is None:
+            self.vllm_attn.logical_mask_mod = mask_mod_cfg.build().get_mask_mod()
 
     def forward(
         self,

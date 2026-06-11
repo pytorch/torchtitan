@@ -61,6 +61,8 @@ from torchtitan.distributed.utils import (
 from torchtitan.experiments.rl.actors.trainer import compute_logprobs
 from torchtitan.experiments.rl.config_registry import (
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
+    rl_grpo_qwen3_0_6b_flex_batch_invariant_custom_mask_mod,
+    rl_grpo_qwen3_0_6b_flex_batch_invariant_sliding_window,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
 )
 from torchtitan.experiments.rl.models.vllm_registry import (
@@ -284,9 +286,12 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
     packed_ids = torch.cat(parts).unsqueeze(0)
     positions = torch.cat(pos_parts).unsqueeze(0)
 
-    mask_mod = and_masks(get_causal_mask_mod(), get_document_mask_mod(positions))
+    mask_mods = [get_causal_mask_mod(), get_document_mask_mod(positions)]
+
+    if inner_attn.mask_mod is not None:
+        mask_mods.append(inner_attn.mask_mod.build().get_mask_mod())
     attention_masks = create_attention_mask(
-        mask_mod,
+        and_masks(*mask_mods),
         1,
         None,
         positions.shape[1],
@@ -528,6 +533,9 @@ class BitwiseParityTestBase(unittest.TestCase):
         hf_path = os.environ.get("HF_ASSETS_PATH")
         if hf_path:
             config.hf_assets_path = hf_path
+        # CheckpointManager.Config.initial_load_path must be absolute; the
+        # config_registry default is relative to the repo root, so resolve it.
+        config.hf_assets_path = os.path.abspath(config.hf_assets_path)
 
         from torchtitan.tools.utils import has_cuda_capability
 
@@ -702,6 +710,26 @@ class TestBitwiseParityFlex(BitwiseParityTestBase):
 
     __test__ = True
     config_fn = staticmethod(rl_grpo_qwen3_0_6b_flex_batch_invariant)
+    attn_backend = "flex"
+
+
+class TestBitwiseParityFlexCustomMaskMod(BitwiseParityTestBase):
+    """Bitwise parity with a sliding window applied via the generic
+    ``logical_mask_mod`` hook (no KV-block pruning).
+    """
+
+    __test__ = True
+    config_fn = staticmethod(rl_grpo_qwen3_0_6b_flex_batch_invariant_custom_mask_mod)
+    attn_backend = "flex"
+
+
+class TestBitwiseParityFlexSlidingWindow(BitwiseParityTestBase):
+    """Bitwise parity with a sliding window applied via vLLM's native
+    ``per_layer_sliding_window`` spec (KV-block pruning).
+    """
+
+    __test__ = True
+    config_fn = staticmethod(rl_grpo_qwen3_0_6b_flex_batch_invariant_sliding_window)
     attn_backend = "flex"
 
 

@@ -209,6 +209,9 @@ class VLLMGenerator(Actor, Configurable):
         debug: DebugConfig = field(default_factory=DebugConfig)
         """Debug and determinism settings."""
 
+        sliding_window: int | None = None
+        """sliding window size"""
+
         def __post_init__(self):
             # VLLMGenerator only supports TP. vLLM handles its own parallelism;
             # we only apply TP via the core parallelize function.
@@ -286,6 +289,7 @@ class VLLMGenerator(Actor, Configurable):
             parallelism=config.parallelism,
             compile_config=compile_config,
             checkpoint_config=config.checkpoint,
+            sliding_window=config.sliding_window,
         )
 
         # Set vLLM environment variables from config before any vLLM initialization

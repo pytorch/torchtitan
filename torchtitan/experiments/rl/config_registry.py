@@ -34,20 +34,29 @@ from torchtitan.experiments.rl.generator_router import (
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.trainer import GRPOLoss, RLTrainer
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import (
+    FlexAttention,
+    MaskMod,
+    SlidingWindowMaskMod,
+)
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.protocols.model import ModelConfigConverter
 
 _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
 
 
-class BatchInvariantFlexConverter(ModelConfigConverter):
-    """Pin flex attention kernel options for batch-invariant mode.
+class FlexConverter(ModelConfigConverter):
+    """Configure FlexAttention layers for the RL loop, applied per flex layer.
 
-    Sets fixed BLOCK_M/BLOCK_N=16 and BACKEND=TRITON on all
-    FlexAttention layers.
+    - ``batch_invariant``: pin kernel options (BACKEND=TRITON, BLOCK_M/N=16) so
+      the trainer's flex kernel is batch-invariant and matches vLLM's tile size.
+      (BACKEND=TRITON avoids the flex_decode kernel.) This is only the
+      model-side piece of batch invariance; the trainer/generator debug flags
+      and batcher padding are applied by the config builder.
+    - ``mask_mod``: a ``MaskMod.Config``set as the within-sequence
+    ``mask_mod`` on every flex layer.
 
-    BACKEND=TRITON is to avoid flex_decode kernel.
+    Both are independent and may be combined.
     """
 
     # the triton BLOCK_N tile size needs to be pinned for stable numerics and
@@ -58,18 +67,24 @@ class BatchInvariantFlexConverter(ModelConfigConverter):
 
     @dataclass(kw_only=True, slots=True)
     class Config(ModelConfigConverter.Config):
-        pass
+        batch_invariant: bool = False
+        mask_mod: MaskMod.Config | None = None
 
     def __init__(self, config: Config):
-        pass
+        self.batch_invariant = config.batch_invariant
+        self.mask_mod = config.mask_mod
 
     def convert(self, model_config) -> None:
         for layer_cfg in model_config.layers:
             inner = layer_cfg.attention.inner_attention
-            if isinstance(inner, FlexAttention.Config):
+            if not isinstance(inner, FlexAttention.Config):
+                continue
+            if self.batch_invariant:
                 inner.kernel_options["BACKEND"] = "TRITON"
                 inner.kernel_options["BLOCK_M"] = self._BLOCK_M
                 inner.kernel_options["BLOCK_N"] = self._BLOCK_N
+            if self.mask_mod is not None:
+                inner.mask_mod = self.mask_mod
 
 
 def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
@@ -130,11 +145,43 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
-    """GRPO training config for Qwen3-0.6B with flex attention (4 GPUs: 2 gen + 2 train)."""
+def _rl_grpo_qwen3_0_6b_flex(
+    *,
+    batch_invariant: bool = False,
+    mask_mod: MaskMod.Config | None = None,
+    sliding_window: int | None = None,
+) -> RLTrainer.Config:
+    """Shared builder for the Qwen3-0.6B flex-attention configs (4 GPUs: 2 gen + 2 train).
+
+    ``mask_mod`` and ``sliding_window`` are two independent ways to apply a
+    within-sequence mask, and are mutually exclusive:
+
+    Args:
+        batch_invariant: Pin flex kernel options + enable deterministic /
+            batch-invariant debug on trainer and generator (bitwise parity).
+        mask_mod: Custom ``MaskMod.Config`` (e.g. ``SlidingWindowMaskMod.Config``)
+            applied on every flex layer
+        sliding_window: Native sliding-window size (tokens)
+    """
     group_size = 8
-    return RLTrainer.Config(
-        model_spec=model_registry("0.6B", attn_backend="flex"),
+    if mask_mod is not None:
+        trainer_mask_mod = mask_mod
+    elif sliding_window is not None:
+        trainer_mask_mod = SlidingWindowMaskMod.Config(window_size=sliding_window)
+    else:
+        raise ValueError("cannot pass in both mask_mod and sliding_window ")
+    model_spec = model_registry(
+        "0.6B",
+        attn_backend="flex",
+        converters=[
+            FlexConverter.Config(
+                batch_invariant=batch_invariant,
+                mask_mod=trainer_mask_mod,
+            )
+        ],
+    )
+    config = RLTrainer.Config(
+        model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
         num_groups_per_rollout_batch=5,
@@ -181,35 +228,65 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
                 top_p=0.95,
                 max_tokens=100,
             ),
+            sliding_window=sliding_window,
         ),
     )
+
+    if batch_invariant:
+        block_size = model_spec.model.layers[0].attention.inner_attention.block_size
+        config.batcher = dataclasses.replace(
+            config.batcher, per_sample_pad_multiple=block_size
+        )
+        config.trainer = dataclasses.replace(
+            config.trainer,
+            debug=_BATCH_INVARIANT_DEBUG,
+            parallelism=dataclasses.replace(
+                config.trainer.parallelism, enable_sequence_parallel=False
+            ),
+        )
+        config.generator = dataclasses.replace(
+            config.generator, debug=_BATCH_INVARIANT_DEBUG
+        )
+    return config
+
+
+def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
+    """GRPO training config for Qwen3-0.6B with flex attention (4 GPUs: 2 gen + 2 train)."""
+    return _rl_grpo_qwen3_0_6b_flex()
 
 
 def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLTrainer.Config:
-    """GRPO training config for Qwen3-0.6B with flex attention and batch invariance
-    for bitwise-identical numerics between trainer and generator (4 GPUs: 2 gen + 2 train).
+    """``rl_grpo_qwen3_0_6b_flex`` + batch invariance, for bitwise-identical
+    trainer/generator numerics (4 GPUs: 2 gen + 2 train)."""
+    return _rl_grpo_qwen3_0_6b_flex(batch_invariant=True)
+
+
+def rl_grpo_qwen3_0_6b_flex_custom_mask_mod() -> RLTrainer.Config:
+    """``rl_grpo_qwen3_0_6b_flex`` + a custom mask_mod (sliding window)"""
+    return _rl_grpo_qwen3_0_6b_flex(
+        mask_mod=SlidingWindowMaskMod.Config(window_size=64)
+    )
+
+
+def rl_grpo_qwen3_0_6b_flex_batch_invariant_custom_mask_mod() -> RLTrainer.Config:
+    """``rl_grpo_qwen3_0_6b_flex_batch_invariant`` + a custom mask_mod (sliding window)"""
+    return _rl_grpo_qwen3_0_6b_flex(
+        batch_invariant=True, mask_mod=SlidingWindowMaskMod.Config(window_size=64)
+    )
+
+
+def rl_grpo_qwen3_0_6b_flex_sliding_window() -> RLTrainer.Config:
+    """``rl_grpo_qwen3_0_6b_flex`` + a causal sliding window via vLLM's native
+    ``per_layer_sliding_window`` spec (SlidingWindowSpec + KV-block pruning).
     """
-    config = rl_grpo_qwen3_0_6b_flex()
-    config.model_spec = model_registry(
-        "0.6B",
-        attn_backend="flex",
-        converters=[BatchInvariantFlexConverter.Config()],
-    )
-    block_size = config.model_spec.model.layers[0].attention.inner_attention.block_size
-    config.batcher = dataclasses.replace(
-        config.batcher, per_sample_pad_multiple=block_size
-    )
-    config.trainer = dataclasses.replace(
-        config.trainer,
-        debug=_BATCH_INVARIANT_DEBUG,
-        parallelism=dataclasses.replace(
-            config.trainer.parallelism, enable_sequence_parallel=False
-        ),
-    )
-    config.generator = dataclasses.replace(
-        config.generator, debug=_BATCH_INVARIANT_DEBUG
-    )
-    return config
+    return _rl_grpo_qwen3_0_6b_flex(sliding_window=64)
+
+
+def rl_grpo_qwen3_0_6b_flex_batch_invariant_sliding_window() -> RLTrainer.Config:
+    """``rl_grpo_qwen3_0_6b_flex_batch_invariant`` + a causal sliding window via
+    vLLM's native ``per_layer_sliding_window`` spec (KV-block pruning
+    """
+    return _rl_grpo_qwen3_0_6b_flex(batch_invariant=True, sliding_window=64)
 
 
 def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
