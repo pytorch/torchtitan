@@ -937,39 +937,16 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
-        """Reorder tokens, then MinimalAsyncEP dispatch to expert-parallel ranks.
-
-        We abbreviate:
-            T-major: Token-major
-            E-major: Expert-major
-
-        Logical shapes match ``AllToAllTokenDispatcher``:
-            B = batch size before flattening, L = sequence length before
-                flattening, and T = B * L local tokens.
-            D = model dimension of each token row.
-            E = global number of experts, EP = expert-parallel group size,
-                and e = E / EP local experts per EP rank.
-            K = top-k router choices per token.
-            N = routed rows, T * K.
-            R = active rows assigned to this rank's local experts,
-                sum(num_tokens_per_local_expert_e).
-
-        MinimalAsyncEP stores ``routed_input_RD`` in a static-capacity receive
-        buffer with row capacity ``R_max = EP * T * min(K, e)``. Only the
-        first ``R`` rows are active; padding rows keep the launch shape static.
+        """Dispatch tokens to expert ranks with MinimalAsyncEP.
 
         Args:
-            x_TD: ``(T, D)`` local token shard.
-            topk_scores_TK: ``(T, K)`` routing scores.
-            topk_expert_ids_TK: ``(T, K)`` expert indices.
-            num_local_tokens_per_expert_E: ``(E,)`` token counts for this local
-                token shard.
+            x_TD, topk_scores_TK, topk_expert_ids_TK,
+                num_local_tokens_per_expert_E: standard ``GroupedExperts``
+                dispatch inputs; see ``torchtitan.models.common.moe`` for shape
+                suffix definitions.
 
         Returns:
-            routed_input_RD: logical
-                ``[R = sum(num_tokens_per_local_expert_e), input_dim(D)]``.
-                Tokens in E-major order for local experts, physically
-                padded to ``(R_max, D)`` for this backend.
+            routed_input_RD: local-expert rows for grouped-mm.
             num_tokens_per_local_expert_e: ``(num_local_experts,)`` token counts
             metadata: dispatch metadata for combine()
         """

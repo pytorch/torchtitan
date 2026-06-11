@@ -9,6 +9,16 @@
 This backend is intentionally narrow: it supports the launch shape where the
 EP process group is the data-parallel group and TP/CP/PP/SP are disabled.
 The symmetric-memory allocation is explicit and must happen before dispatch.
+
+Shape symbols used by the API entrypoints:
+    ``T``: local token rows.
+    ``D``: model dimension.
+    ``K``: routed experts per token.
+    ``N = T * K``: local routed rows before EP exchange.
+    ``R``: active rows assigned to this rank's local experts.
+    ``R_max >= R``: static receive-buffer row capacity.
+    ``E``: global experts.
+    ``EP``: expert-parallel group size.
 """
 
 from dataclasses import dataclass
@@ -60,12 +70,6 @@ _buffer_state: _MinimalAsyncEPBufferState | None = None
 @dataclass
 class MinimalAsyncEPDispatchMetadata:
     """MinimalAsyncEP metadata from dispatch needed for combine.
-
-    Shape symbols match ``MinimalAsyncEPTokenDispatcher.dispatch`` and
-    ``AllToAllTokenDispatcher``: ``T`` local tokens, ``D`` model dimension,
-    ``N = T * K`` T-major routed rows before EP exchange, and ``R`` active rows
-    assigned to this rank's local experts. MinimalAsyncEP additionally keeps
-    a static receive capacity ``R_max >= R``.
 
     Field shapes:
         dispatch_dst_ranks, dispatch_dst_rows: ``(N,)``.
@@ -255,10 +259,6 @@ def _wait_ready(handle: Any, channel: int) -> None:
     """EP-group barrier: ensure every peer has finished writing into this
     rank's symmetric receive buffer before the buffer is read.
 
-    This wait intentionally happens before custom ops return tensors that are
-    consumed by later compute. MinimalAsyncEP is a synchronous, CUDA-graphable
-    backend and does not expose a separate async handle for microbatch overlap.
-
     Issues a single fused ``barrier`` kernel that signals and polls all peers
     concurrently. This was previously a Python loop of ``2 * (ep_size - 1)``
     per-peer ``put_signal`` / ``wait_signal`` kernels, all serialized and fully
@@ -425,9 +425,9 @@ def _dispatch_metadata(
     Args:
         num_local_tokens_per_expert_E: ``(E,)`` int64 counts for this rank's
             local token shard over all global experts.
-        num_routed_rows: ``N = T * K`` routed rows in local E-major order.
-        receive_capacity: ``R_max`` static receive-buffer row capacity.
-        ep_size: ``EP`` expert-parallel group size.
+        num_routed_rows: ``N`` routed rows in local E-major order.
+        receive_capacity: ``R_max``.
+        ep_size: ``EP``.
 
     Returns:
         ``dispatch_dst_ranks`` and ``dispatch_dst_rows``: ``(N,)`` maps local
@@ -487,8 +487,8 @@ def dispatch_op(
         topk_expert_ids_TK: ``(T, K)`` global expert ids.
         num_local_tokens_per_expert_E: ``(E,)`` counts for this rank's token
             shard over all global experts.
-        receive_capacity: ``R_max`` static receive-buffer row capacity.
-        ep_size: ``EP`` expert-parallel group size.
+        receive_capacity: ``R_max``.
+        ep_size: ``EP``.
 
     Returns:
         ``hidden_states`` plus all tensor metadata needed by combine and
@@ -753,7 +753,7 @@ def combine_backward_op(
         saved_routed_output_ND: ``(N, D)`` origin-rank E-major routed output
             rows from ``combine``.
         top_k: ``K`` routed rows per token.
-        receive_capacity: ``R_max`` static receive-buffer row capacity.
+        receive_capacity: ``R_max``.
 
     Returns:
         ``grad_x``: ``(R_max, D)`` gradient for expert output rows.
