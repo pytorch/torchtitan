@@ -353,15 +353,11 @@ class ParallelDims:
             "efsdp": full_sparse_mesh["efsdp"],
         }
         if self.spmd_backend == "full_dtensor":
-            self._single_axis_meshes["dp_shard"] = full_dense_mesh_for_fsdp[
-                "dp_shard"
-            ]
+            self._single_axis_meshes["dp_shard"] = full_dense_mesh_for_fsdp["dp_shard"]
         elif self.spmd_backend == "spmd_types":
             assert spmd_dense_mesh_for_fwdbwd is not None
             self._single_axis_meshes["dp"] = spmd_dense_mesh_for_fwdbwd["dp"]
-            self._single_axis_meshes["dp_shard"] = full_dense_mesh_for_fsdp[
-                "dp_shard"
-            ]
+            self._single_axis_meshes["dp_shard"] = full_dense_mesh_for_fsdp["dp_shard"]
         else:
             self._single_axis_meshes["fsdp"] = full_dense_mesh_for_fsdp["fsdp"]
 
