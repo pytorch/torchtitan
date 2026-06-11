@@ -23,7 +23,6 @@ from torch.utils._pytree import tree_map
 
 from torchtitan.config import Configurable
 from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.distributed.spmd_types import (
     current_spmd_mesh,
     set_current_spmd_mesh,
@@ -31,6 +30,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_redistribute_per_axis,
     spmd_validate_redistributions,
 )
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
 
 
