@@ -137,18 +137,15 @@ class Module(nn.Module, Configurable):
             fqn: SpmdLayout(
                 # pyrefly: ignore [bad-argument-type]
                 axis_types=get_local_type(buf),
-                # pyrefly: ignore [bad-argument-type]
                 partition_spec=get_partition_spec(buf),
             )
             for fqn, buf in self.named_buffers()
-            # pyrefly: ignore [bad-argument-type]
             if has_local_type(buf)
         }
         try:
             yield
         finally:
             for fqn, buf in self.named_buffers():
-                # pyrefly: ignore [bad-argument-type]
                 if fqn in saved and not has_local_type(buf):
                     layout = saved[fqn]
                     spmd.assert_type(
@@ -428,9 +425,7 @@ class Module(nn.Module, Configurable):
             return fn
 
         in_dst = (
-            sharding_config.in_dst_shardings
-            or sharding_config.in_src_shardings
-            or {}
+            sharding_config.in_dst_shardings or sharding_config.in_src_shardings or {}
         )
         pos_args = self._cache_pos_arg_names()
         out_src = sharding_config.out_src_shardings or sharding_config.out_dst_shardings
@@ -573,7 +568,9 @@ class Module(nn.Module, Configurable):
                 value = spmd_redistribute_per_axis(
                     value,
                     current_spmd_mesh(),
+                    # pyrefly: ignore [bad-argument-type]
                     src_spmd_layout.per_axis_spmd_types(),
+                    # pyrefly: ignore [bad-argument-type]
                     dst_spmd_layout.per_axis_spmd_types(),
                 )
                 new_kwargs[name] = value
@@ -652,7 +649,9 @@ class Module(nn.Module, Configurable):
             return spmd_redistribute_per_axis(
                 outputs,
                 current_spmd_mesh(),
+                # pyrefly: ignore [bad-argument-type]
                 out_src.per_axis_spmd_types(),
+                # pyrefly: ignore [bad-argument-type]
                 out_dst.per_axis_spmd_types(),
             )
 
