@@ -114,6 +114,7 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b_min
     --compile.debug_graph_passes \
     --profiler.enable_profiling \
     --profiler.profile_freq 10 \
+    --profiler.enable_memory_snapshot \
     --dump_folder "$PROFILE_DIR" \
     --debug.print-config \
     --compile.memory_policy full
@@ -127,6 +128,17 @@ if [ -n "$TRACE_FILE" ]; then
     python3 ~/local/fbsource/arvr/scripts/perfetto/share_trace.py "$TRACE_FILE"
 else
     echo "No rank0 trace found in $PROFILE_DIR"
+fi
+
+# Upload rank 0 CUDA memory snapshot to the internal PyTorch Memory Visualizer.
+# torchtitan names snapshot files "<rank:06d>_step_<N>.pickle"; rank 0 -> 000000_*.
+# sort|tail -1 picks the latest step when multiple snapshots are dumped.
+SNAPSHOT_FILE=$(find "$PROFILE_DIR" -path "*memory_snapshot*" -name "000000_*.pickle" -type f | sort | tail -1)
+if [ -n "$SNAPSHOT_FILE" ]; then
+    echo "Uploading $SNAPSHOT_FILE"
+    python3 ~/local/fbsource/arvr/scripts/perfetto/share_trace.py --is-memory-snapshot "$SNAPSHOT_FILE"
+else
+    echo "No rank0 memory snapshot found in $PROFILE_DIR"
 fi
 
 } 2>&1 | tee "$LOG_FILE"
