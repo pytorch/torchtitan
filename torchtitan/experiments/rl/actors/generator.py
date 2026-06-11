@@ -104,34 +104,35 @@ def _prepare_generation_request_metrics(
     ]
 
 
-def _force_torch_logprobs_for_batch_invariance() -> None:
+def _force_logprobs_fn_for_batch_invariance() -> None:
     """Make vLLM's v2 logprob path dispatch ``aten::_log_softmax``.
 
     The v2 GPU sampler computes per-token logprobs with a fused Triton kernel
     (``compute_token_logprobs`` -> ``_topk_log_softmax_kernel``) that inlines
-    ``log(softmax(logits))`` and never calls ``aten::_log_softmax``. The
-    batch-invariant overrides installed by ``set_batch_invariance`` therefore
-    never reach it, leaving a ~4e-7 logprob gap against the trainer's
-    ``-F.cross_entropy`` (which does dispatch ``aten::_log_softmax``).
+    ``log(softmax(logits))`` and never calls ``aten::_log_softmax``.
 
     Swapping the kernel for ``log_softmax`` + gather routes the generator and
     the trainer through the same overridden op, so logprobs match bit-for-bit.
-    We patch the module attribute (not the re-export in ``v1/sample/sampler``)
-    because the active v2 path resolves ``compute_token_logprobs`` as a global
-    inside ``compute_topk_logprobs``.
     """
     import vllm.v1.worker.gpu.sample.logprob as vllm_logprob
 
-    def compute_token_logprobs(
+    from torchtitan.experiments.rl.actors.trainer import (
+        compute_logprobs as trainer_compute_logprobs_fn,
+    )
+
+    def generator_compute_token_logprobs(
         logits: torch.Tensor, token_ids: torch.Tensor
     ) -> torch.Tensor:
-        logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float32)
-        return logprobs.gather(-1, token_ids.to(torch.int64))
+        # Broadcast 2D logits over token_ids' num_logprobs columns so the
+        # trainer's compute_logprobs (one token per position) works unchanged.
+        token_ids = token_ids.to(torch.int64)  # int64 required by F.cross_entropy
+        logits = logits.unsqueeze(1).expand(-1, token_ids.shape[1], -1)
+        return trainer_compute_logprobs_fn(logits, token_ids)
 
-    vllm_logprob.compute_token_logprobs = compute_token_logprobs
+    vllm_logprob.compute_token_logprobs = generator_compute_token_logprobs
     logger.info(
-        "Patched vLLM compute_token_logprobs with log_softmax+gather so the "
-        "batch-invariant aten::_log_softmax override applies to generator logprobs"
+        "Patched vLLM compute_token_logprobs to reuse the trainer's "
+        "compute_logprobs so generator and trainer share one logprob code path"
     )
 
 
@@ -395,9 +396,9 @@ class VLLMGenerator(Actor, Configurable):
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
         set_batch_invariance(config.debug.batch_invariant)
         if config.debug.batch_invariant:
-            # The v2 logprob Triton kernel bypasses the aten overrides above;
-            # route it through aten::_log_softmax to match the trainer exactly.
-            _force_torch_logprobs_for_batch_invariance()
+            # The vLLM v2 logprob Triton kernel bypasses the aten overrides above;
+            # route it through trainer's function to match the trainer exactly.
+            _force_logprobs_fn_for_batch_invariance()
 
         self._set_determinism(config.debug)
 
