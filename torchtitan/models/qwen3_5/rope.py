@@ -13,7 +13,14 @@ from torchtitan.models.common.rope import _maybe_check_max_pos, CosSinRoPE
 
 
 class MRoPE(CosSinRoPE):
-    """Multi-dimensional RoPE for Qwen3-VL temporal/height/width positions."""
+    """Multi-dimensional RoPE for Qwen3.5 temporal/height/width positions.
+
+    Standard per-layer RoPE: each full-attention layer owns an ``MRoPE`` and
+    applies it through ``RoPE.forward`` -> ``_reshape_cache`` -> ``apply_rotary_emb``.
+    The only override is ``_reshape_cache``: for 3D ``(batch, seq, 3)`` MRoPE
+    positions it builds an interleaved cos/sin cache; for 2D ``(batch, seq)`` text
+    positions it falls back to the plain ``CosSinRoPE`` per-token lookup.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(CosSinRoPE.Config):
@@ -31,44 +38,56 @@ class MRoPE(CosSinRoPE):
         query: torch.Tensor,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Build a position-specific cache for 3D MRoPE position IDs."""
+        """Build a query-broadcastable cos/sin cache.
+
+        Dispatches on position rank: 3D ``(batch, seq, 3)`` MRoPE positions take
+        the interleaved scatter; everything else (2D text positions or ``None``)
+        falls back to the plain ``CosSinRoPE`` lookup.
+        """
         if positions is not None and positions.ndim == 3:
             return self._compute_mrope_cache(positions)
         return super()._reshape_cache(query, positions)
 
     def _compute_mrope_cache(self, position_ids: torch.Tensor) -> torch.Tensor:
+        """Build the interleaved cos/sin cache for 3D MRoPE positions.
+
+        Args:
+            position_ids: ``(batch, seq, 3)`` T/H/W positions. Plain, or a DTensor
+                under TP matching the rope ``cache`` buffer's Replicate placement.
+
+        Returns:
+            ``(batch, seq, 1, dim * 2)`` cache, broadcastable to the
+            ``(batch, seq, n_heads, rotary_dim)`` query/key in ``apply_rotary_emb``.
+
+        The scatter runs on plain local tensors. Under TP the ``cache`` buffer is a
+        Replicate DTensor, so it is unwrapped to local here and the result is
+        re-distributed with the buffer's placements, yielding a DTensor that
+        composes with the sharded query/key without any manual wrapping in the
+        attention forward.
+        """
         cfg = self.config
         assert isinstance(cfg, MRoPE.Config)
-        if position_ids.shape[0] != 3:
-            raise ValueError(
-                f"MRoPE position IDs must have shape (3, batch, seq), "
-                f"got {tuple(position_ids.shape)}."
-            )
 
         rope_cache = self.cache
         cache_dtensor = rope_cache if isinstance(rope_cache, DTensor) else None
         if cache_dtensor is not None:
             rope_cache = cache_dtensor.to_local()
-
-        position_dtensor = position_ids if isinstance(position_ids, DTensor) else None
-        pos_local = (
-            position_dtensor.to_local()
-            if position_dtensor is not None
+        pos = (
+            position_ids.to_local()
+            if isinstance(position_ids, DTensor)
             else position_ids
         )
-        pos_local = pos_local.to(device=rope_cache.device)
+        pos = pos.to(device=rope_cache.device)
 
-        _maybe_check_max_pos(
-            pos_local,
-            max_valid_pos=rope_cache.shape[0] - 1,
-        )
+        _maybe_check_max_pos(pos, max_valid_pos=rope_cache.shape[0] - 1)
         head_dim = rope_cache.shape[-1] // 2
         cos_cache = rope_cache[:, :head_dim]
         sin_cache = rope_cache[:, head_dim:]
 
         # Start from temporal positions for all dimensions, then overwrite the
         # height/width interleaved sections with their own position IDs.
-        t_pos = pos_local[0].long()
+        # ``pos`` is (batch, seq, 3); the last axis selects T/H/W.
+        t_pos = pos[..., 0].long()
         mrope_cos = cos_cache[t_pos]
         mrope_sin = sin_cache[t_pos]
 
@@ -77,7 +96,7 @@ class MRoPE(CosSinRoPE):
             length = cfg.mrope_section[dim] * 3
             low = torch.arange(offset, length, 3, device=rope_cache.device)
             col_indices = torch.cat([low, low + half])
-            dim_pos = pos_local[dim].long()
+            dim_pos = pos[..., dim].long()
             mrope_cos[..., col_indices] = cos_cache[:, col_indices][dim_pos]
             mrope_sin[..., col_indices] = sin_cache[:, col_indices][dim_pos]
 

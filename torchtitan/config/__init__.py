@@ -23,6 +23,14 @@ from .configs import (
 from .configurable import Configurable
 from .function import Function
 from .manager import ConfigManager
+from .override import (
+    apply_overrides,
+    clear_overrides,
+    derive,
+    Override,
+    override,
+    OverrideConfig,
+)
 
 __all__ = [
     "ConfigManager",
@@ -36,4 +44,11 @@ __all__ = [
     "CommConfig",
     "TrainingConfig",
     "DebugConfig",
+    # Override mechanism
+    "OverrideConfig",
+    "Override",
+    "override",
+    "derive",
+    "apply_overrides",
+    "clear_overrides",
 ]

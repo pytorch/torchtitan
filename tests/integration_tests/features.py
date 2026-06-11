@@ -577,6 +577,17 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "dataloader_kwargs",
             ngpu=2,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--override.imports torchtitan.overrides.fused_swiglu",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "Override: swap FeedForward with fused SwiGLU (FSDP2 + TP2)",
+            "override_fused_swiglu",
+            ngpu=4,
+        ),
         # NOTE: below are tests which require config change that cannot be done
         #       via CLI overrides, so remain llama3 specific
         OverrideDefinitions(
