@@ -266,6 +266,9 @@ class VLLMGenerator(Actor, Configurable):
         """Affects requests ALREADY running at the pull: preempts them and recomputes their KV under
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only."""
 
+        sliding_window: int | None = None
+        """sliding window size"""
+
         def __post_init__(self):
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal
@@ -331,6 +334,7 @@ class VLLMGenerator(Actor, Configurable):
             parallelism=config.parallelism,
             compile_config=compile_config,
             checkpoint_config=config.checkpoint,
+            sliding_window=config.sliding_window,
         )
 
         # Set vLLM environment variables from config before any vLLM initialization

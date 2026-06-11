@@ -311,9 +311,12 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
     packed_ids = torch.cat(parts).unsqueeze(0)
     positions = torch.cat(pos_parts).unsqueeze(0)
 
-    mask_mod = and_masks(get_causal_mask_mod(), get_document_mask_mod(positions))
+    mask_mods = [get_causal_mask_mod(), get_document_mask_mod(positions)]
+
+    if inner_attn.mask_mod is not None:
+        mask_mods.append(inner_attn.mask_mod.build().get_mask_mod())
     attention_masks = create_attention_mask(
-        mask_mod,
+        and_masks(*mask_mods),
         1,
         None,
         positions.shape[1],
@@ -567,6 +570,9 @@ class BitwiseParityTestBase(unittest.TestCase):
         hf_path = os.environ.get(cls.hf_assets_env_var)
         if hf_path:
             config.hf_assets_path = hf_path
+        # CheckpointManager.Config.initial_load_path must be absolute; the
+        # config_registry default is relative to the repo root, so resolve it.
+        config.hf_assets_path = os.path.abspath(config.hf_assets_path)
 
         from torchtitan.tools.utils import has_cuda_capability
 

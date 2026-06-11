@@ -114,6 +114,7 @@ class VLLMModelWrapper(Module):
         compile_config: CompileConfig,
         checkpoint_config: CheckpointManager.Config,
         vllm_config: VllmConfig,
+        sliding_window: int | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -134,21 +135,25 @@ class VLLMModelWrapper(Module):
             if attn_config.head_dim is not None
             else model_config.dim // n_heads
         )
-        vllm_backend = VLLMAttentionWrapper.Config(
-            hidden_size=model_config.dim,
-            num_heads=n_heads,
-            num_kv_heads=n_kv_heads,
-            head_dim=head_dim,
-        )
-        new_layers = [
-            dataclasses.replace(
-                layer_cfg,
-                attention=dataclasses.replace(
-                    layer_cfg.attention, inner_attention=vllm_backend
-                ),
+        new_layers = []
+        for layer_cfg in model_config.layers:
+            inner = layer_cfg.attention.inner_attention
+            vllm_backend = VLLMAttentionWrapper.Config(
+                hidden_size=model_config.dim,
+                num_heads=n_heads,
+                num_kv_heads=n_kv_heads,
+                head_dim=head_dim,
+                mask_mod=getattr(inner, "mask_mod", None),
+                sliding_window=sliding_window,
             )
-            for layer_cfg in model_config.layers
-        ]
+            new_layers.append(
+                dataclasses.replace(
+                    layer_cfg,
+                    attention=dataclasses.replace(
+                        layer_cfg.attention, inner_attention=vllm_backend
+                    ),
+                )
+            )
         self.config = dataclasses.replace(model_config, layers=new_layers)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
