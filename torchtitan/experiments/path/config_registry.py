@@ -108,7 +108,7 @@ def path() -> PathTrainer.Config:
             enable_sequence_parallel=False,
         ),
         checkpoint=_checkpoint_config(),
-        activation_checkpoint=ActivationCheckpointConfig(mode="none"),
+        activation_checkpoint=ActivationCheckpointConfig(mode="full"),
         compile=CompileConfig(enable=True, components=["model"]),
         metrics=MetricsProcessor.Config(log_freq=10, enable_reporterv2=True),
         validator=PathValidator.Config(
@@ -136,7 +136,7 @@ def _model_config() -> PathModel.Config:
             in_channels=in_channels,
             vision_features=vision_features,
             backbone="fastvit_t12",
-            pretrained=True,
+            pretrained=False,
             act_layer_name="gelu_tanh",
             drop_path_rate=0.2,
             mean=255 / 2,
@@ -230,7 +230,7 @@ def _optimizer_config() -> OptimizersContainer.Config:
     common = {"lr": 1e-3, "betas": (0.9, 0.95), "eps": 1e-8}
     no_decay = r"(point_policy\.hydra|temporal_policy\.temporal_hydra)\.(final_layer|scale_layer)"
     return OptimizersContainer.Config(
-        implementation="fused",
+        implementation="fused_opt_states_bf16",
         param_groups=[
             ParamGroupConfig(
                 pattern=no_decay,

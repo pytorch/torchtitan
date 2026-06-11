@@ -15,15 +15,16 @@ from timm.layers import (
     calculate_drop_path_rates,
     create_conv2d,
     get_act_layer,
+    LayerNorm,
+    LayerNorm2d,
     to_ntuple,
     trunc_normal_,
 )
 from timm.models import build_model_with_cfg
 from timm.models._manipulate import checkpoint_seq, named_apply
-from xx.training.path.allnorm import AllNorm1d, AllNorm2d
 
 
-__all__ = ["AllNorm1d", "AllNorm2d", "ConvNeXt", "convnext_xxlarge"]
+__all__ = ["ConvNeXt", "convnext_xxlarge"]
 
 
 class Downsample(nn.Module):
@@ -86,7 +87,7 @@ class ConvNeXtBlock(nn.Module):
             bias=conv_bias,
             **dd,
         )
-        self.norm = AllNorm1d(out_chs, eps=norm_eps, **dd)
+        self.norm = LayerNorm(out_chs, eps=norm_eps, **dd)
         self.mlp = Mlp(out_chs, int(mlp_ratio * out_chs), act_layer=get_act_layer(act_layer), **dd)
         self.gamma = nn.Parameter(ls_init_value * torch.ones(out_chs, **dd)) if ls_init_value is not None else None
         self.shortcut = (
@@ -133,7 +134,7 @@ class ConvNeXtStage(nn.Module):
             ds_ks = 2 if stride > 1 or dilation[0] != dilation[1] else 1
             pad = "same" if dilation[1] > 1 else 0
             self.downsample = nn.Sequential(
-                AllNorm2d(in_chs, eps=norm_eps, **dd),
+                LayerNorm2d(in_chs, eps=norm_eps, **dd),
                 create_conv2d(
                     in_chs,
                     out_chs,
@@ -209,7 +210,7 @@ class ConvNeXt(nn.Module):
 
         self.stem = nn.Sequential(
             nn.Conv2d(in_chans, dims[0], kernel_size=4, stride=4, bias=conv_bias, **dd),
-            AllNorm2d(dims[0], eps=norm_eps, **dd),
+            LayerNorm2d(dims[0], eps=norm_eps, **dd),
         )
         self.stages = nn.Sequential()
         dp_rates = calculate_drop_path_rates(drop_path_rate, depths, stagewise=True)
@@ -250,7 +251,7 @@ class ConvNeXt(nn.Module):
             num_classes,
             pool_type=global_pool,
             drop_rate=drop_rate,
-            norm_layer=partial(AllNorm2d, eps=norm_eps),
+            norm_layer=partial(LayerNorm2d, eps=norm_eps),
             act_layer="gelu",
             **dd,
         )

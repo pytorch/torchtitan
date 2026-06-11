@@ -528,15 +528,24 @@ def _apply_activation_checkpointing(
     model: PathModel,
     ac_config: ActivationCheckpointConfig,
 ) -> None:
-    if ac_config.mode != "selective":
-        raise ValueError("path activation checkpointing only supports mode='selective'")
+    if ac_config.mode not in ("full", "selective"):
+        raise ValueError("path activation checkpointing only supports mode='full' or mode='selective'")
 
     for stage_id, stage in enumerate(model.vision.encoder.stages):
-        model.vision.encoder.stages[stage_id] = _apply_ac_to_transformer_block(
-            stage,
-            ac_config,
-            base_fqn=f"vision.encoder.stages.{stage_id}",
-        )
+        if ac_config.mode == "full" and hasattr(stage, "blocks"):
+            blocks = stage.blocks
+            for block_id, block in enumerate(blocks):
+                blocks[block_id] = _apply_ac_to_transformer_block(
+                    block,
+                    ac_config,
+                    base_fqn=f"vision.encoder.stages.{stage_id}.blocks.{block_id}",
+                )
+        else:
+            model.vision.encoder.stages[stage_id] = _apply_ac_to_transformer_block(
+                stage,
+                ac_config,
+                base_fqn=f"vision.encoder.stages.{stage_id}",
+            )
     layers = model.temporal_policy.temporal_summarizer.transformer.layers
     for layer_id, layer in enumerate(layers):
         layers[layer_id] = _apply_ac_to_transformer_block(
