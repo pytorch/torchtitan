@@ -19,8 +19,6 @@ import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 
 from torchtitan.distributed.minimal_async_ep_kernels import (
-    active_swiglu_backward_kernel,
-    active_swiglu_forward_kernel,
     copy_full_counts_to_peers_kernel,
     copy_rows_to_peers_kernel,
     expand_topk_grad_kernel,
@@ -409,41 +407,6 @@ def _combine_to_origin(
     # should not see capacity padding or unused trailing columns.
     return origin_recv_buffer.narrow(0, 0, num_routed_rows).narrow(1, 0, x_RD.shape[1])
 
-
-@torch.library.custom_op(
-    "minimal_async_ep::active_swiglu",
-    mutates_args=(),
-    device_types="cuda",
-)
-def active_swiglu_op(
-    gate: torch.Tensor,
-    up: torch.Tensor,
-    active_rows: torch.Tensor,
-) -> torch.Tensor:
-    """Compute ``silu(gate) * up`` over active padded expert-buffer rows.
-
-    Args:
-        gate, up: ``(R_max, F)`` expert intermediate rows, where only the
-            first ``R`` rows are active and ``R_max`` is the static receive
-            capacity.
-        active_rows: ``(1,)`` device scalar containing ``R``.
-
-    Returns:
-        ``(R_max, F)`` output. Rows ``[:R]`` are defined; rows ``[R:]`` are
-        unspecified because grouped-mm offsets skip receive-capacity padding.
-    """
-    return active_swiglu_forward_kernel(gate, up, active_rows)
-
-
-@active_swiglu_op.register_fake
-def active_swiglu_op_fake(
-    gate: torch.Tensor,
-    up: torch.Tensor,
-    active_rows: torch.Tensor,
-) -> torch.Tensor:
-    return torch.empty_like(gate)
-
-
 def _dispatch_metadata(
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
     num_routed_rows: int,
@@ -703,40 +666,6 @@ def combine_op_fake(
 
 
 @torch.library.custom_op(
-    "minimal_async_ep::active_swiglu_backward",
-    mutates_args=(),
-    device_types="cuda",
-)
-def active_swiglu_backward_op(
-    grad_out: torch.Tensor,
-    gate: torch.Tensor,
-    up: torch.Tensor,
-    active_rows: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute active-row gradients for ``minimal_async_ep::active_swiglu``.
-
-    Args:
-        grad_out, gate, up: ``(R_max, F)`` tensors from the forward op.
-        active_rows: ``(1,)`` device scalar containing active row count ``R``.
-
-    Returns:
-        ``grad_gate`` and ``grad_up`` with shape ``(R_max, F)``. Rows ``[R:]``
-        are unspecified because receive-capacity padding is not consumed.
-    """
-    return active_swiglu_backward_kernel(grad_out, gate, up, active_rows)
-
-
-@active_swiglu_backward_op.register_fake
-def active_swiglu_backward_op_fake(
-    grad_out: torch.Tensor,
-    gate: torch.Tensor,
-    up: torch.Tensor,
-    active_rows: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(gate), torch.empty_like(up)
-
-
-@torch.library.custom_op(
     "minimal_async_ep::dispatch_backward",
     mutates_args=(),
     device_types="cuda",
@@ -873,22 +802,6 @@ def combine_backward_op_fake(
     )
 
 
-def active_swiglu_autograd_backward(ctx, grad_out):
-    gate, up, active_rows = ctx.saved_tensors
-    grad_gate, grad_up = active_swiglu_backward_op(
-        grad_out,
-        gate,
-        up,
-        active_rows,
-    )
-    return grad_gate, grad_up, None
-
-
-def active_swiglu_setup_context(ctx, inputs, output):
-    gate, up, active_rows = inputs
-    ctx.save_for_backward(gate, up, active_rows)
-
-
 def dispatch_setup_context(ctx, inputs, output):
     dispatch_input, topk_expert_ids_TK, *_ = inputs  # noqa: N806
     (
@@ -995,9 +908,6 @@ def combine_autograd_backward(ctx, grad_out, grad_routed_output):
     )
 
 
-active_swiglu_op.register_autograd(
-    active_swiglu_autograd_backward, setup_context=active_swiglu_setup_context
-)
 dispatch_op.register_autograd(
     dispatch_autograd_backward,
     setup_context=dispatch_setup_context,
@@ -1009,7 +919,6 @@ combine_op.register_autograd(
 
 __all__ = [
     "MinimalAsyncEPDispatchMetadata",
-    "active_swiglu_op",
     "combine_op",
     "dispatch_op",
     "init_buffer",
