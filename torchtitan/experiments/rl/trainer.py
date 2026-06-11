@@ -42,23 +42,20 @@ from monarch.actor import ProcMesh
 from monarch.spmd import setup_torch_elastic_env_async
 
 from torchtitan.config import CompileConfig, Configurable
-from torchtitan.experiments.rl.actors.generator import (
-    GenerateFn,
-    SamplingConfig,
-    VLLMGenerator,
-)
+from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import Batcher
 from torchtitan.experiments.rl.episode_buffer import EpisodeBuffer
+from torchtitan.experiments.rl.generator_router import GeneratorRouter, RoutingContext
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout import (
-    last_completion_text,
     prepare_rollout_metrics,
     rollout_to_episodes,
     RolloutGroup,
 )
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
+from torchtitan.experiments.rl.rollout.types import GenerateFn
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
 from torchtitan.experiments.rl.types import Episode, TrainingBatch
 from torchtitan.observability import structured_logger as sl
@@ -118,6 +115,10 @@ class GRPOLoss(Configurable):
         """
         # Per-token importance sampling ratio: π_θ / π_old
         log_ratio = policy_logprobs - generator_logprobs
+
+        # TODO: debug why we get nan when cudagraph is true
+        log_ratio = torch.nan_to_num(log_ratio)
+        log_ratio = torch.clamp(log_ratio, -20.0, 20.0)
         ratio = torch.exp(log_ratio)
 
         clipped_ratio = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
@@ -134,6 +135,11 @@ class GRPOLoss(Configurable):
                 "loss/ratio_mean": masked_ratio.sum() / loss_denominator,
                 "loss/ratio_clipped_frac": (
                     (torch.abs(ratio - clipped_ratio) > 1e-6).float() * loss_mask
+                ).sum()
+                / loss_denominator,
+                # Fraction of response tokens whose generator (vLLM) logprob is nan
+                "loss/generator_logprob_nan_frac": (
+                    (~torch.isfinite(generator_logprobs)).float() * loss_mask
                 ).sum()
                 / loss_denominator,
             }
@@ -155,10 +161,9 @@ def _log_samples(rollout_groups: list[RolloutGroup]) -> None:
         if rollout is None:
             continue
         logger.info("  [%s] reward=%+.1f", group.group_id, rollout.reward)
-        logger.info(
-            "       A: %s",
-            last_completion_text(rollout)[:300].replace("\n", " ").strip(),
-        )
+        message = rollout.turns[-1].completion_message
+        text = (message.get("content") or "") if message else ""
+        logger.info("       A: %s", text[:300].replace("\n", " ").strip())
 
 
 def _generation_metrics(groups: list[RolloutGroup]) -> list[m.Metric]:
@@ -339,6 +344,12 @@ class RLTrainer(Configurable):
         generator: VLLMGenerator.Config = field(default_factory=VLLMGenerator.Config)
         """VLLMGenerator actor configuration (vLLM engine, sampling)."""
 
+        generator_router: GeneratorRouter.Config = field(
+            default_factory=lambda: GeneratorRouter.Config(hot_swap=True)
+        )
+        """Router over one or more generator actors. `hot_swap=True`: a weight pull doesn't drain
+        in-flight generation (the async producer keeps generating across the swap)."""
+
         metrics: m.MetricsProcessor.Config = field(
             default_factory=m.MetricsProcessor.Config
         )
@@ -375,7 +386,7 @@ class RLTrainer(Configurable):
     def __init__(self, config: Config):
         self.config = config
         self.trainer = None
-        self.generator = None
+        self.generator_router: GeneratorRouter | None = None
         self._proc_meshes = []
         self.metrics_processor: m.MetricsProcessor = config.metrics.build(
             log_dir=config.dump_folder,
@@ -401,16 +412,27 @@ class RLTrainer(Configurable):
     async def close(self):
         """Best-effort: tear down actors, close metric backends, then stop proc meshes."""
         logger.info("Closing: tearing down actors and process meshes.")
-        for actor_name, actor in (
-            ("trainer", self.trainer),
-            ("generator", self.generator),
-        ):
-            if actor is None:
-                continue
+
+        if self.trainer is not None:
             try:
-                await actor.close.call()
+                await self.trainer.close.call()
             except Exception:
-                logger.exception("%s.close failed", actor_name)
+                logger.exception("trainer.close failed")
+
+        if self.generator_router is not None:
+            close_results = await self.generator_router.fanout(
+                "close", return_exceptions=True
+            )
+            for idx, result in enumerate(close_results):
+                if isinstance(result, BaseException):
+                    actor_name = (
+                        "generator" if len(close_results) == 1 else f"generator[{idx}]"
+                    )
+                    logger.error(
+                        "%s.close failed",
+                        actor_name,
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
 
         try:
             self.metrics_processor.close()
@@ -435,19 +457,29 @@ class RLTrainer(Configurable):
 
     @sl.log_trace_span("_generate")
     async def _generate(
-        self, prompt_token_ids, *, request_id, sampling_config=None, metrics_prefix
+        self,
+        prompt_token_ids,
+        *,
+        request_id,
+        session_id=None,
+        sampling_config=None,
+        metrics_prefix,
     ):
-        """Await one completion from the generator (rank 0 value; None on followers).
+        """Await one completion via the generator router (rank 0 value; None on followers).
 
         `metrics_prefix` namespaces the per-generation metrics (e.g. `"generator"` for training,
         `"validation_generator"` for validation). Bind it with `functools.partial` to hand a
-        `GenerateFn` to the rollouter.
+        `GenerateFn` to the rollouter; the rollouter passes `request_id`/`session_id` per call.
         """
-        result = await self.generator.generate.call(
+        # TODO: pass session_id into RoutingContext for sticky routing once #3625 lands.
+        result = await self.generator_router.route(
+            "generate",
             prompt_token_ids,
             request_id=request_id,
+            session_id=session_id,
             sampling_config=sampling_config,
             metrics_prefix=metrics_prefix,
+            routing_ctx=RoutingContext(estimated_cost=len(prompt_token_ids)),
         )
         return self._get_rank_0_value(result)
 
@@ -456,7 +488,7 @@ class RLTrainer(Configurable):
         self,
         *,
         trainer_mesh: ProcMesh,
-        generator_mesh: ProcMesh,
+        generator_meshes: list[ProcMesh],
     ):
         """Spawn Monarch actors on separate meshes and initialize weights.
 
@@ -472,7 +504,7 @@ class RLTrainer(Configurable):
 
         Args:
             trainer_mesh: ProcMesh the trainer actor is spawned on.
-            generator_mesh: ProcMesh the generator actor is spawned on.
+            generator_meshes: ProcMesh objects the generator actors are spawned on.
         """
         # Thread pool for TokenEnv's asyncio.to_thread renderer calls — one worker per
         # concurrent rollout, capped by CPUs.
@@ -486,6 +518,8 @@ class RLTrainer(Configurable):
         )
 
         config = self.config
+        if not generator_meshes:
+            raise ValueError("setup_async requires at least one generator mesh")
 
         # Fail fast on a seq-len mismatch: the batcher's `pack()` silently drops any episode longer
         # than `seq_len`, which then under-fills the batch and crashes the trainer mid-run. A rollout
@@ -518,10 +552,11 @@ class RLTrainer(Configurable):
         # shrink this span to a single call.
         with sl.log_trace_span("mesh_spawn"):
             # Store proc meshes for cleanup
-            self._proc_meshes = [trainer_mesh, generator_mesh]
+            self._proc_meshes = [trainer_mesh, *generator_meshes]
 
             await setup_torch_elastic_env_async(trainer_mesh)
-            await setup_torch_elastic_env_async(generator_mesh)
+            for generator_mesh in generator_meshes:
+                await setup_torch_elastic_env_async(generator_mesh)
 
             # Spawn actors on their respective meshes
             self.trainer = trainer_mesh.spawn(
@@ -535,20 +570,27 @@ class RLTrainer(Configurable):
                 output_dir=config.dump_folder,
             )
 
-            self.generator = generator_mesh.spawn(
-                "generator",
-                VLLMGenerator,
-                config.generator,
-                model_spec=config.model_spec,
-                model_path=config.hf_assets_path,
-                compile_config=config.compile,
-                max_num_seqs=max(
-                    config.num_groups_per_rollout_batch * config.group_size,
-                    config.num_validation_samples,
-                ),
-                output_dir=config.dump_folder,
-                stop_token_ids=self._stop_token_ids,
-            )
+            generators = []
+            for idx, generator_mesh in enumerate(generator_meshes):
+                actor_name = (
+                    "generator" if len(generator_meshes) == 1 else f"generator_{idx}"
+                )
+                generator = generator_mesh.spawn(
+                    actor_name,
+                    VLLMGenerator,
+                    config.generator,
+                    model_spec=config.model_spec,
+                    model_path=config.hf_assets_path,
+                    compile_config=config.compile,
+                    max_num_seqs=max(
+                        config.num_groups_per_rollout_batch * config.group_size,
+                        config.num_validation_samples,
+                    ),
+                    output_dir=config.dump_folder,
+                    stop_token_ids=self._stop_token_ids,
+                )
+                generators.append(generator)
+            self.generator_router = config.generator_router.build(generators=generators)
 
         # Initialize TorchStore for weight sync between trainer and generator.
         # StorageVolumes are spawned on the trainer mesh so they are colocated
@@ -563,7 +605,7 @@ class RLTrainer(Configurable):
         with sl.log_trace_span("trainer_push_model_state_dict"):
             await self.trainer.push_model_state_dict.call()
         with sl.log_trace_span("generator_initial_weight_sync"):
-            await self.generator.pull_model_state_dict.call(0)
+            await self.generator_router.pull_model_state_dict(policy_version=0)
 
     @sl.log_trace_span("_collect_rollouts")
     async def _collect_rollouts(
@@ -618,8 +660,8 @@ class RLTrainer(Configurable):
         group_results = await asyncio.gather(
             *(
                 self._rollouter.run_group_rollouts(
-                    generate=generate,
-                    example=example,
+                    generate_fn=generate,
+                    sample=example,
                     group_id=f"{group_prefix}step={step}/group={group_offset + i}",
                     group_size=group_size,
                     sampling=sampling,
@@ -926,8 +968,8 @@ class RLTrainer(Configurable):
         group_id: str,
     ) -> RolloutGroup:
         return await self._rollouter.run_group_rollouts(
-            generate=generate,
-            example=example,
+            generate_fn=generate,
+            sample=example,
             group_id=group_id,
             group_size=self.config.group_size,
             sampling=self._sampling,
@@ -995,8 +1037,8 @@ class RLTrainer(Configurable):
         for step in range(1, num_steps + 1):
             sl.set_step(step)
             # Propagate the step counter to actors for structured logging.
-            self.trainer.sync_log_step.call(step)
-            self.generator.sync_log_step.call(step)
+            await self.trainer.sync_log_step.call(step)
+            await self.generator_router.fanout("sync_log_step", step)
             t_step_start = time.perf_counter()
 
             # --- wait: this get_batch wait IS the trainer-idle bubble ---
@@ -1086,7 +1128,9 @@ class RLTrainer(Configurable):
             await self.trainer.push_model_state_dict.call()
         push_s = time.perf_counter() - t_push_start
         with sl.log_trace_span("generator_pull_model_state_dict"):
-            await self.generator.pull_model_state_dict.call(policy_version)
+            await self.generator_router.pull_model_state_dict(
+                policy_version=policy_version
+            )
         return _WeightSyncTimings(
             push_s=push_s, total_s=time.perf_counter() - t_push_start
         )

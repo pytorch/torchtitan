@@ -90,10 +90,15 @@ def _stub_trainer_for_step(calls, *, loss):
         ),
         push_model_state_dict=_Endpoint("push", calls),
     )
-    rl.generator = SimpleNamespace(
-        sync_log_step=_Endpoint("sync_log_step/generator", calls),
-        pull_model_state_dict=_Endpoint("pull", calls),
-    )
+
+    async def _fanout(method_name, *args, **kwargs):
+        calls.append(f"router_fanout/{method_name}")
+        return [None]
+
+    async def _pull(*, policy_version):
+        calls.append("pull")
+
+    rl.generator_router = SimpleNamespace(fanout=_fanout, pull_model_state_dict=_pull)
     rl.metrics_processor = SimpleNamespace(log=lambda **kwargs: None)
     rl._train_version = 0
     return rl
@@ -197,7 +202,7 @@ def test_setup_async_rejects_rollouts_that_can_exceed_batch_seq_len():
             ),
         )
         with pytest.raises(ValueError, match="smaller than the longest episode"):
-            await rl.setup_async(trainer_mesh=object(), generator_mesh=object())
+            await rl.setup_async(trainer_mesh=object(), generator_meshes=[object()])
 
     asyncio.run(main())
 

@@ -598,7 +598,7 @@ class VLLMGenerator(Actor, Configurable):
                             # reflects any just-applied swap. Only rank 0 holds the futures.
                             # TODO(async): record exact in-turn swap boundaries (a mid-decode pull
                             #   splits this into >1 interval); FINAL_ONLY output hides per-step counts.
-                            if self._tp_rank == 0:
+                            if self._rank == 0:
                                 self._generation_futures[
                                     request.request_id
                                 ].version_intervals = [(0, self.policy_version)]
