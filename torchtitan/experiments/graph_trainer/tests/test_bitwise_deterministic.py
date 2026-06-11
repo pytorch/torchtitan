@@ -339,11 +339,6 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
     model_flavor = "debugmodel"
     annotate_model = staticmethod(annotate_llama)
 
-    @unittest.skip(
-        "Eager self-determinism hashes drift across nightly PyTorch updates; "
-        "skipped instead of re-baselining. The aot_fx_trace-vs-eager tests "
-        "still guard numerics."
-    )
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
@@ -407,11 +402,6 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
     model_flavor = "debugmodel"
     annotate_model = staticmethod(annotate_deepseekv3)
 
-    @unittest.skip(
-        "Eager self-determinism hashes drift across nightly PyTorch updates; "
-        "skipped instead of re-baselining. The aot_fx_trace-vs-eager tests "
-        "still guard numerics."
-    )
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
@@ -480,11 +470,6 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     attn_backend = "flex"
     annotate_model = staticmethod(annotate_llama)
 
-    @unittest.skip(
-        "Eager self-determinism hashes drift across nightly PyTorch updates; "
-        "skipped instead of re-baselining. The aot_fx_trace-vs-eager tests "
-        "still guard numerics."
-    )
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
@@ -552,11 +537,6 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     attn_backend = "flex"
     annotate_model = staticmethod(annotate_deepseekv3)
 
-    @unittest.skip(
-        "Eager self-determinism hashes drift across nightly PyTorch updates; "
-        "skipped instead of re-baselining. The aot_fx_trace-vs-eager tests "
-        "still guard numerics."
-    )
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
@@ -630,11 +610,6 @@ class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
     model_flavor = "debugmodel_moe"
     annotate_model = staticmethod(annotate_qwen3)
 
-    @unittest.skip(
-        "Eager self-determinism hashes drift across nightly PyTorch updates; "
-        "skipped instead of re-baselining. The aot_fx_trace-vs-eager tests "
-        "still guard numerics."
-    )
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
@@ -703,11 +678,6 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     attn_backend = "flex"
     annotate_model = staticmethod(annotate_qwen3)
 
-    @unittest.skip(
-        "Eager self-determinism hashes drift across nightly PyTorch updates; "
-        "skipped instead of re-baselining. The aot_fx_trace-vs-eager tests "
-        "still guard numerics."
-    )
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
