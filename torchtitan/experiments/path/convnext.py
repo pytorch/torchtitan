@@ -176,9 +176,6 @@ class ConvNeXtStage(nn.Module):
 
 
 class ConvNeXt(nn.Module):
-    pretrained_name = "convnext_xxlarge.clip_laion2b_soup_ft_in1k"
-    first_conv_names = ("stem.0",)
-
     def __init__(
         self,
         in_chans: int = 3,
@@ -261,6 +258,31 @@ class ConvNeXt(nn.Module):
         for stage in self.stages:
             stage.grad_checkpointing = enable
 
+    def apply_activation_checkpointing(self, wrap, mode: str, base_fqn: str) -> None:
+        if mode == "full":
+            for stage_id, stage in enumerate(self.stages):
+                for block_id, block in enumerate(stage.blocks):
+                    stage.blocks[block_id] = wrap(
+                        block,
+                        f"{base_fqn}.stages.{stage_id}.blocks.{block_id}",
+                    )
+        else:
+            for stage_id, stage in enumerate(self.stages):
+                self.stages[stage_id] = wrap(stage, f"{base_fqn}.stages.{stage_id}")
+
+    def apply_fsdp(
+        self,
+        shard,
+        reshard_after_forward: bool,
+        head_reshard_after_forward: bool,
+    ) -> None:
+        shard(self.stem, reshard_after_forward)
+        for stage in self.stages:
+            for block in getattr(stage, "blocks", ()):
+                shard(block, reshard_after_forward)
+            shard(stage, reshard_after_forward)
+        shard(self.head, head_reshard_after_forward)
+
     def get_classifier(self) -> nn.Module:
         return self.head.fc
 
@@ -331,10 +353,6 @@ def checkpoint_filter_fn(state_dict, model):
             v = v.reshape(model.state_dict()[k].shape)
         out_dict[k] = v
     return out_dict
-
-
-ConvNeXt.checkpoint_filter_fn = staticmethod(checkpoint_filter_fn)
-
 
 def _create_convnext(variant: str, pretrained: bool = False, **kwargs):
     return build_model_with_cfg(

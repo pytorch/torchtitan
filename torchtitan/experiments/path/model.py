@@ -5,7 +5,6 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from einops import rearrange
-from timm.layers import get_act_layer
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import DTensor, distribute_tensor
@@ -19,7 +18,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import _apply_ac_to_transformer_block
-from torchtitan.distributed.fsdp import enable_fsdp_symm_mem
+from torchtitan.distributed.fsdp import enable_fsdp_symm_mem, get_fsdp_reshard_after_forward_policy
 from torchtitan.models.common import Embedding, LayerNorm, Linear, RMSNorm, SiLU
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.protocols.model import BaseModel
@@ -27,7 +26,10 @@ from torchtitan.protocols.module import Module, ModuleDict, ModuleList, Sequenti
 from torchtitan.tools.logging import logger
 from xx.ml_tools.constants.model import ModelInputs
 
-from . import convnext, fastvit
+from . import convnext
+
+
+_CONVNEXT_PRETRAINED_NAME = "convnext_xxlarge.clip_laion2b_soup_ft_in1k"
 
 
 @dataclass(frozen=True)
@@ -138,6 +140,14 @@ class PathTransformer(Module):
         for layer in self.layers:
             x = layer(x)
         return x
+
+    def apply_activation_checkpointing(self, wrap, base_fqn: str) -> None:
+        for layer_id, layer in enumerate(self.layers):
+            self.layers[layer_id] = wrap(layer, f"{base_fqn}.layers.{layer_id}")
+
+    def apply_fsdp(self, shard, reshard_after_forward: bool) -> None:
+        for layer in self.layers:
+            shard(layer, reshard_after_forward)
 
 
 class PointSummarizer(Module):
@@ -295,9 +305,7 @@ class Vision(Module):
         input_frame_names: tuple[str, ...]
         in_channels: int
         vision_features: int
-        backbone: str
         pretrained: bool
-        act_layer_name: str
         drop_path_rate: float
         mean: float
         std: float
@@ -305,24 +313,12 @@ class Vision(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
-        if config.backbone == "fastvit_t12":
-            self.encoder = fastvit.fastvit_t12(
-                pretrained=False,
-                in_chans=config.in_channels,
-                num_classes=config.vision_features,
-                act_layer=get_act_layer(config.act_layer_name),
-                drop_path_rate=config.drop_path_rate,
-                norm_layer=fastvit.AllNorm2d,
-            )
-        elif config.backbone == "convnext_xxlarge":
-            self.encoder = convnext.convnext_xxlarge(
-                pretrained=False,
-                in_chans=config.in_channels,
-                num_classes=config.vision_features,
-                drop_path_rate=config.drop_path_rate,
-            )
-        else:
-            raise ValueError(f"unknown path backbone {config.backbone!r}")
+        self.encoder = convnext.convnext_xxlarge(
+            pretrained=False,
+            in_chans=config.in_channels,
+            num_classes=config.vision_features,
+            drop_path_rate=config.drop_path_rate,
+        )
         self.register_buffer("_mean", torch.empty(1, config.in_channels, 1, 1), persistent=True)
         self.register_buffer("_std", torch.empty(1, config.in_channels, 1, 1), persistent=True)
 
@@ -351,37 +347,18 @@ class Vision(Module):
 
         missing, unexpected = self.encoder.load_state_dict(load_state, strict=False)
         logger.info(
-            f"Loaded {len(load_state)} {self.config.backbone} tensors from {self._pretrained_name()} "
+            f"Loaded {len(load_state)} ConvNeXt tensors from {_CONVNEXT_PRETRAINED_NAME} "
             f"({len(missing)} missing, {len(unexpected)} unexpected)"
         )
-
-    def _pretrained_name(self) -> str:
-        return self.encoder.pretrained_name
 
     def _pretrained_state_dict(self) -> dict[str, torch.Tensor]:
         from timm.models._builder import adapt_input_conv, load_state_dict_from_hf
 
-        model_name = self._pretrained_name()
-        state_dict = load_state_dict_from_hf(f"timm/{model_name}", weights_only=True)
-        state_dict = self.encoder.checkpoint_filter_fn(state_dict, self.encoder)
+        state_dict = load_state_dict_from_hf(f"timm/{_CONVNEXT_PRETRAINED_NAME}", weights_only=True)
+        state_dict = convnext.checkpoint_filter_fn(state_dict, self.encoder)
         if self.config.in_channels != 3:
-            for first_conv in self.encoder.first_conv_names:
-                weight_name = f"{first_conv}.weight"
-                state_dict[weight_name] = adapt_input_conv(self.config.in_channels, state_dict[weight_name])
-        self._adapt_allnorm_state_dict(state_dict, self.encoder.state_dict())
+            state_dict["stem.0.weight"] = adapt_input_conv(self.config.in_channels, state_dict["stem.0.weight"])
         return state_dict
-
-    @staticmethod
-    def _adapt_allnorm_state_dict(state_dict: dict[str, torch.Tensor], target_state: dict[str, torch.Tensor]) -> None:
-        to_del = []
-        for name, value in state_dict.items():
-            target = target_state.get(name)
-            if target is not None and tuple(value.shape) != tuple(target.shape) and target.numel() == 1 and value.ndim == 1:
-                # state_dict[name] = value.float().mean().reshape(target.shape)
-                to_del.append(name)
-        for name in to_del:
-            del state_dict[name]
-
 
     @staticmethod
     def _move_pretrained_value(value: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -404,7 +381,6 @@ class PathModel(BaseModel):
         temporal_policy: TemporalPolicy.Config
 
         def update_from_config(self, *, config, **kwargs) -> None:
-            self.vision.backbone = config.backbone
             parallelism = config.parallelism
             if parallelism.full_dtensor:
                 raise ValueError("path v1 does not support full DTensor")
@@ -444,13 +420,7 @@ class PathModel(BaseModel):
             reset = getattr(module, "reset_parameters", None)
             if callable(reset):
                 reset()
-        for module in self.modules():
-            if isinstance(module, fastvit.ConvMlp):
-                module.apply(module._init_weights)
-            elif isinstance(module, fastvit.FastVit):
-                module.apply(module._init_weights)
-            elif isinstance(module, convnext.ConvNeXt):
-                module.init_path_weights()
+        self.vision.encoder.init_path_weights()
 
     def forward(
         self,
@@ -504,9 +474,7 @@ def parallelize_path(
         _apply_activation_checkpointing(model, ac_config)
 
     if model_compile_enabled:
-        model.vision.encoder.compile(backend=compile_config.backend)
-        model.point_policy.compile(backend=compile_config.backend)
-        model.temporal_policy.compile(backend=compile_config.backend)
+        _apply_compile(model, compile_config)
 
     names = ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
     _apply_fsdp(
@@ -514,7 +482,9 @@ def parallelize_path(
         parallel_dims.get_mesh(names),
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+        pp_enabled=parallel_dims.pp_enabled,
         cpu_offload=training.enable_cpu_offload,
+        reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         enable_symm_mem=parallelism.enable_fsdp_symm_mem,
     )
 
@@ -528,50 +498,69 @@ def _apply_activation_checkpointing(
     model: PathModel,
     ac_config: ActivationCheckpointConfig,
 ) -> None:
-    if ac_config.mode not in ("full", "selective"):
-        raise ValueError("path activation checkpointing only supports mode='full' or mode='selective'")
+    def wrap(module: nn.Module, fqn: str) -> nn.Module:
+        return _apply_ac_to_transformer_block(module, ac_config, base_fqn=fqn)
 
-    for stage_id, stage in enumerate(model.vision.encoder.stages):
-        if ac_config.mode == "full" and hasattr(stage, "blocks"):
-            blocks = stage.blocks
-            for block_id, block in enumerate(blocks):
-                blocks[block_id] = _apply_ac_to_transformer_block(
-                    block,
-                    ac_config,
-                    base_fqn=f"vision.encoder.stages.{stage_id}.blocks.{block_id}",
-                )
-        else:
-            model.vision.encoder.stages[stage_id] = _apply_ac_to_transformer_block(
-                stage,
-                ac_config,
-                base_fqn=f"vision.encoder.stages.{stage_id}",
-            )
-    layers = model.temporal_policy.temporal_summarizer.transformer.layers
-    for layer_id, layer in enumerate(layers):
-        layers[layer_id] = _apply_ac_to_transformer_block(
-            layer,
-            ac_config,
-            base_fqn=f"temporal_policy.temporal_summarizer.transformer.layers.{layer_id}",
-        )
+    model.vision.encoder.apply_activation_checkpointing(
+        wrap,
+        ac_config.mode,
+        "vision.encoder",
+    )
+    model.temporal_policy.temporal_summarizer.transformer.apply_activation_checkpointing(
+        wrap,
+        "temporal_policy.temporal_summarizer.transformer",
+    )
+
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the path model")
 
 
+def _apply_compile(model: PathModel, compile_config: CompileConfig) -> None:
+    torch._dynamo.config.capture_scalar_outputs = True
+    torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
+    model.vision.encoder.compile(backend=compile_config.backend)
+    model.point_policy.compile(backend=compile_config.backend)
+    model.temporal_policy.compile(backend=compile_config.backend)
+    logger.info("Compiling path model components with torch.compile")
+
+
 def _apply_fsdp(
-    model: nn.Module,
+    model: PathModel,
     dp_mesh: DeviceMesh,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
+    pp_enabled: bool,
     cpu_offload: bool = False,
+    reshard_after_forward_policy: str = "default",
     enable_symm_mem: bool = False,
 ) -> None:
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
         reduce_dtype=reduce_dtype,
-        cast_forward_inputs=False,
+        cast_forward_inputs=True,
     )
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
+    reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+        reshard_after_forward_policy,
+        pp_enabled,
+    )
+
+    def shard(module: nn.Module, reshard: bool) -> None:
+        fully_shard(module, **fsdp_config, reshard_after_forward=reshard)
+
+    model.vision.encoder.apply_fsdp(
+        shard,
+        reshard_after_forward,
+        reshard_after_forward_policy == "always",
+    )
+    model.temporal_policy.temporal_summarizer.transformer.apply_fsdp(
+        shard,
+        reshard_after_forward,
+    )
+    shard(model.vision.encoder, reshard_after_forward)
+    shard(model.point_policy, reshard_after_forward)
+    shard(model.temporal_policy, reshard_after_forward)
     fully_shard(model, **fsdp_config)
 
     if enable_symm_mem:

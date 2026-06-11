@@ -75,7 +75,6 @@ def path() -> PathTrainer.Config:
     steps = 512*10
     mixed_precision_param = "bfloat16"
     return PathTrainer.Config(
-        backbone="fastvit_t12",
         loss=PathLoss.Config(),
         model_spec=model_registry(),
         tokenizer=NoOpTokenizer.Config(),
@@ -135,9 +134,7 @@ def _model_config() -> PathModel.Config:
             input_frame_names=tuple(INPUT_FRAMES_NAMES),
             in_channels=in_channels,
             vision_features=vision_features,
-            backbone="fastvit_t12",
             pretrained=False,
-            act_layer_name="gelu_tanh",
             drop_path_rate=0.2,
             mean=255 / 2,
             std=255 / 4,

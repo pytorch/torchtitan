@@ -3,7 +3,6 @@ from __future__ import annotations
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from typing import Literal
 
 import torch
 
@@ -20,7 +19,6 @@ from .validate import PathValidator
 class PathTrainer(Trainer):
     @dataclass(kw_only=True, slots=True)
     class Config(Trainer.Config):
-        backbone: Literal["fastvit_t12", "convnext_xxlarge"]
         loss: PathLoss.Config
         validator: PathValidator.Config
         checkpoint: OnnxCheckpointManager.Config
