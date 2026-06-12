@@ -36,6 +36,10 @@ class Completion:
     """Per-generation metrics measured by the generator (latencies); the
     controller attaches them to the rollout turn."""
 
+    version_intervals: list[tuple[int, int]] = field(default_factory=list)
+    """Policy-version boundaries `(start_token_index, version)`; today the single conservative
+    interval `[(0, admission_version)]` — the version this completion was sampled at."""
+
 
 @dataclass(kw_only=True, slots=True)
 class Episode:
@@ -51,6 +55,10 @@ class Episode:
     loss_mask: list[bool]  # [L] True on assistant tokens to train
     logprobs: list[float]  # [L] generator logprobs; 0.0 where loss_mask is False
     advantage: list[float]  # [L] advantage on assistant tokens, 0.0 elsewhere
+
+    version_intervals: list[tuple[int, int]] = field(default_factory=list)
+    """Policy-version boundaries `(start_token_index, version)` in this packed sequence, one per
+    turn's completion; the off-policy filter reads the earliest version (see `earliest_version`)."""
 
 
 @dataclass(kw_only=True, slots=True)

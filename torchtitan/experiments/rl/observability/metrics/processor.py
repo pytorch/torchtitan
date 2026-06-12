@@ -64,6 +64,11 @@ class MetricsProcessor(Configurable):
                 "train/lr",
                 "perf/tokens_per_second",
                 "timing/step",
+                # Async diagnostics: tell generation-bound (idle high) from train/sync-bound.
+                "controller/trainer_idle_time_ratio",
+                "timing/weight_sync_overhead_ratio",
+                "buffer/depth_batches",
+                "buffer/dropped_stale",
             ]
         )
         """Regex search patterns selecting console keys for train log lines.

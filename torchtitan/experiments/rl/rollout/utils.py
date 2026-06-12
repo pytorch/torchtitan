@@ -29,15 +29,20 @@ def rollout_to_episodes(rollout: Rollout) -> list[Episode]:
         i.e. you give tokens to the generators, and you append (bridge) the tokens received, leaving no room for changes.
         TITO is our default;
 
+    Each turn's `version_intervals` (the policy version it was sampled at) shift to where the turn's
+    completion lands in the packed sequence, so a multi-turn episode records the version per turn.
+
     Example (5 turns; the env compacts history before turn 3, so the prefix breaks -> 2 episodes).
     P = prompt; C = completion; E = env reply
-        turn0: prompt=[P1]              completion=[C1]
-        turn1: prompt=[P1,C1,E1]        completion=[C2]
-        turn2: prompt=[P1,C1,E1,C2,E2]  completion=[C3]
-        turn3: prompt=[P2]              completion=[C4]   # history compacted -> prefix breaks
-        turn4: prompt=[P2,C4,E4]        completion=[C5]
+        turn0 (v5): prompt=[P1]              completion=[C1]
+        turn1 (v6): prompt=[P1,C1,E1]        completion=[C2]
+        turn2 (v6): prompt=[P1,C1,E1,C2,E2]  completion=[C3]
+        turn3 (v6): prompt=[P2]              completion=[C4]   # history compacted -> prefix breaks
+        turn4 (v7): prompt=[P2,C4,E4]        completion=[C5]
         # -> episode 0: token_ids=[P1,C1,E1,C2,E2,C3], loss_mask=[0,1,0,1,0,1]   sample_id=<rollout id>
+        #              version_intervals=[(1,5),(3,6),(5,6)]   # each completion at its sampling version
         #    episode 1: token_ids=[P2,C4,E4,C5],        loss_mask=[0,1,0,1]       sample_id=".../branch=1"
+        #              version_intervals=[(1,6),(3,7)]
     """
     rollout_advantage = rollout.advantage
     episodes: list[Episode] = []
@@ -65,7 +70,6 @@ def rollout_to_episodes(rollout: Rollout) -> list[Episode]:
             # start a new episode
             episodes.append(
                 Episode(
-                    # TODO(async): carry per-token version_intervals in episode
                     policy_version=rollout_turn.policy_version,
                     sample_id=(
                         rollout.sample_id
@@ -76,6 +80,7 @@ def rollout_to_episodes(rollout: Rollout) -> list[Episode]:
                     loss_mask=[],
                     logprobs=[],
                     advantage=[],
+                    version_intervals=[],
                 )
             )
             # The whole prompt opens this episode.
@@ -89,10 +94,21 @@ def rollout_to_episodes(rollout: Rollout) -> list[Episode]:
         prompt_delta = prompt[prefix_len:]
         num_delta = len(prompt_delta)
         num_completion = len(rollout_turn.completion_token_ids)
-        episode.token_ids += prompt_delta + rollout_turn.completion_token_ids
-        episode.loss_mask += [False] * num_delta + [True] * num_completion
-        episode.logprobs += [0.0] * num_delta + rollout_turn.completion_logprobs
-        episode.advantage += [0.0] * num_delta + [rollout_advantage] * num_completion
+        episode.token_ids += prompt_delta
+        episode.loss_mask += [False] * num_delta
+        episode.logprobs += [0.0] * num_delta
+        episode.advantage += [0.0] * num_delta
+        # Shift this turn's version boundaries to where its completion lands in the packed
+        # sequence, so a packed multi-turn episode records the version each turn was sampled at.
+        completion_offset = len(episode.token_ids)
+        episode.version_intervals += [
+            (completion_offset + start, version)
+            for start, version in rollout_turn.version_intervals
+        ]
+        episode.token_ids += rollout_turn.completion_token_ids
+        episode.loss_mask += [True] * num_completion
+        episode.logprobs += rollout_turn.completion_logprobs
+        episode.advantage += [rollout_advantage] * num_completion
 
         prev_prompt_and_completion = prompt + rollout_turn.completion_token_ids
 

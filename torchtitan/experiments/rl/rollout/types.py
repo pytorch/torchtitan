@@ -97,6 +97,10 @@ class RolloutTurn:
     """Trainer policy version when this response was sampled; `None` for a
     prompt-only turn (no generation happened, e.g. the prompt was too long)."""
 
+    version_intervals: list[tuple[int, int]] = field(default_factory=list)
+    """Policy-version boundaries `(start_token_index, version)` for this turn's completion, carried
+    from the `Completion`; `rollout_to_episodes` shifts them into packed-episode offsets."""
+
     # Logging
     prompt_messages: list[Message] = field(
         default_factory=list
