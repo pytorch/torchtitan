@@ -38,10 +38,6 @@ class AllToAllDispatchMetadata(LocalDispatchMetadata):
 class LocalTokenDispatcher(Configurable):
     """Token dispatcher for EP=1. Handles local token reordering only.
 
-    Also serves as the base class for EP dispatchers (AllToAllTokenDispatcher,
-    DeepEPTokenDispatcher, HybridEPTokenDispatcher) which override
-    dispatch() and combine().
-
     Not an nn.Module — dispatchers have no learnable parameters or buffers.
     """
 
@@ -55,8 +51,6 @@ class LocalTokenDispatcher(Configurable):
         self.num_experts = config.num_experts
         self.top_k = config.top_k
         self.score_before_experts = config.score_before_experts
-        self.sp_size: int = 1
-        self.sp_rank: int | torch.SymInt = 0
 
     def wire_meshes(
         self,
@@ -66,20 +60,6 @@ class LocalTokenDispatcher(Configurable):
     ) -> None:
         """No-op for the EP=1 dispatcher. Subclasses override."""
         del ep_mesh, tp_mesh
-
-    def _sp_global_token_indices(
-        self,
-        local_indices: torch.Tensor,
-        local_seq_len: int,
-    ) -> torch.Tensor:
-        if self.sp_size == 1:
-            return local_indices
-
-        local_pos = local_indices % local_seq_len
-        batch_idx = local_indices // local_seq_len
-        global_seq_len = local_seq_len * self.sp_size
-        global_indices = batch_idx * global_seq_len + local_pos
-        return torch.add(global_indices, self.sp_rank * local_seq_len)
 
     def _local_reorder(
         self,
@@ -201,15 +181,12 @@ class LocalTokenDispatcher(Configurable):
         return out_TD
 
 
-class AllToAllTokenDispatcher(LocalTokenDispatcher):
-    """Token dispatcher for EP>1. Handles token reorder + all-to-all dispatch/combine.
+class BaseEPTokenDispatcher(LocalTokenDispatcher):
+    """Base class for EP token dispatchers.
 
-    Handles the full token routing lifecycle:
-    dispatch (reorder + EP all-to-all) and combine (reverse).
-
-    ``ep_mesh`` and the ``sp_size`` / ``sp_rank`` SP coordinates are wired
-    by the owning ``GroupedExperts.parallelize`` override via
-    ``wire_meshes``.
+    Owns EP mesh wiring and SP coordinate helpers shared by EP implementations.
+    LocalTokenDispatcher intentionally does not know about SP: local dispatch is
+    used when EP is off, and expert activations are replicated for expert TP.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -218,10 +195,6 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
     def __init__(self, config: Config):
         super().__init__(config)
-        # DeviceMesh (not ProcessGroup) so that CooR precompile can use
-        # torch.ops._dtensor.mesh_get_process_group to keep the FX graph
-        # rank-agnostic. None when EP=1 so dispatch falls back to the
-        # LocalTokenDispatcher path.
         self.ep_mesh: DeviceMesh | None = None
         # Sequence-parallel split coordinates derived from tp_mesh.
         # ``sp_rank`` uses ``DeviceMesh._sym_get_coordinate`` so it is a
@@ -236,16 +209,50 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         ep_mesh: DeviceMesh | None,
         tp_mesh: DeviceMesh | None,
     ) -> None:
-        """Install the EP mesh and SP coordinates used by dispatch / combine.
-
-        Both arguments may be ``None`` when the corresponding parallelism
-        dimension is disabled; ``dispatch`` / ``combine`` handle the
-        disabled cases internally.
-        """
+        """Install the EP mesh and SP coordinates used by dispatch / combine."""
         self.ep_mesh = ep_mesh
         if tp_mesh is not None:
             self.sp_size = tp_mesh.size()
             self.sp_rank = tp_mesh._sym_get_coordinate(0)
+
+    def _sp_global_token_indices(
+        self,
+        local_indices: torch.Tensor,
+        local_seq_len: int,
+    ) -> torch.Tensor:
+        if self.sp_size == 1:
+            return local_indices
+
+        local_pos = local_indices % local_seq_len
+        batch_idx = local_indices // local_seq_len
+        global_seq_len = local_seq_len * self.sp_size
+        global_indices = batch_idx * global_seq_len + local_pos
+        return torch.add(global_indices, self.sp_rank * local_seq_len)
+
+    def dispatch(self, *args, **kwargs):
+        raise NotImplementedError("BaseEPTokenDispatcher does not implement dispatch")
+
+    def combine(self, *args, **kwargs):
+        raise NotImplementedError("BaseEPTokenDispatcher does not implement combine")
+
+
+class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
+    """Token dispatcher for EP>1. Handles token reorder + all-to-all dispatch/combine.
+
+    Handles the full token routing lifecycle:
+    dispatch (reorder + EP all-to-all) and combine (reverse).
+
+    ``ep_mesh`` and the ``sp_size`` / ``sp_rank`` SP coordinates are wired
+    by the owning ``GroupedExperts.parallelize`` override via
+    ``wire_meshes``.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseEPTokenDispatcher.Config):
+        pass
+
+    def __init__(self, config: Config):
+        super().__init__(config)
 
     def dispatch(
         self,
@@ -279,7 +286,8 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         """
         # EP=1: fall back to local dispatch (no all-to-all needed)
         if self.ep_mesh is None:
-            return super().dispatch(
+            return LocalTokenDispatcher.dispatch(
+                self,
                 x_TD, topk_scores_TK, topk_expert_ids_TK, num_local_tokens_per_expert_E
             )
 
@@ -451,7 +459,8 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         """
         # EP=1: fall back to local combine (no all-to-all needed)
         if self.ep_mesh is None:
-            return super().combine(
+            return LocalTokenDispatcher.combine(
+                self,
                 routed_output_RD,
                 metadata,
                 x_TD,
@@ -590,7 +599,7 @@ class DeepEPDispatchMetadata:
     state: object  # deepep.DispatchState or hybridep.DispatchState
 
 
-class DeepEPTokenDispatcher(LocalTokenDispatcher):
+class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     """Token dispatcher using DeepEP for efficient token dispatch/combine.
 
     Uses DeepEP library kernels (H100/NVLink Switch) instead of standard
@@ -599,32 +608,15 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(LocalTokenDispatcher.Config):
+    class Config(BaseEPTokenDispatcher.Config):
         pass
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.ep_mesh: DeviceMesh | None = None
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
         from torchtitan.distributed.deepep import deepep  # noqa: F401
-
-    def wire_meshes(
-        self,
-        *,
-        ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
-    ) -> None:
-        """Install the EP mesh used by DeepEP dispatch / combine.
-
-        ``tp_mesh`` provides SP coordinates so combine can expand its output
-        to full sequence length (matching AllToAll's convention).
-        """
-        self.ep_mesh = ep_mesh
-        if tp_mesh is not None:
-            self.sp_size = tp_mesh.size()
-            self.sp_rank = tp_mesh._sym_get_coordinate(0)
 
     # pyrefly: ignore [bad-override]
     def dispatch(
@@ -702,7 +694,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         return combined_TD
 
 
-class HybridEPTokenDispatcher(LocalTokenDispatcher):
+class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
     """Token dispatcher using HybridEP for efficient token dispatch/combine.
 
     Uses HybridEP library kernels (GB200/NVLink72) instead of standard
@@ -710,7 +702,7 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(LocalTokenDispatcher.Config):
+    class Config(BaseEPTokenDispatcher.Config):
         """Config for HybridEP token dispatcher.
 
         Args:
@@ -750,29 +742,10 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
         super().__init__(config)
         self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
         self.pad_multiple = config.pad_multiple
-        self.ep_mesh: DeviceMesh | None = None
-        self.sp_size: int = 1
-        self.sp_rank: int | torch.SymInt = 0
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
         from torchtitan.distributed.deepep import hybridep  # noqa: F401
-
-    def wire_meshes(
-        self,
-        *,
-        ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
-    ) -> None:
-        """Install the EP mesh used by HybridEP dispatch / combine.
-
-        ``tp_mesh`` provides SP coordinates so combine can expand its output
-        to full sequence length (matching AllToAll's convention).
-        """
-        self.ep_mesh = ep_mesh
-        if tp_mesh is not None:
-            self.sp_size = tp_mesh.size()
-            self.sp_rank = tp_mesh._sym_get_coordinate(0)
 
     # pyrefly: ignore [bad-override]
     def dispatch(
