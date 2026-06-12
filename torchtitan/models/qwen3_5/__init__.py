@@ -12,7 +12,7 @@ import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 
-from torchtitan.models.common import Conv1d, VocabParallelEmbedding, Linear  # noqa: F401
+from torchtitan.models.common import Conv1d, Embedding, Linear  # noqa: F401
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_experts_config,
@@ -479,7 +479,7 @@ def _debugmodel(attn_backend: str) -> Qwen35Model.Config:
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
-        tok_embeddings=VocabParallelEmbedding.Config(
+        tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -539,7 +539,7 @@ def _debugmodel_moe(
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
-        tok_embeddings=VocabParallelEmbedding.Config(
+        tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -605,7 +605,7 @@ def _0_8b(attn_backend: str) -> Qwen35Model.Config:
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
-        tok_embeddings=VocabParallelEmbedding.Config(
+        tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -666,7 +666,7 @@ def _2b(attn_backend: str) -> Qwen35Model.Config:
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
-        tok_embeddings=VocabParallelEmbedding.Config(
+        tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -726,7 +726,7 @@ def _4b(attn_backend: str) -> Qwen35Model.Config:
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
-        tok_embeddings=VocabParallelEmbedding.Config(
+        tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -782,7 +782,7 @@ def _9b(attn_backend: str) -> Qwen35Model.Config:
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
-        tok_embeddings=VocabParallelEmbedding.Config(
+        tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -838,7 +838,7 @@ def _27b(attn_backend: str) -> Qwen35Model.Config:
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
-        tok_embeddings=VocabParallelEmbedding.Config(
+        tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -897,7 +897,7 @@ def _35b_a3b(
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
-        tok_embeddings=VocabParallelEmbedding.Config(
+        tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -960,7 +960,7 @@ def _122b_a10b(
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
-        tok_embeddings=VocabParallelEmbedding.Config(
+        tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -1023,7 +1023,7 @@ def _397b_a17b(
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
-        tok_embeddings=VocabParallelEmbedding.Config(
+        tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,

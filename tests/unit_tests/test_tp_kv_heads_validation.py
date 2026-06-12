@@ -28,7 +28,7 @@ try:
     from torchtitan.models.common import (
         ComplexRoPE,
         compute_ffn_hidden_dim,
-        VocabParallelEmbedding,
+        Embedding,
         Linear,
         RMSNorm,
     )
@@ -95,7 +95,7 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
     return Llama3Model.Config(
         dim=_DIM,
         vocab_size=_VOCAB_SIZE,
-        tok_embeddings=VocabParallelEmbedding.Config(num_embeddings=_VOCAB_SIZE, embedding_dim=_DIM),
+        tok_embeddings=Embedding.Config(num_embeddings=_VOCAB_SIZE, embedding_dim=_DIM),
         norm=RMSNorm.Config(normalized_shape=_DIM),
         lm_head=Linear.Config(in_features=_DIM, out_features=_VOCAB_SIZE),
         layers=layers,
