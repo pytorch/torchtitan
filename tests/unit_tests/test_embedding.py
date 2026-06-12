@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torch.distributed.tensor.placement_types import _MaskPartial
 import unittest
 from dataclasses import dataclass
 from functools import partial
@@ -15,18 +14,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from spmd_types.checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import (
-    distribute_tensor,
-    Replicate,
-    Shard,
-)
+from torch.distributed.tensor import distribute_tensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _MaskPartial
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
 
-from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_backend
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+from torchtitan.distributed.utils import set_spmd_backend
 from torchtitan.models.common.embedding import VocabParallelEmbedding
 
 
@@ -144,7 +140,9 @@ class TestVocabParallelEmbedding(DTensorTestBase):
                     full_output = F.embedding(global_tokens, global_weight)
                     expected_placement = Shard(1) if enable_sp else Replicate()
                     native_dtensor_output = F.embedding(tokens_dtensor, weight_dtensor)
-                    self.assertTrue(isinstance(native_dtensor_output.placements[0], _MaskPartial))
+                    self.assertTrue(
+                        isinstance(native_dtensor_output.placements[0], _MaskPartial)
+                    )
                     dtensor_output = native_dtensor_output.redistribute(
                         placements=(expected_placement,)
                     )
@@ -192,9 +190,7 @@ class TestVocabParallelEmbedding(DTensorTestBase):
                         torch.equal(local_output, dtensor_output.to_local())
                     )
                     if not enable_sp:
-                        self.assertTrue(
-                            torch.equal(local_output, full_output)
-                        )
+                        self.assertTrue(torch.equal(local_output, full_output))
 
 
 if __name__ == "__main__":
