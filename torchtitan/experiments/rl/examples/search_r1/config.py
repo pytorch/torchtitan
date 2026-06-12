@@ -20,7 +20,11 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
-from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
+from torchtitan.experiments.rl.actors.generator import (
+    SamplingConfig,
+    VLLMCudagraphConfig,
+    VLLMGenerator,
+)
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.examples.search_r1.rollouter import SearchR1Rollouter
@@ -103,6 +107,11 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
+            # Run vLLM eager (no CUDA-graph capture). With cudagraph="full" the
+            # engine emits degenerate generations + NaN logprobs in this stack
+            # (see PR #3593 note on cudagraph NaNs); eager matches the reference
+            # 1.7B run. TODO: re-enable once the cudagraph NaN root cause is fixed.
+            cudagraph=VLLMCudagraphConfig(enable=False),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 # slime: temperature 1.0 + top_p 1.0; stop each turn at its action tag.
