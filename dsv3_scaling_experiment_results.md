@@ -635,3 +635,350 @@ eager run. Eager peaks at ~72% of 95 GiB at B=16; graph has more headroom.
   baseline, default `graph` runs the graph_trainer path (Run 7).
 - No OOM at B=16 (peak ~68.8 GiB / 95 GiB), but eager is ~12 GiB closer to the
   limit than graph_trainer at the same batch.
+
+---
+
+## Run 9 — graph_trainer + MinimalAsyncEP + forced cudagraph (the fix, sync-free MoE row)
+
+**Date:** 2026-06-11
+**Branch:** `graph_trainer/dsv3_scaling` (same tree as Runs 7–8, with the
+`chunked_loss.py` fix and the `cudagraph.py` force-capture override)
+**Launcher:** `MODE=graph EP=minimal ./run_graph_trainer_dsv3.sh` —
+`graph_trainer_deepseek_v3_16b_minimal_async_ep`, `dp_shard=8 tp=1 ep=4`, B=16,
+seq 4096, `--compile.memory_policy full`, **cudagraph ENABLED + FORCED**
+(MinimalAsyncEP is sync-free / cudagraphable; the force bypasses the `_grouped_mm`
+`< sm_100` gate), `ChunkedCELossWithParamGrads` (`num_chunks=8`),
+`TORCHINDUCTOR_COMPILE_THREADS=8`.
+
+> ✅ **NUMERICS NOW VERIFIED (update).** When first run this was a perf-only
+> comparison; the seed-pinned `--debug.deterministic` check has since proven graph
+> ≡ eager **bitwise** for MinimalAsyncEP **with the forced cudagraph on** (loss +
+> grad_norm 0/20) — see the "MinimalAsyncEP numerics verification" subsection at
+> the end. The throughput/memory numbers below stand as a perf comparison vs the
+> eager MinimalAsyncEP baseline (Run 10); the steady-state MFU is re-measured
+> cleanly in Run 9′.
+>
+> *(original caveat, for context: MinimalAsyncEP is a new sync-free dispatcher and
+> the forced cudagraph bypasses the `_grouped_mm` sm_90 gate — both were unverified
+> at the time of this run; the deterministic check has now cleared both.)*
+
+### Setup
+Same model / parallelism / batch / recompute as Run 7 (8× H100, `dp_shard=8 tp=1
+ep=4`, `aot_fx_trace`, `memory_policy=full`, B=16 / seq 4096, 20 steps, c4_test,
+ChunkedCELoss) **except the MoE dispatcher + cudagraph**:
+
+| | |
+|---|---|
+| MoE dispatcher | **MinimalAsyncEPTokenDispatcher** (sync-free EP via symmetric memory) |
+| Config | `graph_trainer_deepseek_v3_16b_minimal_async_ep` |
+| cudagraph | **enabled + forced** (312 non-cudagraphable `_grouped_mm` nodes captured anyway) |
+
+MinimalAsyncEP buffer init confirmed: `tokens_per_rank=65536, top_k=6,
+num_local_experts=16, ep_size=4, max_routed_tokens=1572864`.
+
+### Results (graph + MinimalAsyncEP + forced cudagraph, B=16)
+| step | loss | grad_norm | memory | tps | tflops | mfu |
+|-----:|------|-----------|--------|-----|--------|-----|
+| 1 | 12.01981 | 1.6180 | 57.19 GiB (60.16%) | 452 | 8.19 | 0.83% |
+| 10 | 9.07173 | 5.7077 | 57.31 GiB (60.28%) | 11,521 | 208.60 | 21.09% |
+| 20 | 7.11517 | 2.5456 | 57.31 GiB (60.28%) | 10,411 | 188.50 | 19.06% |
+
+Loss converges; peak ~57.3 GiB / 95 GiB. step-10/20 both carry the
+profiler+memory-snapshot dump (`profile_freq=10`), so MFU is best read as a
+~19–21% band (clean steady-state is **22.54%** — see Run 9′). **Numerics now
+bitwise-verified ✅** (see verification subsection).
+
+### Compile pipeline
+All **11** graph passes took **97.213 s** (`regional_inductor` dominant; cold-ish
+MinimalAsyncEP/swiglu kernels). `cudagraph_pass` logs `FORCING cudagraph despite
+312 non-cudagraphable node(s)` then `Applied cudagraph pass.`
+
+### Artifacts
+| artifact | link |
+|---|---|
+| run log (pastry) | https://www.internalfb.com/intern/paste/P2374809129/ |
+| profiler trace (perfetto, rank0 iter 10) | https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fbahuang_b755e5ff-674e-48c9-b179-3593b36330b7_rank0_trace.json.gz |
+| CUDA memory snapshot (memory visualizer, step 20) | https://www.internalfb.com/pytorch_memory_visualizer/perfetto_internal_traces/tree/shared_trace/bahuang_9d5560ff-81d0-4f9a-8d54-e4d4eb72fdd2_000000_step_20.pickle |
+| tlparse logs (manifold, **temporary** `.tmp` path) | https://manifold.edge.x2p.facebook.net/v0/read/tree/logs/.tmpNMsm5U/index.html?bucketName=tlparse_reports&apiKey=tlparse_reports-key&withPayload=1&timeoutMsec=10000 |
+
+#### Per-pass before/after graph diffs
+| pass | diff |
+|---|---|
+| eliminate_dead_code | https://www.internalfb.com/intern/diffing/?before_paste_number=2374807228&after_paste_number=2374807311&selected_tab=plain_diff |
+| canonicalize_graph | https://www.internalfb.com/intern/diffing/?before_paste_number=2374807003&after_paste_number=2374807137&selected_tab=plain_diff |
+| tag_with_memory_policy | https://www.internalfb.com/intern/diffing/?before_paste_number=2374808470&after_paste_number=2374808585&selected_tab=plain_diff |
+| selective_activation_remat | https://www.internalfb.com/intern/diffing/?before_paste_number=2374808252&after_paste_number=2374808337&selected_tab=plain_diff |
+| reassign_collective_pgs | https://www.internalfb.com/intern/diffing/?before_paste_number=2374807801&after_paste_number=2374807924&selected_tab=plain_diff |
+| joint_transformer_block_bucketing_reordering | https://www.internalfb.com/intern/diffing/?before_paste_number=2374807450&after_paste_number=2374807632&selected_tab=plain_diff |
+| annotate_flex_attention_for_regional_inductor | https://www.internalfb.com/intern/diffing/?before_paste_number=2374806825&after_paste_number=2374806916&selected_tab=plain_diff |
+| regional_inductor | https://www.internalfb.com/intern/diffing/?before_paste_number=2374808044&after_paste_number=2374808148&selected_tab=plain_diff |
+
+#### Standalone artifacts
+| artifact | paste |
+|---|---|
+| activation_memory_policy | https://www.internalfb.com/intern/paste/P2374808648/ |
+| fx_compute_nodes_runtime_estimation | https://www.internalfb.com/intern/paste/P2374808722/ |
+
+### Notes
+- `run_graph_trainer_dsv3.sh` gained an `EP` toggle: `EP=minimal` selects the
+  MinimalAsyncEP config + enables cudagraph; default `EP=regular` is the
+  eager-comparable, cudagraph-disabled path (Run 7). Composes with `MODE`.
+- Same forced-cudagraph override as Runs 4–6 (`cudagraph.py`, TODO: revert / gate).
+- Peak ~57.3 GiB — essentially identical to Run 7's regular-EP graph peak (~57.5),
+  i.e. MinimalAsyncEP doesn't cost extra steady-state memory here.
+
+---
+
+## Run 10 — eager `Trainer` + MinimalAsyncEP baseline (FSDP2 + full AC)
+
+**Date:** 2026-06-11
+**Branch:** `graph_trainer/dsv3_scaling` (same tree as Run 9)
+**Launcher:** `MODE=eager EP=minimal ./run_graph_trainer_dsv3.sh` — eager
+`Trainer`, `deepseek_v3_16b_minimal_async_ep`, `dp_shard=8 tp=1 ep=4`, B=16,
+seq 4096, `--activation_checkpoint.mode full`, loss compiled (config default),
+`ChunkedCELoss`.
+
+This is the eager reference for the MinimalAsyncEP row (the Run 9 counterpart).
+**MinimalAsyncEP runs in pure eager** — the sync-free dispatcher is not
+graph-only; eager never uses cudagraph. MinimalAsyncEP buffer init confirmed
+(`tokens_per_rank=65536, max_routed_tokens=1572864`, identical to Run 9).
+
+> ✅ This eager MinimalAsyncEP path is now the **bitwise reference** for the graph
+> side: the seed-pinned deterministic check (verification subsection) shows graph ≡
+> this eager run, loss + grad_norm 0/20. (The numbers in this section are perf-only
+> and not seed-pinned, so the loss here just converges in the expected band.)
+
+### Results (eager + MinimalAsyncEP, B=16)
+| step | loss | grad_norm | memory | tps | tflops | mfu |
+|-----:|------|-----------|--------|-----|--------|-----|
+| 1 | 12.03384 | 1.6457 | 50.98 GiB (53.62%) | 4,026 | 72.89 | 7.37% |
+| 10 | 9.21959 | 7.5177 | 65.67 GiB (69.08%) | 12,537 | 226.99 | 22.95% |
+| 20 | 7.29374 | 2.3227 | 65.67 GiB (69.08%) | 9,847 | 178.29 | 18.03% |
+
+Loss converges; peak ~65.7 GiB / 95 GiB. Same profiler-dump perturbation at
+steps 10/20 → read MFU as an ~18–23% band.
+
+### Artifacts
+| artifact | link |
+|---|---|
+| run log (pastry) | https://www.internalfb.com/intern/paste/P2374813340/ |
+| profiler trace (perfetto, rank0 iter 10) | https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fbahuang_bf74e873-3d0e-4eec-9694-f3aa16edcb40_rank0_trace.json.gz |
+| CUDA memory snapshot (memory visualizer, step 20) | https://www.internalfb.com/pytorch_memory_visualizer/perfetto_internal_traces/tree/shared_trace/bahuang_6f90084a-2ee2-4797-84e4-955bf741f92e_000000_step_20.pickle |
+| tlparse logs (manifold, **temporary** `.tmp` path) | https://manifold.edge.x2p.facebook.net/v0/read/tree/logs/.tmpd0CHli/index.html?bucketName=tlparse_reports&apiKey=tlparse_reports-key&withPayload=1&timeoutMsec=10000 |
+
+> eager has no aot_fx_trace graph → **no per-pass graph diffs**; the tlparse report
+> covers only the loss `torch.compile`. Perfetto trace + memory snapshot are the
+> meaningful eager artifacts.
+
+### Notes
+- MinimalAsyncEP works unchanged in eager — no cudagraph, no graph passes.
+- Peak ~65.7 GiB, ~1 GiB under the regular-EP eager peak (Run 8, ~68.8 GiB).
+
+---
+
+## Summary — 2×2 matrix (graph_trainer vs eager × regular EP vs MinimalAsyncEP), B=16
+
+All four runs are the **same model / parallelism / batch / seq / recompute**
+(`deepseek_v3 16B`, `dp_shard=8 tp=1 ep=4`, B=16, seq 4096, full recompute):
+
+| | **regular EP** (no cudagraph) | **MinimalAsyncEP** (graph: forced cudagraph) |
+|---|---|---|
+| **graph_trainer** (the fix, `memory_policy=full`) | Run 7 — mfu 18.51%, 10,108 tps, peak **57.5 GiB** ✅ bitwise vs eager | Run 9 — peak **57.3 GiB**, clean MFU 22.54% (Run 9′) **✅ bitwise vs eager (cudagraph on *and* off)** |
+| **eager** (FSDP2, full AC) | Run 8 — mfu 18.60%, 10,160 tps, peak 68.8 GiB | Run 10 — mfu ~18–23%, 12,537 tps, peak 65.7 GiB |
+
+(MFU/tps quoted at step 10; step 10 & 20 both carry the profiler/snapshot dump,
+so treat single-step MFU as a band, not a point.)
+
+**Takeaways:**
+- **MinimalAsyncEP is a real throughput win in both backends.** Step-10 tps:
+  graph 10,108 → 11,521 (+14%), eager 10,160 → 12,537 (+23%). The sync-free MoE
+  dispatcher beats all-to-all + `_grouped_mm` regular EP on this config.
+- **graph_trainer's structural advantage is memory, in both EP modes.** Peak
+  ~57 GiB (graph) vs ~66–69 GiB (eager) — **~11–16% lower** — because
+  tensor-granularity `memory_policy=full` recompute is tighter than eager's
+  module-level `checkpoint_wrapper`. Notably MinimalAsyncEP barely moves graph's
+  peak (57.5 → 57.3 GiB).
+- **At steady state graph and eager are within ~2% throughput** (eager marginally
+  ahead) for the MinimalAsyncEP row — settled by a clean **50-step, profiler-off**
+  re-run (Runs 9′/10′ below): **graph 22.54% / eager 22.96% MFU** (steps 20–50
+  avg). The earlier single-step readings were *both* measurement artifacts pulling
+  opposite ways: (a) the profiled **step-10** MFU (eager 22.95% vs graph 21.09%)
+  over-penalized graph because its step-1 **cudagraph capture** is amortized into
+  the step-10 rolling average; (b) the profiled **trace** per-step (graph 5,336 vs
+  eager 5,639 ms) over-credited graph because the **profiler instruments every
+  host launch** — hammering eager's 7,267 launches/step while barely touching
+  graph's 596 (turning the profiler off sped eager's step 5.64→5.20 s, +8.5%, but
+  graph's only 5.34→5.32 s). At B=16 both are ~99% GPU-bound, so cudagraph's
+  launch-collapse buys **memory and host headroom, not throughput**. See the
+  trace-analysis and Runs 9′/10′ subsections below.
+- **Numerics caveat RESOLVED ✅ — MinimalAsyncEP is bitwise-verified, forced
+  cudagraph included.** eager `deepseek_v3_16b_minimal_async_ep` vs graph
+  `graph_trainer_..._minimal_async_ep` (`--debug.seed=42 --debug.deterministic
+  --no-seed-checkpoint`, 20 steps, dp8/tp1/ep4) is **bitwise-identical in loss AND
+  grad_norm (0/20, max|diff| 0.000e+00)** — both with cudagraph **disabled** and
+  with the **forced cudagraph** (312 `_grouped_mm` nodes captured past the sm_90
+  gate). This clears the unverified flags on the whole MinimalAsyncEP column
+  (Runs 3–6, 9) and shows the **forced-cudagraph hack is numerically safe** on
+  H100 for this config (the feared `_grouped_mm` hidden CPU↔CUDA copy does not
+  corrupt replay). See the verification subsection below.
+
+### Profiler-trace analysis — Run 9 vs Run 10 (rank0, iter-10 capture)
+
+> ⚠️ **These per-step numbers are from the *profiled* runs and are profiler-skewed
+> — the profiler over-penalizes the eager path (see below). For the throughput
+> verdict use the profiler-off Runs 9′/10′. The trace is still the right tool for
+> the *mechanism* (kernel mix, host-launch counts, recompute fragments).**
+
+Pulled both rank-0 traces (Run 9 from manifold, Run 10 local) and sliced one
+training step using the per-step loss marker (`num_chunks=8` → **8 loss-chunk
+kernels = 1 step**): Run 9's window held **2 steps** (16 `nll_loss_forward`),
+Run 10's held **1 step** (8 `log_softmax+nll`). Normalizing to **per-step**:
+
+| | graph (Run 9) | eager (Run 10) |
+|---|---|---|
+| **wall / step** (profiled) | **5,336 ms** | 5,639 ms |
+| **GPU-busy / step** (union) | **5,309 ms** | 5,598 ms |
+| GPU busy % | 99.5% | 99.3% |
+| cpu_op events (window) | 2,145 | 44,962 |
+| cuda launch/Memcpy calls | 596 | 7,267 |
+| launches per GPU kernel | **0.028** | 0.652 |
+
+**cudagraph signature:** graph issues ~0.03 host launches per kernel vs eager's
+0.65 — CPU-side launch/op overhead is essentially collapsed (the captured graph
+replays). Both are ~99% GPU-busy, so neither is launch-bound at this batch, but
+the graph path removes ~7k host calls/step.
+
+**Per-step GPU time by kernel category (ms/step; streams overlap so columns
+sum > wall):**
+
+| category | graph (Run 9) | eager (Run 10) | Δ (graph−eager) |
+|---|---:|---:|---:|
+| matmul (dense+MoE) | 2,260.8 | 2,544.8 | **−284.0** |
+| symm_mem (EP dispatch) | 1,345.4 | 1,268.8 | +76.6 |
+| elementwise | 641.7 | 621.9 | +19.8 |
+| comm (nccl) | 309.3 | 460.4 | **−151.0** |
+| reduce/norm/softmax | 229.2 | 180.4 | +48.8 |
+| other | 184.2 | 295.5 | −111.3 |
+| attn_bwd (flex) | 172.9 | 200.5 | −27.5 |
+| cat/concat | 162.4 | 180.5 | −18.1 |
+| moe_swiglu | 159.2 | 179.2 | −20.0 |
+| attn_fwd (flex) | 92.0 | 116.5 | −24.5 |
+
+**Mechanism (robust — kernel durations aren't profiler-inflated, only gaps are):**
+1. **Collapsed host overhead** — cudagraph issues 596 vs 7,267 launches/step
+   (0.03 vs 0.65 per kernel). This is why the profiler skews the comparison:
+   instrumentation cost scales with host launches, so it taxes eager far more.
+2. **Slightly less recompute** under `memory_policy=full` tensor-granularity remat
+   vs eager module-level full AC: **52 vs 56 flex-fwd fragments/step**, −284 ms
+   matmul; offset by +49 ms reduce/norm + ~+20 ms elementwise from more, smaller
+   remat kernels. Roughly a wash.
+3. **Less NCCL comm** in-trace (−151 ms) — cudagraph + simple_fsdp bucketing.
+
+> **Takeaway:** the per-step deltas here are dominated by the profiler's
+> asymmetric per-launch overhead, so they do **not** establish a throughput
+> winner. The clean profiler-off Runs 9′/10′ do: **graph and eager are within
+> ~2% MFU (eager marginally ahead)**, and graph_trainer's durable advantage is
+> **memory (~13% lower, 57.3 vs 65.7 GiB)**. Analyzer: `~/tmp/mfu_compare/analyze.py`.
+
+---
+
+## Runs 9′ / 10′ — clean 50-step MFU re-measure (profiler OFF), MinimalAsyncEP
+
+**Date:** 2026-06-11
+**Branch:** `graph_trainer/dsv3_scaling` (same tree as Runs 9/10)
+**Launcher:** `STEPS=50 PROFILE=0 MODE={graph,eager} EP=minimal ./run_graph_trainer_dsv3.sh`
+— new `STEPS` and `PROFILE` toggles. `PROFILE=0` is a **lean run**: no profiler,
+no memory snapshot, no tlparse/`tlp`, no uploads.
+
+Re-measure of the MinimalAsyncEP row at **50 steps with profiling disabled**, to
+remove the two artifacts that distorted Runs 9/10: the step-1 cudagraph capture
+amortized into the step-10 average, and the profiler's per-host-launch overhead
+(which taxes eager's ~7k launches/step far more than graph's ~600). With
+`log_freq=10` and the profiler off, **every logged interval past step 10 is a
+clean, capture-free steady state**.
+
+### Results — graph (Run 9′) vs eager (Run 10′), B=16, profiler off
+| step | graph mfu | graph tps | eager mfu | eager tps |
+|-----:|----------:|----------:|----------:|----------:|
+| 1  (capture/warmup) | 0.89% | 486 | 7.36% | 4,022 |
+| 10 (interval incl. capture) | 21.79% | 11,901 | 22.81% | 12,459 |
+| 20 | 22.52% | 12,303 | 23.08% | 12,606 |
+| 30 | 22.35% | 12,206 | 22.57% | 12,327 |
+| 40 | 22.43% | 12,250 | 23.00% | 12,564 |
+| 50 | 22.85% | 12,483 | 23.18% | 12,662 |
+| **avg steps 20–50** | **22.54%** | **12,310** | **22.96%** | **12,540** |
+| **peak memory** | **57.31 GiB** | | 65.67 GiB | |
+
+**Verdict:** **eager is ~1.9% faster** at steady state (22.96% vs 22.54% MFU;
+12,540 vs 12,310 tps); **graph uses ~13% less memory** (57.3 vs 65.7 GiB). At
+B=16 both are ~99% GPU-bound, so cudagraph's host-launch savings don't convert to
+throughput — they buy memory and CPU headroom. This supersedes the throughput
+reading from Runs 9/10 (the step-10 MFU and the profiled trace were both
+artifacts; see the matrix takeaways above).
+
+### Loss parity (incidental — these perf runs are NOT deterministic)
+These are throughput runs, launched **without** `--debug.seed/--debug.deterministic`,
+so the kernels use nondeterministic algorithms and the curves drift run-to-run:
+step-10 9.865/9.786, step-20 8.027/7.987, step-50 **5.95344 / 5.95386** (~4e-4
+apart). That ~4e-4 is **nondeterminism jitter, not a graph-vs-eager difference** —
+the seed-pinned `--debug.deterministic` comparison (see the "MinimalAsyncEP
+numerics verification" subsection below) proves graph and eager are **bitwise
+identical** (loss + grad_norm 0/20). Correctness milestone: **MET ✅.**
+
+### Notes
+- No artifacts (profiler off by design). Pure throughput/memory measurement.
+- `run_graph_trainer_dsv3.sh` gained `STEPS` (default 20) and `PROFILE` (default 1)
+  toggles, composing with `MODE`/`EP`. `PROFILE=0` skips `tlp` + profiler flags +
+  uploads.
+
+---
+
+## MinimalAsyncEP numerics verification — graph ≡ eager, BITWISE ✅ (cudagraph on & off)
+
+**Date:** 2026-06-11
+**Branch:** `graph_trainer/dsv3_scaling`
+**Launcher:** `CONFIG_SUFFIX=_minimal_async_ep [TEST_CUDAGRAPH=0|1] STEPS=20 ./run_loss_compare_dsv3.sh`
+(new `CONFIG_SUFFIX` + `TEST_CUDAGRAPH` toggles).
+
+The MinimalAsyncEP analog of the Run 7-vs-8 regular-EP bitwise check: eager
+`deepseek_v3_16b_minimal_async_ep` (FSDP2, full AC, `--compile.no-enable`) vs
+graph `graph_trainer_deepseek_v3_16b_minimal_async_ep` (simple_fsdp, aot_fx_trace,
+`memory_policy=full`), via `scripts/loss_compare.py` with `--debug.deterministic
+--debug.seed=42 --no-seed-checkpoint --assert-equal`, 20 steps, dp8/tp1/ep4, B=4
+(loss_compare default batch). Run **twice**: cudagraph disabled, and forced on.
+
+| variant | loss max\|diff\| | grad_norm max\|diff\| | verdict |
+|---|---|---|---|
+| graph (cudagraph **off**) vs eager | 0.000e+00 (0/20) | 0.000e+00 (0/20) | **BITWISE IDENTICAL ✅** |
+| graph (**forced cudagraph**) vs eager | 0.000e+00 (0/20) | 0.000e+00 (0/20) | **BITWISE IDENTICAL ✅** |
+
+Real full-precision values (identical across all three runs — eager, graph-off,
+graph-forced-cg): step 1 loss `11.98491382598877`, step 10 `9.099592208862305`,
+step 20 `7.229188442230225` / grad_norm `5.547492504119873`.
+
+**Two things this proves:**
+1. **MinimalAsyncEP is deterministic and numerically correct** — it runs cleanly
+   under `--debug.deterministic` (no missing-deterministic-kernel error), and
+   graph simple_fsdp matches eager FSDP2 to the last bit (the lm_head chunked-loss
+   fix + #3590 FSDP-order carry over to the sync-free MoE path).
+2. **The forced cudagraph is numerically safe** on H100 (sm_90) for this config —
+   capturing the 312 non-cudagraphable `_grouped_mm` nodes past the gate does
+   **not** corrupt replay (the hypothesized hidden `_grouped_mm` CPU↔CUDA copy
+   either doesn't occur here or is captured correctly). Resolves the ⛔/🟡
+   correctness caveats carried since Runs 4–6.
+
+Incidental perf at this deterministic B=4 (avg steps >10, graph/eager): cudagraph
+**off** 0.983× tps (graph slightly slower — launch overhead exposed at B=4);
+forced cudagraph **on** 1.016× tps (graph faster — cudagraph recovers the launch
+overhead). Consistent with the B=16 finding that cudagraph's benefit is
+launch-bound (a wash once GPU-bound at large batch).
+
+### Notes
+- Summaries: `~/tmp/loss_compare_dsv3_16b_minimal_async_ep/fullprec_summary.md`
+  (no-cg) and `..._minimal_async_ep_cg/fullprec_summary.md` (forced cg).
+- `run_loss_compare_dsv3.sh` gained `CONFIG_SUFFIX` (variant on both sides) and
+  `TEST_CUDAGRAPH` (default 0 = disable cudagraph on the graph side; 1 = keep the
+  forced cudagraph) toggles.
+- Scope: 20 steps / B=4 / dp8 tp1 ep4. The regular-EP divergence (pre-fix)
+  appeared by step 7, and a cudagraph stale-data bug would surface on the first
+  post-capture replay (step 2), so 20 steps is a decisive window.
