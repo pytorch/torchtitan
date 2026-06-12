@@ -11,7 +11,6 @@ from contextvars import ContextVar
 from typing import Any, TYPE_CHECKING
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import _get_device_handle
 
@@ -59,10 +58,8 @@ def _record_comm_if_eager(
     label: str,
     fqn: str | None,
 ) -> AbstractContextManager[Any]:
-    """Return a c10d profiler range in eager and a no-op during compile."""
-    if torch.compiler.is_compiling() or _SUPPRESS_EAGER_PROFILING.get():
-        return nullcontext()
-    return dist.record_comm(_with_fqn(label, fqn))
+    """Return an eager profiler range for communication launch code."""
+    return _record_function_if_eager(label, fqn)
 
 
 def _get_single_placement(placements: tuple[Placement, ...]) -> Placement:
