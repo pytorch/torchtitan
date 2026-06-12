@@ -659,6 +659,8 @@ class RLTrainer(Configurable):
         # TODO: investigate using pass@k for validation.
         t_validate_start = time.perf_counter()
         num_samples = self.config.num_validation_samples
+        if num_samples == 0:  # skip validation (e.g. loss guard CI)
+            return []
         greedy = replace(self._sampling, temperature=0.0, top_p=1.0)
 
         rollout_groups, validation_metrics = await self._collect_rollouts(
