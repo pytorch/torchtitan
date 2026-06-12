@@ -8,9 +8,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
 from typing import Literal
 
-from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
+from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.config.configs import CompileConfig
+from torchtitan.experiments.graph_trainer.chunked_loss import (
+    ChunkedCELossWithParamGrads,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
@@ -153,9 +156,13 @@ def to_graph_trainer_config(
     if ac is not None and ac.mode != "none":
         d["activation_checkpoint"] = ActivationCheckpointConfig(mode="selective")
 
-    # TODO: graph_trainer doesn't yet support ChunkedCELoss
-    if isinstance(d.get("loss"), ChunkedCELoss.Config):
-        d["loss"] = CrossEntropyLoss.Config()
+    # graph_trainer's tracer requires explicit autograd outputs for lm_head
+    # params instead of relying on .grad side effects from chunk_loss.backward().
+    loss_cfg = d.get("loss")
+    if isinstance(loss_cfg, ChunkedCELoss.Config):
+        d["loss"] = ChunkedCELossWithParamGrads.Config(
+            **{f.name: getattr(loss_cfg, f.name) for f in fields(loss_cfg)}
+        )
 
     # Merge CUDA graph kernel annotations into profiler traces when profiling
     # is active.  No-op otherwise (and no-op when requirements aren't met).
