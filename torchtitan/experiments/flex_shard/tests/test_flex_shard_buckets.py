@@ -130,20 +130,36 @@ class _PaddedShard(Shard):
 
 class TestBucketCommScheduling(TestCase):
     @staticmethod
-    def _context_with_reshard_flags(flags: list[bool]) -> BucketCommContext:
+    def _context_with_reshard_flags(
+        flags: list[bool],
+        unit_keys: list[object] | None = None,
+    ) -> BucketCommContext:
         context = BucketCommContext(
             device_handle=ModuleType("dummy_device_handle"),
             unshard_stream=cast(torch.Stream, object()),
             reduce_grad_stream=cast(torch.Stream, object()),
         )
+        if unit_keys is None:
+            unit_keys = [object() for _ in flags]
+        pending_keys = [object() for _ in flags]
         context.buckets = [
             cast(
                 BucketRuntime,
                 SimpleNamespace(
                     bucket_storage=SimpleNamespace(_reshard_after_forward=flag),
+                    recompute_prefetch_unit_key=lambda key=unit_key: key,
+                    pending_unshard_key=lambda *, recompute, key=pending_key: (
+                        key,
+                        recompute,
+                    ),
                 ),
             )
-            for flag in flags
+            for flag, unit_key, pending_key in zip(
+                flags,
+                unit_keys,
+                pending_keys,
+                strict=True,
+            )
         ]
         return context
 
@@ -174,7 +190,7 @@ class TestBucketCommScheduling(TestCase):
             )
         )
 
-    def test_reduce_grad_defer_depends_on_previous_bucket_not_current_bucket(self):
+    def test_reduce_grad_defer_skips_non_reshard_bucket(self):
         context = self._context_with_reshard_flags([True, False, True])
 
         self.assertTrue(
@@ -182,10 +198,49 @@ class TestBucketCommScheduling(TestCase):
                 context.buckets[1],
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             context.should_defer_reduce_grad_for_backward_prefetch(
                 context.buckets[2],
             )
+        )
+
+    def test_recompute_prefetch_order_reverses_units_preserving_unit_order(self):
+        context = self._context_with_reshard_flags(
+            [True, True, True, True, True, True, False, False],
+            unit_keys=[
+                "tok",
+                "layer0",
+                "layer1",
+                "layer1",
+                "layer2",
+                "layer2",
+                "norm",
+                "head",
+            ],
+        )
+
+        self.assertEqual(
+            context.recompute_prefetch_buckets(),
+            [
+                context.buckets[4],
+                context.buckets[5],
+                context.buckets[2],
+                context.buckets[3],
+                context.buckets[1],
+                context.buckets[0],
+            ],
+        )
+        self.assertIs(
+            context.next_backward_unshard_bucket(context.buckets[7]),
+            context.buckets[4],
+        )
+        self.assertIs(
+            context.next_backward_unshard_bucket(context.buckets[4]),
+            context.buckets[5],
+        )
+        self.assertIs(
+            context.next_backward_unshard_bucket(context.buckets[5]),
+            context.buckets[2],
         )
 
 
@@ -966,6 +1021,7 @@ class TestDistributedBuckets(FSDPTest):
 # ---------------------------------------------------------------------------
 # Per-bucket mesh: experts on a 1-D efsdp axis, dense on a 1-D dp axis
 # ---------------------------------------------------------------------------
+
 
 def _multi_mesh_moe_args() -> ModelArgs:
     # weight_tying=False: flex_shard rejects shared params (output<->tok_emb).

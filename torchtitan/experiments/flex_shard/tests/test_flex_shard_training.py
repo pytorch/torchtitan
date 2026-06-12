@@ -13,6 +13,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointWrapper,
 )
 from torch.distributed.device_mesh import init_device_mesh
+from torch.profiler import ProfilerActivity
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_fsdp import FSDPTest, get_devtype
 from torch.testing._internal.common_utils import run_tests
@@ -262,11 +263,14 @@ class TestFlexShardTraining(FSDPTest):
 
         optim.zero_grad(set_to_none=True)
         ref_optim.zero_grad(set_to_none=True)
-        loss = model(x).sum()
-        ref_loss = reference(x).sum()
-        self.assertEqual(loss, ref_loss)
-        loss.backward()
-        ref_loss.backward()
+        with torch.profiler.profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        ):
+            loss = model(x).sum()
+            ref_loss = reference(x).sum()
+            self.assertEqual(loss, ref_loss)
+            loss.backward()
+            ref_loss.backward()
 
         _average_reference_grads(reference)
         check_flex_shard_parity(self, reference, model, self.rank, self.world_size)
