@@ -384,7 +384,7 @@ class RaggedShard(Placement):
             device=send_buf.device,
         )
         with _record_comm_if_eager(
-            "FlexShard::reduce_scatter",
+            "FlexShard::post_backward_reduce",
             state.debug_fqn,
         ):
             # TODO: Plumb the reduction/scaling policy from SPMD gradient semantics.
@@ -880,7 +880,7 @@ class GroupedRaggedShard(RaggedShard):
             device=send_buf.device,
         )
         with _record_comm_if_eager(
-            "FlexShard::reduce_scatter",
+            "FlexShard::post_backward_reduce",
             state.debug_fqn,
         ):
             dist.reduce_scatter_tensor(
