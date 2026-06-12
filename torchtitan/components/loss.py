@@ -564,11 +564,13 @@ class ChunkedCELoss(BaseLoss):
             ]
             label_chunks = list(_chunk(labels))
 
-            grad_accumulator = GradAccumulator(
-                hidden_states,
-                num_chunks=num_chunks,
-                dtype=torch.float32,
-            )
+            grad_accumulator = None
+            if requires_grad:
+                grad_accumulator = GradAccumulator(
+                    hidden_states,
+                    num_chunks=num_chunks,
+                    dtype=torch.float32,
+                )
 
             total_loss = hidden_states.new_zeros((), dtype=torch.float32)
 
@@ -598,6 +600,7 @@ class ChunkedCELoss(BaseLoss):
                 if requires_grad:
                     chunk_loss.backward()
                     assert h_chunk.grad is not None
+                    assert grad_accumulator is not None
                     grad_accumulator.add(h_chunk.grad)
                     h_chunk.grad = None
 
@@ -609,6 +612,7 @@ class ChunkedCELoss(BaseLoss):
             if not requires_grad:
                 return total_loss
 
+            assert grad_accumulator is not None
             accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
         return self._gradient_backprop(
