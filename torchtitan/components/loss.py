@@ -574,7 +574,7 @@ class ChunkedCELoss(BaseLoss):
 
             total_loss = hidden_states.new_zeros((), dtype=torch.float32)
             mesh = current_spmd_mesh()
-            if mesh is not None:
+            if mesh is not None and spmd.is_type_checking():
                 for axis_name, dst in {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}.items():
                     total_loss = spmd.mutate_type(
                         total_loss,
