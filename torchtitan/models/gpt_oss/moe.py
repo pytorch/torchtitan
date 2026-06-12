@@ -170,6 +170,7 @@ class GptOssGroupedExperts(Module):
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
         T = B * L
+        local_seq_len_after_padding = num_local_tokens_after_padding // B
         x_TD = x_BLD.view(T, D)
         topk_scores_TK = topk_scores_BLK.view(T, K)
         topk_expert_ids_TK = topk_expert_ids_BLK.view(T, K)
@@ -182,7 +183,6 @@ class GptOssGroupedExperts(Module):
             topk_scores_TK,
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
-            input_shape_BLD=(B, L, D),
         )
         routed_output_RD = self._experts_forward(
             routed_input_RD, num_global_tokens_per_local_expert_e
@@ -193,6 +193,7 @@ class GptOssGroupedExperts(Module):
             metadata,
             x_TD,
             num_local_tokens_after_padding=num_local_tokens_after_padding,
+            local_seq_len_after_padding=local_seq_len_after_padding,
         )
         # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
         # won't cause _StridedShard in the downstream view (e.g., CP is used).
