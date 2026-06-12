@@ -107,11 +107,15 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
-            # cudagraph ON (main default). The GRPOLoss drops non-finite (NaN) tokens
-            # + clamps the log-ratio, so the NaN logprobs vLLM emits under cudagraph are
-            # handled in the loss rather than worked around with eager. enable=False
-            # falls back to eager if cudagraph turns out to corrupt generation itself.
-            cudagraph=VLLMCudagraphConfig(enable=True),
+            # Run vLLM EAGER (no CUDA-graph capture). Verified by two controlled runs
+            # (only this flag changed): cudagraph="full" corrupts GENERATION itself —
+            # the engine emits degenerate "locklock" tokens at step-0 validation, before
+            # any training/loss runs. So the GRPOLoss NaN-drop (which only fixes the
+            # trainer loss) cannot rescue it; eager is required and matches the reference
+            # 1.7B run. The NaN-drop loss is kept for robustness. TODO: root-cause the
+            # cudagraph generation corruption (likely captured-graph vs weight-sync
+            # staleness in the vLLM generator) so cudagraph can be re-enabled for speed.
+            cudagraph=VLLMCudagraphConfig(enable=False),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 # slime: temperature 1.0 + top_p 1.0; stop each turn at its action tag.
