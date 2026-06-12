@@ -575,3 +575,63 @@ All 9 graph passes took **110.61 s** (`regional_inductor` dominant;
 - **PR: https://github.com/pytorch/torchtitan/pull/3636** (ghstack, stacked on #3248).
 - tlparse manifold link is a temporary `.tmp` path and will expire; pastry,
   perfetto, and memory-snapshot links are durable.
+
+---
+
+## Run 8 — eager `Trainer` baseline (FSDP2 + full AC), same model as Run 7
+
+**Date:** 2026-06-11
+**Branch:** `graph_trainer/dsv3_scaling` (same tree as Run 7)
+**Launcher:** `MODE=eager ./run_graph_trainer_dsv3.sh` — eager `Trainer`,
+`deepseek_v3_16b`, `dp_shard=8 tp=1 ep=4`, B=16, seq 4096,
+`--activation_checkpoint.mode full` (eager equivalent of Run 7's
+`memory_policy=full`), loss compiled (config default), `ChunkedCELoss`.
+
+This is the eager reference that Run 7's graph_trainer path is **bitwise-matched
+to** (loss + grad_norm 0/20, see Run 7) — here as a standalone perf/memory
+baseline with full artifacts.
+
+### Results (eager, B=16)
+| step | loss | grad_norm | memory | tps | tflops | mfu |
+|-----:|------|-----------|--------|-----|--------|-----|
+| 1 | 12.01018 | 1.6315 | 49.57 GiB (52.14%) | 2,758 | 49.93 | 5.05% |
+| 10 | 9.14808 | 8.5312 | 66.98 GiB (70.45%) | 10,160 | 183.96 | 18.60% |
+| 20 | 7.07741 | 1.5436 | 68.76 GiB (72.32%) | 8,065 | 146.02 | 14.76% |
+
+Model-only CUDA mem 7.83 GiB. Step 10 is the clean steady state; step 20's lower
+mfu is the memory-snapshot dump (`profile_freq=10`, fires at steps 10 & 20).
+
+### Run 8 (eager) vs Run 7 (graph_trainer + fix) — same model/parallelism/batch
+| | Run 8 eager (full AC) | Run 7 graph (memory_policy full) |
+|---|---|---|
+| step-10 MFU | 18.60% | 18.51% |
+| step-10 tps | 10,160 | 10,108 |
+| step-10 tflops | 183.96 | 183.02 |
+| **step-10 memory** | **66.98 GiB** | **55.47 GiB** |
+| **peak memory** | **~68.8 GiB** | **~57.5 GiB** |
+| numerics | reference | **bitwise-identical (0/20)** |
+
+**Takeaway:** graph_trainer (the fix) **matches eager throughput** (18.5% vs
+18.6% MFU; ~10.1k tps both) while using **~17% less step memory and ~16% less
+peak memory** (55.5 vs 67.0 GiB; 57.5 vs 68.8 GiB) — graph's tensor-granularity
+`memory_policy=full` recompute is more memory-efficient than eager's
+module-level `checkpoint_wrapper` full AC — *and* it's bitwise-exact vs this
+eager run. Eager peaks at ~72% of 95 GiB at B=16; graph has more headroom.
+
+### Artifacts
+| artifact | link |
+|---|---|
+| run log (pastry) | https://www.internalfb.com/intern/paste/P2374793889/ |
+| profiler trace (perfetto, rank0 iter 10) | https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fbahuang_2be83b84-0c5e-4bb9-a7bb-5046983dacc1_rank0_trace.json.gz |
+| CUDA memory snapshot (memory visualizer, step 20) | https://www.internalfb.com/pytorch_memory_visualizer/perfetto_internal_traces/tree/shared_trace/bahuang_7e0cc58e-a4ce-4125-ba86-e84bd329e20a_000000_step_20.pickle |
+| tlparse logs (manifold, **temporary** `.tmp` path) | https://manifold.edge.x2p.facebook.net/v0/read/tree/logs/.tmpcZyqP7/index.html?bucketName=tlparse_reports&apiKey=tlparse_reports-key&withPayload=1&timeoutMsec=10000 |
+
+> eager has no aot_fx_trace graph, so there are **no per-pass graph diffs** — the
+> tlparse report covers only the loss `torch.compile`. The perfetto trace and
+> memory snapshot are the meaningful eager artifacts.
+
+### Notes
+- `run_graph_trainer_dsv3.sh` gained a `MODE` toggle: `MODE=eager` runs this eager
+  baseline, default `graph` runs the graph_trainer path (Run 7).
+- No OOM at B=16 (peak ~68.8 GiB / 95 GiB), but eager is ~12 GiB closer to the
+  limit than graph_trainer at the same batch.
