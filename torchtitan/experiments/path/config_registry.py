@@ -89,7 +89,7 @@ def convnext_xxlarge() -> PathTrainer.Config:
 
 
 def _path(flavor: str) -> PathTrainer.Config:
-    steps = 512*10
+    steps = 1024*100
     mixed_precision_param = "bfloat16"
     local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
     world_size = int(os.environ.get("WORLD_SIZE", str(local_world_size)))
@@ -104,9 +104,9 @@ def _path(flavor: str) -> PathTrainer.Config:
         dataloader=_dataloader_config(split="train"),
         optimizer=_optimizer_config(),
         lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=round(steps * 0.),
+            warmup_steps=round(steps * 0.01),
             total_steps=steps,
-            decay_ratio=0.,
+            decay_ratio=0.2,
             decay_type="cosine",
             min_lr_factor=0.0,
         ),
@@ -135,10 +135,10 @@ def _path(flavor: str) -> PathTrainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
         compile=CompileConfig(enable=True, components=["model"]),
-        metrics=MetricsProcessor.Config(log_freq=10, enable_reporterv2=True),
+        metrics=MetricsProcessor.Config(log_freq=1, enable_reporterv2=True, save_freq=1024),
         validator=PathValidator.Config(
             enable=True,
-            freq=512,
+            freq=1024,
             steps=32,
             dataloader=_dataloader_config(split="val"),
             mixed_precision_param=mixed_precision_param,
@@ -247,7 +247,7 @@ def _checkpoint_config(folder: str, base_folder: str) -> PathOnnxCheckpointManag
         export_onnx=True,
         enable_first_step_checkpoint=True,
         folder=folder,
-        interval=512,
+        interval=1024,
         input_names=input_names,
         input_shapes=input_shapes,
         input_dtypes=["float16"] * len(input_names),
