@@ -452,7 +452,7 @@ class Shard(Placement):
             device=send_buf.device,
         )
         with _record_comm_if_eager(
-            "FlexShard::reduce_scatter",
+            "FlexShard::post_backward_reduce",
             prepared.placement_state.debug_fqn,
         ):
             # TODO: Plumb the reduction/scaling policy from SPMD gradient semantics.
