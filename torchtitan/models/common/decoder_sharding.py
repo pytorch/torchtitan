@@ -229,7 +229,7 @@ def set_gqa_inner_attention_local_map(
     """
     q_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2))
     kv_src_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2))
-    kv_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2), cp=spmd.R)
+    kv_dst_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2), cp=spmd.R)
     kv_grad_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2), cp=spmd.P)
     out_src: SpmdLayout | tuple[SpmdLayout, ...] = (
         (q_placements, q_placements) if return_lse else q_placements
@@ -242,8 +242,8 @@ def set_gqa_inner_attention_local_map(
         },
         in_dst_shardings={
             "q": q_placements,
-            "k": kv_placements,
-            "v": kv_placements,
+            "k": kv_dst_placements,
+            "v": kv_dst_placements,
         },
         out_src_shardings=out_src,
         local_map=LocalMapConfig(
