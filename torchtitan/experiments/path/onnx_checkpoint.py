@@ -42,12 +42,15 @@ class _TemporalPolicyOnnxModel(nn.Module):
 class PathOnnxCheckpointManager(OnnxCheckpointManager):
     @dataclass(kw_only=True, slots=True)
     class Config(OnnxCheckpointManager.Config):
+        checkpoint_base_folder: str = ""
         onnx_file: str = ""
         onnx_model_dtype: OnnxInputDType = "float32"
         vision_input_names: list[str] = field(default_factory=list)
         temporal_policy_input_names: list[str] = field(default_factory=list)
 
     def __init__(self, config: Config, **kwargs) -> None:
+        if config.checkpoint_base_folder:
+            kwargs["base_folder"] = config.checkpoint_base_folder
         super().__init__(config, **kwargs)
         self.onnx_model_dtype = _ONNX_DTYPE_MAP[config.onnx_model_dtype]
         self.vision_input_names = config.vision_input_names

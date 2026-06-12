@@ -94,6 +94,9 @@ def _path(flavor: str) -> PathTrainer.Config:
     local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
     world_size = int(os.environ.get("WORLD_SIZE", str(local_world_size)))
     num_nodes = int(os.environ.get("GROUP_WORLD_SIZE", str(world_size // local_world_size)))
+    reporterv2_host = os.getenv("REPORTERV2_HOST")
+    reporterv2_training_id = os.getenv("REPORTERV2_TRAINING_ID")
+    checkpoint_base_folder = f"{reporterv2_host.rstrip('/')}/checkpoint" if reporterv2_host else ""
     return PathTrainer.Config(
         loss=PathLoss.Config(),
         model_spec=model_registry(flavor),
@@ -126,7 +129,10 @@ def _path(flavor: str) -> PathTrainer.Config:
             expert_parallel_degree=1,
             enable_sequence_parallel=False,
         ),
-        checkpoint=_checkpoint_config(),
+        checkpoint=_checkpoint_config(
+            folder=reporterv2_training_id or "checkpoint",
+            base_folder=checkpoint_base_folder,
+        ),
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
         compile=CompileConfig(enable=True, components=["model"]),
         metrics=MetricsProcessor.Config(log_freq=10, enable_reporterv2=True),
@@ -212,7 +218,7 @@ def _dataloader_config(*, split: str) -> PathDataLoader.Config:
     )
 
 
-def _checkpoint_config() -> PathOnnxCheckpointManager.Config:
+def _checkpoint_config(folder: str, base_folder: str) -> PathOnnxCheckpointManager.Config:
     frame_constants = frame_constants_from_fps(n_frames=N_FRAMES, frame_type=FRAME_TYPE)
     temporal_len = frame_constants["temporal_len"]
     vision_input_names = [ModelInputs.IMG, ModelInputs.BIG_IMG]
@@ -236,9 +242,11 @@ def _checkpoint_config() -> PathOnnxCheckpointManager.Config:
     ]
     return PathOnnxCheckpointManager.Config(
         enable=True,
+        checkpoint_base_folder=base_folder,
         save_model_state_dict=True,
         export_onnx=True,
         enable_first_step_checkpoint=True,
+        folder=folder,
         interval=512,
         input_names=input_names,
         input_shapes=input_shapes,
