@@ -75,18 +75,6 @@ class Conv2d(nn.Conv2d, Module):
         )
 
 
-class Embedding(nn.Embedding, Module):
-    """Configurable nn.Embedding."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        num_embeddings: int
-        embedding_dim: int
-
-    def __init__(self, config: Config):
-        super().__init__(config.num_embeddings, config.embedding_dim)
-
-
 class GELU(nn.GELU, Module):
     """Configurable nn.GELU."""
 
@@ -191,7 +179,6 @@ class SiLU(nn.SiLU, Module):
 __all__ = [
     "Conv1d",
     "Conv2d",
-    "Embedding",
     "GELU",
     "GroupNorm",
     "Identity",
