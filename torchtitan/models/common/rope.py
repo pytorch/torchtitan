@@ -12,6 +12,7 @@ import torch
 import spmd_types as spmd
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.protocols.module import Module
 
 __all__ = [
@@ -357,6 +358,8 @@ def _reshape_for_broadcast(
     positions: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Reshape a RoPE cache for broadcasting with query/key tensors."""
+    if isinstance(rope_cache, DTensor) and get_spmd_backend() == "spmd_types":
+        rope_cache = rope_cache.to_local()
     ndim = len(query_shape)
     assert ndim > 1
     bsz, seqlen = query_shape[:2]

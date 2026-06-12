@@ -625,13 +625,22 @@ class QKVLinear(BaseQKVLinear):
     def forward(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        from torch.distributed.tensor import DTensor
+
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
         # Use -1 instead of n_heads (or n_kv_heads) to infer the
         # actual local heads from sizes as TP may have sharded them.
-        xq = xq.view(bs, seqlen, -1, self.head_dim)
-        xk = xk.view(bs, seqlen, -1, self.head_dim)
-        xv = xv.view(bs, seqlen, -1, self.head_dim)
+        def local_head_split(x):
+            with spmd.local():
+                x_ = x.view(bs, seqlen, -1, self.head_dim)
+                if not isinstance(x, DTensor):
+                    spmd.assert_type(
+                        x_, spmd.get_local_type(x), spmd.PartitionSpec("dp", "cp", "tp", None)
+                    )
+            return x_
+
+        xq, xk, xv = local_head_split(xq), local_head_split(xk), local_head_split(xv)
         return xq, xk, xv
 
 
