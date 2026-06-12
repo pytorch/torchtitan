@@ -210,6 +210,9 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
         trust_remote_code=True,
         dtype=gen_config.model_dtype,
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
+        # Generator-only convention: this config field is TorchTitan FSDP
+        # degree for trainers, but here it is intentionally mapped to vLLM's
+        # pure data-parallel degree. The vLLM wrapper skips FSDP/DDP.
         data_parallel_size=gen_config.parallelism.data_parallel_shard_degree,
         enable_expert_parallel=enable_ep,
         distributed_executor_backend="external_launcher",
@@ -533,8 +536,10 @@ class BitwiseParityTestBase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        world_size = dist.get_world_size() if dist.is_initialized() else int(
-            os.environ.get("WORLD_SIZE", "1")
+        world_size = (
+            dist.get_world_size()
+            if dist.is_initialized()
+            else int(os.environ.get("WORLD_SIZE", "1"))
         )
         if world_size < cls.min_world_size:
             raise unittest.SkipTest(

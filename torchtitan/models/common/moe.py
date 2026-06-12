@@ -113,6 +113,7 @@ class GroupedExperts(Module):
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
         T = B * L
+        local_seq_len_after_padding = num_local_tokens_after_padding // B
         x_TD = x_BLD.view(T, D)
 
         topk_scores_TK = topk_scores_BLK.view(T, K)
@@ -135,6 +136,7 @@ class GroupedExperts(Module):
             metadata,
             x_TD,
             num_local_tokens_after_padding=num_local_tokens_after_padding,
+            local_seq_len_after_padding=local_seq_len_after_padding,
         )
         # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
         # won't cause _StridedShard in the downstream view (e.g., CP is used).
@@ -144,8 +146,8 @@ class GroupedExperts(Module):
         """Parallelize expert weights, then wire EP/TP meshes on the dispatcher
         so dispatch/combine see the right meshes at runtime."""
         super().parallelize(parallel_dims)
-        # TODO(@pianpwk): With spmd_types and set_current_mesh, replace wire_meshes
-        # with current_mesh calls inside AllToAllTokenDispatcher and
+        # TODO(@pianpwk): With spmd_types and set_current_spmd_mesh, replace wire_meshes
+        # with current_spmd_mesh calls inside AllToAllTokenDispatcher and
         # DeepEPTokenDispatcher.
         self.token_dispatcher.wire_meshes(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
@@ -384,11 +386,9 @@ class MoE(Module):
         B, L, D = x_BLD.shape
         sp_size = getattr(self.experts.token_dispatcher, "sp_size", 1)
 
-        # EP routes over sequence-parallel token shards. Very short decode
-        # forwards cannot shard across all SP ranks, so pad to ``sp_size`` and
-        # trim before returning. This is a no-op for training/prefill and EP-off;
-        # padded tokens only affect the inference-only load-balance counter.
-        seq_pad = sp_size - L if L < sp_size else 0
+        # EP routes over sequence-parallel token shards. Pad the sequence
+        # dimension to a SP multiple so every TP rank has the same local length.
+        seq_pad = (-L) % sp_size if sp_size > 1 else 0
         if seq_pad:
             x_BLD = F.pad(x_BLD, (0, 0, 0, seq_pad))
             L = L + seq_pad

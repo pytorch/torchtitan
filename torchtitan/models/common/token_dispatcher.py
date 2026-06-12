@@ -35,10 +35,6 @@ class AllToAllDispatchMetadata(LocalDispatchMetadata):
 class LocalTokenDispatcher(Configurable):
     """Token dispatcher for EP=1. Handles local token reordering only.
 
-    Also serves as the base class for EP dispatchers (AllToAllTokenDispatcher,
-    DeepEPTokenDispatcher, HybridEPTokenDispatcher) which override
-    dispatch() and combine().
-
     Not an nn.Module — dispatchers have no learnable parameters or buffers.
     """
 
@@ -148,6 +144,7 @@ class LocalTokenDispatcher(Configurable):
         x_TD: torch.Tensor,
         *,
         num_local_tokens_after_padding: int,
+        local_seq_len_after_padding: int,
     ) -> torch.Tensor:
         """Score and scatter_add routed expert outputs.
 
@@ -157,11 +154,13 @@ class LocalTokenDispatcher(Configurable):
             x_TD: ``(T, D)`` original input tokens
             num_local_tokens_after_padding: Unused for local dispatch; kept
                 for a shared dispatcher combine signature.
+            local_seq_len_after_padding: Unused for local dispatch; kept for
+                a shared dispatcher combine signature.
 
         Returns:
             out_TD: ``(T, D)`` combined output.
         """
-        del num_local_tokens_after_padding
+        del num_local_tokens_after_padding, local_seq_len_after_padding
         out_TD = torch.zeros_like(x_TD)
 
         if not self.score_before_experts:
@@ -179,15 +178,12 @@ class LocalTokenDispatcher(Configurable):
         return out_TD
 
 
-class AllToAllTokenDispatcher(LocalTokenDispatcher):
-    """Token dispatcher for EP>1. Handles token reorder + all-to-all dispatch/combine.
+class BaseEPTokenDispatcher(LocalTokenDispatcher):
+    """Base class for EP token dispatchers.
 
-    Handles the full token routing lifecycle:
-    dispatch (reorder + EP all-to-all) and combine (reverse).
-
-    ``ep_mesh`` and the ``sp_size`` / ``sp_rank`` SP coordinates are wired
-    by the owning ``GroupedExperts.parallelize`` override via
-    ``wire_meshes``.
+    Owns EP mesh wiring and SP coordinate helpers shared by EP implementations.
+    LocalTokenDispatcher intentionally does not know about SP: local dispatch is
+    used when EP is off, and expert activations are replicated for expert TP.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -196,10 +192,6 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
     def __init__(self, config: Config):
         super().__init__(config)
-        # DeviceMesh (not ProcessGroup) so that CooR precompile can use
-        # torch.ops._dtensor.mesh_get_process_group to keep the FX graph
-        # rank-agnostic. None when EP=1 so dispatch falls back to the
-        # LocalTokenDispatcher path.
         self.ep_mesh: DeviceMesh | None = None
         # Sequence-parallel split coordinates derived from tp_mesh.
         # ``sp_rank`` uses ``DeviceMesh._sym_get_coordinate`` so it is a
@@ -214,17 +206,54 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         ep_mesh: DeviceMesh | None,
         tp_mesh: DeviceMesh | None,
     ) -> None:
-        """Install the EP mesh and SP coordinates used by dispatch / combine.
-
-        Both arguments may be ``None`` when the corresponding parallelism
-        dimension is disabled; ``dispatch`` / ``combine`` handle the
-        disabled cases internally.
-        """
+        """Install the EP mesh and SP coordinates used by dispatch / combine."""
         self.ep_mesh = ep_mesh
         if tp_mesh is not None:
             self.sp_size = tp_mesh.size()
             self.sp_rank = tp_mesh._sym_get_coordinate(0)
 
+    def _sp_global_token_indices(
+        self,
+        local_indices: torch.Tensor,
+        local_seq_len: int,
+    ) -> torch.Tensor:
+        if self.sp_size == 1:
+            return local_indices
+
+        local_pos = local_indices % local_seq_len
+        batch_idx = local_indices // local_seq_len
+        global_seq_len = local_seq_len * self.sp_size
+        global_indices = batch_idx * global_seq_len + local_pos
+        return torch.add(  # pyrefly: ignore [no-matching-overload]
+            global_indices, self.sp_rank * local_seq_len
+        )
+
+    def dispatch(self, *args, **kwargs):
+        raise NotImplementedError("BaseEPTokenDispatcher does not implement dispatch")
+
+    def combine(self, *args, **kwargs):
+        raise NotImplementedError("BaseEPTokenDispatcher does not implement combine")
+
+
+class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
+    """Token dispatcher for EP>1. Handles token reorder + all-to-all dispatch/combine.
+
+    Handles the full token routing lifecycle:
+    dispatch (reorder + EP all-to-all) and combine (reverse).
+
+    ``ep_mesh`` and the ``sp_size`` / ``sp_rank`` SP coordinates are wired
+    by the owning ``GroupedExperts.parallelize`` override via
+    ``wire_meshes``.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseEPTokenDispatcher.Config):
+        pass
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+
+    # pyrefly: ignore [bad-override]
     def dispatch(
         self,
         x_TD: torch.Tensor,
@@ -257,8 +286,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         """
         # EP=1: fall back to local dispatch (no all-to-all needed)
         if self.ep_mesh is None:
-            return super().dispatch(
-                x_TD, topk_scores_TK, topk_expert_ids_TK, num_local_tokens_per_expert_E
+            return LocalTokenDispatcher.dispatch(
+                self,
+                x_TD,
+                topk_scores_TK,
+                topk_expert_ids_TK,
+                num_local_tokens_per_expert_E,
             )
 
         ep_size = self.ep_mesh.size()
@@ -404,6 +437,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         x_TD: torch.Tensor,
         *,
         num_local_tokens_after_padding: int,
+        local_seq_len_after_padding: int,
     ) -> torch.Tensor:
         """Reverse the dispatch: unpermute + all-to-all + score + scatter_add.
 
@@ -418,6 +452,9 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             num_local_tokens_after_padding: Local token count to use for the
                 combined SP view after logical padding. MoE padding passes this
                 count without materializing pad rows.
+            local_seq_len_after_padding: Per-batch local sequence length after
+                logical padding, used to map local token indices to global SP
+                positions.
 
         Returns:
             out_TD: Combined output. With SP, shape is
@@ -425,11 +462,13 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         """
         # EP=1: fall back to local combine (no all-to-all needed)
         if self.ep_mesh is None:
-            return super().combine(
+            return LocalTokenDispatcher.combine(
+                self,
                 routed_output_RD,
                 metadata,
                 x_TD,
                 num_local_tokens_after_padding=num_local_tokens_after_padding,
+                local_seq_len_after_padding=local_seq_len_after_padding,
             )
 
         # Reverse expert-major reordering
@@ -447,8 +486,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         )
 
         # With SP, create a full-size buffer for scatter_add so routed results
-        # from all SP ranks can be placed at global positions. Padded tail rows
-        # are never routed and are sliced off below.
+        # from all SP ranks can be placed at global positions.
         out_TD = torch.zeros(
             num_local_tokens_after_padding * self.sp_size,
             x_TD.shape[-1],
@@ -462,15 +500,10 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
                 * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
             ).to(routed_output_RD.dtype)
 
-        # With SP, token indices are 0-based within the local shard.
-        # Offset to global positions for the full-size scatter buffer.
-        if self.sp_size > 1:
-            token_indices_experts_sorted_N = (
-                metadata.token_indices_experts_sorted_N
-                + num_local_tokens_after_padding * self.sp_rank
-            )
-        else:
-            token_indices_experts_sorted_N = metadata.token_indices_experts_sorted_N
+        token_indices_experts_sorted_N = self._sp_global_token_indices(
+            metadata.token_indices_experts_sorted_N,
+            local_seq_len_after_padding,
+        )
 
         assert isinstance(token_indices_experts_sorted_N, torch.Tensor)
         out_TD = deterministic_scatter_add(
@@ -503,7 +536,11 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         self.pad_multiple = config.pad_multiple
 
     def dispatch(
-        self, x_TD, topk_scores_TK, topk_expert_ids_TK, num_local_tokens_per_expert_E
+        self,
+        x_TD,
+        topk_scores_TK,
+        topk_expert_ids_TK,
+        num_local_tokens_per_expert_E,
     ):
         if self.ep_mesh is None:
             raise ValueError(
@@ -565,7 +602,7 @@ class DeepEPDispatchMetadata:
     state: object  # deepep.DispatchState or hybridep.DispatchState
 
 
-class DeepEPTokenDispatcher(LocalTokenDispatcher):
+class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     """Token dispatcher using DeepEP for efficient token dispatch/combine.
 
     Uses DeepEP library kernels (H100/NVLink Switch) instead of standard
@@ -574,32 +611,15 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(LocalTokenDispatcher.Config):
+    class Config(BaseEPTokenDispatcher.Config):
         pass
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.ep_mesh: DeviceMesh | None = None
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
         from torchtitan.distributed.deepep import deepep  # noqa: F401
-
-    def wire_meshes(
-        self,
-        *,
-        ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
-    ) -> None:
-        """Install the EP mesh used by DeepEP dispatch / combine.
-
-        ``tp_mesh`` provides SP coordinates so combine can expand its output
-        to full sequence length (matching AllToAll's convention).
-        """
-        self.ep_mesh = ep_mesh
-        if tp_mesh is not None:
-            self.sp_size = tp_mesh.size()
-            self.sp_rank = tp_mesh._sym_get_coordinate(0)
 
     # pyrefly: ignore [bad-override]
     def dispatch(
@@ -642,6 +662,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         x_TD: torch.Tensor,
         *,
         num_local_tokens_after_padding: int,
+        local_seq_len_after_padding: int,
     ) -> torch.Tensor:
         """Combine tokens via DeepEP.
 
@@ -663,14 +684,20 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
                 device=combined_TD.device,
                 dtype=combined_TD.dtype,
             )
-            offset = num_local_tokens_after_padding * self.sp_rank
-            out_TD[offset : offset + combined_TD.shape[0]] = combined_TD
+            local_indices = torch.arange(
+                combined_TD.shape[0], device=combined_TD.device
+            )
+            global_indices = self._sp_global_token_indices(
+                local_indices,
+                local_seq_len_after_padding,
+            )
+            out_TD[global_indices] = combined_TD
             return out_TD
 
         return combined_TD
 
 
-class HybridEPTokenDispatcher(LocalTokenDispatcher):
+class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
     """Token dispatcher using HybridEP for efficient token dispatch/combine.
 
     Uses HybridEP library kernels (GB200/NVLink72) instead of standard
@@ -678,7 +705,7 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(LocalTokenDispatcher.Config):
+    class Config(BaseEPTokenDispatcher.Config):
         """Config for HybridEP token dispatcher.
 
         Args:
@@ -718,29 +745,10 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
         super().__init__(config)
         self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
         self.pad_multiple = config.pad_multiple
-        self.ep_mesh: DeviceMesh | None = None
-        self.sp_size: int = 1
-        self.sp_rank: int | torch.SymInt = 0
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
         from torchtitan.distributed.deepep import hybridep  # noqa: F401
-
-    def wire_meshes(
-        self,
-        *,
-        ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
-    ) -> None:
-        """Install the EP mesh used by HybridEP dispatch / combine.
-
-        ``tp_mesh`` provides SP coordinates so combine can expand its output
-        to full sequence length (matching AllToAll's convention).
-        """
-        self.ep_mesh = ep_mesh
-        if tp_mesh is not None:
-            self.sp_size = tp_mesh.size()
-            self.sp_rank = tp_mesh._sym_get_coordinate(0)
 
     # pyrefly: ignore [bad-override]
     def dispatch(
@@ -785,6 +793,7 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
         x_TD: torch.Tensor,
         *,
         num_local_tokens_after_padding: int,
+        local_seq_len_after_padding: int,
     ) -> torch.Tensor:
         """Combine tokens via HybridEP."""
         from torchtitan.distributed.deepep import hybridep
@@ -802,8 +811,14 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
                 device=combined_TD.device,
                 dtype=combined_TD.dtype,
             )
-            offset = num_local_tokens_after_padding * self.sp_rank
-            out_TD[offset : offset + combined_TD.shape[0]] = combined_TD
+            local_indices = torch.arange(
+                combined_TD.shape[0], device=combined_TD.device
+            )
+            global_indices = self._sp_global_token_indices(
+                local_indices,
+                local_seq_len_after_padding,
+            )
+            out_TD[global_indices] = combined_TD
             return out_TD
 
         return combined_TD
