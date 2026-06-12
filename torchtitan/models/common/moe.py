@@ -15,7 +15,6 @@ from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
-from torchtitan.ops.topk import deterministic_topk
 from torchtitan.protocols.module import Module
 
 from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
@@ -114,6 +113,7 @@ class GroupedExperts(Module):
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
         T = B * L
+        local_seq_len_after_padding = num_local_tokens_after_padding // B
         x_TD = x_BLD.view(T, D)
 
         topk_scores_TK = topk_scores_BLK.view(T, K)
@@ -136,6 +136,7 @@ class GroupedExperts(Module):
             metadata,
             x_TD,
             num_local_tokens_after_padding=num_local_tokens_after_padding,
+            local_seq_len_after_padding=local_seq_len_after_padding,
         )
         # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
         # won't cause _StridedShard in the downstream view (e.g., CP is used).
@@ -232,9 +233,9 @@ class TokenChoiceTopKRouter(Module):
         scores_grouped = scores_for_choice_BLE.unflatten(
             -1, (self.num_expert_groups, experts_per_group)
         )
-        top2_scores_in_group, _ = deterministic_topk(scores_grouped, 2, dim=-1)
+        top2_scores_in_group, _ = scores_grouped.topk(2, dim=-1)
         group_scores = top2_scores_in_group.sum(dim=-1)
-        _, group_idx = deterministic_topk(
+        _, group_idx = torch.topk(
             group_scores, k=self.num_limited_groups, dim=-1, sorted=False
         )
         group_mask = torch.ones_like(group_scores, dtype=torch.bool)
@@ -280,7 +281,7 @@ class TokenChoiceTopKRouter(Module):
             scores_for_choice_BLE = self._get_node_limited_routing_scores(
                 scores_for_choice_BLE
             )
-        _, topk_expert_ids_BLK = deterministic_topk(
+        _, topk_expert_ids_BLK = torch.topk(
             scores_for_choice_BLE, k=self.top_k, dim=-1, sorted=False
         )
 

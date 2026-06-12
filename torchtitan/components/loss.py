@@ -601,15 +601,15 @@ class ChunkedCELoss(BaseLoss):
                     grad_accumulator.add(h_chunk.grad)
                     h_chunk.grad = None
 
-        if fsdp_enabled:
-            lm_head.set_reshard_after_forward(True)
-            lm_head.set_reshard_after_backward(True)
-            lm_head.set_requires_gradient_sync(True, recurse=False)
-            lm_head.reshard()
-        if not requires_grad:
-            return total_loss
+            if fsdp_enabled:
+                lm_head.set_reshard_after_forward(True)
+                lm_head.set_reshard_after_backward(True)
+                lm_head.set_requires_gradient_sync(True, recurse=False)
+                lm_head.reshard()
+            if not requires_grad:
+                return total_loss
 
-        accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
+            accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
         return self._gradient_backprop(
             hidden_states, accumulated_grad, total_loss, lm_head, fsdp_enabled
