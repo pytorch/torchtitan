@@ -480,3 +480,98 @@ All **11** graph passes took **163.95 s** (autotuning grows with batch shapes;
 ### Notes
 - `--training.local_batch_size 16` is now in the committed launcher.
 - ~61 GiB / 95 GiB at B=16 — room to push further (B≈24) if desired.
+
+---
+
+## Run 7 — lm_head chunked-loss coalescing fix: BITWISE-VERIFIED vs eager ✅
+
+**Date:** 2026-06-11
+**Branch:** `graph_trainer/dsv3_scaling`
+**Branch state at run:** Run 6 stack **+ the `chunked_loss.py` fix** (lm_head
+chunked-loss collective coalescing, PR #3636).
+**Launcher:** `./run_graph_trainer_dsv3.sh` — now **non-MinimalAsyncEP**
+(`graph_trainer_deepseek_v3_16b`), `dp_shard=8 tp=1 ep=4`, B=16, seq 4096,
+`--compile.memory_policy full`, **cudagraph disabled** (regular EP's
+`_grouped_mm` / all-to-all aren't cudagraphable on H100), `num_chunks=8`,
+`TORCHINDUCTOR_COMPILE_THREADS=8`.
+
+> ✅ **CORRECTNESS VERIFIED** — resolves the "UNVERIFIED" caveat on Runs 2–6 for
+> the chunked-loss path. graph_trainer is now **bitwise-identical to the eager
+> `Trainer`** (full-precision loss *and* grad_norm) over 20 steps.
+
+### The fix (PR #3636)
+Root cause of the prior eager-vs-graph drift (see `dsv3_numerics_verification.md`):
+graph_trainer uses `simple_fsdp` (not FSDP2), so the lm_head weight grad was
+reduce-scattered **once per chunk** and summed ranks-then-chunks, while eager
+FSDP2 accumulates the per-chunk grads **unsharded in f32** and reduce-scatters
+**once** (chunks-then-ranks). Both f32 — only the summation order differed, an
+f32-ulp gap that compounded (loss diverged at step 7 at 16B).
+
+`ChunkedCELossWithParamGrads` now reads the all-gathered lm_head weight **once**,
+runs the per-chunk forward+backward on a detached leaf (no per-chunk collective —
+chunking/memory preserved), accumulates the per-chunk grads **unsharded in f32**,
+and does **one** `Partial→Shard` reduce-scatter — reproducing eager's order.
+
+### Bitwise verification (eager FSDP2 vs graph simple_fsdp, 20 steps)
+`scripts/loss_compare.py` (`--debug.deterministic --debug.seed=42`, shared init):
+
+| metric | steps | max \|diff\| | diverging steps |
+|---|---|---|---|
+| loss (`global_avg_loss`) | 20 | **0.000e+00** | 0 / 20 |
+| grad_norm | 20 | **0.000e+00** | 0 / 20 |
+
+Also bitwise across debugmodel no-TP (dp8/tp1/ep4), debugmodel TP (dp4/tp2/ep2),
+and `lm_head.weight.grad` directly (0/15 at 16B). CPU `test_chunked_loss` 3/3.
+
+### Results (this benchmark — non-MinimalAsyncEP regular EP, B=16)
+| step | loss | grad_norm | memory | tps | tflops | mfu |
+|-----:|------|-----------|--------|-----|--------|-----|
+| 1 | 12.03631 | 1.6044 | 39.16 GiB (41.19%) | 373 | 6.75 | 0.68% |
+| 10 | 9.03867 | 6.0536 | 55.47 GiB (58.35%) | 10,108 | 183.02 | 18.51% |
+| 20 | 7.08863 | 1.9277 | 57.51 GiB (60.49%) | 7,734 | 140.02 | 14.16% |
+
+Step 10 is the clean steady state (**mfu 18.51%, 10.1k tps**); step 20's lower
+mfu reflects the memory-snapshot dump firing at `profile_freq=10` (steps 10 & 20).
+Model-only CUDA mem 7.83 GiB; peak ~57.5 GiB / 95 GiB at B=16.
+
+### Compile pipeline
+All 9 graph passes took **110.61 s** (`regional_inductor` dominant;
+`--compile.debug_graph_passes` instrumentation adds overhead).
+
+### Artifacts
+| artifact | link |
+|---|---|
+| run log (pastry) | https://www.internalfb.com/intern/paste/P2374744733/ |
+| profiler trace (perfetto, rank0 iter 10) | https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fbahuang_fe219053-85d4-49ab-ba7c-608967670d51_rank0_trace.json.gz |
+| CUDA memory snapshot (memory visualizer, step 20) | https://www.internalfb.com/pytorch_memory_visualizer/perfetto_internal_traces/tree/shared_trace/bahuang_4f5fac09-f864-437c-b162-d0157945b194_000000_step_20.pickle |
+| tlparse logs (manifold, **temporary** `.tmp` path) | https://manifold.edge.x2p.facebook.net/v0/read/tree/logs/.tmpQVIOId/index.html?bucketName=tlparse_reports&apiKey=tlparse_reports-key&withPayload=1&timeoutMsec=10000 |
+| 20-step bitwise loss_compare (pastry) | https://www.internalfb.com/intern/paste/P2374650180/ |
+| full numerics root-cause + fix writeup | `dsv3_numerics_verification.md` |
+
+#### Per-pass before/after graph diffs
+| pass | diff |
+|---|---|
+| eliminate_dead_code | https://www.internalfb.com/intern/diffing/?before_paste_number=2374743002&after_paste_number=2374743090&selected_tab=plain_diff |
+| canonicalize_graph | https://www.internalfb.com/intern/diffing/?before_paste_number=2374742803&after_paste_number=2374742897&selected_tab=plain_diff |
+| tag_with_memory_policy | https://www.internalfb.com/intern/diffing/?before_paste_number=2374744012&after_paste_number=2374744133&selected_tab=plain_diff |
+| selective_activation_remat | https://www.internalfb.com/intern/diffing/?before_paste_number=2374743758&after_paste_number=2374743878&selected_tab=plain_diff |
+| reassign_collective_pgs | https://www.internalfb.com/intern/diffing/?before_paste_number=2374743379&after_paste_number=2374743474&selected_tab=plain_diff |
+| joint_transformer_block_bucketing_reordering | https://www.internalfb.com/intern/diffing/?before_paste_number=2374743176&after_paste_number=2374743282&selected_tab=plain_diff |
+| annotate_flex_attention_for_regional_inductor | https://www.internalfb.com/intern/diffing/?before_paste_number=2374742627&after_paste_number=2374742717&selected_tab=plain_diff |
+| regional_inductor | https://www.internalfb.com/intern/diffing/?before_paste_number=2374743561&after_paste_number=2374743651&selected_tab=plain_diff |
+
+#### Standalone artifacts
+| artifact | paste |
+|---|---|
+| activation_memory_policy | https://www.internalfb.com/intern/paste/P2374744192/ |
+| fx_compute_nodes_runtime_estimation | https://www.internalfb.com/intern/paste/P2374744274/ |
+
+### Notes
+- `run_graph_trainer_dsv3.sh` updated to **non-MinimalAsyncEP + cudagraph
+  disabled** (Runs 5–6 used MinimalAsyncEP + forced cudagraph). This is the
+  eager-comparable path the fix makes bitwise-exact.
+- No OOM at B=16 (peak ~57.5 GiB); regular EP fits with `memory_policy=full`.
+- Fix is `chunked_loss.py` only (+194/−76), lint-clean; depends on #3248.
+- **PR: https://github.com/pytorch/torchtitan/pull/3636** (ghstack, stacked on #3248).
+- tlparse manifold link is a temporary `.tmp` path and will expire; pastry,
+  perfetto, and memory-snapshot links are durable.
