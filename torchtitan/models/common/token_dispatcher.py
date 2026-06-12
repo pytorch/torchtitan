@@ -227,7 +227,9 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher):
         batch_idx = local_indices // local_seq_len
         global_seq_len = local_seq_len * self.sp_size
         global_indices = batch_idx * global_seq_len + local_pos
-        return torch.add(global_indices, self.sp_rank * local_seq_len)
+        return torch.add(  # pyrefly: ignore [no-matching-overload]
+            global_indices, self.sp_rank * local_seq_len
+        )
 
     def dispatch(self, *args, **kwargs):
         raise NotImplementedError("BaseEPTokenDispatcher does not implement dispatch")
@@ -254,6 +256,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
     def __init__(self, config: Config):
         super().__init__(config)
 
+    # pyrefly: ignore [bad-override]
     def dispatch(
         self,
         x_TD: torch.Tensor,
@@ -288,7 +291,10 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         if self.ep_mesh is None:
             return LocalTokenDispatcher.dispatch(
                 self,
-                x_TD, topk_scores_TK, topk_expert_ids_TK, num_local_tokens_per_expert_E
+                x_TD,
+                topk_scores_TK,
+                topk_expert_ids_TK,
+                num_local_tokens_per_expert_E,
             )
 
         ep_size = self.ep_mesh.size()
