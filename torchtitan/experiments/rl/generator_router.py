@@ -17,6 +17,7 @@ from enum import auto, Enum
 from typing import Any
 
 from torchtitan.config import Configurable
+from torchtitan.observability import structured_logger as sl
 
 
 class _GeneratorState(Enum):
@@ -130,15 +131,13 @@ class GeneratorRouter(Configurable):
         ``RoundRobinRoutingStrategy.Config()`` or
         ``LeastLoadedRoutingStrategy.Config()``."""
 
-        hot_swap: bool = False
-        """When True, pulls model's state dict concurrently with in-flight
-        generation (no draining). When False, each generator is drained before
-        its pull.
+        hot_swap: bool = True
+        """Default True: pull the state dict concurrently with in-flight generation (no draining).
 
-        Draining only waits for a generator's in-flight ``route`` call (one
-        turn) to finish; between turns of a multi-turn rollout the generator is
-        idle, so a weight sync may land mid-rollout and successive turns can run
-        under different policy versions."""
+        False drains each generator before its pull, which blocks on the in-flight ``route`` (a full
+        turn) — so under long generations the drain dominates weight-sync time. Either way a sync can
+        land between turns of a multi-turn rollout, so successive turns may run under different policy
+        versions (tracked per-turn via ``version_intervals``)."""
 
     def __init__(
         self,
@@ -261,7 +260,11 @@ class GeneratorRouter(Configurable):
                 # work to finish before pulling, then re-admit it.
                 self._set_state(h, _GeneratorState.SYNCING)
                 try:
-                    await h.idle.wait()
+                    # The drain wait IS the weight-sync cost under load: it blocks until the
+                    # generator's in-flight `route` (one full turn) finishes — ~6s for a long
+                    # thinking=True turn, ~ms for a short one. Spanned so the gantt shows it.
+                    with sl.log_trace_span("router_drain_wait"):
+                        await h.idle.wait()
                     await h.actor.pull_model_state_dict.call(policy_version)
                 finally:
                     self._set_state(h, _GeneratorState.SERVING)

@@ -345,10 +345,10 @@ class RLTrainer(Configurable):
         """VLLMGenerator actor configuration (vLLM engine, sampling)."""
 
         generator_router: GeneratorRouter.Config = field(
-            default_factory=lambda: GeneratorRouter.Config(hot_swap=True)
+            default_factory=GeneratorRouter.Config
         )
-        """Router over one or more generator actors. `hot_swap=True`: a weight pull doesn't drain
-        in-flight generation (the async producer keeps generating across the swap)."""
+        """Router over one or more generator actors. `hot_swap` defaults True: a weight pull doesn't
+        drain in-flight generation (the async producer keeps generating across the swap)."""
 
         metrics: m.MetricsProcessor.Config = field(
             default_factory=m.MetricsProcessor.Config

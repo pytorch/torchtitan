@@ -217,12 +217,13 @@ def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
     from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b_varlen
 
     config = rl_grpo_qwen3_0_6b_varlen()
-    assert (
-        not config.generator_router.hot_swap
-    )  # default; guard fires only when both are off
+    # hot_swap defaults True; the guard fires only in drain mode (hot_swap=False) with reset also off.
     with pytest.raises(ValueError, match="reset_prefix_cache_on_weight_sync"):
         dataclasses.replace(
             config,
+            generator_router=dataclasses.replace(
+                config.generator_router, hot_swap=False
+            ),
             generator=dataclasses.replace(
                 config.generator, reset_prefix_cache_on_weight_sync=False
             ),
