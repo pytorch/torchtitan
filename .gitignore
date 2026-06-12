@@ -52,3 +52,4 @@ CLAUDE_CONTEXT/
 
 # Lychee (link checker) cache
 .lycheecache
+example_checkpoint

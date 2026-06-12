@@ -245,6 +245,22 @@ class PolicyTrainer(Actor, Configurable):
                 "Set checkpoint.enable=True to load from a checkpoint."
             )
 
+        # Frozen reference model for the optional KL-to-reference penalty. Built only
+        # when the loss uses KL (kl_coef > 0), since it costs a full model's memory.
+        # Copies the just-loaded policy weights, so it captures the initial policy.
+        self.ref_model = None
+        if getattr(config.loss, "kl_coef", 0.0) > 0.0:
+            with sl.log_trace_span("build_ref_model"):
+                ref_model = self._build_model(model_spec, config, device_type)
+                ref_model.load_state_dict(self.model.state_dict())
+                ref_model.eval()
+                ref_model.requires_grad_(False)
+                self.ref_model = ref_model
+            logger.info(
+                "Built frozen reference model for KL penalty (kl_coef=%s)",
+                config.loss.kl_coef,
+            )
+
         self.generator: Any | None = None
 
         # Data parallelism: mesh is available after _build_model triggers build_mesh
@@ -425,6 +441,15 @@ class PolicyTrainer(Actor, Configurable):
             )
         policy_logprobs = compute_logprobs(logits, labels)
 
+        # Reference logprobs for the optional KL penalty (frozen base model; no grad).
+        ref_logprobs = None
+        if self.ref_model is not None:
+            with sl.log_trace_span("ref_model_forward"), torch.no_grad():
+                ref_logits = self.ref_model(
+                    token_ids, attention_masks=attention_masks, positions=positions
+                )
+            ref_logprobs = compute_logprobs(ref_logits, labels)
+
         with sl.log_trace_span("loss_fn"):
             loss, loss_metrics = self.loss_fn(
                 policy_logprobs=policy_logprobs,
@@ -432,6 +457,7 @@ class PolicyTrainer(Actor, Configurable):
                 loss_mask=loss_mask,
                 advantages=advantages,
                 num_global_valid_tokens=num_global_valid_tokens,
+                ref_logprobs=ref_logprobs,
             )
 
         with sl.log_trace_span("model_backward"):

@@ -46,6 +46,29 @@ from torchtitan.protocols.model_spec import ModelSpec
 logger = logging.getLogger(__name__)
 
 
+def _compute_kl(
+    logprobs: torch.Tensor, ref_logprobs: torch.Tensor, kl_loss_type: str
+) -> torch.Tensor:
+    """Per-token approximate KL(π_θ ‖ π_ref). Ported from slime/OpenRLHF.
+
+    "low_var_kl"/"k3" is the non-negative, low-variance estimator from
+    http://joschu.net/blog/kl-approx.html. "k1" = log-ratio, "k2" = log-ratio^2/2.
+    """
+    log_ratio = logprobs.float() - ref_logprobs.float()
+    if kl_loss_type in ("k3", "low_var_kl"):
+        neg = -log_ratio
+        kl = neg.exp() - 1 - neg
+    elif kl_loss_type == "k1":
+        kl = log_ratio
+    elif kl_loss_type == "k2":
+        kl = log_ratio**2 / 2.0
+    else:
+        raise ValueError(f"Unknown kl_loss_type: {kl_loss_type}")
+    if kl_loss_type == "low_var_kl":
+        kl = torch.clamp(kl, min=-10.0, max=10.0)
+    return kl
+
+
 class GRPOLoss(Configurable):
     """Per-token clipped surrogate loss for GRPO.
 
@@ -66,10 +89,30 @@ class GRPOLoss(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         clip_eps: float = 0.2
-        """PPO clipping epsilon for the probability ratio."""
+        """PPO clipping epsilon for the probability ratio (lower bound 1 - clip_eps)."""
+
+        clip_eps_high: float | None = None
+        """Upper clip bound (DAPO "clip-higher": ratio clamp max = 1 + clip_eps_high).
+        ``None`` (default) -> symmetric (uses clip_eps). A larger value (e.g. 0.28)
+        keeps more probability mass on up-weighted tokens, mitigating mode collapse."""
+
+        kl_coef: float = 0.0
+        """Coefficient for the KL-to-reference penalty added per token. 0.0 (default)
+        disables it (and the trainer then skips building the reference model). slime
+        uses ~0.001 to keep the policy near the base model and prevent mode collapse."""
+
+        kl_loss_type: str = "low_var_kl"
+        """KL estimator (used only when kl_coef > 0): "low_var_kl"/"k3", "k1", "k2"."""
 
     def __init__(self, config: Config):
         self.clip_eps = config.clip_eps
+        self.clip_eps_high = (
+            config.clip_eps_high
+            if config.clip_eps_high is not None
+            else config.clip_eps
+        )
+        self.kl_coef = config.kl_coef
+        self.kl_loss_type = config.kl_loss_type
 
     def __call__(
         self,
@@ -78,8 +121,9 @@ class GRPOLoss(Configurable):
         loss_mask: torch.Tensor,
         advantages: torch.Tensor,
         num_global_valid_tokens: int,
+        ref_logprobs: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        """Compute per-token GRPO clipped surrogate loss.
+        """Compute per-token GRPO clipped surrogate loss (+ optional KL penalty).
 
         Args:
             policy_logprobs: [B, L] log π_θ(a_t | s_t) from the current policy.
@@ -89,6 +133,8 @@ class GRPOLoss(Configurable):
             num_global_valid_tokens: total response tokens across all microbatches
                 and DP ranks; used as the loss denominator so gradient
                 accumulation is equivalent to a single large-batch step.
+            ref_logprobs: [B, L] log π_ref from the frozen reference model; required
+                when ``kl_coef > 0`` (the KL-to-reference penalty), else ignored.
 
         Returns:
             (loss, metrics) where loss is a scalar tensor and metrics is a
@@ -103,10 +149,21 @@ class GRPOLoss(Configurable):
         log_ratio = torch.clamp(log_ratio, -20.0, 20.0)
         ratio = torch.exp(log_ratio)
 
-        clipped_ratio = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
+        # Asymmetric clip ("clip-higher"): upper bound 1 + clip_eps_high (= clip_eps
+        # by default, so this is unchanged unless a config sets clip_eps_high).
+        clipped_ratio = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps_high)
         token_pg_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
 
-        masked_loss = token_pg_loss * loss_mask
+        # KL-to-reference penalty (keeps π_θ near the frozen base; prevents collapse
+        # to a degenerate reward-hacking mode). Off unless kl_coef > 0.
+        kl = None
+        if self.kl_coef > 0.0 and ref_logprobs is not None:
+            kl = _compute_kl(policy_logprobs, ref_logprobs, self.kl_loss_type)
+            token_loss = token_pg_loss + self.kl_coef * kl
+        else:
+            token_loss = token_pg_loss
+
+        masked_loss = token_loss * loss_mask
         loss_denominator = max(num_global_valid_tokens, 1)
         loss = masked_loss.sum() / loss_denominator
 
@@ -125,6 +182,8 @@ class GRPOLoss(Configurable):
                 ).sum()
                 / loss_denominator,
             }
+            if kl is not None:
+                metrics["loss/kl_mean"] = (kl * loss_mask).sum() / loss_denominator
 
         return loss, metrics
 
@@ -172,8 +231,20 @@ class RLTrainer(Configurable):
         """Sibling rollouts sampled per dataset row (the GRPO group). The generator
         is always called with `n=1`; prompts are pre-expanded by `group_size`."""
 
+        advantage_std_normalization: bool = False
+        """Standard GRPO advantage ``A = (reward - group_mean) / (group_std + eps)``
+        (divide the centered advantage by the group's reward std). False (default) =
+        mean-baseline only (Dr.GRPO). slime/Search-R1 uses True: it up-weights
+        high-uncertainty groups (few-of-N correct), i.e. the hard, search-dependent
+        questions, so the policy keeps learning to search."""
+
         num_validation_samples: int = 20
         """Number of held-out prompts scored greedily (temp=0, n=1) per validation pass."""
+
+        validation_freq: int = 0
+        """Run a validation pass every ``validation_freq`` training steps (on top of the
+        pre-/post-training passes). 0 (default) = only pre/post. Set e.g. 5 to trace the
+        eval curve across training."""
 
         rollouter: Rollouter.Config
         """The rollouter: its datasets, envs, and rubric."""
@@ -562,14 +633,19 @@ class RLTrainer(Configurable):
     @sl.log_trace_span("_build_episodes")
     def _build_episodes(
         rollout_groups: list[RolloutGroup],
+        *,
+        std_normalize: bool = False,
     ) -> tuple[list[Episode], list[m.Metric]]:
         """Build training episodes and GRPO advantages from scored rollout groups.
 
-        Centers each group's rewards by its mean, skips rollouts without
+        Centers each group's rewards by its mean (and, when ``std_normalize``,
+        divides by the group reward std — standard GRPO), skips rollouts without
         training tokens, and emits reward/advantage metrics.
 
         Args:
             rollout_groups: Scored rollout groups from one collection round.
+            std_normalize: If True, divide each centered advantage by the group's
+                reward std (+eps) — standard GRPO. If False, mean-baseline (Dr.GRPO).
 
         Returns:
             Train episodes plus episode-level metrics.
@@ -597,11 +673,15 @@ class RLTrainer(Configurable):
             # TODO: move advantage calculation to Rollouter
             rewards = [rollout.reward for rollout in group.rollouts]
             group_mean = sum(rewards) / len(rewards)
-            group_stds.append(statistics.pstdev(rewards))
+            group_std = statistics.pstdev(rewards)
+            group_stds.append(group_std)
 
-            # Center the advantage per rollout; each rollout packs into one or more episodes.
+            # Center the advantage per rollout (and, when std_normalize, divide by the
+            # group reward std -> standard GRPO). A zero-std group already has advantage
+            # 0 (reward == mean), so eps only avoids 0/0. Each rollout packs into 1+ episodes.
+            denom = (group_std + 1e-6) if std_normalize else 1.0
             for rollout in group.rollouts:
-                rollout.advantage = rollout.reward - group_mean
+                rollout.advantage = (rollout.reward - group_mean) / denom
                 rollout_episodes = rollout_to_episodes(rollout)
                 episodes.extend(rollout_episodes)
                 branches_per_rollout.append(float(len(rollout_episodes)))
@@ -750,7 +830,10 @@ class RLTrainer(Configurable):
                 )
                 group_offset += num_groups
 
-            episodes, episode_metrics = self._build_episodes(rollout_groups)
+            episodes, episode_metrics = self._build_episodes(
+                rollout_groups,
+                std_normalize=self.config.advantage_std_normalization,
+            )
             t_rollout_s = time.perf_counter() - t_rollout_start
 
             # record rollout to jsonl
@@ -860,6 +943,21 @@ class RLTrainer(Configurable):
             if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
                 logger.error("Loss is NaN/Inf; training diverged")
                 break
+
+            # --- periodic validation ---
+            # validation_freq=0 (default) disables this; pre/post passes always run.
+            # Skip at num_steps to avoid double-validating with the post-training pass.
+            if (
+                self.config.validation_freq
+                and step % self.config.validation_freq == 0
+                and step != num_steps
+            ):
+                periodic_validation_metrics = await self.validate(step=step)
+                self.metrics_processor.log(
+                    step=step,
+                    metrics=periodic_validation_metrics,
+                    is_validation=True,
+                )
 
         post_validation_metrics = await self.validate(step=num_steps)
         self.metrics_processor.log(
