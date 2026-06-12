@@ -12,6 +12,7 @@ import gc
 import logging
 import math
 import os
+import re
 from dataclasses import dataclass, field
 
 import torch
@@ -618,7 +619,7 @@ class VLLMGenerator(Actor, Configurable):
                             self._engine.add_request(
                                 request_id=request.request_id,
                                 prompt=engine_input,
-                                params=self._build_sampling_params(request.sampling),
+                                params=self._build_sampling_params(request),
                             )
 
                 # Barrier (NCCL): engine.step() runs SPMD in lockstep.
@@ -734,15 +735,28 @@ class VLLMGenerator(Actor, Configurable):
             self._pull_model_state_dict_future = None
             self._model_state_dict_pull_request = None
 
-    def _build_sampling_params(self, sampling: SamplingConfig) -> SamplingParams:
-        """Translate a `SamplingConfig` into vLLM `SamplingParams` (n=1; seed from debug)."""
+    def _build_sampling_params(self, request: GenerationRequest) -> SamplingParams:
+        """Translate a request's `SamplingConfig` into vLLM `SamplingParams` (n=1).
+
+        The debug seed is offset by the per-sample index parsed from
+        ``request_id`` (``.../sample=<idx>/...``). Each sample in a group is a
+        separate ``n=1`` request, so a single fixed seed would make all samples
+        in a group identical -> zero reward std -> zero GRPO advantage. Offsetting
+        keeps runs bitwise-reproducible while restoring intra-group diversity.
+        """
+        sampling = request.sampling
+        base_seed = self.config.debug.seed
+        seed = base_seed
+        if base_seed is not None:
+            match = re.search(r"sample=(\d+)", request.request_id)
+            seed = base_seed + (int(match.group(1)) if match else 0)
         return SamplingParams(
             temperature=sampling.temperature,
             top_p=sampling.top_p,
             max_tokens=sampling.max_tokens,
             n=1,  # always expects a single sample per request. Caller can call N times.
             stop_token_ids=self._stop_token_ids or None,
-            seed=self.config.debug.seed,
+            seed=seed,
             logprobs=0,  # return only the sampled token's logprob (for the GRPO ratio)
             # Return each request's result once, when it is fully done, instead of streaming partial
             # outputs as tokens arrive.

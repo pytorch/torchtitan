@@ -23,6 +23,7 @@ from torchtitan.config import DebugConfig, ParallelismConfig
 from torchtitan.experiments.rl.actors.generator import (
     _prepare_generation_request_metrics,
     GenerationFuture,
+    GenerationRequest,
     SamplingConfig,
     VLLMGenerator,
 )
@@ -140,11 +141,20 @@ def test_process_finished_requests_noop_on_followers():
 # --- SamplingParams contract (must match the batched path exactly) ---
 
 
+def _gen_request(request_id, sampling):
+    return GenerationRequest(
+        request_id=request_id, prompt_token_ids=[1, 2, 3], sampling=sampling
+    )
+
+
 def test_build_sampling_params_matches_contract():
     generator = _generator()
     generator._stop_token_ids = [99]
     params = generator._build_sampling_params(
-        SamplingConfig(temperature=0.3, top_p=0.9, max_tokens=64)
+        _gen_request(
+            "step=1/group=0/sample=0/turn=0",
+            SamplingConfig(temperature=0.3, top_p=0.9, max_tokens=64),
+        )
     )
     assert params.temperature == 0.3 and params.top_p == 0.9
     assert params.max_tokens == 64
@@ -152,6 +162,30 @@ def test_build_sampling_params_matches_contract():
     assert params.logprobs == 0
     assert params.output_kind == RequestOutputKind.FINAL_ONLY
     assert params.stop_token_ids == [99]
+
+
+def test_build_sampling_params_offsets_seed_per_sample():
+    # Each sample in a group is a separate n=1 request; the seed must be offset
+    # by the sample index so the group stays diverse (non-zero GRPO advantage)
+    # while remaining reproducible run-to-run.
+    generator = _generator()
+    generator.config.debug.seed = 42
+    sampling = SamplingConfig(temperature=0.8, top_p=0.95, max_tokens=64)
+
+    seeds = [
+        generator._build_sampling_params(
+            _gen_request(f"step=1/group=0/sample={i}/turn=0", sampling)
+        ).seed
+        for i in range(4)
+    ]
+    assert seeds == [42, 43, 44, 45]
+
+    # seed=None stays None (non-deterministic runs are unaffected).
+    generator.config.debug.seed = None
+    none_seed = generator._build_sampling_params(
+        _gen_request("step=1/group=0/sample=2/turn=0", sampling)
+    ).seed
+    assert none_seed is None
 
 
 # --- vLLM metric timing math (the `_prepare_generation_request_metrics` helper) ---
