@@ -17,10 +17,7 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
 
-from .token_dispatcher import (
-    DeepEPTokenDispatcher,
-    LocalTokenDispatcher,
-)
+from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):

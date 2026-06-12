@@ -407,6 +407,7 @@ def _combine_to_origin(
     # should not see capacity padding or unused trailing columns.
     return origin_recv_buffer.narrow(0, 0, num_routed_rows).narrow(1, 0, x_RD.shape[1])
 
+
 def _dispatch_metadata(
     num_local_tokens_per_expert_E: torch.Tensor,  # noqa: N803
     num_routed_rows: int,

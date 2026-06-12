@@ -202,9 +202,8 @@ class Decoder(BaseModel):
                 if minimal_async_ep_dispatcher_cfgs:
                     # None for eager trainer
                     memory_policy = getattr(config.compile, "memory_policy", None)
-                    if (
-                        config.activation_checkpoint.mode != "full"
-                        and (memory_policy is None or memory_policy != "full")
+                    if config.activation_checkpoint.mode != "full" and (
+                        memory_policy is None or memory_policy != "full"
                     ):
                         raise ValueError(
                             "MinimalAsyncEP requires full recompute: set "
