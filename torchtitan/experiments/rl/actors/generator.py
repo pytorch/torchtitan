@@ -104,6 +104,59 @@ def _prepare_generation_request_metrics(
     ]
 
 
+def _force_logprobs_fn_for_batch_invariance() -> None:
+    """Make vLLM's v2 logprob path dispatch.
+
+    The v2 GPU sampler computes per-token logprobs with a fused Triton kernel
+    (``compute_token_logprobs`` -> ``_topk_log_softmax_kernel``) that inlines
+    ``log(softmax(logits))`` and never calls PyTorch ops.
+
+    Swapping the kernel to routes the generator and the trainer through
+    the same set of ops, so logprobs match bit-for-bit.
+    """
+    import vllm.v1.worker.gpu.sample.logprob as vllm_logprob
+
+    from torchtitan.experiments.rl.actors.trainer import compute_logprobs
+
+    def generator_compute_token_logprobs(
+        logits: torch.Tensor, token_ids: torch.Tensor
+    ) -> torch.Tensor:
+        """Per-token logprobs for vLLM's v2 sampler (replaces its fused kernel).
+
+        Args:
+            logits: ``[N, V]`` next-token logits for N sampled positions
+                (V = vocab_size).
+            token_ids: ``[N, K]`` the K token ids to score per position (vLLM
+                passes the sampled token's logprob plus any top-k logprobs it requested).
+
+        Returns:
+            ``[N, K]`` logprob of each of the K token ids at each position.
+        """
+        # vLLM gives token_ids [N, K]. SamplingParams(logprobs=0) makes real
+        # requests K=1, but we can't assert that: vLLM's kernel warmup probes
+        # this patched fn with K>1 (e.g. K=6), so we must handle any K. Map the
+        # N positions to one sequence (B=1, S=N) and reuse the trainer's
+        # compute_logprobs (one token per position) once per column.
+        #
+        # NOTE: each element of token_ids is scored independently, after the
+        # whole generated sequence is marterialized. We iterate column-by-column
+        # purely because torchtitan's compute_logprobs takes one token id per
+        # position; it is not a cross-column/cross-position dependency.
+        logits = logits.unsqueeze(0)  # [1, N, V]  (B=1, S=N)
+        token_ids = token_ids.to(torch.int64)
+        per_column = [
+            compute_logprobs(logits, token_ids[:, k].unsqueeze(0))  # [1, N]
+            for k in range(token_ids.shape[1])
+        ]
+        return torch.stack(per_column, dim=-1).squeeze(0)  # [N, K]
+
+    vllm_logprob.compute_token_logprobs = generator_compute_token_logprobs
+    logger.info(
+        "Patched vLLM compute_token_logprobs with trainer's implementation "
+        "so generator and trainer share one logprob code path"
+    )
+
+
 @dataclass(kw_only=True, slots=True)
 class VLLMCudagraphConfig:
     """CUDA graph capture settings for the vLLM inference engine.
@@ -363,6 +416,10 @@ class VLLMGenerator(Actor, Configurable):
 
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
         set_batch_invariance(config.debug.batch_invariant)
+        if config.debug.batch_invariant:
+            # The vLLM v2 logprob Triton kernel bypasses the aten overrides above;
+            # route it through trainer's function to match the trainer exactly.
+            _force_logprobs_fn_for_batch_invariance()
 
         self._set_determinism(config.debug)
 
