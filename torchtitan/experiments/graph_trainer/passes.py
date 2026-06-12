@@ -42,6 +42,7 @@ from torchtitan.experiments.graph_trainer.debug_utils import (
     tlparse_log_graph_pass,
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
+    get_fsdp_param_module_order,
     joint_transformer_block_bucketing_reordering_pass,
     reassign_collective_pgs_pass,
 )
@@ -148,6 +149,11 @@ def compile_time_passes(
         functools.partial(
             joint_transformer_block_bucketing_reordering_pass,
             module_bucket_plans=get_default_transformer_block_buckets(n_layers),
+            # FSDP2 packs buckets in managed parameter order. The traced state
+            # FQNs preserve that registration order, unlike graph execution order.
+            fsdp_param_module_order=get_fsdp_param_module_order(
+                traced_result.state_fqns
+            ),
         ),
     ]
     if config.parallelism.enable_async_tensor_parallel:
