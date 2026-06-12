@@ -239,5 +239,96 @@ Inductor cache for the new MinimalAsyncEP / offset-aware swiglu kernels):
   `spmd_backend=default` (MinimalAsyncEP rejects `full_dtensor`).
 - Cold-cache compile mitigation as in Run 2 (`TORCHINDUCTOR_COMPILE_THREADS=8`);
   the MinimalAsyncEP / swiglu kernels are new, so their first compile is cold.
-- The committed launcher still uses `graph_trainer_deepseek_v3_16b`; the
-  MinimalAsyncEP config was set only for this run.
+- For Run 3 the committed launcher still used `graph_trainer_deepseek_v3_16b`;
+  the MinimalAsyncEP config was a temporary override. (The launcher was later
+  switched to MinimalAsyncEP — see Run 4.)
+
+---
+
+## Run 4 — MinimalAsyncEP + cudagraph, FORCED (run script + #3419 + #3248 + #3561 + cudagraph.py override)
+
+**Date:** 2026-06-09
+**Branch:** `graph_trainer/dsv3_scaling`
+**Branch state at run:** run-script + #3419 + #3248 + #3561, **plus a local
+`cudagraph.py` override that forces capture**. #3590 / EP-overlap / #3548 not yet
+applied.
+**Launcher:** `./run_graph_trainer_dsv3.sh` (`CONFIG=...minimal_async_ep`,
+`TORCHINDUCTOR_COMPILE_THREADS=8`, cudagraph enabled).
+
+> 🟡 **cudagraph FORCED past the safety gate.** With cudagraph merely *enabled*,
+> `cudagraph_pass` first **SKIPPED** — `is_cudagraphable` flagged **312
+> `aten._grouped_mm` nodes** (the MoE grouped expert matmul), which it disallows
+> on **< sm_100** (H100 = sm_90) because `_grouped_mm` "may perform internal
+> CPU↔CUDA copies not visible in FX metadata; resolved on sm_100+". A local edit
+> to `cudagraph.py:cudagraph_pass` bypasses that gate (logs the offenders,
+> captures anyway). **cudagraph then applied and ran without crashing.**
+
+> ⛔ **CORRECTNESS UNVERIFIED — forced past a real safety check.** If
+> `_grouped_mm` does hidden CPU↔CUDA copies on sm_90, cudagraph replay uses
+> **stale** data → silently wrong. The plausible loss is NOT proof. **Must**
+> confirm vs an eager `deepseek_v3_16b_minimal_async_ep` run (`loss_compare.py`,
+> `--debug.seed=42 --debug.deterministic`) before trusting. (Also still subject
+> to the chunked-loss / MinimalAsyncEP numerics caveat from Runs 2–3.)
+
+### Setup
+Identical to Run 3 (MinimalAsyncEP, 8× H100, `dp_shard=8 ep=4`, `aot_fx_trace`,
+`memory_policy=full`, ChunkedCELoss, B=4 / seq 4096, 20 steps, c4_test) with
+**cudagraph enabled AND forced** (the `cudagraph.py` gate bypass above).
+
+### Results (forced cudagraph)
+| step | loss | grad_norm | memory | tps | tflops | mfu |
+|-----:|------|-----------|--------|-----|--------|-----|
+| 1 | 12.02520 | 1.6800 | 36.30 GiB (38.18%) | 116 | 2.09 | 0.21% |
+| 10 | 9.17969 | 6.7772 | 36.42 GiB (38.30%) | 9,114 | 165.01 | 16.68% |
+| 20 | 7.19782 | 2.4133 | 36.42 GiB (38.30%) | 9,028 | 163.46 | 16.53% |
+
+**cudagraph speedup** (same config, cudagraph off vs forced-on):
+| variant | step-10 mfu | step-20 mfu | step-20 tps |
+|---|---|---|---|
+| Run 3 (no cudagraph) | 15.05% | 10.08% | 5,504 |
+| cudagraph *skipped* (earlier Run 4 attempt) | 15.51% | 12.73% | 6,951 |
+| **cudagraph FORCED** | **16.68%** | **16.53%** | **9,028** |
+
+Forced cudagraph gives a real, stable speedup (~16.5% mfu, tps ~9k; step-20 no
+longer drops off). Loss in the same band. **Numerics unverified — see caveat.**
+
+### Compile pipeline
+All **11** graph passes took **91.714 s**. `regional_inductor` 69.52 s;
+`cudagraph_pass` now actually applies — logs `FORCING cudagraph despite 312
+non-cudagraphable node(s)` then `Applied cudagraph pass.`
+
+### Artifacts
+| artifact | link |
+|---|---|
+| run log (pastry) | https://www.internalfb.com/intern/paste/P2372005165/ |
+| profiler trace (perfetto, rank0 iter 10) | https://www.internalfb.com/intern/perfetto/open_trace/?manifold_path=perfetto_internal_traces%2Ftree%2Fshared_trace%2Fbahuang_5ad8fb07-f46c-4670-b5e8-c2ae40df6a69_rank0_trace.json.gz |
+| tlparse logs (manifold, **temporary** `.tmp` path) | https://manifold.edge.x2p.facebook.net/v0/read/tree/logs/.tmpg3MotK/index.html?bucketName=tlparse_reports&apiKey=tlparse_reports-key&withPayload=1&timeoutMsec=10000 |
+
+#### Per-pass before/after graph diffs
+| pass | diff |
+|---|---|
+| eliminate_dead_code | https://www.internalfb.com/intern/diffing/?before_paste_number=2372003617&after_paste_number=2372003737&selected_tab=plain_diff |
+| canonicalize_graph | https://www.internalfb.com/intern/diffing/?before_paste_number=2372003396&after_paste_number=2372003512&selected_tab=plain_diff |
+| tag_with_memory_policy | https://www.internalfb.com/intern/diffing/?before_paste_number=2372004743&after_paste_number=2372004852&selected_tab=plain_diff |
+| selective_activation_remat | https://www.internalfb.com/intern/diffing/?before_paste_number=2372004505&after_paste_number=2372004642&selected_tab=plain_diff |
+| reassign_collective_pgs | https://www.internalfb.com/intern/diffing/?before_paste_number=2372004011&after_paste_number=2372004127&selected_tab=plain_diff |
+| joint_transformer_block_bucketing_reordering | https://www.internalfb.com/intern/diffing/?before_paste_number=2372003828&after_paste_number=2372003916&selected_tab=plain_diff |
+| annotate_flex_attention_for_regional_inductor | https://www.internalfb.com/intern/diffing/?before_paste_number=2372003147&after_paste_number=2372003245&selected_tab=plain_diff |
+| regional_inductor | https://www.internalfb.com/intern/diffing/?before_paste_number=2372004259&after_paste_number=2372004381&selected_tab=plain_diff |
+
+#### Standalone artifacts
+| artifact | paste |
+|---|---|
+| activation_memory_policy | https://www.internalfb.com/intern/paste/P2372004904/ |
+| fx_compute_nodes_runtime_estimation | https://www.internalfb.com/intern/paste/P2372004981/ |
+
+### Notes
+- **Root cause of the cudagraph skip:** the `_grouped_mm` `< sm_100` gate in
+  `is_cudagraphable` (`cudagraph.py`). Allowed on sm_100+ (Blackwell);
+  conservatively disallowed on H100 (sm_90).
+- The forced-capture change in `cudagraph.py` is an **unconditional debug
+  override** (TODO: revert). The principled fix, *if verified numerically safe
+  on sm_90*, is to relax just the `_grouped_mm` gate (or gate the force behind a
+  flag) — not a blanket bypass.
+- MinimalAsyncEP buffer init confirmed; `TORCHINDUCTOR_COMPILE_THREADS=8`
+  cold-cache mitigation as before.
