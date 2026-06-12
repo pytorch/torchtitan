@@ -12,6 +12,7 @@ import torch
 import spmd_types as spmd
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
+from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.protocols.module import Module
 
@@ -238,6 +239,14 @@ class ComplexRoPE(RoPE):
         # Complex RoPE cache has width dim / 2 because each complex value
         # represents a pair of real dimensions.
         complex_query_shape = (*query.shape[:-1], query.shape[-1] // 2)
+        if get_spmd_backend() == "spmd_types":
+            # this is strictly a local SPMD region;
+            # it relies on local shape comparisons & local shape expand/gather.
+            return spmd.local_map(
+                out_types={"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R}
+            )(_reshape_for_broadcast)(
+                self.cache, complex_query_shape, positions
+            )
         return _reshape_for_broadcast(self.cache, complex_query_shape, positions)
 
     @staticmethod
@@ -358,8 +367,6 @@ def _reshape_for_broadcast(
     positions: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Reshape a RoPE cache for broadcasting with query/key tensors."""
-    if isinstance(rope_cache, DTensor) and get_spmd_backend() == "spmd_types":
-        rope_cache = rope_cache.to_local()
     ndim = len(query_shape)
     assert ndim > 1
     bsz, seqlen = query_shape[:2]
