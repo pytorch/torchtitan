@@ -38,6 +38,7 @@ class GenerateFn(Protocol):
         prompt_token_ids: list[int],
         *,
         request_id: str,
+        routing_session_id: str | None = None,
         sampling_config: SamplingConfig | None = None,
     ) -> Completion | None:
         """Run one generation.
@@ -45,6 +46,9 @@ class GenerateFn(Protocol):
         Args:
             prompt_token_ids: The tokenized prompt to generate from.
             request_id: Unique per call; identifies the exact turn (e.g. ".../turn=2") in logs.
+            routing_session_id: Stable key grouping calls that share a prompt prefix; lets
+                sticky routing keep them on the same generator for prefix-cache reuse.
+                `None` means no session affinity.
             sampling_config: Optional per-call sampling overrides.
 
         Returns:

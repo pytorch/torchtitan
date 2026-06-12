@@ -258,9 +258,19 @@ class Rollouter(Configurable):
             while not step.status.is_terminal():
 
                 # generator call
+                # routing_session_id=group_id pins a whole group to one generator, so its
+                # shared prefix is prefilled once. The group is then the unit of load
+                # placement (group_size siblings), so generators are fully utilized
+                # only when num_groups >= num_generators.
+                #
+                # The alternative, routing_session_id=rollout_id, spreads a group's siblings
+                # across generators — finer load placement, but it forfeits the
+                # cross-sibling prefix reuse (specifically the shared first-turn
+                # prompt). We accept the coarser placement here to keep that reuse.
                 completion = await generate_fn(
                     prompt_token_ids=step.next_prompt_token_ids,
                     request_id=f"{rollout_id}/turn={len(turns)}",
+                    routing_session_id=group_id,
                     sampling_config=sampling,
                 )
 
