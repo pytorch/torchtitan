@@ -34,6 +34,8 @@ class VocabParallelEmbedding(nn.Embedding, Module):
         self.tp_group: dist.ProcessGroup | None = None
 
     def parallelize(self, parallel_dims: "ParallelDims") -> None:
+        # TODO(pianpwk): delete and rely on `current_spmd_mesh().get_group("tp")`
+        # once full_dtensor & legacy backends are removed.
         tp_mesh = parallel_dims.get_optional_mesh("tp")
         if tp_mesh is not None:
             self.tp_group = tp_mesh.get_group("tp")
@@ -41,7 +43,9 @@ class VocabParallelEmbedding(nn.Embedding, Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Runs vocab-parallel embedding when the module has a TP group."""
-        weight = self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
+        weight = (
+            self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
+        )
         if self.tp_group is None:
             return F.embedding(
                 input,
@@ -53,8 +57,6 @@ class VocabParallelEmbedding(nn.Embedding, Module):
                 self.sparse,
             )
 
-        # TODO(pianpwk): Once DTensor backend is removed, delete ``tp_group`` and
-        # use ``current_spmd_mesh().get_group("tp")`` here instead.
         tp_pg = self.tp_group
         tp_size = dist.get_world_size(tp_pg)
         weight = weight.to_local() if isinstance(weight, DTensor) else weight
