@@ -60,11 +60,11 @@ _LINEAR_INIT = {"weight": partial(nn.init.normal_, mean=0.0, std=0.02), "bias": 
 _NORM_INIT = {"weight": nn.init.ones_, "bias": nn.init.zeros_}
 
 
-def model_registry() -> ModelSpec:
+def model_registry(flavor: str) -> ModelSpec:
     return ModelSpec(
         name="path",
-        flavor="default",
-        model=_model_config(),
+        flavor=flavor,
+        model=_model_config(flavor),
         parallelize_fn=parallelize_path,
         pipelining_fn=None,
         post_optimizer_build_fn=None,
@@ -72,7 +72,23 @@ def model_registry() -> ModelSpec:
     )
 
 
-def path() -> PathTrainer.Config:
+def path_convnext_tiny() -> PathTrainer.Config:
+    return _path("convnext_tiny")
+
+
+def path_convnext_small() -> PathTrainer.Config:
+    return _path("convnext_small")
+
+
+def path_convnext_base() -> PathTrainer.Config:
+    return _path("convnext_base")
+
+
+def path_convnext_xxlarge() -> PathTrainer.Config:
+    return _path("convnext_xxlarge")
+
+
+def _path(flavor: str) -> PathTrainer.Config:
     steps = 512*10
     mixed_precision_param = "bfloat16"
     local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
@@ -80,7 +96,7 @@ def path() -> PathTrainer.Config:
     num_nodes = int(os.environ.get("GROUP_WORLD_SIZE", str(world_size // local_world_size)))
     return PathTrainer.Config(
         loss=PathLoss.Config(),
-        model_spec=model_registry(),
+        model_spec=model_registry(flavor),
         tokenizer=NoOpTokenizer.Config(),
         dataloader=_dataloader_config(split="train"),
         optimizer=_optimizer_config(),
@@ -125,7 +141,7 @@ def path() -> PathTrainer.Config:
     )
 
 
-def _model_config() -> PathModel.Config:
+def _model_config(flavor: str) -> PathModel.Config:
     vision_features = 512
     frame_constants = frame_constants_from_fps(n_frames=N_FRAMES, frame_type=FRAME_TYPE)
     in_channels = sum(frame_constants["frame_shapes"][name][0] for name in INPUT_FRAMES_NAMES)
@@ -135,6 +151,7 @@ def _model_config() -> PathModel.Config:
 
     return PathModel.Config(
         vision=Vision.Config(
+            flavor=flavor,
             input_frame_names=tuple(INPUT_FRAMES_NAMES),
             in_channels=in_channels,
             vision_features=vision_features,

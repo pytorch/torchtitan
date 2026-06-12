@@ -29,9 +29,6 @@ from xx.ml_tools.constants.model import ModelInputs
 from . import convnext
 
 
-_CONVNEXT_PRETRAINED_NAME = "convnext_xxlarge.clip_laion2b_soup_ft_in1k"
-
-
 @dataclass(frozen=True)
 class PathHead:
     name: str
@@ -302,6 +299,7 @@ class TemporalPolicy(Module):
 class Vision(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        flavor: str
         input_frame_names: tuple[str, ...]
         in_channels: int
         vision_features: int
@@ -313,7 +311,8 @@ class Vision(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
-        self.encoder = convnext.convnext_xxlarge(
+        self.encoder = convnext.create_convnext(
+            config.flavor,
             pretrained=False,
             in_chans=config.in_channels,
             num_classes=config.vision_features,
@@ -346,15 +345,19 @@ class Vision(Module):
             load_state[name] = value
 
         missing, unexpected = self.encoder.load_state_dict(load_state, strict=False)
+        pretrained_name = convnext.pretrained_name(self.config.flavor)
         logger.info(
-            f"Loaded {len(load_state)} ConvNeXt tensors from {_CONVNEXT_PRETRAINED_NAME} "
+            f"Loaded {len(load_state)} ConvNeXt tensors from {pretrained_name} "
             f"({len(missing)} missing, {len(unexpected)} unexpected)"
         )
 
     def _pretrained_state_dict(self) -> dict[str, torch.Tensor]:
         from timm.models._builder import adapt_input_conv, load_state_dict_from_hf
 
-        state_dict = load_state_dict_from_hf(f"timm/{_CONVNEXT_PRETRAINED_NAME}", weights_only=True)
+        state_dict = load_state_dict_from_hf(
+            f"timm/{convnext.pretrained_name(self.config.flavor)}",
+            weights_only=True,
+        )
         state_dict = convnext.checkpoint_filter_fn(state_dict, self.encoder)
         if self.config.in_channels != 3:
             state_dict["stem.0.weight"] = adapt_input_conv(self.config.in_channels, state_dict["stem.0.weight"])

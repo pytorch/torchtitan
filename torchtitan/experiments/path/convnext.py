@@ -1,4 +1,4 @@
-"""Minimal ConvNeXt-XXLarge copy for path training."""
+"""Minimal ConvNeXt copy for path training."""
 
 from __future__ import annotations
 
@@ -24,7 +24,40 @@ from timm.models import build_model_with_cfg
 from timm.models._manipulate import checkpoint_seq, named_apply
 
 
-__all__ = ["ConvNeXt", "convnext_xxlarge"]
+__all__ = [
+    "CONVNEXT_FLAVORS",
+    "ConvNeXt",
+    "convnext_base",
+    "convnext_small",
+    "convnext_tiny",
+    "convnext_xxlarge",
+    "create_convnext",
+    "pretrained_name",
+]
+
+
+CONVNEXT_FLAVORS = {
+    "convnext_tiny": {
+        "depths": (3, 3, 9, 3),
+        "dims": (96, 192, 384, 768),
+        "pretrained": "convnext_tiny.in12k_ft_in1k",
+    },
+    "convnext_small": {
+        "depths": (3, 3, 27, 3),
+        "dims": (96, 192, 384, 768),
+        "pretrained": "convnext_small.in12k_ft_in1k",
+    },
+    "convnext_base": {
+        "depths": (3, 3, 27, 3),
+        "dims": (128, 256, 512, 1024),
+        "pretrained": "convnext_base.clip_laion2b_augreg_ft_in1k",
+    },
+    "convnext_xxlarge": {
+        "depths": (3, 4, 30, 3),
+        "dims": (384, 768, 1536, 3072),
+        "pretrained": "convnext_xxlarge.clip_laion2b_soup_ft_in1k",
+    },
+}
 
 
 class Downsample(nn.Module):
@@ -365,6 +398,30 @@ def _create_convnext(variant: str, pretrained: bool = False, **kwargs):
     )
 
 
+def pretrained_name(flavor: str) -> str:
+    return CONVNEXT_FLAVORS[flavor]["pretrained"]
+
+
+def create_convnext(flavor: str, pretrained: bool = False, **kwargs) -> ConvNeXt:
+    model_args = {
+        "depths": CONVNEXT_FLAVORS[flavor]["depths"],
+        "dims": CONVNEXT_FLAVORS[flavor]["dims"],
+        "norm_eps": kwargs.pop("norm_eps", 1e-5),
+    }
+    return _create_convnext(flavor, pretrained=pretrained, **dict(model_args, **kwargs))
+
+
+def convnext_tiny(pretrained: bool = False, **kwargs) -> ConvNeXt:
+    return create_convnext("convnext_tiny", pretrained=pretrained, **kwargs)
+
+
+def convnext_small(pretrained: bool = False, **kwargs) -> ConvNeXt:
+    return create_convnext("convnext_small", pretrained=pretrained, **kwargs)
+
+
+def convnext_base(pretrained: bool = False, **kwargs) -> ConvNeXt:
+    return create_convnext("convnext_base", pretrained=pretrained, **kwargs)
+
+
 def convnext_xxlarge(pretrained: bool = False, **kwargs) -> ConvNeXt:
-    model_args = dict(depths=(3, 4, 30, 3), dims=(384, 768, 1536, 3072), norm_eps=kwargs.pop("norm_eps", 1e-5))
-    return _create_convnext("convnext_xxlarge", pretrained=pretrained, **dict(model_args, **kwargs))
+    return create_convnext("convnext_xxlarge", pretrained=pretrained, **kwargs)
