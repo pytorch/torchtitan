@@ -443,6 +443,7 @@ class TestCommFreeMuonHelpers(TestCase):
             torch.ops.c10d.broadcast_.default,
             torch.ops._c10d_functional.broadcast.default,
             torch.ops.c10d.allgather_.default,
+            torch.ops.c10d._allgather_base_.default,
         ):
             self.assertEqual(
                 _reshard_after_forward_policy(None, op),
@@ -450,6 +451,17 @@ class TestCommFreeMuonHelpers(TestCase):
             )
         self.assertEqual(
             _reshard_after_forward_policy(None, torch.ops.aten.mm.default),
+            CheckpointPolicy.PREFER_SAVE,
+        )
+        self.assertEqual(
+            _reshard_after_forward_policy(None, torch.ops.aten.add_.Tensor),
+            CheckpointPolicy.PREFER_RECOMPUTE,
+        )
+        self.assertEqual(
+            _reshard_after_forward_policy(
+                None,
+                torch.ops.aten.empty.memory_format,
+            ),
             CheckpointPolicy.PREFER_RECOMPUTE,
         )
 

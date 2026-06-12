@@ -38,11 +38,11 @@ class MixedPrecisionPolicy:
     """Mixed precision policy for FlexShard buckets.
 
     Args:
-        param_dtype: Dtype for forward compute. Parameters are all-gathered
-            in storage dtype, then cast to param_dtype. If None, no cast.
-        reduce_dtype: Dtype for gradient reduction. Gradients are cast to
-            this dtype before reduce-scatter. If None, uses param_dtype
-            (or storage dtype if param_dtype is also None).
+        param_dtype: Dtype for forward compute. Placements should materialize
+            unsharded parameters in this dtype. If None, use storage dtype.
+        reduce_dtype: Dtype for gradient reduction. Placements should pack
+            bucket gradient reduction buffers in this dtype. If None, use
+            param_dtype (or storage dtype if param_dtype is also None).
     """
 
     param_dtype: torch.dtype | None = None
@@ -135,6 +135,8 @@ class ParamInfo:
     dtype: torch.dtype
     requires_grad: bool
     placements: tuple[Placement, ...]
+    param_dtype: torch.dtype | None = None
+    reduce_dtype: torch.dtype | None = None
     local_shape: torch.Size = field(default_factory=lambda: torch.Size([]))
     local_numel: int = 0
     byte_offset: int = 0  # byte offset into the sharded storage
@@ -146,6 +148,16 @@ class ParamInfo:
     def placement(self) -> Placement:
         """The single placement supported by the minimal eager path."""
         return _get_single_placement(self.placements)
+
+    @property
+    def unsharded_dtype(self) -> torch.dtype:
+        """Dtype exposed to module forward for the full parameter."""
+        return self.param_dtype or self.dtype
+
+    @property
+    def grad_reduce_dtype(self) -> torch.dtype:
+        """Dtype used to communicate this parameter's gradient."""
+        return self.reduce_dtype or self.param_dtype or self.dtype
 
 
 class ShardedBucketStorage:
@@ -197,6 +209,7 @@ class ShardedBucketStorage:
             named_params,
             mesh,
             param_placements,
+            bucket_spec.mp_policy,
         )
 
         if bucket_spec.offload_policy is not None:
@@ -229,6 +242,7 @@ class ShardedBucketStorage:
         named_params: list[tuple[str, nn.Parameter]],
         mesh: DeviceMesh,
         param_placements: dict[str, tuple[Placement, ...]],
+        mp_policy: MixedPrecisionPolicy | None = None,
     ) -> tuple[dict[str, ParamInfo], int]:
         """
         Create ParamInfo for each parameter, computing local layout and byte offsets.
@@ -252,11 +266,13 @@ class ShardedBucketStorage:
                 named_params,
                 param_placements,
                 bucket_layout,
+                mp_policy,
             )
         return cls._create_param_infos_from_local_layouts(
             named_params,
             mesh,
             param_placements,
+            mp_policy,
         )
 
     @classmethod
@@ -265,6 +281,7 @@ class ShardedBucketStorage:
         named_params: list[tuple[str, nn.Parameter]],
         mesh: DeviceMesh,
         param_placements: dict[str, tuple[Placement, ...]],
+        mp_policy: MixedPrecisionPolicy | None,
     ) -> tuple[dict[str, ParamInfo], int]:
         rank = mesh.get_local_rank()
         world_size = mesh.size()
@@ -294,6 +311,7 @@ class ShardedBucketStorage:
                 local_numel=local_storage_layout.local_numel,
                 byte_offset=byte_offset,
                 storage_nbytes=local_storage_layout.storage_nbytes,
+                mp_policy=mp_policy,
             )
 
         return param_infos, current_byte_offset
@@ -342,6 +360,7 @@ class ShardedBucketStorage:
         named_params: list[tuple[str, nn.Parameter]],
         param_placements: dict[str, tuple[Placement, ...]],
         bucket_layout: BucketStorageLayout,
+        mp_policy: MixedPrecisionPolicy | None,
     ) -> tuple[dict[str, ParamInfo], int]:
         expected_fqns = {fqn for fqn, _ in named_params}
         actual_fqns = set(bucket_layout.param_layouts)
@@ -400,6 +419,7 @@ class ShardedBucketStorage:
                 byte_offset=layout.byte_offset,
                 storage_nbytes=layout.storage_nbytes,
                 bucket_layout=layout.bucket_layout,
+                mp_policy=mp_policy,
             )
 
         return param_infos, bucket_layout.total_bytes
@@ -415,12 +435,15 @@ class ShardedBucketStorage:
         byte_offset: int,
         storage_nbytes: int,
         bucket_layout: BucketLayout | None = None,
+        mp_policy: MixedPrecisionPolicy | None = None,
     ) -> ParamInfo:
         return ParamInfo(
             fqn=fqn,
             global_shape=param.shape,
             global_stride=tuple(make_contiguous_strides_for(param.shape)),
             dtype=param.dtype,
+            param_dtype=mp_policy.param_dtype if mp_policy is not None else None,
+            reduce_dtype=mp_policy.reduce_dtype if mp_policy is not None else None,
             requires_grad=param.requires_grad,
             placements=placements,
             local_shape=local_shape,

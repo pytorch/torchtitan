@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import ChunkedCELoss
+from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
@@ -60,6 +60,13 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
 def deepseek_v3_debugmodel_ep() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
     config.model_spec = model_registry("debugmodel")
+    return config
+
+
+def deepseek_v3_debugmodel_ep_ce_loss() -> Trainer.Config:
+    """EP debug model with standard (non-chunked) CrossEntropyLoss."""
+    config = deepseek_v3_debugmodel_ep()
+    config.loss = CrossEntropyLoss.Config()
     return config
 
 
