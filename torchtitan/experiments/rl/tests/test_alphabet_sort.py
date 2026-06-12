@@ -80,22 +80,24 @@ def test_dataset_is_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_state_dict_resumes_the_stream(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_names(monkeypatch)
-    dataset = AlphabetSortDataset(AlphabetSortDataset.Config(seed=3))
+    # Pin small bounds so the 8-author fixture can supply every turn (drawn without replacement).
+    config = AlphabetSortDataset.Config(seed=3, max_turns=2, max_names_per_turn=2)
+    dataset = AlphabetSortDataset(config)
     next(dataset)
     next(dataset)
     checkpoint = dataset.state_dict()
     expected_after = [next(dataset), next(dataset)]
 
-    resumed = AlphabetSortDataset(AlphabetSortDataset.Config(seed=3))
+    resumed = AlphabetSortDataset(config)
     resumed.load_state_dict(checkpoint)
     assert [next(resumed), next(resumed)] == expected_after
 
 
-def test_default_is_single_turn_sorted_by_first_or_last(
+def test_single_turn_sorted_by_first_or_last(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_names(monkeypatch)
-    dataset = AlphabetSortDataset(AlphabetSortDataset.Config(seed=0))  # max_turns=1
+    dataset = AlphabetSortDataset(AlphabetSortDataset.Config(seed=0, max_turns=1))
     seen_first = seen_last = False
     for _ in range(50):
         sample = next(dataset)
@@ -180,7 +182,7 @@ def test_ties_broken_by_other_name_part(monkeypatch: pytest.MonkeyPatch) -> None
     )
     monkeypatch.setattr(alphabet_data, "_load_authors", lambda *a, **k: pair)
     dataset = AlphabetSortDataset(
-        AlphabetSortDataset.Config(seed=0, max_names_per_turn=2)
+        AlphabetSortDataset.Config(seed=0, max_turns=1, max_names_per_turn=2)
     )
     checked_both = False
     for _ in range(50):
