@@ -121,6 +121,12 @@ class VLLMCudagraphConfig:
     enable: bool = True
     """Whether to enable CUDA graph capture (vLLM "full" mode)."""
 
+    max_capture_size: int | None = None
+    """Cap CUDA-graph capture sizes at this batch size; batches larger than it run
+    eager. ``None`` (default) captures up to ``max_num_seqs``. A smaller cap (e.g. 64)
+    avoids large-batch full-graph capture, which corrupts generation in some
+    vLLM/model stacks (degenerate tokens + NaN logprobs at large batch)."""
+
     # TODO: Validate CUDA graph capture with MoE / Expert Parallelism.
     # MoE routing produces dynamic shapes that may conflict with full
     # CUDA graph capture despite being torch.compile-compatible
@@ -136,17 +142,21 @@ class VLLMCudagraphConfig:
         """Build a vLLM ``CompilationConfig``, or return ``None`` when
         CUDA graphs are disabled.
 
-        ``max_num_seqs`` determines CUDA graph capture sizes: powers of
-        2 from 1 up to ``max_num_seqs``, plus ``max_num_seqs`` itself
-        if it isn't already a power of 2.
+        Capture sizes are powers of 2 from 1 up to the cap, plus the cap itself
+        if it isn't a power of 2. The cap is ``max_num_seqs``, or
+        ``min(max_num_seqs, max_capture_size)`` when ``max_capture_size`` is set;
+        batches larger than the cap run eager.
         """
         if not self.enable:
             return None
         if max_num_seqs <= 0:
             raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}")
-        sizes = [1 << i for i in range(int(math.log2(max_num_seqs)) + 1)]
-        if max_num_seqs not in sizes:
-            sizes.append(max_num_seqs)
+        cap = max_num_seqs
+        if self.max_capture_size is not None:
+            cap = min(max_num_seqs, self.max_capture_size)
+        sizes = [1 << i for i in range(int(math.log2(cap)) + 1)]
+        if cap not in sizes:
+            sizes.append(cap)
         return CompilationConfig(
             cudagraph_mode="full",
             mode=0,

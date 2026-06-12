@@ -107,15 +107,14 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
-            # Run vLLM EAGER (no CUDA-graph capture). Verified by two controlled runs
-            # (only this flag changed): cudagraph="full" corrupts GENERATION itself —
-            # the engine emits degenerate "locklock" tokens at step-0 validation, before
-            # any training/loss runs. So the GRPOLoss NaN-drop (which only fixes the
-            # trainer loss) cannot rescue it; eager is required and matches the reference
-            # 1.7B run. The NaN-drop loss is kept for robustness. TODO: root-cause the
-            # cudagraph generation corruption (likely captured-graph vs weight-sync
-            # staleness in the vLLM generator) so cudagraph can be re-enabled for speed.
-            cudagraph=VLLMCudagraphConfig(enable=False),
+            # cudagraph ON, but cap the capture size. Full cudagraph capture at large
+            # batch (our max_num_seqs hits 256-500) corrupts generation in this stack
+            # ("locklock" degenerate tokens + NaN logprobs at step-0); the working
+            # alphabet_sort config only captures up to 40. Capping capture at 64 keeps
+            # cudagraph for the small decode batches (speed) and falls back to eager for
+            # larger batches, avoiding the bad large-graph capture. The GRPOLoss NaN-drop
+            # additionally tolerates any residual NaN logprobs. (cap tuned empirically.)
+            cudagraph=VLLMCudagraphConfig(enable=True, max_capture_size=64),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 # slime: temperature 1.0 + top_p 1.0; stop each turn at its action tag.
