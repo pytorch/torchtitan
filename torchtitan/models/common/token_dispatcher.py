@@ -5,9 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from typing import cast
+from typing import ClassVar, cast
 
 import torch
+
 from torch.distributed._functional_collectives import (
     all_to_all_single,
     all_to_all_single_autograd,
@@ -22,6 +23,7 @@ from torchtitan.distributed.minimal_async_ep import (
     MinimalAsyncEPDispatchMetadata,
 )
 from torchtitan.ops.scatter_add import deterministic_scatter_add
+from torchtitan.tools.utils import device_module, device_type
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -855,6 +857,10 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     @dataclass(kw_only=True, slots=True)
     class Config(LocalTokenDispatcher.Config):
         score_before_experts: bool = False
+        hidden_dim: int | None = None
+        tokens_per_rank: int | None = None
+        dtype: torch.dtype | None = None
+        device: torch.device | None = None
 
         def __post_init__(self):
             if self.score_before_experts:
@@ -867,6 +873,20 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         super().__init__(config)
         self.ep_mesh: DeviceMesh | None = None
         self.sp_size: int = 1
+        self.hidden_dim = config.hidden_dim
+        self.tokens_per_rank = config.tokens_per_rank
+        self.dtype = config.dtype
+        if config.device is None:
+            self.device = torch.device(device_type, device_module.current_device())
+        else:
+            self.device = config.device
+
+    # MinimalAsyncEP has one process-global buffer: the first dispatcher
+    # initializes it, same-configuration dispatchers reuse it, and differing
+    # metadata is invalid because the buffer layout would not match.
+    _global_buffer_key: ClassVar[
+        tuple[object, int, int, int, int, torch.dtype, torch.device] | None
+    ] = None
 
     def validate_parallel_dims(self, parallel_dims) -> None:
         if parallel_dims.spmd_backend == "full_dtensor":
@@ -906,28 +926,65 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             )
         self.ep_mesh = ep_mesh
         self.sp_size = 1
+        self.init_buffer()
 
-    def init_buffer(
-        self,
-        *,
-        hidden_dim: int,
-        tokens_per_rank: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> None:
+    def init_buffer(self) -> None:
         """Initialize MinimalAsyncEP's process-local symmetric-memory buffer."""
         if self.ep_mesh is None:
             raise ValueError("MinimalAsyncEPTokenDispatcher requires an EP mesh.")
+        missing_fields = [
+            field
+            for field, value in (
+                ("hidden_dim", self.hidden_dim),
+                ("tokens_per_rank", self.tokens_per_rank),
+                ("dtype", self.dtype),
+                ("device", self.device),
+            )
+            if value is None
+        ]
+        if missing_fields:
+            raise ValueError(
+                "MinimalAsyncEPTokenDispatcher.Config is missing "
+                f"{', '.join(missing_fields)}. Call update_from_config() with a "
+                "Trainer.Config before building the model."
+            )
+
+        assert self.hidden_dim is not None
+        assert self.tokens_per_rank is not None
+        assert self.dtype is not None
+        assert self.device is not None
+
         ep_size = self.ep_mesh.size()
-        minimal_async_ep_init_buffer(
-            group=self.ep_mesh.get_group(),
-            hidden_dim=hidden_dim,
-            tokens_per_rank=tokens_per_rank,
-            num_local_experts=self.num_experts // ep_size,
-            top_k=self.top_k,
-            dtype=dtype,
-            device=device,
+        ep_group = self.ep_mesh.get_group()
+
+        num_local_experts = self.num_experts // ep_size
+        buffer_key = (
+            ep_group,
+            self.hidden_dim,
+            self.tokens_per_rank,
+            num_local_experts,
+            self.top_k,
+            self.dtype,
+            self.device,
         )
+        if MinimalAsyncEPTokenDispatcher._global_buffer_key is not None:
+            if MinimalAsyncEPTokenDispatcher._global_buffer_key != buffer_key:
+                raise ValueError(
+                    "MinimalAsyncEP buffer was already initialized with a "
+                    "different configuration."
+                )
+            return
+
+        minimal_async_ep_init_buffer(
+            group=ep_group,
+            hidden_dim=self.hidden_dim,
+            tokens_per_rank=self.tokens_per_rank,
+            num_local_experts=num_local_experts,
+            top_k=self.top_k,
+            dtype=self.dtype,
+            device=self.device,
+        )
+        MinimalAsyncEPTokenDispatcher._global_buffer_key = buffer_key
 
     # pyrefly: ignore [bad-override]
     def dispatch(

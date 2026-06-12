@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import torch
-
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -24,47 +22,7 @@ from torchtitan.distributed.full_dtensor import (
     validate_config,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
-from torchtitan.tools.utils import device_module, device_type
-
-
-def _get_minimal_async_ep_dispatcher(
-    model: DeepSeekV3Model,
-) -> MinimalAsyncEPTokenDispatcher | None:
-    for module in model.modules():
-        dispatcher = getattr(module, "token_dispatcher", None)
-        if isinstance(dispatcher, MinimalAsyncEPTokenDispatcher):
-            return dispatcher
-    return None
-
-
-def _maybe_init_minimal_async_ep_buffer(
-    model: DeepSeekV3Model,
-    *,
-    parallel_dims: ParallelDims,
-    training: TrainingConfig,
-    ac_config: ActivationCheckpointConfig,
-    memory_policy: str | None = None,
-) -> None:
-    dispatcher = _get_minimal_async_ep_dispatcher(model)
-    if dispatcher is None:
-        return
-
-    if ac_config.mode != "full" and memory_policy != "full":
-        raise ValueError(
-            "MinimalAsyncEP requires full recompute: set "
-            "--activation_checkpoint.mode full for eager training or "
-            "--compile.memory_policy full for graph_trainer."
-        )
-
-    dispatcher.validate_parallel_dims(parallel_dims)
-    dispatcher.init_buffer(
-        hidden_dim=model.config.dim,
-        tokens_per_rank=training.local_batch_size * training.seq_len,
-        dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-        device=torch.device(device_type, device_module.current_device()),
-    )
 
 
 # Adapted from llama4/infra/parallelize.py
@@ -98,13 +56,6 @@ def parallelize_deepseekv3(
             )
         if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
             model.parallelize(parallel_dims)
-
-    _maybe_init_minimal_async_ep_buffer(
-        model,
-        parallel_dims=parallel_dims,
-        training=training,
-        ac_config=ac_config,
-    )
 
     if parallel_dims.tp_enabled:
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))

@@ -23,9 +23,6 @@ from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
     GraphTrainerDeepSeekV3Model,
 )
-from torchtitan.models.deepseek_v3.parallelize import (
-    _maybe_init_minimal_async_ep_buffer,
-)
 from torchtitan.tools.logging import logger
 
 
@@ -91,14 +88,6 @@ def parallelize_deepseekv3(
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         model.parallelize(parallel_dims)
-
-    _maybe_init_minimal_async_ep_buffer(
-        model,
-        parallel_dims=parallel_dims,
-        training=training,
-        ac_config=ac_config,
-        memory_policy=getattr(compile_config, "memory_policy", None),
-    )
 
     if parallel_dims.tp_enabled:
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
