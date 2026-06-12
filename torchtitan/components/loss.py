@@ -18,7 +18,8 @@ from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
-from torchtitan.distributed.spmd_types import current_spmd_mesh
+from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -460,8 +461,10 @@ class ChunkedCELoss(BaseLoss):
         fires per-chunk, and FSDP2 accumulates the sharded gradients correctly.
 
     TP / SP composability:
-        The pre-lm-head norm emits hidden states replicated on the TP axis,
-        so each chunk enters the lm_head with the expected input placement.
+        Hidden states are redistributed to ``Replicate()`` on the TP mesh
+        before chunking, so each chunk enters the lm_head as ``Replicate()``
+        input regardless of whether SP is enabled. With SP, this is an
+        all-gather from ``Shard(1)``; without SP, it's a no-op.
 
         When loss parallel is applied, each TP rank
         computes partial CE on its ``V/tp`` slice, with an internal
@@ -493,18 +496,34 @@ class ChunkedCELoss(BaseLoss):
         """Set the lm_head module. Must be called before the first __call__."""
         self.lm_head = lm_head
 
-    def chunk_states_and_labels(
+    def __call__(
         self,
-        hidden_states: torch.Tensor,
+        pred: torch.Tensor,
         labels: torch.Tensor,
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Chunk hidden states and labels along the local sequence dimension.
+        global_valid_tokens: float | None = None,
+    ) -> torch.Tensor:
+        """Compute chunked cross-entropy loss.
 
-        Hidden state chunks are detached as leaves so their per-chunk gradients
-        can be collected by GradAccumulator. For DTensor we use local_map;
-        spmd_types backend should already run in local SPMD.
+        ``pred`` should be hidden states from model forward with
+        ``_skip_lm_head=True``.
+
+        When ``pred`` does not require grad (e.g. validation), runs chunked
+        forward only — no per-chunk backward or gradient accumulation.
+
+        Returns a differentiable loss. When ``.backward()`` is called on it
+        (either by the trainer or the PP schedule), it triggers backward
+        through the decoder via a custom autograd Function.
         """
+        from torch.distributed._composable.fsdp import FSDPModule
+
+        hidden_states = pred
         num_chunks = self.num_chunks
+        lm_head = self.lm_head
+        assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
+        fsdp_enabled = isinstance(lm_head, FSDPModule)
+
+        # Check if it's training model or validation mode
+        requires_grad = hidden_states.requires_grad
 
         # Chunking always operates on the *local* view: when ``t`` is a
         # Shard(1) DTensor, chunking the global view would distribute whole
@@ -529,58 +548,31 @@ class ChunkedCELoss(BaseLoss):
             )
             return wrapped(t)
 
-        # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
-        # accumulates ``.grad`` for ``GradAccumulator``.
-        requires_grad = hidden_states.requires_grad
-        h_chunks = [
-            c.detach().requires_grad_(requires_grad) for c in _chunk(hidden_states)
-        ]
-        label_chunks = list(_chunk(labels))
-        return h_chunks, label_chunks
-
-    def chunked_loss_and_grad(
-        self,
-        hidden_states: torch.Tensor,
-        labels: torch.Tensor,
-        *,
-        global_valid_tokens: float | None,
-        fsdp_enabled: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Run the chunked lm_head/CE loop and return loss plus hidden grad.
-
-        This is the memory-saving inner loop. It detaches hidden states, runs
-        lm_head and CE one local sequence chunk at a time, accumulates the
-        detached scalar loss, and records the per-chunk hidden gradients needed
-        to bridge backward into the decoder graph.
-
-        Returns:
-            A scalar detached loss accumulated over chunks, and the hidden-state
-            gradient buffer to pass back into the decoder graph. The gradient
-            buffer is ``None`` when ``hidden_states`` does not require grad.
-        """
-        lm_head = self.lm_head
-        assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
-
-        requires_grad = hidden_states.requires_grad
-        h_partition_spec = get_partition_spec(hidden_states)
+        is_spmd_backend = get_spmd_backend() == "spmd_types"
+        h_partition_spec = (
+            get_partition_spec(hidden_states) if is_spmd_backend else None
+        )
         with spmd.local():
-            hidden_states = hidden_states.detach().requires_grad_(requires_grad)
-            h_chunks, label_chunks = self.chunk_states_and_labels(hidden_states, labels)
+            # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
+            # accumulates ``.grad`` for ``GradAccumulator``.
+            h_chunks = [
+                c.detach().requires_grad_(requires_grad) for c in _chunk(hidden_states)
+            ]
+            label_chunks = list(_chunk(labels))
+
             grad_accumulator = GradAccumulator(
                 hidden_states,
-                num_chunks=self.num_chunks,
+                num_chunks=num_chunks,
                 dtype=torch.float32,
             )
 
             total_loss = hidden_states.new_zeros((), dtype=torch.float32)
-            mesh = current_spmd_mesh()
-            if mesh is not None and spmd.is_type_checking():
+            if is_spmd_backend and spmd.is_type_checking():
+                # TODO(pianpwk): would be nice if mutate_type no-op if not typechecking,
+                # and accepted multiple axes.
                 for axis_name, dst in {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}.items():
                     total_loss = spmd.mutate_type(
-                        total_loss,
-                        mesh.get_group(axis_name),
-                        src=spmd.R,
-                        dst=dst,
+                        total_loss, axis_name, src=spmd.R, dst=dst
                     )
 
             # Disable FSDP reshard on lm_head to keep weight unsharded across
@@ -592,6 +584,12 @@ class ChunkedCELoss(BaseLoss):
                 lm_head.set_reshard_after_backward(False)
                 lm_head.set_requires_gradient_sync(False, recurse=False)
 
+            # TODO(pianpwk): migrate DTensor backend off pytorch's loss_parallel to simplify this.
+            use_loss_parallel_autograd_fn = (
+                get_spmd_backend() == "spmd_types"
+                and self.loss_parallel
+                and spmd_mesh_size("tp") > 1
+            )
             last_idx = len(h_chunks) - 1
             for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
                 if fsdp_enabled and i == last_idx:
@@ -600,21 +598,18 @@ class ChunkedCELoss(BaseLoss):
                     )
 
                 logits = lm_head(h_chunk)
-
-                if current_spmd_mesh() is not None and self.loss_parallel:
-                    mesh = current_spmd_mesh()
-                    assert mesh is not None
+                if use_loss_parallel_autograd_fn:
                     chunk_loss = _LossParallelCrossEntropy.apply(
                         logits,
                         label_chunk,
-                        mesh.get_group("tp"),
-                        getattr(lm_head, "out_features"),
+                        current_spmd_mesh().get_group("tp"),
+                        lm_head.out_features,
                     )
                 else:
                     chunk_loss = self.fn(logits, label_chunk)
                 if global_valid_tokens is not None:
                     chunk_loss = chunk_loss / global_valid_tokens
-                if current_spmd_mesh() is not None:
+                if is_spmd_backend:
                     spmd.assert_type(chunk_loss, {"dp": spmd.P, "cp": spmd.P})
                 total_loss = total_loss + chunk_loss.detach()
 
@@ -625,65 +620,23 @@ class ChunkedCELoss(BaseLoss):
                         grad_accumulator.add(h_chunk.grad)
                         h_chunk.grad = None
 
-            accumulated_grad = (
-                grad_accumulator.result().to(hidden_states.dtype)
-                if requires_grad
-                else None
-            )
-
             if fsdp_enabled:
                 lm_head.set_reshard_after_forward(True)
                 lm_head.set_reshard_after_backward(True)
                 lm_head.set_requires_gradient_sync(True, recurse=False)
                 lm_head.reshard()
+            if not requires_grad:
+                return total_loss
 
-        if accumulated_grad is not None and current_spmd_mesh() is not None:
+            accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
+
+        # TODO(pianpwk): assert_type_like to carry global SPMD info.
+        if is_spmd_backend:
             spmd.assert_type(
                 accumulated_grad,
-                dict(spmd.get_local_type(hidden_states)),
+                spmd.get_local_type(hidden_states),
                 partition_spec=h_partition_spec,
             )
-        return total_loss, accumulated_grad
-
-    def __call__(
-        self,
-        pred: torch.Tensor,
-        labels: torch.Tensor,
-        global_valid_tokens: float | None = None,
-    ) -> torch.Tensor:
-        """Compute chunked cross-entropy loss.
-
-        ``pred`` should be hidden states from model forward with
-        ``_skip_lm_head=True``.
-
-        When ``pred`` does not require grad (e.g. validation), runs chunked
-        forward only — no per-chunk backward or gradient accumulation.
-
-        Returns a differentiable loss. When ``.backward()`` is called on it
-        (either by the trainer or the PP schedule), it triggers backward
-        through the decoder via a custom autograd Function.
-        """
-        from torch.distributed._composable.fsdp import FSDPModule
-
-        hidden_states = pred
-        lm_head = self.lm_head
-        assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
-        fsdp_enabled = isinstance(lm_head, FSDPModule)
-
-        # Check if it's training model or validation mode
-        requires_grad = hidden_states.requires_grad
-
-        total_loss, accumulated_grad = self.chunked_loss_and_grad(
-            hidden_states,
-            labels,
-            global_valid_tokens=global_valid_tokens,
-            fsdp_enabled=fsdp_enabled,
-        )
-
-        if not requires_grad:
-            return total_loss
-
-        assert accumulated_grad is not None
         return self._gradient_backprop(
             hidden_states, accumulated_grad, total_loss, lm_head, fsdp_enabled
         )
@@ -722,21 +675,6 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
     """
 
     @staticmethod
-    def typecheck_forward(
-        hidden_states: torch.Tensor,
-        accumulated_grad: torch.Tensor,
-        loss: torch.Tensor,
-    ) -> torch.Tensor:
-        # The hidden activation type depends on the model's sharding config;
-        # we'll defer hidden_states typechecking to previous module boundaries.
-        result = _DecoderOutputGradientBackProp.apply(
-            hidden_states, accumulated_grad, loss
-        )
-        if has_local_type(loss):
-            spmd.assert_type(result, spmd.get_local_type(loss))
-        return result
-
-    @staticmethod
     # pyrefly: ignore [bad-override]
     def forward(
         ctx,
@@ -762,3 +700,18 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         # to properly handle. The complicated part is that grad_output might not be
         # on the same device mesh as accumlated_grad.
         return accumulated_grad, None, None
+
+    @staticmethod
+    def typecheck_forward(
+        hidden_states: torch.Tensor,
+        accumulated_grad: torch.Tensor,
+        loss: torch.Tensor,
+    ) -> torch.Tensor:
+        # The hidden activation type depends on the model's sharding config;
+        # we'll defer hidden_states typechecking to previous module boundaries.
+        result = _DecoderOutputGradientBackProp.apply(
+            hidden_states, accumulated_grad, loss
+        )
+        if has_local_type(loss):
+            spmd.assert_type(result, spmd.get_local_type(loss))
+        return result

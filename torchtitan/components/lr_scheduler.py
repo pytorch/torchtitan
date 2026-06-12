@@ -209,13 +209,14 @@ class LRSchedulersContainer(Stateful, Configurable):
         return len(self.schedulers)
 
     def get_metrics(self) -> dict[str, float]:
-        """Return per-param-group learning rates keyed for logging."""
+        """Return learning rates keyed by optimizer (and param-group index)."""
         metrics = {}
         for scheduler in self.schedulers:
-            opt = scheduler.optimizer
-            opt_name = type(opt).__name__
-            for group, lr_val in zip(opt.param_groups, scheduler.get_last_lr()):
-                metrics[f"lr/{opt_name}_{group['pattern']}"] = float(lr_val)
+            opt_name = type(scheduler.optimizer).__name__
+            last_lrs = scheduler.get_last_lr()
+            for i, lr_val in enumerate(last_lrs):
+                key = f"lr/{opt_name}" if len(last_lrs) == 1 else f"lr/{opt_name}/{i}"
+                metrics[key] = float(lr_val)
         return metrics
 
     def step(self) -> None:
