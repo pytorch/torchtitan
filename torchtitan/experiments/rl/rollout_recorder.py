@@ -96,7 +96,11 @@ class RolloutSampleRecorder(Configurable):
                     "step": step,
                     "is_validation": is_validation,
                     **self._encode_rollout(rollout),
-                }
+                },
+                # Some renderer parse outputs (e.g. ParsedToolCall in a completion
+                # message's tool_calls) are not JSON-serializable; stringify them so
+                # recording never crashes the run.
+                default=str,
             )
             + "\n"
             for rollout in self._filter(rollout_groups)
