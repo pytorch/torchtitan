@@ -300,7 +300,9 @@ class FaultTolerantTrainer(Trainer):
         loss_parallel_enabled = (
             parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
         )
-        self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
+        self.train_context = dist_utils.get_train_context(
+            enable_loss_parallel=loss_parallel_enabled
+        )
 
         # Build validator if validation is configured
         if config.validator.enable:
