@@ -354,6 +354,9 @@ class MetricsProcessor(Configurable):
         log_freq: int = 10
         """How often to log metrics to TensorBoard, in iterations"""
 
+        save_freq: int = 1
+        """How often to save buffered log metrics, in iterations. Only applicable for ReporterV2."""
+
         enable_tensorboard: bool = False
         """Whether to log metrics to TensorBoard"""
 
