@@ -109,6 +109,10 @@ tlp ()
 # graph+minimal enables cudagraph (MinimalAsyncEP is sync-free / cudagraphable);
 # graph+regular disables it (regular EP's _grouped_mm / all-to-all aren't
 # cudagraphable on H100). Eager never uses cudagraph.
+#   Run 11 MODE=graph EP=minimal INDUCTOR=full  -- full inductor (whole-graph
+#          codegen). OOMs at B=16 (memory ~+15 GiB vs regional); use BATCH=8.
+# Extra toggles (see their definitions below): INDUCTOR (regional|full),
+# CUDAGRAPH (auto|on|off), BATCH (per-rank local batch size).
 # TORCHINDUCTOR_COMPILE_THREADS caps Inductor compile workers so the cold MoE
 # kernel compile doesn't spike host RAM and OOM-kill regional_inductor.
 MODE="${MODE:-graph}"
@@ -125,6 +129,25 @@ if [ "$EP" = "minimal" ]; then SUFFIX="_minimal_async_ep"; else SUFFIX=""; fi
 #            read past the capture (step 20+).
 STEPS="${STEPS:-20}"
 PROFILE="${PROFILE:-1}"
+
+# INDUCTOR = regional (default) | full. graph (MODE=graph) only.
+#   regional : compile just the FlexAttention regions with inductor; the rest of
+#              the traced graph runs interpreted (the historical default for
+#              Runs 1-10).
+#   full     : compile the ENTIRE traced graph through inductor into Triton
+#              kernels (--compile.inductor_compilation full). Faster, but may
+#              shift bits vs regional (inductor fuses/reorders + re-enables
+#              reorder_for_peak_memory). full inductor still returns a
+#              GraphModule, so cudagraph can wrap it -> composes with EP=minimal's
+#              forced cudagraph.
+INDUCTOR="${INDUCTOR:-regional}"
+if [ "$INDUCTOR" = "full" ]; then INDUCTOR_FLAG="--compile.inductor_compilation full"; else INDUCTOR_FLAG=""; fi
+
+# BATCH = per-rank local batch size (default 16). Lower it (e.g. 8) when a config
+# does not fit in 95 GiB -- full inductor under forced cudagraph pins the whole
+# fused working set into the cudagraph static pool, which OOMs at B=16.
+BATCH="${BATCH:-16}"
+
 if [ "$PROFILE" = "1" ]; then
     RUNNER=tlp
     PROFILE_FLAGS="--profiler.enable_profiling --profiler.profile_freq 10 --profiler.enable_memory_snapshot --dump_folder $PROFILE_DIR"
@@ -143,24 +166,35 @@ NGPU=8 MODULE=deepseek_v3 CONFIG=deepseek_v3_16b${SUFFIX} TORCHINDUCTOR_COMPILE_
     --parallelism.tensor_parallel_degree=1 \
     --parallelism.expert_parallel_degree=4 \
     --training.steps $STEPS \
-    --training.local_batch_size 16 \
+    --training.local_batch_size $BATCH \
     --dataloader.dataset c4_test \
     --activation_checkpoint.mode full \
     $PROFILE_FLAGS \
     --debug.print-config
 else
 # --- DeepSeek-v3 16B graph_trainer (lm_head chunked-loss fix, PR #3636) ---
-if [ "$EP" = "minimal" ]; then CUDAGRAPH_FLAG=""; else CUDAGRAPH_FLAG="--compile.disable_passes cudagraph_pass"; fi
+# CUDAGRAPH = auto (default: ON for EP=minimal which is cudagraphable, OFF for
+#             EP=regular whose _grouped_mm/all-to-all aren't) | on | off. The
+#             explicit on/off override lets us disable cudagraph on the minimal
+#             path (e.g. to fit full inductor at B=16, which OOMs with the
+#             cudagraph static pool).
+CUDAGRAPH="${CUDAGRAPH:-auto}"
+case "$CUDAGRAPH" in
+    on)   CUDAGRAPH_FLAG="" ;;
+    off)  CUDAGRAPH_FLAG="--compile.disable_passes cudagraph_pass" ;;
+    auto) if [ "$EP" = "minimal" ]; then CUDAGRAPH_FLAG=""; else CUDAGRAPH_FLAG="--compile.disable_passes cudagraph_pass"; fi ;;
+esac
 NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b${SUFFIX} TORCHINDUCTOR_COMPILE_THREADS=8 $RUNNER ./run_train.sh \
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=8 \
     --parallelism.tensor_parallel_degree=1 \
     --parallelism.expert_parallel_degree=4 \
     --training.steps $STEPS \
-    --training.local_batch_size 16 \
+    --training.local_batch_size $BATCH \
     --dataloader.dataset c4_test \
     --compile.debug_graph_passes \
     $CUDAGRAPH_FLAG \
+    $INDUCTOR_FLAG \
     $PROFILE_FLAGS \
     --debug.print-config \
     --compile.memory_policy full

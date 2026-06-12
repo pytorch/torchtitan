@@ -50,6 +50,7 @@ from torchtitan.experiments.graph_trainer.inductor_passes import (
     annotate_flex_attention_for_regional_inductor_pass,
     full_inductor_compilation_pass,
     regional_inductor_pass,
+    serialize_loss_chunks_pass,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.memory_policy import (
@@ -161,6 +162,14 @@ def compile_time_passes(
 
     inductor_compilation = config.compile.inductor_compilation
     if inductor_compilation == "full":
+        # Serialize the ChunkedCELoss chunks before full inductor: without this,
+        # Inductor batches all num_chunks lm_head matmuls so every chunk's
+        # [tokens, vocab] logits (and grad-logits) are live at once, defeating
+        # the chunking and OOM-ing DSv3-16B at B=16 (see
+        # dsv3_scaling_experiment_results.md Run 11). Must run before
+        # full_inductor_compilation_pass tags the graph. Disable with
+        # --compile.disable_passes serialize_loss_chunks_pass.
+        passes.append(serialize_loss_chunks_pass)
         # Compile the entire graph into optimized Triton kernels. Must
         # be terminal — the FX graph is no longer authoritative after
         # this pass, so insert_kernel_annotations_pass cannot follow.
