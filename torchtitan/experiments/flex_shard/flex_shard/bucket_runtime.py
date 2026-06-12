@@ -26,7 +26,13 @@ from .bucket_comm import (
 )
 from .bucket_storage import BucketSpec, ParamInfo, ShardedBucketStorage
 from .unsharded_param_getters import UnshardedParamSlot
-from .utils import _get_bucket_storage_debug_fqn, _record_function_if_eager
+from .utils import (
+    _get_bucket_storage_debug_fqn,
+    _record_function_if_eager,
+    _strip_checkpoint_wrapped_module_path,
+    _suppress_eager_profiling,
+    _top_level_owner_path,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -81,10 +87,18 @@ class BucketParam:
 
 @dataclass
 class PendingUnshard:
-    """The single one-bucket-ahead unshard in flight."""
+    """One in-flight one-bucket-ahead unshard."""
 
     bucket: BucketRuntime
     result: UnshardHandle
+    recompute: bool
+
+
+@dataclass(frozen=True)
+class PendingUnshardKey:
+    """Key separating forward and RAF recompute prefetches for one bucket."""
+
+    bucket_id: int
     recompute: bool
 
 
@@ -112,12 +126,26 @@ class BucketCommContext:
     unshard_stream: torch.Stream
     reduce_grad_stream: torch.Stream
     buckets: list[BucketRuntime] = field(default_factory=list)
-    pending: PendingUnshard | None = None
+    pending_unshards: dict[PendingUnshardKey, PendingUnshard] = field(
+        default_factory=dict
+    )
     pending_reduce_grad_launches: list[PendingReduceGradLaunch] = field(
         default_factory=list
     )
     reduce_grad_states: list[PendingReduceGrad] = field(default_factory=list)
     reduce_grad_callback_queued: bool = False
+    raf_saved_unshard_cache: dict[int, list[torch.Tensor]] = field(default_factory=dict)
+    raf_saved_unshard_cache_callback_queued: bool = False
+    _forward_bucket_indices: dict[int, int] | None = None
+    _recompute_prefetch_buckets: list[BucketRuntime] | None = None
+    _recompute_prefetch_bucket_indices: dict[int, int] | None = None
+
+    def add_bucket(self, bucket: BucketRuntime) -> None:
+        """Append a bucket and invalidate cached scheduling metadata."""
+        self.buckets.append(bucket)
+        self._forward_bucket_indices = None
+        self._recompute_prefetch_buckets = None
+        self._recompute_prefetch_bucket_indices = None
 
     def next_backward_unshard_bucket(
         self,
@@ -125,32 +153,103 @@ class BucketCommContext:
     ) -> BucketRuntime | None:
         """Return the next bucket whose backward unshard has priority.
 
-        Buckets execute forward in ``self.buckets`` order and backward in reverse
-        order. After bucket ``i`` produces gradients, bucket ``i - 1``'s
-        unshard is the next critical-path backward communication when that
-        bucket uses reshard-after-forward. In that case bucket ``i``'s
-        reduce-grad should be delayed until after the previous bucket's
-        unshard has launched.
+        Reshard-after-forward backward recomputes top-level execution units in
+        reverse order, while replaying bucket hooks inside each unit in forward
+        order. Non-reshard buckets are not recomputed, but their backward may
+        still be the point where the first recompute bucket should get priority.
         """
-        idx = next(
-            (i for i, candidate in enumerate(self.buckets) if candidate is bucket),
-            None,
-        )
-        if idx is None:
+        recompute_order = self.recompute_prefetch_buckets()
+        if not recompute_order:
             return None
-        if idx == 0:
+
+        recompute_idx = self.recompute_prefetch_bucket_index(bucket)
+        if recompute_idx is not None:
+            next_idx = recompute_idx + 1
+            if next_idx >= len(recompute_order):
+                return None
+            return recompute_order[next_idx]
+
+        bucket_forward_idx = self.forward_bucket_index(bucket)
+        if bucket_forward_idx is None:
             return None
-        next_bucket = self.buckets[idx - 1]
-        if not next_bucket.bucket_storage._reshard_after_forward:
-            return None
-        return next_bucket
+        for candidate in recompute_order:
+            candidate_forward_idx = self.forward_bucket_index(candidate)
+            if candidate_forward_idx is not None and (
+                candidate_forward_idx < bucket_forward_idx
+            ):
+                return candidate
+        return None
+
+    def forward_bucket_index(self, bucket: BucketRuntime) -> int | None:
+        """Return bucket's index in forward execution order."""
+        if self._forward_bucket_indices is None:
+            self._forward_bucket_indices = {
+                id(candidate): idx for idx, candidate in enumerate(self.buckets)
+            }
+        return self._forward_bucket_indices.get(id(bucket))
+
+    def recompute_prefetch_bucket_index(self, bucket: BucketRuntime) -> int | None:
+        """Return bucket's index in RAF recompute prefetch order."""
+        if self._recompute_prefetch_bucket_indices is None:
+            self._recompute_prefetch_bucket_indices = {
+                id(candidate): idx
+                for idx, candidate in enumerate(self.recompute_prefetch_buckets())
+            }
+        return self._recompute_prefetch_bucket_indices.get(id(bucket))
+
+    def recompute_prefetch_buckets(self) -> list[BucketRuntime]:
+        """Return RAF recompute prefetch order.
+
+        Forward execution order lists buckets inside a top-level unit in the
+        order their hooks fire. During backward recompute, top-level units are
+        visited in reverse, but each unit still replays its forward hook order.
+        """
+        if self._recompute_prefetch_buckets is not None:
+            return self._recompute_prefetch_buckets
+
+        unit_order: list[object] = []
+        buckets_by_unit: dict[object, list[BucketRuntime]] = {}
+        for bucket in self.buckets:
+            if not bucket.bucket_storage._reshard_after_forward:
+                continue
+            unit_key = self.recompute_prefetch_unit_key(bucket)
+            if unit_key not in buckets_by_unit:
+                unit_order.append(unit_key)
+                buckets_by_unit[unit_key] = []
+            buckets_by_unit[unit_key].append(bucket)
+
+        recompute_order: list[BucketRuntime] = []
+        for unit_key in reversed(unit_order):
+            recompute_order.extend(buckets_by_unit[unit_key])
+        self._recompute_prefetch_buckets = recompute_order
+        self._recompute_prefetch_bucket_indices = {
+            id(bucket): idx for idx, bucket in enumerate(recompute_order)
+        }
+        return recompute_order
+
+    @staticmethod
+    def recompute_prefetch_unit_key(bucket: BucketRuntime) -> object:
+        """Return the top-level execution unit key for a bucket."""
+        key_fn = getattr(bucket, "recompute_prefetch_unit_key", None)
+        if callable(key_fn):
+            return key_fn()
+        return id(bucket)
 
     def should_defer_reduce_grad_for_backward_prefetch(
         self,
         bucket: BucketRuntime,
     ) -> bool:
         """Return whether reduce-grad should wait for backward prefetch."""
-        return self.next_backward_unshard_bucket(bucket) is not None
+        next_bucket = self.next_backward_unshard_bucket(bucket)
+        if next_bucket is None or not self.should_prefetch_bucket(next_bucket):
+            return False
+        backward_prefetch_key = next_bucket.pending_unshard_key(recompute=True)
+        return backward_prefetch_key not in self.pending_unshards
+
+    def should_prefetch_bucket(self, bucket: BucketRuntime) -> bool:
+        """Return whether this bucket can be unsharded from another module hook."""
+        _ = bucket
+        return True
 
     @classmethod
     def get(
@@ -207,6 +306,22 @@ class BucketCommContext:
                 self.reduce_grad_callback_queued = False
 
         torch.autograd.Variable._execution_engine.queue_callback(_wait_for_reduce_grad)
+
+    def queue_raf_saved_unshard_cache_clear(self) -> None:
+        """Queue cleanup for RAF saved-tensor backward unshard values."""
+        if self.raf_saved_unshard_cache_callback_queued:
+            return
+        self.raf_saved_unshard_cache_callback_queued = True
+
+        def _clear_raf_saved_unshard_cache() -> None:
+            try:
+                self.raf_saved_unshard_cache.clear()
+            finally:
+                self.raf_saved_unshard_cache_callback_queued = False
+
+        torch.autograd.Variable._execution_engine.queue_callback(
+            _clear_raf_saved_unshard_cache
+        )
 
     def wait_and_clear_reduce_grad_states(
         self,
@@ -296,6 +411,36 @@ class BucketUnshardRuntime:
 
     bucket: BucketRuntime
     prefetched_result: UnshardHandle | None
+
+
+@dataclass(frozen=True)
+class RafSavedUnshardedParam:
+    """Saved-tensor hook handle for a RAF full parameter."""
+
+    bucket: BucketRuntime
+    param_index: int
+
+    def unpack_raf_saved_tensor(self) -> torch.Tensor:
+        bucket_id = id(self.bucket.bucket_storage)
+        full_params = self.bucket.context.raf_saved_unshard_cache.get(bucket_id)
+        if full_params is None:
+            recompute_state = (
+                self.bucket.bucket_storage._reshard_after_forward_recompute_state
+            )
+            token = None
+            if recompute_state is not None:
+                token = recompute_state.enter_recompute(frozenset({bucket_id}))
+            try:
+                full_params = self.bucket.recompute_unshard_for_saved_tensor()
+            finally:
+                if token is not None and recompute_state is not None:
+                    recompute_state.exit_recompute(token)
+            self.bucket.context.raf_saved_unshard_cache[bucket_id] = full_params
+            self.bucket.context.queue_raf_saved_unshard_cache_clear()
+
+        full_param = full_params[self.param_index]
+        slot = self.bucket.bucket_params[self.param_index].unsharded_param_slot
+        return slot.apply_unsharded_param_policy(full_param)
 
 
 @dataclass
@@ -394,6 +539,29 @@ class BucketRuntime:
             local_shards.append(local_shard)
         return local_shards
 
+    def recompute_prefetch_unit_key(self) -> object:
+        """Return a key for the top-level module replayed during recompute."""
+        owner_paths = sorted(
+            {
+                _strip_checkpoint_wrapped_module_path(
+                    ".".join(info.fqn.split(".")[:-1])
+                )
+                for info in self.bucket_storage._param_infos.values()
+                if "." in info.fqn
+            }
+        )
+        top_level_paths = tuple(
+            sorted(
+                {
+                    _top_level_owner_path(self.bucket_storage._module, owner_path)
+                    for owner_path in owner_paths
+                }
+            )
+        )
+        if len(top_level_paths) == 1:
+            return top_level_paths[0]
+        return top_level_paths or id(self)
+
     def bucket_module(self) -> nn.Module:
         """Find the deepest common ancestor module for this bucket's params."""
         fqns = list(self.bucket_storage._param_infos.keys())
@@ -453,20 +621,77 @@ class BucketRuntime:
             return None
         return getattr(target, "_checkpoint_wrapped_module", target)
 
-    def begin_unshard(self) -> UnshardHandle:
+    def begin_unshard(
+        self,
+        *,
+        sac_transparent: bool | None = None,
+    ) -> UnshardHandle:
         """Begin this bucket's unshard on the shared stream."""
-        return begin_bucket_unshard(
+        return self.begin_unshard_from_tensors(
             self._local_shards(use_autograd=False),
+            sac_transparent=sac_transparent,
+        )
+
+    def begin_unshard_from_tensors(
+        self,
+        local_shards: list[torch.Tensor],
+        *,
+        sac_transparent: bool | None = None,
+    ) -> UnshardHandle:
+        """Begin a physical bucket unshard, hidden from SAC when needed."""
+        if sac_transparent is None:
+            sac_transparent = self.bucket_storage._reshard_after_forward
+        if sac_transparent and not torch.compiler.is_compiling():
+            # Selective activation checkpointing requires the same
+            # replay-visible op stream in forward and recompute. RAF prefetch
+            # deliberately moves the physical all-gather between module hooks,
+            # so keep low-level allocation/c10d/profiler ops out of SAC storage.
+            with torch._C._DisableTorchDispatch():
+                with _suppress_eager_profiling():
+                    return self._begin_unshard_from_tensors(local_shards)
+        return self._begin_unshard_from_tensors(local_shards)
+
+    def _begin_unshard_from_tensors(
+        self,
+        local_shards: list[torch.Tensor],
+    ) -> UnshardHandle:
+        return begin_bucket_unshard(
+            local_shards,
             self.infos,
             self.bucket_storage._mesh,
             self.context.unshard_stream,
             debug_fqn=self.debug_fqn,
         )
 
+    def recompute_unshard_for_saved_tensor(self) -> list[torch.Tensor]:
+        """Recreate full params for autograd saved-tensor unpack."""
+        if torch.compiler.is_compiling():
+            raise AssertionError("RAF saved-tensor unpack is eager-only.")
+
+        result = self.take_pending()
+        if result is None:
+            result = self.begin_unshard(sac_transparent=False)
+        full_params = result.finish()
+        self.prefetch_next()
+        return full_params
+
     def wait_pending(self, result: UnshardHandle) -> None:
         """Wait for and release an unused pending unshard result."""
         result.wait()
         result.release_buffers()
+
+    def pending_unshard_key(self, *, recompute: bool) -> PendingUnshardKey:
+        """Return the pending-unshard key for this bucket and execution phase."""
+        return PendingUnshardKey(
+            bucket_id=id(self.bucket_storage),
+            recompute=recompute,
+        )
+
+    def clear_stale_pending_unshards(self) -> None:
+        """Drain unused pending unshards so stale work cannot cross phases."""
+        for pending in self.context.pending_unshards.values():
+            self.wait_pending(pending.result)
+        self.context.pending_unshards.clear()
 
     def in_reshard_after_forward_recompute(self) -> bool:
         """Return whether this bucket is in reshard-after-forward recompute."""
@@ -479,12 +704,14 @@ class BucketRuntime:
 
     def prefetch_next(self) -> None:
         """Start the next bucket's unshard if no prefetch is in flight."""
-        if self.context.pending is not None:
+        if self.context.pending_unshards:
             return
-        prefetch_order = self.context.buckets
         is_recompute = self.in_reshard_after_forward_recompute()
-        if is_recompute:
-            prefetch_order = prefetch_order[::-1]
+        prefetch_order = (
+            self.context.recompute_prefetch_buckets()
+            if is_recompute
+            else self.context.buckets
+        )
         for idx, bucket in enumerate(prefetch_order):
             if bucket is self:
                 break
@@ -494,26 +721,31 @@ class BucketRuntime:
         if next_idx >= len(prefetch_order):
             return
         next_bucket = prefetch_order[next_idx]
-        self.context.pending = PendingUnshard(
+        if not self.context.should_prefetch_bucket(next_bucket):
+            return
+        key = next_bucket.pending_unshard_key(recompute=is_recompute)
+        self.context.pending_unshards[key] = PendingUnshard(
             bucket=next_bucket,
-            result=next_bucket.begin_unshard(),
+            result=next_bucket.begin_unshard(
+                sac_transparent=(
+                    self.bucket_storage._reshard_after_forward
+                    or next_bucket.bucket_storage._reshard_after_forward
+                ),
+            ),
             recompute=is_recompute,
         )
 
     def take_pending(self) -> UnshardHandle | None:
         """Return a matching pending result, releasing stale pending work."""
-        pending = self.context.pending
+        is_recompute = self.in_reshard_after_forward_recompute()
+        key = self.pending_unshard_key(recompute=is_recompute)
+        pending = self.context.pending_unshards.pop(key, None)
         if pending is None:
+            self.clear_stale_pending_unshards()
             return None
-        if (
-            pending.bucket is self
-            and pending.recompute == self.in_reshard_after_forward_recompute()
-        ):
-            self.context.pending = None
-            return pending.result
-        self.wait_pending(pending.result)
-        self.context.pending = None
-        return None
+        assert pending.bucket is self
+        assert pending.recompute == is_recompute
+        return pending.result
 
     def reduce_grads(
         self,
@@ -526,10 +758,6 @@ class BucketRuntime:
             return
         with torch.no_grad():
             self.context.wait_and_clear_reduce_grad_states(self.debug_fqn)
-            # TODO: Thread the bucket's reduce_dtype into the non-reshard-after-forward
-            # path before launching reduce-grad. Reshard-after-forward uses
-            # _MixedPrecisionCast backward, but detached non-reshard-after-forward
-            # leaves can arrive in param_dtype.
             result = begin_reduce_grad(
                 grads,
                 infos,
@@ -549,9 +777,27 @@ class BucketRuntime:
             self.context.reduce_grad_states.append(PendingReduceGrad(result))
             self.context.queue_reduce_grad_wait()
 
+    def schedule_reduce_grad_tensors(
+        self,
+        grads: list[torch.Tensor],
+        infos: list[ParamInfo],
+        param_owners: list[ParamOwnerRef],
+    ) -> None:
+        """Launch or defer a pre-packed bucket reduce-grad request."""
+        if self.context.should_defer_reduce_grad_for_backward_prefetch(self):
+            self.context.queue_reduce_grad_launch(
+                self,
+                grads,
+                infos,
+                param_owners,
+            )
+        else:
+            self.reduce_grads(grads, infos, param_owners)
+
     def pre_forward_hook(self, mod, args) -> None:
         local_shards = self._local_shards(use_autograd=True)
         is_compiling = torch.compiler.is_compiling()
+        is_recompute = self.in_reshard_after_forward_recompute()
         prefetched_result = None if is_compiling else self.take_pending()
         runtime = BucketUnshardRuntime(
             bucket=self,
@@ -560,11 +806,20 @@ class BucketRuntime:
         full_params = list(_BucketUnshard.apply(runtime, *local_shards))
         if not is_compiling:
             self.prefetch_next()
+        if not is_compiling and not is_recompute:
             self.context.flush_pending_reduce_grad_launches(max_to_flush=1)
-        for bucket_param, full_param in zip(
-            self.bucket_params, full_params, strict=True
+        for param_index, (bucket_param, full_param) in enumerate(
+            zip(self.bucket_params, full_params, strict=True)
         ):
-            bucket_param.unsharded_param_slot.push_unsharded_param(full_param)
+            saved_tensor_handle = (
+                RafSavedUnshardedParam(self, param_index)
+                if self.bucket_storage._reshard_after_forward
+                else None
+            )
+            bucket_param.unsharded_param_slot.push_unsharded_param(
+                full_param,
+                saved_tensor_handle=saved_tensor_handle,
+            )
 
     def post_forward_hook(self, mod, args, output) -> None:
         for bucket_param in self.bucket_params:
@@ -595,12 +850,8 @@ class _BucketUnshard(torch.autograd.Function):
         result = runtime.prefetched_result
         runtime.prefetched_result = None
         if result is None:
-            result = begin_bucket_unshard(
+            result = runtime.bucket.begin_unshard_from_tensors(
                 [shard.detach() for shard in local_shards],
-                runtime.bucket.infos,
-                runtime.bucket.bucket_storage._mesh,
-                runtime.bucket.context.unshard_stream,
-                debug_fqn=runtime.bucket.debug_fqn,
             )
         full_params = result.finish()
         frozen_params = [
@@ -619,7 +870,10 @@ class _BucketUnshard(torch.autograd.Function):
     ) -> tuple[Any, ...]:
         runtime: BucketUnshardRuntime = ctx.runtime
         bucket = runtime.bucket
-        input_grads: list[torch.Tensor | None] = [None] * ctx.num_inputs
+        is_compiling = torch.compiler.is_compiling()
+        input_grads: list[torch.Tensor | None] | None = (
+            [None] * ctx.num_inputs if is_compiling else None
+        )
         grads: list[torch.Tensor] = []
         valid_infos: list[ParamInfo] = []
         valid_param_owners: list[ParamOwnerRef] = []
@@ -633,12 +887,15 @@ class _BucketUnshard(torch.autograd.Function):
         ):
             if grad is None:
                 continue
-            valid_indices.append(idx)
-            grads.append(grad.contiguous())
+            if is_compiling:
+                valid_indices.append(idx)
+            grads.append(grad)
             valid_infos.append(bucket_param.param_info)
             valid_param_owners.append(bucket_param.param_owner)
 
-        if grads and torch.compiler.is_compiling():
+        if grads and is_compiling:
+            if input_grads is None:
+                raise AssertionError("Expected compile backward input gradients.")
             result = begin_reduce_grad(
                 grads,
                 valid_infos,
@@ -659,15 +916,11 @@ class _BucketUnshard(torch.autograd.Function):
             return (None, *input_grads)
 
         if grads:
-            if bucket.context.should_defer_reduce_grad_for_backward_prefetch(bucket):
-                bucket.context.queue_reduce_grad_launch(
-                    bucket,
-                    grads,
-                    valid_infos,
-                    valid_param_owners,
-                )
-            else:
-                bucket.reduce_grads(grads, valid_infos, valid_param_owners)
+            bucket.schedule_reduce_grad_tensors(
+                grads,
+                valid_infos,
+                valid_param_owners,
+            )
 
         return (None, *([None] * ctx.num_inputs))
 
@@ -715,17 +968,13 @@ def _create_unsharded_param_slots(
         bucket_fqn = _get_bucket_storage_debug_fqn(bucket_storage)
         for fqn, info in bucket_storage._param_infos.items():
             bucket_spec = fqn_to_bucket_spec[fqn]
-            mp_policy = bucket_spec.mp_policy
-            param_dtype = mp_policy.param_dtype if mp_policy else None
-            reduce_dtype = mp_policy.reduce_dtype if mp_policy else None
             compute_device = (
                 torch.device(device) if bucket_spec.offload_policy is not None else None
             )
             unsharded_param_slot = UnshardedParamSlot(
                 param_fqn=fqn,
                 bucket_fqn=bucket_fqn,
-                param_dtype=param_dtype,
-                reduce_dtype=reduce_dtype,
+                param_dtype=info.param_dtype,
                 compute_device=compute_device,
             )
 
@@ -772,6 +1021,6 @@ def _install_bucket_unshard_hooks(
             bucket_runtime.post_forward_hook,
             always_call=True,
         )
-        bucket_runtime.context.buckets.append(bucket_runtime)
+        bucket_runtime.context.add_bucket(bucket_runtime)
         for bucket_param in bucket_runtime.bucket_params:
             bucket_param.unsharded_param_slot.bucket_unshard_hook_registered = True
