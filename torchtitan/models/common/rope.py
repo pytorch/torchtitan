@@ -239,14 +239,6 @@ class ComplexRoPE(RoPE):
         # Complex RoPE cache has width dim / 2 because each complex value
         # represents a pair of real dimensions.
         complex_query_shape = (*query.shape[:-1], query.shape[-1] // 2)
-        if get_spmd_backend() == "spmd_types":
-            # this is strictly a local SPMD region;
-            # it relies on local shape comparisons & local shape expand/gather.
-            return spmd.local_map(
-                out_types={"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R}
-            )(_reshape_for_broadcast)(
-                self.cache, complex_query_shape, positions
-            )
         return _reshape_for_broadcast(self.cache, complex_query_shape, positions)
 
     @staticmethod
@@ -361,6 +353,9 @@ class CosSinRoPE(RoPE):
         return torch.cat((-x2, x1), dim=-1)
 
 
+@spmd.local_map(
+    out_types={"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R}
+)
 def _reshape_for_broadcast(
     rope_cache: torch.Tensor,
     query_shape: torch.Size | tuple[int, ...],
