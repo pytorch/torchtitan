@@ -28,7 +28,7 @@ import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 
-from torchtitan.distributed.minimal_async_ep_kernels import (
+from torchtitan.distributed.minimal_async_ep.kernels import (
     copy_full_counts_to_peers_kernel,
     copy_rows_to_peers_kernel,
     expand_topk_grad_kernel,
