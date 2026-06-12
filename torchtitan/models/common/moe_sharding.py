@@ -14,6 +14,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
+    dense_token_parallel_placement,
 )
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 
@@ -114,27 +115,25 @@ def _shared_expert_rowwise_config() -> ShardingConfig:
 def _router_gate_config(*, enable_ep: bool) -> ShardingConfig:
     """Router gate: Replicate weights, output stays DTensor.
 
-    EP off: input Replicate, gate computes on all tokens, output DTensor(Replicate).
-    EP on:  input Shard(1) (slen dim of 3-D activation), gate computes on
-            local shard, output DTensor(Shard(1)).
+    The MoE router folds the gate input to 2-D ``(B*L, D)`` (see
+    ``TokenChoiceTopKRouter.forward``), so the gate uses a 2-D token-parallel
+    layout instead of a 3-D activation layout:
+    - EP on:  token dim sharded over (DP, CP, TP); MoE reuses the mesh axis
+              named TP as the sequence-parallel axis, so each rank routes its
+              own token shard.
+    - EP off: token dim sharded over (DP, CP), TP replicated; the gate computes
+              on all (TP-replicated) tokens.
     """
     state = {
         "weight": dense_param_placement(tp=spmd.R),
         "bias": dense_param_placement(tp=spmd.R),
     }
-    if enable_ep:
-        sp_layout = dense_sequence_parallel_placement()
-        return ShardingConfig(
-            state_shardings=state,
-            in_dst_shardings={"input": sp_layout},
-            out_dst_shardings=sp_layout,
-        )
-    else:
-        return ShardingConfig(
-            state_shardings=state,
-            in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
-            out_dst_shardings=dense_activation_placement(tp=spmd.R),
-        )
+    layout = dense_token_parallel_placement(shard_tp=enable_ep)
+    return ShardingConfig(
+        state_shardings=state,
+        in_dst_shardings={"input": layout},
+        out_dst_shardings=layout,
+    )
 
 
 def _tokens_per_expert_placement(*, enable_ep: bool) -> SpmdLayout:
@@ -142,8 +141,9 @@ def _tokens_per_expert_placement(*, enable_ep: bool) -> SpmdLayout:
 
     Each DP/CP rank processes different data and accumulates partial token
     counts, so DP/CP axes are ``Partial``. TP is ``Partial`` when EP is
-    enabled (TP axis doubles as SP, each rank sees different tokens) or
-    ``Replicate`` when EP is disabled (all TP ranks see the same tokens).
+    enabled (MoE reuses the mesh axis named TP for sequence-token sharding, so
+    each rank sees different tokens) or ``Replicate`` when EP is disabled (all
+    TP ranks see the same tokens).
     """
     return SpmdLayout(
         {
