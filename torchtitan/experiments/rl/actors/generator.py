@@ -116,23 +116,38 @@ def _force_logprobs_fn_for_batch_invariance() -> None:
     """
     import vllm.v1.worker.gpu.sample.logprob as vllm_logprob
 
-    from torchtitan.experiments.rl.actors.trainer import (
-        compute_logprobs as trainer_compute_logprobs_fn,
-    )
+    from torchtitan.experiments.rl.actors.trainer import compute_logprobs
 
     def generator_compute_token_logprobs(
         logits: torch.Tensor, token_ids: torch.Tensor
     ) -> torch.Tensor:
-        # Broadcast 2D logits over token_ids' num_logprobs columns so the
-        # trainer's compute_logprobs (one token per position) works unchanged.
-        token_ids = token_ids.to(torch.int64)  # int64 required by F.cross_entropy
-        logits = logits.unsqueeze(1).expand(-1, token_ids.shape[1], -1)
-        return trainer_compute_logprobs_fn(logits, token_ids)
+        """Per-token logprobs for vLLM's v2 sampler (replaces its fused kernel).
+
+        Args:
+            logits: ``[N, V]`` next-token logits for N sampled positions
+                (V = vocab_size).
+            token_ids: ``[N, K]`` the K token ids to score per position (vLLM
+                passes the sampled token's logprob plus any top-k logprobs it requested).
+
+        Returns:
+            ``[N, K]`` logprob of each of the K token ids at each position.
+        """
+        # Map the N positions to a single sequence (B=1, S=N) and reuse the
+        # trainer's compute_logprobs for each of the K target columns: it scores
+        # one token per position, so K calls are needed (K=1 for our logprobs=0
+        # requests; vLLM's warmup probes K>1).
+        logits = logits.unsqueeze(0)  # [1, N, V]  (B=1, S=N)
+        token_ids = token_ids.to(torch.int64)
+        per_column = [
+            compute_logprobs(logits, token_ids[:, k].unsqueeze(0))  # [1, N]
+            for k in range(token_ids.shape[1])
+        ]
+        return torch.stack(per_column, dim=-1).squeeze(0)  # [N, K]
 
     vllm_logprob.compute_token_logprobs = generator_compute_token_logprobs
     logger.info(
-        "Patched vLLM compute_token_logprobs to reuse the trainer's "
-        "compute_logprobs so generator and trainer share one logprob code path"
+        "Patched vLLM compute_token_logprobs with trainer's implementation "
+        "so generator and trainer share one logprob code path"
     )
 
 
