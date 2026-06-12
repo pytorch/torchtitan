@@ -242,7 +242,8 @@ def _checkpoint_config() -> PathOnnxCheckpointManager.Config:
         interval=512,
         input_names=input_names,
         input_shapes=input_shapes,
-        input_dtypes=["float32"] * len(input_names),
+        input_dtypes=["float16"] * len(input_names),
+        onnx_model_dtype="float16",
         vision_input_names=vision_input_names,
         temporal_policy_input_names=temporal_policy_input_names,
     )

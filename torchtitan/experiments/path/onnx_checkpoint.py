@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components import fs
-from torchtitan.components.onnx_checkpoint import _ONNX_DTYPE_MAP, OnnxCheckpointManager
+from torchtitan.components.onnx_checkpoint import _ONNX_DTYPE_MAP, OnnxCheckpointManager, OnnxInputDType
 from xx.ml_tools.constants.model import ModelInputs
 
 from .model import PathModel
@@ -43,16 +43,19 @@ class PathOnnxCheckpointManager(OnnxCheckpointManager):
     @dataclass(kw_only=True, slots=True)
     class Config(OnnxCheckpointManager.Config):
         onnx_file: str = ""
+        onnx_model_dtype: OnnxInputDType = "float32"
         vision_input_names: list[str] = field(default_factory=list)
         temporal_policy_input_names: list[str] = field(default_factory=list)
 
     def __init__(self, config: Config, **kwargs) -> None:
         super().__init__(config, **kwargs)
+        self.onnx_model_dtype = _ONNX_DTYPE_MAP[config.onnx_model_dtype]
         self.vision_input_names = config.vision_input_names
         self.temporal_policy_input_names = config.temporal_policy_input_names
 
     def _export_onnx(self, model: nn.Module, path: str) -> None:
         assert isinstance(model, PathModel)
+        model = model.to(dtype=self.onnx_model_dtype)
         self._export_one(
             _VisionOnnxModel(model).eval(),
             self._input_dict(self.vision_input_names),
