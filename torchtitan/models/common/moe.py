@@ -15,6 +15,7 @@ from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
+from torchtitan.ops.topk import deterministic_topk
 from torchtitan.protocols.module import Module
 
 from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
@@ -101,6 +102,8 @@ class GroupedExperts(Module):
         topk_scores_BLK: torch.Tensor,
         topk_expert_ids_BLK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
+        *,
+        num_local_tokens_after_padding: int,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
@@ -112,6 +115,7 @@ class GroupedExperts(Module):
         K = topk_scores_BLK.size(-1)
         T = B * L
         x_TD = x_BLD.view(T, D)
+
         topk_scores_TK = topk_scores_BLK.view(T, K)
         topk_expert_ids_TK = topk_expert_ids_BLK.view(T, K)
         (
@@ -123,12 +127,20 @@ class GroupedExperts(Module):
             topk_scores_TK,
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
+<<<<<<< EP_BUG_FIX
             input_shape_BLD=(B, L, D),
+=======
+>>>>>>> main
         )
         routed_output_RD = self._experts_forward(
             routed_input_RD, num_global_tokens_per_local_expert_e
         )
-        out_TD = self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        out_TD = self.token_dispatcher.combine(
+            routed_output_RD,
+            metadata,
+            x_TD,
+            num_local_tokens_after_padding=num_local_tokens_after_padding,
+        )
         # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
         # won't cause _StridedShard in the downstream view (e.g., CP is used).
         return out_TD.view(B, -1, D)
@@ -137,8 +149,8 @@ class GroupedExperts(Module):
         """Parallelize expert weights, then wire EP/TP meshes on the dispatcher
         so dispatch/combine see the right meshes at runtime."""
         super().parallelize(parallel_dims)
-        # TODO(@pianpwk): With spmd_types and set_current_mesh, replace wire_meshes
-        # with current_mesh calls inside AllToAllTokenDispatcher and
+        # TODO(@pianpwk): With spmd_types and set_current_spmd_mesh, replace wire_meshes
+        # with current_spmd_mesh calls inside AllToAllTokenDispatcher and
         # DeepEPTokenDispatcher.
         self.token_dispatcher.wire_meshes(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
@@ -224,9 +236,9 @@ class TokenChoiceTopKRouter(Module):
         scores_grouped = scores_for_choice_BLE.unflatten(
             -1, (self.num_expert_groups, experts_per_group)
         )
-        top2_scores_in_group, _ = scores_grouped.topk(2, dim=-1)
+        top2_scores_in_group, _ = deterministic_topk(scores_grouped, 2, dim=-1)
         group_scores = top2_scores_in_group.sum(dim=-1)
-        _, group_idx = torch.topk(
+        _, group_idx = deterministic_topk(
             group_scores, k=self.num_limited_groups, dim=-1, sorted=False
         )
         group_mask = torch.ones_like(group_scores, dtype=torch.bool)
@@ -272,7 +284,7 @@ class TokenChoiceTopKRouter(Module):
             scores_for_choice_BLE = self._get_node_limited_routing_scores(
                 scores_for_choice_BLE
             )
-        _, topk_expert_ids_BLK = torch.topk(
+        _, topk_expert_ids_BLK = deterministic_topk(
             scores_for_choice_BLE, k=self.top_k, dim=-1, sorted=False
         )
 
@@ -374,6 +386,17 @@ class MoE(Module):
         operates on DTensors — the DTensor→local conversion happens at
         the GroupedExperts boundary.
         """
+        B, L, D = x_BLD.shape
+        T = B * L
+        sp_size = getattr(self.experts.token_dispatcher, "sp_size", 1)
+        pad_tokens = (-T) % sp_size
+        # Padding is logically appended to the flattened global sequence tail,
+        # not to a specific SP rank. This lets combine() infer each SP rank's
+        # start/end offsets from the uniform padded shard length; for example,
+        # if T < sp_size, only the first T ranks have real tokens. No padded
+        # token is materialized or routed.
+        num_local_tokens_after_padding = (T + pad_tokens) // sp_size
+
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # scores_BLE shape (B, L, E)
         (
@@ -432,6 +455,7 @@ class MoE(Module):
             topk_scores_BLK,
             topk_expert_ids_BLK,
             num_local_tokens_per_expert_E,
+            num_local_tokens_after_padding=num_local_tokens_after_padding,
         )
 
         # shared_experts runs in parallel with deepep combine communication.
@@ -449,6 +473,14 @@ class MoE(Module):
             from torchtitan.distributed.deepep.deepep import sync_combine
 
             sync_combine()
+
+        if pad_tokens:
+            # Combine constructs the full logically padded SP view so each rank
+            # uses the same stride for global token offsets. The input was not
+            # physically padded, so trim the logical tail padding before
+            # restoring the original (B, L, D) shape.
+            out_TD = out_BLD.view(-1, D)
+            out_BLD = out_TD[:T].view(B, L, D)
 
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD

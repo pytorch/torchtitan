@@ -207,7 +207,6 @@ def _precompile_aot_fx_trace(
         * parallel_dims.cp
     )
     dummy_global_valid_tokens = float(global_batch_size * seq_len)
-    extra_inputs: dict[str, torch.Tensor] = {}
     extra_kwargs: dict[str, Any] = {}
 
     if isinstance(model_config, Decoder.Config) and model_config.layers:
@@ -257,7 +256,6 @@ def _precompile_aot_fx_trace(
             dummy_inputs,
             dummy_labels,
             dummy_global_valid_tokens,
-            extra_inputs,
             extra_kwargs,
         )
     logger.info(

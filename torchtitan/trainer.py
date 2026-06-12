@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any, cast
 
+import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
 import tyro
@@ -37,9 +38,10 @@ from torchtitan.config.configs import (
     ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.config.override import apply_overrides, OverrideConfig
 from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
-
+from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
@@ -97,6 +99,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         comm: CommConfig = field(default_factory=CommConfig)
         validator: Validator.Config = field(default_factory=Validator.Config)
         debug: DebugConfig = field(default_factory=DebugConfig)
+        override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
 
         def __post_init__(self):
@@ -104,6 +107,27 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise ValueError(
                     "Batch-invariant mode is not supported in pre-training."
                 )
+            if (
+                self.parallelism.spmd_backend == "spmd_types"
+                and self.debug.spmd_typechecking
+                and self.parallelism.pipeline_parallel_degree > 1
+            ):
+                # TODO(sanketpurandare): Enable SPMD typechecking under PP.
+                raise ValueError(
+                    "SPMD typechecking is not supported with pipeline parallelism. "
+                    "Validate the same config without PP "
+                    "(--parallelism.pipeline_parallel_degree 1)."
+                )
+
+            # Pretraining inputs are shaped by TrainingConfig.seq_len when
+            # sequence_parallel is applied
+            if self.parallelism.enable_sequence_parallel:
+                sp_degree = self.parallelism.tensor_parallel_degree
+                if sp_degree > 1 and self.training.seq_len % sp_degree != 0:
+                    raise ValueError(
+                        f"Training sequence length ({self.training.seq_len}) must be "
+                        f"divisible by sequence parallel degree ({sp_degree})."
+                    )
 
         def to_dict(self) -> dict[str, Any]:
             d = {}
@@ -195,6 +219,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
+        # TODO(pianpwk): Transitional until the local-SPMD and full-DTensor
+        # backends share one runtime mesh/type mechanism.
+        dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
 
         # Logging needs to happen after distributed initialized
         config.maybe_log()
@@ -226,6 +253,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config=config,
         )
         self.model_config = model_config
+
+        # Apply overrides to the full config tree, before any component is
+        # built. The model config is reached via ModelSpec.traverse. Model
+        # overrides must run after update_from_config above (it sets sharding
+        # config on the pre-override modules); all other components (optimizer,
+        # loss, dataloader, …) are built later in __init__.
+        if config.override.imports:
+            apply_overrides(config.override, config)
 
         logger.info(f"Building {model_spec.name} {model_spec.flavor}")
 
@@ -459,7 +494,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         loss_parallel_enabled = (
             parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
         )
-        self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
+        self.train_context = dist_utils.get_train_context(
+            enable_loss_parallel=loss_parallel_enabled,
+            parallel_dims=parallel_dims,
+            spmd_typechecking=(
+                config.parallelism.spmd_backend == "spmd_types"
+                and config.debug.spmd_typechecking
+            ),
+        )
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -542,7 +584,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     @sl.log_trace_span("post_dataloading_process")
     def post_dataloading_process(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """
         Post-processing hook after data loading and before model forward pass.
 
@@ -561,31 +603,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             labels: Target labels for the batch.
 
         Returns:
-            A tuple of (inputs, labels, extra_inputs, extra_kwargs) where:
+            A tuple of (inputs, labels, extra_kwargs) where:
                 - inputs: Main input tensor extracted from input_dict["input"].
                 - labels: Target labels (unchanged from input parameter).
-                - extra_inputs: Dict of auxiliary input tensors from input_dict
-                    (excluding "input" and "positions"). These are passed to the
-                    model forward but are NOT forwarded across pipeline parallel
-                    stages.
-                - extra_kwargs: Dict of additional keyword arguments for model
-                    forward (positions, attention_masks). These ARE forwarded
-                    across all pipeline parallel stages.
-
-        Note:
-            The distinction between extra_inputs and extra_kwargs is important for
-            pipeline parallelism: extra_kwargs are forwarded to all pipeline stages,
-            while extra_inputs are only available to the first stage. Positions
-            always go into extra_kwargs so every stage can apply RoPE correctly.
+                - extra_kwargs: Additional keyword arguments for the model forward
+                    (e.g. positions, attention_masks), forwarded to every
+                    pipeline-parallel stage.
         """
         inputs = input_dict["input"]
-        extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
-        # extra_kwargs are forwarded to all PP stages; extra_inputs are only
-        # available to the first stage.  Positions go into extra_kwargs so
-        # every stage can apply RoPE correctly.
-        extra_kwargs: dict[str, Any] = {}
+        # Everything else becomes a model-forward kwarg, forwarded to all PP
+        # stages by the schedule. positions is read here so we can build masks.
+        extra_kwargs: dict[str, Any] = {
+            k: v for k, v in input_dict.items() if k != "input"
+        }
 
-        positions = extra_inputs.pop("positions", None)
+        positions = extra_kwargs.get("positions", None)
 
         # positions and attention_masks are optional (Decoder.forward defaults
         # both to None). Build attention masks only for the masked backends
@@ -594,7 +626,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # tests) still receives positions for RoPE but no masks — it relies on
         # is_causal instead.
         if isinstance(self.model_config, Decoder.Config) and positions is not None:
-            inner_attention = self.model_config.layers[0].attention.inner_attention
+            inner_attention = getattr(
+                self.model_config.first_attention, "inner_attention", None
+            )
             if isinstance(
                 inner_attention, (FlexAttention.Config, VarlenAttention.Config)
             ):
@@ -602,8 +636,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 extra_kwargs["attention_masks"] = model.get_attention_masks(
                     positions=positions,
                 )
-
-        extra_kwargs["positions"] = positions
 
         if self.parallel_dims.cp_enabled:
             inputs, labels, extra_kwargs = prepare_context_parallel_input(
@@ -623,8 +655,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
+        elif self.config.parallelism.spmd_backend == "spmd_types":
+            inputs, labels, extra_kwargs = annotate_input_spmd_types(
+                self.parallel_dims,
+                inputs,
+                labels,
+                extra_kwargs,
+            )
 
-        return inputs, labels, extra_inputs, extra_kwargs
+        return inputs, labels, extra_kwargs
 
     @sl.log_trace_span("fwd_bwd")
     def forward_backward_step(
@@ -637,9 +676,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
-        inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
-            input_dict, labels
-        )
+        inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
@@ -651,7 +688,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 if self.pp_has_first_stage:
                     self.pp_schedule.step(
                         inputs,
-                        **extra_inputs,
                         **extra_kwargs,
                         target=targets,
                         losses=losses,
@@ -679,7 +715,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             # Non-PP forward / backward
             assert len(model_parts) == 1
             with self.train_context():
-                pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                pred = model_parts[0](inputs, **extra_kwargs)
                 # Under non-full_dtensor, labels stay as plain tensors. See
                 # ``cross_entropy_loss`` for why pred must also be plain.
                 # Remove once non-full_dtensor is no longer supported.
@@ -691,7 +727,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     pred = pred.to_local()
                 loss = self.loss_fn(pred, labels, global_valid_tokens)
                 del pred
-                loss.backward()
+                with spmd.no_typecheck():
+                    # this propagates types through BWD, causing unnecessary conflicts
+                    # between torch_function and internals (e.g. AC). FWD is sufficient.
+                    loss.backward()
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
