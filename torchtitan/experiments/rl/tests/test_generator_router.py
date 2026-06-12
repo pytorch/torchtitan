@@ -14,6 +14,7 @@ from torchtitan.experiments.rl.generator_router import (
     LeastLoadedRoutingStrategy,
     RoundRobinRoutingStrategy,
     RoutingContext,
+    StickySessionRoutingStrategy,
 )
 
 
@@ -261,6 +262,50 @@ def test_drain_restores_serving_on_pull_failure():
 
         assert router._generators[0].state is _GeneratorState.SERVING
         assert await router.route("generate", routing_ctx=RoutingContext()) == "gen0"
+
+    asyncio.run(_run())
+
+
+def test_sticky_session_pins_a_session_despite_load():
+    async def _run():
+        # Both generators hold their generate in flight so reserved_load is observable.
+        actors = [
+            _Actor("gen0", wait_generate=True),
+            _Actor("gen1", wait_generate=True),
+        ]
+        router = _router(actors, strategy=StickySessionRoutingStrategy.Config())
+
+        # Session A's first turn -> gen0 (least-loaded; ties pick the first). Held in flight (load=1).
+        a1 = asyncio.create_task(
+            router.route(
+                "generate",
+                routing_ctx=RoutingContext(session_key="A", estimated_cost=1),
+            )
+        )
+        await actors[0].generate.started.wait()
+        # A NEW session B -> gen1 (gen0 is now busier).
+        b1 = asyncio.create_task(
+            router.route(
+                "generate",
+                routing_ctx=RoutingContext(session_key="B", estimated_cost=1),
+            )
+        )
+        await actors[1].generate.started.wait()
+        # Session A's SECOND turn: sticky keeps it on gen0 even though gen1 is less loaded.
+        a2 = asyncio.create_task(
+            router.route(
+                "generate",
+                routing_ctx=RoutingContext(session_key="A", estimated_cost=1),
+            )
+        )
+        await asyncio.sleep(0.01)
+
+        assert len(actors[0].generate.calls) == 2  # a1 + a2 (A stayed put)
+        assert len(actors[1].generate.calls) == 1  # b1
+
+        for actor in actors:
+            actor.generate.release.set()
+        assert await asyncio.gather(a1, b1, a2) == ["gen0", "gen1", "gen0"]
 
     asyncio.run(_run())
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import auto, Enum
@@ -50,6 +51,10 @@ class RoutingContext:
 
     estimated_cost: int = 1
     """Estimated request cost used by load-aware routing strategies."""
+
+    session_key: str | None = None
+    """Sticky-routing key: requests sharing a key route to the same generator so its KV/prefix cache
+    is reused (e.g. a multi-turn rollout's turns). `None` opts out (the request is routed by load)."""
 
 
 class RoutingStrategy(Configurable, ABC):
@@ -110,7 +115,56 @@ class LeastLoadedRoutingStrategy(RoutingStrategy):
         """Return the serving generator with the lowest reserved load."""
 
         del routing_ctx
-        return min(candidates, key=lambda h: h.reserved_load)
+        return min(candidates, key=lambda handle: handle.reserved_load)
+
+
+class StickySessionRoutingStrategy(RoutingStrategy):
+    """Pin each session (e.g. one multi-turn rollout) to the generator it first landed on, so its turns
+    reuse that generator's KV/prefix cache. Least-loaded scatters a session's turns across generators
+    and misses the prefix cache; sticky keeps them together.
+
+    Falls back to least-loaded for a session with no key, an unseen key, or when the pinned generator
+    is no longer serving (e.g. draining for a non-hotswap weight sync).
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        pass
+
+    # Cap on remembered pins. Only sessions in flight need a pin (a finished session's key never
+    # recurs), and at most ~num_groups_per_rollout_batch are in flight; this LRU bound keeps the map
+    # from growing without limit over a long run while never evicting an active session.
+    _MAX_PINS = 1024
+
+    def __init__(self, config: Config):
+        del config
+        # session_key -> pinned generator handle (by identity), LRU-ordered (oldest first).
+        self._pinned: OrderedDict[str, _GeneratorHandle] = OrderedDict()
+
+    def choose(
+        self,
+        routing_ctx: RoutingContext,
+        candidates: Sequence[_GeneratorHandle],
+    ) -> _GeneratorHandle:
+        key = routing_ctx.session_key
+        if key is not None:
+            pinned = self._pinned.get(key)
+            if pinned is not None and any(
+                pinned is candidate for candidate in candidates
+            ):
+                self._pinned.move_to_end(key)  # mark recently used
+                return pinned  # still serving: keep the session on its generator
+        chosen = min(candidates, key=lambda handle: handle.reserved_load)
+        if key is not None:
+            self._pinned[
+                key
+            ] = chosen  # pin a new (or displaced) session to a least-loaded generator
+            self._pinned.move_to_end(key)
+            if len(self._pinned) > self._MAX_PINS:
+                self._pinned.popitem(
+                    last=False
+                )  # evict the oldest (a long-finished session)
+        return chosen
 
 
 class GeneratorRouter(Configurable):

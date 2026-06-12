@@ -4,84 +4,40 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""Packs scored `Episode`s into the trainer's microbatch grid.
+
+A `Batcher` turns a `list[Episode]` into `[grad_accum_steps][dp_degree]` microbatches, each a
+`TrainingBatch` of shape `[local_batch_size, seq_len]`. It owns ALL packing decisions — next-fit row
+assignment, the loss-target `[:-1]/[1:]` split, and per-sample padding — so callers (the episode
+buffer) hand it raw episodes and never re-derive packing.
+"""
+
 import logging
-from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 
 import torch
-
-logger = logging.getLogger(__name__)
 
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import Episode, TrainingBatch
 
+logger = logging.getLogger(__name__)
 
-def pack(
-    samples: Iterable[dict[str, list]],
-    max_seq_length: int,
-    pad_values: dict[str, int | float | bool],
-) -> Iterator[dict[str, torch.Tensor]]:
-    """Greedy-pack variable-length samples into [1, max_seq_length] sequences."""
-    keys = list(pad_values.keys())
-    dtypes: dict[str, torch.dtype] | None = None
-    buffer: dict[str, list] = {key: [] for key in keys}
-    position_buffer: list[int] = []
-    seq_lens_buffer: list[int] = []
-    buffer_length = 0
-
-    def _flush() -> dict:
-        nonlocal buffer, position_buffer, seq_lens_buffer, buffer_length
-        assert dtypes is not None
-        pad_length = max_seq_length - buffer_length
-        if pad_length > 0:
-            for key in keys:
-                buffer[key].extend([pad_values[key]] * pad_length)
-            position_buffer.extend(range(pad_length))
-
-        result: dict = {
-            key: torch.tensor(
-                buffer[key],
-                dtype=dtypes[key],
-            ).unsqueeze(0)
-            for key in keys
-        }
-        result["positions"] = torch.tensor(position_buffer, dtype=torch.long).unsqueeze(
-            0
-        )
-        result["seq_lens"] = list(seq_lens_buffer)
-
-        buffer = {key: [] for key in keys}
-        position_buffer = []
-        seq_lens_buffer = []
-        buffer_length = 0
-        return result
-
-    for sample in samples:
-        sample_length = len(sample[keys[0]])
-
-        if sample_length > max_seq_length:
-            logger.warning(
-                "Dropping sample with length %d exceeding max_seq_length %d",
-                sample_length,
-                max_seq_length,
-            )
-            continue
-
-        if dtypes is None:
-            dtypes = {key: torch.tensor(sample[key]).dtype for key in keys}
-
-        if buffer_length > 0 and buffer_length + sample_length > max_seq_length:
-            yield _flush()
-
-        for key in keys:
-            buffer[key].extend(sample[key])
-        position_buffer.extend(range(sample_length))
-        seq_lens_buffer.append(sample_length)
-        buffer_length += sample_length
-
-    if buffer_length > 0:
-        yield _flush()
+# Per-field pad values + tensor dtypes for a packed row.
+_PAD_VALUES: dict[str, int | float | bool] = {
+    "input_ids": 0,  # overwritten with pad_id in __init__-bound builds
+    "labels": 0,
+    "generator_logprobs": 0.0,
+    "loss_mask": False,
+    "advantages": 0.0,
+}
+_DTYPES: dict[str, torch.dtype] = {
+    "input_ids": torch.long,
+    "labels": torch.long,
+    "generator_logprobs": torch.float,
+    "loss_mask": torch.bool,
+    "advantages": torch.float,
+}
 
 
 @dataclass(kw_only=True, slots=True)
@@ -103,10 +59,28 @@ class BatchConfig:
     """Tokens per row (packed sequence length)."""
 
 
+@dataclass(frozen=True, slots=True)
+class PackedBatch:
+    """One training batch packed from the front of a list of episodes.
+
+    `num_episodes_consumed` is how many leading episodes filled this batch; the caller drops exactly
+    that many and keeps the rest for the next batch (the surplus is never truncated).
+
+    Example:
+
+        # global_batch_size=2, seq_len=10, three 5-token episodes
+        result = batcher.pack_one_batch([e5, e5, e5], dp_degree=1)
+        # -> microbatches [grad_accum][dp], num_episodes_consumed=3 (rows [e5,e5] and [e5])
+    """
+
+    microbatches: list[list[TrainingBatch]]  # [grad_accum_steps][dp_degree]
+    num_global_valid_tokens: int
+    num_episodes_consumed: int
+    metrics: list[m.Metric]
+
+
 class Batcher(Configurable):
-    """Packs ``list[Episode]`` into ``[grad_accum_steps][dp_degree]``
-    microbatches, where each microbatch is a ``TrainingBatch`` of shape
-    ``[local_batch_size, seq_len]``.
+    """Packs ``list[Episode]`` into ``[grad_accum_steps][dp_degree]`` microbatches.
 
     ``gradient_accumulation_steps = global_batch_size // (local_batch_size * dp_degree)``
     """
@@ -127,132 +101,189 @@ class Batcher(Configurable):
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
 
     def num_tokens_target(self, dp_degree: int) -> int:
-        global_batch_size = self.global_batch_size
-        if global_batch_size == -1:
-            global_batch_size = self.local_batch_size * dp_degree
-        return global_batch_size * self.seq_len
+        """Token slots in one full batch: ``global_batch_size`` rows * ``seq_len``."""
+        return self._resolve_global_batch_size(dp_degree) * self.seq_len
 
-    def batch(
-        self,
-        episodes: list[Episode],
-        *,
-        dp_degree: int,
-    ) -> tuple[list[list[TrainingBatch]], int, list[m.Metric]]:
-        """Pack episodes into ``[B, seq_len]`` microbatches.
+    def trainable_tokens(self, episode: Episode) -> int:
+        """Tokens this episode contributes to a packed row.
+
+        The loss-target split drops the last token (``input_ids = raw[:-1]``), and batch-invariant
+        mode rounds the length up to ``per_sample_pad_multiple``.
+
+        Example:
+
+            # token_ids of length 6, per_sample_pad_multiple=None  -> 5
+            # token_ids of length 6, per_sample_pad_multiple=8      -> 8
+        """
+        length = len(episode.token_ids) - 1
+        if self._per_sample_pad_multiple:
+            align = self._per_sample_pad_multiple
+            length = ((length + align - 1) // align) * align
+        return length
+
+    def pack_one_batch(self, episodes: list[Episode], *, dp_degree: int) -> PackedBatch:
+        """Pack the front of ``episodes`` into ONE training batch; report how many it consumed.
+
+        Greedy next-fit fills rows up to the global batch's row budget, then stops — the surplus is
+        left for the next batch (never truncated). Every packing decision lives here: next-fit
+        (``_fill_rows``), the ``[:-1]`` loss-target split (``trainable_tokens`` / ``_pack_row``), and
+        per-sample padding.
+
+        Args:
+            episodes: Buffered episodes, oldest first. The caller must have at least one full batch
+                of fresh tokens buffered (the buffer's readiness gate guarantees this).
+            dp_degree: Data-parallel degree, for the row budget and the microbatch grid.
 
         Returns:
-            microbatches: shape ``[gradient_accumulation_steps][dp_degree]``,
-                each entry is a ``TrainingBatch`` with ``local_batch_size`` rows.
-            num_global_valid_tokens: total response tokens across the batch
-                (excludes padding). Used to normalize the loss so that
-                gradient accumulation matches a single large-batch step.
-            packing_metrics: list of Metric objects for logging.
+            A `PackedBatch`. Pop ``num_episodes_consumed`` from the front and keep the rest.
         """
-        # TODO: Consider consuming the iterator lazily instead of
-        # materializing all rows upfront.
-        packed_rows = list(self._pack_episodes(episodes))
-
-        global_batch_size = self.global_batch_size
-        if global_batch_size == -1:
-            global_batch_size = self.local_batch_size * dp_degree
-        num_rows_before_truncate = len(packed_rows)
-        if len(packed_rows) > global_batch_size:
-            logger.warning(
-                "Dropping %d packed rows (%d -> %d) to fit global_batch_size",
-                len(packed_rows) - global_batch_size,
-                len(packed_rows),
-                global_batch_size,
-            )
-            packed_rows = packed_rows[:global_batch_size]
+        global_batch_size = self._resolve_global_batch_size(dp_degree)
+        rows = self._fill_rows(episodes, max_rows=global_batch_size)
+        # A single episode longer than seq_len can't pack and would silently under-fill the batch;
+        # setup_async's seq-len guard promises this can't happen, so assert rather than drop quietly.
+        # Checked over the CONSUMED episodes only (O(batch), not O(whole buffer)).
+        assert all(
+            self.trainable_tokens(episode) <= self.seq_len
+            for row in rows
+            for episode in row
+        ), "episode longer than seq_len; setup_async's seq-len guard should have prevented this"
+        assert len(rows) == global_batch_size, (
+            f"expected a full batch of {global_batch_size} rows, packed {len(rows)} "
+            "(the buffer's readiness gate should guarantee enough fresh tokens)"
+        )
+        num_episodes_consumed = sum(len(row) for row in rows)
+        packed_rows = [self._pack_row(row) for row in rows]
 
         gradient_accumulation_steps = global_batch_size // (
             self.local_batch_size * dp_degree
         )
-
-        num_global_valid_tokens = sum(
-            int(row["loss_mask"].sum().item()) for row in packed_rows
-        )
-
         microbatches: list[list[TrainingBatch]] = []
         for step in range(gradient_accumulation_steps):
             step_batches: list[TrainingBatch] = []
             for rank in range(dp_degree):
                 start = (step * dp_degree + rank) * self.local_batch_size
-                end = start + self.local_batch_size
-                step_batches.append(self.collate(packed_rows[start:end]))
+                step_batches.append(
+                    self.collate(packed_rows[start : start + self.local_batch_size])
+                )
             microbatches.append(step_batches)
 
-        total_token_slots = len(packed_rows) * self.seq_len
-        non_padded_tokens = sum(sum(row["seq_lens"]) for row in packed_rows)
-        pct_pad_in_batch = (
-            (total_token_slots - non_padded_tokens) / total_token_slots
-            if total_token_slots > 0
-            else 0.0
+        num_global_valid_tokens = sum(
+            int(row["loss_mask"].sum().item()) for row in packed_rows
         )
-        packing_metrics = [
-            m.Metric("batcher/pct_pad_in_batch", m.NoReduce(pct_pad_in_batch)),
+        total_slots = len(packed_rows) * self.seq_len
+        non_padded = sum(sum(row["seq_lens"]) for row in packed_rows)
+        metrics = [
             m.Metric(
-                "batcher/num_rows_wasted",
-                m.NoReduce(float(max(0, num_rows_before_truncate - len(packed_rows)))),
-            ),
+                "batcher/pct_pad_in_batch",
+                m.NoReduce(
+                    (total_slots - non_padded) / total_slots if total_slots else 0.0
+                ),
+            )
         ]
-
-        return microbatches, num_global_valid_tokens, packing_metrics
-
-    def _pack_episodes(self, episodes: list[Episode]) -> Iterator[dict]:
-        """Pack all episodes into [1, seq_len] rows.
-
-        Each episode's raw tokens (length N) are split into
-        ``input_ids = raw[:-1]`` and ``labels = raw[1:]`` (both length
-        N-1), matching the pre-training dataloader convention.
-
-        When ``_per_sample_pad_multiple`` is non-zero, each sample is padded
-        to a multiple of that value so that flex attention block
-        boundaries align identically regardless of batch composition.
-        """
-        pad_values = {
-            "input_ids": self.pad_id,
-            "labels": self.pad_id,
-            "generator_logprobs": 0.0,
-            "loss_mask": False,
-            "advantages": 0.0,
-        }
-
-        def _iterate_samples() -> Iterator[dict]:
-            for episode in episodes:
-                sample = {
-                    "input_ids": episode.token_ids[:-1],
-                    "labels": episode.token_ids[1:],
-                    "generator_logprobs": episode.logprobs[1:],
-                    "loss_mask": episode.loss_mask[1:],
-                    "advantages": episode.advantage[1:],
-                }
-                if self._per_sample_pad_multiple:
-                    sample_len = len(sample["input_ids"])
-                    align = self._per_sample_pad_multiple
-                    padded_len = ((sample_len + align - 1) // align) * align
-                    pad_count = padded_len - sample_len
-                    if pad_count > 0:
-                        for key in sample:
-                            sample[key].extend([pad_values[key]] * pad_count)
-                yield sample
-
-        yield from pack(
-            _iterate_samples(),
-            max_seq_length=self.seq_len,
-            pad_values=pad_values,
+        return PackedBatch(
+            microbatches=microbatches,
+            num_global_valid_tokens=num_global_valid_tokens,
+            num_episodes_consumed=num_episodes_consumed,
+            metrics=metrics,
         )
+
+    def _resolve_global_batch_size(self, dp_degree: int) -> int:
+        if self.global_batch_size == -1:
+            return self.local_batch_size * dp_degree
+        return self.global_batch_size
+
+    def _fill_rows(
+        self, episodes: list[Episode], *, max_rows: int
+    ) -> list[list[Episode]]:
+        """Next-fit episodes into rows of <= ``seq_len`` tokens, up to ``max_rows`` rows.
+
+        The single source of packing geometry: ``pack_one_batch`` materializes exactly these row
+        groups, so the row count and the packed tensors can never drift. Surplus beyond ``max_rows``
+        is left for the next batch.
+
+        Example:
+
+            # seq_len=10, episode effective lengths [5, 5, 5], max_rows=2
+            _fill_rows([e5, e5, e5], max_rows=2)  # -> [[e5, e5], [e5]]
+        """
+        rows: list[list[Episode]] = []
+        current_row: list[Episode] = []
+        current_len = 0
+        for episode in episodes:
+            length = self.trainable_tokens(episode)
+            if (
+                current_row and current_len + length > self.seq_len
+            ):  # doesn't fit -> close the row
+                rows.append(current_row)
+                if (
+                    len(rows) == max_rows
+                ):  # budget full -> leave the rest for the next batch
+                    return rows
+                current_row, current_len = [], 0
+            current_row.append(episode)
+            current_len += length
+        if current_row and len(rows) < max_rows:
+            rows.append(current_row)
+        return rows
+
+    def _pack_row(self, episodes: list[Episode]) -> dict:
+        """Concatenate one row's episodes into a single ``[1, seq_len]`` padded row.
+
+        Each episode's raw tokens (length N) split into ``input_ids = raw[:-1]`` and
+        ``labels = raw[1:]`` (length N-1); each sample is padded to ``per_sample_pad_multiple``; then
+        the row is padded up to ``seq_len``. ``positions`` restart at 0 per sample; ``seq_lens`` keeps
+        the per-sample lengths (for the pad-fraction metric and packed-attention).
+        """
+        pad_values = {**_PAD_VALUES, "input_ids": self.pad_id, "labels": self.pad_id}
+        keys = list(pad_values)
+        row: dict[str, list] = {key: [] for key in keys}
+        positions: list[int] = []
+        seq_lens: list[int] = []
+        for episode in episodes:
+            sample = {
+                "input_ids": episode.token_ids[:-1],
+                "labels": episode.token_ids[1:],
+                "generator_logprobs": episode.logprobs[1:],
+                "loss_mask": episode.loss_mask[1:],
+                "advantages": episode.advantage[1:],
+            }
+            sample_len = len(sample["input_ids"])
+            if self._per_sample_pad_multiple:
+                align = self._per_sample_pad_multiple
+                padded_len = ((sample_len + align - 1) // align) * align
+                for key in keys:
+                    sample[key] = sample[key] + [pad_values[key]] * (
+                        padded_len - sample_len
+                    )
+                sample_len = padded_len
+            for key in keys:
+                row[key].extend(sample[key])
+            positions.extend(range(sample_len))
+            seq_lens.append(sample_len)
+
+        pad_len = self.seq_len - len(positions)
+        if pad_len > 0:
+            for key in keys:
+                row[key].extend([pad_values[key]] * pad_len)
+            positions.extend(range(pad_len))
+
+        packed = {
+            key: torch.tensor(row[key], dtype=_DTYPES[key]).unsqueeze(0) for key in keys
+        }
+        packed["positions"] = torch.tensor(positions, dtype=torch.long).unsqueeze(0)
+        packed["seq_lens"] = seq_lens
+        return packed
 
     # TODO: Make collate configurable (passed as an argument to Batcher),
     # similar to how the pre-trainer accepts a collate_fn for its dataloader.
     @staticmethod
     def collate(rows: list[dict]) -> TrainingBatch:
-        """Concatenate packed rows into a single [B, L] TrainingBatch."""
+        """Concatenate packed rows into a single ``[B, L]`` TrainingBatch."""
         return TrainingBatch(
-            token_ids=torch.cat([r["input_ids"] for r in rows]),
-            labels=torch.cat([r["labels"] for r in rows]),
-            positions=torch.cat([r["positions"] for r in rows]),
-            generator_logprobs=torch.cat([r["generator_logprobs"] for r in rows]),
-            loss_mask=torch.cat([r["loss_mask"] for r in rows]),
-            advantages=torch.cat([r["advantages"] for r in rows]),
+            token_ids=torch.cat([row["input_ids"] for row in rows]),
+            labels=torch.cat([row["labels"] for row in rows]),
+            positions=torch.cat([row["positions"] for row in rows]),
+            generator_logprobs=torch.cat([row["generator_logprobs"] for row in rows]),
+            loss_mask=torch.cat([row["loss_mask"] for row in rows]),
+            advantages=torch.cat([row["advantages"] for row in rows]),
         )

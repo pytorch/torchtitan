@@ -18,7 +18,6 @@ import torch
 import torch.distributed as dist
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
-from monarch.rdma import is_rdma_available
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import (
     CompileConfig,
@@ -804,14 +803,16 @@ class VLLMGenerator(Actor, Configurable):
         """ALL RANKS: collectively copy the latest weights from TorchStore, optionally drop the
         prefix cache (so no new request reuses an old-weight prefix), and bump the policy version.
         """
-        # TODO: with >1 generator, trainer should probably use direct_rdma=False (CPU-staged, fanout-safe)
-        # is_rdma_available() is a hardware probe, not a fanout signal.
+        # CPU-staged (direct_rdma=False): every generator reads its own copy from the trainer's CPU
+        # StorageVolume, so multi-generator fanout is safe and the trainer's GPU weights are free
+        # during the read (the async weight-sync overlap). The trainer publishes alternating keys
+        # (version % 2) so a deferred pull is never overwritten by the next push (one in flight).
         model_sd = self._get_model().model.state_dict()
         await ts.get_state_dict(
-            "model_state_dict",
+            f"model_state_dict_{version % 2}",
             user_state_dict=model_sd,
             strict=False,
-            direct_rdma=is_rdma_available(),
+            direct_rdma=False,
         )
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:

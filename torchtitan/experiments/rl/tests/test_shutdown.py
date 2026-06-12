@@ -59,6 +59,7 @@ class _FakeConfig:
     trainer = _FakeTrainerConfig()
     # main() also reads config.generator.parallelism (same stubbing applies).
     generator = SimpleNamespace(parallelism=None)
+    num_generators = 1  # main() passes this to spawn_proc_mesh
 
     @property
     def __class__(self):
@@ -118,7 +119,7 @@ def stub_mesh_provisioning(monkeypatch):
     """
     monkeypatch.setattr(train, "_compute_world_size", lambda p: 1)
     monkeypatch.setattr(
-        train, "spawn_proc_mesh", lambda *args, **kwargs: (object(), object())
+        train, "spawn_proc_mesh", lambda *args, **kwargs: (object(), [object()])
     )
 
 

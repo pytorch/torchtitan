@@ -32,6 +32,7 @@ import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from typing import NamedTuple
 
 # must run before torch import
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -44,7 +45,7 @@ from monarch.spmd import setup_torch_elastic_env_async
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.batcher import Batcher
+from torchtitan.experiments.rl.batcher import Batcher, PackedBatch
 from torchtitan.experiments.rl.episode_buffer import EpisodeBuffer
 from torchtitan.experiments.rl.generator_router import GeneratorRouter, RoutingContext
 from torchtitan.experiments.rl.observability import metrics as m
@@ -57,7 +58,7 @@ from torchtitan.experiments.rl.rollout import (
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
 from torchtitan.experiments.rl.rollout.types import GenerateFn
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
-from torchtitan.experiments.rl.types import Episode, TrainingBatch
+from torchtitan.experiments.rl.types import Episode
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -147,25 +148,6 @@ class GRPOLoss(Configurable):
         return loss, metrics
 
 
-def _log_samples(rollout_groups: list[RolloutGroup]) -> None:
-    """Log the first scored, trainable rollout per group for debugging."""
-    for group in rollout_groups:
-        rollout = next(
-            (
-                r
-                for r in group.rollouts
-                if r.reward is not None and r.turns and r.turns[0].completion_token_ids
-            ),
-            None,
-        )
-        if rollout is None:
-            continue
-        logger.info("  [%s] reward=%+.1f", group.group_id, rollout.reward)
-        message = rollout.turns[-1].completion_message
-        text = (message.get("content") or "") if message else ""
-        logger.info("       A: %s", text[:300].replace("\n", " ").strip())
-
-
 def _generation_metrics(groups: list[RolloutGroup]) -> list[m.Metric]:
     """Flatten every turn's per-generation metrics (latencies, output tokens) across the groups.
 
@@ -181,83 +163,82 @@ def _generation_metrics(groups: list[RolloutGroup]) -> list[m.Metric]:
     ]
 
 
-@dataclass(frozen=True, slots=True)
-class _WeightSyncTimings:
-    """Wall-clock for one trainer->generator weight hotswap (push, then pull)."""
+class _PendingPull(NamedTuple):
+    """A generator weight-load fired into the background; awaited before the next publish (§5.1)."""
 
-    push_s: float
-    total_s: float
-
-    @property
-    def pull_s(self) -> float:
-        # The generator keeps sampling during the pull; pull = total - push.
-        return self.total_s - self.push_s
+    task: asyncio.Task
+    version: int
 
 
-@dataclass(frozen=True, slots=True)
-class _TrainStepTimings:
-    """Wall-clock timings for one async train step."""
+def _reduce_microbatches(per_microbatch: list[dict[str, float]]) -> dict[str, float]:
+    """Reduce per-microbatch loss metrics over the grad-accumulation: mean/frac keys are pre-normalized
+    by num_global_valid_tokens so summing them reconstructs the global value; max keys take the max.
 
-    step_s: float
-    get_batch_s: float  # the trainer-idle bubble (waiting on the buffer)
-    train_s: float
-    weight_sync: _WeightSyncTimings
-
-
-def _build_train_step_metrics(
-    *,
-    buffer_metrics: list[m.Metric],
-    fwd_bwd_metrics: dict[str, float],
-    optimizer_metrics: dict[str, float],
-    num_global_valid_tokens: int,
-    timings: _TrainStepTimings,
-) -> list[m.Metric]:
-    """All metrics for one async train step, in one place (pure: no I/O, unit-testable).
-
-    `buffer_metrics` already carry the rollout/episode/staleness/depth signals that rode out with
-    the batch; this adds fwd/bwd, optimizer, timing, and the derived diagnostic ratios.
-
-    `perf/trainer_active_tokens_per_second` divides by TRAIN time, while goodput
-    (`perf/tokens_per_second`) divides by the whole STEP, so their gap is the trainer-idle bubble.
+    Matches `_mean`/`_frac` as well as `/mean`/`/frac` so the GRPO loss keys (`loss/ratio_mean`,
+    `loss/ratio_clipped_frac`, `loss/generator_logprob_nan_frac`) are summed too — they are all
+    pre-normalized, so without this they would report ~1/grad_accum of the truth.
 
     Example:
 
-        t = _TrainStepTimings(step_s=10.0, get_batch_s=8.0, train_s=1.0,
-                              weight_sync=_WeightSyncTimings(push_s=0.4, total_s=1.0))
-        # -> controller/trainer_idle_time_ratio = 0.8, timing/weight_sync_overhead_ratio = 0.1,
-        #    perf/tokens_per_second = tokens/10, perf/trainer_active_tokens_per_second = tokens/1
+        _reduce_microbatches([{"loss/ratio_clipped_frac": 0.1, "x/max": 2.0},
+                              {"loss/ratio_clipped_frac": 0.2, "x/max": 5.0}])
+        # -> {"loss/ratio_clipped_frac": 0.3, "x/max": 5.0}
     """
-    # TODO(observability): generator-side KV-cache usage + preemption counts would separate a
-    #   saturated generator from an under-provisioned one when idle_ratio is high.
-    step_s = timings.step_s
-    weight_sync = timings.weight_sync
-    metrics: list[m.Metric] = list(buffer_metrics)
-    metrics += [
-        m.Metric(key, m.NoReduce(value)) for key, value in fwd_bwd_metrics.items()
-    ]
-    metrics += [
-        m.Metric(key, m.NoReduce(value)) for key, value in optimizer_metrics.items()
-    ]
+    reduced: dict[str, float] = {}
+    for microbatch in per_microbatch:
+        for key, value in microbatch.items():
+            if key not in reduced:
+                reduced[key] = value
+            elif key.endswith("/max"):
+                reduced[key] = max(reduced[key], value)
+            elif key.endswith(("/mean", "_mean", "/frac", "_frac")):
+                reduced[key] += value
+    return reduced
+
+
+def _build_step_metrics(
+    *,
+    batch: PackedBatch,
+    fwd_bwd: dict[str, float],
+    optimizer: dict[str, float],
+    wait_s: float,
+    train_s: float,
+    push_s: float,
+    pull_wait_s: float,
+    sync_s: float,
+    step_s: float,
+) -> list[m.Metric]:
+    """All metrics for one async train step (pure: no I/O, unit-testable).
+
+    `batch.metrics` already carry the buffer's `perf/buffer_*` panel keys + rollout/generation/packing
+    drill-down that rode out with the batch; this adds fwd/bwd, optimizer, the 4 trainer-side `perf/`
+    panel ratios, and `timing/*` drill-down.
+
+    The gap between goodput (`/ step_s`) and active (`/ train_s`) IS the trainer-idle + sync bubble.
+
+    Example:
+
+        # step_s=10, wait_s=8, train_s=1, sync_s=0.5, num_global_valid_tokens=100
+        # -> perf/trainer_idle_ratio=0.8, perf/weight_sync_overhead_ratio=0.05,
+        #    perf/goodput_tokens_per_second=10, perf/active_tokens_per_second=100
+    """
+    tokens = batch.num_global_valid_tokens
+    metrics: list[m.Metric] = list(batch.metrics)
+    metrics += [m.Metric(key, m.NoReduce(value)) for key, value in fwd_bwd.items()]
+    metrics += [m.Metric(key, m.NoReduce(value)) for key, value in optimizer.items()]
     derived = [
+        ("perf/trainer_idle_ratio", wait_s / step_s if step_s else 0.0),
+        ("perf/goodput_tokens_per_second", tokens / step_s if step_s else 0.0),
+        ("perf/active_tokens_per_second", tokens / train_s if train_s else 0.0),
+        ("perf/weight_sync_overhead_ratio", sync_s / step_s if step_s else 0.0),
         ("timing/step", step_s),
-        ("timing/get_batch", timings.get_batch_s),
-        ("timing/train", timings.train_s),
-        ("timing/weight_sync/push", weight_sync.push_s),
-        ("timing/weight_sync/pull", weight_sync.pull_s),
-        ("timing/weight_sync/total", weight_sync.total_s),
-        (
-            "timing/weight_sync_overhead_ratio",
-            weight_sync.total_s / step_s if step_s else 0.0,
-        ),
-        (
-            "controller/trainer_idle_time_ratio",
-            timings.get_batch_s / step_s if step_s else 0.0,
-        ),
-        ("perf/tokens_per_second", num_global_valid_tokens / step_s if step_s else 0.0),
-        (
-            "perf/trainer_active_tokens_per_second",
-            num_global_valid_tokens / timings.train_s if timings.train_s else 0.0,
-        ),
+        ("timing/get_batch", wait_s),
+        ("timing/train", train_s),
+        ("timing/weight_sync", sync_s),
+        # push (GPU->CPU stage) vs pull_wait (un-overlapped tail of the prior generator load): which
+        # half of the sync dominates — the drill-down that gates overlapping the push too (RFC §12).
+        ("timing/weight_sync/push", push_s),
+        ("timing/weight_sync/pull_wait", pull_wait_s),
     ]
     metrics += [m.Metric(key, m.NoReduce(value)) for key, value in derived]
     return metrics
@@ -304,6 +285,10 @@ class RLTrainer(Configurable):
         """Sibling rollouts sampled per dataset row (the GRPO group). The generator
         is always called with `n=1`; prompts are pre-expanded by `group_size`."""
 
+        num_generators: int = 1
+        """Data-parallel vLLM generators behind the router. >1 raises decode throughput; pair with
+        `generator_router.strategy=StickySessionRoutingStrategy` for prefix-cache locality."""
+
         num_validation_samples: int = 20
         """Number of held-out prompts scored greedily (temp=0, n=1) per validation pass."""
 
@@ -321,9 +306,6 @@ class RLTrainer(Configurable):
 
         renderer: RendererConfig
         """Message-to-token renderer config."""
-
-        log_samples: bool = False
-        """Log first completion per rollout during training and validation."""
 
         rollout_recorder: RolloutSampleRecorder.Config = field(
             default_factory=RolloutSampleRecorder.Config
@@ -479,6 +461,11 @@ class RLTrainer(Configurable):
         `metrics_prefix` namespaces the per-generation metrics (e.g. `"generator"` for training,
         `"validation_generator"` for validation). Bind it with `functools.partial` to hand a
         `GenerateFn` to the rollouter; the rollouter passes `request_id` per call.
+
+        The `session_key` is the GROUP id (the request_id up to `/sample=`). Sticky routing pins a
+        whole GRPO group — all its siblings and all their turns — to one generator, so the group's
+        shared prompt prefix and the per-turn KV stay in that generator's cache. Load-aware strategies
+        ignore it.
         """
         result = await self.generator_router.route(
             "generate",
@@ -486,7 +473,10 @@ class RLTrainer(Configurable):
             request_id=request_id,
             sampling_config=sampling_config,
             metrics_prefix=metrics_prefix,
-            routing_ctx=RoutingContext(estimated_cost=len(prompt_token_ids)),
+            routing_ctx=RoutingContext(
+                estimated_cost=len(prompt_token_ids),
+                session_key=request_id.split("/sample=", 1)[0],
+            ),
         )
         return self._get_rank_0_value(result)
 
@@ -610,7 +600,7 @@ class RLTrainer(Configurable):
 
         # Initial weight sync from trainer to generator (engine is idle, so no drain needed)
         with sl.log_trace_span("trainer_push_model_state_dict"):
-            await self.trainer.push_model_state_dict.call()
+            await self.trainer.push_model_state_dict.call(version=0)
         with sl.log_trace_span("generator_initial_weight_sync"):
             await self.generator_router.pull_model_state_dict(policy_version=0)
 
@@ -828,8 +818,6 @@ class RLTrainer(Configurable):
         )
         rollouts = [rollout for group in rollout_groups for rollout in group.rollouts]
 
-        if self.config.log_samples:
-            _log_samples(rollout_groups)
         self.rollout_recorder.record(
             step=step, is_validation=True, rollout_groups=rollout_groups
         )
@@ -843,67 +831,74 @@ class RLTrainer(Configurable):
         return validation_metrics
 
     async def train(self) -> None:
+        """Launch the three sibling coroutines and drive training from the ready queue.
+
+        Rollout workers PRODUCE episodes into the buffer; the pack loop PRE-PACKS the next batch into
+        `ready`; the consumer (this coroutine, the driver) trains from `ready` and hotswaps weights.
+        The producer closes the buffer when it stops (crash OR cancel) and the pack loop forwards that
+        as the `ready` sentinel, so the consumer always unblocks.
+        """
         num_steps = self.config.num_steps
         logger.info(
             f"Pre-training validation; then {num_steps} steps of async RL training"
         )
 
-        # Validate before and after so the reward improvement is visible.
-        pre_validation_agg = self._log_validation(
-            step=0, metrics=await self.validate(step=0)
-        )
+        pre_validation = await self._validate_and_log(step=0)
         sl.log_trace_instant("training_start")
 
-        # The producer banks fresh episodes; the consumer (driver) trains whole batches and
-        # hotswaps weights, advancing `_train_version`. The producer supervisor closes the buffer
-        # when it stops (crash OR cancel), so the consumer's `get_batch` always unblocks.
         buffer = EpisodeBuffer(
             batcher=self.batcher,
             dp_degree=self.trainer_dp_degree,
             max_offpolicy_steps=self.config.max_offpolicy_steps,
             max_buffered_batches=self.config.max_buffered_batches,
+            train_version=lambda: self._train_version,  # read live: drops enforce the latest version
         )
+        ready: asyncio.Queue[PackedBatch | None] = asyncio.Queue(maxsize=1)
         self._train_version = 0
+        self._pending_pull = (
+            None  # the in-flight generator weight-load (set by _consume_and_train)
+        )
         producer = asyncio.create_task(
             self._run_rollout_producer(buffer), name="rollout_producer"
         )
+        pack_loop = asyncio.create_task(
+            self._run_pack_loop(buffer, ready), name="pack_loop"
+        )
         try:
-            await self._consume_and_train(buffer, num_steps=num_steps)
+            await self._consume_and_train(ready, num_steps=num_steps)
         finally:
             producer.cancel()
-            try:
-                await producer  # re-raises a producer crash; CancelledError on a clean stop
-            except asyncio.CancelledError:
-                pass
+            pack_loop.cancel()
+            # Cancel the in-flight weight-pull too, so an outer cancel (Ctrl-C) doesn't orphan it.
+            if self._pending_pull is not None and not self._pending_pull.task.done():
+                self._pending_pull.task.cancel()
+            for task in (producer, pack_loop):
+                try:
+                    await task  # re-raises a real crash; CancelledError on a clean stop
+                except asyncio.CancelledError:
+                    pass
 
         # TODO(async): the engine may still hold abandoned train requests when post-validation
         #   starts; they resolve harmlessly (validation uses a `val/` id namespace) but share the
         #   engine. Drain them first if it skews validation timing.
-        post_validation_agg = self._log_validation(
-            step=num_steps, metrics=await self.validate(step=num_steps)
-        )
-        self._log_validation_summary(pre_validation_agg, post_validation_agg)
+        post_validation = await self._validate_and_log(step=num_steps)
+        self._log_reward_delta(pre_validation, post_validation)
 
-    def _log_validation(
-        self, *, step: int, metrics: list[m.Metric]
-    ) -> dict[str, float]:
-        """Log one validation pass; return its aggregated values for the pre/post summary."""
+    async def _validate_and_log(self, *, step: int) -> dict[str, float]:
+        """Run one validation pass, log it, and return its aggregated values for the pre/post delta."""
+        metrics = await self.validate(step=step)
         self.metrics_processor.log(step=step, metrics=metrics, is_validation=True)
         return m.MetricsProcessor._aggregate_metrics(metrics)
 
-    def _log_validation_summary(
-        self, pre_agg: dict[str, float], post_agg: dict[str, float]
-    ) -> None:
-        """Side-by-side pre/post reward summary, visible without scrolling back through the loop."""
-        reward_keys = sorted(
-            key for key in set(pre_agg) | set(post_agg) if "reward" in key
-        )
+    def _log_reward_delta(self, pre: dict[str, float], post: dict[str, float]) -> None:
+        """Console pre/post reward summary, visible without scrolling back through the loop."""
+        reward_keys = sorted(key for key in set(pre) | set(post) if "reward" in key)
         logger.info("=" * 60)
-        logger.info("Validation summary (pre / post):")
+        logger.info("Validation reward (pre / post):")
         for key in reward_keys:
-            pre = pre_agg.get(key, float("nan"))
-            post = post_agg.get(key, float("nan"))
-            logger.info(f"  {key}:  {pre:+.3f}  /  {post:+.3f}")
+            logger.info(
+                f"  {key}:  {pre.get(key, float('nan')):+.3f}  /  {post.get(key, float('nan')):+.3f}"
+            )
         logger.info("=" * 60)
 
     async def _run_rollout_producer(self, buffer: EpisodeBuffer) -> None:
@@ -993,7 +988,8 @@ class RLTrainer(Configurable):
     ) -> None:
         """ROLLOUT stage: pull a ready example, run its group rollout, score it into episodes,
         and `put` them in the buffer. A group that raises is logged + dropped (its
-        `group_failures` rides out with the next batch); the worker keeps going."""
+        `group_failures` rides out with the next batch); the worker keeps going. Staleness is
+        dropped at consume (`take_full_batch`), so `put` carries no version."""
         group_count = 0
         while True:
             example = await example_queue.get()
@@ -1009,135 +1005,152 @@ class RLTrainer(Configurable):
                 )
             except Exception:
                 logger.exception("rollout group %s failed; dropping", group_id)
-                await buffer.put(
-                    [],
-                    [m.Metric("rollout/group_failures", m.Sum(1.0))],
-                    train_version=self._train_version,
-                )
+                await buffer.put([], [m.Metric("rollout/group_failures", m.Sum(1.0))])
                 continue
 
             episodes, episode_metrics = self._build_episodes([group])
             rollout_metrics = prepare_rollout_metrics("rollout", group.rollouts)
             generation_metrics = _generation_metrics([group])
-            if self.config.log_samples:
-                _log_samples([group])
             self.rollout_recorder.record(
                 step=self._train_version + 1,
                 is_validation=False,
                 rollout_groups=[group],
             )
-            # Live read: the consumer advances `_train_version` after each weight sync while this
-            # worker awaits, so admission staleness is measured against the version current when
-            # the rollout finished; do not snapshot it earlier in the loop.
             await buffer.put(
-                episodes,
-                rollout_metrics + generation_metrics + episode_metrics,
-                train_version=self._train_version,
+                episodes, rollout_metrics + generation_metrics + episode_metrics
             )
 
-    async def _consume_and_train(
-        self, buffer: EpisodeBuffer, *, num_steps: int
-    ) -> None:
-        """Consumer/driver: each step wait one packed batch, train, hotswap weights, advance the
-        policy version. The `get_batch` wait is the trainer-idle bubble.
+    async def _run_pack_loop(self, buffer: EpisodeBuffer, ready: asyncio.Queue) -> None:
+        """Pre-pack: take a full fresh batch from the buffer, pack it OFF the event loop, and park it
+        on the 1-deep `ready` queue so the trainer's pull is instant. Forwards the buffer's close as a
+        `None` sentinel so the trainer unblocks on a clean stop OR a crash.
         """
+        try:
+            while True:
+                episodes = await buffer.take_full_batch()
+                if episodes is None:  # buffer closed and drained
+                    break
+                with sl.log_trace_span("pack_one_batch"):
+                    packed = await asyncio.to_thread(
+                        self.batcher.pack_one_batch,
+                        episodes,
+                        dp_degree=self.trainer_dp_degree,
+                    )
+                # commit drops the consumed episodes and returns this batch's ride-out metrics
+                # (the consumed groups' rollout/gen metrics + the buffer's staleness/depth).
+                ride_out_metrics = await buffer.commit(packed.num_episodes_consumed)
+                ready_batch = replace(packed, metrics=packed.metrics + ride_out_metrics)
+                await ready.put(
+                    ready_batch
+                )  # 1-deep: blocks => at most one batch pre-packed ahead
+        finally:
+            # Unblock a trainer parked on `ready.get()`. Non-blocking on purpose: at a clean stop the
+            # trainer has already finished and the queue may hold an unconsumed pre-packed batch
+            # (full) — a blocking `put` there would deadlock the cancel (the trainer won't drain it).
+            try:
+                ready.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+
+    async def _consume_and_train(self, ready: asyncio.Queue, *, num_steps: int) -> None:
+        """Consumer/driver. Each step reads a pre-packed batch, trains, and hands the new weights to
+        the generators ASYNC so their load overlaps the next step. Phases read top-to-bottom: wait ->
+        fwd/bwd -> divergence gate -> optim -> stage weights -> await prior pull (advance version) ->
+        fire next pull -> emit. The `ready.get` wait is the trainer-idle bubble (`perf/trainer_idle_ratio`).
+        """
+        # The previous step's generator weight-load runs in the background and overlaps this step.
+        # We await it before publishing again, and advance `_train_version` to the version it adopted.
+        self._pending_pull: _PendingPull | None = None
         for step in range(1, num_steps + 1):
             sl.set_step(step)
-            # Propagate the step counter to actors for structured logging.
-            await self.trainer.sync_log_step.call(step)
+            await self.trainer.sync_log_step.call(
+                step
+            )  # propagate the step counter to actors
             await self.generator_router.fanout("sync_log_step", step)
-            t_step_start = time.perf_counter()
+            t_step = time.perf_counter()
 
-            # --- wait: this get_batch wait IS the trainer-idle bubble ---
-            t_get_start = time.perf_counter()
-            batch = await buffer.get_batch(train_version=self._train_version)
+            # --- wait: pulling the pre-packed batch IS the trainer-idle bubble ---
+            t_wait = time.perf_counter()
+            batch = await ready.get()
             if batch is None:
                 logger.info("Episode buffer closed and drained; stopping training")
                 break
-            get_batch_s = time.perf_counter() - t_get_start
+            wait_s = time.perf_counter() - t_wait
 
-            # --- train: grad-accum microbatches; a NaN step must NEVER reach optim or push ---
-            t_train_start = time.perf_counter()
-            fwd_bwd_metrics = await self._run_microbatches(
-                batch.microbatches, batch.num_global_valid_tokens
+            # --- train: grad-accum microbatches; a NaN loss ends the run before optim/publish ---
+            t_train = time.perf_counter()
+            fwd_bwd = _reduce_microbatches(
+                [
+                    await self._forward_backward(
+                        microbatch, batch.num_global_valid_tokens
+                    )
+                    for microbatch in batch.microbatches
+                ]
             )
-            if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
+            if not math.isfinite(fwd_bwd["loss/mean"]):
                 logger.error("Loss is NaN/Inf; training diverged")
                 break
             with sl.log_trace_span("trainer_optim_step_call"):
-                optim_output = self._get_rank_0_value(
-                    await self.trainer.optim_step.call()
+                optim = self._get_rank_0_value(await self.trainer.optim_step.call())
+            train_s = time.perf_counter() - t_train
+
+            # --- weight sync (overlapped): stage to CPU, await the prior pull (advance to the version
+            #     the generator adopted), then fire this pull so its load overlaps the NEXT step ---
+            t_sync = time.perf_counter()
+            with sl.log_trace_span("trainer_push_model_state_dict"):
+                await self.trainer.push_model_state_dict.call(
+                    version=optim.policy_version
                 )
-            train_s = time.perf_counter() - t_train_start
-
-            # --- weight sync (push -> pull, hotswap), then advance to the published version ---
-            weight_sync = await self._sync_generator_weights(
-                optim_output.policy_version
+            push_s = (
+                time.perf_counter() - t_sync
+            )  # the GPU->CPU stage cost (on the critical path)
+            if self._pending_pull is not None:
+                await self._pending_pull.task  # prior pull landed: the generator has adopted that version
+                self._train_version = (
+                    self._pending_pull.version
+                )  # advance ON COMPLETION
+            # Un-overlapped tail of the PRIOR pull: ~0 when the generator load hid behind this step,
+            # large when the pull can't keep up (the signal that gates the deferred-push follow-up).
+            pull_wait_s = time.perf_counter() - t_sync - push_s
+            self._pending_pull = _PendingPull(
+                task=asyncio.create_task(
+                    self.generator_router.pull_model_state_dict(
+                        policy_version=optim.policy_version
+                    ),
+                    name=f"pull_v{optim.policy_version}",
+                ),
+                version=optim.policy_version,
             )
-            self._train_version = optim_output.policy_version
-            step_s = time.perf_counter() - t_step_start
+            sync_s = time.perf_counter() - t_sync
+            step_s = time.perf_counter() - t_step
 
-            # --- emit (rollout/episode/staleness/depth metrics ride out with the batch) ---
-            timings = _TrainStepTimings(
-                step_s=step_s,
-                get_batch_s=get_batch_s,
-                train_s=train_s,
-                weight_sync=weight_sync,
-            )
+            # --- emit (buffer/rollout/episode/packing metrics ride out with the batch) ---
             self.metrics_processor.log(
                 step=step,
                 is_validation=False,
-                metrics=_build_train_step_metrics(
-                    buffer_metrics=batch.metrics,
-                    fwd_bwd_metrics=fwd_bwd_metrics,
-                    optimizer_metrics=optim_output.metrics,
-                    num_global_valid_tokens=batch.num_global_valid_tokens,
-                    timings=timings,
+                metrics=_build_step_metrics(
+                    batch=batch,
+                    fwd_bwd=fwd_bwd,
+                    optimizer=optim.metrics,
+                    wait_s=wait_s,
+                    train_s=train_s,
+                    push_s=push_s,
+                    pull_wait_s=pull_wait_s,
+                    sync_s=sync_s,
+                    step_s=step_s,
                 ),
             )
+        if self._pending_pull is not None:
+            await self._pending_pull.task  # drain the last weight-load before returning
+            self._train_version = self._pending_pull.version
 
-    async def _run_microbatches(
-        self, microbatches: list[list[TrainingBatch]], num_global_valid_tokens: int
+    async def _forward_backward(
+        self, microbatch, num_global_valid_tokens: int
     ) -> dict[str, float]:
-        """Forward/backward each grad-accum microbatch and reduce its metrics over the accumulation.
-
-        "/mean" and "/frac" keys are pre-normalized by num_global_valid_tokens, so summing them
-        across microbatches reconstructs the global value; "/max" keys take the max.
-        """
-        fwd_bwd_metrics: dict[str, float] = {}
-        for microbatch in microbatches:
-            with sl.log_trace_span("trainer_forward_backward_call"):
-                mb_metrics = self._get_rank_0_value(
-                    await self.trainer.forward_backward.call(
-                        microbatch, num_global_valid_tokens
-                    )
+        """One grad-accum microbatch forward/backward on the trainer; returns rank-0's metric dict."""
+        with sl.log_trace_span("trainer_forward_backward_call"):
+            return self._get_rank_0_value(
+                await self.trainer.forward_backward.call(
+                    microbatch, num_global_valid_tokens
                 )
-            for key, value in mb_metrics.items():
-                if key not in fwd_bwd_metrics:
-                    fwd_bwd_metrics[key] = value
-                elif key.endswith("/max"):
-                    fwd_bwd_metrics[key] = max(fwd_bwd_metrics[key], value)
-                elif key.endswith(("/mean", "/frac")):
-                    fwd_bwd_metrics[key] += value
-        return fwd_bwd_metrics
-
-    async def _sync_generator_weights(self, policy_version: int) -> _WeightSyncTimings:
-        """Push trainer weights, then pull them into the generator (hotswap).
-
-        Push-before-pull is load-bearing: the generator keeps sampling on the old weights during
-        the push and swaps to `policy_version` on pull. From here the producer samples at, and the
-        buffer measures staleness against, the new version.
-        """
-        # TODO(perf): trainer awaits the pull before the next step; overlapping it (start step k+1
-        #   during the pull) needs versioned weight keys or double-buffered source weights to be safe.
-        t_push_start = time.perf_counter()
-        with sl.log_trace_span("trainer_push_model_state_dict"):
-            await self.trainer.push_model_state_dict.call()
-        push_s = time.perf_counter() - t_push_start
-        with sl.log_trace_span("generator_pull_model_state_dict"):
-            await self.generator_router.pull_model_state_dict(
-                policy_version=policy_version
             )
-        return _WeightSyncTimings(
-            push_s=push_s, total_s=time.perf_counter() - t_push_start
-        )

@@ -521,26 +521,29 @@ class PolicyTrainer(Actor, Configurable):
 
     @endpoint
     @sl.log_trace_span("push_model_state_dict")
-    async def push_model_state_dict(self) -> None:
-        """Publish model weights for generator consumption via TorchStore.
+    async def push_model_state_dict(self, version: int) -> None:
+        """Stage model weights to a CPU StorageVolume for the generators to pull (TorchStore).
 
-        When `direct_rdma=True`, weights are transferred directly from
-        GPU to GPU via one-sided RDMA reads, bypassing StorageVolumes
-        entirely. When `False`, data goes through StorageVolumes
-        (which may themselves use RDMA as a transport internally).
+        `direct_rdma=False` copies the state dict GPU->CPU into a StorageVolume colocated on the
+        trainer mesh, so the trainer's live GPU weights are free the moment this returns (the async
+        weight-sync overlap) and any number of generators can read the staged copy independently
+        (fanout-safe). Writes under `model_state_dict_{version % 2}` — a 2-slot double-buffer so a
+        deferred pull of the previous version is never overwritten by this push (one pull in flight).
 
-        Note: we couple `is_rdma_available()` with `direct_rdma` here,
-        but the two concepts are not identical -- StorageVolumes can also
-        use RDMA as their transport layer. `direct_rdma` specifically
-        means "skip StorageVolumes and let the destination read directly
-        from the source's GPU memory".
-
+        Args:
+            version: Policy version being published; selects the double-buffer slot.
         """
-        from monarch.rdma import is_rdma_available
+        state_dict = self.model.state_dict()
+        if self._transfer_dtype is not None:
+            # torchstore only applies `transfer_dtype` on the RDMA path, so under direct_rdma=False
+            # cast to the generator dtype here (else the generator reads fp32 into its bf16 state dict).
+            state_dict = {
+                name: tensor.to(self._transfer_dtype)
+                for name, tensor in state_dict.items()
+            }
 
         await ts.put_state_dict(
-            self.model.state_dict(),
-            "model_state_dict",
-            direct_rdma=is_rdma_available(),
-            transfer_dtype=self._transfer_dtype,
+            state_dict,
+            f"model_state_dict_{version % 2}",
+            direct_rdma=False,
         )
