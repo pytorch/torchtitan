@@ -99,8 +99,11 @@ tlp ()
 # logged automatically.
 {
 
-# --- DeepSeek-v3 16B (FSDP+TP+EP) ---
-NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b tlp ./run_train.sh \
+# --- DeepSeek-v3 16B MinimalAsyncEP (FSDP+EP, sync-free MoE) ---
+# TORCHINDUCTOR_COMPILE_THREADS caps Inductor compile-worker parallelism:
+# MinimalAsyncEP's kernels compile cold, and the default worker pool (this host
+# has 368 cores) spikes host RAM enough to OOM-kill regional_inductor without it.
+NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b_minimal_async_ep TORCHINDUCTOR_COMPILE_THREADS=8 tlp ./run_train.sh \
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=8 \
     --parallelism.tensor_parallel_degree=1 \
