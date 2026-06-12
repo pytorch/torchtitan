@@ -21,8 +21,11 @@ if TYPE_CHECKING:
     from torchtitan.distributed import ParallelDims
 
 
-class VocabParallelEmbedding(nn.Embedding, Module):
-    """Configurable embedding with optional local vocab-parallel execution."""
+class Embedding(nn.Embedding, Module):
+    """
+    Configurable embedding with optional local vocab-parallel execution.
+    TODO(pianpwk): rename to VocabParallelEmbedding
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -76,4 +79,4 @@ class VocabParallelEmbedding(nn.Embedding, Module):
         return out * mask.unsqueeze(-1).to(out.dtype)
 
 
-__all__ = ["VocabParallelEmbedding"]
+__all__ = ["Embedding"]

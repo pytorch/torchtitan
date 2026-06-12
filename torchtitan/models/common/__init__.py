@@ -22,7 +22,7 @@ from .attention import (
     VarlenMetadata,
 )
 from .decoder import Decoder, TransformerBlock
-from .embedding import VocabParallelEmbedding
+from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .moe import MoE
 from .nn_modules import (
@@ -46,7 +46,7 @@ __all__ = [
     "create_attention_mask",
     "create_varlen_metadata_for_document",
     "Decoder",
-    "VocabParallelEmbedding",
+    "Embedding",
     "FeedForward",
     "FlexAttention",
     "BaseQKVLinear",
