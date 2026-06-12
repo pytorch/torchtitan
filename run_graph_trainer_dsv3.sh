@@ -115,47 +115,62 @@ MODE="${MODE:-graph}"
 EP="${EP:-regular}"
 if [ "$EP" = "minimal" ]; then SUFFIX="_minimal_async_ep"; else SUFFIX=""; fi
 
+# STEPS    = number of training steps (default 20).
+# PROFILE  = 1 (default) runs under `tlp` with the profiler + memory snapshot and
+#            uploads all artifacts; 0 is a LEAN throughput run -- no profiler, no
+#            memory snapshot, no tlparse, no uploads. Use PROFILE=0 with a larger
+#            STEPS for clean steady-state MFU: the profiler perturbs the cudagraph
+#            path asymmetrically, and step-1 graph capture pollutes the step-10
+#            rolling average, so MFU is only trustworthy from a profiler-free run
+#            read past the capture (step 20+).
+STEPS="${STEPS:-20}"
+PROFILE="${PROFILE:-1}"
+if [ "$PROFILE" = "1" ]; then
+    RUNNER=tlp
+    PROFILE_FLAGS="--profiler.enable_profiling --profiler.profile_freq 10 --profiler.enable_memory_snapshot --dump_folder $PROFILE_DIR"
+else
+    RUNNER=""
+    PROFILE_FLAGS=""
+fi
+
 if [ "$MODE" = "eager" ]; then
 # --- DeepSeek-v3 16B EAGER baseline (FSDP2 + full activation checkpointing) ---
 # Eager Trainer reference. No aot_fx_trace graph -> no graph-pass tlparse diffs
 # (tlparse covers only the loss torch.compile); the profiler trace and CUDA
 # memory snapshot are the meaningful artifacts.
-NGPU=8 MODULE=deepseek_v3 CONFIG=deepseek_v3_16b${SUFFIX} TORCHINDUCTOR_COMPILE_THREADS=8 tlp ./run_train.sh \
+NGPU=8 MODULE=deepseek_v3 CONFIG=deepseek_v3_16b${SUFFIX} TORCHINDUCTOR_COMPILE_THREADS=8 $RUNNER ./run_train.sh \
     --parallelism.data_parallel_shard_degree=8 \
     --parallelism.tensor_parallel_degree=1 \
     --parallelism.expert_parallel_degree=4 \
-    --training.steps 20 \
+    --training.steps $STEPS \
     --training.local_batch_size 16 \
     --dataloader.dataset c4_test \
     --activation_checkpoint.mode full \
-    --profiler.enable_profiling \
-    --profiler.profile_freq 10 \
-    --profiler.enable_memory_snapshot \
-    --dump_folder "$PROFILE_DIR" \
+    $PROFILE_FLAGS \
     --debug.print-config
 else
 # --- DeepSeek-v3 16B graph_trainer (lm_head chunked-loss fix, PR #3636) ---
 if [ "$EP" = "minimal" ]; then CUDAGRAPH_FLAG=""; else CUDAGRAPH_FLAG="--compile.disable_passes cudagraph_pass"; fi
-NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b${SUFFIX} TORCHINDUCTOR_COMPILE_THREADS=8 tlp ./run_train.sh \
+NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b${SUFFIX} TORCHINDUCTOR_COMPILE_THREADS=8 $RUNNER ./run_train.sh \
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=8 \
     --parallelism.tensor_parallel_degree=1 \
     --parallelism.expert_parallel_degree=4 \
-    --training.steps 20 \
+    --training.steps $STEPS \
     --training.local_batch_size 16 \
     --dataloader.dataset c4_test \
     --compile.debug_graph_passes \
     $CUDAGRAPH_FLAG \
-    --profiler.enable_profiling \
-    --profiler.profile_freq 10 \
-    --profiler.enable_memory_snapshot \
-    --dump_folder "$PROFILE_DIR" \
+    $PROFILE_FLAGS \
     --debug.print-config \
     --compile.memory_policy full
 fi
 
 echo "Run log saved to $LOG_FILE"
 
+# Artifact uploads only when profiling (PROFILE=1). A lean throughput run (PROFILE=0)
+# produces no trace/snapshot, so there is nothing to upload.
+if [ "$PROFILE" = "1" ]; then
 # Upload rank 0 trace to Perfetto
 TRACE_FILE=$(find "$PROFILE_DIR" -name "rank0_*" -type f | head -1)
 if [ -n "$TRACE_FILE" ]; then
@@ -174,6 +189,7 @@ if [ -n "$SNAPSHOT_FILE" ]; then
     python3 ~/local/fbsource/arvr/scripts/perfetto/share_trace.py --is-memory-snapshot "$SNAPSHOT_FILE"
 else
     echo "No rank0 memory snapshot found in $PROFILE_DIR"
+fi
 fi
 
 } 2>&1 | tee "$LOG_FILE"
