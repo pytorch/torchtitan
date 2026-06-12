@@ -789,6 +789,12 @@ All four runs are the **same model / parallelism / batch / seq / recompute**
 (MFU/tps quoted at step 10; step 10 & 20 both carry the profiler/snapshot dump,
 so treat single-step MFU as a band, not a point.)
 
+> **Inductor mode (Run 11):** all four cells above use **regional** inductor
+> (flex-only). Switching the graph + MinimalAsyncEP cell to **full** inductor
+> (whole-graph Triton codegen) **OOMs at B=16** — it needs ~15 GiB more than
+> regional and the forced-cudagraph static pool tips it over 95 GiB. At B=8 it
+> fits and is ~3.7% faster than regional for +28% memory. See Run 11.
+
 **Takeaways:**
 - **MinimalAsyncEP is a real throughput win in both backends.** Step-10 tps:
   graph 10,108 → 11,521 (+14%), eager 10,160 → 12,537 (+23%). The sync-free MoE
@@ -982,3 +988,232 @@ launch-bound (a wash once GPU-bound at large batch).
 - Scope: 20 steps / B=4 / dp8 tp1 ep4. The regular-EP divergence (pre-fix)
   appeared by step 7, and a cudagraph stale-data bug would surface on the first
   post-capture replay (step 2), so 20 steps is a decisive window.
+
+---
+
+## Run 11 — graph_trainer + MinimalAsyncEP + forced cudagraph + FULL inductor
+
+**Date:** 2026-06-11
+**Branch:** `graph_trainer/dsv3_scaling` (same tree as Runs 9/9′)
+**Launcher:** `MODE=graph EP=minimal INDUCTOR=full [CUDAGRAPH=on|off] [BATCH=8|16] [STEPS=50 PROFILE=0] ./run_graph_trainer_dsv3.sh`
+— new `INDUCTOR`, `CUDAGRAPH`, and `BATCH` toggles.
+
+Run 9/9′ used **regional** inductor: only the FlexAttention regions are compiled
+to Triton, the rest of the traced graph runs interpreted. This run switches to
+**full** inductor (`--compile.inductor_compilation full`,
+`GraphTrainerCompileConfig.inductor_compilation`): the **entire** traced
+forward+backward graph is compiled by inductor into Triton kernels. Everything
+else is held fixed (MinimalAsyncEP, forced cudagraph, `memory_policy=full`,
+dp8/tp1/ep4, seq 4096, c4_test).
+
+### Headline: the requested combo (full inductor + forced cudagraph) **OOMs at B=16** ⛔
+
+At B=16 — the Runs 9/9′ batch — `MODE=graph EP=minimal INDUCTOR=full` **hard-OOMs
+during cudagraph capture**, before step 1:
+
+```
+torch.OutOfMemoryError: CUDA out of memory ... GPU 0 has a total capacity of
+95.07 GiB of which 74.88 MiB is free ... 79.93 GiB is allocated by PyTorch, with
+57.07 GiB allocated in private pools (e.g., CUDA Graphs)
+```
+
+The 57 GiB cudagraph **static private pool** + ~23 GiB of params/grads/optimizer
+(FSDP-sharded) ≈ the full 95 GiB H100. For reference, Run 9 (regional + the same
+forced cudagraph, same B=16) peaked at **57.3 GiB total**.
+
+**This is a memory problem, not a compatibility problem.** Two things it is *not*:
+
+1. **Not a cudagraph-compatibility failure.** full inductor + forced cudagraph
+   **compose cleanly**: after the inductor collapse there are **0
+   non-cudagraphable nodes** (inductor fuses the 312 `_grouped_mm`/symm-mem ops
+   into cudagraphable Triton kernels), so the force captures with nothing left to
+   force. The pass log: `full_inductor_compilation_pass` conservatively sets
+   `meta['cudagraph_compatible']=False` pre-collapse, then `FORCING cudagraph
+   despite 0 non-cudagraphable node(s): []` → `Applied cudagraph pass.`
+2. **Not caused by cudagraph alone.** Full inductor does not fit at B=16 **even
+   with cudagraph disabled** (diagnostic Run A below) — it is ~15 GiB heavier than
+   regional. cudagraph's static pool then tips the already-too-large working set
+   over the edge into a hard OOM.
+
+### Root cause: full inductor's working set is ~15 GiB larger than regional
+
+Diagnostic **Run A** (`INDUCTOR=full CUDAGRAPH=off BATCH=16`, profiler off):
+
+| step | memory | mfu | note |
+|-----:|--------|-----|------|
+| 1 | **71.84 GiB** (75.6%) | 1.76% | already +14.5 GiB vs Run 9's 57.3 |
+| 10 | **79.85 GiB** (84.0%) | 12.05% | climbing; allocator thrashing |
+
+Even without cudagraph, full inductor at B=16 sits at 71.8 GiB and **climbs** to
+~80 GiB, at which point the caching allocator continuously fails to map new
+segments (`expandable_segments: memory mapping failed with OOM ... free:
+~19 MB`) and retries — collapsing MFU to ~12%. It is a degenerate near-OOM state,
+not a usable run; killed after step 10.
+
+Why full inductor needs more memory than regional here: it compiles the whole
+fwd+bwd graph and re-enables `reorder_for_peak_memory=True` (globally off for the
+graph_trainer, re-patched on by `full_inductor_compilation_pass`), and inductor's
+static buffer planning over the entire graph reuses memory less aggressively than
+the interpreted path's recompute-driven freeing under `memory_policy=full`. The
+tensor-granularity remat that gives regional its ~57 GiB peak is largely
+defeated when the whole graph becomes one inductor region.
+
+### At B=8 the combo fits — full vs regional inductor (both + forced cudagraph, profiler off)
+
+To get a clean throughput/memory number for the requested combo, drop to **B=8**
+(where full inductor + cudagraph fits) and compare against regional at the same
+batch:
+
+| config | peak mem | mfu (avg 20–50) | tps (avg 20–50) | compile (graph passes) |
+|---|---:|---:|---:|---:|
+| **Run B** — full inductor + forced cg, B=8 | **55.71 GiB** | **22.98%** | **12,554** | 155.1 s (full-inductor pass 141.5 s) |
+| **Run C** — regional inductor + forced cg, B=8 | **43.42 GiB** | 22.16% | 12,103 | 90.3 s |
+
+Per-step (B=8, profiler off), both memory-stable across all 50 steps:
+
+| step | full mfu | full tps | regional mfu | regional tps |
+|-----:|---------:|---------:|-------------:|-------------:|
+| 10 | 17.21% | 9,403 | 20.30% | 11,089 |
+| 20 | 23.04% | 12,583 | 22.25% | 12,156 |
+| 30 | 22.92% | 12,519 | 21.99% | 12,009 |
+| 40 | 22.87% | 12,492 | 22.11% | 12,079 |
+| 50 | 23.10% | 12,620 | 22.27% | 12,166 |
+
+**Verdict at B=8:** full inductor is **+3.7% throughput** (22.98% vs 22.16% MFU;
+12,554 vs 12,103 tps) but costs **+28% memory** (+12.3 GiB: 55.71 vs 43.42 GiB).
+That memory premium is exactly what makes full inductor infeasible at B=16 on
+95 GiB, where regional + cudagraph lives comfortably at 57.3 GiB.
+
+### Compile cost
+`full_inductor_compilation_pass` is the dominant compile cost: **141–151 s cold**
+(it codegens the whole graph), vs regional's fast `regional_inductor` pass (total
+graph-pass time 90 s). It **caches**: a re-run at the *same* shapes dropped the
+pass to **9.2 s** (warm inductor cache); a batch-size change is a cache miss
+(new shapes → full recompile).
+
+### Numerics
+Not bitwise vs regional — full inductor **changes the computation** (fuses /
+reorders ops, `reorder_for_peak_memory`), so by the STEP-0 rule of
+`numerics_verification` it is expected to be only *close*, not bit-identical. The
+B=8 perf runs (non-deterministic) converge in the same band (step 50 loss: full
+6.028 / regional 5.983). A seed-pinned full-vs-regional check was not run; if
+needed it would use `loss_compare` with `ASSERT_EQUAL=0` and judge by convergence.
+
+### Notes
+- `run_graph_trainer_dsv3.sh` gained three composable toggles:
+  - `INDUCTOR` = `regional` (default; Runs 1–10 behavior) | `full`.
+  - `CUDAGRAPH` = `auto` (default: on for EP=minimal, off for EP=regular) | `on` | `off`.
+    The override is what let Run A disable cudagraph on the minimal path.
+  - `BATCH` = per-rank local batch size (default 16).
+- **Recommendation (at the time of Run 11):** regional inductor + forced cudagraph
+  at B=16 (Run 9′) was the best operating point — full inductor's memory cost
+  forced a batch halving. **Run 12 root-causes and fixes that memory cost**, after
+  which full inductor fits at B=16 and is *faster* than regional; see below.
+
+---
+
+## Run 12 — full inductor memory root-cause + fix (serialize the ChunkedCELoss chunks)
+
+**Date:** 2026-06-11
+**Branch:** `graph_trainer/dsv3_scaling`
+**Launcher:** `MODE=graph EP=minimal INDUCTOR=full CUDAGRAPH=on BATCH=16 ./run_graph_trainer_dsv3.sh`
+(now memory-viable; previously OOM'd — see Run 11).
+
+Run 11 left full inductor OOM-ing at B=16 and ~+12–15 GiB heavier than regional at
+B=8. This run finds *where* that memory goes and removes it.
+
+### Where the memory comes from (root cause)
+
+Parsing the full-inductor `inductor_output_code` from the Run 11 B=16 profile
+(reconstructing the live-buffer timeline through all 3308 `# reuse` aliases) puts
+the inductor-planned activation peak at **40.25 GB**, landing exactly at the
+**ChunkedCELoss backward** (`_log_softmax_backward_data`, `nll_loss_backward`).
+**16 buffers of `(8192, 102400)` bf16 = 1.677 GiB each (~27 GB) are live at once** —
+8 forward vocab-logit chunks + 8 backward grad-logit chunks (`vocab_size=102400`,
+8192 = 65536 tokens ÷ `num_chunks=8`).
+
+`ChunkedCELossWithParamGrads` chunks the tokens precisely so the huge
+`[tokens, vocab]` logits are materialized **one chunk at a time**. The chunks are
+data-independent, so when full inductor compiles the whole graph its scheduler
+**batches all 8 lm_head matmuls** (allocating all 8 logit buffers before the
+per-chunk reductions free them) and the forward-loss kernel reads all 8 chunks at
+once — reconstituting the full `[65536, 102400]` logits tensor. `reorder_for_peak_memory`
+does not serialize these large independent regions. The interpreted/regional path
+runs the chunks in traced order, so it streams them (1–2 logit buffers live).
+
+**Hypotheses ruled out by direct measurement** (each was a plausible cause):
+
+| hypothesis | test | verdict |
+|---|---|---|
+| fwd↔bwd **fusion** | 444 `torch.ops._inductor_test.realize` barriers on fwd→bwd edges | ❌ byte-identical memory (B=16 same OOM; B=8 55.71→55.71) |
+| inductor **CSE** undoes recompute | output-code test: a duplicated `mm` is emitted **twice** | ❌ inductor does not graph-CSE identical compute |
+| **cudagraph** static pool | full **+cg** 55.71 ≈ full **no-cg** 55.98 (B=8) | ❌ not the cause |
+
+`realize` is the wrong tool here: it is a single-arg *fusion* barrier, but the
+chunk logits are already separate buffers held alive by *scheduling/lifetime*, not
+fusion — so it has no effect (confirmed above). Serialization needs a cross-chunk
+*ordering* dependency.
+
+### The fix — `serialize_loss_chunks_pass`
+
+A graph pass (`inductor_passes.py`), run before `full_inductor_compilation_pass`
+in the `inductor_compilation == "full"` branch, that restores chunk streaming:
+for each chunk it locates the `nll_loss_forward` and its lm_head matmul, then makes
+chunk *i+1*'s matmul input data-depend on chunk *i*'s forward loss. Inductor can no
+longer hoist a later chunk's matmul ahead of an earlier chunk's loss, so each
+chunk's logits are freed before the next chunk's are allocated.
+
+The injected term is `hidden + nan_to_num(prev_loss).to(hidden.dtype) * 0`:
+- `* 0` → the added value is zero (numerically identity), but the **read** of
+  `prev_loss` is what orders the chunks (verified not constant-folded by inductor).
+- `nan_to_num` → maps any inf/nan to finite first, so the `* 0` is exactly `0`
+  (a plain `prev_loss * 0` gives `nan` when a chunk loss overflows: `inf*0 = nan`).
+- `.to(hidden.dtype)` → the loss anchor is fp32; without the cast,
+  `bf16_hidden + fp32_zero` promotes the matmul input to fp32 and changes numerics.
+
+The last two points were found the hard way: the first version (`prev_loss * 0`,
+fp32) ran clean at B=8 but produced **`nan` at B=16 step 20** — the fp32 promotion
+silently changed the lm_head matmul precision. The fixed pass operates on the
+lowered (plain-tensor) graph, so there are no DTensor placement concerns, and is
+disableable via `--compile.disable_passes serialize_loss_chunks_pass`.
+
+### Bitwise verification (the pass must be numerics-neutral)
+
+Deterministic B=8 (`--debug.seed=42 --debug.deterministic`), full inductor + forced
+cudagraph, serialize **ON vs OFF**:
+
+| step | loss (ON) | loss (OFF) | grad_norm (ON) | grad_norm (OFF) |
+|---|---|---|---|---|
+| 1 | 11.98543 | 11.98543 | 1.6531 | 1.6531 |
+| 10 | 8.57498 | 8.57498 | 6.8166 | 6.8166 |
+
+Identical loss **and** grad_norm — the pass is numerically identity (additive
+same-dtype zero), while ON uses **50.24 GiB vs 55.71 GiB** (−5.5 GiB).
+
+### Results — B=16, full inductor + forced cudagraph (profiler off)
+
+| config | peak mem | MFU (avg 20–50) | tps (avg 20–50) | status |
+|---|---:|---:|---:|---|
+| full + cg, **no serialize** | OOM (57 GiB cudagraph pool + ~23 → 95 GiB) | — | — | ⛔ OOM before step 1 |
+| full + cg, **+ serialize** | **75.48 GiB** | **23.51%** | **12,840** | ✅ fits, clean (step 50 loss 5.84) |
+| regional + cg (Run 9′) | 57.31 GiB | 22.54% | 12,310 | ✅ |
+
+**Full inductor is now viable at B=16** and **~4% faster** than regional
+(whole-graph Triton codegen helps throughput). At B=8 the pass drops peak from
+55.71 → 50.24 GiB.
+
+### Remaining gap (follow-up)
+Full inductor at 75.48 GiB is still ~18 GiB above regional (57.31) because only the
+**forward** loss is serialized; the per-chunk **backward grad-logits** still
+partially batch. Extending the dependency to each chunk's backward (anchor on the
+grad-w matmul, which shares the chunk's hidden input) should close the gap and make
+full inductor strictly beat regional (faster *and* less memory). Not yet done.
+
+### Notes
+- New pass: `serialize_loss_chunks_pass` in
+  `torchtitan/experiments/graph_trainer/inductor_passes.py`; wired into
+  `compile_time_passes` (full-inductor branch only) in `passes.py`.
+- Analyzer for the live-buffer peak: `~/tmp/parse_oc.py` (parses
+  `inductor_output_code`, reuse-aware).
+- Scope: dp8/tp1/ep4, seq 4096, c4_test. Bitwise check 10 steps (a real numerics
+  change would surface by then); perf 50 steps.

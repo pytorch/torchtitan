@@ -212,6 +212,133 @@ def _migrate_cpu_get_attrs_to_cuda(gm: torch.fx.GraphModule) -> None:
                 _assign_attr(attr.cuda(), module, node.target)
 
 
+def _get_fake_mode(gm: torch.fx.GraphModule):
+    """Return the FakeTensorMode backing the graph's placeholder metadata."""
+    from torch._subclasses.fake_tensor import FakeTensor
+
+    for node in gm.graph.nodes:
+        if node.op == "placeholder" and isinstance(node.meta.get("val"), FakeTensor):
+            return node.meta["val"].fake_mode
+    return None
+
+
+def serialize_loss_chunks_pass(
+    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
+) -> torch.fx.GraphModule:
+    """Force the ChunkedCELoss chunks to execute one at a time before full inductor.
+
+    ``ChunkedCELossWithParamGrads`` splits the tokens into ``num_chunks`` so the
+    huge ``[tokens, vocab]`` lm_head logits are materialized one chunk at a time.
+    The chunks are data-independent, so when full inductor compiles the whole
+    graph its scheduler batches all ``num_chunks`` lm_head matmuls together —
+    every chunk's forward logits AND backward grad-logits (each
+    ``[tokens/num_chunks, vocab]``) end up live simultaneously, reconstituting
+    the full logits tensor and OOM-ing DSv3-16B at B=16 (root-caused in
+    ``dsv3_scaling_experiment_results.md`` Run 11: ~16 × 1.68 GiB live at the
+    loss backward).
+
+    This pass restores the streaming by threading a numerically-zero dependency:
+    each chunk's lm_head matmul input is made to depend on the previous chunk's
+    forward loss (``nll_loss_forward``), which itself depends on that chunk's
+    logits. Inductor can then no longer hoist a later chunk's matmul ahead of an
+    earlier chunk's loss, so each chunk's logits are freed before the next
+    chunk's are allocated.
+
+    The injected term is ``hidden + nan_to_num(prev_loss) * 0`` (broadcast of a
+    scalar zero): ``nan_to_num`` first maps any inf/nan to a finite value so the
+    ``* 0`` is exactly ``0`` (a plain ``prev_loss * 0`` would give ``nan`` if a
+    chunk loss ever overflowed -> ``inf * 0 = nan`` -> corrupted training). The
+    result is numerically identity (``hidden + 0``) yet keeps the data read of
+    ``prev_loss`` that orders the chunks. Operates on the lowered (plain-tensor)
+    graph, so there are no DTensor placement concerns. Disable with
+    ``--compile.disable_passes serialize_loss_chunks_pass``.
+    """
+    import operator
+
+    aten = torch.ops.aten
+    g = gm.graph
+    order = {n: i for i, n in enumerate(g.nodes)}
+
+    # Each chunk's forward partial loss is a distinct nll_loss_forward.
+    nll_nodes = [n for n in g.nodes if n.target == aten.nll_loss_forward.default]
+    if len(nll_nodes) < 2:
+        return gm  # not chunked (or single chunk): nothing to serialize
+
+    def find_chunk_matmul(nll: torch.fx.Node) -> torch.fx.Node | None:
+        """Walk back from a chunk's nll to the lm_head matmul that produced its
+        logits (nll <- log_softmax <- to_copy <- view... <- mm)."""
+        seen: set[torch.fx.Node] = set()
+        stack = list(nll.all_input_nodes)
+        while stack:
+            n = stack.pop()
+            if n in seen:
+                continue
+            seen.add(n)
+            if n.op == "call_function" and n.target == aten.mm.default:
+                return n
+            stack.extend(n.all_input_nodes)
+        return None
+
+    def loss_scalar(nll: torch.fx.Node) -> torch.fx.Node:
+        """The scalar loss output of nll_loss_forward (getitem 0); fall back to
+        the nll node itself."""
+        for u in nll.users:
+            if u.target is operator.getitem and u.args[1] == 0:
+                return u
+        return nll
+
+    chunks = []
+    for nll in nll_nodes:
+        mm = find_chunk_matmul(nll)
+        if mm is not None:
+            chunks.append((mm, nll))
+    if len(chunks) < 2:
+        return gm
+    chunks.sort(key=lambda mn: order[mn[0]])
+
+    fake_mode = _get_fake_mode(gm)
+    num_serialized = 0
+    for i in range(1, len(chunks)):
+        mm = chunks[i][0]
+        anchor = loss_scalar(chunks[i - 1][1])
+        hidden = mm.args[0]
+        if not isinstance(hidden, torch.fx.Node):
+            continue
+        hidden_dtype = hidden.meta["val"].dtype
+        with g.inserting_before(mm):
+            finite = g.call_function(aten.nan_to_num.default, (anchor,))
+            # Cast the anchor to the hidden's dtype BEFORE the broadcast add: the
+            # loss anchor is fp32, and ``bf16_hidden + fp32_zero`` would promote
+            # the matmul input to fp32 and change its numerics. With the cast the
+            # added term is a same-dtype zero, so hidden_dep == hidden bitwise.
+            finite_cast = g.call_function(
+                aten._to_copy.default, (finite,), {"dtype": hidden_dtype}
+            )
+            zero = g.call_function(aten.mul.Tensor, (finite_cast, 0.0))
+            hidden_dep = g.call_function(aten.add.Tensor, (hidden, zero))
+        # Fresh fake-tensor metadata so downstream passes / inductor see valid
+        # vals. The chain keeps the anchor's (scalar) shape; the broadcast add
+        # keeps the hidden input's shape and dtype -> numerically identity.
+        if fake_mode is not None:
+            with fake_mode:
+                av = anchor.meta["val"]
+                hv = hidden.meta["val"]
+                finite.meta["val"] = torch.nan_to_num(av)
+                finite_cast.meta["val"] = finite.meta["val"].to(hidden_dtype)
+                zero.meta["val"] = finite_cast.meta["val"] * 0.0
+                hidden_dep.meta["val"] = hv + zero.meta["val"]
+        mm.replace_input_with(hidden, hidden_dep)
+        num_serialized += 1
+
+    g.lint()
+    gm.recompile()
+    logger.info(
+        f"serialize_loss_chunks_pass: serialized {num_serialized + 1} loss "
+        f"chunks ({num_serialized} dependency edge(s))"
+    )
+    return gm
+
+
 def full_inductor_compilation_pass(
     gm: torch.fx.GraphModule, example_inputs: tuple
 ) -> torch.fx.GraphModule:
