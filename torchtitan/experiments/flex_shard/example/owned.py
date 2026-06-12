@@ -25,6 +25,7 @@ from ..flex_shard.placement_contract import (
     PlacementUnshardResult,
 )
 from ..flex_shard.utils import _record_comm_if_eager, _record_function_if_eager
+from ._copy import copy_tensors_to_dtype
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -111,18 +112,21 @@ class Owned(Placement):
         rank = mesh.get_local_rank()
         self._validate_owner_rank(mesh.size())
 
-        full_params: list[torch.Tensor] = []
-        for tensor, info in zip(tensors, infos, strict=True):
-            with _record_function_if_eager("FlexShard::broadcast_copy_in", debug_fqn):
-                if rank == self.owner_rank:
-                    full_param = tensor.contiguous()
-                else:
-                    full_param = torch.empty(
+        with _record_function_if_eager("FlexShard::broadcast_copy_in", debug_fqn):
+            if rank == self.owner_rank:
+                full_params = copy_tensors_to_dtype(
+                    tensors,
+                    [info.unsharded_dtype for info in infos],
+                )
+            else:
+                full_params = [
+                    torch.empty(
                         info.global_shape,
-                        dtype=info.dtype,
+                        dtype=info.unsharded_dtype,
                         device=tensor.device,
                     )
-            full_params.append(full_param)
+                    for tensor, info in zip(tensors, infos, strict=True)
+                ]
         return PlacementPreparedUnshard(
             placement=self,
             buffers=full_params,
@@ -170,7 +174,10 @@ class Owned(Placement):
         """Pack full gradients for reduce-to-owner."""
         self._validate_owner_rank(mesh.size())
         with _record_function_if_eager("FlexShard::reduce_copy_in", debug_fqn):
-            send_tensors = [tensor.contiguous() for tensor in tensors]
+            send_tensors = copy_tensors_to_dtype(
+                tensors,
+                [info.grad_reduce_dtype for info in infos],
+            )
         return PlacementPreparedReduceGrad(
             placement=self,
             buffers=send_tensors,

@@ -25,11 +25,8 @@ from torchtitan.experiments.flex_shard.example.shard import Shard
 from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     MixedPrecisionPolicy,
 )
-from torchtitan.models.common.token_dispatcher import (
-    AllToAllTokenDispatcher,
-    DeepEPTokenDispatcher,
-)
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
+from torchtitan.models.llama4.parallelize import apply_moe_ep_tp
 from torchtitan.tools.logging import logger
 
 
@@ -64,7 +61,12 @@ def parallelize_deepseekv3(
         """
 
     if parallel_dims.ep_enabled:
-        _apply_plain_moe_ep(model, parallel_dims.get_mesh("ep"))
+        apply_moe_ep_tp(
+            model,
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+            ep_mesh=parallel_dims.get_mesh("ep"),
+            enable_sp=parallelism.enable_sequence_parallel,
+        )
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
@@ -78,9 +80,7 @@ def parallelize_deepseekv3(
         )
 
     dp_mesh = parallel_dims.get_mesh("fsdp")
-    efsdp_mesh = (
-        parallel_dims.get_mesh("efsdp") if parallel_dims.ep_enabled else None
-    )
+    efsdp_mesh = parallel_dims.get_mesh("efsdp") if parallel_dims.ep_enabled else None
 
     _apply_flex_shard(
         model,
@@ -126,41 +126,6 @@ def _validate_supported_parallelisms(
         raise NotImplementedError(
             "This FlexShard training entry point is eager-only; disable model compile."
         )
-
-
-def _apply_plain_moe_ep(model: nn.Module, ep_mesh: DeviceMesh) -> None:
-    """Slice routed expert parameters across EP ranks without DTensor wrapping."""
-    ep_rank = ep_mesh.get_local_rank()
-    ep_size = ep_mesh.size()
-
-    for transformer_block in model.layers.values():
-        if not getattr(transformer_block, "moe_enabled", False):
-            continue
-
-        experts = transformer_block.moe.experts
-        if experts.num_experts % ep_size != 0:
-            raise ValueError(
-                "FlexShard plain EP requires the number of experts to be "
-                f"divisible by EP degree: got {experts.num_experts} experts "
-                f"and EP degree {ep_size}."
-            )
-        num_local_experts = experts.num_experts // ep_size
-        start = ep_rank * num_local_experts
-
-        for param_name, param in list(experts.named_parameters(recurse=False)):
-            local_param = param.narrow(0, start, num_local_experts).contiguous()
-            experts.register_parameter(
-                param_name,
-                nn.Parameter(local_param, requires_grad=param.requires_grad),
-            )
-
-        dispatcher = experts.token_dispatcher
-        if not isinstance(dispatcher, (AllToAllTokenDispatcher, DeepEPTokenDispatcher)):
-            raise TypeError(
-                "FlexShard plain EP expected AllToAllTokenDispatcher or "
-                f"DeepEPTokenDispatcher, got {type(dispatcher).__name__}."
-            )
-        dispatcher.ep_mesh = ep_mesh
 
 
 def _placement_fn(dim: int) -> PlacementFn:
@@ -213,20 +178,6 @@ def _apply_flex_shard(
             mp_policy=mp_policy,
             reshard_after_forward=reshard_after_forward,
         ),
-        BucketSpec(
-            ["norm.*"],
-            placement_fn=_placement_fn(0),
-            mesh=dp_mesh,
-            mp_policy=mp_policy,
-            reshard_after_forward=reshard_last,
-        ),
-        BucketSpec(
-            ["lm_head.*"],
-            placement_fn=_placement_fn(0),
-            mesh=dp_mesh,
-            mp_policy=mp_policy,
-            reshard_after_forward=reshard_last,
-        ),
     ]
 
     for layer_id in model.layers.keys():
@@ -255,5 +206,24 @@ def _apply_flex_shard(
                 reshard_after_forward=reshard_after_forward,
             )
         )
+
+    buckets.extend(
+        [
+            BucketSpec(
+                ["norm.*"],
+                placement_fn=_placement_fn(0),
+                mesh=dp_mesh,
+                mp_policy=mp_policy,
+                reshard_after_forward=reshard_last,
+            ),
+            BucketSpec(
+                ["lm_head.*"],
+                placement_fn=_placement_fn(0),
+                mesh=dp_mesh,
+                mp_policy=mp_policy,
+                reshard_after_forward=reshard_last,
+            ),
+        ]
+    )
 
     flex_shard(model, buckets=buckets)
