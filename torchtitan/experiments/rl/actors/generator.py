@@ -105,14 +105,14 @@ def _prepare_generation_request_metrics(
 
 
 def _force_logprobs_fn_for_batch_invariance() -> None:
-    """Make vLLM's v2 logprob path dispatch ``aten::_log_softmax``.
+    """Make vLLM's v2 logprob path dispatch.
 
     The v2 GPU sampler computes per-token logprobs with a fused Triton kernel
     (``compute_token_logprobs`` -> ``_topk_log_softmax_kernel``) that inlines
-    ``log(softmax(logits))`` and never calls ``aten::_log_softmax``.
+    ``log(softmax(logits))`` and never calls PyTorch ops.
 
-    Swapping the kernel for ``log_softmax`` + gather routes the generator and
-    the trainer through the same overridden op, so logprobs match bit-for-bit.
+    Swapping the kernel to routes the generator and the trainer through
+    the same set of ops, so logprobs match bit-for-bit.
     """
     import vllm.v1.worker.gpu.sample.logprob as vllm_logprob
 
@@ -132,10 +132,16 @@ def _force_logprobs_fn_for_batch_invariance() -> None:
         Returns:
             ``[N, K]`` logprob of each of the K token ids at each position.
         """
-        # Map the N positions to a single sequence (B=1, S=N) and reuse the
-        # trainer's compute_logprobs for each of the K target columns: it scores
-        # one token per position, so K calls are needed (K=1 for our logprobs=0
-        # requests; vLLM's warmup probes K>1).
+        # vLLM gives token_ids [N, K]. SamplingParams(logprobs=0) makes real
+        # requests K=1, but we can't assert that: vLLM's kernel warmup probes
+        # this patched fn with K>1 (e.g. K=6), so we must handle any K. Map the
+        # N positions to one sequence (B=1, S=N) and reuse the trainer's
+        # compute_logprobs (one token per position) once per column.
+        #
+        # NOTE: each element of token_ids is scored independently, after the
+        # whole generated sequence is marterialized. We iterate column-by-column
+        # purely because torchtitan's compute_logprobs takes one token id per
+        # position; it is not a cross-column/cross-position dependency.
         logits = logits.unsqueeze(0)  # [1, N, V]  (B=1, S=N)
         token_ids = token_ids.to(torch.int64)
         per_column = [
