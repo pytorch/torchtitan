@@ -560,16 +560,17 @@ class ChunkedCELoss(BaseLoss):
             ]
             label_chunks = list(_chunk(labels))
 
-            grad_accumulator = GradAccumulator(
-                hidden_states,
-                num_chunks=num_chunks,
-                dtype=torch.float32,
-            )
+            grad_accumulator = None
+            if requires_grad:
+                grad_accumulator = GradAccumulator(
+                    hidden_states,
+                    num_chunks=num_chunks,
+                    dtype=torch.float32,
+                )
 
             total_loss = hidden_states.new_zeros((), dtype=torch.float32)
             if is_spmd_backend and spmd.is_type_checking():
-                # TODO(pianpwk): would be nice if mutate_type no-op if not typechecking,
-                # and accepted multiple axes.
+                # TODO(pianpwk): would be nice if mutate_type accepted multiple axes.
                 for axis_name, dst in {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}.items():
                     total_loss = spmd.mutate_type(
                         total_loss, axis_name, src=spmd.R, dst=dst
@@ -617,6 +618,7 @@ class ChunkedCELoss(BaseLoss):
                     with spmd.no_typecheck():
                         chunk_loss.backward()
                         assert h_chunk.grad is not None
+                        assert grad_accumulator is not None
                         grad_accumulator.add(h_chunk.grad)
                         h_chunk.grad = None
 
@@ -628,6 +630,7 @@ class ChunkedCELoss(BaseLoss):
             if not requires_grad:
                 return total_loss
 
+            assert grad_accumulator is not None
             accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
         # TODO(pianpwk): assert_type_like to carry global SPMD info.
