@@ -25,8 +25,10 @@ from expecttest import assert_expected_inline
 from tests.utils import hash_gradient, hash_model
 from torch.nn.attention.flex_attention import flex_attention
 
+from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
@@ -107,6 +109,20 @@ class BitwiseDeterministicBase(unittest.TestCase):
             self.model_flavor, attn_backend=self.attn_backend
         )
         self.model_config = model_spec.model
+        # Match Trainer.__init__: model configs consume runtime settings before
+        # build. DSv3 uses the synced RoPE length to decide YaRN scaling.
+        runtime_config = Trainer.Config(
+            model_spec=model_spec,
+            training=TrainingConfig(
+                local_batch_size=BATCH_SIZE,
+                seq_len=SEQ_LEN,
+                steps=NUM_STEPS,
+            ),
+            parallelism=ParallelismConfig(),
+            checkpoint=CheckpointManager.Config(initial_load_model_only=False),
+            debug=DebugConfig(seed=SEED, deterministic=True),
+        )
+        self.model_config.update_from_config(config=runtime_config)
         vocab_size = self.model_config.vocab_size
         with torch.device("meta"):
             model = self.model_config.build()
@@ -210,7 +226,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
         global_valid_tokens = torch.tensor(
             BATCH_SIZE * SEQ_LEN, dtype=torch.float, device="cuda"
         )
-        extra_inputs: dict[str, torch.Tensor] = {}
         extra_kwargs: dict[str, object] = {
             "positions": self.positions,
             **self._get_extra_kwargs(model),
@@ -222,7 +237,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             self.inputs,
             self.labels,
             global_valid_tokens,
-            extra_inputs,
             extra_kwargs,
         )
 
@@ -284,7 +298,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 self.inputs,
                 self.labels,
                 global_valid_tokens,
-                extra_inputs,
                 extra_kwargs,
             )
             loss = outputs[0]
@@ -340,7 +353,7 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.961757659912109""")
         assert_expected_inline(
             model_hash,
-            """d8c4495bc41d103e3864433002d31be0823567938729396c44eb2f2782a47a23""",
+            """4cf2bed8281dfcdf4a5e5ced666ccd65681fab5fcaf404e14e91b583fe21bd4c""",
         )
         assert_expected_inline(
             grad_hash,
@@ -400,14 +413,14 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
         loss, model_hash, grad_hash = self._run_steps(
             copy.deepcopy(self.model), Trainer
         )
-        assert_expected_inline(str(loss.item()), """7.4749956130981445""")
+        assert_expected_inline(str(loss.item()), """7.474959373474121""")
         assert_expected_inline(
             model_hash,
-            """edaec1177d073cf99a24433a6381b23282bfbfe306c40cefcea5d4efaf14cd0a""",
+            """99d414c98ec7de31e58ad41f3324a402dfa4f8fc4b3c57a406368af7360a2ec6""",
         )
         assert_expected_inline(
             grad_hash,
-            """ce80bf7a7186d63eb6231d684ecefe7a7846f1bc63c8fde794fefd462e9c2c5d""",
+            """7f38de9544b31d1161c4191987663e2e8cc7be8b83b6226ff72a349a71aa1afa""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -471,7 +484,7 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.961757183074951""")
         assert_expected_inline(
             model_hash,
-            """2cc38288f1641b058a56a1930af77dcb33c91fb12176cfdb59f436c9a2b3addd""",
+            """6884b7b1013badc769666dc1acc75db5a09dbcf1170e3bea2c35ae77d20a3896""",
         )
         assert_expected_inline(
             grad_hash,
@@ -535,14 +548,14 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         loss, model_hash, grad_hash = self._run_steps(
             copy.deepcopy(self.model), Trainer
         )
-        assert_expected_inline(str(loss.item()), """7.4749956130981445""")
+        assert_expected_inline(str(loss.item()), """7.474959373474121""")
         assert_expected_inline(
             model_hash,
-            """d2670e9bf949d83c446bcce1ca468a23eda98c83c0cac83eafb15ddebde3c234""",
+            """aff6268960d2b137a44756d322b72c0dc253ffbbc54077e4105fc3abed0fdd79""",
         )
         assert_expected_inline(
             grad_hash,
-            """e90a28b41bdae0de5d1db20de40998b0508866efed561cce4373e595626e8e7a""",
+            """86f1656c38fa1e23d6b29955889bd5c4ad0c363f9755e2c4ea8dee142cacfcfe""",
         )
 
     # TODO: FlexAttention compilation exceeds resource limits on pre-Hopper GPUs.
@@ -611,7 +624,7 @@ class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.297995567321777""")
         assert_expected_inline(
             model_hash,
-            """c4f3d5d6a4dacffc82a0845ef620dcbdb053d9785ce64b8dd5b5e181f4fe2d1b""",
+            """633e10071953205f68501138d4e7a907d42c8523320df205c737a30ee8aaa9d7""",
         )
         assert_expected_inline(
             grad_hash,
@@ -679,7 +692,7 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.297987461090088""")
         assert_expected_inline(
             model_hash,
-            """85240276507f93d2dbc8b09d5dad5f86623bcd49423abe64fba787b74d7f6d81""",
+            """8f3524a4b2d4c6144abbb570ef7309a80ed87dc37025fa449ec332201f02aaed""",
         )
         assert_expected_inline(
             grad_hash,
