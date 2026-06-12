@@ -14,10 +14,15 @@ import torch
 import torch._functorch.config
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    ActivationWrapper,
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
 
 from torchtitan.config import ActivationCheckpointConfig as ACConfig
+from torchtitan.distributed._region_checkpoint import (
+    checkpoint as region_checkpoint,
+    unit,
+)
 from torchtitan.tools.logging import logger
 
 
@@ -148,6 +153,109 @@ def _apply_op_sac(
     )
 
 
+class _UnitWrapper(ActivationWrapper):
+    """Routes a submodule's forward through unit() so a region policy can save it
+    by name. FQN/state_dict transparent (ActivationWrapper), so wrapping a
+    submodule does not change parameter names or the model's state_dict.
+    """
+
+    def __init__(self, mod: nn.Module, region_name: str):
+        super().__init__(mod)
+        self._region_name = region_name
+
+    def forward(self, *args, **kwargs):
+        return unit(
+            self._checkpoint_wrapped_module, *args, name=self._region_name, **kwargs
+        )
+
+
+class _RegionCheckpointWrapper(ActivationWrapper):
+    """Checkpoint a block, saving the regions named in ``policy`` and recomputing
+    the rest. Unlike op-level SAC (a context_fn / policy_fn over aten ops), this
+    drives the region checkpoint from torchtitan.distributed._region_checkpoint:
+    the submodules wrapped by _UnitWrapper are the named regions. Subclasses
+    ActivationWrapper so parameter FQNs and state_dict stay identical to
+    ptd_checkpoint_wrapper.
+    """
+
+    def __init__(self, mod: nn.Module, policy: dict, ac_config: ACConfig):
+        super().__init__(mod)
+        self._region_policy = policy
+        self._preserve_rng_state = ac_config.preserve_rng_state
+        self._determinism_check = ac_config.determinism_check
+        self._early_stop = ac_config.early_stop
+        self._debug = ac_config.debug
+
+    def forward(self, *args, **kwargs):
+        return region_checkpoint(
+            self._checkpoint_wrapped_module,
+            *args,
+            policy=self._region_policy,
+            preserve_rng_state=self._preserve_rng_state,
+            determinism_check=self._determinism_check,
+            early_stop=self._early_stop,
+            debug=self._debug,
+            **kwargs,
+        )
+
+
+def _install_region_units(module: nn.Module, region_save_list: list[str]) -> dict:
+    """Wrap each saved submodule of ``module`` in a _UnitWrapper, naming the region
+    by the submodule's FQN within the block. Returns the name->policy dict for the
+    region checkpoint. Each entry in ``region_save_list`` is the exact FQN of a
+    submodule within the block, e.g. "attention.wq", "feed_forward.w1".
+
+    Regions must be disjoint: a saved region must not contain another saved region.
+    Nesting silently corrupts recompute (the outer region is skipped on the
+    recompute pass and never re-runs the inner one, so a downstream recomputed op
+    sees a stale value), so overlap is rejected rather than wrapped.
+    """
+    from torch.utils.checkpoint import CheckpointPolicy
+
+    save = set(region_save_list)
+    matched = [
+        (fqn, submod) for fqn, submod in module.named_modules() if fqn in save
+    ]
+    fqns = [fqn for fqn, _ in matched]
+    for a in fqns:
+        for b in fqns:
+            if a != b and b.startswith(a + "."):
+                raise ValueError(
+                    f"Region SAC units must be disjoint, but region '{a}' contains "
+                    f"region '{b}'. Remove one from the save list."
+                )
+    policy = {}
+    for fqn, submod in matched:
+        parent = (
+            module if "." not in fqn else module.get_submodule(fqn.rsplit(".", 1)[0])
+        )
+        setattr(parent, fqn.rsplit(".", 1)[-1], _UnitWrapper(submod, fqn))
+        policy[fqn] = CheckpointPolicy.MUST_SAVE
+    missing = save - set(fqns)
+    if missing:
+        logger.warning(f"Region SAC save list entries matched no submodule: {missing}")
+    return policy
+
+
+def _apply_region_sac(
+    module: nn.Module, ac_config: ACConfig, *, region_save_list: list[str]
+) -> nn.Module:
+    """Apply name-based region selective activation checkpointing to a block.
+
+    Wraps the saved submodules as named regions (no edits to the model forward
+    needed), then checkpoints the whole block, saving those regions.
+
+    Args:
+        module (nn.Module): The transformer block to checkpoint.
+        ac_config (ACConfig): The activation checkpointing config.
+        region_save_list (list[str]): Submodules to save (the rest recompute),
+            named by their exact FQN within the block, e.g. "attention.wq",
+            "feed_forward.w1".
+    """
+    policy = _install_region_units(module, region_save_list)
+    return _RegionCheckpointWrapper(module, policy, ac_config)
+
+
 def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
     """Apply full activation checkpointing to the module.
 
@@ -174,6 +282,7 @@ def _apply_ac_to_transformer_block(
     base_fqn: str | None = None,
     model_compile_enabled: bool = False,
     op_sac_save_list: set[torch._ops.OpOverload] | None = None,
+    region_save_list: list[str] | None = None,
 ) -> nn.Module:
     valid_ac_modes = ("full", "selective")
     if ac_config.mode not in valid_ac_modes:
@@ -194,6 +303,12 @@ def _apply_ac_to_transformer_block(
         )
 
     if use_op_sac:
+        # Name-based region SAC (this stack's alternative to counter-based op SAC):
+        # selected when the model passes a region_save_list.
+        if region_save_list is not None:
+            return _apply_region_sac(
+                module, ac_config, region_save_list=region_save_list
+            )
         op_sac_save_list = op_sac_save_list or set()
         return _apply_op_sac(
             module, ac_config, base_fqn=base_fqn, op_sac_save_list=op_sac_save_list
@@ -208,6 +323,7 @@ def apply_ac(
     *,
     model_compile_enabled: bool = False,
     op_sac_save_list: set[torch._ops.OpOverload] | None = None,
+    region_save_list: list[str] | None = None,
     base_folder: str = "",
 ) -> None:
     """Apply activation checkpointing to the model.
@@ -218,6 +334,10 @@ def apply_ac(
         model_compile_enabled (bool): Whether torch.compile is enabled for the model.
         op_sac_save_list (set[torch._ops.OpOverload]): The list of ops to save instead
             of recomputing.
+        region_save_list (list[str]): For op-level selective AC, exact FQNs of
+            block submodules to save instead of recompute (apply_ac wraps each as a
+            named region). When provided, name-based region SAC is used in place of
+            counter-based op SAC.
     Returns:
         None
     """
@@ -254,6 +374,7 @@ def apply_ac(
                 base_fqn=f"layers.{layer_id}",
                 model_compile_enabled=model_compile_enabled,
                 op_sac_save_list=op_sac_save_list,
+                region_save_list=region_save_list,
             )
             layers.register_module(layer_id, transformer_block)
 

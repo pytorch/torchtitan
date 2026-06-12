@@ -59,6 +59,19 @@ _op_sac_save_list = {
 }
 
 
+# For name-based region selective activation checkpointing (this stack's
+# alternative to counter-based op SAC). apply_ac wraps the submodules named here
+# (by their exact FQN within the block; no edits to the model forward needed) as
+# regions and saves them; the rest (wk, wv, w3, attention) recompute. Equivalent
+# save count to the every-other-mm policy, but each projection is chosen by name.
+_region_save_list = [
+    "attention.wq",
+    "attention.wo",
+    "feed_forward.w1",
+    "feed_forward.w2",
+]
+
+
 def parallelize_llama(
     model: Llama3Model,
     *,
@@ -130,6 +143,7 @@ def parallelize_llama(
             model_compile_enabled=model_compile_enabled,
             # pyrefly: ignore [bad-argument-type]
             op_sac_save_list=_op_sac_save_list,
+            region_save_list=_region_save_list,
             base_folder=dump_folder,
         )
 
