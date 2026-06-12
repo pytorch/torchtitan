@@ -281,13 +281,7 @@ def set_decoder_sharding_config(
     loss_tp = spmd.S(-1) if loss_parallel else spmd.I
 
     embed_out_src = dense_activation_placement(tp=spmd.P)
-    embed_input = SpmdLayout(
-        {
-            DP: spmd.S(0),
-            CP: spmd.S(1),
-            TP: spmd.R,
-        }
-    )
+    embed_input = dense_activation_placement(tp=spmd.R)
     config.tok_embeddings.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings={"input": embed_input},
