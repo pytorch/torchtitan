@@ -174,6 +174,23 @@ def test_empty_turns_rollout(tmp_path) -> None:
     assert record["reward"] == 0.0
 
 
+def test_turn_metrics_are_excluded_not_serialized(tmp_path) -> None:
+    # Metric/MetricValue objects aren't JSON-serializable; they must be dropped, not crash.
+    from torchtitan.experiments.rl.observability import metrics as m
+
+    turn = _turn(completion_logprobs=[-0.5, -1.5])
+    turn.metrics = [m.Metric("generator/queue_time_ms", m.Mean(2.0))]
+    rollout = Rollout(
+        group_id="step=1/group=0",
+        sample_id="step=1/group=0/sample=0",
+        status=RolloutStatus.COMPLETED,
+        turns=[turn],
+        reward=1.0,
+    )
+    record = _record_one(tmp_path, rollout)
+    assert "metrics" not in record["turns"][0]
+
+
 def test_none_policy_version_and_completion_message(tmp_path) -> None:
     turn = RolloutTurn(
         prompt_token_ids=[1, 2],
