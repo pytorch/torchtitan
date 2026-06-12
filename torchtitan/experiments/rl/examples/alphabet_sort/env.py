@@ -43,15 +43,12 @@ class AlphabetSortEnv(MessageEnv):
         """Ask the model to sort the first batch of names."""
         # init asks for turn 0; step asks for turns 1, 2, ... in order
         self._next_turn = 1
-        sort_by = "FIRST" if self._env_input.sort_by_first_name else "LAST"
+        sort_type = "FIRST" if self._env_input.sort_by_first_name else "LAST"
+        names = ", ".join(self._env_input.new_names_per_turn[0])
         prompt = (
-            f"Sort these names in alphabetical order by {sort_by} name: "
-            f"{', '.join(self._env_input.new_names_per_turn[0])}\n\n"
+            f"Sort these names in alphabetical order by {sort_type} name: {names}\n\n"
             "Use exactly this format:\n"
-            "<alphabetical_sorted>\n"
-            "Name1\n"
-            "Name2\n"
-            "</alphabetical_sorted>"
+            "<alphabetical_sorted>\nName1\nName2\n...\n</alphabetical_sorted>"
         )
         return MessageEnvInitOutput(
             init_prompt_messages=[{"role": "user", "content": prompt}]
@@ -59,20 +56,25 @@ class AlphabetSortEnv(MessageEnv):
 
     async def step(self, completion_message: Message) -> MessageEnvStepOutput:
         """Introduce the next batch of new names to re-sort, or end the rollout if none are left."""
+        del completion_message  # advance to the next names regardless of the model's reply
         if self._next_turn >= len(self._env_input.new_names_per_turn):
             return MessageEnvStepOutput(done=True)
-        new_names = self._env_input.new_names_per_turn[self._next_turn]
+        turn = self._next_turn
         self._next_turn += 1
-        sort_by = "FIRST" if self._env_input.sort_by_first_name else "LAST"
+        sort_type = "FIRST" if self._env_input.sort_by_first_name else "LAST"
+        names = ", ".join(self._env_input.new_names_per_turn[turn])
         prompt = (
-            f"Now sort ALL of these names alphabetically by {sort_by} name: "
-            f"{', '.join(new_names)}\n\n"
-            "These are in addition to the prior list. Mark any NEW names "
-            "(that weren't in the prior list) with `// new name!` at the end.\n\n"
-            "Use exactly this format:\n"
-            "<combined_alphabetical_sorted>\n"
-            "Name1\n"
-            "Name2 // new name!\n"
-            "</combined_alphabetical_sorted>"
+            f"Now sort ALL of these names alphabetically by {sort_type} name: {names}\n\n"
+            "These are in addition to the prior list. Mark any NEW names (that weren't in the "
+            "prior list) with `// new name!` at the end."
         )
+        if turn == 1:
+            # The first re-sort shows the combined format with one new name tagged.
+            prompt += (
+                "\n\nUse exactly this format:\n"
+                "<combined_alphabetical_sorted>\nName1\nName2 // new name!\n...\n"
+                "</combined_alphabetical_sorted>"
+            )
+        else:
+            prompt += " Follow the same format as before."
         return MessageEnvStepOutput(env_messages=[{"role": "user", "content": prompt}])
