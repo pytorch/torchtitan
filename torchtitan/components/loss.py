@@ -492,17 +492,46 @@ class ChunkedCELoss(BaseLoss):
         """Set the lm_head module. Must be called before the first __call__."""
         self.lm_head = lm_head
 
-    def chunk_states_and_labels(
+    def __call__(
         self,
-        hidden_states: torch.Tensor,
+        pred: torch.Tensor,
         labels: torch.Tensor,
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Chunk hidden states and labels along the local sequence dimension.
+        global_valid_tokens: float | None = None,
+    ) -> torch.Tensor:
+        """Compute chunked cross-entropy loss.
 
-        Hidden state chunks are detached as leaves so their per-chunk gradients
-        can be collected by GradAccumulator. For DTensor we use local_map.
+        ``pred`` should be hidden states from model forward with
+        ``_skip_lm_head=True``.
+
+        When ``pred`` does not require grad (e.g. validation), runs chunked
+        forward only — no per-chunk backward or gradient accumulation.
+
+        Returns a differentiable loss. When ``.backward()`` is called on it
+        (either by the trainer or the PP schedule), it triggers backward
+        through the decoder via a custom autograd Function.
         """
+        from torch.distributed._composable.fsdp import FSDPModule
+
+        hidden_states = pred
         num_chunks = self.num_chunks
+        lm_head = self.lm_head
+        assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
+        fsdp_enabled = isinstance(lm_head, FSDPModule)
+
+        # If SP is enabled, hidden states are Shard(1) on the TP mesh dim.
+        # Redistribute only the TP dim to Replicate before chunking so that
+        # the lm_head receives Replicate input on TP.
+        if isinstance(hidden_states, DTensor):
+            mesh = hidden_states.device_mesh
+            if mesh.mesh_dim_names is not None and "tp" in mesh.mesh_dim_names:
+                tp_dim = mesh.mesh_dim_names.index("tp")
+                placements = list(hidden_states.placements)
+                if not isinstance(placements[tp_dim], Replicate):
+                    placements[tp_dim] = Replicate()
+                    hidden_states = hidden_states.redistribute(mesh, tuple(placements))
+
+        # Check if it's training model or validation mode
+        requires_grad = hidden_states.requires_grad
 
         # Chunking always operates on the *local* view: when ``t`` is a
         # Shard(1) DTensor, chunking the global view would distribute whole
@@ -527,128 +556,61 @@ class ChunkedCELoss(BaseLoss):
             )
             return wrapped(t)
 
-        # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
-        # accumulates ``.grad`` for ``GradAccumulator``.
-        requires_grad = hidden_states.requires_grad
-        h_chunks = [
-            c.detach().requires_grad_(requires_grad) for c in _chunk(hidden_states)
-        ]
-        label_chunks = list(_chunk(labels))
-        return h_chunks, label_chunks
+        with spmd.local():
+            # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
+            # accumulates ``.grad`` for ``GradAccumulator``.
+            h_chunks = [
+                c.detach().requires_grad_(requires_grad) for c in _chunk(hidden_states)
+            ]
+            label_chunks = list(_chunk(labels))
 
-    def chunked_loss_and_grad(
-        self,
-        hidden_states: torch.Tensor,
-        labels: torch.Tensor,
-        *,
-        global_valid_tokens: float | None,
-        fsdp_enabled: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Run the chunked lm_head/CE loop and return loss plus hidden grad.
+            grad_accumulator = GradAccumulator(
+                hidden_states,
+                num_chunks=num_chunks,
+                dtype=torch.float32,
+            )
 
-        This is the memory-saving inner loop. It detaches hidden states, runs
-        lm_head and CE one local sequence chunk at a time, accumulates the
-        detached scalar loss, and records the per-chunk hidden gradients needed
-        to bridge backward into the decoder graph.
+            total_loss = hidden_states.new_zeros((), dtype=torch.float32)
 
-        Returns:
-            A scalar detached loss accumulated over chunks, and the hidden-state
-            gradient buffer to pass back into the decoder graph. The gradient
-            buffer is ``None`` when ``hidden_states`` does not require grad.
-        """
-        lm_head = self.lm_head
-        assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
+            # Disable FSDP reshard on lm_head to keep weight unsharded across
+            # all chunks, avoiding repeated all-gathers. Coalesce per-chunk
+            # grad sync into a single reduce-scatter at the last chunk by
+            # disabling gradient sync for chunks 0..N-2.
+            if fsdp_enabled:
+                lm_head.set_reshard_after_forward(False)
+                lm_head.set_reshard_after_backward(False)
+                lm_head.set_requires_gradient_sync(False, recurse=False)
 
-        requires_grad = hidden_states.requires_grad
-        hidden_states = hidden_states.detach().requires_grad_(requires_grad)
-        h_chunks, label_chunks = self.chunk_states_and_labels(hidden_states, labels)
-        grad_accumulator = GradAccumulator(
-            hidden_states,
-            num_chunks=self.num_chunks,
-            dtype=torch.float32,
-        )
+            last_idx = len(h_chunks) - 1
+            for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
+                if fsdp_enabled and i == last_idx:
+                    lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
+                        True, recurse=False
+                    )
 
-        total_loss = hidden_states.new_zeros((), dtype=torch.float32)
+                logits = lm_head(h_chunk)
 
-        # Disable FSDP reshard on lm_head to keep weight unsharded across
-        # all chunks, avoiding repeated all-gathers. Coalesce per-chunk
-        # grad sync into a single reduce-scatter at the last chunk by
-        # disabling gradient sync for chunks 0..N-2.
-        if fsdp_enabled:
-            lm_head.set_reshard_after_forward(False)
-            lm_head.set_reshard_after_backward(False)
-            lm_head.set_requires_gradient_sync(False, recurse=False)
+                chunk_loss = self.fn(logits, label_chunk)
+                if global_valid_tokens is not None:
+                    chunk_loss = chunk_loss / global_valid_tokens
+                total_loss = total_loss + chunk_loss.detach()
 
-        last_idx = len(h_chunks) - 1
-        for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
-            if fsdp_enabled and i == last_idx:
-                lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
-                    True, recurse=False
-                )
-
-            logits = lm_head(h_chunk)
-
-            chunk_loss = self.fn(logits, label_chunk)
-            if global_valid_tokens is not None:
-                chunk_loss = chunk_loss / global_valid_tokens
-            total_loss = total_loss + chunk_loss.detach()
-
-            if requires_grad:
-                chunk_loss.backward()
-                assert h_chunk.grad is not None
-                grad_accumulator.add(h_chunk.grad)
-                h_chunk.grad = None
+                if requires_grad:
+                    chunk_loss.backward()
+                    assert h_chunk.grad is not None
+                    grad_accumulator.add(h_chunk.grad)
+                    h_chunk.grad = None
 
         if fsdp_enabled:
             lm_head.set_reshard_after_forward(True)
             lm_head.set_reshard_after_backward(True)
             lm_head.set_requires_gradient_sync(True, recurse=False)
             lm_head.reshard()
-
-        accumulated_grad = (
-            grad_accumulator.result().to(hidden_states.dtype) if requires_grad else None
-        )
-        return total_loss, accumulated_grad
-
-    def __call__(
-        self,
-        pred: torch.Tensor,
-        labels: torch.Tensor,
-        global_valid_tokens: float | None = None,
-    ) -> torch.Tensor:
-        """Compute chunked cross-entropy loss.
-
-        ``pred`` should be hidden states from model forward with
-        ``_skip_lm_head=True``.
-
-        When ``pred`` does not require grad (e.g. validation), runs chunked
-        forward only — no per-chunk backward or gradient accumulation.
-
-        Returns a differentiable loss. When ``.backward()`` is called on it
-        (either by the trainer or the PP schedule), it triggers backward
-        through the decoder via a custom autograd Function.
-        """
-        from torch.distributed._composable.fsdp import FSDPModule
-
-        hidden_states = pred
-        lm_head = self.lm_head
-        assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
-        fsdp_enabled = isinstance(lm_head, FSDPModule)
-
-        # Check if it's training model or validation mode
-        requires_grad = hidden_states.requires_grad
-
-        total_loss, accumulated_grad = self.chunked_loss_and_grad(
-            hidden_states,
-            labels,
-            global_valid_tokens=global_valid_tokens,
-            fsdp_enabled=fsdp_enabled,
-        )
-
         if not requires_grad:
             return total_loss
 
-        assert accumulated_grad is not None
+        accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
+
         return self._gradient_backprop(
             hidden_states, accumulated_grad, total_loss, lm_head, fsdp_enabled
         )
