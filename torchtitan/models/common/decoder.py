@@ -10,6 +10,8 @@ from dataclasses import dataclass
 import torch
 from torch.nn.attention.flex_attention import and_masks
 
+from torchtitan.distributed.minimal_async_ep.api import validate_cfg
+
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -27,6 +29,7 @@ from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
+
 
 __all__ = ["Decoder", "TransformerBlock"]
 
@@ -153,6 +156,7 @@ class Decoder(BaseModel):
                         f"n_kv_heads ({n_kv_heads})."
                     )
 
+            ep_dispatcher_cfg = None
             minimal_async_ep_dispatcher_cfgs = []
             for layer_cfg in self.layers:
                 if layer_cfg.moe is not None:
@@ -168,22 +172,18 @@ class Decoder(BaseModel):
                         MinimalAsyncEPTokenDispatcher.Config,
                     ):
                         minimal_async_ep_dispatcher_cfgs.append(token_dispatcher_cfg)
-                    if (
-                        isinstance(
-                            token_dispatcher_cfg,
-                            (
-                                DeepEPTokenDispatcher.Config,
-                                MinimalAsyncEPTokenDispatcher.Config,
-                                HybridEPTokenDispatcher.Config,
-                            ),
-                        )
-                        and parallelism.expert_parallel_degree == 1
+                    if isinstance(
+                        token_dispatcher_cfg,
+                        (
+                            DeepEPTokenDispatcher.Config,
+                            MinimalAsyncEPTokenDispatcher.Config,
+                            HybridEPTokenDispatcher.Config,
+                        ),
                     ):
-                        raise ValueError(
-                            f"{type(token_dispatcher_cfg).__qualname__} "
-                            "requires expert parallelism "
-                            "(expert_parallel_degree > 1)."
-                        )
+                        ep_dispatcher_cfg = ep_dispatcher_cfg or token_dispatcher_cfg
+
+            if minimal_async_ep_dispatcher_cfgs:
+                validate_cfg(minimal_async_ep_dispatcher_cfgs, parallelism)
 
             # NOTE: Inference-only callers such as the RL generator skip
             # training.seq_len sync. Generated sequence length is not known

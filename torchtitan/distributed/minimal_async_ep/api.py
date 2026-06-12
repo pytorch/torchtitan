@@ -22,7 +22,7 @@ Shape symbols used by the API entrypoints:
 """
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 import torch
 import torch.distributed as dist
@@ -65,6 +65,29 @@ class _MinimalAsyncEPBufferState:
 
 
 _buffer_state: _MinimalAsyncEPBufferState | None = None
+
+
+def validate_cfg(dispatcher_cfgs: Sequence[Any], parallelism) -> None:
+    """Validate MinimalAsyncEP model/training config constraints."""
+    if not dispatcher_cfgs:
+        return
+    if parallelism.spmd_backend == "full_dtensor":
+        raise ValueError("MinimalAsyncEP does not support full_dtensor SPMD.")
+    if parallelism.tensor_parallel_degree != 1:
+        raise ValueError(
+            "MinimalAsyncEP does not support tensor or sequence parallelism."
+        )
+    if parallelism.context_parallel_degree != 1:
+        raise ValueError("MinimalAsyncEP does not support context parallelism.")
+    if parallelism.pipeline_parallel_degree != 1:
+        raise ValueError("MinimalAsyncEP does not support pipeline parallelism.")
+    for num_experts in {cfg.num_experts for cfg in dispatcher_cfgs}:
+        if num_experts % parallelism.expert_parallel_degree != 0:
+            raise ValueError(
+                f"MinimalAsyncEP num_experts ({num_experts}) must be "
+                "divisible by expert_parallel_degree "
+                f"({parallelism.expert_parallel_degree})."
+            )
 
 
 @dataclass
@@ -923,4 +946,5 @@ __all__ = [
     "combine_op",
     "dispatch_op",
     "init_buffer",
+    "validate_cfg",
 ]

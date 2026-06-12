@@ -75,10 +75,6 @@ class LocalTokenDispatcher(Configurable):
         """No-op for the EP=1 dispatcher. Subclasses override."""
         del ep_mesh, tp_mesh
 
-    def validate_parallel_dims(self, parallel_dims) -> None:
-        """Validate dispatcher-specific parallelism constraints."""
-        del parallel_dims
-
     def _local_reorder(
         self,
         x_TD: torch.Tensor,
@@ -888,25 +884,6 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         tuple[object, int, int, int, int, torch.dtype, torch.device] | None
     ] = None
 
-    def validate_parallel_dims(self, parallel_dims) -> None:
-        if parallel_dims.spmd_backend == "full_dtensor":
-            raise ValueError("MinimalAsyncEP does not support full_dtensor SPMD.")
-        if parallel_dims.ep <= 1:
-            raise ValueError("MinimalAsyncEP requires expert_parallel_degree > 1.")
-        if self.num_experts % parallel_dims.ep != 0:
-            raise ValueError(
-                f"MinimalAsyncEP num_experts ({self.num_experts}) must be "
-                f"divisible by expert_parallel_degree ({parallel_dims.ep})."
-            )
-        if parallel_dims.tp != 1:
-            raise ValueError(
-                "MinimalAsyncEP does not support tensor or sequence parallelism."
-            )
-        if parallel_dims.cp != 1:
-            raise ValueError("MinimalAsyncEP does not support context parallelism.")
-        if parallel_dims.pp != 1:
-            raise ValueError("MinimalAsyncEP does not support pipeline parallelism.")
-
     def wire_meshes(
         self,
         *,
@@ -919,11 +896,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
                 "MinimalAsyncEPTokenDispatcher requires expert parallelism "
                 "(ep_mesh must be set)."
             )
-        if tp_mesh is not None and tp_mesh.size() > 1:
-            raise ValueError(
-                "MinimalAsyncEPTokenDispatcher does not support tensor or sequence "
-                "parallelism."
-            )
+        del tp_mesh
         self.ep_mesh = ep_mesh
         self.sp_size = 1
         self.init_buffer()

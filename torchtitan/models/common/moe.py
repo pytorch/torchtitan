@@ -149,7 +149,6 @@ class GroupedExperts(Module):
         # TODO(@pianpwk): With spmd_types and set_current_spmd_mesh, replace wire_meshes
         # with current_spmd_mesh calls inside AllToAllTokenDispatcher and
         # DeepEPTokenDispatcher.
-        self.token_dispatcher.validate_parallel_dims(parallel_dims)
         self.token_dispatcher.wire_meshes(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
