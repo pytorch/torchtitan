@@ -6,6 +6,7 @@
 
 import io
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any, cast, Literal
 
 import torch
@@ -19,6 +20,7 @@ from torch.distributed.checkpoint.state_dict import (
 from torchtitan.components import fs
 from torchtitan.components.checkpoint import CheckpointManager, MODEL
 from torchtitan.tools.logging import logger
+from torchtitan.tools.utils import device_module
 
 
 OnnxInputDType = Literal[
@@ -46,6 +48,7 @@ _ONNX_DTYPE_MAP: dict[str, torch.dtype] = {
     "uint8": torch.uint8,
     "bool": torch.bool,
 }
+_ARTIFACT_BARRIER_TIMEOUT = timedelta(minutes=5)
 
 
 def _rank() -> int:
@@ -104,7 +107,23 @@ class OnnxCheckpointManager(CheckpointManager):
         if saved and (self.save_model_state_dict or self.export_onnx):
             self._async_wait()
             self._save_rank0_artifacts(curr_step)
+            self._wait_for_rank0()
         return saved
+
+    def _wait_for_rank0(self) -> None:
+        if not dist.is_available() or not dist.is_initialized():
+            return
+        if dist.get_world_size() == 1:
+            return
+
+        barrier_group = dist.new_group(timeout=_ARTIFACT_BARRIER_TIMEOUT)
+        try:
+            dist.barrier(
+                group=barrier_group,
+                device_ids=[device_module.current_device()],
+            )
+        finally:
+            dist.destroy_process_group(barrier_group)
 
     def _save_rank0_artifacts(self, curr_step: int) -> None:
         model_parts = self.states[MODEL].model
