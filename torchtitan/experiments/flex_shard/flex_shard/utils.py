@@ -6,7 +6,8 @@
 
 from __future__ import annotations
 
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextvars import ContextVar
 from typing import Any, TYPE_CHECKING
 
 import torch
@@ -21,6 +22,22 @@ if TYPE_CHECKING:
     from .placement_contract import Placement
 
 
+_SUPPRESS_EAGER_PROFILING: ContextVar[bool] = ContextVar(
+    "_flex_shard_suppress_eager_profiling",
+    default=False,
+)
+
+
+@contextmanager
+def _suppress_eager_profiling():
+    """Temporarily suppress eager profiler ranges for SAC-hidden physical work."""
+    token = _SUPPRESS_EAGER_PROFILING.set(True)
+    try:
+        yield
+    finally:
+        _SUPPRESS_EAGER_PROFILING.reset(token)
+
+
 def _with_fqn(label: str, fqn: str | None) -> str:
     """Append a module/bucket FQN to profiler labels, matching FSDP style."""
     if fqn:
@@ -33,7 +50,7 @@ def _record_function_if_eager(
     fqn: str | None,
 ) -> AbstractContextManager[Any]:
     """Return a profiler range in eager and a no-op context during compile."""
-    if torch.compiler.is_compiling():
+    if torch.compiler.is_compiling() or _SUPPRESS_EAGER_PROFILING.get():
         return nullcontext()
     return torch.profiler.record_function(_with_fqn(label, fqn))
 
@@ -43,7 +60,7 @@ def _record_comm_if_eager(
     fqn: str | None,
 ) -> AbstractContextManager[Any]:
     """Return a c10d profiler range in eager and a no-op during compile."""
-    if torch.compiler.is_compiling():
+    if torch.compiler.is_compiling() or _SUPPRESS_EAGER_PROFILING.get():
         return nullcontext()
     return dist.record_comm(_with_fqn(label, fqn))
 
