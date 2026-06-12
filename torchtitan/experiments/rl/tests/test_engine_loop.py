@@ -41,7 +41,7 @@ def _bare_generator(
 ) -> VLLMGenerator:
     # Bypass __init__ (which builds the vLLM engine); set only the loop's state.
     generator = object.__new__(VLLMGenerator)
-    generator._condition = asyncio.Condition()
+    generator._engine_loop_condition = asyncio.Condition()
     generator._close_request = CloseRequest() if close_requested else None
     generator._model_state_dict_pull_request = model_state_dict_pull_request
     generator._queued_generation_requests = pending or []

@@ -61,7 +61,7 @@ class AlphabetSortDataset(Configurable):
         seed: int = 1337420
 
         max_turns: int = 3
-        """Turns per sample, drawn uniformly from [1, max_turns]. Leave at 1 for a single-turn controller"""
+        """Maximum turns per sample; each sample draws uniformly from [1, max_turns]."""
 
         max_names_per_turn: int = 5
         """Names introduced per turn are drawn uniformly from [1, max_names_per_turn]."""

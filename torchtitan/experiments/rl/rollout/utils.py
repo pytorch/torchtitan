@@ -17,9 +17,17 @@ from torchtitan.experiments.rl.types import Episode
 def rollout_to_episodes(rollout: Rollout) -> list[Episode]:
     """Pack a scored `Rollout` into training episodes — usually one, or several where its turns branch.
 
-    Turns share a growing prefix (each prompt continues the previous prompt + completion), so the whole
-    rollout packs into ONE episode: prompts and env replies are masked out, completions are trained. A new
-    episode (branch) opens wherever that prefix breaks (the env edited/compacted history).
+    Turns that share a growing prefix (each prompt continues the previous prompt + completion) are
+    packed into ONE episode: prompts and env replies are masked out, completions are trained. A new
+    episode (branch) opens wherever that prefix breaks (history was edited).
+
+    This branching has three common causes:
+    1) The rollout loop purposely edits the history: For example, when compacting a long conversation;
+    2) Thinking is removed from history: This is a flag in the `renderer` used in the `Rollouter`. Choose
+        `preserve_all_thinking=True` to avoid stripping thinking (default=True);
+    3) Some error or change from retokenization: Those can be avoided by doing token-in-token-out (TITO),
+        i.e. you give tokens to the generators, and you append (bridge) the tokens received, leaving no room for changes.
+        TITO is our default;
 
     Example (5 turns; the env compacts history before turn 3, so the prefix breaks -> 2 episodes).
     P = prompt; C = completion; E = env reply
@@ -33,11 +41,13 @@ def rollout_to_episodes(rollout: Rollout) -> list[Episode]:
     """
     rollout_advantage = rollout.advantage
     episodes: list[Episode] = []
+
+    # Used to check if [P1, C1] is prefix of [P1,C1,E1] in the docstring example
     prev_prompt_and_completion: list[int] = []
 
+    # Skip if no completion (nothing to train on). This happens when the prompt is too long.
+    # TODO: This seems to happen on the very first turn. Check if we can prefilter it.
     for turn_idx, rollout_turn in enumerate(rollout.turns):
-        # No completion happens on prompt too long, and is only valid on the last turn.
-        # TODO: This seems to happen on the very first turn. Check if we can prefilter it.
         if not rollout_turn.completion_token_ids:
             if turn_idx != len(rollout.turns) - 1:
                 raise ValueError(

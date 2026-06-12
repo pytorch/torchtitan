@@ -249,6 +249,7 @@ class VLLMGenerator(Actor, Configurable):
         Every generation call is queued for execution by the `engine_loop`. A higher value enables buffering
         of more requests to avoid a prefill between every engine decode step, which is inefficient."""
 
+        # TODO: check if we should put these under WeightSyncConfig
         reset_prefix_cache_on_weight_sync: bool = True
         """Drop the prefix cache when weights change so new requests don't reuse KV computed under the old
         weights. vLLM only clears it while the engine is idle (true under sync training)."""
@@ -424,7 +425,9 @@ class VLLMGenerator(Actor, Configurable):
         # --- Continuous-batching state (see the class docstring) ---
         self._rank = dist.get_rank()
         self._broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
-        self._condition = asyncio.Condition()  # Signals to wake up when there is work
+        self._engine_loop_condition = (
+            asyncio.Condition()
+        )  # Signals to wake up when there is work
 
         # Engine-loop INBOX (rank 0): requests the controller submits; the loop reads them to decide.
         self._queued_generation_requests: list[GenerationRequest] = []
@@ -436,7 +439,7 @@ class VLLMGenerator(Actor, Configurable):
         self._generation_futures: dict[str, GenerationFuture] = {}
         self._pull_model_state_dict_future: asyncio.Future[int] | None = None
 
-        # Async task to drive the engine_loop
+        # Background asyncio.Task running _engine_loop; None until the first generate/pull starts it.
         self._engine_loop_task: asyncio.Task | None = None
 
         logger.info("Generator initialized with vLLM engine")
@@ -516,8 +519,8 @@ class VLLMGenerator(Actor, Configurable):
             sampling_config if sampling_config is not None else self.config.sampling
         )
 
-        # `condition` wakes the engine loop, if asleep, when a new request is added.
-        async with self._condition:
+        # `_engine_loop_condition` wakes the engine loop, if asleep, when a new request is added.
+        async with self._engine_loop_condition:
             if request_id in self._generation_futures:
                 raise ValueError(f"request_id {request_id!r} is already in flight")
 
@@ -540,7 +543,7 @@ class VLLMGenerator(Actor, Configurable):
                 )
             )
             # Wakes the engine loop only if it is idle in `_decide_next_action`.
-            self._condition.notify()
+            self._engine_loop_condition.notify()
 
         # Await outside the lock so other generate / pull calls can proceed meanwhile.
         return await generation_future
@@ -572,21 +575,24 @@ class VLLMGenerator(Actor, Configurable):
                 # Rank 0 decides next decision; followers pass None and learn from the broadcast.
                 decision = await self._decide_next_action() if self._rank == 0 else None
 
-                # Barrier(gloo, CPU): ship rank 0's decision (incl. prompts) to every TP rank, off the
-                # NCCL stream. broadcast_object_list blocks, so to_thread keeps the event loop free.
+                # Barrier(gloo, CPU): Ship rank 0's decision (incl. prompts) to every TP rank via gloo/CPU, off the
+                # NCCL stream. broadcast_object_list mutates a list in place; `to_thread` runs the
+                # blocking call in a worker so the event loop can still serve generate/pull/close.
                 # TODO(perf): overlap this broadcast with the step burst (pipeline the next decision) so
                 # gloo transfer hides behind GPU compute.
                 # TODO(perf): swap broadcast_object_list (double serialization of pickle+broadcast) for a byte
                 # broadcast, to cut pickle overhead. i.e. serialize the decision to bytes on rank 0, then broadcast.
-                decision_box = [decision] if self._rank == 0 else [None]
+                # TODO: Revisit when enabling DP>1
+                decision_broadcast_container = [decision] if self._rank == 0 else [None]
                 await asyncio.to_thread(
                     dist.broadcast_object_list,
-                    decision_box,
+                    decision_broadcast_container,
                     src=0,
                     group=self._broadcast_group,
                     device=torch.device("cpu"),
                 )
-                decision = decision_box[0]
+                # get rank 0's broadcasted decision
+                decision = decision_broadcast_container[0]  # [num_ranks]
 
                 if decision.action is LoopAction.CLOSE:
                     return
@@ -615,15 +621,16 @@ class VLLMGenerator(Actor, Configurable):
                                 params=self._build_sampling_params(request.sampling),
                             )
 
-                # Barrier (NCCL): a burst of steps (then loop back for a new decision)
-                # This gives the generator time to buffer some new requests to balance out
-                # prefill vs completion.
+                # Barrier (NCCL): engine.step() runs SPMD in lockstep.
+                # The step burst `max_engine_steps_between_decisions` gives the generator time to buffer
+                # new requests and avoid a prefill in between every engine decode step, which is inefficient.
                 with sl.log_trace_span("vllm_engine_step_burst"):
                     for _ in range(self.config.max_engine_steps_between_decisions):
                         if not self._engine.has_unfinished_requests():
                             break
                         with torch.no_grad():
-                            request_outputs = self._engine.step()
+                            with sl.log_trace_span("vllm_engine_step"):
+                                request_outputs = self._engine.step()
                         self._process_finished_requests(request_outputs)
                         await asyncio.sleep(0)  # let pending generate() calls enqueue
 
@@ -635,10 +642,10 @@ class VLLMGenerator(Actor, Configurable):
     async def _decide_next_action(self) -> LoopDecision:
         """RANK 0: picks the next action. Sleeps until there is something to do."""
 
-        # `self._condition.wait_for` blocks until there is work; `notify()` rechecks the predicate.
-        # In-flight requests keep the predicate true, so they need no notify.
-        async with self._condition:
-            await self._condition.wait_for(
+        # `self._engine_loop_condition.wait_for` blocks until there is work; `notify()` rechecks
+        # the predicate. In-flight requests keep the predicate true, so they need no notify.
+        async with self._engine_loop_condition:
+            await self._engine_loop_condition.wait_for(
                 lambda: self._close_request is not None
                 or self._model_state_dict_pull_request is not None
                 or self._queued_generation_requests
@@ -715,7 +722,7 @@ class VLLMGenerator(Actor, Configurable):
             )
 
     def _fail_outstanding_futures(self, exc: BaseException) -> None:
-        """Fail every unresolved future"""
+        """Fail every unresolved future after an exception or engine teardown."""
         for generation_future in self._generation_futures.values():
             if not generation_future.future.done():
                 generation_future.future.set_exception(exc)
@@ -753,6 +760,9 @@ class VLLMGenerator(Actor, Configurable):
         Args:
             version: Policy version to pull
         """
+        # TODO: if an incoming request is received while another pull request is queued
+        # we should drop the older request and pull the latest version instead
+
         # Starting requires asyncio, which isn't available in the sync __init__.
         # Start on first call; no-op after.
         await self._ensure_engine_loop()
@@ -766,13 +776,13 @@ class VLLMGenerator(Actor, Configurable):
             int
         ] = asyncio.get_running_loop().create_future()
 
-        # `condition` wakes the engine loop, if asleep, when a pull is queued.
-        async with self._condition:
+        # `_engine_loop_condition` wakes the engine loop, if asleep, when a pull is queued.
+        async with self._engine_loop_condition:
             self._model_state_dict_pull_request = ModelStateDictPullRequest(
                 version=version
             )
             self._pull_model_state_dict_future = pull_model_state_dict_future
-            self._condition.notify()  # wakes the engine loop only if it is idle
+            self._engine_loop_condition.notify()  # wakes the engine loop only if it is idle
 
         # Await outside the lock so other generate / pull calls can proceed meanwhile.
         await pull_model_state_dict_future
@@ -821,9 +831,9 @@ class VLLMGenerator(Actor, Configurable):
         renderer-local resources and leaves process teardown to `ProcMesh.stop()`.
         """
         if self._rank == 0:
-            async with self._condition:
+            async with self._engine_loop_condition:
                 self._close_request = CloseRequest()
-                self._condition.notify()  # wake the loop so it returns CLOSE
+                self._engine_loop_condition.notify()  # wake the loop so it returns CLOSE
 
         # Let the engine loop process the shutdown.
         if self._engine_loop_task is not None:
