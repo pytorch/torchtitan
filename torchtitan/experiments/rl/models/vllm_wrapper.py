@@ -174,8 +174,9 @@ class VLLMModelWrapper(Module):
         self.config = dataclasses.replace(model_config, layers=new_layers)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
-        # Build ParallelDims from the torchtitan ParallelismConfig (the
-        # controller's source of truth) rather than vLLM's parallel_config.
+        # Build ParallelDims from the TorchTitan ParallelismConfig so TP/EP
+        # sharding sees the same mesh shape as vLLM. In the generator,
+        # data_parallel_shard_degree means vLLM pure DP, not TorchTitan FSDP.
         self.parallel_dims = ParallelDims(
             dp_replicate=parallelism.data_parallel_replicate_degree,
             dp_shard=parallelism.data_parallel_shard_degree,
@@ -219,6 +220,9 @@ class VLLMModelWrapper(Module):
             compile_config=compile_config,
             ac_config=ActivationCheckpointConfig(mode="none"),
             dump_folder="",
+            # Generator inference replicates parameters across vLLM DP groups.
+            # Keep TP/EP sharding above, but do not translate dp_shard into
+            # TorchTitan FSDP/DDP here.
             skip_dp=True,
         )
 

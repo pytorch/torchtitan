@@ -252,7 +252,6 @@ def set_determinism(
 
 
 _batch_invariant_enabled: bool = False
-_batch_invariant_bmm_lib: torch.library.Library | None = None
 
 
 def is_in_batch_invariant_mode() -> bool:
@@ -271,26 +270,18 @@ def set_batch_invariance(enable: bool) -> None:
     On top of that, this function applies torchtitan-specific settings:
     - NCCL env vars for deterministic inter-GPU collectives
     - Disables reduced-precision reductions and TF32
-    - Batch-invariant ``bmm`` for batched matrix multiplies
 
     Note: callers must set ``debug.deterministic=True`` separately.
     """
-    global _batch_invariant_bmm_lib, _batch_invariant_enabled
+    global _batch_invariant_enabled
     if not enable or _batch_invariant_enabled:
         return
 
     # Register batch-invariant ATen overrides via upstream package
     # https://github.com/thinking-machines-lab/batch_invariant_ops
-    # pyrefly: ignore[missing-import]
     from batch_invariant_ops import enable_batch_invariant_mode as _upstream_enable
 
     _upstream_enable()
-
-    from vllm.model_executor.layers.batch_invariant import bmm_batch_invariant
-
-    _batch_invariant_bmm_lib = torch.library.Library("aten", "IMPL")
-    _batch_invariant_bmm_lib.impl("bmm", bmm_batch_invariant, "CUDA")
-    torch.bmm = bmm_batch_invariant
 
     # Set NCCL env vars for deterministic inter-GPU collectives.
     # Must be set BEFORE dist.init_process_group.
@@ -337,7 +328,6 @@ def set_batch_invariance(enable: bool) -> None:
     logger.info(
         "Batch-invariant mode enabled: mm, addmm, _log_softmax, mean.dim "
         "overridden with Triton kernels (via batch_invariant_ops); "
-        "bmm overridden with vLLM batch-invariant kernel; "
         "reduced-precision reductions and TF32 disabled"
     )
 
@@ -477,7 +467,6 @@ def init_distributed(
     device_id: torch.device | None = None
     if comm_config.mode == "torchcomms":
         try:
-            # pyrefly: ignore[missing-import]
             import torchcomms  # noqa: F401
         except ImportError as err:
             raise ImportError(

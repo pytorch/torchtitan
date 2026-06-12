@@ -262,7 +262,15 @@ class TokenChoiceTopKRouter(Module):
         """
         # Compute gate in float32 to help stability of expert load balancing.
         with torch.autocast(device_type=x_BLD.device.type, dtype=torch.float32):
-            scores_BLE = self.gate(x_BLD)
+            # Fold the gate input to 2-D (B*L, D) for the matmul, then unfold the
+            # scores back to (B, L, E). Why: a 3-D activation @ 2-D weight lowers to aten::bmm in an
+            # inference (no-grad) graph, which breaks batch-invariant mode
+            # NOTE: under EP with B>1 this changes the gate's token->rank
+            # distribution (2-D token shard over B*L vs 3-D shard over the
+            # sequence), which changes the reduction order of the downstream
+            # expert grouped_mm and sharded reductions, and will slightly change numerics
+            B, L, D = x_BLD.shape
+            scores_BLE = self.gate(x_BLD.reshape(B * L, D)).view(B, L, -1)
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion.
         # scores_BLE is already float32 from the autocast above.
@@ -386,12 +394,25 @@ class MoE(Module):
         B, L, D = x_BLD.shape
         sp_size = getattr(self.experts.token_dispatcher, "sp_size", 1)
 
-        # EP routes over sequence-parallel token shards. Pad the sequence
-        # dimension to a SP multiple so every TP rank has the same local length.
-        seq_pad = (-L) % sp_size if sp_size > 1 else 0
+        # ---------------------------------------------------------------------
+        # TODO: Temporary workaround for #3622. Remove it once short-sequence
+        # routing counts can remain Partial.
+        # EP routes over sequence-parallel token shards. Very short decode
+        # forwards cannot shard across all SP ranks, so pad to ``sp_size`` and
+        # trim before returning. The padded positions are routed and computed,
+        # but their outputs are dropped. This must stay inference-only: inference
+        # does not consume ``tokens_per_expert_E`` for load-balance updates,
+        # while training would.
+        seq_pad = sp_size - L if L < sp_size else 0
         if seq_pad:
+            if self.training:
+                raise ValueError(
+                    "MoE short-sequence padding for L < sp_size is inference-only; "
+                    f"got L={L}, sp_size={sp_size} while the module is in training mode."
+                )
             x_BLD = F.pad(x_BLD, (0, 0, 0, seq_pad))
             L = L + seq_pad
+        # ---------------------------------------------------------------------
 
         T = B * L
         pad_tokens = (-T) % sp_size
@@ -490,9 +511,14 @@ class MoE(Module):
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD
 
+        # ---------------------------------------------------------------------
+        # TODO: Temporary workaround for #3622. Paired with the short-sequence
+        # padding above; remove it once short-sequence routing counts can remain
+        # Partial.
         if seq_pad:
             # Drop the tokens padded on for SP sharding, restoring (B, L, D).
             out_BLD = out_BLD[:, : L - seq_pad, :]
+        # ---------------------------------------------------------------------
         return out_BLD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
