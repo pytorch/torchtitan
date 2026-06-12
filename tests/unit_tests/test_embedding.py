@@ -23,28 +23,28 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.distributed.utils import set_spmd_backend
-from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.embedding import VocabParallelEmbedding
 
 
-class TestEmbeddingConfig(unittest.TestCase):
-    """Tests for the Embedding class used in the codebase."""
+class TestVocabParallelEmbeddingConfig(unittest.TestCase):
+    """Tests for the VocabParallelEmbedding class used in the codebase."""
 
     def test_config_build(self):
-        """Embedding.Config.build() creates a working embedding."""
-        config = Embedding.Config(num_embeddings=100, embedding_dim=32)
+        """VocabParallelEmbedding.Config.build() creates a working embedding."""
+        config = VocabParallelEmbedding.Config(num_embeddings=100, embedding_dim=32)
         emb = config.build()
-        self.assertIsInstance(emb, Embedding)
+        self.assertIsInstance(emb, VocabParallelEmbedding)
         self.assertIsInstance(emb, nn.Embedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 
     def test_config_build_without_fields_raises(self):
-        """Embedding.Config() raises TypeError when required fields are not provided."""
+        """VocabParallelEmbedding.Config() raises TypeError when required fields are not provided."""
         with self.assertRaises(TypeError):
-            Embedding.Config()
+            VocabParallelEmbedding.Config()
 
     def test_init_states(self):
         """init_states re-initializes the weight tensor."""
-        config = Embedding.Config(
+        config = VocabParallelEmbedding.Config(
             num_embeddings=50,
             embedding_dim=16,
             param_init={"weight": partial(nn.init.trunc_normal_, std=0.02)},
@@ -57,8 +57,8 @@ class TestEmbeddingConfig(unittest.TestCase):
         self.assertFalse(torch.all(emb.weight == 0))
 
     def test_custom_init_std(self):
-        """Embedding respects custom mean and std."""
-        config = Embedding.Config(
+        """VocabParallelEmbedding respects custom mean and std."""
+        config = VocabParallelEmbedding.Config(
             num_embeddings=1000,
             embedding_dim=160,
             param_init={"weight": partial(nn.init.normal_, mean=0.1, std=0.02)},
@@ -74,34 +74,34 @@ class TestEmbeddingConfig(unittest.TestCase):
         self.assertAlmostEqual(emb.weight.std().item(), 0.02, places=3)
 
     def test_config_pre_specified_build(self):
-        """Embedding.Config with both fields pre-specified builds with no kwargs."""
-        config = Embedding.Config(num_embeddings=100, embedding_dim=32)
+        """VocabParallelEmbedding.Config with both fields pre-specified builds with no kwargs."""
+        config = VocabParallelEmbedding.Config(num_embeddings=100, embedding_dim=32)
         emb = config.build()
-        self.assertIsInstance(emb, Embedding)
+        self.assertIsInstance(emb, VocabParallelEmbedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 
     def test_config_partial_pre_specified(self):
-        """Embedding.Config with fields specified at construction builds correctly."""
-        config = Embedding.Config(num_embeddings=100, embedding_dim=32)
+        """VocabParallelEmbedding.Config with fields specified at construction builds correctly."""
+        config = VocabParallelEmbedding.Config(num_embeddings=100, embedding_dim=32)
         emb = config.build()
-        self.assertIsInstance(emb, Embedding)
+        self.assertIsInstance(emb, VocabParallelEmbedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 
     def test_config_inheritance_preset(self):
-        """Inheriting Embedding.Config can put fields back in __init__."""
+        """Inheriting VocabParallelEmbedding.Config can put fields back in __init__."""
 
         @dataclass(kw_only=True, slots=True)
-        class PresetConfig(Embedding.Config):
+        class PresetConfig(VocabParallelEmbedding.Config):
             num_embeddings: int = 100
             embedding_dim: int = 32
 
         config = PresetConfig()
         emb = config.build()
-        self.assertIsInstance(emb, Embedding)
+        self.assertIsInstance(emb, VocabParallelEmbedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 
 
-class TestEmbedding(DTensorTestBase):
+class TestVocabParallelEmbedding(DTensorTestBase):
     @property
     def world_size(self):
         return 4
@@ -148,8 +148,8 @@ class TestEmbedding(DTensorTestBase):
                     )
 
                     # Setup the manual vocab-parallel embedding.
-                    embedding = Embedding(
-                        Embedding.Config(
+                    embedding = VocabParallelEmbedding(
+                        VocabParallelEmbedding.Config(
                             num_embeddings=vocab_size,
                             embedding_dim=32,
                         )

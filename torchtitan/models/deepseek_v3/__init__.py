@@ -15,7 +15,7 @@ from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     ComplexRoPE,
-    Embedding,
+    VocabParallelEmbedding,
     Linear,
     RMSNorm,
     RoPE,
@@ -315,7 +315,7 @@ def _debugmodel(
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
@@ -379,7 +379,7 @@ def _16b(
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
@@ -447,7 +447,7 @@ def _236b(
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
@@ -516,7 +516,7 @@ def _671b(
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
