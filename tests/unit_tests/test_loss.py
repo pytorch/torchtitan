@@ -32,7 +32,8 @@ from torchtitan.components.loss import (
     GradAccumulator,
     IGNORE_INDEX,
 )
-from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_backend
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+from torchtitan.distributed.utils import set_spmd_backend
 
 
 class TestLoss(unittest.TestCase):
@@ -547,7 +548,7 @@ class TestChunkedCELossSPMD(DTensorTestBase):
     ):
         """Create the ChunkedCELoss variant under SPMD typecheck."""
         chunked_loss = ChunkedCELoss(ChunkedCELoss.Config(num_chunks=num_chunks))
-        chunked_loss.lm_head = lm_head
+        chunked_loss.set_lm_head(lm_head)
         chunked_loss.loss_parallel = loss_parallel
         return chunked_loss
 
@@ -561,7 +562,7 @@ class TestChunkedCELossSPMD(DTensorTestBase):
     ):
         """Mimic TorchTitan's TP-vocab-parallel lm_head for ChunkedCELoss.
 
-        Each rank owns only its local vocab rows.  With loss parallel enabled,
+        Each rank owns only its local vocab rows. With loss parallel enabled,
         ChunkedCELoss consumes those sharded logits directly; otherwise the
         lm_head gathers logits back to TP-invariant form before CE.
         """
@@ -586,18 +587,17 @@ class TestChunkedCELossSPMD(DTensorTestBase):
 
     @with_comms
     def test_spmd_matches_eager_and_types(self):
-        """Validate ChunkedCELoss on local tensors with a TP-sharded lm_head.
+        """Check ChunkedCELoss numerics and SPMD types with a TP lm_head.
 
-        The eager oracle is a normal full-vocab lm_head followed by plain
-        cross_entropy_loss. The SPMD path uses ChunkedCELoss with a local
-        TP-vocab-sharded lm_head. This covers both chunked CE paths:
-        loss-parallel CE over vocab-sharded logits and the non-loss-parallel
-        path that gathers logits back to TP-invariant form before CE. In both
-        cases, strict typechecking should accept the boundary types and the
-        result should match the eager oracle for loss and hidden-state gradients.
+        The reference path runs a full-vocab ``lm_head`` followed by ordinary
+        ``cross_entropy_loss``. The SPMD path uses a TP-vocab-sharded
+        ``lm_head`` and exercises both supported chunked CE modes:
+        loss-parallel CE consumes sharded logits directly, while the
+        non-loss-parallel mode gathers logits back to TP-invariant form before
+        CE. For both modes, strict typechecking must accept the local tensor
+        placements, and the final loss plus hidden-state gradients must match
+        the eager reference.
         """
-        # Build one global batch/vocab problem, then compare the TP-local SPMD
-        # chunked loss against the eager full-vocab cross_entropy_loss.
         torch.manual_seed(42)
         B, L, D, V = 2, 8, 32, 64
         num_chunks = 2
@@ -609,7 +609,6 @@ class TestChunkedCELossSPMD(DTensorTestBase):
         _, _, tp_rank = mesh.get_coordinate()
         _, _, tp_degree = mesh.shape
 
-        # init states, labels, test IGNORE_INDEX
         hidden_states = torch.randn(B, L, D, device=self.device_type)
         labels = torch.randint(0, V, (B, L), device=self.device_type)
         labels[0, 1] = IGNORE_INDEX
@@ -618,6 +617,7 @@ class TestChunkedCELossSPMD(DTensorTestBase):
         tp_group = mesh.get_group("tp")
         for enable_loss_parallel in (False, True):
             with self.subTest(loss_parallel=enable_loss_parallel):
+                # create full-weight ref lm_head, sharded lm_head & ChunkedCELoss
                 lm_head_ref = nn.Linear(D, V, bias=False).to(self.device_type)
                 lm_head_spmd = self._make_vocab_parallel_lm_head(
                     D,
@@ -630,33 +630,34 @@ class TestChunkedCELossSPMD(DTensorTestBase):
                     num_chunks=num_chunks,
                     loss_parallel=enable_loss_parallel,
                 )
-                # Copy over lm_head weight shard
+
+                # copy over vocab shard
                 vocab_start = tp_rank * (V // tp_degree)
                 vocab_end = vocab_start + (V // tp_degree)
                 lm_head_spmd.weight.data.copy_(
                     lm_head_ref.weight.data[vocab_start:vocab_end]
                 )
 
-                # Run standard cross_entropy_loss
+                # run reference path for loss, grad
                 h_ref = hidden_states.clone().detach().requires_grad_(True)
                 loss_ref = cross_entropy_loss(lm_head_ref(h_ref), labels)
                 loss_ref.backward()
                 h_grad_ref = h_ref.grad.clone()
 
-                # Run SPMD backend ChunkedCELoss
+                # run SPMD path, typecheck
                 h_spmd = hidden_states.clone().detach().requires_grad_(True)
                 with set_current_spmd_mesh(mesh):
                     spmd.assert_type(h_spmd, {tp_group: spmd.R})
                     spmd.assert_type(labels, {tp_group: spmd.I})
                     spmd.assert_type(lm_head_spmd.weight, {tp_group: spmd.S(0)})
-                    with typecheck(strict_mode="strict"):
+                    with typecheck(strict_mode="strict", local=False):
                         loss_spmd = loss_spmd_fn(h_spmd, labels)
                     self.assertIs(
                         spmd.get_axis_local_type(loss_spmd, tp_group),
                         spmd.I,
                     )
 
-                # Compare output, gradient numerics
+                # numerics check
                 loss_spmd.backward()
                 torch.testing.assert_close(loss_spmd, loss_ref)
                 h_grad_spmd = h_spmd.grad.clone()

@@ -19,7 +19,7 @@ from torchtitan.models.qwen3.model import Qwen3Model
 
 def _build_qwen3_moe_model(num_experts: int = 8) -> Qwen3Model:
     """Build a tiny Qwen3 MoE model with a configurable number of experts."""
-    from torchtitan.models.common import CosSinRoPE, Linear, RMSNorm, VocabParallelEmbedding
+    from torchtitan.models.common import CosSinRoPE, Embedding, Linear, RMSNorm
 
     # Use a tiny variant of the standard MoE debug config, overriding
     # num_experts to exercise the expert-sharding branches.
@@ -34,7 +34,7 @@ def _build_qwen3_moe_model(num_experts: int = 8) -> Qwen3Model:
         vocab_size=vocab_size,
         dim=dim,
         norm=RMSNorm.Config(normalized_shape=dim),
-        tok_embeddings=VocabParallelEmbedding.Config(num_embeddings=vocab_size, embedding_dim=dim),
+        tok_embeddings=Embedding.Config(num_embeddings=vocab_size, embedding_dim=dim),
         lm_head=Linear.Config(in_features=dim, out_features=vocab_size),
         layers=_build_qwen3_moe_layers(
             n_layers=n_layers,
