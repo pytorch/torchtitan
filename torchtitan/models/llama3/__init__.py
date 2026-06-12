@@ -13,7 +13,7 @@ from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     ComplexRoPE,
     compute_ffn_hidden_dim,
-    Embedding,
+    VocabParallelEmbedding,
     Linear,
     RMSNorm,
     RoPE,
@@ -114,7 +114,7 @@ def _debugmodel(attn_backend: str) -> Llama3Model.Config:
     return Llama3Model.Config(
         dim=dim,
         vocab_size=2048,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=2048, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
@@ -144,7 +144,7 @@ def _debugmodel_fused_qkv(attn_backend: str) -> Llama3Model.Config:
     return Llama3Model.Config(
         dim=dim,
         vocab_size=2048,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=2048, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
@@ -178,7 +178,7 @@ def _1b(attn_backend: str) -> Llama3Model.Config:
         dim=dim,
         vocab_size=vocab_size,
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
@@ -218,7 +218,7 @@ def _3b(attn_backend: str) -> Llama3Model.Config:
         dim=dim,
         vocab_size=vocab_size,
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
@@ -257,7 +257,7 @@ def _8b(attn_backend: str) -> Llama3Model.Config:
     return Llama3Model.Config(
         dim=dim,
         vocab_size=vocab_size,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
@@ -294,7 +294,7 @@ def _70b(attn_backend: str) -> Llama3Model.Config:
     return Llama3Model.Config(
         dim=dim,
         vocab_size=vocab_size,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
@@ -331,7 +331,7 @@ def _405b(attn_backend: str) -> Llama3Model.Config:
     return Llama3Model.Config(
         dim=dim,
         vocab_size=vocab_size,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
         norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
