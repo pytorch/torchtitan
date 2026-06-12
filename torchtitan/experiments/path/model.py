@@ -272,7 +272,7 @@ class TemporalPolicy(Module):
         self.config = config
         self.temporal_summarizer = config.temporal_summarizer.build()
         self.temporal_hydra = config.temporal_hydra.build()
-        self.register_buffer("history_idxs", torch.empty(len(config.history_idxs), dtype=torch.long), persistent=False)
+        self.register_buffer("history_idxs", torch.tensor(config.history_idxs, dtype=torch.long), persistent=False)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         device = buffer_device if buffer_device is not None else self.history_idxs.device

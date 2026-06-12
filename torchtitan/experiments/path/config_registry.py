@@ -8,7 +8,6 @@ import torch.nn as nn
 
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.onnx_checkpoint import OnnxCheckpointManager
 from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 from torchtitan.components.tokenizer import NoOpTokenizer
 from torchtitan.config import (
@@ -52,6 +51,7 @@ from .model import (
     parallelize_path,
 )
 from .loss import PathLoss
+from .onnx_checkpoint import PathOnnxCheckpointManager
 from .trainer import PathTrainer
 from .validate import PathValidator
 
@@ -72,19 +72,19 @@ def model_registry(flavor: str) -> ModelSpec:
     )
 
 
-def path_convnext_tiny() -> PathTrainer.Config:
+def convnext_tiny() -> PathTrainer.Config:
     return _path("convnext_tiny")
 
 
-def path_convnext_small() -> PathTrainer.Config:
+def convnext_small() -> PathTrainer.Config:
     return _path("convnext_small")
 
 
-def path_convnext_base() -> PathTrainer.Config:
+def convnext_base() -> PathTrainer.Config:
     return _path("convnext_base")
 
 
-def path_convnext_xxlarge() -> PathTrainer.Config:
+def convnext_xxlarge() -> PathTrainer.Config:
     return _path("convnext_xxlarge")
 
 
@@ -212,29 +212,39 @@ def _dataloader_config(*, split: str) -> PathDataLoader.Config:
     )
 
 
-def _checkpoint_config() -> OnnxCheckpointManager.Config:
+def _checkpoint_config() -> PathOnnxCheckpointManager.Config:
     frame_constants = frame_constants_from_fps(n_frames=N_FRAMES, frame_type=FRAME_TYPE)
     temporal_len = frame_constants["temporal_len"]
-    input_names = [
-        ModelInputs.IMG,
-        ModelInputs.BIG_IMG,
+    vision_input_names = [ModelInputs.IMG, ModelInputs.BIG_IMG]
+    temporal_policy_input_names = [
+        ModelInputs.FEATURES,
         ModelInputs.DESIRE,
         ModelInputs.TRAFFIC,
         ModelInputs.ACTION_T,
     ]
+    input_names = [
+        *vision_input_names,
+        *temporal_policy_input_names,
+    ]
     input_shapes = [
-        [1, len(frame_constants["history_idxs"]), *frame_constants["frame_shapes"][ModelInputs.IMG]],
-        [1, len(frame_constants["history_idxs"]), *frame_constants["frame_shapes"][ModelInputs.BIG_IMG]],
+        [1, *frame_constants["frame_shapes"][ModelInputs.IMG]],
+        [1, *frame_constants["frame_shapes"][ModelInputs.BIG_IMG]],
+        [1, temporal_len, TEMPORAL_INPUTS[ModelInputs.FEATURES][0]],
         [1, temporal_len, TEMPORAL_INPUTS[ModelInputs.DESIRE][0]],
         [1, temporal_len, TEMPORAL_INPUTS[ModelInputs.TRAFFIC][0]],
         [1, temporal_len, TEMPORAL_INPUTS[ModelInputs.ACTION_T][0]],
     ]
-    return OnnxCheckpointManager.Config(
-        enable=False,
-        onnx_file="path.onnx",
+    return PathOnnxCheckpointManager.Config(
+        enable=True,
+        save_model_state_dict=True,
+        export_onnx=True,
+        enable_first_step_checkpoint=True,
+        interval=512,
         input_names=input_names,
         input_shapes=input_shapes,
         input_dtypes=["float32"] * len(input_names),
+        vision_input_names=vision_input_names,
+        temporal_policy_input_names=temporal_policy_input_names,
     )
 
 

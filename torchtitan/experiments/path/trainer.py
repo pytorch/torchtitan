@@ -7,12 +7,12 @@ from dataclasses import dataclass
 import torch
 
 from torchtitan.components.dataloader import DataloaderExhaustedError
-from torchtitan.components.onnx_checkpoint import OnnxCheckpointManager
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.observability import structured_logger as sl
 from torchtitan.trainer import Trainer
 
 from .loss import PathLoss
+from .onnx_checkpoint import PathOnnxCheckpointManager
 from .validate import PathValidator
 
 
@@ -21,7 +21,7 @@ class PathTrainer(Trainer):
     class Config(Trainer.Config):
         loss: PathLoss.Config
         validator: PathValidator.Config
-        checkpoint: OnnxCheckpointManager.Config
+        checkpoint: PathOnnxCheckpointManager.Config
 
     def __init__(self, config: Config):
         super().__init__(config)
