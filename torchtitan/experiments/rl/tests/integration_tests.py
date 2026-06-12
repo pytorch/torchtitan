@@ -20,6 +20,7 @@ Usage:
 import argparse
 import os
 import subprocess
+import sys
 import time
 
 from tests.integration_tests import OverrideDefinitions
@@ -163,7 +164,7 @@ def run_single_test(
 
     for override_arg in test_flavor.override_args:
         cmd_parts = [
-            "python",
+            sys.executable,
             "-m",
             "torchtitan.experiments.rl.train",
             f"--dump_folder {dump_folder}",
