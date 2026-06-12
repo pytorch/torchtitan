@@ -104,6 +104,12 @@ class GRPOLoss(Configurable):
         kl_loss_type: str = "low_var_kl"
         """KL estimator (used only when kl_coef > 0): "low_var_kl"/"k3", "k1", "k2"."""
 
+        max_log_ratio: float = 10.0
+        """Clamp ``|log(π_θ/π_old)|`` to this (after dropping non-finite tokens) before
+        ``exp()``. Bounds the generator<->trainer logprob mismatch — especially the
+        large/NaN logprobs vLLM can emit under cudagraph — so ``exp()`` cannot overflow
+        to inf/NaN; also acts as a TIS-like guard on the mismatch."""
+
     def __init__(self, config: Config):
         self.clip_eps = config.clip_eps
         self.clip_eps_high = (
@@ -113,6 +119,7 @@ class GRPOLoss(Configurable):
         )
         self.kl_coef = config.kl_coef
         self.kl_loss_type = config.kl_loss_type
+        self.max_log_ratio = config.max_log_ratio
 
     def __call__(
         self,
@@ -141,12 +148,20 @@ class GRPOLoss(Configurable):
             dict of scalar tensors pre-normalized for SUM reduction across
             DP ranks.
         """
-        # Per-token importance sampling ratio: π_θ / π_old
-        log_ratio = policy_logprobs - generator_logprobs
-
-        # TODO: debug why vLLM+cudagraph emits nan generator logprobs
-        log_ratio = torch.nan_to_num(log_ratio, nan=0.0)
-        log_ratio = torch.clamp(log_ratio, -20.0, 20.0)
+        # Per-token importance sampling ratio: π_θ / π_old. vLLM occasionally emits a
+        # non-finite logprob for some tokens (notably under cudagraph). Such a token has
+        # no valid old-policy reference, so its importance ratio is meaningless: DROP it
+        # from the loss + denominator (cleaner than nan->0, which trains it as if it were
+        # on-policy). Dropping also prevents a single NaN from poisoning the whole loss
+        # via nan*0=nan. `response_mask` keeps the original tokens for the nan-frac metric.
+        response_mask = loss_mask
+        raw_log_ratio = policy_logprobs - generator_logprobs
+        loss_mask = loss_mask & torch.isfinite(raw_log_ratio)
+        # Clamp (after sanitizing) so a large generator<->trainer mismatch can't blow
+        # exp() up to inf/NaN; also acts as a TIS-like guard on the mismatch.
+        log_ratio = torch.clamp(
+            torch.nan_to_num(raw_log_ratio), -self.max_log_ratio, self.max_log_ratio
+        )
         ratio = torch.exp(log_ratio)
 
         # Asymmetric clip ("clip-higher"): upper bound 1 + clip_eps_high (= clip_eps
@@ -176,9 +191,11 @@ class GRPOLoss(Configurable):
                     (torch.abs(ratio - clipped_ratio) > 1e-6).float() * loss_mask
                 ).sum()
                 / loss_denominator,
-                # Fraction of response tokens whose generator (vLLM) logprob is nan.
+                # Fraction of response tokens whose generator (vLLM) logprob is nan
+                # (these are dropped from the loss above; tracked vs the ORIGINAL
+                # response_mask to monitor how often cudagraph emits NaN logprobs).
                 "loss/generator_logprob_nan_frac": (
-                    (~torch.isfinite(generator_logprobs)).float() * loss_mask
+                    (~torch.isfinite(generator_logprobs)).float() * response_mask
                 ).sum()
                 / loss_denominator,
             }

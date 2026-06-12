@@ -107,11 +107,11 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
-            # Run vLLM eager (no CUDA-graph capture). With cudagraph="full" the
-            # engine emits degenerate generations + NaN logprobs in this stack
-            # (see PR #3593 note on cudagraph NaNs); eager matches the reference
-            # 1.7B run. TODO: re-enable once the cudagraph NaN root cause is fixed.
-            cudagraph=VLLMCudagraphConfig(enable=False),
+            # cudagraph ON (main default). The GRPOLoss drops non-finite (NaN) tokens
+            # + clamps the log-ratio, so the NaN logprobs vLLM emits under cudagraph are
+            # handled in the loss rather than worked around with eager. enable=False
+            # falls back to eager if cudagraph turns out to corrupt generation itself.
+            cudagraph=VLLMCudagraphConfig(enable=True),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 # slime: temperature 1.0 + top_p 1.0; stop each turn at its action tag.
