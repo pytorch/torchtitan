@@ -312,9 +312,14 @@ class RLTrainer(Configurable):
         )
         self.renderer = config.renderer.build(tokenizer_path=config.hf_assets_path)
 
-        # Renderer stop tokens are injected into the generator at spawn
-        self._stop_token_ids = list(self.renderer.get_stop_token_ids())
-        self._sampling = config.generator.sampling
+        # Carry the base seed and renderer stop tokens on the sampling config so
+        # the generator reads them off each request; the rollouter offsets the
+        # seed per sample. Avoids the generator depending on request_id format.
+        self._sampling = replace(
+            config.generator.sampling,
+            seed=config.generator.debug.seed,
+            stop_token_ids=list(self.renderer.get_stop_token_ids()),
+        )
         # TODO: pass our own tokenizer to the renderer and read pad/eos off it
         # once `renderers` supports bring-your-own-tokenizer
         # (https://github.com/PrimeIntellect-ai/renderers/pull/70).
@@ -464,7 +469,6 @@ class RLTrainer(Configurable):
                         config.num_validation_samples,
                     ),
                     output_dir=config.dump_folder,
-                    stop_token_ids=self._stop_token_ids,
                 )
                 generators.append(generator)
             self.generator_router = config.generator_router.build(generators=generators)
@@ -709,6 +713,8 @@ class RLTrainer(Configurable):
         # TODO: investigate using pass@k for validation.
         t_validate_start = time.perf_counter()
         num_samples = self.config.num_validation_samples
+        if num_samples == 0:  # skip validation (e.g. loss guard CI)
+            return []
         greedy = replace(self._sampling, temperature=0.0, top_p=1.0)
 
         rollout_groups, validation_metrics = await self._collect_rollouts(

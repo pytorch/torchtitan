@@ -104,6 +104,59 @@ def _prepare_generation_request_metrics(
     ]
 
 
+def _force_logprobs_fn_for_batch_invariance() -> None:
+    """Make vLLM's v2 logprob path dispatch.
+
+    The v2 GPU sampler computes per-token logprobs with a fused Triton kernel
+    (``compute_token_logprobs`` -> ``_topk_log_softmax_kernel``) that inlines
+    ``log(softmax(logits))`` and never calls PyTorch ops.
+
+    Swapping the kernel to routes the generator and the trainer through
+    the same set of ops, so logprobs match bit-for-bit.
+    """
+    import vllm.v1.worker.gpu.sample.logprob as vllm_logprob
+
+    from torchtitan.experiments.rl.actors.trainer import compute_logprobs
+
+    def generator_compute_token_logprobs(
+        logits: torch.Tensor, token_ids: torch.Tensor
+    ) -> torch.Tensor:
+        """Per-token logprobs for vLLM's v2 sampler (replaces its fused kernel).
+
+        Args:
+            logits: ``[N, V]`` next-token logits for N sampled positions
+                (V = vocab_size).
+            token_ids: ``[N, K]`` the K token ids to score per position (vLLM
+                passes the sampled token's logprob plus any top-k logprobs it requested).
+
+        Returns:
+            ``[N, K]`` logprob of each of the K token ids at each position.
+        """
+        # vLLM gives token_ids [N, K]. SamplingParams(logprobs=0) makes real
+        # requests K=1, but we can't assert that: vLLM's kernel warmup probes
+        # this patched fn with K>1 (e.g. K=6), so we must handle any K. Map the
+        # N positions to one sequence (B=1, S=N) and reuse the trainer's
+        # compute_logprobs (one token per position) once per column.
+        #
+        # NOTE: each element of token_ids is scored independently, after the
+        # whole generated sequence is marterialized. We iterate column-by-column
+        # purely because torchtitan's compute_logprobs takes one token id per
+        # position; it is not a cross-column/cross-position dependency.
+        logits = logits.unsqueeze(0)  # [1, N, V]  (B=1, S=N)
+        token_ids = token_ids.to(torch.int64)
+        per_column = [
+            compute_logprobs(logits, token_ids[:, k].unsqueeze(0))  # [1, N]
+            for k in range(token_ids.shape[1])
+        ]
+        return torch.stack(per_column, dim=-1).squeeze(0)  # [N, K]
+
+    vllm_logprob.compute_token_logprobs = generator_compute_token_logprobs
+    logger.info(
+        "Patched vLLM compute_token_logprobs with trainer's implementation "
+        "so generator and trainer share one logprob code path"
+    )
+
+
 @dataclass(kw_only=True, slots=True)
 class VLLMCudagraphConfig:
     """CUDA graph capture settings for the vLLM inference engine.
@@ -177,6 +230,13 @@ class SamplingConfig:
     max_tokens: int = 100
     """Maximum number of tokens to generate per completion."""
 
+    seed: int | None = None
+    """Per-request RNG seed. The rollouter offsets this per sample so a group's
+    n=1 requests stay diverse while remaining reproducible (None = nondeterministic)."""
+
+    stop_token_ids: list[int] | None = None
+    """Renderer role-boundary stop tokens; filled by the controller."""
+
     stop: list[str] = field(default_factory=list)
     """Stop strings: generation halts as soon as any is produced. Empty (default) =
     no string stops, so turns end only at the renderer's role-boundary stop tokens.
@@ -230,7 +290,6 @@ class VLLMGenerator(Actor, Configurable):
             trainer so both sides compile identically.
         max_num_seqs: vLLM's max concurrent sequences (KV budget + CUDA-graph sizes).
         output_dir: Structured-logger output directory.
-        stop_token_ids: Renderer role-boundary stop tokens injected by the controller.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -341,7 +400,6 @@ class VLLMGenerator(Actor, Configurable):
         compile_config: CompileConfig,
         max_num_seqs: int,
         output_dir: str,
-        stop_token_ids: list[int],
     ):
         init_logger()
         sl.init_structured_logger(
@@ -362,10 +420,6 @@ class VLLMGenerator(Actor, Configurable):
         # (RLTrainer) as num_groups_per_rollout_batch * group_size.
         self._max_num_seqs = max_num_seqs
 
-        # Renderer role-boundary stop tokens (e.g. Qwen3 `<|im_end|>`), injected by the
-        # controller;
-        self._stop_token_ids = stop_token_ids
-
         # Register TorchTitan model + parser with vLLM
         registry_to_vllm(
             model_spec,
@@ -383,6 +437,10 @@ class VLLMGenerator(Actor, Configurable):
 
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
         set_batch_invariance(config.debug.batch_invariant)
+        if config.debug.batch_invariant:
+            # The vLLM v2 logprob Triton kernel bypasses the aten overrides above;
+            # route it through trainer's function to match the trainer exactly.
+            _force_logprobs_fn_for_batch_invariance()
 
         self._set_determinism(config.debug)
 
@@ -755,7 +813,13 @@ class VLLMGenerator(Actor, Configurable):
             self._model_state_dict_pull_request = None
 
     def _build_sampling_params(self, sampling: SamplingConfig) -> SamplingParams:
-        """Translate a `SamplingConfig` into vLLM `SamplingParams` (n=1; seed from debug)."""
+        """Translate a `SamplingConfig` into vLLM `SamplingParams` (n=1).
+
+        ``seed`` and ``stop_token_ids`` are carried on the ``SamplingConfig``
+        (the controller fills ``stop_token_ids`` and the rollouter offsets
+        ``seed`` per sample), so each sample in a group is a distinct ``n=1``
+        request that stays diverse and bitwise-reproducible.
+        """
         return SamplingParams(
             temperature=sampling.temperature,
             top_p=sampling.top_p,
@@ -763,8 +827,8 @@ class VLLMGenerator(Actor, Configurable):
             n=1,  # always expects a single sample per request. Caller can call N times.
             stop=sampling.stop or None,
             include_stop_str_in_output=sampling.include_stop_str_in_output,
-            stop_token_ids=self._stop_token_ids or None,
-            seed=self.config.debug.seed,
+            stop_token_ids=sampling.stop_token_ids or None,
+            seed=sampling.seed,
             logprobs=0,  # return only the sampled token's logprob (for the GRPO ratio)
             # Return each request's result once, when it is fully done, instead of streaming partial
             # outputs as tokens arrive.
