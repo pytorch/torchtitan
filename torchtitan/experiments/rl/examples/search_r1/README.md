@@ -53,7 +53,8 @@ Override `message_env.search_url` / `message_env.topk` in the config if needed.
 
 ```bash
 # eval run (Qwen3-1.7B), W&B on
-python torchtitan/experiments/rl/train.py --module rl \
+python torchtitan/experiments/rl/train.py \
+  --module torchtitan.experiments.rl.examples.search_r1 \
   --config rl_grpo_qwen3_1_7b_search_r1
 ```
 

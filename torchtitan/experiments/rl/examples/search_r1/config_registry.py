@@ -8,8 +8,11 @@
 
 These set the **slime-aligned recipe** (the stabilizers that the reproduction needs)
 entirely from the example's config — the core defaults are unchanged, so every other
-config keeps vanilla GRPO. Imported into ``config_registry`` so ``ConfigManager``
-discovers them via ``--module rl --config rl_grpo_qwen3_*_search_r1``.
+config keeps vanilla GRPO. ``ConfigManager`` discovers these directly from the example
+module::
+
+    --module torchtitan.experiments.rl.examples.search_r1 \\
+        --config rl_grpo_qwen3_1_7b_search_r1
 """
 
 from __future__ import annotations
@@ -41,8 +44,8 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
     **pure-EM 0/1 reward** (the rollouter's default rubric — no format/retrieval
     weighting, matching slime), **standard GRPO with group-std-normalized advantages**,
     **256 samples/step** (32 prompts x group 8, no dynamic sampling), clip-higher
-    (0.2/0.28), KL-to-reference (low_var_kl, 0.001), AdamW lr 1e-6 constant,
-    temperature 1.0 / top_p 1.0, max 4 search turns, 500 steps.
+    (0.2/0.28, DAPO-style), AdamW lr 1e-6 constant, temperature 1.0 / top_p 1.0,
+    max 4 search turns, 500 steps. No KL-to-reference penalty (no reference model).
 
     8 GPUs: 4 generator (TP=4) + 1 trainer (TP=1) + (off-config) a dense retrieval
     server on the spare GPUs. Requires a running retrieval server and the Search-R1
@@ -89,13 +92,12 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
                 interval=10000,  # only the initial HF load; no mid-run checkpoints
                 last_save_model_only=True,
             ),
-            # slime stabilizers: clip-higher (0.2/0.28) + KL-to-reference (low_var_kl,
-            # 0.001). These are off by default in core; this config opts in.
+            # slime stabilizer: clip-higher (0.2/0.28, DAPO-style). Off by default in
+            # core; this config opts in. No KL penalty / reference model (modern
+            # outcome-reward RL — DAPO/CISPO/GSPO — drops it; the reproduction holds).
             loss=GRPOLoss.Config(
                 clip_eps=0.2,
                 clip_eps_high=0.28,
-                kl_coef=0.001,
-                kl_loss_type="low_var_kl",
             ),
         ),
         generator=VLLMGenerator.Config(
@@ -144,8 +146,12 @@ def rl_grpo_qwen3_8b_search_r1() -> RLTrainer.Config:
             config.trainer.parallelism, tensor_parallel_degree=4
         ),
     )
+    # 8B TP=2 weights + a 0.9 KV cache leave no headroom for the trainer->generator
+    # weight sync, which OOMs the generator GPUs. 0.6 keeps ample paged-KV room
+    # while reserving ~30GB/GPU for the weight-sync transient.
     config.generator = dataclasses.replace(
         config.generator,
+        gpu_memory_limit=0.6,
         parallelism=dataclasses.replace(
             config.generator.parallelism, tensor_parallel_degree=2
         ),

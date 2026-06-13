@@ -46,35 +46,12 @@ from torchtitan.protocols.model_spec import ModelSpec
 logger = logging.getLogger(__name__)
 
 
-def _compute_kl(
-    logprobs: torch.Tensor, ref_logprobs: torch.Tensor, kl_loss_type: str
-) -> torch.Tensor:
-    """Per-token approximate KL(π_θ ‖ π_ref). Ported from slime/OpenRLHF.
-
-    "low_var_kl"/"k3" is the non-negative, low-variance estimator from
-    http://joschu.net/blog/kl-approx.html. "k1" = log-ratio, "k2" = log-ratio^2/2.
-    """
-    log_ratio = logprobs.float() - ref_logprobs.float()
-    if kl_loss_type in ("k3", "low_var_kl"):
-        neg = -log_ratio
-        kl = neg.exp() - 1 - neg
-    elif kl_loss_type == "k1":
-        kl = log_ratio
-    elif kl_loss_type == "k2":
-        kl = log_ratio**2 / 2.0
-    else:
-        raise ValueError(f"Unknown kl_loss_type: {kl_loss_type}")
-    if kl_loss_type == "low_var_kl":
-        kl = torch.clamp(kl, min=-10.0, max=10.0)
-    return kl
-
-
 class GRPOLoss(Configurable):
     """Per-token clipped surrogate loss for GRPO.
 
     Computes the PPO-style clipped objective at the token level::
 
-        ratio_t = exp(policy_logprob_t - ref_logprob_t)     # π_θ / π_old
+        ratio_t = exp(policy_logprob_t - old_logprob_t)     # π_θ / π_old
         clipped_t = clamp(ratio_t, 1 - ε, 1 + ε)
         loss_t = -min(ratio_t * A_t, clipped_t * A_t)
 
@@ -96,14 +73,6 @@ class GRPOLoss(Configurable):
         ``None`` (default) -> symmetric (uses clip_eps). A larger value (e.g. 0.28)
         keeps more probability mass on up-weighted tokens, mitigating mode collapse."""
 
-        kl_coef: float = 0.0
-        """Coefficient for the KL-to-reference penalty added per token. 0.0 (default)
-        disables it (and the trainer then skips building the reference model). slime
-        uses ~0.001 to keep the policy near the base model and prevent mode collapse."""
-
-        kl_loss_type: str = "low_var_kl"
-        """KL estimator (used only when kl_coef > 0): "low_var_kl"/"k3", "k1", "k2"."""
-
         max_log_ratio: float = 10.0
         """Clamp ``|log(π_θ/π_old)|`` to this (after dropping non-finite tokens) before
         ``exp()``. Bounds the generator<->trainer logprob mismatch — especially the
@@ -117,8 +86,6 @@ class GRPOLoss(Configurable):
             if config.clip_eps_high is not None
             else config.clip_eps
         )
-        self.kl_coef = config.kl_coef
-        self.kl_loss_type = config.kl_loss_type
         self.max_log_ratio = config.max_log_ratio
 
     def __call__(
@@ -128,9 +95,8 @@ class GRPOLoss(Configurable):
         loss_mask: torch.Tensor,
         advantages: torch.Tensor,
         num_global_valid_tokens: int,
-        ref_logprobs: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        """Compute per-token GRPO clipped surrogate loss (+ optional KL penalty).
+        """Compute per-token GRPO clipped surrogate loss.
 
         Args:
             policy_logprobs: [B, L] log π_θ(a_t | s_t) from the current policy.
@@ -140,8 +106,6 @@ class GRPOLoss(Configurable):
             num_global_valid_tokens: total response tokens across all microbatches
                 and DP ranks; used as the loss denominator so gradient
                 accumulation is equivalent to a single large-batch step.
-            ref_logprobs: [B, L] log π_ref from the frozen reference model; required
-                when ``kl_coef > 0`` (the KL-to-reference penalty), else ignored.
 
         Returns:
             (loss, metrics) where loss is a scalar tensor and metrics is a
@@ -167,16 +131,7 @@ class GRPOLoss(Configurable):
         # Asymmetric clip ("clip-higher"): upper bound 1 + clip_eps_high (= clip_eps
         # by default, so this is unchanged unless a config sets clip_eps_high).
         clipped_ratio = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps_high)
-        token_pg_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
-
-        # KL-to-reference penalty (keeps π_θ near the frozen base; prevents collapse
-        # to a degenerate reward-hacking mode). Off unless kl_coef > 0.
-        kl = None
-        if self.kl_coef > 0.0 and ref_logprobs is not None:
-            kl = _compute_kl(policy_logprobs, ref_logprobs, self.kl_loss_type)
-            token_loss = token_pg_loss + self.kl_coef * kl
-        else:
-            token_loss = token_pg_loss
+        token_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
 
         masked_loss = token_loss * loss_mask
         loss_denominator = max(num_global_valid_tokens, 1)
@@ -199,8 +154,6 @@ class GRPOLoss(Configurable):
                 ).sum()
                 / loss_denominator,
             }
-            if kl is not None:
-                metrics["loss/kl_mean"] = (kl * loss_mask).sum() / loss_denominator
 
         return loss, metrics
 
