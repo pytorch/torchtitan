@@ -33,7 +33,7 @@ from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.examples.search_r1.rollouter import SearchR1Rollouter
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
-from torchtitan.experiments.rl.trainer import GRPOLoss, RLTrainer
+from torchtitan.experiments.rl.trainer import DAPOLoss, RLTrainer
 from torchtitan.models.qwen3 import model_registry
 
 
@@ -92,10 +92,11 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
                 interval=10000,  # only the initial HF load; no mid-run checkpoints
                 last_save_model_only=True,
             ),
-            # slime stabilizer: clip-higher (0.2/0.28, DAPO-style). Off by default in
-            # core; this config opts in. No KL penalty / reference model (modern
-            # outcome-reward RL — DAPO/CISPO/GSPO — drops it; the reproduction holds).
-            loss=GRPOLoss.Config(
+            # slime stabilizer: DAPO-style clip-higher (0.2/0.28). Vanilla GRPOLoss is
+            # symmetric; DAPOLoss adds the higher upper clip bound (+ a stricter
+            # generator/trainer logprob-mismatch guard). No KL penalty / reference model
+            # (modern outcome-reward RL — DAPO/CISPO/GSPO — drops it; reproduction holds).
+            loss=DAPOLoss.Config(
                 clip_eps=0.2,
                 clip_eps_high=0.28,
             ),

@@ -66,27 +66,10 @@ class GRPOLoss(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         clip_eps: float = 0.2
-        """PPO clipping epsilon for the probability ratio (lower bound 1 - clip_eps)."""
-
-        clip_eps_high: float | None = None
-        """Upper clip bound (DAPO "clip-higher": ratio clamp max = 1 + clip_eps_high).
-        ``None`` (default) -> symmetric (uses clip_eps). A larger value (e.g. 0.28)
-        keeps more probability mass on up-weighted tokens, mitigating mode collapse."""
-
-        max_log_ratio: float = 10.0
-        """Clamp ``|log(π_θ/π_old)|`` to this (after dropping non-finite tokens) before
-        ``exp()``. Bounds the generator<->trainer logprob mismatch — especially the
-        large/NaN logprobs vLLM can emit under cudagraph — so ``exp()`` cannot overflow
-        to inf/NaN; also acts as a TIS-like guard on the mismatch."""
+        """PPO clipping epsilon for the probability ratio."""
 
     def __init__(self, config: Config):
         self.clip_eps = config.clip_eps
-        self.clip_eps_high = (
-            config.clip_eps_high
-            if config.clip_eps_high is not None
-            else config.clip_eps
-        )
-        self.max_log_ratio = config.max_log_ratio
 
     def __call__(
         self,
@@ -112,6 +95,87 @@ class GRPOLoss(Configurable):
             dict of scalar tensors pre-normalized for SUM reduction across
             DP ranks.
         """
+        # Per-token importance sampling ratio: π_θ / π_old
+        log_ratio = policy_logprobs - generator_logprobs
+
+        # TODO: debug why vLLM+cudagraph emits nan generator logprobs
+        log_ratio = torch.nan_to_num(log_ratio, nan=0.0)
+        log_ratio = torch.clamp(log_ratio, -20.0, 20.0)
+        ratio = torch.exp(log_ratio)
+
+        clipped_ratio = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
+        token_pg_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
+
+        masked_loss = token_pg_loss * loss_mask
+        loss_denominator = max(num_global_valid_tokens, 1)
+        loss = masked_loss.sum() / loss_denominator
+
+        with torch.no_grad():
+            masked_ratio = ratio * loss_mask
+            metrics = {
+                "loss/mean": loss.detach(),
+                "loss/ratio_mean": masked_ratio.sum() / loss_denominator,
+                "loss/ratio_clipped_frac": (
+                    (torch.abs(ratio - clipped_ratio) > 1e-6).float() * loss_mask
+                ).sum()
+                / loss_denominator,
+                # Fraction of response tokens whose generator (vLLM) logprob is nan.
+                "loss/generator_logprob_nan_frac": (
+                    (~torch.isfinite(generator_logprobs)).float() * loss_mask
+                ).sum()
+                / loss_denominator,
+            }
+
+        return loss, metrics
+
+
+class DAPOLoss(GRPOLoss):
+    """GRPO with DAPO-style "clip-higher" + a stricter generator/trainer mismatch guard.
+
+    Two recipe-specific changes over the vanilla :class:`GRPOLoss`:
+
+    - **Clip-higher** (DAPO, https://arxiv.org/abs/2503.14476): the importance ratio's
+      upper clip bound is ``1 + clip_eps_high`` (>= ``1 + clip_eps``), keeping more
+      probability mass on up-weighted tokens to counter entropy collapse / premature
+      convergence.
+    - **Drop non-finite tokens** instead of ``nan_to_num`` -> 0: vLLM can emit a
+      non-finite logprob for a token (notably under cudagraph), which has no valid
+      old-policy reference. Such a token is masked out of the loss + denominator (rather
+      than trained as if it were on-policy), and the log-ratio is clamped to
+      ``±max_log_ratio`` so a large mismatch can't overflow ``exp()``.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(GRPOLoss.Config):
+        clip_eps_high: float | None = None
+        """Upper clip bound (DAPO "clip-higher": ratio clamp max = 1 + clip_eps_high).
+        ``None`` (default) -> symmetric (uses clip_eps). A larger value (e.g. 0.28)
+        keeps more probability mass on up-weighted tokens, mitigating mode collapse."""
+
+        max_log_ratio: float = 10.0
+        """Clamp ``|log(π_θ/π_old)|`` to this (after dropping non-finite tokens) before
+        ``exp()``. Bounds the generator<->trainer logprob mismatch — especially the
+        large/NaN logprobs vLLM can emit under cudagraph — so ``exp()`` cannot overflow
+        to inf/NaN; also acts as a TIS-like guard on the mismatch."""
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.clip_eps_high = (
+            config.clip_eps_high
+            if config.clip_eps_high is not None
+            else config.clip_eps
+        )
+        self.max_log_ratio = config.max_log_ratio
+
+    def __call__(
+        self,
+        policy_logprobs: torch.Tensor,
+        generator_logprobs: torch.Tensor,
+        loss_mask: torch.Tensor,
+        advantages: torch.Tensor,
+        num_global_valid_tokens: int,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Compute per-token clip-higher GRPO loss; see :class:`DAPOLoss`."""
         # Per-token importance sampling ratio: π_θ / π_old. vLLM occasionally emits a
         # non-finite logprob for some tokens (notably under cudagraph). Such a token has
         # no valid old-policy reference, so its importance ratio is meaningless: DROP it
@@ -128,8 +192,7 @@ class GRPOLoss(Configurable):
         )
         ratio = torch.exp(log_ratio)
 
-        # Asymmetric clip ("clip-higher"): upper bound 1 + clip_eps_high (= clip_eps
-        # by default, so this is unchanged unless a config sets clip_eps_high).
+        # Asymmetric clip ("clip-higher"): upper bound 1 + clip_eps_high.
         clipped_ratio = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps_high)
         token_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
 
