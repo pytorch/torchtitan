@@ -61,6 +61,10 @@ You should NEVER use `--debug.deterministic_warn_only`.
    fields, distributed utilities), check and update every callsite. This includes all
    model variants: llama3, llama4, qwen3, deepseek_v3, gpt_oss, flux, etc.
 
+7. **No speculative defensive checks.** Don't add checks, casts, fallbacks, or
+   conversions "just in case." Only validate explicit contracts, user-facing
+   configuration, or invariants whose failure would otherwise be silent or unclear.
+
 ## Code Style
 
 ### Naming
