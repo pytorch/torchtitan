@@ -33,6 +33,7 @@ from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.examples.search_r1.rollouter import SearchR1Rollouter
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
+from torchtitan.experiments.rl.rollout.advantage import GRPOAdvantage
 from torchtitan.experiments.rl.trainer import DAPOLoss, RLTrainer
 from torchtitan.models.qwen3 import model_registry
 
@@ -60,13 +61,15 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
         # 32, n_samples_per_prompt 8, global_batch_size 256). No dynamic sampling.
         num_groups_per_rollout_batch=32,
         group_size=group_size,
-        # slime uses standard GRPO: normalize the advantage by the group reward std.
-        advantage_std_normalization=True,
         # Eval on NQ test (slime-style): every 5 steps, first 500 prompts (file order).
         num_validation_samples=500,
         validation_freq=5,
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        rollouter=SearchR1Rollouter.Config(),
+        # slime uses standard GRPO: normalize the advantage by the group reward std.
+        # Advantage is a post-scoring step on the rollouter (the trainer just consumes it).
+        rollouter=SearchR1Rollouter.Config(
+            advantage=GRPOAdvantage.Config(std_normalize=True),
+        ),
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         # seq_len 4096 fits the multi-turn rollouts; global_batch_size 48 packed rows

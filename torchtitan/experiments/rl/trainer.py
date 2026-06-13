@@ -264,13 +264,6 @@ class RLTrainer(Configurable):
         """Sibling rollouts sampled per dataset row (the GRPO group). The generator
         is always called with `n=1`; prompts are pre-expanded by `group_size`."""
 
-        advantage_std_normalization: bool = False
-        """Standard GRPO advantage ``A = (reward - group_mean) / (group_std + eps)``
-        (divide the centered advantage by the group's reward std). False (default) =
-        mean-baseline only (Dr.GRPO). slime/Search-R1 uses True: it up-weights
-        high-uncertainty groups (few-of-N correct), i.e. the hard, search-dependent
-        questions, so the policy keeps learning to search."""
-
         num_validation_samples: int = 20
         """Number of held-out prompts scored greedily (temp=0, n=1) per validation pass."""
 
@@ -670,24 +663,19 @@ class RLTrainer(Configurable):
     @sl.log_trace_span("_build_episodes")
     def _build_episodes(
         rollout_groups: list[RolloutGroup],
-        *,
-        std_normalize: bool = False,
     ) -> tuple[list[Episode], list[m.Metric]]:
-        """Build training episodes and GRPO advantages from scored rollout groups.
+        """Build training episodes from scored rollout groups.
 
-        Centers each group's rewards by its mean (and, when ``std_normalize``,
-        divides by the group reward std — standard GRPO), skips rollouts without
-        training tokens, and emits reward/advantage metrics.
+        Advantages are already filled per rollout by the Rollouter's
+        ``AdvantageEstimator`` (a post-scoring step); here we only flatten rollouts
+        into episodes, skip rollouts without training tokens, and emit metrics.
 
         Args:
-            rollout_groups: Scored rollout groups from one collection round.
-            std_normalize: If True, divide each centered advantage by the group's
-                reward std (+eps) — standard GRPO. If False, mean-baseline (Dr.GRPO).
+            rollout_groups: Scored rollout groups (with advantages) from one round.
 
         Returns:
             Train episodes plus episode-level metrics.
         """
-        # Mean-baseline advantage per group
         episodes: list[Episode] = []
         group_stds: list[float] = []
 
@@ -707,18 +695,13 @@ class RLTrainer(Configurable):
                 )
                 continue
 
-            # TODO: move advantage calculation to Rollouter
-            rewards = [rollout.reward for rollout in group.rollouts]
-            group_mean = sum(rewards) / len(rewards)
-            group_std = statistics.pstdev(rewards)
-            group_stds.append(group_std)
-
-            # Center the advantage per rollout (and, when std_normalize, divide by the
-            # group reward std -> standard GRPO). A zero-std group already has advantage
-            # 0 (reward == mean), so eps only avoids 0/0. Each rollout packs into 1+ episodes.
-            denom = (group_std + 1e-6) if std_normalize else 1.0
+            # Advantage is filled upstream by the Rollouter's AdvantageEstimator;
+            # group_std is recomputed here only for the metric. Each rollout packs into
+            # 1+ episodes.
+            group_stds.append(
+                statistics.pstdev([rollout.reward for rollout in group.rollouts])
+            )
             for rollout in group.rollouts:
-                rollout.advantage = (rollout.reward - group_mean) / denom
                 rollout_episodes = rollout_to_episodes(rollout)
                 episodes.extend(rollout_episodes)
                 branches_per_rollout.append(float(len(rollout_episodes)))
@@ -869,10 +852,7 @@ class RLTrainer(Configurable):
                 )
                 group_offset += num_groups
 
-            episodes, episode_metrics = self._build_episodes(
-                rollout_groups,
-                std_normalize=self.config.advantage_std_normalization,
-            )
+            episodes, episode_metrics = self._build_episodes(rollout_groups)
             t_rollout_s = time.perf_counter() - t_rollout_start
 
             # record rollout to jsonl
