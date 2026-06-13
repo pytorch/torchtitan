@@ -25,7 +25,6 @@ from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 
 
-# Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
     model: DeepSeekV3Model,
     *,
@@ -42,6 +41,7 @@ def parallelize_deepseekv3(
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
+
     if parallelism.spmd_backend == "full_dtensor":
         validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)

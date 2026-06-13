@@ -79,17 +79,18 @@ class GroupedExperts(Module):
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
 
-        gate_RF = torch._grouped_mm(
-            x_RD.bfloat16(),
-            w1_EFD.bfloat16().transpose(-2, -1),
-            offs=offsets_E,
+        h_RF = F.silu(
+            torch._grouped_mm(
+                x_RD.bfloat16(),
+                w1_EFD.bfloat16().transpose(-2, -1),
+                offs=offsets_E,
+            )
         )
-        up_RF = torch._grouped_mm(
+        h_RF = h_RF * torch._grouped_mm(
             x_RD.bfloat16(),
             w3_EFD.bfloat16().transpose(-2, -1),
             offs=offsets_E,
         )
-        h_RF = F.silu(gate_RF) * up_RF
         return torch._grouped_mm(
             h_RF, w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
         ).type_as(x_RD)
@@ -128,8 +129,7 @@ class GroupedExperts(Module):
             num_local_tokens_per_expert_E,
         )
         routed_output_RD = self._experts_forward(
-            routed_input_RD,
-            num_global_tokens_per_local_expert_e,
+            routed_input_RD, num_global_tokens_per_local_expert_e
         )
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,

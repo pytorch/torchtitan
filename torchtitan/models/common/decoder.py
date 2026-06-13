@@ -10,7 +10,9 @@ from dataclasses import dataclass
 import torch
 from torch.nn.attention.flex_attention import and_masks
 
-from torchtitan.distributed.minimal_async_ep.api import validate_cfg
+from torchtitan.distributed.minimal_async_ep.api import (
+    maybe_update_minimal_async_ep_config,
+)
 
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
@@ -122,7 +124,7 @@ class Decoder(BaseModel):
             object with a ``ParallelismConfig`` in its ``parallelism``
             field; in that case the training/debug setup is skipped.
             """
-            from torchtitan.config import ParallelismConfig, TORCH_DTYPE_MAP
+            from torchtitan.config import ParallelismConfig
             from torchtitan.trainer import Trainer
 
             assert hasattr(config, "parallelism"), (
@@ -156,34 +158,31 @@ class Decoder(BaseModel):
                         f"n_kv_heads ({n_kv_heads})."
                     )
 
-            ep_dispatcher_cfg = None
-            minimal_async_ep_dispatcher_cfgs = []
             for layer_cfg in self.layers:
                 if layer_cfg.moe is not None:
                     from torchtitan.models.common.token_dispatcher import (
                         DeepEPTokenDispatcher,
                         HybridEPTokenDispatcher,
-                        MinimalAsyncEPTokenDispatcher,
                     )
 
                     token_dispatcher_cfg = layer_cfg.moe.experts.token_dispatcher
-                    if isinstance(
-                        token_dispatcher_cfg,
-                        MinimalAsyncEPTokenDispatcher.Config,
+                    if (
+                        isinstance(
+                            token_dispatcher_cfg,
+                            (
+                                DeepEPTokenDispatcher.Config,
+                                HybridEPTokenDispatcher.Config,
+                            ),
+                        )
+                        and parallelism.expert_parallel_degree == 1
                     ):
-                        minimal_async_ep_dispatcher_cfgs.append(token_dispatcher_cfg)
-                    if isinstance(
-                        token_dispatcher_cfg,
-                        (
-                            DeepEPTokenDispatcher.Config,
-                            MinimalAsyncEPTokenDispatcher.Config,
-                            HybridEPTokenDispatcher.Config,
-                        ),
-                    ):
-                        ep_dispatcher_cfg = ep_dispatcher_cfg or token_dispatcher_cfg
+                        raise ValueError(
+                            f"{type(token_dispatcher_cfg).__qualname__} "
+                            "requires expert parallelism "
+                            "(expert_parallel_degree > 1)."
+                        )
 
-            if minimal_async_ep_dispatcher_cfgs:
-                validate_cfg(minimal_async_ep_dispatcher_cfgs, parallelism)
+            maybe_update_minimal_async_ep_config(self, config)
 
             # NOTE: Inference-only callers such as the RL generator skip
             # training.seq_len sync. Generated sequence length is not known
@@ -198,27 +197,6 @@ class Decoder(BaseModel):
                         f"attention RoPE maximum supported sequence "
                         f"length {max_seq_len}."
                     )
-
-                if minimal_async_ep_dispatcher_cfgs:
-                    # None for eager trainer
-                    memory_policy = getattr(config.compile, "memory_policy", None)
-                    if config.activation_checkpoint.mode != "full" and (
-                        memory_policy is None or memory_policy != "full"
-                    ):
-                        raise ValueError(
-                            "MinimalAsyncEP requires full recompute: set "
-                            "--activation_checkpoint.mode full for eager training or "
-                            "--compile.memory_policy full for graph_trainer."
-                        )
-
-                    for token_dispatcher_cfg in minimal_async_ep_dispatcher_cfgs:
-                        token_dispatcher_cfg.hidden_dim = self.dim
-                        token_dispatcher_cfg.tokens_per_rank = (
-                            config.training.local_batch_size * seq_len
-                        )
-                        token_dispatcher_cfg.dtype = TORCH_DTYPE_MAP[
-                            config.training.mixed_precision_param
-                        ]
 
                 for layer_cfg in self.layers:
                     attention_cfg = getattr(layer_cfg, "attention", None)

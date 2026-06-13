@@ -22,7 +22,7 @@ Shape symbols used by the API entrypoints:
 """
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -67,12 +67,40 @@ class _MinimalAsyncEPBufferState:
 _buffer_state: _MinimalAsyncEPBufferState | None = None
 
 
-def validate_cfg(dispatcher_cfgs: Sequence[Any], parallelism) -> None:
-    """Validate MinimalAsyncEP model/training config constraints."""
+def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None:
+    """Validate and fill MinimalAsyncEP dispatcher configs from runtime config."""
+    from torchtitan.config import ParallelismConfig, TORCH_DTYPE_MAP
+    from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
+    from torchtitan.trainer import Trainer
+
+    assert hasattr(
+        config, "parallelism"
+    ), "config passed to update_from_config must provide a parallelism field."
+    parallelism = config.parallelism
+    assert isinstance(parallelism, ParallelismConfig), (
+        "config.parallelism must be a ParallelismConfig, got "
+        f"{type(parallelism).__name__}."
+    )
+
+    dispatcher_cfgs = []
+    for layer_cfg in model_config.layers:
+        moe_cfg = getattr(layer_cfg, "moe", None)
+        if moe_cfg is None:
+            continue
+        token_dispatcher_cfg = moe_cfg.experts.token_dispatcher
+        if isinstance(token_dispatcher_cfg, MinimalAsyncEPTokenDispatcher.Config):
+            dispatcher_cfgs.append(token_dispatcher_cfg)
+
     if not dispatcher_cfgs:
         return
+
     if parallelism.spmd_backend == "full_dtensor":
         raise ValueError("MinimalAsyncEP does not support full_dtensor SPMD.")
+    if parallelism.expert_parallel_degree == 1:
+        raise ValueError(
+            "MinimalAsyncEPTokenDispatcher.Config requires expert parallelism "
+            "(expert_parallel_degree > 1)."
+        )
     if parallelism.tensor_parallel_degree != 1:
         raise ValueError(
             "MinimalAsyncEP does not support tensor or sequence parallelism."
@@ -88,6 +116,29 @@ def validate_cfg(dispatcher_cfgs: Sequence[Any], parallelism) -> None:
                 "divisible by expert_parallel_degree "
                 f"({parallelism.expert_parallel_degree})."
             )
+
+    if not isinstance(config, Trainer.Config):
+        raise ValueError(
+            "MinimalAsyncEP requires a Trainer.Config-compatible runtime config "
+            "to set hidden_dim, tokens_per_rank, and dtype."
+        )
+
+    memory_policy = getattr(config.compile, "memory_policy", None)
+    if config.activation_checkpoint.mode != "full" and memory_policy != "full":
+        raise ValueError(
+            "MinimalAsyncEP requires full recompute: set "
+            "--activation_checkpoint.mode full for eager training or "
+            "--compile.memory_policy full for graph_trainer."
+        )
+
+    for token_dispatcher_cfg in dispatcher_cfgs:
+        token_dispatcher_cfg.hidden_dim = model_config.dim
+        token_dispatcher_cfg.tokens_per_rank = (
+            config.training.local_batch_size * config.training.seq_len
+        )
+        token_dispatcher_cfg.dtype = TORCH_DTYPE_MAP[
+            config.training.mixed_precision_param
+        ]
 
 
 @dataclass
@@ -946,5 +997,5 @@ __all__ = [
     "combine_op",
     "dispatch_op",
     "init_buffer",
-    "validate_cfg",
+    "maybe_update_minimal_async_ep_config",
 ]

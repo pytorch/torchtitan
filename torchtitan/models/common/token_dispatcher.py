@@ -47,11 +47,6 @@ class AllToAllDispatchMetadata(LocalDispatchMetadata):
 class LocalTokenDispatcher(Configurable):
     """Token dispatcher for EP=1. Handles local token reordering only.
 
-    Also serves as the base class for EP dispatchers (AllToAllTokenDispatcher,
-    DeepEPTokenDispatcher, HybridEPTokenDispatcher,
-    MinimalAsyncEPTokenDispatcher)
-    which override dispatch() and combine().
-
     Not an nn.Module — dispatchers have no learnable parameters or buffers.
     """
 
@@ -850,6 +845,13 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     combine overlap are intentionally out of scope.
     """
 
+    ep_mesh: DeviceMesh | None
+    sp_size: int
+    hidden_dim: int | None
+    tokens_per_rank: int | None
+    dtype: torch.dtype | None
+    buffer_device: torch.device
+
     @dataclass(kw_only=True, slots=True)
     class Config(LocalTokenDispatcher.Config):
         score_before_experts: bool = False
@@ -873,9 +875,11 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         self.tokens_per_rank = config.tokens_per_rank
         self.dtype = config.dtype
         if config.device is None:
-            self.device = torch.device(device_type, device_module.current_device())
+            buffer_device = torch.device(device_type, device_module.current_device())
         else:
-            self.device = config.device
+            buffer_device = config.device
+        # pyrefly: ignore [read-only]
+        self.buffer_device = buffer_device
 
     # MinimalAsyncEP has one process-global buffer: the first dispatcher
     # initializes it, same-configuration dispatchers reuse it, and differing
@@ -911,7 +915,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
                 ("hidden_dim", self.hidden_dim),
                 ("tokens_per_rank", self.tokens_per_rank),
                 ("dtype", self.dtype),
-                ("device", self.device),
+                ("device", self.buffer_device),
             )
             if value is None
         ]
@@ -925,7 +929,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         assert self.hidden_dim is not None
         assert self.tokens_per_rank is not None
         assert self.dtype is not None
-        assert self.device is not None
+        assert self.buffer_device is not None
 
         ep_size = self.ep_mesh.size()
         ep_group = self.ep_mesh.get_group()
@@ -938,7 +942,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             num_local_experts,
             self.top_k,
             self.dtype,
-            self.device,
+            self.buffer_device,
         )
         if MinimalAsyncEPTokenDispatcher._global_buffer_key is not None:
             if MinimalAsyncEPTokenDispatcher._global_buffer_key != buffer_key:
@@ -955,7 +959,7 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
             num_local_experts=num_local_experts,
             top_k=self.top_k,
             dtype=self.dtype,
-            device=self.device,
+            device=self.buffer_device,
         )
         MinimalAsyncEPTokenDispatcher._global_buffer_key = buffer_key
 
