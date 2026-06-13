@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from renderers import Renderer
@@ -186,7 +186,13 @@ class Rollouter(Configurable):
                     self._run_single_rollout(
                         generate_fn=generate_fn,
                         env=env,
-                        sampling=sampling,
+                        # Offset the base seed per sample so a group's n=1
+                        # requests are diverse yet reproducible run-to-run.
+                        sampling=(
+                            sampling
+                            if sampling.seed is None
+                            else replace(sampling, seed=sampling.seed + sample_idx)
+                        ),
                         group_id=group_id,
                         rollout_id=f"{group_id}/sample={sample_idx}",
                     )
