@@ -3,17 +3,24 @@ from __future__ import annotations
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
 from torchtitan.components.dataloader import DataloaderExhaustedError
+from torchtitan.components.unique_counter import BitsetUniqueCounter
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.observability import structured_logger as sl
 from torchtitan.trainer import Trainer
+from xx.common.helpers import parse_info
 
 from .loss import PathLoss
 from .onnx_checkpoint import PathOnnxCheckpointManager
 from .validate import PathValidator
+
+
+def segment_names_from_info(info: torch.Tensor) -> list[str]:
+    return [parse_info(x)["name"] for x in info.cpu().numpy()]
 
 
 class PathTrainer(Trainer):
@@ -25,6 +32,10 @@ class PathTrainer(Trainer):
 
     def __init__(self, config: Config):
         super().__init__(config)
+        segment_names = getattr(self.dataloader, "segment_names", None)
+        self.unique_segment_counter = (
+            BitsetUniqueCounter(segment_names) if segment_names is not None else None
+        )
         self.loss_fn.to(self.device)
 
     def batch_generator(
@@ -78,11 +89,15 @@ class PathTrainer(Trainer):
         parallel_dims = self.parallel_dims
 
         microbatches = []
+        step_segment_names: dict[str, None] = {}
         local_samples = torch.tensor(0, dtype=torch.int64)
         for _ in range(self.gradient_accumulation_steps):
             with sl.log_trace_span("fetching_batch"):
                 input_dict, targets = next(data_iterator)
                 local_samples += next(iter(input_dict.values())).shape[0]
+                if self.unique_segment_counter is not None and "info" in input_dict:
+                    for name in segment_names_from_info(input_dict["info"]):
+                        step_segment_names[name] = None
                 microbatches.append((input_dict, targets))
         sl.log_trace_scalar({"local_samples": int(local_samples)})
 
@@ -122,6 +137,9 @@ class PathTrainer(Trainer):
             self.optimizers.step()
             self.lr_schedulers.step()
 
+        if self.unique_segment_counter is not None:
+            self.unique_segment_counter.update(step_segment_names.keys())
+
         loss = torch.sum(torch.stack(accumulated_losses))
         if not self.metrics_processor.should_log(self.step):
             return
@@ -143,7 +161,10 @@ class PathTrainer(Trainer):
             f"path/{k}": float((torch.as_tensor(v, dtype=torch.float32, device=self.device) / global_samples).item())
             for k, v in metric_sums.items()
         }
-        extra_metrics = {"n_samples_seen": global_samples_seen, **lr_metrics, **path_metrics}
+        dataset_metrics = {}
+        if self.unique_segment_counter is not None:
+            dataset_metrics["dataset/unique_segments_seen/train"] = self.unique_segment_counter.global_count()
+        extra_metrics = {"n_samples_seen": global_samples_seen, **lr_metrics, **path_metrics, **dataset_metrics}
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
@@ -157,3 +178,16 @@ class PathTrainer(Trainer):
         if self.config.validator.enable:
             self.validator.close()
         super().close()
+
+    def state_dict(self) -> dict[str, Any]:
+        state = super().state_dict()
+        unique_segment_counter = getattr(self, "unique_segment_counter", None)
+        if unique_segment_counter is not None:
+            state["unique_segment_counter"] = unique_segment_counter.state_dict()
+        return state
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        super().load_state_dict(state_dict)
+        unique_segment_counter = getattr(self, "unique_segment_counter", None)
+        if unique_segment_counter is not None and "unique_segment_counter" in state_dict:
+            unique_segment_counter.load_state_dict(state_dict["unique_segment_counter"])
