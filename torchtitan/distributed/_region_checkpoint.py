@@ -26,10 +26,15 @@ Two backends behind one surface:
     every decomposed node with the region's policy. The partitioner ignores views
     for free (inf save-weight), so only real compute nodes are saved.
   - eager: a plain use_reentrant=False checkpoint recomputes by default. To SAVE a
-    region we (a) shadow the checkpoint's pack/unpack with identity hooks while
-    running the body on the FORWARD pass (so the region's internal saves bypass the
-    checkpoint frame), and (b) on the RECOMPUTE pass skip the body via if/else and
-    return the stashed output.
+    region we (a) stash its output and skip the body on the RECOMPUTE pass; and (b)
+    on the FORWARD pass replace each tensor the region saved that can be refilled
+    from the recompute -- the input activations, the module parameters, and views of
+    either (an N-D input is saved as a reshape view, nn.Linear saves weight.t()) --
+    with a slot, freeing it now and refilling it (via as_strided for views) when the
+    recompute reaches the region. A dummy tensor saved last (see _Trigger) makes the
+    recompute fire before any region's backward reads a slot. Freeing parameter
+    views matters under FSDP: a pinned weight.t() would hold the gathered parameter
+    resident; instead it is refilled from the re-gathered parameter.
 
 Regions must be disjoint -- a unit must not contain another unit. The eager replay
 log is consumed in unit-entry order on recompute but written in unit-completion
@@ -73,7 +78,7 @@ _REGION_POLICY: dict = {}
 # path never touches this state (it tags fx nodes instead), so it is unchanged.
 class _EagerState:
     def __init__(self):
-        self.log: list = []  # per-forward (is_save, stashed_output)
+        self.log: list = []  # per-forward (is_save, stashed_output, slots)
         self.recomp_gid = None
         self.idx = 0
 
@@ -103,7 +108,10 @@ def checkpoint(fn, *args, policy=None, use_reentrant=False, **kwargs):
             state.idx = 0  # recompute pass start
         _eager_state_stack.append(state)
         try:
-            return fn(*a, **k)
+            # Add a dummy save (frame holder) last, so its backward -- the first
+            # node in the block's backward -- triggers the checkpoint's recompute
+            # before any saved region reads its slots.
+            return _add_trigger(fn(*a, **k))
         finally:
             _eager_state_stack.pop()
 
@@ -117,9 +125,120 @@ def _is_save(pol):
     return pol in (CheckpointPolicy.MUST_SAVE, CheckpointPolicy.PREFER_SAVE)
 
 
-class _identity_hooks(torch.autograd.graph.saved_tensors_hooks):
+class _Slot:
+    """Placeholder stored in a saved region's grad_fn in place of a saved tensor, so
+    that tensor is not pinned resident after the forward. Filled from the recompute
+    (run()'s recompute branch) when the block recompute reaches the region; the
+    _Trigger dummy save guarantees that recompute runs before any slot is read."""
+
+    __slots__ = ("value",)
+
     def __init__(self):
-        super().__init__(lambda x: x, lambda x: x)
+        self.value = None
+
+
+class _Trigger(torch.autograd.Function):
+    """Saves a dummy tensor as the LAST tensor of the checkpointed forward. Its
+    backward is therefore the FIRST node in the block's backward; unpacking the
+    dummy (a frame holder) triggers the checkpoint's own recompute before any saved
+    region's backward reads its slots. Because the dummy is the last frame holder,
+    early-stop cannot cut the recompute short -- it reaches every region. This needs
+    nothing from the checkpoint frame's internals."""
+
+    @staticmethod
+    def forward(ctx, x, dummy):
+        ctx.save_for_backward(dummy)
+        return x
+
+    @staticmethod
+    def backward(ctx, grad):
+        ctx.saved_tensors  # unpack -> triggers the frame recompute (fills slots)
+        return grad, None
+
+
+def _add_trigger(out):
+    if isinstance(out, torch.Tensor):
+        return _Trigger.apply(out, out.new_zeros(1))
+    if isinstance(out, (tuple, list)):
+        return type(out)(
+            _add_trigger(o) if isinstance(o, torch.Tensor) else o for o in out
+        )
+    return out
+
+
+def _resolve_source(x, id_to_arg, id_to_param):
+    """Return how to refill a saved tensor from the recompute, or None to pin it:
+    ("arg"/"param", index, view) where view is None for a direct save or
+    (size, stride, storage_offset) for a view of an arg/param (e.g. a reshaped
+    activation or nn.Linear's weight.t())."""
+    i = id_to_arg.get(id(x))
+    if i is not None:
+        return ("arg", i, None)
+    j = id_to_param.get(id(x))
+    if j is not None:
+        return ("param", j, None)
+    base = x._base
+    if base is not None:
+        spec = (x.size(), x.stride(), x.storage_offset())
+        i = id_to_arg.get(id(base))
+        if i is not None:
+            return ("arg", i, spec)
+        j = id_to_param.get(id(base))
+        if j is not None:
+            return ("param", j, spec)
+    return None
+
+
+class _region_save_hooks(torch.autograd.graph.saved_tensors_hooks):
+    """Save-tensor hooks for a MUST_SAVE region: replace every saved tensor that can
+    be refilled from the recompute -- the input activations, the module parameters,
+    and views of either (an N-D input is saved as a reshape view; nn.Linear saves
+    weight.t()) -- with a slot (freeing it now), and pin anything else (a true
+    intermediate). Each slot records an index-based source (see _resolve_source); no
+    tensors or ids are retained past the forward.
+
+    Freeing parameter views matters under FSDP: pinning a saved weight.t() would
+    hold the gathered parameter resident and defeat resharding; it is refilled from
+    the re-gathered parameter on recompute instead.
+    """
+
+    def __init__(self, args, module, slots):
+        # ids are valid only while inputs/params are alive (this forward); used only
+        # to resolve the index-based sources now, then dropped on __exit__.
+        id_to_arg = {
+            id(a): i for i, a in enumerate(args) if isinstance(a, torch.Tensor)
+        }
+        id_to_param = {}
+        if isinstance(module, torch.nn.Module):
+            id_to_param = {id(p): j for j, p in enumerate(module.parameters())}
+        self._maps = (id_to_arg, id_to_param)
+
+        def pack(x):
+            src = _resolve_source(x, id_to_arg, id_to_param)
+            if src is None:
+                return x  # pin (a true intermediate, not an input or parameter)
+            slot = _Slot()
+            slots.append((slot, src))
+            return slot
+
+        def unpack(s):
+            if type(s) is _Slot:
+                if s.value is None:
+                    raise RuntimeError(
+                        "region SAC: a saved region's slot was read before the block "
+                        "recompute filled it. The _Trigger dummy save should make the "
+                        "recompute run first; this indicates it did not fire."
+                    )
+                return s.value
+            return s
+
+        super().__init__(pack, unpack)
+
+    def __exit__(self, *exc):
+        # Sources are resolved; drop the ids so none are kept past the forward.
+        for m in self._maps:
+            m.clear()
+        return super().__exit__(*exc)
 
 
 def _unit_impl(pol, inner_fn):
@@ -150,20 +269,36 @@ def _unit_impl(pol, inner_fn):
         gid = torch._C._current_graph_task_id()
         if gid != -1:
             # recompute pass: replay the forward decision from the log
-            is_save, val = state.log[state.idx]
+            is_save, val, slots = state.log[state.idx]
             state.idx += 1
             if is_save:
+                # refill the saved region's slots from the recomputed sources
+                params = None
+                for slot, (base_kind, index, view) in slots:
+                    if base_kind == "arg":
+                        base = args[index]
+                    else:
+                        if params is None:
+                            params = list(inner_fn.parameters())
+                        base = params[index]
+                    t = base if view is None else base.as_strided(*view)
+                    slot.value = (
+                        t.detach()
+                        if isinstance(t, torch.Tensor) and t.requires_grad
+                        else t
+                    )
                 return val  # skip body, return stashed output
             return inner_fn(*args, **kwargs)
 
         # forward pass
         if _is_save(pol):
-            with _identity_hooks():
+            slots: list = []
+            with _region_save_hooks(args, inner_fn, slots):
                 out = inner_fn(*args, **kwargs)
-            state.log.append((True, out))
+            state.log.append((True, out, slots))
             return out
         out = inner_fn(*args, **kwargs)
-        state.log.append((False, None))
+        state.log.append((False, None, None))
         return out
 
     return run
