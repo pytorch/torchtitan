@@ -368,12 +368,20 @@ class TestCudagraphPass(unittest.TestCase):
                 (cuda_f32(4, 8), cuda_f32(12, 8)),
             ),
             (
+                torch.ops.minimal_async_ep.active_swiglu.default,
+                cuda_f32(16, 8),
+            ),
+            (
                 torch.ops.minimal_async_ep.dispatch_backward.default,
                 cuda_f32(4, 8),
             ),
             (
                 torch.ops.minimal_async_ep.combine_backward.default,
                 (cuda_f32(16, 8), cuda_f32(12)),
+            ),
+            (
+                torch.ops.minimal_async_ep.active_swiglu_backward.default,
+                (cuda_f32(16, 8), cuda_f32(16, 8)),
             ),
         ]
         nodes = []

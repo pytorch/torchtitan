@@ -14,6 +14,7 @@ import triton.language as tl
 _COUNT_COPY_BLOCK_SIZE = 1024
 _METADATA_BLOCK_SIZE = 256
 _MAX_BLOCK_N = 2048
+_SWIGLU_BLOCK_M = 4
 
 # MinimalAsyncEP hidden buffers use TrainingConfig.mixed_precision_param,
 # currently restricted to bfloat16 or float32.
@@ -289,6 +290,140 @@ def _topk_scores_grad_kernel(
 
 
 @triton.jit
+def _active_swiglu_forward_kernel(
+    gate,
+    up,
+    out,
+    active_rows_ptr: tl.pointer_type(tl.int32),
+    NUM_COLS: tl.constexpr,
+    GATE_ROW_STRIDE: tl.constexpr,
+    GATE_COL_STRIDE: tl.constexpr,
+    UP_ROW_STRIDE: tl.constexpr,
+    UP_COL_STRIDE: tl.constexpr,
+    OUT_ROW_STRIDE: tl.constexpr,
+    OUT_COL_STRIDE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+) -> None:
+    """Compute ``silu(gate) * up`` for active received rows only.
+
+    Rows at or after ``active_rows_ptr[0]`` are receive-capacity padding and
+    are intentionally left unspecified because grouped-mm offsets skip them.
+
+    Example:
+        With ``active_rows=2``, ``gate=[[0], [1], [9]]``, and
+        ``up=[[2], [3], [4]]``, the first two output rows are
+        approximately ``[[0.0], [2.193]]`` and row 2 is unspecified.
+    """
+    row_start = tl.program_id(0) * BLOCK_M
+    active_rows = tl.load(active_rows_ptr)
+    if row_start >= active_rows:
+        return
+
+    rows = row_start + tl.arange(0, BLOCK_M)
+    cols = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask = (rows[:, None] < active_rows) & (cols[None, :] < NUM_COLS)
+
+    gate_values = tl.load(
+        gate + rows[:, None] * GATE_ROW_STRIDE + cols[None, :] * GATE_COL_STRIDE,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    up_values = tl.load(
+        up + rows[:, None] * UP_ROW_STRIDE + cols[None, :] * UP_COL_STRIDE,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    silu = gate_values * tl.sigmoid(gate_values)
+    tl.store(
+        out + rows[:, None] * OUT_ROW_STRIDE + cols[None, :] * OUT_COL_STRIDE,
+        silu * up_values,
+        mask=mask,
+    )
+
+
+@triton.jit
+def _active_swiglu_backward_kernel(
+    grad_out,
+    gate,
+    up,
+    grad_gate,
+    grad_up,
+    active_rows_ptr: tl.pointer_type(tl.int32),
+    NUM_COLS: tl.constexpr,
+    GRAD_OUT_ROW_STRIDE: tl.constexpr,
+    GRAD_OUT_COL_STRIDE: tl.constexpr,
+    GATE_ROW_STRIDE: tl.constexpr,
+    GATE_COL_STRIDE: tl.constexpr,
+    UP_ROW_STRIDE: tl.constexpr,
+    UP_COL_STRIDE: tl.constexpr,
+    GRAD_GATE_ROW_STRIDE: tl.constexpr,
+    GRAD_GATE_COL_STRIDE: tl.constexpr,
+    GRAD_UP_ROW_STRIDE: tl.constexpr,
+    GRAD_UP_COL_STRIDE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+) -> None:
+    """Backward for ``_active_swiglu_forward_kernel`` over active rows only.
+
+    Gradients for receive-capacity padding rows are intentionally left
+    unspecified because no later grouped-mm segment consumes them.
+
+    Example:
+        With ``active_rows=2``, ``grad_out=[[5], [7], [11]]``,
+        ``gate=[[0], [1], [9]]``, and ``up=[[2], [3], [4]]``, the first
+        two ``grad_gate`` rows are approximately ``[[5.0], [19.48]]``,
+        the first two ``grad_up`` rows are approximately
+        ``[[0.0], [5.118]]``, and row 2 is unspecified.
+    """
+    row_start = tl.program_id(0) * BLOCK_M
+    active_rows = tl.load(active_rows_ptr)
+    if row_start >= active_rows:
+        return
+
+    rows = row_start + tl.arange(0, BLOCK_M)
+    cols = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask = (rows[:, None] < active_rows) & (cols[None, :] < NUM_COLS)
+
+    grad_values = tl.load(
+        grad_out
+        + rows[:, None] * GRAD_OUT_ROW_STRIDE
+        + cols[None, :] * GRAD_OUT_COL_STRIDE,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    gate_values = tl.load(
+        gate + rows[:, None] * GATE_ROW_STRIDE + cols[None, :] * GATE_COL_STRIDE,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    up_values = tl.load(
+        up + rows[:, None] * UP_ROW_STRIDE + cols[None, :] * UP_COL_STRIDE,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+
+    sigmoid = tl.sigmoid(gate_values)
+    silu = gate_values * sigmoid
+    silu_grad = sigmoid * (1.0 + gate_values * (1.0 - sigmoid))
+
+    tl.store(
+        grad_gate
+        + rows[:, None] * GRAD_GATE_ROW_STRIDE
+        + cols[None, :] * GRAD_GATE_COL_STRIDE,
+        grad_values * up_values * silu_grad,
+        mask=mask,
+    )
+    tl.store(
+        grad_up
+        + rows[:, None] * GRAD_UP_ROW_STRIDE
+        + cols[None, :] * GRAD_UP_COL_STRIDE,
+        grad_values * silu,
+        mask=mask,
+    )
+
+
+@triton.jit
 def _copy_rows_to_peer_ptrs_kernel(
     src,
     dst_ptrs: tl.pointer_type(tl.int64),
@@ -377,6 +512,77 @@ def copy_full_counts_to_peers_kernel(
         DST_ROW_STRIDE=dsts[0].stride(0),
         BLOCK_SIZE=block_size,
     )
+
+
+def active_swiglu_forward_kernel(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    active_rows: torch.Tensor,
+) -> torch.Tensor:
+    """Compute ``silu(gate) * up`` only for rows before ``active_rows[0]``.
+
+    Rows at or after ``active_rows[0]`` in the returned tensor are unspecified.
+    MinimalAsyncEP only consumes rows covered by the same grouped-mm offsets.
+    """
+    out = torch.empty_like(gate)
+
+    block_m = _SWIGLU_BLOCK_M
+    block_n = min(_MAX_BLOCK_N, triton.next_power_of_2(gate.shape[1]))
+    grid = (triton.cdiv(gate.shape[0], block_m), triton.cdiv(gate.shape[1], block_n))
+    _active_swiglu_forward_kernel[grid](
+        gate,
+        up,
+        out,
+        active_rows,
+        NUM_COLS=gate.shape[1],
+        GATE_ROW_STRIDE=gate.stride(0),
+        GATE_COL_STRIDE=gate.stride(1),
+        UP_ROW_STRIDE=up.stride(0),
+        UP_COL_STRIDE=up.stride(1),
+        OUT_ROW_STRIDE=out.stride(0),
+        OUT_COL_STRIDE=out.stride(1),
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        num_warps=8,
+    )
+    return out
+
+
+def active_swiglu_backward_kernel(
+    grad_out: torch.Tensor,
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    active_rows: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    grad_gate = torch.empty_like(gate)
+    grad_up = torch.empty_like(up)
+
+    block_m = _SWIGLU_BLOCK_M
+    block_n = min(_MAX_BLOCK_N, triton.next_power_of_2(gate.shape[1]))
+    grid = (triton.cdiv(gate.shape[0], block_m), triton.cdiv(gate.shape[1], block_n))
+    _active_swiglu_backward_kernel[grid](
+        grad_out,
+        gate,
+        up,
+        grad_gate,
+        grad_up,
+        active_rows,
+        NUM_COLS=gate.shape[1],
+        GRAD_OUT_ROW_STRIDE=grad_out.stride(0),
+        GRAD_OUT_COL_STRIDE=grad_out.stride(1),
+        GATE_ROW_STRIDE=gate.stride(0),
+        GATE_COL_STRIDE=gate.stride(1),
+        UP_ROW_STRIDE=up.stride(0),
+        UP_COL_STRIDE=up.stride(1),
+        GRAD_GATE_ROW_STRIDE=grad_gate.stride(0),
+        GRAD_GATE_COL_STRIDE=grad_gate.stride(1),
+        GRAD_UP_ROW_STRIDE=grad_up.stride(0),
+        GRAD_UP_COL_STRIDE=grad_up.stride(1),
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        num_warps=8,
+    )
+    return grad_gate, grad_up
 
 
 def copy_rows_to_peers_kernel(
