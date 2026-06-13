@@ -29,6 +29,12 @@ only example-specific pieces are this folder plus a config that sets the slime r
 
 ## Prerequisites
 
+Install the example's extra Python dependencies (not in core torchtitan):
+
+```bash
+pip install -r torchtitan/experiments/rl/examples/search_r1/requirements.txt
+```
+
 ### 1. Data
 Prepare the Search-R1 NQ/HotpotQA parquet (via Search-R1's
 `scripts/data_process/qa_search_{train,test}_merge.py`). Point the config's
