@@ -95,7 +95,7 @@ def _set_qwen3_layer_sharding(
         attn_x_layout = (
             dense_sequence_parallel_placement()
             if enable_sp
-            else dense_activation_placement(tp=spmd.R)
+            else dense_activation_placement(tp=spmd.I)
         )
         set_dense_ffn_sharding(
             layer_cfg.feed_forward,
