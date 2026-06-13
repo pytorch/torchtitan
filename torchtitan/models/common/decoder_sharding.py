@@ -7,6 +7,7 @@
 import spmd_types as spmd
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.utils import get_spmd_backend
 
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
@@ -111,6 +112,30 @@ def norm_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
+def pre_lm_head_norm_config(*, enable_sp: bool) -> ShardingConfig:
+    """Root decoder norm sharding before ``lm_head`` / chunked CE loss.
+
+    With sequence parallelism, decoder blocks emit sequence-sharded hidden
+    states. ``ChunkedCELoss`` chunks those hidden states and applies
+    ``lm_head`` inside the loss, so this root norm is the last clean module
+    boundary to all-gather the TP sequence shard back to replicated hidden
+    states before chunking starts.
+    """
+    activation = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I)
+    )
+    return ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.R if enable_sp else spmd.I)
+        },
+        in_src_shardings={"input": activation},
+        out_src_shardings=activation,
+        out_dst_shardings=dense_activation_placement(tp=spmd.R),
+    )
+
+
 def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
     """Colwise-shard each Q/K/V projection of a ``BaseQKVLinear``.
 
@@ -118,6 +143,18 @@ def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
     ``FusedQKVLinear`` (single ``wqkv``).
     """
     if isinstance(qkv_linear_cfg, FusedQKVLinear.Config):
+        # TODO(pianpwk): Make fused-QKV local_map work for DTensor backends too;
+        # wrapping the parent today mixes local inputs with DTensor child params.
+        if get_spmd_backend() == "spmd_types":
+            qkv_output = dense_activation_placement(tp=spmd.S(2))
+            qkv_linear_cfg.sharding_config = ShardingConfig(
+                in_src_shardings={"x": dense_activation_placement(tp=spmd.R)},
+                in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
+                out_src_shardings=(qkv_output, qkv_output, qkv_output),
+                local_map=LocalMapConfig(
+                    in_grad_placements=(dense_activation_placement(tp=spmd.P),),
+                ),
+            )
         qkv_linear_cfg.wqkv.sharding_config = colwise_config()
     elif isinstance(qkv_linear_cfg, QKVLinear.Config):
         qkv_linear_cfg.wq.sharding_config = colwise_config()
@@ -266,11 +303,11 @@ def set_decoder_sharding_config(
         out_dst_shardings=activation_layout,
         local_map=LocalMapConfig(in_grad_placements=None),
     )
-    config.norm.sharding_config = norm_config(enable_sp=enable_sp)
+    config.norm.sharding_config = pre_lm_head_norm_config(enable_sp=enable_sp)
 
     config.lm_head.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={"input": activation_layout},
+        in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
         in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
         out_src_shardings=dense_activation_placement(tp=spmd.S(-1)),
         out_dst_shardings=dense_activation_placement(tp=loss_tp),

@@ -75,9 +75,9 @@ def spmd_mesh_size(axis_name: str) -> int:
 @contextlib.contextmanager
 def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
     """Set TorchTitan and spmd_types current mesh state for one runtime region."""
-    assert (
-        get_spmd_backend() == "spmd_types"
-    ), "set_current_spmd_mesh() is only valid under spmd_types backend"
+    if get_spmd_backend() != "spmd_types":
+        yield
+        return
 
     stack = _spmd_mesh_stack()
     stack.append(mesh)
