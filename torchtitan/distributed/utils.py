@@ -621,7 +621,7 @@ def _clip_grad_norm_with_ep(
         assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
         mesh_dim_names = p.device_mesh.mesh_dim_names
         assert mesh_dim_names is not None
-        if "ep" in mesh_dim_names:
+        if "ep" in mesh_dim_names or "efsdp" in mesh_dim_names:
             ep_params.append(p)
             ep_grads.append(p.grad)
         else:
