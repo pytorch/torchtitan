@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -90,10 +90,6 @@ class PathDataLoader(BaseDataLoader):
         )
         self.loader = DataLoader(dataset, loader_config)
         self._iterator: Any | None = None
-
-    @property
-    def segment_names(self) -> Iterable[str] | None:
-        return getattr(self.dataset, "segment_names", None)
 
     def __iter__(self) -> Iterator[tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]]:
         iterator = iter(self.loader)
