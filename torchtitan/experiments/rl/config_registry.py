@@ -27,10 +27,6 @@ from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGener
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
-
-# Search-R1 example configs live in the example folder and are discovered directly via
-# `--module torchtitan.experiments.rl.examples.search_r1 --config rl_grpo_qwen3_*_search_r1`
-# (no import here — they don't belong in the core registry).
 from torchtitan.experiments.rl.generator_router import (
     GeneratorRouter,
     RoundRobinRoutingStrategy,
