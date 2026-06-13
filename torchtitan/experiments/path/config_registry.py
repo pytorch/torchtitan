@@ -241,9 +241,10 @@ def _checkpoint_config(folder: str, base_folder: str) -> PathOnnxCheckpointManag
         [1, temporal_len, TEMPORAL_INPUTS[ModelInputs.ACTION_T][0]],
     ]
     return PathOnnxCheckpointManager.Config(
+        keep_latest_k=0, # keep all checkpoints
         enable=True,
         checkpoint_base_folder=base_folder,
-        save_model_state_dict=True,
+        save_model_state_dict=True, # another copy of full state dict
         export_onnx=True,
         enable_first_step_checkpoint=True,
         folder=folder,
@@ -251,7 +252,7 @@ def _checkpoint_config(folder: str, base_folder: str) -> PathOnnxCheckpointManag
         input_names=input_names,
         input_shapes=input_shapes,
         input_dtypes=["float16"] * len(input_names),
-        onnx_model_dtype="float16",
+        onnx_model_dtype="float16", # WIP: test if fp16 doesn't degrade performance
         vision_input_names=vision_input_names,
         temporal_policy_input_names=temporal_policy_input_names,
     )
