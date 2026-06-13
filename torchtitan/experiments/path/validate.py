@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -11,13 +12,19 @@ import torch.nn as nn
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
+from torchtitan.components.unique_counter import StringUniqueCounter
 from torchtitan.components.validate import BaseValidator
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from xx.common.helpers import parse_info
 
 from .loss import PathLoss
 
 ValidationContext = Callable[[], AbstractContextManager[None]]
+
+
+def segment_names_from_info(info: torch.Tensor) -> list[str]:
+    return [parse_info(x)["name"] for x in info.cpu().numpy()]
 
 
 class PathValidator(BaseValidator):
@@ -63,6 +70,8 @@ class PathValidator(BaseValidator):
             local_batch_size=self.local_batch_size,
             validation_steps=self.config.steps,
         )
+        training_id = os.getenv("REPORTERV2_TRAINING_ID") or "local"
+        self.unique_segment_counter = StringUniqueCounter(f"unique_ids:{training_id}:path:validation")
 
     @torch.no_grad()
     def validate(self, model_parts: list[nn.Module], step: int) -> None:
@@ -74,17 +83,21 @@ class PathValidator(BaseValidator):
             total_loss = torch.zeros((), device=device)
             total_samples = torch.zeros((), device=device)
             metric_sums: dict[str, torch.Tensor] = {}
+            validation_segment_names: set[str] = set()
+            batch_mesh = self.parallel_dims.get_optional_mesh("batch")
             loss_mesh = self.parallel_dims.get_optional_mesh("loss")
             for num_steps, (input_dict, targets) in enumerate(self.dataloader):
                 if self.config.steps != -1 and num_steps >= self.config.steps:
                     break
                 self.metrics_processor.ntokens_since_last_log += next(iter(input_dict.values())).shape[0]
+                if "info" in input_dict:
+                    validation_segment_names.update(segment_names_from_info(input_dict["info"]))
                 input_dict = {k: v.to(device) for k, v in input_dict.items()}
                 targets = {k: v.to(device) for k, v in targets.items()}
                 local_samples = torch.tensor(next(iter(input_dict.values())).shape[0], dtype=torch.float32, device=device)
                 global_samples = (
-                    dist_utils.dist_sum(local_samples, self.parallel_dims.get_mesh("batch"))
-                    if self.parallel_dims.dp_enabled
+                    dist_utils.dist_sum(local_samples, batch_mesh)
+                    if batch_mesh is not None
                     else local_samples
                 )
 
@@ -102,12 +115,19 @@ class PathValidator(BaseValidator):
                 for name, value in batch_metric_sums.items():
                     metric_sums[name] = metric_sums.get(name, torch.zeros((), device=device)) + value
 
+            self.unique_segment_counter.update(validation_segment_names)
+
             samples = torch.as_tensor(total_samples, dtype=torch.float32, device=device)
             loss = float((torch.as_tensor(total_loss, dtype=torch.float32, device=device) / samples).item())
             extra_metrics = {
                 f"validation_metrics/path/{k}": float((torch.as_tensor(v, dtype=torch.float32, device=device) / samples).item())
                 for k, v in metric_sums.items()
             }
+            extra_metrics["validation_metrics/dataset/unique_segments_seen"] = (
+                self.unique_segment_counter.global_count(batch_mesh.get_group())
+                if batch_mesh is not None
+                else self.unique_segment_counter.local_count()
+            )
             self.metrics_processor.log_validation(loss=loss, step=step, extra_metrics=extra_metrics)
         finally:
             for model in model_parts:

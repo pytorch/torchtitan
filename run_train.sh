@@ -57,30 +57,31 @@ MASTER_PORT=${MASTER_PORT:-12355}
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
 
 generate_uuid() {
-  if [[ -r /proc/sys/kernel/random/uuid ]]; then
-    tr -d '\n' < /proc/sys/kernel/random/uuid
-  elif command -v uuidgen >/dev/null 2>&1; then
-    uuidgen | tr '[:upper:]' '[:lower:]'
-  elif command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import uuid; print(uuid.uuid4())'
-  else
-    date +'%s-%N'
+  if [[ -z "${1:-}" ]]; then
+    cat /proc/sys/kernel/random/uuid
+    return
   fi
+
+  local hex
+  hex=$(printf '%s' "$1" | sha1sum)
+  hex=${hex%% *}
+  printf '%s-%s-%s-%s-%s\n' "${hex:0:8}" "${hex:8:4}" "${hex:12:4}" "${hex:16:4}" "${hex:20:12}"
 }
 
-declare -A env_vars=()
+export REPORTERV2_HOST="${REPORTERV2_HOST:-mkv://data-gen.comma.life:3080/reporterv2}"
 
-if [[ -z "${env_vars[REPORTERV2_HOST]+set}" ]]; then
-  env_vars["REPORTERV2_HOST"]="${REPORTERV2_HOST:-mkv://data-gen.comma.life:3080/reporterv2}"
+if [[ -z "${REPORTERV2_TRAINING_ID:-}" ]]; then
+  reporterv2_seed=""
+  if [[ -n "${SLURM_ARRAY_JOB_ID:-}" && -n "${SLURM_ARRAY_TASK_ID:-}" ]]; then
+    reporterv2_seed="slurm:${SLURM_ARRAY_JOB_ID}:${SLURM_ARRAY_TASK_ID}"
+  elif [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    reporterv2_seed="slurm:${SLURM_JOB_ID}"
+  elif [[ -n "${RDZV_ID:-}" ]]; then
+    reporterv2_seed="rdzv:${RDZV_ID}"
+  fi
+  REPORTERV2_TRAINING_ID="$(generate_uuid "$reporterv2_seed")"
 fi
-
-if [[ -z "${env_vars[REPORTERV2_TRAINING_ID]+set}" ]]; then
-  env_vars["REPORTERV2_TRAINING_ID"]="${REPORTERV2_TRAINING_ID:-$(generate_uuid)}"
-fi
-
-for env_var in "${!env_vars[@]}"; do
-  export "${env_var}=${env_vars[$env_var]}"
-done
+export REPORTERV2_TRAINING_ID
 
 if [ -n "$COMM_MODE" ]; then
     # Communication mode specified: validate configuration or run in debug mode

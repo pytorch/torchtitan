@@ -135,7 +135,7 @@ def _path(flavor: str) -> PathTrainer.Config:
         ),
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
         compile=CompileConfig(enable=True, components=["model"]),
-        metrics=MetricsProcessor.Config(log_freq=1, enable_reporterv2=True, save_freq=1024),
+        metrics=MetricsProcessor.Config(log_freq=16, enable_reporterv2=True, save_freq=1024),
         validator=PathValidator.Config(
             enable=True,
             freq=1024,
