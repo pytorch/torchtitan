@@ -28,7 +28,7 @@ cd "$SCRIPT_DIR"
 #    - Useful for debugging distributed training logic locally
 #    Example: NGPU=32 COMM_MODE="local_tensor" ./run_train.sh
 
-NGPU=${NGPU:-"8"}
+NGPU=${NGPU:-"$(nvidia-smi -L | wc -l)"}
 export LOG_RANK=${LOG_RANK:-0}
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
