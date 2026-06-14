@@ -19,7 +19,6 @@ dependencies = [
     "safetensors",
 
     # Miscellaneous
-    "fsspec",
     "tyro",
     "tensorboard",
     "wandb",
