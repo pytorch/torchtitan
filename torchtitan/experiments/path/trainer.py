@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -25,6 +25,14 @@ class PathTrainer(Trainer):
         loss: PathLoss.Config
         validator: PathValidator.Config
         checkpoint: PathOnnxCheckpointManager.Config
+        codedir: str = ""
+        miniray: dict[str, Any] = field(default_factory=dict)
+
+        def __post_init__(self) -> None:
+            Trainer.Config.__post_init__(self)
+            if self.codedir:
+                self.miniray = {**self.miniray, "codedir": self.codedir}
+                self.validator.miniray = {**self.validator.miniray, "codedir": self.codedir}
 
     def __init__(self, config: Config):
         super().__init__(config)

@@ -62,6 +62,8 @@ class OnnxCheckpointManager(CheckpointManager):
 
     @dataclass(kw_only=True, slots=True)
     class Config(CheckpointManager.Config):
+        checkpoint_id_format: str = ""
+
         save_model_state_dict: bool = False
         """Save a gathered model state dict as one rank-0 torch file."""
 

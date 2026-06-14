@@ -43,7 +43,7 @@ NODE_RANK=${NODE_RANK:-${SLURM_NODEID:-0}}
 TORCHTITAN_ARGS=()
 for arg in "$@"; do
   case "$arg" in
-    codedir=*) ;;
+    codedir=*) TORCHTITAN_ARGS+=("--codedir=${arg#codedir=}") ;;
     master_addr=*) MASTER_ADDR="${arg#master_addr=}" ;;
     master_port=*) MASTER_PORT="${arg#master_port=}" ;;
     --metrics.enable_reporterv2=) TORCHTITAN_ARGS+=("--metrics.enable_reporterv2") ;;

@@ -89,7 +89,20 @@ def convnext_xxlarge() -> PathTrainer.Config:
 
 
 def _path(flavor: str) -> PathTrainer.Config:
-    steps = 1024*100
+    steps = 512*100
+    validation_freq = 512
+    reports = {
+        name: list(range(validation_freq, steps + 1, 50 * validation_freq))
+        for name in (
+            "analyse_driving",
+            #"analyse_lat_no_noise",
+            #"analyse_cones",
+            #"analyse_lights",
+            #"analyse_stop",
+            #"analyse_hard_brake",
+        )
+    }
+    reports["analyse_dataset"] = [validation_freq]
     mixed_precision_param = "bfloat16"
     local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
     world_size = int(os.environ.get("WORLD_SIZE", str(local_world_size)))
@@ -132,16 +145,18 @@ def _path(flavor: str) -> PathTrainer.Config:
         checkpoint=_checkpoint_config(
             folder=reporterv2_training_id or "checkpoint",
             base_folder=checkpoint_base_folder,
+            interval=validation_freq,
         ),
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
         compile=CompileConfig(enable=True, components=["model"]),
-        metrics=MetricsProcessor.Config(log_freq=16, enable_reporterv2=True, save_freq=1024),
+        metrics=MetricsProcessor.Config(log_freq=16, enable_reporterv2=True, save_freq=validation_freq),
         validator=PathValidator.Config(
             enable=True,
-            freq=1024,
+            freq=validation_freq,
             steps=32,
             dataloader=_dataloader_config(split="val"),
             mixed_precision_param=mixed_precision_param,
+            reports=reports,
         ),
         debug=DebugConfig(seed=0),
     )
@@ -218,7 +233,7 @@ def _dataloader_config(*, split: str) -> PathDataLoader.Config:
     )
 
 
-def _checkpoint_config(folder: str, base_folder: str) -> PathOnnxCheckpointManager.Config:
+def _checkpoint_config(folder: str, base_folder: str, interval: int) -> PathOnnxCheckpointManager.Config:
     frame_constants = frame_constants_from_fps(n_frames=N_FRAMES, frame_type=FRAME_TYPE)
     temporal_len = frame_constants["temporal_len"]
     vision_input_names = [ModelInputs.IMG, ModelInputs.BIG_IMG]
@@ -248,7 +263,7 @@ def _checkpoint_config(folder: str, base_folder: str) -> PathOnnxCheckpointManag
         export_onnx=True,
         enable_first_step_checkpoint=True,
         folder=folder,
-        interval=1024,
+        interval=interval,
         input_names=input_names,
         input_shapes=input_shapes,
         input_dtypes=["float16"] * len(input_names),
