@@ -964,8 +964,6 @@ class RLTrainer(Configurable):
                 break
 
             # --- periodic validation ---
-            # validation_freq=0 (default) disables this; pre/post passes always run.
-            # Skip at num_steps to avoid double-validating with the post-training pass.
             # TODO(async): validation is generation-only, so overlap it with the next
             # step's training instead of blocking here.
             if (
