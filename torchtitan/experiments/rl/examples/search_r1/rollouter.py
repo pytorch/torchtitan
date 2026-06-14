@@ -15,7 +15,7 @@ from torchtitan.experiments.rl.examples.search_r1.data import SearchR1Dataset
 from torchtitan.experiments.rl.examples.search_r1.env import SearchR1Env
 from torchtitan.experiments.rl.examples.search_r1.rubric import (
     RewardAnswerEM,
-    RewardSearchR1,
+    RewardExactMatch,
 )
 
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
@@ -60,9 +60,9 @@ class SearchR1Rollouter(Rollouter):
                 reward_fns=[
                     # Default = pure-EM 0/1. Put search on the gradient (anti
                     # closed-book reward hacking) by enabling the graded levers, e.g.
-                    #   RewardSearchR1.Config(weight=1.0, structure_format_score=0.2,
+                    #   RewardExactMatch.Config(weight=1.0, structure_format_score=0.2,
                     #                         retrieval_score=0.1, final_format_score=0.1)
-                    RewardSearchR1.Config(weight=1.0),
+                    RewardExactMatch.Config(weight=1.0),
                     # Metric-only (weight 0): pure-EM in the reward breakdown.
                     RewardAnswerEM.Config(weight=0.0),
                 ],

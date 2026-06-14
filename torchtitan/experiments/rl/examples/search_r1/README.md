@@ -17,7 +17,7 @@ only example-specific pieces are this folder plus its config.
 - `env.py` — `SearchR1Env(MessageEnv)`: text-tag `<search>`/`<answer>` protocol, injects
   `<information>`, and contains the local dense-retrieval client. The per-rollout turn
   budget is enforced by `TokenEnv.max_num_turns`.
-- `rubric.py` — `RewardSearchR1` (`compute_score_em`). **Default = pure-EM 0/1**
+- `rubric.py` — `RewardExactMatch` (`compute_score_em`). **Default = pure-EM 0/1**
   (correct answer → 1.0, else 0). Opt into the fine-grained
   graded reward by setting the sub-scores > 0
   (`structure_format_score=0.2, retrieval_score=0.1, final_format_score=0.1`): it adds

@@ -181,7 +181,7 @@ def compute_score_em(
     return final_format_score
 
 
-class RewardSearchR1(RewardFn):
+class RewardExactMatch(RewardFn):
     """Search-R1 reward: EM + (optional) format state-machine + retrieval credit.
 
     Default (all sub-scores 0) = pure-EM 0/1. Set the sub-scores > 0 for the graded
@@ -243,4 +243,4 @@ class RewardAnswerEM(RewardFn):
         return 1.0 if _is_exact_match(answer, env_input.golden_answers) else 0.0
 
 
-__all__ = ["RewardSearchR1", "RewardAnswerEM", "compute_score_em"]
+__all__ = ["RewardExactMatch", "RewardAnswerEM", "compute_score_em"]

@@ -13,12 +13,12 @@ from torchtitan.experiments.rl.examples.search_r1.rollouter import SearchR1Rollo
 from torchtitan.experiments.rl.examples.search_r1.rubric import (
     compute_score_em,
     RewardAnswerEM,
-    RewardSearchR1,
+    RewardExactMatch,
 )
 
 __all__ = [
     "RewardAnswerEM",
-    "RewardSearchR1",
+    "RewardExactMatch",
     "SearchR1Dataset",
     "SearchR1Env",
     "SearchR1Sample",

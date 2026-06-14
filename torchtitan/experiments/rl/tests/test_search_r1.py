@@ -14,7 +14,7 @@ import asyncio
 from torchtitan.experiments.rl.examples.search_r1 import (
     env as sr1_env,
     RewardAnswerEM,
-    RewardSearchR1,
+    RewardExactMatch,
     SearchR1Env,
     SearchR1Sample,
 )
@@ -155,7 +155,7 @@ EX = SearchR1Sample(question="q", golden_answers=["Paris"])
 
 # --- default = pure-EM 0/1 (sub-scores 0): correct -> 1.0, else 0 ---
 def test_searchr1_default_is_pure_em_correct():
-    r = RewardSearchR1(RewardSearchR1.Config())
+    r = RewardExactMatch(RewardExactMatch.Config())
     # both a searched and a bare correct answer score 1.0 under the default.
     assert _approx(
         asyncio.run(r(_search_rollout("Paris", info="capital is Paris"), EX)), 1.0
@@ -164,7 +164,7 @@ def test_searchr1_default_is_pure_em_correct():
 
 
 def test_searchr1_default_is_pure_em_wrong():
-    r = RewardSearchR1(RewardSearchR1.Config())
+    r = RewardExactMatch(RewardExactMatch.Config())
     assert _approx(
         asyncio.run(r(_search_rollout("London", info="capital is Paris"), EX)), 0.0
     )
@@ -173,7 +173,7 @@ def test_searchr1_default_is_pure_em_wrong():
 
 # --- fine-grained (graded) mode: bare correct < searched correct, partial credit ---
 def test_searchr1_graded_searched_correct_full():
-    r = RewardSearchR1(RewardSearchR1.Config(**_GRADED))
+    r = RewardExactMatch(RewardExactMatch.Config(**_GRADED))
     assert _approx(
         asyncio.run(r(_search_rollout("Paris", info="capital is Paris"), EX)), 1.0
     )
@@ -181,24 +181,24 @@ def test_searchr1_graded_searched_correct_full():
 
 def test_searchr1_graded_bare_correct_penalized():
     # The anti-collapse case: correct but no <think>/<search> -> 1.0 - 0.2 = 0.8.
-    r = RewardSearchR1(RewardSearchR1.Config(**_GRADED))
+    r = RewardExactMatch(RewardExactMatch.Config(**_GRADED))
     assert _approx(asyncio.run(r(_answer_rollout("<answer>Paris</answer>"), EX)), 0.8)
 
 
 def test_searchr1_graded_wrong_valid_with_retrieval():
-    r = RewardSearchR1(RewardSearchR1.Config(**_GRADED))
+    r = RewardExactMatch(RewardExactMatch.Config(**_GRADED))
     assert _approx(
         asyncio.run(r(_search_rollout("London", info="capital is Paris"), EX)), 0.3
     )
 
 
 def test_searchr1_graded_wrong_valid_no_retrieval():
-    r = RewardSearchR1(RewardSearchR1.Config(**_GRADED))
+    r = RewardExactMatch(RewardExactMatch.Config(**_GRADED))
     assert _approx(
         asyncio.run(r(_search_rollout("London", info="irrelevant"), EX)), 0.2
     )
 
 
 def test_searchr1_graded_wrong_invalid_floor():
-    r = RewardSearchR1(RewardSearchR1.Config(**_GRADED))
+    r = RewardExactMatch(RewardExactMatch.Config(**_GRADED))
     assert _approx(asyncio.run(r(_answer_rollout("<answer>London</answer>"), EX)), 0.1)
