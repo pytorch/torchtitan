@@ -22,6 +22,7 @@ from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.protocols.model_spec import ModelSpec
 from xx.datasets.helpers import DEFAULT_BIG_TRAIN_LIST
 from xx.ml_tools.constants.model import (
+    SUPERCOMBO_FPS,
     FRAME_TYPE,
     INPUT_FRAMES_NAMES,
     N_FRAMES,
@@ -110,11 +111,13 @@ def _path(flavor: str) -> PathTrainer.Config:
     reporterv2_host = os.getenv("REPORTERV2_HOST")
     reporterv2_training_id = os.getenv("REPORTERV2_TRAINING_ID")
     checkpoint_base_folder = f"{reporterv2_host.rstrip('/')}/checkpoint" if reporterv2_host else ""
+    fps = SUPERCOMBO_FPS
+    plan_only = False
     return PathTrainer.Config(
         loss=PathLoss.Config(),
         model_spec=model_registry(flavor),
         tokenizer=NoOpTokenizer.Config(),
-        dataloader=_dataloader_config(split="train"),
+        dataloader=_dataloader_config(split="train", fps=fps, plan_only=plan_only),
         optimizer=_optimizer_config(),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=round(steps * 0.01),
@@ -154,7 +157,7 @@ def _path(flavor: str) -> PathTrainer.Config:
             enable=True,
             freq=validation_freq,
             steps=32,
-            dataloader=_dataloader_config(split="val"),
+            dataloader=_dataloader_config(split="val", fps=fps, plan_only=plan_only),
             mixed_precision_param=mixed_precision_param,
             reports=reports,
         ),
@@ -164,16 +167,22 @@ def _path(flavor: str) -> PathTrainer.Config:
 
 def _model_config(flavor: str) -> PathModel.Config:
     vision_features = 512
-    frame_constants = frame_constants_from_fps(n_frames=N_FRAMES, frame_type=FRAME_TYPE)
-    in_channels = sum(frame_constants["frame_shapes"][name][0] for name in INPUT_FRAMES_NAMES)
+    n_frames_input = N_FRAMES
+    input_frame_names = INPUT_FRAMES_NAMES
+    input_frame_type = FRAME_TYPE
+    frame_constants = frame_constants_from_fps(n_frames=n_frames_input, frame_type=input_frame_type)
+    in_channels = sum(frame_constants["frame_shapes"][name][0] for name in input_frame_names)
     block_size = len(frame_constants["history_idxs"])
     temporal_len = frame_constants["temporal_len"]
     dim = vision_features
 
     return PathModel.Config(
+        n_frames_input=n_frames_input,
+        input_frame_names=tuple(input_frame_names),
+        frame_type=input_frame_type,
         vision=Vision.Config(
             flavor=flavor,
-            input_frame_names=tuple(INPUT_FRAMES_NAMES),
+            input_frame_names=tuple(input_frame_names),
             in_channels=in_channels,
             vision_features=vision_features,
             pretrained=False,
@@ -214,8 +223,8 @@ def _model_config(flavor: str) -> PathModel.Config:
     )
 
 
-def _dataloader_config(*, split: str) -> PathDataLoader.Config:
-    base = XXPathDatasetConfig()
+def _dataloader_config(*, split: str, fps: int, plan_only: bool) -> PathDataLoader.Config:
+    base = XXPathDatasetConfig(fps=fps, plan_only=plan_only)
     return PathDataLoader.Config(
         dataset=DEFAULT_BIG_TRAIN_LIST,
         split=split,
@@ -266,8 +275,8 @@ def _checkpoint_config(folder: str, base_folder: str, interval: int) -> PathOnnx
         interval=interval,
         input_names=input_names,
         input_shapes=input_shapes,
-        input_dtypes=["float16"] * len(input_names),
-        onnx_model_dtype="float16", # WIP: test if fp16 doesn't degrade performance
+        input_dtypes=["float32"] * len(input_names),
+        onnx_model_dtype="float32", # WIP: test if fp16 doesn't degrade performance
         vision_input_names=vision_input_names,
         temporal_policy_input_names=temporal_policy_input_names,
     )

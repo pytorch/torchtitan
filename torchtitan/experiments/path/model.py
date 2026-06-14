@@ -379,6 +379,9 @@ class Vision(Module):
 class PathModel(BaseModel):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
+        n_frames_input: int
+        input_frame_names: tuple[str, ...]
+        frame_type: str
         vision: Vision.Config
         point_policy: Policy.Config
         temporal_policy: TemporalPolicy.Config

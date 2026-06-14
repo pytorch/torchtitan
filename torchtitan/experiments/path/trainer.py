@@ -27,6 +27,7 @@ class PathTrainer(Trainer):
         checkpoint: PathOnnxCheckpointManager.Config
         codedir: str = ""
         miniray: dict[str, Any] = field(default_factory=dict)
+        fps: int
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)
