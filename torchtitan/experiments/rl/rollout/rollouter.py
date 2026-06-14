@@ -215,9 +215,11 @@ class Rollouter(Configurable):
             rollout.reward = output.reward
             rollout.reward_breakdown = output.reward_breakdown
 
-        # Post-scoring: turn group rewards into per-rollout advantages (in place).
+        # Post-scoring: turn group rewards into per-rollout advantages.
         group = RolloutGroup(group_id=group_id, rollouts=rollouts)
-        self.advantage_estimator(group)
+        advantages = self.advantage_estimator(group)
+        for rollout, advantage in zip(group.rollouts, advantages, strict=True):
+            rollout.advantage = advantage
         return group
 
     async def _run_single_rollout(
