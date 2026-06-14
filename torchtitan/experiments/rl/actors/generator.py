@@ -245,6 +245,13 @@ class SamplingConfig:
     max_tokens: int = 100
     """Maximum number of tokens to generate per completion."""
 
+    seed: int | None = None
+    """Per-request RNG seed. The rollouter offsets this per sample so a group's
+    n=1 requests stay diverse while remaining reproducible (None = nondeterministic)."""
+
+    stop_token_ids: list[int] | None = None
+    """Renderer role-boundary stop tokens; filled by the controller."""
+
 
 class VLLMGenerator(Actor, Configurable):
     """vLLM engine to drive concurrent `generate` calls through one SPMD engine loop.
@@ -288,7 +295,6 @@ class VLLMGenerator(Actor, Configurable):
             trainer so both sides compile identically.
         max_num_seqs: vLLM's max concurrent sequences (KV budget + CUDA-graph sizes).
         output_dir: Structured-logger output directory.
-        stop_token_ids: Renderer role-boundary stop tokens injected by the controller.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -394,7 +400,6 @@ class VLLMGenerator(Actor, Configurable):
         compile_config: CompileConfig,
         max_num_seqs: int,
         output_dir: str,
-        stop_token_ids: list[int],
     ):
         init_logger()
         sl.init_structured_logger(
@@ -414,10 +419,6 @@ class VLLMGenerator(Actor, Configurable):
         # the CUDA graph capture sizes.  Always computed by the caller
         # (RLTrainer) as num_groups_per_rollout_batch * group_size.
         self._max_num_seqs = max_num_seqs
-
-        # Renderer role-boundary stop tokens (e.g. Qwen3 `<|im_end|>`), injected by the
-        # controller;
-        self._stop_token_ids = stop_token_ids
 
         # Register TorchTitan model + parser with vLLM
         registry_to_vllm(
@@ -823,14 +824,20 @@ class VLLMGenerator(Actor, Configurable):
             self._model_state_dict_pull_request = None
 
     def _build_sampling_params(self, sampling: SamplingConfig) -> SamplingParams:
-        """Translate a `SamplingConfig` into vLLM `SamplingParams` (n=1; seed from debug)."""
+        """Translate a `SamplingConfig` into vLLM `SamplingParams` (n=1).
+
+        ``seed`` and ``stop_token_ids`` are carried on the ``SamplingConfig``
+        (the controller fills ``stop_token_ids`` and the rollouter offsets
+        ``seed`` per sample), so each sample in a group is a distinct ``n=1``
+        request that stays diverse and bitwise-reproducible.
+        """
         return SamplingParams(
             temperature=sampling.temperature,
             top_p=sampling.top_p,
             max_tokens=sampling.max_tokens,
             n=1,  # always expects a single sample per request. Caller can call N times.
-            stop_token_ids=self._stop_token_ids or None,
-            seed=self.config.debug.seed,
+            stop_token_ids=sampling.stop_token_ids or None,
+            seed=sampling.seed,
             logprobs=0,  # return only the sampled token's logprob (for the GRPO ratio)
             # Return each request's result once, when it is fully done, instead of streaming partial
             # outputs as tokens arrive.

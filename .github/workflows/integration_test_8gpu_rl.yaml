@@ -28,7 +28,10 @@ permissions:
 jobs:
   # Step 1: Dynamically compute the matrix based on conditions
   set-matrix:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/rl')
+    # Skip scheduled runs on forks, where they would only fail and email the fork owner
+    if: >-
+      (github.repository_owner == 'pytorch' || github.event_name != 'schedule') &&
+      (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/rl'))
     uses: ./.github/workflows/set-matrix.yaml
     with:
       is-experimental: true
