@@ -104,6 +104,31 @@ def _prepare_generation_request_metrics(
     ]
 
 
+_batch_invariant_bmm_lib: torch.library.Library | None = None
+
+
+def _patch_bmm_for_batch_invariance() -> None:
+    """Override ``aten::bmm`` with vLLM's batch-invariant bmm kernel.
+
+    torchtitan's batch-invariant mode (``batch_invariant_ops``, applied by
+    ``set_batch_invariance``) overrides ``mm``/``addmm``/``_log_softmax``/
+    ``mean.dim`` but not ``bmm``. The MoE router gate lowers to ``aten::bmm`` in
+    the vLLM inference graph (3-D activation @ 2-D weight), so without this the
+    generator's gate scores drift from the trainer's ``mm`` gate and flip top-k
+    expert routing, breaking on-policy logprob parity. Only the generator needs
+    it (the trainer's gate is ``mm``), so it lives here rather than in core.
+    """
+    global _batch_invariant_bmm_lib
+    if _batch_invariant_bmm_lib is not None:
+        return
+    from vllm.model_executor.layers.batch_invariant import bmm_batch_invariant
+
+    _batch_invariant_bmm_lib = torch.library.Library("aten", "IMPL")
+    _batch_invariant_bmm_lib.impl("bmm", bmm_batch_invariant, "CUDA")
+    # pyrefly: ignore[bad-assignment]
+    torch.bmm = bmm_batch_invariant
+
+
 def _force_logprobs_fn_for_batch_invariance() -> None:
     """Make vLLM's v2 logprob path dispatch.
 
@@ -412,6 +437,10 @@ class VLLMGenerator(Actor, Configurable):
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
         set_batch_invariance(config.debug.batch_invariant)
         if config.debug.batch_invariant:
+            # batch_invariant_ops (via set_batch_invariance) covers
+            # mm/addmm/_log_softmax/mean but not bmm; the MoE router gate lowers
+            # to bmm in the vLLM inference graph, so override it generator-side.
+            _patch_bmm_for_batch_invariance()
             # The vLLM v2 logprob Triton kernel bypasses the aten overrides above;
             # route it through trainer's function to match the trainer exactly.
             _force_logprobs_fn_for_batch_invariance()
