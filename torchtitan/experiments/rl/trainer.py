@@ -268,9 +268,9 @@ class RLTrainer(Configurable):
         """Number of held-out prompts scored greedily (temp=0, n=1) per validation pass."""
 
         validation_freq: int = 0
-        """Run a validation pass every ``validation_freq`` training steps (on top of the
-        pre-/post-training passes). 0 (default) = only pre/post. Set e.g. 5 to trace the
-        eval curve across training."""
+        """How often (in training steps) to run a mid-training validation pass. 0
+        (the default) only validates once before and once after training; set it to,
+        say, 5 to watch the eval metric move as training proceeds."""
 
         rollouter: Rollouter.Config
         """The rollouter: its datasets, envs, and rubric."""
@@ -636,7 +636,7 @@ class RLTrainer(Configurable):
         # Metrics ride with the rollout: flatten each turn's per-generation metrics, add failures.
         # TODO: it is confusing what metrics belong in the rollout turn and what metrics
         # should be calculated here in the controller. It seems that we should move
-        # all metrics calculation to the rollout loop, including advantage calculation.
+        # all metrics calculation to the rollout loop.
         # TODO: we may also have some metrics at the Rollout level, i.e. not turn specific.
         # TODO: we also need a "logs" field, so that if there were errors/warnings
         # they can be made available for the rollout_logger
@@ -664,14 +664,12 @@ class RLTrainer(Configurable):
     def _build_episodes(
         rollout_groups: list[RolloutGroup],
     ) -> tuple[list[Episode], list[m.Metric]]:
-        """Build training episodes from scored rollout groups.
+        """Flatten scored rollout groups into training episodes.
 
-        Advantages are already filled per rollout by the Rollouter's
-        ``AdvantageEstimator`` (a post-scoring step); here we only flatten rollouts
-        into episodes, skip rollouts without training tokens, and emit metrics.
+        Skips rollouts without training tokens and emits episode-level metrics.
 
         Args:
-            rollout_groups: Scored rollout groups (with advantages) from one round.
+            rollout_groups: Scored rollout groups from one round.
 
         Returns:
             Train episodes plus episode-level metrics.
