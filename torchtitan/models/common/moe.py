@@ -114,6 +114,7 @@ class GroupedExperts(Module):
         num_local_tokens_per_expert_E: torch.Tensor,
         *,
         num_local_tokens_after_padding: int,
+        local_seq_len_after_padding: int,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
@@ -124,7 +125,6 @@ class GroupedExperts(Module):
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
         T = B * L
-        local_seq_len_after_padding = num_local_tokens_after_padding // B
         x_TD = x_BLD.view(T, D)
 
         topk_scores_TK = topk_scores_BLK.view(T, K)
@@ -400,15 +400,22 @@ class MoE(Module):
         the GroupedExperts boundary.
         """
         B, L, D = x_BLD.shape
-        T = B * L
         sp_size = getattr(self.experts.token_dispatcher, "sp_size", 1)
-        pad_tokens = (-T) % sp_size
-        # Padding is logically appended to the flattened global sequence tail,
+
+        if isinstance(x_BLD, DTensor):
+            local_B, local_L, _ = x_BLD.to_local().shape
+        else:
+            local_B, local_L, _ = x_BLD.shape
+
+        pad_tokens = (-local_L) % sp_size
+        # Padding is logically appended to the sequence tail of each batch,
         # not to a specific SP rank. This lets combine() infer each SP rank's
         # start/end offsets from the uniform padded shard length; for example,
-        # if T < sp_size, only the first T ranks have real tokens. No padded
-        # token is materialized or routed.
-        num_local_tokens_after_padding = (T + pad_tokens) // sp_size
+        # if the local sequence length is shorter than the SP size, only ranks
+        # with real local positions route tokens. No padded token is
+        # materialized or routed.
+        local_seq_len_after_padding = local_L + pad_tokens
+        num_local_tokens_after_padding = local_B * local_seq_len_after_padding
 
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # scores_BLE shape (B, L, E)
@@ -476,6 +483,7 @@ class MoE(Module):
             topk_expert_ids_BLK,
             num_local_tokens_per_expert_E,
             num_local_tokens_after_padding=num_local_tokens_after_padding,
+            local_seq_len_after_padding=local_seq_len_after_padding,
         )
 
         # shared_experts runs in parallel with deepep combine communication.
@@ -500,6 +508,7 @@ class MoE(Module):
             # physically padded, so trim the logical tail padding before
             # restoring the original (B, L, D) shape.
             out_TD = out_BLD.view(-1, D)
+            T = B * L
             out_BLD = out_TD[:T].view(B, L, D)
 
         if shared_out_BLD is not None:
