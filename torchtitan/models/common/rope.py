@@ -9,8 +9,11 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
+import spmd_types as spmd
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
+from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.protocols.module import Module
 
 __all__ = [
@@ -20,6 +23,7 @@ __all__ = [
 ]
 
 
+@spmd.no_typecheck()
 def _maybe_check_max_pos(positions: torch.Tensor, *, max_valid_pos: int) -> None:
     """Async bounds check: verify all position values <= max_valid_pos.
 
@@ -334,8 +338,11 @@ class CosSinRoPE(RoPE):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply cos/sin RoPE using the rotate-half convention."""
         head_dim = query.shape[-1]
-        cos = rope_cache[..., :head_dim].to(device=query.device)
-        sin = rope_cache[..., head_dim:].to(device=query.device)
+        cos = rope_cache[..., :head_dim]
+        sin = rope_cache[..., head_dim:]
+        if cos.device != query.device:
+            cos = cos.to(device=query.device)
+            sin = sin.to(device=query.device)
         query_f = query.float()
         key_f = key.float()
         xq_out = (query_f * cos) + (CosSinRoPE._rotate_half(query_f) * sin)
@@ -349,6 +356,9 @@ class CosSinRoPE(RoPE):
         return torch.cat((-x2, x1), dim=-1)
 
 
+@spmd.local_map(
+    out_types={"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R}
+)
 def _reshape_for_broadcast(
     rope_cache: torch.Tensor,
     query_shape: torch.Size | tuple[int, ...],
@@ -368,16 +378,7 @@ def _reshape_for_broadcast(
             for i, d in enumerate(query_shape)
         ]
         return rope_cache.view(*shape)
-    elif positions.size(0) == 1:
-        assert positions.shape == (1, seqlen)
-        rope_cache = rope_cache[positions.squeeze(0)]
-        assert rope_cache.shape == (seqlen, cache_width)
-        shape = [
-            d if i == 1 else cache_width if i == ndim - 1 else 1
-            for i, d in enumerate(query_shape)
-        ]
-        return rope_cache.view(*shape)
-    else:
+    elif positions.size(0) == bsz:
         assert positions.shape == (bsz, seqlen)
         rope_cache_expanded = rope_cache[None, :, None, :].expand(bsz, -1, -1, -1)
         rope_cache = torch.gather(
@@ -386,6 +387,16 @@ def _reshape_for_broadcast(
             index=positions.view(bsz, seqlen, 1, 1).expand(bsz, seqlen, 1, cache_width),
         )
         return rope_cache
+    else:
+        assert positions.size(0) == 1
+        assert positions.shape == (1, seqlen)
+        rope_cache = rope_cache[positions.squeeze(0)]
+        assert rope_cache.shape == (seqlen, cache_width)
+        shape = [
+            d if i == 1 else cache_width if i == ndim - 1 else 1
+            for i, d in enumerate(query_shape)
+        ]
+        return rope_cache.view(*shape)
 
 
 def _maybe_wrap_positions(
