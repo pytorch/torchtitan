@@ -262,15 +262,7 @@ class TokenChoiceTopKRouter(Module):
         """
         # Compute gate in float32 to help stability of expert load balancing.
         with torch.autocast(device_type=x_BLD.device.type, dtype=torch.float32):
-            # Fold the gate input to 2-D (B*L, D) for the matmul, then unfold the
-            # scores back to (B, L, E). Why: a 3-D activation @ 2-D weight lowers to aten::bmm in an
-            # inference (no-grad) graph, which breaks batch-invariant mode
-            # NOTE: under EP with B>1 this changes the gate's token->rank
-            # distribution (2-D token shard over B*L vs 3-D shard over the
-            # sequence), which changes the reduction order of the downstream
-            # expert grouped_mm and sharded reductions, and will slightly change numerics
-            B, L, D = x_BLD.shape
-            scores_BLE = self.gate(x_BLD.reshape(B * L, D)).view(B, L, -1)
+            scores_BLE = self.gate(x_BLD)
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion.
         # scores_BLE is already float32 from the autocast above.

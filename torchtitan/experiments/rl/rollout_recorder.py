@@ -107,7 +107,8 @@ class RolloutSampleRecorder(Configurable):
                     "is_validation": is_validation,
                     **self._encode_rollout(rollout),
                 },
-                # Validation rollouts can contain renderer-owned message objects.
+                # Rollout messages can hold objects json.dumps can't serialize
+                # natively, e.g. tool-calling results
                 default=_json_default,
             )
             + "\n"

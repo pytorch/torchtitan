@@ -104,6 +104,31 @@ def _prepare_generation_request_metrics(
     ]
 
 
+_batch_invariant_bmm_lib: torch.library.Library | None = None
+
+
+def _patch_bmm_for_batch_invariance() -> None:
+    """Override ``aten::bmm`` with vLLM's batch-invariant bmm kernel.
+
+    torchtitan's batch-invariant mode (``batch_invariant_ops``, applied by
+    ``set_batch_invariance``) overrides ``mm``/``addmm``/``_log_softmax``/
+    ``mean.dim`` but not ``bmm``. The MoE router gate lowers to ``aten::bmm`` in
+    the vLLM inference graph (3-D activation @ 2-D weight), so without this the
+    generator's gate scores drift from the trainer's ``mm`` gate and flip top-k
+    expert routing, breaking on-policy logprob parity. Only the generator needs
+    it (the trainer's gate is ``mm``), so it lives here rather than in core.
+    """
+    global _batch_invariant_bmm_lib
+    if _batch_invariant_bmm_lib is not None:
+        return
+    from vllm.model_executor.layers.batch_invariant import bmm_batch_invariant
+
+    _batch_invariant_bmm_lib = torch.library.Library("aten", "IMPL")
+    _batch_invariant_bmm_lib.impl("bmm", bmm_batch_invariant, "CUDA")
+    # pyrefly: ignore[bad-assignment]
+    torch.bmm = bmm_batch_invariant
+
+
 def _force_logprobs_fn_for_batch_invariance() -> None:
     """Make vLLM's v2 logprob path dispatch.
 
@@ -419,6 +444,10 @@ class VLLMGenerator(Actor, Configurable):
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
         set_batch_invariance(config.debug.batch_invariant)
         if config.debug.batch_invariant:
+            # batch_invariant_ops (via set_batch_invariance) covers
+            # mm/addmm/_log_softmax/mean but not bmm; the MoE router gate lowers
+            # to bmm in the vLLM inference graph, so override it generator-side.
+            _patch_bmm_for_batch_invariance()
             # The vLLM v2 logprob Triton kernel bypasses the aten overrides above;
             # route it through trainer's function to match the trainer exactly.
             _force_logprobs_fn_for_batch_invariance()
@@ -661,7 +690,6 @@ class VLLMGenerator(Actor, Configurable):
                     group=self._broadcast_group,
                     device=torch.device("cpu"),
                 )
-<<<<<<< HEAD
                 # get rank 0's broadcasted decision
                 decision = decision_broadcast_container[0]  # [num_ranks]
 
@@ -682,23 +710,6 @@ class VLLMGenerator(Actor, Configurable):
                                 {"prompt_token_ids": request.prompt_token_ids}
                                 for request in decision.requests
                             ]
-=======
-                for sample in output.outputs:
-                    per_token_logprobs = [
-                        logprob_dict[token_id].logprob
-                        for token_id, logprob_dict in zip(
-                            sample.token_ids, sample.logprobs, strict=True
-                        )
-                    ]
-                    output_token_counts.append(len(sample.token_ids))
-                    completions.append(
-                        Completion(
-                            policy_version=self.policy_version,
-                            request_id=output.request_id,
-                            token_ids=sample.token_ids,
-                            token_logprobs=per_token_logprobs,
-                            finish_reason=sample.finish_reason,
->>>>>>> 5d6bdf5b5 (Enable DP+EP for MoE inference in vLLM wrapper)
                         )
                         for request, engine_input in zip(
                             decision.requests, engine_inputs, strict=True
@@ -737,7 +748,7 @@ class VLLMGenerator(Actor, Configurable):
                 lambda: self._close_request is not None
                 or self._model_state_dict_pull_request is not None
                 or self._queued_generation_requests
-                or self._engine.has_unfinished_requests()
+                or self._engine_has_local_unfinished_requests()
             )
 
             if self._close_request is not None:
@@ -757,6 +768,20 @@ class VLLMGenerator(Actor, Configurable):
                 [],
             )
             return LoopDecision(action=LoopAction.STEP, requests=requests)
+
+    def _engine_has_local_unfinished_requests(self) -> bool:
+        """Return local pending request state without vLLM DP collectives.
+
+        ``_decide_next_action`` runs only on rank 0 before broadcasting the
+        decision to follower ranks. vLLM's public ``has_unfinished_requests()``
+        performs a DP all-reduce when vLLM data parallelism is enabled, so
+        calling it only on rank 0 deadlocks with followers waiting in the
+        decision broadcast.
+        """
+        output_processor = getattr(self._engine, "output_processor", None)
+        if output_processor is not None:
+            return output_processor.has_unfinished_requests()
+        return self._engine.get_num_unfinished_requests() > 0
 
     def _process_finished_requests(self, request_outputs: list[RequestOutput]) -> None:
         """RANK 0: resolve each finished request's future with its `Completion` (metrics included)."""

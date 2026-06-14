@@ -62,28 +62,6 @@ def dense_sequence_parallel_placement() -> SpmdLayout:
     )
 
 
-def dense_token_parallel_placement(*, shard_tp: bool = True) -> SpmdLayout:
-    """Token-parallel ``(tokens, hidden)`` 2-D activation placement.
-
-    The 2-D analog of the dense 3-D activation placements for a flattened
-    ``(B*L, D)`` activation (see the MoE router's gate fold). The token dim (0)
-    is sharded across DP and CP -- mirroring the 3-D batch+seq sharding after
-    folding ``[B, L] -> [B*L]`` (DP shards batch, CP shards seq). ``shard_tp``
-    additionally shards the token dim over TP (for EP, where the dense
-    activation is TP/SP-sharded over the sequence); otherwise TP replicates
-    (the non-EP gate, whose 3-D layout is TP-replicated). The hidden dim (1)
-    is always replicated.
-    """
-    return SpmdLayout(
-        {
-            DP: spmd.V,
-            CP: spmd.V,
-            TP: spmd.V if shard_tp else spmd.R,
-        },
-        partition_spec=((DP, CP, TP), None) if shard_tp else ((DP, CP), None),
-    )
-
-
 def colwise_config() -> ShardingConfig:
     """ColwiseParallel: weight S(0), output S(-1)."""
     return ShardingConfig(
