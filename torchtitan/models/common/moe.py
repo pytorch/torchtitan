@@ -9,10 +9,14 @@ from typing import Literal
 
 import torch
 import torch.nn.functional as F
+import spmd_types as spmd
+from spmd_types.runtime import get_partition_spec
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
+from torchtitan.distributed.spmd_types import spmd_mesh_size
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
@@ -78,6 +82,13 @@ class GroupedExperts(Module):
             w3_EFD = self.w3_EFD
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
+        if (
+            get_spmd_backend() == "spmd_types"
+            and spmd.is_type_checking()
+            and spmd_mesh_size("ep") == 1
+        ):
+            for axis in ("dp", "cp"):
+                spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
         h_RF = F.silu(
             torch._grouped_mm(
@@ -128,9 +139,10 @@ class GroupedExperts(Module):
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
-        routed_output_RD = self._experts_forward(
-            routed_input_RD, num_global_tokens_per_local_expert_e
-        )
+        with self.token_dispatcher.sparse_spmd_mesh():
+            routed_output_RD = self._experts_forward(
+                routed_input_RD, num_global_tokens_per_local_expert_e
+            )
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
@@ -421,7 +433,14 @@ class MoE(Module):
                 True,
             )
 
-        if isinstance(topk_expert_ids_BLK, DTensor):
+        if get_spmd_backend() == "spmd_types":
+            generate_routing_map = spmd.local_map(
+                out_types=(
+                    spmd.get_local_type(scores_BLE),
+                    get_partition_spec(scores_BLE),
+                ),
+            )(_generate_routing_map)
+        elif isinstance(topk_expert_ids_BLK, DTensor):
             assert isinstance(
                 scores_BLE, DTensor
             ), "scores_BLE and topk_expert_ids_BLK should both be DTensors"
