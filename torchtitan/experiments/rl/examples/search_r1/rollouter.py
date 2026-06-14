@@ -23,33 +23,20 @@ from torchtitan.experiments.rl.rollout.rollouter import Rollouter
 from torchtitan.experiments.rl.rubrics import Rubric
 
 
-# Default Search-R1 NQ/HotpotQA parquet locations (prepared via Search-R1's
-# data_process scripts). Override `train_dataset`/`validation_dataset` data_path
-# in a config to point elsewhere. See README.md for data + retriever setup.
-#
-# The defaults are dev-server paths; set ``SEARCH_R1_TRAIN_PARQUET`` /
-# ``SEARCH_R1_TEST_PARQUET`` to relocate the data without a config change. This
-# is how the MAST launcher (``mast_rl/run.sh``) points the job at the parquet
-# staged on the mounted Manifold bucket — overriding the deeply-nested
-# ``rollouter.*.data_path`` fields through the base-typed ``rollouter`` config
-# is not reliable via tyro CLI flags.
+# QA parquet locations. Set SEARCH_R1_TRAIN_PARQUET / SEARCH_R1_TEST_PARQUET to
+# point at the data without editing the config; see README.md for how to prepare it.
 DEFAULT_TRAIN_PARQUET = os.environ.get(
-    "SEARCH_R1_TRAIN_PARQUET",
-    "/home/yichuan/Search-R1/data/nq_hotpotqa_train/train.parquet",
+    "SEARCH_R1_TRAIN_PARQUET", "data/nq_hotpotqa_train/train.parquet"
 )
 DEFAULT_TEST_PARQUET = os.environ.get(
-    "SEARCH_R1_TEST_PARQUET",
-    "/home/yichuan/Search-R1/data/nq_hotpotqa_train/test.parquet",
+    "SEARCH_R1_TEST_PARQUET", "data/nq_hotpotqa_train/test.parquet"
 )
 
 
 class SearchR1Rollouter(Rollouter):
-    """The Search-R1 rollouter: NQ/HotpotQA train/val datasets, a multi-turn
-    search env, and an EM + format rubric. Pure config — all behavior
-    (`make_env_group`, `sample_*`, `score_group`) is inherited from `Rollouter`.
-
-    The per-rollout turn budget lives in `SearchR1Env.max_assistant_turns`;
-    `token_env.max_rollout_tokens` additionally bounds total prompt length.
+    """Search-R1 rollouter: the QA datasets, the multi-turn search env, and the
+    EM/format rubric wired together. All behavior is inherited from ``Rollouter``;
+    this only supplies the default configs.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -61,29 +48,22 @@ class SearchR1Rollouter(Rollouter):
         )
         validation_dataset: SearchR1Dataset.Config = field(
             default_factory=lambda: SearchR1Dataset.Config(
-                # Evaluate on the NQ test split only (in-distribution with the
-                # NQ+HotpotQA train set), like slime's per-benchmark eval.
+                # Evaluate on the NQ split only; fixed file order for a stable eval set.
                 data_path=DEFAULT_TEST_PARQUET,
                 seed=99,
                 data_source="nq",
-                # File order (no shuffle) so the first num_validation_samples rows
-                # match slime's nq_test test.parquet@[0:N] exactly -> EM directly
-                # comparable to slime.
                 shuffle=False,
             )
         )
         rubric: Rubric.Config = field(
             default_factory=lambda: Rubric.Config(
                 reward_fns=[
-                    # Search-R1 reward. Default = slime's pure-EM 0/1 (correct -> 1.0,
-                    # else 0). To put search on the gradient (anti closed-book reward
-                    # hacking), enable the graded levers, e.g.:
+                    # Default = pure-EM 0/1. Put search on the gradient (anti
+                    # closed-book reward hacking) by enabling the graded levers, e.g.
                     #   RewardSearchR1.Config(weight=1.0, structure_format_score=0.2,
                     #                         retrieval_score=0.1, final_format_score=0.1)
                     RewardSearchR1.Config(weight=1.0),
-                    # Metric-only (weight 0): keeps the pure-EM number in the reward
-                    # breakdown comparable across runs without affecting the gradient
-                    # (redundant with the default 0/1 reward, useful once graded).
+                    # Metric-only (weight 0): pure-EM in the reward breakdown.
                     RewardAnswerEM.Config(weight=0.0),
                 ],
                 # No <answer> on a truncated rollout -> no reward, no learning signal.

@@ -6,7 +6,7 @@
 
 from torchtitan.experiments.rl.examples.search_r1.data import (
     SearchR1Dataset,
-    SearchR1Example,
+    SearchR1Sample,
 )
 from torchtitan.experiments.rl.examples.search_r1.env import SearchR1Env
 from torchtitan.experiments.rl.examples.search_r1.rollouter import SearchR1Rollouter
@@ -21,7 +21,7 @@ __all__ = [
     "RewardSearchR1",
     "SearchR1Dataset",
     "SearchR1Env",
-    "SearchR1Example",
+    "SearchR1Sample",
     "SearchR1Rollouter",
     "compute_score_em",
 ]

@@ -18,12 +18,12 @@ from torchtitan.experiments.rl.environment import (
     MessageEnvInitOutput,
     MessageEnvStepOutput,
 )
-from torchtitan.experiments.rl.examples.search_r1.data import SearchR1Example
+from torchtitan.experiments.rl.examples.search_r1.data import SearchR1Sample
 
 
-# Search-R1 instruction prompt (ported from the Search-R1 / slime data format).
-# The model reasons in <think>, searches via <search> query </search> (results come
-# back in <information>...</information>), and answers in <answer>...</answer>.
+# Search-R1 instruction prompt. The model reasons in <think>, searches via
+# <search> query </search> (results come back in <information>...</information>),
+# and answers in <answer>...</answer>.
 SEARCH_R1_INSTRUCTION = (
     "Answer the given question. You must conduct reasoning inside <think> and "
     "</think> first every time you get new information. After reasoning, if you "
@@ -46,7 +46,7 @@ _ACTION_RE = re.compile(r"<(search|answer)>(.*?)</\1>", re.DOTALL)
 
 
 # ---------------------------------------------------------------------------
-# Local dense retrieval client (Search-R1 / slime `retrieval_server.py`).
+# Local dense retrieval client (`retrieval_server.py`).
 # `POST {url}` accepts {"queries": [...], "topk": k, "return_scores": false} and
 # returns {"result": [[{"id", "contents"}, ...]]} (one list per query).
 # ---------------------------------------------------------------------------
@@ -109,7 +109,7 @@ class SearchR1Env(MessageEnv):
         """Per-rollout turn budget: end the rollout after this many assistant turns
         even without an ``<answer>`` (then it scores 0). Bounds runaway search loops."""
 
-    def __init__(self, config: Config, *, env_input: SearchR1Example) -> None:
+    def __init__(self, config: Config, *, env_input: SearchR1Sample) -> None:
         self._question = env_input.question
         self._search_url = config.search_url
         self._topk = config.topk

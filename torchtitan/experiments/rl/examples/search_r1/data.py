@@ -16,8 +16,8 @@ from torchtitan.config import Configurable
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class SearchR1Example:
-    """Typed payload for one open-domain QA problem (Search-R1)."""
+class SearchR1Sample:
+    """One Search-R1 open-domain QA sample: a question and its accepted answers."""
 
     question: str
     """The natural-language question the model must answer."""
@@ -27,18 +27,11 @@ class SearchR1Example:
 
 
 class SearchR1Dataset(Configurable):
-    """Endless, seeded stream of Search-R1 QA examples read from a parquet file.
+    """Endless, seeded stream of Search-R1 QA samples read from a parquet file.
 
-    The parquet is the Search-R1 NQ/HotpotQA format with ``question`` and
-    ``golden_answers`` columns (e.g. produced by Search-R1's
-    ``scripts/data_process/qa_search_*_merge.py``). The dataset shuffles row
-    order with the given seed and reshuffles each time it wraps around, so a run
-    sees a fresh permutation every epoch.
-
-    Example:
-
-        dataset = SearchR1Dataset(SearchR1Dataset.Config(data_path=".../train.parquet"))
-        example: SearchR1Example = next(iter(dataset))
+    The parquet has ``question`` and ``golden_answers`` columns; see this folder's
+    README for how to produce it. Row order is shuffled with ``seed`` and reshuffled
+    on each wrap, so a run sees a fresh permutation every epoch.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -50,15 +43,12 @@ class SearchR1Dataset(Configurable):
         """Seed for the row-order shuffle."""
 
         data_source: str | None = None
-        """If set, keep only rows whose ``data_source`` equals this (e.g. ``"nq"``).
-        The merged Search-R1 test split mixes 7 datasets; use this to evaluate on a
-        single benchmark like slime. ``None`` keeps all rows."""
+        """If set, keep only rows whose ``data_source`` equals this (e.g. ``"nq"``) —
+        the merged test split mixes several datasets. ``None`` keeps all rows."""
 
         shuffle: bool = True
-        """Shuffle row order (with ``seed``) and reshuffle on each wrap. Set False
-        for validation to read rows in file order, so the first N rows match slime's
-        ``--eval-prompt-data nq_test test.parquet@[0:N]`` exactly (apples-to-apples
-        NQ EM)."""
+        """Shuffle row order (with ``seed``), reshuffling on each wrap. Set False for
+        validation so the first N rows are a fixed, file-order held-out set."""
 
     def __init__(self, config: Config) -> None:
         columns = ["question", "golden_answers"]
@@ -86,17 +76,17 @@ class SearchR1Dataset(Configurable):
             self._rng.shuffle(self._order)
         self._pos = 0
 
-    def __iter__(self) -> Iterator[SearchR1Example]:
+    def __iter__(self) -> Iterator[SearchR1Sample]:
         return self
 
-    def __next__(self) -> SearchR1Example:
+    def __next__(self) -> SearchR1Sample:
         if self._pos >= len(self._order):
             if self._shuffle:
                 self._rng.shuffle(self._order)
             self._pos = 0
         idx = self._order[self._pos]
         self._pos += 1
-        return SearchR1Example(
+        return SearchR1Sample(
             question=self._questions[idx],
             golden_answers=self._golden_answers[idx],
         )

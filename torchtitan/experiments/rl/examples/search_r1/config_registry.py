@@ -6,10 +6,9 @@
 
 """Config entry points for the Search-R1 example.
 
-These set the **slime-aligned recipe** (the stabilizers that the reproduction needs)
-entirely from the example's config — the core defaults are unchanged, so every other
-config keeps vanilla GRPO. ``ConfigManager`` discovers these directly from the example
-module::
+These set the full Search-R1 recipe entirely from the example's config — the core
+defaults are unchanged, so every other config keeps vanilla GRPO. ``ConfigManager``
+discovers these directly from the example module::
 
     --module torchtitan.experiments.rl.examples.search_r1 \\
         --config rl_grpo_qwen3_1_7b_search_r1
@@ -41,39 +40,28 @@ from torchtitan.models.qwen3 import model_registry
 def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
     """GRPO Search-R1 (multi-turn retrieval QA) for Qwen3-1.7B.
 
-    Reproduces slime's ``examples/search-r1`` nq_test EM curve (~0.13 -> ~0.30):
-    **pure-EM 0/1 reward** (the rollouter's default rubric — no format/retrieval
-    weighting, matching slime), **standard GRPO with group-std-normalized advantages**,
-    **256 samples/step** (32 prompts x group 8, no dynamic sampling), clip-higher
-    (0.2/0.28, DAPO-style), AdamW lr 1e-6 constant, temperature 1.0 / top_p 1.0,
-    max 4 search turns, 500 steps. No KL-to-reference penalty (no reference model).
-
-    8 GPUs: 4 generator (TP=4) + 1 trainer (TP=1) + (off-config) a dense retrieval
-    server on the spare GPUs. Requires a running retrieval server and the Search-R1
-    NQ/HotpotQA parquet data; see ``README.md``.
+    Runs on 8 GPUs: 4 generator (TP=4) + 1 trainer (TP=1), with a dense retrieval
+    server on the spare GPUs. Requires a running retrieval server and the QA parquet
+    data; see ``README.md``.
     """
-    group_size = 8
     return RLTrainer.Config(
         model_spec=model_registry("1.7B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         num_steps=500,
-        # 32 prompts x group_size 8 = 256 rollouts/step (= slime's rollout_batch_size
-        # 32, n_samples_per_prompt 8, global_batch_size 256). No dynamic sampling.
+        # 32 prompts x group 8 = 256 rollouts/step.
         num_groups_per_rollout_batch=32,
-        group_size=group_size,
-        # Eval on NQ test (slime-style): every 5 steps, first 500 prompts (file order).
+        group_size=8,
+        # Validate on a fixed file-order held-out set every 5 steps.
         num_validation_samples=500,
         validation_freq=5,
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        # slime uses standard GRPO: normalize the advantage by the group reward std.
-        # Advantage is a post-scoring step on the rollouter (the trainer just consumes it).
+        # Standard GRPO (advantage normalized by group reward std). Advantage is a
+        # post-scoring step on the rollouter; the trainer just consumes it.
         rollouter=SearchR1Rollouter.Config(
             advantage=GRPOAdvantage.Config(std_normalize=True),
         ),
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        # seq_len 4096 fits the multi-turn rollouts; global_batch_size 48 packed rows
-        # so the ~256 rollouts/step train in one optimizer step.
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=1, global_batch_size=48, seq_len=4096),
         ),
@@ -95,10 +83,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
                 interval=10000,  # only the initial HF load; no mid-run checkpoints
                 last_save_model_only=True,
             ),
-            # slime stabilizer: DAPO-style clip-higher (0.2/0.28). Vanilla GRPOLoss is
-            # symmetric; DAPOLoss adds the higher upper clip bound (+ a stricter
-            # generator/trainer logprob-mismatch guard). No KL penalty / reference model
-            # (modern outcome-reward RL — DAPO/CISPO/GSPO — drops it; reproduction holds).
+            # DAPO-style clip-higher (asymmetric clip); no KL / reference model.
             loss=DAPOLoss.Config(
                 clip_eps=0.2,
                 clip_eps_high=0.28,
@@ -123,10 +108,10 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
             cudagraph=VLLMCudagraphConfig(enable=True, max_capture_size=64),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
-                # slime: temperature 1.0 + top_p 1.0; stop each turn at its action tag.
                 temperature=1.0,
                 top_p=1.0,
                 max_tokens=512,
+                # Stop each turn at its action tag so the env can run retrieval.
                 stop=["</search>", "</answer>"],
             ),
         ),
@@ -134,12 +119,11 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
 
 
 def rl_grpo_qwen3_8b_search_r1() -> RLTrainer.Config:
-    """GRPO Search-R1 for Qwen3-8B — identical slime recipe to the 1.7B config.
+    """GRPO Search-R1 for Qwen3-8B — same recipe as the 1.7B config.
 
-    Only the model and GPU split differ (everything affecting the gradient is the
-    same, so the 8B curve is directly comparable). 8 GPUs: 2 generator (TP=2) +
-    4 trainer (TP=4) + retriever on the spare GPUs. The trainer runs fp32, so 8B
-    needs TP=4 to avoid OOM; the bf16 vLLM generator fits on TP=2.
+    Only the model and GPU split differ. 8 GPUs: 2 generator (TP=2) + 4 trainer
+    (TP=4) + retriever on the spare GPUs. The trainer runs fp32, so 8B needs TP=4
+    to avoid OOM; the bf16 vLLM generator fits on TP=2.
     """
     config = rl_grpo_qwen3_1_7b_search_r1()
     config.model_spec = model_registry("8B", attn_backend="varlen")

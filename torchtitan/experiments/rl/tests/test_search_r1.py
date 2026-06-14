@@ -16,7 +16,7 @@ from torchtitan.experiments.rl.examples.search_r1 import (
     RewardAnswerEM,
     RewardSearchR1,
     SearchR1Env,
-    SearchR1Example,
+    SearchR1Sample,
 )
 from torchtitan.experiments.rl.rollout import Rollout, RolloutStatus, RolloutTurn
 
@@ -28,7 +28,7 @@ def _build_env(monkeypatch, question="Who wrote Hamlet?"):
     monkeypatch.setattr(sr1_env, "_search", _fake_search)
     return SearchR1Env(
         SearchR1Env.Config(),
-        env_input=SearchR1Example(question=question, golden_answers=["Shakespeare"]),
+        env_input=SearchR1Sample(question=question, golden_answers=["Shakespeare"]),
     )
 
 
@@ -83,7 +83,7 @@ def _answer_rollout(text: str) -> Rollout:
 
 def test_reward_em_exact_match_normalized():
     em = RewardAnswerEM(RewardAnswerEM.Config())
-    ex = SearchR1Example(question="q", golden_answers=["Shakespeare"])
+    ex = SearchR1Sample(question="q", golden_answers=["Shakespeare"])
     # normalization lowercases + strips punctuation/articles.
     r = asyncio.run(em(_answer_rollout("<answer>The Shakespeare.</answer>"), ex))
     assert r == 1.0
@@ -91,14 +91,14 @@ def test_reward_em_exact_match_normalized():
 
 def test_reward_em_mismatch():
     em = RewardAnswerEM(RewardAnswerEM.Config())
-    ex = SearchR1Example(question="q", golden_answers=["Shakespeare"])
+    ex = SearchR1Sample(question="q", golden_answers=["Shakespeare"])
     r = asyncio.run(em(_answer_rollout("<answer>Marlowe</answer>"), ex))
     assert r == 0.0
 
 
 def test_reward_em_uses_last_answer():
     em = RewardAnswerEM(RewardAnswerEM.Config())
-    ex = SearchR1Example(question="q", golden_answers=["Paris"])
+    ex = SearchR1Sample(question="q", golden_answers=["Paris"])
     r = asyncio.run(
         em(_answer_rollout("<answer>London</answer> ... <answer>Paris</answer>"), ex)
     )
@@ -150,10 +150,10 @@ def _approx(a: float, b: float) -> bool:
 # Fine-grained (graded) opt-in config: search/format/retrieval on the gradient.
 _GRADED = dict(structure_format_score=0.2, retrieval_score=0.1, final_format_score=0.1)
 
-EX = SearchR1Example(question="q", golden_answers=["Paris"])
+EX = SearchR1Sample(question="q", golden_answers=["Paris"])
 
 
-# --- default = slime's pure-EM 0/1 (sub-scores 0): correct -> 1.0, else 0 ---
+# --- default = pure-EM 0/1 (sub-scores 0): correct -> 1.0, else 0 ---
 def test_searchr1_default_is_pure_em_correct():
     r = RewardSearchR1(RewardSearchR1.Config())
     # both a searched and a bare correct answer score 1.0 under the default.
