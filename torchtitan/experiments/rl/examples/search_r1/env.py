@@ -21,6 +21,13 @@ from torchtitan.experiments.rl.environment import (
 from torchtitan.experiments.rl.examples.search_r1.data import SearchR1Sample
 
 
+# Search-R1 protocol tags (open, close).
+_THINK_TAG = ("<think>", "</think>")
+_SEARCH_TAG = ("<search>", "</search>")
+_ANSWER_TAG = ("<answer>", "</answer>")
+_INFORMATION_TAG = ("<information>", "</information>")
+
+
 # Search-R1 instruction prompt. The model reasons in <think>, searches via
 # <search> query </search> (results come back in <information>...</information>),
 # and answers in <answer>...</answer>.
@@ -45,14 +52,14 @@ _INVALID_ACTION_MESSAGE = (
 _ACTION_RE = re.compile(r"<(search|answer)>(.*?)</\1>", re.DOTALL)
 
 
-# ---------------------------------------------------------------------------
-# Local dense retrieval client (`retrieval_server.py`).
-# `POST {url}` accepts {"queries": [...], "topk": k, "return_scores": false} and
-# returns {"result": [[{"id", "contents"}, ...]]} (one list per query).
-# ---------------------------------------------------------------------------
 def _passages_to_string(docs: list[dict]) -> str:
-    """Format retrieved docs into the ``Doc i(Title: ...) text`` block Search-R1
-    feeds back to the model. Each doc's ``contents`` is ``"<title>\\n<text>"``."""
+    """Format retrieved docs into the block fed back to the model.
+
+    Each doc's ``contents`` is ``"<title>\\n<body>"``. Example::
+
+        [{"contents": "Eiffel Tower\\nA tower in Paris."}]
+        -> "Doc 1(Title: Eiffel Tower) A tower in Paris.\\n"
+    """
     out = ""
     for i, doc in enumerate(docs):
         contents = doc.get("contents", "") if isinstance(doc, dict) else ""
@@ -64,10 +71,12 @@ def _passages_to_string(docs: list[dict]) -> str:
 
 
 async def _search(query: str, *, url: str, topk: int, timeout_s: float = 60.0) -> str:
-    """Retrieve the top-``topk`` passages for ``query`` and format them as a string.
+    """Retrieve the top-``topk`` passages for ``query``, formatted for the model.
 
-    Returns an empty string on any transport/server error so a single flaky
-    retrieval degrades the rollout (empty ``<information>``) instead of crashing it.
+    POSTs ``{"queries": [query], "topk": topk}`` and reads back
+    ``{"result": [[{"contents": ...}, ...]]}``. On any transport/server error
+    returns ``""`` (an empty ``<information>`` block) instead of raising, so one
+    flaky request doesn't crash the whole rollout.
     """
     payload = {"queries": [query], "topk": topk, "return_scores": False}
     timeout = aiohttp.ClientTimeout(total=timeout_s)
@@ -143,7 +152,8 @@ class SearchR1Env(MessageEnv):
 
         if action == "search":
             passages = await _search(argument, url=self._search_url, topk=self._topk)
-            observation = f"\n\n<information>{passages.strip()}</information>\n\n"
+            info_open, info_close = _INFORMATION_TAG
+            observation = f"\n\n{info_open}{passages.strip()}{info_close}\n\n"
             return MessageEnvStepOutput(
                 env_messages=[{"role": "user", "content": observation}],
                 done=False,
