@@ -15,10 +15,7 @@ from renderers import Renderer
 
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.environment import MessageEnv, TokenEnv
-from torchtitan.experiments.rl.rollout.advantage import (
-    AdvantageEstimator,
-    GRPOAdvantage,
-)
+from torchtitan.experiments.rl.rollout.advantage import GRPOAdvantage
 from torchtitan.experiments.rl.rollout.types import (
     GenerateFn,
     Rollout,
@@ -86,9 +83,7 @@ class Rollouter(Configurable):
         token_env: TokenEnv.Config = field(default_factory=TokenEnv.Config)
         """`TokenEnv` limits (e.g. `max_rollout_tokens`) passed to `make_env_group`."""
 
-        advantage: AdvantageEstimator.Config = field(
-            default_factory=GRPOAdvantage.Config
-        )
+        advantage: Configurable.Config = field(default_factory=GRPOAdvantage.Config)
         """Post-scoring advantage estimator. Default = GRPO mean-baseline (Dr.GRPO);
         set `GRPOAdvantage.Config(std_normalize=True)` for standard GRPO."""
 
@@ -96,7 +91,7 @@ class Rollouter(Configurable):
         self._train_dataset = config.train_dataset.build()
         self._validation_dataset = config.validation_dataset.build()
         self.rubric: Rubric = config.rubric.build()
-        self.advantage_estimator: AdvantageEstimator = config.advantage.build()
+        self.advantage_estimator = config.advantage.build()
         self._message_env_config = config.message_env
         self._token_env_config = config.token_env
 
