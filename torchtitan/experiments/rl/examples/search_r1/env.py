@@ -138,9 +138,9 @@ class SearchR1Env(MessageEnv):
         # The text-tag protocol only uses plain-text content.
         content = completion_message.get("content")
         content = content if isinstance(content, str) else ""
-        match = _ACTION_RE.search(content)
-        action = match.group(1) if match else None
-        argument = match.group(2).strip() if match else ""
+        tag_match = _ACTION_RE.search(content)
+        action = tag_match.group(1) if tag_match else None
+        search_argument = tag_match.group(2).strip() if tag_match else ""
 
         if action == "answer":
             # Final answer: end the rollout.
@@ -151,9 +151,11 @@ class SearchR1Env(MessageEnv):
             return MessageEnvStepOutput(done=True)
 
         if action == "search":
-            passages = await _search(argument, url=self._search_url, topk=self._topk)
+            search_results = await _search(
+                search_argument, url=self._search_url, topk=self._topk
+            )
             info_open, info_close = _INFORMATION_TAG
-            observation = f"\n\n{info_open}{passages.strip()}{info_close}\n\n"
+            observation = f"\n\n{info_open}{search_results.strip()}{info_close}\n\n"
             return MessageEnvStepOutput(
                 env_messages=[{"role": "user", "content": observation}],
                 done=False,
