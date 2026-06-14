@@ -30,10 +30,11 @@ from torchtitan.experiments.rl.actors.generator import (
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.examples.search_r1.rollouter import SearchR1Rollouter
+from torchtitan.experiments.rl.losses import DAPOLoss
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout.advantage import GRPOAdvantage
-from torchtitan.experiments.rl.trainer import DAPOLoss, RLTrainer
+from torchtitan.experiments.rl.trainer import RLTrainer
 from torchtitan.models.qwen3 import model_registry
 
 
@@ -85,8 +86,8 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
             ),
             # DAPO-style clip-higher (asymmetric clip); no KL / reference model.
             loss=DAPOLoss.Config(
-                clip_eps=0.2,
-                clip_eps_high=0.28,
+                ratio_clip_low=0.2,
+                ratio_clip_high=0.28,
             ),
         ),
         generator=VLLMGenerator.Config(
