@@ -97,8 +97,7 @@ class SearchR1Env(MessageEnv):
     Each assistant turn either issues a ``<search>query</search>`` — which the env
     answers with a ``<information>...</information>`` user message — or gives a final
     ``<answer>...</answer>``, which ends the rollout. Malformed turns get a corrective
-    nudge. The rollout also ends once ``max_assistant_turns`` is reached (the env's
-    own turn budget, since the framework's ``TokenEnv`` only bounds total tokens).
+    nudge. The per-rollout turn budget is enforced by ``TokenEnv.max_num_turns``.
 
     Uses the text-tag protocol (not function-calling tools); pair it with a
     renderer configured with ``enable_thinking=False`` so the model's ``<think>``
@@ -114,16 +113,10 @@ class SearchR1Env(MessageEnv):
         topk: int = 3
         """Number of passages to retrieve per search query."""
 
-        max_assistant_turns: int = 4
-        """Per-rollout turn budget: end the rollout after this many assistant turns
-        even without an ``<answer>`` (then it scores 0). Bounds runaway search loops."""
-
     def __init__(self, config: Config, *, env_input: SearchR1Sample) -> None:
         self._question = env_input.question
         self._search_url = config.search_url
         self._topk = config.topk
-        self._max_assistant_turns = config.max_assistant_turns
-        self._num_turns = 0
 
     async def init(self) -> MessageEnvInitOutput:
         return MessageEnvInitOutput(
@@ -133,8 +126,6 @@ class SearchR1Env(MessageEnv):
         )
 
     async def step(self, completion_message: Message) -> MessageEnvStepOutput:
-        self._num_turns += 1
-
         # The text-tag protocol only uses plain-text content.
         content = completion_message.get("content")
         content = content if isinstance(content, str) else ""
@@ -144,10 +135,6 @@ class SearchR1Env(MessageEnv):
 
         if action == "answer":
             # Final answer: end the rollout.
-            return MessageEnvStepOutput(done=True)
-
-        # Out of turn budget: end the rollout (no further search/answer allowed).
-        if self._num_turns >= self._max_assistant_turns:
             return MessageEnvStepOutput(done=True)
 
         if action == "search":

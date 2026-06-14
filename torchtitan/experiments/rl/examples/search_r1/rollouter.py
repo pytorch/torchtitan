@@ -72,5 +72,7 @@ class SearchR1Rollouter(Rollouter):
         )
         message_env: SearchR1Env.Config = field(default_factory=SearchR1Env.Config)
         token_env: TokenEnv.Config = field(
-            default_factory=lambda: TokenEnv.Config(max_rollout_tokens=3072)
+            default_factory=lambda: TokenEnv.Config(
+                max_rollout_tokens=3072, max_num_turns=4
+            )
         )

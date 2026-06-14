@@ -15,8 +15,8 @@ only example-specific pieces are this folder plus its config.
 ## Files
 - `data.py` — `SearchR1Dataset` / `SearchR1Sample`: reads the Search-R1 NQ/HotpotQA parquet.
 - `env.py` — `SearchR1Env(MessageEnv)`: text-tag `<search>`/`<answer>` protocol, injects
-  `<information>`, and contains the local dense-retrieval client + the per-rollout
-  `max_assistant_turns` budget.
+  `<information>`, and contains the local dense-retrieval client. The per-rollout turn
+  budget is enforced by `TokenEnv.max_num_turns`.
 - `rubric.py` — `RewardSearchR1` (`compute_score_em`). **Default = pure-EM 0/1**
   (correct answer → 1.0, else 0). Opt into the fine-grained
   graded reward by setting the sub-scores > 0
