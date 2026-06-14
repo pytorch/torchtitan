@@ -150,6 +150,7 @@ def _path(flavor: str) -> PathTrainer.Config:
             base_folder=checkpoint_base_folder,
             interval=validation_freq,
         ),
+        fps=fps,
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
         compile=CompileConfig(enable=True, components=["model"]),
         metrics=MetricsProcessor.Config(log_freq=16, enable_reporterv2=True, save_freq=validation_freq),

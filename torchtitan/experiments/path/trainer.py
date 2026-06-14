@@ -25,7 +25,6 @@ class PathTrainer(Trainer):
         loss: PathLoss.Config
         validator: PathValidator.Config
         checkpoint: PathOnnxCheckpointManager.Config
-        codedir: str = ""
         miniray: dict[str, Any] = field(default_factory=dict)
         fps: int
 

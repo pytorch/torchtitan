@@ -71,6 +71,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         dump_folder: str = "./outputs"
         """Folder to dump job outputs"""
 
+        codedir: str = ""
+        """Path to cached code source"""
+
         profiler: Profiler.Config = field(default_factory=Profiler.Config)
         metrics: MetricsProcessor.Config = field(
             default_factory=MetricsProcessor.Config
