@@ -388,9 +388,9 @@ class MoE(Module):
         # ---------------------------------------------------------------------
         # TODO: Temporary workaround for #3622. Remove it once short-sequence
         # routing counts can remain Partial.
-        # Real padding when seq_len < sp_size: EP routes over sequence-parallel 
-        # token shards. A sequence shorter than ``sp_size`` cannot shard across 
-        # all SP ranks, so physically pad to ``sp_size`` and trim before returning. 
+        # Real padding when seq_len < sp_size: EP routes over sequence-parallel
+        # token shards. A sequence shorter than ``sp_size`` cannot shard across
+        # all SP ranks, so physically pad to ``sp_size`` and trim before returning.
         seq_pad = sp_size - L if L < sp_size else 0
         if seq_pad:
             if self.training:
