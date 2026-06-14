@@ -23,8 +23,7 @@ only example-specific pieces are this folder plus its config.
   (`structure_format_score=0.2, retrieval_score=0.1, final_format_score=0.1`): it adds
   a `<think>→<search>→<information>→<answer>` format state-machine + retrieval-correctness
   credit, so a bare correct answer (0.8) scores less than a searched one (1.0) and the
-  policy can't reward-hack by skipping search. `RewardAnswerEM` is a metric-only (weight 0)
-  pure-EM signal.
+  policy can't reward-hack by skipping search.
 - `rollouter.py` — wires datasets + env + rubric into a `Rollouter.Config`.
 
 ## Prerequisites

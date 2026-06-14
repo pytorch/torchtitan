@@ -13,7 +13,6 @@ import asyncio
 
 from torchtitan.experiments.rl.examples.search_r1 import (
     env as sr1_env,
-    RewardAnswerEM,
     RewardExactMatch,
     SearchR1Env,
     SearchR1Sample,
@@ -82,7 +81,7 @@ def _answer_rollout(text: str) -> Rollout:
 
 
 def test_reward_em_exact_match_normalized():
-    em = RewardAnswerEM(RewardAnswerEM.Config())
+    em = RewardExactMatch(RewardExactMatch.Config())
     ex = SearchR1Sample(question="q", golden_answers=["Shakespeare"])
     # normalization lowercases + strips punctuation/articles.
     r = asyncio.run(em(_answer_rollout("<answer>The Shakespeare.</answer>"), ex))
@@ -90,14 +89,14 @@ def test_reward_em_exact_match_normalized():
 
 
 def test_reward_em_mismatch():
-    em = RewardAnswerEM(RewardAnswerEM.Config())
+    em = RewardExactMatch(RewardExactMatch.Config())
     ex = SearchR1Sample(question="q", golden_answers=["Shakespeare"])
     r = asyncio.run(em(_answer_rollout("<answer>Marlowe</answer>"), ex))
     assert r == 0.0
 
 
 def test_reward_em_uses_last_answer():
-    em = RewardAnswerEM(RewardAnswerEM.Config())
+    em = RewardExactMatch(RewardExactMatch.Config())
     ex = SearchR1Sample(question="q", golden_answers=["Paris"])
     r = asyncio.run(
         em(_answer_rollout("<answer>London</answer> ... <answer>Paris</answer>"), ex)

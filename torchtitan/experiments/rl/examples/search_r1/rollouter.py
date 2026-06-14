@@ -13,10 +13,7 @@ from dataclasses import dataclass, field
 from torchtitan.experiments.rl.environment import TokenEnv
 from torchtitan.experiments.rl.examples.search_r1.data import SearchR1Dataset
 from torchtitan.experiments.rl.examples.search_r1.env import SearchR1Env
-from torchtitan.experiments.rl.examples.search_r1.rubric import (
-    RewardAnswerEM,
-    RewardExactMatch,
-)
+from torchtitan.experiments.rl.examples.search_r1.rubric import RewardExactMatch
 
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
 
@@ -63,8 +60,6 @@ class SearchR1Rollouter(Rollouter):
                     #   RewardExactMatch.Config(weight=1.0, structure_format_score=0.2,
                     #                         retrieval_score=0.1, final_format_score=0.1)
                     RewardExactMatch.Config(weight=1.0),
-                    # Metric-only (weight 0): pure-EM in the reward breakdown.
-                    RewardAnswerEM.Config(weight=0.0),
                 ],
                 # No <answer> on a truncated rollout -> no reward, no learning signal.
                 truncation_reward=0.0,

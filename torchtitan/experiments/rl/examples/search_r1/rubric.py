@@ -48,16 +48,6 @@ def _is_exact_match(prediction: str, golden_answers: list[str]) -> bool:
     return any(normalized == _normalize_answer(g) for g in golden_answers)
 
 
-def _all_assistant_text(rollout: Rollout) -> str:
-    """Concatenate every assistant completion's text across the rollout's turns."""
-    texts: list[str] = []
-    for turn in rollout.turns:
-        content = (turn.completion_message or {}).get("content")
-        if isinstance(content, str):
-            texts.append(content)
-    return "\n".join(texts)
-
-
 def _trajectory_text(rollout: Rollout) -> str:
     """Reconstruct the full Search-R1 trajectory text for format/retrieval scoring.
 
@@ -225,22 +215,4 @@ class RewardExactMatch(RewardFn):
         )
 
 
-class RewardAnswerEM(RewardFn):
-    """1.0 if the final ``<answer>`` exactly matches any gold answer (normalized), else 0.
-
-    Metric-only: configure with ``weight=0.0`` to log pure EM alongside the training
-    reward without affecting the gradient.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(RewardFn.Config):
-        pass
-
-    async def __call__(self, rollout: Rollout, env_input: SearchR1Sample) -> float:
-        answer = _extract_answer(_all_assistant_text(rollout))
-        if answer is None:
-            return 0.0
-        return 1.0 if _is_exact_match(answer, env_input.golden_answers) else 0.0
-
-
-__all__ = ["RewardExactMatch", "RewardAnswerEM", "compute_score_em"]
+__all__ = ["RewardExactMatch", "compute_score_em"]
