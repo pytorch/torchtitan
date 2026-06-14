@@ -205,7 +205,6 @@ def make_token_dispatcher_config(
     *,
     num_experts: int,
     top_k: int,
-    score_before_experts: bool = True,
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> LocalTokenDispatcher.Config:
@@ -229,26 +228,22 @@ def make_token_dispatcher_config(
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
-            score_before_experts=score_before_experts,
         )
     elif comm_backend == "hybridep":
         return HybridEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
-            score_before_experts=score_before_experts,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         )
     elif comm_backend == "minimal_async_ep":
         return MinimalAsyncEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
-            score_before_experts=score_before_experts,
         )
     elif comm_backend == "standard":
         return AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
-            score_before_experts=score_before_experts,
         )
     else:
         raise ValueError(
@@ -264,7 +259,6 @@ def make_experts_config(
     num_experts: int,
     top_k: int,
     param_init: dict[str, Callable],
-    score_before_experts: bool = True,
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> GroupedExperts.Config:
@@ -277,7 +271,6 @@ def make_experts_config(
         token_dispatcher=make_token_dispatcher_config(
             num_experts=num_experts,
             top_k=top_k,
-            score_before_experts=score_before_experts,
             comm_backend=comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         ),

@@ -54,12 +54,10 @@ class LocalTokenDispatcher(Configurable):
     class Config(Configurable.Config):
         num_experts: int
         top_k: int
-        score_before_experts: bool = True
 
     def __init__(self, config: Config):
         self.num_experts = config.num_experts
         self.top_k = config.top_k
-        self.score_before_experts = config.score_before_experts
 
     def wire_meshes(
         self,
@@ -78,8 +76,8 @@ class LocalTokenDispatcher(Configurable):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Reorder tokens by expert assignment for local expert computation.
 
-        Groups tokens by expert index via argsort and optionally applies
-        routing scores (when ``score_before_experts`` is True).
+        Groups tokens by expert index via argsort. Routing scores are applied
+        to the expert outputs in ``combine``, after expert computation.
 
         Args:
             x_TD: ``(T, D)`` input tokens
@@ -88,7 +86,7 @@ class LocalTokenDispatcher(Configurable):
 
         Returns:
             routed_input_ND: ``(N, D)`` where N = T*K. Tokens in expert-sorted
-                order, score-weighted if ``score_before_experts``.
+                order.
             token_indices_experts_sorted_N: ``(N,)`` token-to-original mapping
             topk_scores_experts_sorted_N: ``(N,)`` scores in expert-sorted order
         """
@@ -101,13 +99,6 @@ class LocalTokenDispatcher(Configurable):
         ]
         token_indices_experts_sorted_N = token_indices_experts_sorted_N // self.top_k
         routed_input_ND = x_TD[token_indices_experts_sorted_N]
-
-        # Apply scores before expert computation if configured
-        if self.score_before_experts:
-            routed_input_ND = (
-                routed_input_ND.to(torch.float32)
-                * topk_scores_experts_sorted_N.reshape(-1, 1)
-            ).to(x_TD.dtype)
 
         return (
             routed_input_ND,
@@ -175,11 +166,10 @@ class LocalTokenDispatcher(Configurable):
         del num_local_tokens_after_padding, local_seq_len_after_padding
         out_TD = torch.zeros_like(x_TD)
 
-        if not self.score_before_experts:
-            routed_output_RD = (
-                routed_output_RD.to(torch.float32)
-                * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
-            ).to(routed_output_RD.dtype)
+        routed_output_RD = (
+            routed_output_RD.to(torch.float32)
+            * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
+        ).to(routed_output_RD.dtype)
 
         dim = x_TD.shape[-1]
         out_TD = deterministic_scatter_add(
@@ -507,11 +497,10 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             dtype=x_TD.dtype,
         )
 
-        if not self.score_before_experts:
-            routed_output_RD = (
-                routed_output_RD.to(torch.float32)
-                * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
-            ).to(routed_output_RD.dtype)
+        routed_output_RD = (
+            routed_output_RD.to(torch.float32)
+            * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
+        ).to(routed_output_RD.dtype)
 
         token_indices_experts_sorted_N = self._sp_global_token_indices(
             metadata.token_indices_experts_sorted_N,
@@ -661,7 +650,6 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             num_local_experts,
             self.num_experts,
             ep_group,
-            score_before_experts=self.score_before_experts,
         )
 
         metadata = DeepEPDispatchMetadata(state=state)
@@ -790,7 +778,6 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
             num_local_experts,
             self.num_experts,
             ep_group,
-            score_before_experts=self.score_before_experts,
             non_blocking_expert_capacity_factor=self.non_blocking_capacity_factor,
             pad_multiple=self.pad_multiple,
         )
@@ -840,9 +827,8 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
 class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
     """Token dispatcher using MinimalAsyncEP for constrained EP communication.
 
-    This first integration supports EP with ``sp_size == 1`` and
-    ``score_before_experts=False`` only. TP/SP, CP, PP, padding, and async
-    combine overlap are intentionally out of scope.
+    This first integration supports EP with ``sp_size == 1`` only. TP/SP, CP,
+    PP, padding, and async combine overlap are intentionally out of scope.
     """
 
     ep_mesh: DeviceMesh | None
@@ -854,18 +840,10 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
 
     @dataclass(kw_only=True, slots=True)
     class Config(LocalTokenDispatcher.Config):
-        score_before_experts: bool = False
         hidden_dim: int | None = None
         tokens_per_rank: int | None = None
         dtype: torch.dtype | None = None
         device: torch.device | None = None
-
-        def __post_init__(self):
-            if self.score_before_experts:
-                raise ValueError(
-                    "MinimalAsyncEPTokenDispatcher.Config requires "
-                    "score_before_experts=False."
-                )
 
     def __init__(self, config: Config):
         super().__init__(config)
