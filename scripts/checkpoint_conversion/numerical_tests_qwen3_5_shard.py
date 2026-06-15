@@ -26,13 +26,9 @@ import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    CompileConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.models.qwen3_5 import Qwen35Model, qwen3_5_configs
 from torchtitan.models.qwen3_5.parallelize import parallelize_qwen3_5
 
@@ -108,7 +104,7 @@ def run_worker(args):
         training=training,
         parallelism=parallelism,
         compile_config=CompileConfig(),
-        ac_config=ActivationCheckpointConfig(),
+        ac_config=SelectiveAC.Config(),
         dump_folder="/tmp",
     )
 

@@ -70,6 +70,7 @@ _buffer_state: _MinimalAsyncEPBufferState | None = None
 def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None:
     """Validate and fill MinimalAsyncEP dispatcher configs from runtime config."""
     from torchtitan.config import ParallelismConfig, TORCH_DTYPE_MAP
+    from torchtitan.distributed.activation_checkpoint import FullAC
     from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
     from torchtitan.trainer import Trainer
 
@@ -124,10 +125,13 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
         )
 
     memory_policy = getattr(config.compile, "memory_policy", None)
-    if config.activation_checkpoint.mode != "full" and memory_policy != "full":
+    if (
+        not isinstance(config.activation_checkpoint, FullAC.Config)
+        and memory_policy != "full"
+    ):
         raise ValueError(
             "MinimalAsyncEP requires full recompute: set "
-            "--activation_checkpoint.mode full for eager training or "
+            "activation-checkpoint:full for eager training or "
             "--compile.memory_policy full for graph_trainer."
         )
 

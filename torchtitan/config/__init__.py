@@ -13,7 +13,6 @@ TORCH_DTYPE_MAP = {
 }
 
 from .configs import (
-    ActivationCheckpointConfig,
     CommConfig,
     CompileConfig,
     DebugConfig,
@@ -38,7 +37,6 @@ __all__ = [
     "Function",
     "TORCH_DTYPE_MAP",
     # Config dataclasses
-    "ActivationCheckpointConfig",
     "CompileConfig",
     "ParallelismConfig",
     "CommConfig",
