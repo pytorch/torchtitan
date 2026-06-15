@@ -67,7 +67,6 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
             batch=BatchConfig(local_batch_size=1, global_batch_size=48, seq_len=4096),
         ),
         trainer=PolicyTrainer.Config(
-            # lr 1e-6 constant (min_lr_factor=1.0 -> flat after a 2-step warmup).
             optimizer=default_adamw(lr=1e-6),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2, decay_type="linear", min_lr_factor=1.0
