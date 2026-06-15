@@ -109,8 +109,6 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
                 temperature=1.0,
                 top_p=1.0,
                 max_tokens=512,
-                # No string stop: each assistant turn ends at the renderer's role
-                # boundary (<|im_end|>) after the model's tool call or final answer.
             ),
         ),
     )

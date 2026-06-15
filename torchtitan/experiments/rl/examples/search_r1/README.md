@@ -11,8 +11,8 @@ Thinking is controlled purely by the renderer's `enable_thinking` flag (no promp
 chain-of-thought doesn't help EM and would eat into the multi-turn token budget. Flip it to
 `True` in the config for tasks that benefit from reasoning.
 
-It is a multi-turn, tool-using RL example: each assistant turn ends at the renderer's
-role boundary, the env answers a `search` tool call with a `tool`-role message, and the
+It is a multi-turn, tool-using RL example: the assistant takes a prompt and produces a
+response, the env answers a `search` tool call with a `tool`-role message, and the
 rollout continues until the model stops calling tools or the turn budget is hit. It
 runs entirely on the framework's multi-turn rollouter (`rollout/rollouter.py`) and
 continuous-batching generator — the only example-specific pieces are this folder plus
