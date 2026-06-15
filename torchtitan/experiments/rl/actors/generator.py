@@ -112,11 +112,12 @@ def _patch_bmm_for_batch_invariance() -> None:
 
     torchtitan's batch-invariant mode (``batch_invariant_ops``, applied by
     ``set_batch_invariance``) overrides ``mm``/``addmm``/``_log_softmax``/
-    ``mean.dim`` but not ``bmm``. The MoE router gate lowers to ``aten::bmm`` in
-    the vLLM inference graph (3-D activation @ 2-D weight), so without this the
-    generator's gate scores drift from the trainer's ``mm`` gate and flip top-k
-    expert routing, breaking on-policy logprob parity. Only the generator needs
-    it (the trainer's gate is ``mm``), so it lives here rather than in core.
+    ``mean.dim`` but not ``bmm``. The MoE router gate (3-D activation @ 2-D
+    weight) lowers to ``aten::bmm`` in the generator but ``aten::mm`` in the
+    trainer, so without this the generator's gate scores drift from the
+    trainer's and flip top-k expert routing, breaking on-policy logprob parity.
+
+    TODO: Investigate how to drop bmm batch invariant patch in generator.
     """
     global _batch_invariant_bmm_lib
     if _batch_invariant_bmm_lib is not None:
