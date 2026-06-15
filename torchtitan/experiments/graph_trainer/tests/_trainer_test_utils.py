@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components.loss import CrossEntropyLoss
-from torchtitan.config import ActivationCheckpointConfig
+from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.distributed.utils import get_train_context
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.trainer import Trainer
@@ -57,9 +57,11 @@ def build_minimal_trainer(
                 cpu_offload_budget_gb=100.0,
             ),
             model_spec=SimpleNamespace(model=model_config),
-            activation_checkpoint=ActivationCheckpointConfig(
-                mode=activation_checkpoint_mode
-            ),
+            activation_checkpoint={
+                "none": None,
+                "selective": SelectiveAC.Config(),
+                "full": FullAC.Config(),
+            }[activation_checkpoint_mode],
             parallelism=SimpleNamespace(
                 pipeline_parallel_degree=1,
                 fsdp_reshard_after_forward=fsdp_reshard_after_forward,

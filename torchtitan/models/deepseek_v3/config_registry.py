@@ -13,12 +13,8 @@ from torchtitan.components.quantization import (
     Float8GroupedExpertsConverter,
     Float8LinearConverter,
 )
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    CompileConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.trainer import Trainer
 
@@ -51,9 +47,7 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
 
 
@@ -109,9 +103,7 @@ def deepseek_v3_16b() -> Trainer.Config:
             expert_parallel_degree=8,
         ),
         checkpoint=CheckpointManager.Config(interval=10),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
         compile=CompileConfig(enable=True, components=["loss"]),
     )
 
@@ -187,8 +179,6 @@ def deepseek_v3_671b() -> Trainer.Config:
             expert_parallel_degree=2,
         ),
         checkpoint=CheckpointManager.Config(interval=500),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
         compile=compile_config,
     )
