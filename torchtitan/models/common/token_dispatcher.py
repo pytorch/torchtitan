@@ -357,18 +357,15 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             input_splits_list = input_splits.tolist()
             output_splits_list = output_splits.tolist()
 
-        with set_current_spmd_mesh(self.sparse_mesh):
-            # All-to-all dispatch tokens to EP ranks
+        with self.sparse_spmd_mesh():
             if get_spmd_backend() == "spmd_types":
-                if spmd.is_type_checking():
-                    routed_input_ND = spmd.reinterpret_mesh(
-                        routed_input_ND,
-                        {
-                            "dp_replicate": spmd.V,
-                            "efsdp": spmd.V,
-                            "ep": spmd.V,
-                        },
-                    )
+                # re-annotate after no-typecheck
+                spmd.assert_type(
+                    num_global_tokens_per_local_expert_E,
+                    {"dp_replicate": spmd.V, "efsdp": spmd.V, "ep": spmd.S(0)},
+                )
+                if spmd.is_type_checking():  # sparse mesh reinterpret
+                    routed_input_ND = spmd.reinterpret_mesh(routed_input_ND, spmd.current_mesh())
                 routed_input_RD = spmd.all_to_all(
                     routed_input_ND,
                     self.sparse_mesh.get_group("ep"),
@@ -394,11 +391,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             # TODO: Consider using num_global_tokens_per_local_expert_e as the
             # expert_bias_e update buffer, then all-gather on EP ranks. This
             # is blocked by clarification on HybridEP token dropping.
-            if get_spmd_backend() == "spmd_types":
-                spmd.assert_type(
-                    num_global_tokens_per_local_expert_E,
-                    {"dp_replicate": spmd.V, "efsdp": spmd.V, "ep": spmd.S(0)},
-                )
             (
                 input_shape,
                 routed_input_RD,
@@ -520,7 +512,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 local_seq_len_after_padding=local_seq_len_after_padding,
             )
 
-        with set_current_spmd_mesh(self.sparse_mesh):
+        with self.sparse_spmd_mesh():
             # Reverse expert-major reordering
             routed_output_RD = self._unpermute(
                 routed_output_RD, metadata.input_shape, metadata.permuted_indices
@@ -545,15 +537,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 )
 
         if get_spmd_backend() == "spmd_types":
-            if spmd.is_type_checking():
-                routed_output_RD = spmd.reinterpret_mesh(
-                    routed_output_RD,
-                    {
-                        "dp": spmd.V,
-                        "cp": spmd.V,
-                        "tp": spmd.V,
-                    },
-                )
+            if spmd.is_type_checking():  # dense mesh reinterpret
+                routed_output_RD = spmd.reinterpret_mesh(routed_output_RD, spmd.current_mesh())
 
         # With SP, create a full-size buffer for scatter_add so routed results
         # from all SP ranks can be placed at global positions.
