@@ -143,18 +143,12 @@ def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
     ``FusedQKVLinear`` (single ``wqkv``).
     """
     if isinstance(qkv_linear_cfg, FusedQKVLinear.Config):
-        # TODO(pianpwk): Make fused-QKV local_map work for DTensor backends too;
-        # wrapping the parent today mixes local inputs with DTensor child params.
-        if get_spmd_backend() == "spmd_types":
-            qkv_output = dense_activation_placement(tp=spmd.S(2))
-            qkv_linear_cfg.sharding_config = ShardingConfig(
-                in_src_shardings={"x": dense_activation_placement(tp=spmd.R)},
-                in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
-                out_src_shardings=(qkv_output, qkv_output, qkv_output),
-                local_map=LocalMapConfig(
-                    in_grad_placements=(dense_activation_placement(tp=spmd.P),),
-                ),
-            )
+        qkv_output = dense_activation_placement(tp=spmd.S(2))
+        qkv_linear_cfg.sharding_config = ShardingConfig(
+            in_src_shardings={"x": dense_activation_placement(tp=spmd.R)},
+            in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
+            out_src_shardings=(qkv_output, qkv_output, qkv_output),
+        )
         qkv_linear_cfg.wqkv.sharding_config = colwise_config()
     elif isinstance(qkv_linear_cfg, QKVLinear.Config):
         qkv_linear_cfg.wq.sharding_config = colwise_config()
