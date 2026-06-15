@@ -31,10 +31,8 @@ class SearchR1Dataset(Configurable):
     """Endless, seeded stream of Search-R1 QA samples.
 
     The NQ/HotpotQA parquet (columns ``question``, ``golden_answers``, ``data_source``)
-    is downloaded from the HF Hub dataset ``PeterJinGo/nq_hotpotqa_train`` — no local
-    preprocessing needed; set ``data_path`` to read a local parquet instead. Row order
-    is shuffled with ``seed`` and reshuffled on each wrap, so a run sees a fresh
-    permutation every epoch.
+    is downloaded from the HF Hub dataset ``PeterJinGo/nq_hotpotqa_train``. Row order
+    is shuffled with ``seed`` and reshuffled on each wrap, so a run sees a fresh permutation every epoch.
     """
 
     @dataclass(kw_only=True, slots=True)

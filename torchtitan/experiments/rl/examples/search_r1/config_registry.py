@@ -117,9 +117,7 @@ def rl_grpo_qwen3_8b_search_r1() -> RLTrainer.Config:
     """GRPO Search-R1 for Qwen3-8B — same recipe as the 1.7B config.
 
     Only the model and GPU split differ. 8 GPUs: 4 generator (TP=4) + 2 trainer
-    (TP=2) + retriever on the spare GPUs. The trainer runs full bf16 (no fp32 master
-    copy), so 8B fits on TP=2 and leaves more GPUs for generation — RL is
-    generation-bound, so we keep n_generators >= n_trainers.
+    (TP=2) + retriever on the spare GPUs. The trainer runs full bf16.
     """
     config = rl_grpo_qwen3_1_7b_search_r1()
     config.model_spec = model_registry("8B", attn_backend="varlen")
