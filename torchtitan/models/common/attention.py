@@ -30,7 +30,7 @@ from torch.nn.attention.varlen import varlen_attn
 import spmd_types as spmd
 
 from torchtitan.distributed.compile import maybe_regional_inductor
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
+from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
 
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -209,34 +209,34 @@ class FlexAttention(Module):
         super().__init__()
         self.kernel_options = config.kernel_options
 
+    @staticmethod
     def compiled_flex_attn(
-        self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
         *,
-        attention_masks: BlockMask | None,
+        block_mask: BlockMask | None,
         scale: float | None,
-        return_lse: bool,
         enable_gqa: bool,
+        return_aux: AuxRequest,
+        kernel_options: dict,
     ):
-        """Run compiled FlexAttention outside SPMD typechecking."""
+        """Run compiled FlexAttention outside SPMD typechecking, and propagate types."""
         with spmd.no_typecheck():
             out, aux = FlexAttention._compiled_flex_attn(
                 q,
                 k,
                 v,
-                block_mask=attention_masks,
+                block_mask=block_mask,
                 scale=scale,
                 enable_gqa=enable_gqa,
-                return_aux=AuxRequest(lse=return_lse),
-                kernel_options=self.kernel_options,
+                return_aux=return_aux,
+                kernel_options=kernel_options,
             )
-        if spmd.is_type_checking():
-            out_type = spmd.get_local_type(q)
-            spmd.assert_type(out, out_type)
-            if return_lse:
-                spmd.assert_type(aux.lse, out_type)
+        if get_spmd_backend() == "spmd_types":
+            spmd.assert_type(out, spmd.V, spmd.PartitionSpec("dp", "tp", "cp", None))
+            if return_aux.lse:
+                spmd.assert_type(aux.lse, spmd.V, spmd.PartitionSpec("dp", "tp", "cp"))
         return out, aux
 
     def forward(
@@ -269,14 +269,15 @@ class FlexAttention(Module):
         # an inductor sub-compile (see distributed/compile.py). A null context on
         # the default inductor / eager paths, so no dead metadata is emitted.
         with maybe_regional_inductor(FlexAttention.inductor_configs):
-            out, aux = self.compiled_flex_attn(
+            out, aux = FlexAttention.compiled_flex_attn(
                 q,
                 k,
                 v,
-                attention_masks=attention_masks,
+                block_mask=attention_masks,
                 scale=scale,
-                return_lse=return_lse,
                 enable_gqa=enable_gqa,
+                return_aux=AuxRequest(lse=return_lse),
+                kernel_options=self.kernel_options,
             )
         # Transpose back to (bs, seq, heads, dim)
         if return_lse:
@@ -626,18 +627,19 @@ class QKVLinear(BaseQKVLinear):
     def forward(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        from torch.distributed.tensor import DTensor
-
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
         # Use -1 instead of n_heads (or n_kv_heads) to infer the
         # actual local heads from sizes as TP may have sharded them.
+
         def local_head_split(x):
+            # Drop into local region, we can't propagate S(2) -> qkv head unflatten.
+            # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
             with spmd.local():
                 x_ = x.view(bs, seqlen, -1, self.head_dim)
-                if not isinstance(x, DTensor):
+                if get_spmd_backend() == "spmd_types":
                     spmd.assert_type(
-                        x_, spmd.get_local_type(x), spmd.PartitionSpec("dp", "cp", "tp", None)
+                        x_, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None)
                     )
             return x_
 
