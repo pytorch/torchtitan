@@ -57,14 +57,14 @@ class AsyncMode(str, enum.Enum):
 def _shares_storage(a: torch.Tensor, b: torch.Tensor) -> bool:
     """Whether ``a`` and ``b`` are backed by the same storage.
 
-    For ``DTensor`` the local shard's storage is compared. This is a read-only
-    identity check on already-detached ``state_dict`` tensors, so there is no
-    autograd interaction.
+    For ``DTensor`` the local shard's storage is compared via ``_local_tensor``
+    rather than ``to_local()``, which is autograd-aware; this is a read-only
+    identity check on the local storage.
     """
     if isinstance(a, DTensor):
-        a = a.to_local()
+        a = a._local_tensor
     if isinstance(b, DTensor):
-        b = b.to_local()
+        b = b._local_tensor
     return a.untyped_storage().data_ptr() == b.untyped_storage().data_ptr()
 
 
