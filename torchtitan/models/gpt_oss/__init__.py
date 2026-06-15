@@ -11,6 +11,7 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
+from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     CosSinRoPE,
     Embedding,
@@ -364,7 +365,7 @@ def model_registry(
         flavor=flavor,
         model=config,
         parallelize_fn=parallelize_gptoss,
-        pipelining_fn=None,
+        pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=GptOssStateDictAdapter,
     )

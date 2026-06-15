@@ -242,14 +242,6 @@ class ParallelismConfig:
                 "for compute capability 9.0 or newer."
             )
 
-    context_parallel_rotate_method: Literal["allgather", "alltoall"] = "allgather"
-    """
-    The collective to use in context parallel SDPA for kv shards exchange.
-    - 'allgather' means to all-gather all kv shards on ranks after the first sub-SDPA computation,
-    - 'alltoall' means to all-to-all shuffle the kv shards.
-    The default value is 'allgather'.
-    """
-
     expert_parallel_degree: int = 1
     """
     Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
