@@ -104,6 +104,32 @@ def _prepare_generation_request_metrics(
     ]
 
 
+_batch_invariant_bmm_lib: torch.library.Library | None = None
+
+
+def _patch_bmm_for_batch_invariance() -> None:
+    """Override ``aten::bmm`` with vLLM's batch-invariant bmm kernel.
+
+    torchtitan's batch-invariant mode (``batch_invariant_ops``, applied by
+    ``set_batch_invariance``) overrides ``mm``/``addmm``/``_log_softmax``/
+    ``mean.dim`` but not ``bmm``. The MoE router gate (3-D activation @ 2-D
+    weight) lowers to ``aten::bmm`` in the generator but ``aten::mm`` in the
+    trainer, so without this the generator's gate scores drift from the
+    trainer's and flip top-k expert routing, breaking on-policy logprob parity.
+
+    TODO: Investigate how to drop bmm batch invariant patch in generator.
+    """
+    global _batch_invariant_bmm_lib
+    if _batch_invariant_bmm_lib is not None:
+        return
+    from vllm.model_executor.layers.batch_invariant import bmm_batch_invariant
+
+    _batch_invariant_bmm_lib = torch.library.Library("aten", "IMPL")
+    _batch_invariant_bmm_lib.impl("bmm", bmm_batch_invariant, "CUDA")
+    # pyrefly: ignore[bad-assignment]
+    torch.bmm = bmm_batch_invariant
+
+
 def _force_logprobs_fn_for_batch_invariance() -> None:
     """Make vLLM's v2 logprob path dispatch.
 
@@ -318,8 +344,8 @@ class VLLMGenerator(Actor, Configurable):
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only."""
 
         def __post_init__(self):
-            # VLLMGenerator only supports TP. vLLM handles its own parallelism;
-            # we only apply TP via the core parallelize function.
+            # VLLMGenerator supports TP plus MoE EP. vLLM handles its own
+            # process groups, and the wrapper applies the model parallelisms.
             p = self.parallelism
             if p.data_parallel_replicate_degree != 1:
                 raise ValueError(
@@ -335,11 +361,6 @@ class VLLMGenerator(Actor, Configurable):
                 raise ValueError(
                     f"Generator does not support context parallelism, "
                     f"got cp={p.context_parallel_degree}"
-                )
-            if p.expert_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support expert parallelism, "
-                    f"got ep={p.expert_parallel_degree}"
                 )
             if p.enable_sequence_parallel:
                 raise ValueError(
@@ -418,6 +439,10 @@ class VLLMGenerator(Actor, Configurable):
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
         set_batch_invariance(config.debug.batch_invariant)
         if config.debug.batch_invariant:
+            # batch_invariant_ops (via set_batch_invariance) covers
+            # mm/addmm/_log_softmax/mean but not bmm; the MoE router gate lowers
+            # to bmm in the vLLM inference graph, so override it generator-side.
+            _patch_bmm_for_batch_invariance()
             # The vLLM v2 logprob Triton kernel bypasses the aten overrides above;
             # route it through trainer's function to match the trainer exactly.
             _force_logprobs_fn_for_batch_invariance()
@@ -427,6 +452,7 @@ class VLLMGenerator(Actor, Configurable):
         self.model_path = model_path
 
         # Build vLLM engine
+        enable_ep = config.parallelism.expert_parallel_degree > 1
         engine_kwargs = dict(
             # ``model`` is the path to the HF checkpoint directory. The
             # config is sourced from torchtitan's ModelSpec via
@@ -441,6 +467,12 @@ class VLLMGenerator(Actor, Configurable):
             config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
+            # NOTE: Monarch launches the generator workers and sets the torch
+            # elastic distributed env; with external_launcher, vLLM uses that
+            # world to build its process groups. vLLM does not take an
+            # explicit EP degree: when this boolean is set, it converts all
+            # DP * TP ranks into the expert-parallel group for MoE layers.
+            enable_expert_parallel=enable_ep,
             # Monarch already spawned TP workers via proc mesh. "external_launcher"
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",

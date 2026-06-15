@@ -11,6 +11,7 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
+from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     CosSinRoPE,
     Embedding,
@@ -132,7 +133,6 @@ def _make_gptoss_experts_config(
     num_experts: int,
     layer_id: int,
     top_k: int,
-    score_before_experts: bool,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> GptOssGroupedExperts.Config:
@@ -152,7 +152,6 @@ def _make_gptoss_experts_config(
         token_dispatcher=make_token_dispatcher_config(
             num_experts=num_experts,
             top_k=top_k,
-            score_before_experts=score_before_experts,
             comm_backend=moe_comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         ),
@@ -166,7 +165,6 @@ def _build_gptoss_layers(
     hidden_dim: int,
     num_experts: int,
     top_k: int,
-    score_before_experts: bool,
     load_balance_coeff: float,
     fuse_qkv: bool = False,
     moe_comm_backend: str,
@@ -192,7 +190,6 @@ def _build_gptoss_layers(
             num_experts=num_experts,
             layer_id=layer_id,
             top_k=top_k,
-            score_before_experts=score_before_experts,
             moe_comm_backend=moe_comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         )
@@ -248,7 +245,6 @@ def _debugmodel(
             hidden_dim=hidden_dim,
             num_experts=8,
             top_k=4,
-            score_before_experts=False,
             load_balance_coeff=1e-3,
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
@@ -289,7 +285,6 @@ def _20b(
             hidden_dim=hidden_dim,
             num_experts=32,
             top_k=4,
-            score_before_experts=False,
             load_balance_coeff=1e-3,
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
@@ -330,7 +325,6 @@ def _120b(
             hidden_dim=hidden_dim,
             num_experts=128,
             top_k=4,
-            score_before_experts=False,
             load_balance_coeff=1e-3,
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
@@ -371,7 +365,7 @@ def model_registry(
         flavor=flavor,
         model=config,
         parallelize_fn=parallelize_gptoss,
-        pipelining_fn=None,
+        pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=GptOssStateDictAdapter,
     )
