@@ -13,7 +13,6 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from spmd_types.runtime import get_partition_spec, has_local_type
 from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
@@ -548,10 +547,6 @@ class ChunkedCELoss(BaseLoss):
             )
             return wrapped(t)
 
-        is_spmd_backend = get_spmd_backend() == "spmd_types"
-        h_partition_spec = (
-            get_partition_spec(hidden_states) if is_spmd_backend else None
-        )
         with spmd.local():
             # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
             # accumulates ``.grad`` for ``GradAccumulator``.
@@ -569,7 +564,7 @@ class ChunkedCELoss(BaseLoss):
                 )
 
             total_loss = hidden_states.new_zeros((), dtype=torch.float32)
-            if is_spmd_backend and spmd.is_type_checking():
+            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
                 # TODO(pianpwk): would be nice if mutate_type accepted multiple axes.
                 for axis_name, dst in {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}.items():
                     total_loss = spmd.mutate_type(
@@ -610,7 +605,7 @@ class ChunkedCELoss(BaseLoss):
                     chunk_loss = self.fn(logits, label_chunk)
                 if global_valid_tokens is not None:
                     chunk_loss = chunk_loss / global_valid_tokens
-                if is_spmd_backend:
+                if get_spmd_backend() == "spmd_types":  # V -> P reinterpret, after exiting local region
                     spmd.assert_type(chunk_loss, {"dp": spmd.P, "cp": spmd.P})
                 total_loss = total_loss + chunk_loss.detach()
 
@@ -633,12 +628,11 @@ class ChunkedCELoss(BaseLoss):
             assert grad_accumulator is not None
             accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
-        # TODO(pianpwk): assert_type_like to carry global SPMD info.
-        if is_spmd_backend:
+        if get_spmd_backend() == "spmd_types":
             spmd.assert_type(
                 accumulated_grad,
-                spmd.get_local_type(hidden_states),
-                partition_spec=h_partition_spec,
+                {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
+                spmd.PartitionSpec("dp", "cp", None),
             )
         return self._gradient_backprop(
             hidden_states, accumulated_grad, total_loss, lm_head, fsdp_enabled
@@ -715,6 +709,5 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         result = _DecoderOutputGradientBackProp.apply(
             hidden_states, accumulated_grad, loss
         )
-        if has_local_type(loss):
-            spmd.assert_type(result, spmd.get_local_type(loss))
+        spmd.assert_type(result, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I})
         return result
