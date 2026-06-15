@@ -116,27 +116,28 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
 def rl_grpo_qwen3_8b_search_r1() -> RLTrainer.Config:
     """GRPO Search-R1 for Qwen3-8B — same recipe as the 1.7B config.
 
-    Only the model and GPU split differ. 8 GPUs: 2 generator (TP=2) + 4 trainer
-    (TP=4) + retriever on the spare GPUs. The trainer runs fp32, so 8B needs TP=4
-    to avoid OOM; the bf16 vLLM generator fits on TP=2.
+    Only the model and GPU split differ. 8 GPUs: 4 generator (TP=4) + 2 trainer
+    (TP=2) + retriever on the spare GPUs. The trainer runs full bf16 (no fp32 master
+    copy), so 8B fits on TP=2 and leaves more GPUs for generation — RL is
+    generation-bound, so we keep n_generators >= n_trainers.
     """
     config = rl_grpo_qwen3_1_7b_search_r1()
     config.model_spec = model_registry("8B", attn_backend="varlen")
     config.hf_assets_path = "torchtitan/experiments/rl/example_checkpoint/Qwen3-8B"
     config.trainer = dataclasses.replace(
         config.trainer,
+        training=TrainingConfig(dtype="bfloat16"),
         parallelism=dataclasses.replace(
-            config.trainer.parallelism, tensor_parallel_degree=4
+            config.trainer.parallelism, tensor_parallel_degree=2
         ),
     )
-    # 8B TP=2 weights + a 0.9 KV cache leave no headroom for the trainer->generator
-    # weight sync, which OOMs the generator GPUs. 0.6 keeps ample paged-KV room
-    # while reserving ~30GB/GPU for the weight-sync transient.
+    # Leave headroom for the trainer->generator weight-sync transient (a full 0.9
+    # KV cache OOMs the generator GPUs during sync).
     config.generator = dataclasses.replace(
         config.generator,
         gpu_memory_limit=0.6,
         parallelism=dataclasses.replace(
-            config.generator.parallelism, tensor_parallel_degree=2
+            config.generator.parallelism, tensor_parallel_degree=4
         ),
     )
     return config
