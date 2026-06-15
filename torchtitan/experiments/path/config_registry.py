@@ -276,8 +276,8 @@ def _checkpoint_config(folder: str, base_folder: str, interval: int) -> PathOnnx
         interval=interval,
         input_names=input_names,
         input_shapes=input_shapes,
-        input_dtypes=["float32"] * len(input_names),
-        onnx_model_dtype="float32", # WIP: test if fp16 doesn't degrade performance
+        input_dtypes=["float16"] * len(input_names),
+        onnx_model_dtype="float16", # WIP: test if fp16 doesn't degrade performance
         vision_input_names=vision_input_names,
         temporal_policy_input_names=temporal_policy_input_names,
     )
