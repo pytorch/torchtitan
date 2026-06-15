@@ -726,7 +726,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 if (
                     isinstance(pred, DTensor)
                     and not isinstance(self.loss_fn, ChunkedCELoss)
-                    and self.config.parallelism.spmd_backend != "full_dtensor"
+                    and self.config.parallelism.spmd_backend == "default"
                     and self.config.parallelism.disable_loss_parallel
                 ):
                     pred = pred.to_local()
