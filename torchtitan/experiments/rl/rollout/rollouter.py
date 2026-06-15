@@ -84,8 +84,8 @@ class Rollouter(Configurable):
         """`TokenEnv` limits (e.g. `max_rollout_tokens`) passed to `make_env_group`."""
 
         advantage: Configurable.Config = field(default_factory=GRPOAdvantage.Config)
-        """Post-scoring advantage estimator. Default = GRPO mean-baseline (Dr.GRPO);
-        set `GRPOAdvantage.Config(std_normalize=True)` for standard GRPO."""
+        """Post-scoring advantage estimator. Default = Dr.GRPO (mean-baseline only);
+        set `GRPOAdvantage.Config(should_std_normalize=True)` for standard GRPO."""
 
     def __init__(self, config: Config) -> None:
         self._train_dataset = config.train_dataset.build()

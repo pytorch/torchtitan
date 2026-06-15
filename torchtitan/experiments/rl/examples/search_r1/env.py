@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 
@@ -110,8 +111,8 @@ class SearchR1Env(MessageEnv):
     a ``role="tool"`` message containing the retrieved passages — or stops calling
     tools, which ends the rollout with the assistant's reply as the final answer. The
     model uses native thinking and tool calling (the renderer renders the tool schema
-    and parses the tool calls); the per-rollout turn budget is enforced by
-    ``TokenEnv.max_num_turns``.
+    and parses the tool calls); the per-rollout turn and token budget is enforced by
+    ``TokenEnv``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -142,17 +143,14 @@ class SearchR1Env(MessageEnv):
             # No tool call -> the assistant's reply is the final answer.
             return MessageEnvStepOutput(done=True)
 
-        # Answer each search call with a tool-role message holding the passages.
-        env_messages: list[Message] = []
-        for tool_call in tool_calls:
-            query = _query_from_tool_call(tool_call)
-            passages = await _search(query, url=self._search_url, topk=self._topk)
-            tool_message: Message = {
-                "role": "tool",
-                "content": passages,
-                "name": tool_call.name or "search",
-            }
-            if tool_call.id:
-                tool_message["tool_call_id"] = tool_call.id
-            env_messages.append(tool_message)
+        # Run every search call concurrently, then answer each with a tool message.
+        passages = await asyncio.gather(
+            *(
+                _search(
+                    _query_from_tool_call(tc), url=self._search_url, topk=self._topk
+                )
+                for tc in tool_calls
+            )
+        )
+        env_messages: list[Message] = [{"role": "tool", "content": p} for p in passages]
         return MessageEnvStepOutput(env_messages=env_messages, done=False)

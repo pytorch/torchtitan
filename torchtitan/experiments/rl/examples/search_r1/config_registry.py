@@ -59,7 +59,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
         # Standard GRPO (advantage normalized by group reward std). Advantage is a
         # post-scoring step on the rollouter; the trainer just consumes it.
         rollouter=SearchR1Rollouter.Config(
-            advantage=GRPOAdvantage.Config(std_normalize=True),
+            advantage=GRPOAdvantage.Config(should_std_normalize=True),
         ),
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -142,4 +142,17 @@ def rl_grpo_qwen3_8b_search_r1() -> RLTrainer.Config:
             config.generator.parallelism, tensor_parallel_degree=2
         ),
     )
+    return config
+
+
+def rl_grpo_qwen3_8b_search_r1_inductor() -> RLTrainer.Config:
+    """Same as ``rl_grpo_qwen3_8b_search_r1`` but per-layer torch.compile uses
+    ``backend="inductor"`` instead of ``aot_eager`` — a speed test. cudagraph stays
+    OFF. Per-layer compile keeps the custom attention op out of the compiled graph,
+    so it should avoid the inductor 'out variant' assertion that vLLM whole-model
+    VLLM_COMPILE hits (issue #3669). Numerics-shared with the trainer (same
+    CompileConfig on both sides), only the codegen backend changes vs the default.
+    """
+    config = rl_grpo_qwen3_8b_search_r1()
+    config.compile = CompileConfig(enable=True, backend="inductor")
     return config

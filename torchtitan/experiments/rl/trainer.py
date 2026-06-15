@@ -601,9 +601,8 @@ class RLTrainer(Configurable):
                 )
                 continue
 
-            # Advantage is filled upstream by the Rollouter's AdvantageEstimator;
-            # group_std is recomputed here only for the metric. Each rollout packs into
-            # 1+ episodes.
+            # Advantage was already filled by the Rollouter's advantage estimator; here
+            # we only collect each group's reward std for the metric emitted below.
             group_stds.append(
                 statistics.pstdev([rollout.reward for rollout in group.rollouts])
             )

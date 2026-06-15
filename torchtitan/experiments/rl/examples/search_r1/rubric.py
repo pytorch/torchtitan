@@ -61,6 +61,7 @@ def _made_search_call(rollout: Rollout) -> bool:
 
 def _retrieval_surfaced_gold(rollout: Rollout, golden_answers: list[str]) -> bool:
     """True if a gold answer (normalized) appears in any search (tool) result."""
+    normalized_golds = [_normalize_answer(g) for g in golden_answers]
     for turn in rollout.turns:
         for message in turn.env_messages or []:
             if message.get("role") != "tool":
@@ -69,7 +70,7 @@ def _retrieval_surfaced_gold(rollout: Rollout, golden_answers: list[str]) -> boo
             if not isinstance(content, str):
                 continue
             normalized = _normalize_answer(content)
-            if any(_normalize_answer(g) in normalized for g in golden_answers):
+            if any(g in normalized for g in normalized_golds):
                 return True
     return False
 
@@ -82,7 +83,7 @@ class RewardExactMatch(RewardFn):
     searching):
 
     - ``no_search_penalty`` > 0: a correct answer that never called the search tool
-      scores ``score - no_search_penalty`` (< a searched correct answer's ``score``).
+      scores ``score - no_search_penalty``.
     - ``retrieval_score`` > 0: a wrong/missing answer still gets this credit if a
       search surfaced a gold answer.
     """
@@ -113,6 +114,8 @@ class RewardExactMatch(RewardFn):
             if _made_search_call(rollout):
                 return self._score
             return self._score - self._no_search_penalty
+        # Reached only when the final answer is wrong/missing: partial credit if a
+        # search still surfaced the gold answer.
         if self._retrieval_score and _retrieval_surfaced_gold(
             rollout, env_input.golden_answers
         ):
