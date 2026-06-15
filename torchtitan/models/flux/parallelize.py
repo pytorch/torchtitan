@@ -16,13 +16,13 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 
 from torchtitan.config import (
-    ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
@@ -38,11 +38,11 @@ def parallelize_flux(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
+    ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
-    if ac_config.mode != "none":
-        apply_ac(model, ac_config)
+    if ac_config is not None:
+        apply_ac(model)
 
     if parallel_dims.cp_enabled:
         apply_cp(model, parallel_dims.get_mesh("cp"))
@@ -150,8 +150,8 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     )
 
 
-def apply_ac(model: nn.Module, ac_config):
-    """Apply activation checkpointing to the model."""
+def apply_ac(model: nn.Module):
+    """Apply full activation checkpointing to the Flux double/single blocks."""
 
     # pyrefly: ignore [missing-attribute]
     for layer_id, block in model.double_blocks.named_children():
@@ -165,7 +165,7 @@ def apply_ac(model: nn.Module, ac_config):
         # pyrefly: ignore [missing-attribute]
         model.single_blocks.register_module(layer_id, block)
 
-    logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
+    logger.info("Applied full activation checkpointing to the model")
 
 
 def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:

@@ -132,7 +132,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.expert_parallel_degree 4",
-                    "--activation_checkpoint.mode 'selective'",
+                    "activation-checkpoint:selective",
                 ],
             ],
             "Gpt-oss PP+FSDP+EP+SACOP",

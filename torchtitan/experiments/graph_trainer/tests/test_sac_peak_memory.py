@@ -11,8 +11,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from torchtitan.config import ActivationCheckpointConfig
-from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.experiments.graph_trainer.llama3 import (
     model_registry as llama3_registry,
 )
@@ -108,7 +107,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
     def test_llama3_debugmodel_peak_memory_matches_eager_selective_ac(self):
         eager_model = _build_model(DEBUGMODEL)
         eager_model.load_state_dict(copy.deepcopy(self.state_dict))
-        apply_ac(eager_model, ActivationCheckpointConfig(mode="selective"))
+        SelectiveAC.Config().build().apply(eager_model)
         eager_trainer = build_minimal_trainer(
             eager_model,
             llama3_registry(DEBUGMODEL).model,
@@ -223,7 +222,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         """Graph full recompute produces bitwise-identical loss and grads vs eager."""
         eager_model = _build_model(DEBUGMODEL)
         eager_model.load_state_dict(copy.deepcopy(self.state_dict))
-        apply_ac(eager_model, ActivationCheckpointConfig(mode="full"))
+        FullAC.Config().build().apply(eager_model)
         eager_trainer = build_minimal_trainer(
             eager_model,
             llama3_registry(DEBUGMODEL).model,
