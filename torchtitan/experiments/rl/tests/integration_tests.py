@@ -38,6 +38,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--num_steps 5",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
+                    "--num_generators 3",
                     "--group_size 2",
                     "--batcher.batch.seq_len 1024",
                     "--renderer.enable-thinking False",
@@ -51,7 +52,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             ],
             "RL GRPO TP=2 no compile",
             "rl_grpo_tp2_no_compile",
-            ngpu=4,
+            ngpu=8,
         ),
         OverrideDefinitions(
             [
