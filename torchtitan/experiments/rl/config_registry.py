@@ -503,7 +503,8 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
-                tensor_parallel_degree=4,
+                data_parallel_replicate_degree=1,
+                tensor_parallel_degree=2,
                 disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
@@ -519,8 +520,9 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
             model_dtype="bfloat16",
             cudagraph=VLLMCudagraphConfig(enable=False),
             parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=4,
+                # Generator-only convention: mapped to vLLM pure DP, not FSDP.
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,

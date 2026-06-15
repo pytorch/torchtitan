@@ -194,10 +194,6 @@ class ParallelDims:
             # can install MixedPrecisionPolicy and FSDP can discriminate the DP
             # submesh on TP/DDP/PP-only.
             return True
-        if name == "dp_replicate":  # TODO(jianiw): check if this is needed
-            # Always keep dp_replicate mesh so replicate() / fully_shard()
-            # can use it for data parallel replication even at degree 1.
-            return True
         if name == "efsdp":
             # We always keep the efsdp if EP is larger than 1 because we need
             # FSDP wrapping to help the MoE layers do mixed precision training.

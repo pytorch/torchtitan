@@ -9,8 +9,7 @@ from copy import deepcopy
 
 import torch
 from torch.utils.flop_counter import FlopCounterMode
-from torchtitan.config import ActivationCheckpointConfig as ACConfig
-from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module, ModuleDict
 
@@ -65,58 +64,29 @@ class TestApplyAC(unittest.TestCase):
         # 2. SAC
         # Per-op SAC's policy is to save every other mm
         model_selective_ac = ToyModule()
-        ac_config_no_force = ACConfig(
-            mode="selective",
-            per_op_sac_force_recompute_mm_shapes_by_fqns=[],  # Empty list
-            early_stop=False,
-        )
-        apply_ac(
-            model_selective_ac,
-            ac_config_no_force,
-            model_compile_enabled=False,
-        )
+        SelectiveAC.Config(
+            force_recompute_mm_shapes_by_fqns=[],  # Empty list
+        ).build().apply(model_selective_ac)
         flops_selective_ac = get_bw_flops(model_selective_ac)
 
         # 3. Per-op SAC with force recompute "moe.router.gate"
         # This leads to two mms being recomputed since they share the same shape!
         model_with_force_first = ToyModule()
-        ac_config_with_force_first = ACConfig(
-            mode="selective",
-            per_op_sac_force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
-            early_stop=False,
-        )
-        apply_ac(
-            model_with_force_first,
-            ac_config_with_force_first,
-            model_compile_enabled=False,
-        )
+        SelectiveAC.Config(
+            force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
+        ).build().apply(model_with_force_first)
         flops_with_force_first = get_bw_flops(model_with_force_first)
 
         # 4. Per-op SAC with force recompute "output"
         model_with_force_last = ToyModule()
-        ac_config_with_force_last = ACConfig(
-            mode="selective",
-            per_op_sac_force_recompute_mm_shapes_by_fqns=["output"],
-            early_stop=False,
-        )
-        apply_ac(
-            model_with_force_last,
-            ac_config_with_force_last,
-            model_compile_enabled=False,
-        )
+        SelectiveAC.Config(
+            force_recompute_mm_shapes_by_fqns=["output"],
+        ).build().apply(model_with_force_last)
         flops_with_force_last = get_bw_flops(model_with_force_last)
 
         # 5. Full AC
         model_with_full_ac = ToyModule()
-        ac_config_full_ac = ACConfig(
-            mode="full",
-            early_stop=False,
-        )
-        apply_ac(
-            model_with_full_ac,
-            ac_config_full_ac,
-            model_compile_enabled=False,
-        )
+        FullAC.Config().build().apply(model_with_full_ac)
         flops_full_ac = get_bw_flops(model_with_full_ac)
 
         self.assertEqual(flops_no_ac, 8.0)
@@ -148,54 +118,29 @@ class TestApplyAC(unittest.TestCase):
         # 2. SAC
         # Per-op SAC's policy is to save every other mm
         model_selective_ac = ToyModule().cuda()
-        ac_config_no_force = ACConfig(
-            mode="selective",
-            per_op_sac_force_recompute_mm_shapes_by_fqns=[],  # Empty list
-        )
-        apply_ac(
-            model_selective_ac,
-            ac_config_no_force,
-            model_compile_enabled=False,
-        )
+        SelectiveAC.Config(
+            force_recompute_mm_shapes_by_fqns=[],  # Empty list
+        ).build().apply(model_selective_ac)
         mem_selective_ac = get_act_mem(model_selective_ac)
 
         # 3. Per-op SAC with force recompute "moe.router.gate"
         # This leads to two mms being recomputed since they share the same shape!
         model_with_force_first = ToyModule().cuda()
-        ac_config_with_force_first = ACConfig(
-            mode="selective",
-            per_op_sac_force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
-        )
-        apply_ac(
-            model_with_force_first,
-            ac_config_with_force_first,
-            model_compile_enabled=False,
-        )
+        SelectiveAC.Config(
+            force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
+        ).build().apply(model_with_force_first)
         mem_with_force_first = get_act_mem(model_with_force_first)
 
         # 4. Per-op SAC with force recompute "output"
         model_with_force_last = ToyModule().cuda()
-        ac_config_with_force_last = ACConfig(
-            mode="selective",
-            per_op_sac_force_recompute_mm_shapes_by_fqns=["output"],
-        )
-        apply_ac(
-            model_with_force_last,
-            ac_config_with_force_last,
-            model_compile_enabled=False,
-        )
+        SelectiveAC.Config(
+            force_recompute_mm_shapes_by_fqns=["output"],
+        ).build().apply(model_with_force_last)
         mem_with_force_last = get_act_mem(model_with_force_last)
 
         # 5. Full AC
         model_with_full_ac = ToyModule().cuda()
-        ac_config_full_ac = ACConfig(
-            mode="full",
-        )
-        apply_ac(
-            model_with_full_ac,
-            ac_config_full_ac,
-            model_compile_enabled=False,
-        )
+        FullAC.Config().build().apply(model_with_full_ac)
         mem_full_ac = get_act_mem(model_with_full_ac)
 
         self.assertEqual(mem_no_ac, 2.0)
@@ -212,35 +157,21 @@ class TestApplyAC(unittest.TestCase):
 
         model_selective_ac = ToyModule()
         model_selective_ac.load_state_dict(model_no_ac.state_dict())
-        apply_ac(
-            model_selective_ac,
-            ACConfig(
-                mode="selective",
-                per_op_sac_force_recompute_mm_shapes_by_fqns=[],
-            ),
-            model_compile_enabled=False,
-        )
+        SelectiveAC.Config(
+            force_recompute_mm_shapes_by_fqns=[],
+        ).build().apply(model_selective_ac)
+
         model_force_first = ToyModule()
         model_force_first.load_state_dict(model_no_ac.state_dict())
-        apply_ac(
-            model_force_first,
-            ACConfig(
-                mode="selective",
-                per_op_sac_force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
-            ),
-            model_compile_enabled=False,
-        )
+        SelectiveAC.Config(
+            force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
+        ).build().apply(model_force_first)
 
         model_force_last = ToyModule()
         model_force_last.load_state_dict(model_no_ac.state_dict())
-        apply_ac(
-            model_force_last,
-            ACConfig(
-                mode="selective",
-                per_op_sac_force_recompute_mm_shapes_by_fqns=["output"],
-            ),
-            model_compile_enabled=False,
-        )
+        SelectiveAC.Config(
+            force_recompute_mm_shapes_by_fqns=["output"],
+        ).build().apply(model_force_last)
 
         def run_fwd_bwd(model, batch):
             model.zero_grad(set_to_none=True)
@@ -285,7 +216,7 @@ class TestApplyAC(unittest.TestCase):
             torch.testing.assert_close(g_ref, g_fl)
 
     def test_force_recompute_mm_fqns(self):
-        """Test that per_op_sac_force_recompute_mm_shapes_by_fqns controls
+        """Test that force_recompute_mm_shapes_by_fqns controls
         exactly which matmuls are recomputed vs stored during backward.
 
         Approach: during backward, count aten.mm calls per weight tensor.
@@ -311,15 +242,9 @@ class TestApplyAC(unittest.TestCase):
 
         def get_recomputed(force_recompute_fqns):
             m = ToyModule()
-            apply_ac(
-                m,
-                ACConfig(
-                    mode="selective",
-                    per_op_sac_force_recompute_mm_shapes_by_fqns=force_recompute_fqns,
-                    early_stop=False,
-                ),
-                model_compile_enabled=False,
-            )
+            SelectiveAC.Config(
+                force_recompute_mm_shapes_by_fqns=force_recompute_fqns,
+            ).build().apply(m)
             ptr_to_name = {
                 mod.weight.data_ptr(): fqn.rsplit(".", 1)[-1]
                 for fqn, mod in m.named_modules()

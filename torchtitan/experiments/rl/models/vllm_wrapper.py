@@ -20,12 +20,7 @@ import torch.distributed as dist
 from torch.distributed._tensor import DTensor, Replicate
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    CompileConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.protocols.model_spec import ModelSpec
@@ -218,7 +213,7 @@ class VLLMModelWrapper(Module):
             training=TrainingConfig(),
             parallelism=parallelism,
             compile_config=compile_config,
-            ac_config=ActivationCheckpointConfig(mode="none"),
+            ac_config=None,
             dump_folder="",
             # Generator inference replicates parameters across vLLM DP groups.
             # Keep TP/EP sharding above, but do not translate dp_shard into
