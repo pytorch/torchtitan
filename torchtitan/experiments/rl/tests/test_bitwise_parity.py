@@ -194,6 +194,9 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     inner_attn = config.model_spec.model.layers[0].attention.inner_attention
     use_flex = isinstance(inner_attn, FlexAttention.Config)
 
+    # Mirror the production VLLMGenerator so the test exercises the same
+    # batch-invariant path (v2 runner is required for the logprob-kernel patch).
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     if use_flex:
         os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
         backend_enum = AttentionBackendEnum.FLEX_ATTENTION
@@ -201,6 +204,17 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
         if gen_config.debug.batch_invariant:
             set_batch_invariance(True)
+            # batch_invariant_ops covers mm/addmm/_log_softmax/mean but not bmm
+            # (the MoE router gate lowers to bmm in the vLLM inference graph), and
+            # the v2 logprob Triton kernel bypasses the aten overrides. Apply the
+            # same generator-side patches the production VLLMGenerator does.
+            from torchtitan.experiments.rl.actors.generator import (
+                _force_logprobs_fn_for_batch_invariance,
+                _patch_bmm_for_batch_invariance,
+            )
+
+            _patch_bmm_for_batch_invariance()
+            _force_logprobs_fn_for_batch_invariance()
         backend_enum = AttentionBackendEnum.CUSTOM
 
     _set_generator_determinism(gen_config.debug)
@@ -656,7 +670,10 @@ class BitwiseParityTestBase(unittest.TestCase):
 
         if dist.get_rank() == 0:
             for i in range(mid):
-                partial_lp = lps_partial[i] if mid > 1 else lps_partial
+                # ``prompt_ids[:mid]`` is a list of sequences, so
+                # ``compute_trainer_prefill_logprobs`` always returns a list
+                # (even for mid==1) -> index per-sequence.
+                partial_lp = lps_partial[i]
                 self._assert_logprobs_equal(
                     f"seq {i}: prefill(bsz={mid}) vs prefill(bsz={n})",
                     partial_lp,
@@ -751,6 +768,31 @@ class TestBitwiseParityMoEEP(BitwiseParityTestBase):
     attn_backend = "varlen"
     min_world_size = 4
     hf_assets_env_var = "MOE_HF_ASSETS_PATH"
+
+
+class TestBitwiseParity30BA3B(BitwiseParityTestBase):
+    """Bitwise parity for the real Qwen3-30B-A3B MoE with batch-invariant mode.
+
+    On 4 co-located GPUs: trainer FSDP2 dp_shard=2/TP=2/EP=4 (world 4); the
+    generator maps dp_shard=2 to vLLM data parallelism with TP=2, EP=4 (world
+    4). Both sides load the same real HF checkpoint, so weights match by
+    construction. Small batch/sequence sizes keep the co-located trainer +
+    generator within a single GPU's memory.
+
+    Requires a real Qwen3-30B-A3B HF checkpoint via QWEN3_30B_HF_ASSETS_PATH
+    (absolute path).
+    """
+
+    __test__ = True
+
+    BATCH_SIZE = 2
+    PROMPT_LENGTH = 64
+    MAX_GEN_TOKENS = 16
+
+    config_fn = staticmethod(rl_grpo_qwen3_30b_a3b_varlen_batch_invariant)
+    attn_backend = "varlen"
+    min_world_size = 4
+    hf_assets_env_var = "QWEN3_30B_HF_ASSETS_PATH"
 
 
 if __name__ == "__main__":
