@@ -222,20 +222,16 @@ class FlexAttention(Module):
     ):
         """Run compiled FlexAttention outside SPMD typechecking."""
         with spmd.no_typecheck():
-            # Mark the flex region so that, when the enclosing model is compiled
-            # with a non-inductor backend, regional_inductor scoops just this
-            # region into an inductor sub-compile (see distributed/compile.py).
-            with maybe_regional_inductor(FlexAttention.inductor_configs):
-                out, aux = FlexAttention._compiled_flex_attn(
-                    q,
-                    k,
-                    v,
-                    block_mask=attention_masks,
-                    scale=scale,
-                    enable_gqa=enable_gqa,
-                    return_aux=AuxRequest(lse=return_lse),
-                    kernel_options=self.kernel_options,
-                )
+            out, aux = FlexAttention._compiled_flex_attn(
+                q,
+                k,
+                v,
+                block_mask=attention_masks,
+                scale=scale,
+                enable_gqa=enable_gqa,
+                return_aux=AuxRequest(lse=return_lse),
+                kernel_options=self.kernel_options,
+            )
         if spmd.is_type_checking():
             out_type = spmd.get_local_type(q)
             spmd.assert_type(out, out_type)
@@ -268,15 +264,20 @@ class FlexAttention(Module):
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
         #    `FlexAttention._compiled_flex_attn` is correct.
-        out, aux = self.compiled_flex_attn(
-            q,
-            k,
-            v,
-            attention_masks=attention_masks,
-            scale=scale,
-            return_lse=return_lse,
-            enable_gqa=enable_gqa,
-        )
+        # Mark the flex region so that, when the enclosing model is compiled with
+        # a non-inductor backend, regional_inductor scoops just this region into
+        # an inductor sub-compile (see distributed/compile.py). A null context on
+        # the default inductor / eager paths, so no dead metadata is emitted.
+        with maybe_regional_inductor(FlexAttention.inductor_configs):
+            out, aux = self.compiled_flex_attn(
+                q,
+                k,
+                v,
+                attention_masks=attention_masks,
+                scale=scale,
+                return_lse=return_lse,
+                enable_gqa=enable_gqa,
+            )
         # Transpose back to (bs, seq, heads, dim)
         if return_lse:
             return out.transpose(1, 2), aux.lse.transpose(1, 2)
