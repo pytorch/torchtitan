@@ -110,7 +110,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--compile.enable",
-                    "--activation_checkpoint.mode selective",
+                    "activation-checkpoint:selective",
                 ],
             ],
             "1D compile with selective op AC",
@@ -310,7 +310,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--parallelism.pipeline_parallel_degree 4",
                     "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
-                    "--activation_checkpoint.mode full",
+                    "activation-checkpoint:full",
                 ],
             ],
             "PP looped zero bubble test",
@@ -323,7 +323,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
-                    "--activation_checkpoint.mode full",
+                    "activation-checkpoint:full",
                 ],
             ],
             "PP zero bubble test (v shaped)",
@@ -341,7 +341,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
                     "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
-                    "--activation_checkpoint.mode full",
+                    "activation-checkpoint:full",
                 ],
             ],
             "PP with custom pipeline schedule loaded from CSV file",
@@ -526,7 +526,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--module llama3 --config llama3_debugmodel_varlen_attn",
                     "--parallelism.data_parallel_shard_degree=4",
-                    "--activation_checkpoint.mode=selective",
+                    "activation-checkpoint:selective",
                 ]
             ],
             "FSDP+VARLEN_ATTN + per op SAC",
