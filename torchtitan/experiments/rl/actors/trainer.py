@@ -20,7 +20,6 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
-    ActivationCheckpointConfig,
     CommConfig,
     CompileConfig,
     Configurable,
@@ -30,6 +29,10 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed.activation_checkpoint import (
+    ActivationCheckpointingConfig,
+    SelectiveAC,
+)
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingBatch
 from torchtitan.models.common.attention import FlexAttention
@@ -140,8 +143,8 @@ class PolicyTrainer(Actor, Configurable):
         comm: CommConfig = field(default_factory=CommConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
         loss: Configurable.Config = field(default_factory=Configurable.Config)
-        ac_config: ActivationCheckpointConfig = field(
-            default_factory=lambda: ActivationCheckpointConfig(mode="none")
+        ac_config: ActivationCheckpointingConfig = field(
+            default_factory=SelectiveAC.Config
         )
         checkpoint: CheckpointManager.Config = field(
             default_factory=CheckpointManager.Config
@@ -482,6 +485,7 @@ class PolicyTrainer(Actor, Configurable):
                 self.config.training.max_norm,
                 foreach=True,
                 pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
+                ep_enabled=self.parallel_dims.ep_enabled,
             )
 
         with sl.log_trace_span("optim"):

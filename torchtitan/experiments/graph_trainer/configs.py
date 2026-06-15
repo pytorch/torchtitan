@@ -9,8 +9,8 @@ from dataclasses import dataclass, field, fields, replace
 from typing import Literal
 
 from torchtitan.components.loss import ChunkedCELoss
-from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.config.configs import CompileConfig
+from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedCELossWithParamGrads,
 )
@@ -151,10 +151,11 @@ def to_graph_trainer_config(
     d.pop("compile")
 
     # graph_trainer uses graph-based SAC instead of eager AC. Override any
-    # non-"none" AC mode to "selective" so callers don't need per-config fixups.
+    # enabled AC policy with the default selective one so callers don't need
+    # per-config fixups.
     ac = d.get("activation_checkpoint")
-    if ac is not None and ac.mode != "none":
-        d["activation_checkpoint"] = ActivationCheckpointConfig(mode="selective")
+    if ac is not None:
+        d["activation_checkpoint"] = SelectiveAC.Config()
 
     # graph_trainer's tracer requires explicit autograd outputs for lm_head
     # params instead of relying on .grad side effects from chunk_loss.backward().
