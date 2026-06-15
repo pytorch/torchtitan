@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 import pandas as pd
+from huggingface_hub import hf_hub_download
 
 from torchtitan.config import Configurable
 
@@ -27,17 +28,26 @@ class SearchR1Sample:
 
 
 class SearchR1Dataset(Configurable):
-    """Endless, seeded stream of Search-R1 QA samples read from a parquet file.
+    """Endless, seeded stream of Search-R1 QA samples.
 
-    The parquet has ``question`` and ``golden_answers`` columns; see this folder's
-    README for how to produce it. Row order is shuffled with ``seed`` and reshuffled
-    on each wrap, so a run sees a fresh permutation every epoch.
+    The NQ/HotpotQA parquet (columns ``question``, ``golden_answers``, ``data_source``)
+    is downloaded from the HF Hub dataset ``PeterJinGo/nq_hotpotqa_train`` — no local
+    preprocessing needed; set ``data_path`` to read a local parquet instead. Row order
+    is shuffled with ``seed`` and reshuffled on each wrap, so a run sees a fresh
+    permutation every epoch.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        data_path: str
-        """Path to the Search-R1 QA parquet (train or test split)."""
+        filename: str = "train.parquet"
+        """Which split to load from the HF dataset repo: ``train.parquet`` (train) or
+        ``test.parquet`` (validation)."""
+
+        repo_id: str = "PeterJinGo/nq_hotpotqa_train"
+        """HF Hub dataset repo holding the preprocessed Search-R1 NQ/HotpotQA parquets."""
+
+        data_path: str | None = None
+        """Local parquet path; overrides the HF download when set (offline use)."""
 
         seed: int = 42
         """Seed for the row-order shuffle."""
@@ -54,12 +64,15 @@ class SearchR1Dataset(Configurable):
         columns = ["question", "golden_answers"]
         if config.data_source is not None:
             columns.append("data_source")
-        df = pd.read_parquet(config.data_path, columns=columns)
+        path = config.data_path or hf_hub_download(
+            repo_id=config.repo_id, filename=config.filename, repo_type="dataset"
+        )
+        df = pd.read_parquet(path, columns=columns)
         if config.data_source is not None:
             df = df[df["data_source"] == config.data_source].reset_index(drop=True)
             if df.empty:
                 raise ValueError(
-                    f"no rows with data_source={config.data_source!r} in {config.data_path}"
+                    f"no rows with data_source={config.data_source!r} in {path}"
                 )
         self._questions: list[str] = [str(q) for q in df["question"].tolist()]
         # golden_answers is a per-row array of strings; normalize to list[str].
@@ -67,7 +80,7 @@ class SearchR1Dataset(Configurable):
             [str(a) for a in answers] for answers in df["golden_answers"].tolist()
         ]
         if not self._questions:
-            raise ValueError(f"no rows found in {config.data_path}")
+            raise ValueError(f"no rows found in {path}")
 
         self._rng = random.Random(config.seed)
         self._shuffle = config.shuffle

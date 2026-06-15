@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-import os
-
 from dataclasses import dataclass, field
 
 from torchtitan.experiments.rl.environment import TokenEnv
@@ -20,16 +18,6 @@ from torchtitan.experiments.rl.rollout.rollouter import Rollouter
 from torchtitan.experiments.rl.rubrics import Rubric
 
 
-# QA parquet locations. Set SEARCH_R1_TRAIN_PARQUET / SEARCH_R1_TEST_PARQUET to
-# point at the data without editing the config; see README.md for how to prepare it.
-DEFAULT_TRAIN_PARQUET = os.environ.get(
-    "SEARCH_R1_TRAIN_PARQUET", "data/nq_hotpotqa_train/train.parquet"
-)
-DEFAULT_TEST_PARQUET = os.environ.get(
-    "SEARCH_R1_TEST_PARQUET", "data/nq_hotpotqa_train/test.parquet"
-)
-
-
 class SearchR1Rollouter(Rollouter):
     """Search-R1 rollouter: the QA datasets, the multi-turn search env, and the
     EM/format rubric wired together. All behavior is inherited from ``Rollouter``;
@@ -40,13 +28,13 @@ class SearchR1Rollouter(Rollouter):
     class Config(Rollouter.Config):
         train_dataset: SearchR1Dataset.Config = field(
             default_factory=lambda: SearchR1Dataset.Config(
-                data_path=DEFAULT_TRAIN_PARQUET, seed=42
+                filename="train.parquet", seed=42
             )
         )
         validation_dataset: SearchR1Dataset.Config = field(
             default_factory=lambda: SearchR1Dataset.Config(
                 # Evaluate on the NQ split only; fixed file order for a stable eval set.
-                data_path=DEFAULT_TEST_PARQUET,
+                filename="test.parquet",
                 seed=99,
                 data_source="nq",
                 shuffle=False,
@@ -61,7 +49,7 @@ class SearchR1Rollouter(Rollouter):
                     #                           retrieval_score=0.1)
                     RewardExactMatch.Config(weight=1.0),
                 ],
-                # No <answer> on a truncated rollout -> no reward, no learning signal.
+                # A truncated rollout has no final answer -> no reward / learning signal.
                 truncation_reward=0.0,
             )
         )

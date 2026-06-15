@@ -14,7 +14,8 @@ continuous-batching generator — the only example-specific pieces are this fold
 its config.
 
 ## Files
-- `data.py` — `SearchR1Dataset` / `SearchR1Sample`: reads the NQ/HotpotQA parquet.
+- `data.py` — `SearchR1Dataset` / `SearchR1Sample`: streams the NQ/HotpotQA parquet,
+  downloaded from the HF dataset `PeterJinGo/nq_hotpotqa_train` (no preprocessing).
 - `env.py` — `SearchR1Env(MessageEnv)`: defines the `search` `ToolSpec`, reads the
   renderer-parsed `tool_calls`, runs retrieval, and returns the passages as a `tool`
   message. The per-rollout turn budget is enforced by `TokenEnv.max_num_turns`.
@@ -32,10 +33,10 @@ pip install -r torchtitan/experiments/rl/examples/search_r1/requirements.txt
 ```
 
 ### 1. Data
-Prepare the Search-R1 NQ/HotpotQA parquet (via Search-R1's
-`scripts/data_process/qa_search_{train,test}_merge.py`). Point the config's
-`train_dataset`/`validation_dataset` `data_path` at it, or set the
-`SEARCH_R1_TRAIN_PARQUET` / `SEARCH_R1_TEST_PARQUET` env vars (used by `rollouter.py`).
+Nothing to prepare — the NQ/HotpotQA parquet is pulled straight from the HF dataset
+[`PeterJinGo/nq_hotpotqa_train`](https://huggingface.co/datasets/PeterJinGo/nq_hotpotqa_train)
+on first use (train + NQ-test splits). To use a local copy instead, set the dataset
+config's `data_path` to a parquet with `question` / `golden_answers` columns.
 
 ### 2. Local dense retrieval server
 Start the dense retriever (e5 index over wiki-18) listening on
