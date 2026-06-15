@@ -8,6 +8,9 @@
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
+from threading import local
 from typing import Any, TYPE_CHECKING
 
 import spmd_types as spmd
@@ -15,8 +18,83 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
+from torchtitan.distributed.utils import get_spmd_backend
+
+# Avoid circular import: protocols.__init__ imports module.py, which imports us.
 if TYPE_CHECKING:
-    from torchtitan.distributed.parallel_dims import MeshAxisName, SpmdLayout
+    from torchtitan.distributed.parallel_dims import (
+        MeshAxisName,
+        ParallelDims,
+        SpmdLayout,
+    )
+
+__all__ = [
+    "annotate_input_spmd_types",
+    "current_spmd_mesh",
+    "spmd_mesh_size",
+    "spmd_distribute_tensor",
+    "spmd_redistribute_per_axis",
+    "spmd_validate_redistributions",
+    "set_current_spmd_mesh",
+    "spmd_layout_to_dtensor_placements",
+]
+
+
+_MESH_TLS = local()
+
+
+def _spmd_mesh_stack() -> list[DeviceMesh | None]:
+    stack = getattr(_MESH_TLS, "mesh_stack", None)
+    if stack is None:
+        stack = []
+        _MESH_TLS.mesh_stack = stack
+    return stack
+
+
+def current_spmd_mesh() -> DeviceMesh | None:
+    """Return the current runtime mesh, or ``None`` if unset."""
+    if get_spmd_backend() != "spmd_types":
+        return None
+    stack = _spmd_mesh_stack()
+    if not stack:
+        return None
+    return stack[-1]
+
+
+def spmd_mesh_size(axis_name: str) -> int:
+    """Return the size of a mesh axis, or 1 if not active."""
+    mesh = current_spmd_mesh()
+    if mesh is None:
+        return 1
+    names = mesh.mesh_dim_names or ()
+    if axis_name not in names:
+        return 1
+    return mesh.size(names.index(axis_name))
+
+
+@contextlib.contextmanager
+def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
+    """Set TorchTitan and spmd_types current mesh state for one runtime region."""
+    assert (
+        get_spmd_backend() == "spmd_types"
+    ), "set_current_spmd_mesh() is only valid under spmd_types backend"
+
+    stack = _spmd_mesh_stack()
+    stack.append(mesh)
+    if mesh is None:
+        try:
+            yield
+        finally:
+            popped = stack.pop()
+            assert popped is mesh
+        return
+
+    with spmd.set_current_mesh(mesh):
+        try:
+            yield
+        finally:
+            popped = stack.pop()
+            assert popped is mesh
 
 
 def spmd_layout_to_dtensor_placements(
@@ -41,6 +119,43 @@ def spmd_layout_to_dtensor_placements(
         else:
             result[axis_name] = dtensor_placement
     return result
+
+
+def annotate_input_spmd_types(
+    parallel_dims: "ParallelDims",
+    inputs: torch.Tensor,
+    labels: torch.Tensor,
+    extra_kwargs: dict[str, Any],
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    """Annotate decoder inputs/labels with SPMD types.
+
+    Hardcodes the standard decoder convention: inputs and positions are
+    ``S(0)@DP, S(1)@CP, R@TP``; labels are ``S(0)@DP, S(1)@CP, I@TP``.
+    Analogous to ``full_dtensor.parallelize_inputs()`` but for the
+    ``spmd_types`` path.
+    """
+    from torchtitan.distributed.parallel_dims import MeshAxisName
+
+    token_type = {
+        MeshAxisName.DP: spmd.S(0),
+        MeshAxisName.CP: spmd.S(1),
+        MeshAxisName.TP: spmd.R,
+    }
+    label_type = {
+        MeshAxisName.DP: spmd.S(0),
+        MeshAxisName.CP: spmd.S(1),
+        MeshAxisName.TP: spmd.I,
+    }
+
+    mesh = parallel_dims._global_meshes["spmd_dense_for_fwdbwd"]
+    with set_current_spmd_mesh(mesh):
+        spmd.assert_type(inputs, token_type)
+        spmd.assert_type(labels, label_type)
+        if "positions" in extra_kwargs and isinstance(
+            extra_kwargs["positions"], torch.Tensor
+        ):
+            spmd.assert_type(extra_kwargs["positions"], token_type)
+    return inputs, labels, extra_kwargs
 
 
 def spmd_validate_redistributions(sharding_config: Any) -> None:

@@ -4,11 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Checkpoint interop tests for the FusedSwiGLU override (issue #3569).
+"""Checkpoint interop tests for the FusedSwiGLU override.
 
 FusedSwiGLU stores a single fused ``w13`` parameter but checkpoints in the stock
 ``FeedForward`` layout (``w1.weight`` / ``w3.weight``) via state_dict hooks, so
-its checkpoints round-trip with the non-fused module. These run on CPU.
+its checkpoints round-trip with the non-fused module and the HF state-dict
+adapter. These run on CPU.
 """
 
 import unittest
@@ -17,7 +18,10 @@ import torch
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
-from torchtitan.overrides.fused_swiglu import FusedSwiGLU
+from torchtitan.models.llama3 import llama3_configs
+from torchtitan.models.llama3.model import Llama3Model
+from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
+from torchtitan.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
 
 _DIM = 16
 _HIDDEN = 32
@@ -102,6 +106,43 @@ class TestFusedSwiGLUCheckpointInterop(unittest.TestCase):
         fused = _build_fused()
         with self.assertRaises(RuntimeError):
             fused.load_state_dict({"w2.weight": fused.w2.weight.detach().clone()})
+
+
+class TestFusedSwiGLUHFAdapter(unittest.TestCase):
+    def test_hf_adapter_roundtrip(self):
+        """A fused-SwiGLU model interoperates with the HF state-dict adapter.
+
+        The adapter maps HF mlp.gate_proj/up_proj <-> the unfused
+        feed_forward.w1/w3 FQNs, which the fused module emits and consumes via
+        its state_dict hooks.
+        """
+        config = llama3_configs["debugmodel"](attn_backend="flex")
+        # Apply the fused override factory directly, independent of the global
+        # override registry (which other tests may clear).
+        for layer in config.layers:
+            layer.feed_forward = fused_swiglu(layer.feed_forward)
+        model = Llama3Model(config)
+        model.init_states()
+        ffn = model.get_submodule("layers.0.feed_forward")
+        self.assertIsInstance(ffn, FusedSwiGLU)
+
+        sd = model.state_dict()
+        # The fused FFN presents the unfused stock FQNs, not w13.
+        self.assertTrue(any(k.endswith("feed_forward.w1.weight") for k in sd))
+        self.assertFalse(any("feed_forward.w13" in k for k in sd))
+
+        adapter = Llama3StateDictAdapter(config, hf_assets_path=None)
+        hf_sd = adapter.to_hf(sd)
+        self.assertIn("model.layers.0.mlp.gate_proj.weight", hf_sd)
+        self.assertIn("model.layers.0.mlp.up_proj.weight", hf_sd)
+
+        # Load the HF checkpoint back through the adapter (which reads unfused
+        # FQNs) into the fused model; the load hook merges w1/w3 into w13.
+        orig_w13 = ffn.w13.detach().clone()
+        restored = adapter.from_hf(hf_sd)
+        self.assertIn("layers.0.feed_forward.w1.weight", restored)
+        model.load_state_dict(restored, strict=False)
+        self.assertTrue(torch.equal(ffn.w13, orig_w13))
 
 
 if __name__ == "__main__":

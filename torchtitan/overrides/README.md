@@ -370,8 +370,7 @@ checkpoints `w1.weight` / `w3.weight`, so its checkpoints are a drop-in for the
 stock `FeedForward` (and for the HF adapter, which targets the stock layout),
 while still accepting a native `w13` key for back-compat. This is the symmetric
 use of the same hook mechanism the activation-checkpoint wrapper uses to strip
-its `_checkpoint_wrapped_module` prefix. (Resolves
-[#3569](https://github.com/pytorch/torchtitan/issues/3569).)
+its `_checkpoint_wrapped_module` prefix.
 
 For mappings too complex for module hooks, a model-level `BaseStateDictAdapter`
 (the mechanism used for HF conversion, e.g. `Llama3StateDictAdapter`) remains an

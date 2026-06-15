@@ -104,7 +104,9 @@ def set_qwen35_sharding_config(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
         in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
+        out_src_shardings=dense_activation_placement(tp=spmd.P),
         out_dst_shardings=dense_activation_placement(tp=spmd.R),
+        local_map=LocalMapConfig(in_grad_placements=None),
     )
     _set_vision_encoder_sharding(config.vision_encoder)
     for layer_cfg in config.layers:

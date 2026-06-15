@@ -7,7 +7,7 @@
 """
 Example override: a SwiGLU feed-forward with a single fused gate+up weight.
 
-This is the worked example referenced in ``torchtitan/config/OVERRIDE.md``. It
+This is the worked example referenced in ``torchtitan/overrides/README.md``. It
 demonstrates the pieces a non-trivial fused module needs to plug in via the
 override mechanism, *without touching core*:
 
@@ -36,9 +36,8 @@ this module checkpoints in the stock ``FeedForward`` layout
 the non-fused module (and with the HF adapter, which targets the stock layout). A
 ``register_state_dict_post_hook`` splits ``w13`` into ``w1.weight``/``w3.weight``
 on save, and a ``register_load_state_dict_pre_hook`` merges them back into ``w13``
-on load (a native ``w13`` key is still accepted for back-compat). Resolves
-https://github.com/pytorch/torchtitan/issues/3569. See ``OVERRIDE.md``
-"Checkpoint Compatibility".
+on load (a native ``w13`` key is still accepted for back-compat). See
+``torchtitan/overrides/README.md`` "Checkpoint Compatibility".
 """
 
 from collections.abc import Callable

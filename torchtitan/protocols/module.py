@@ -4,19 +4,33 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
+import contextlib
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
+from spmd_types.runtime import get_local_type, get_partition_spec, has_local_type
 from torch.distributed.tensor import distribute_tensor, DTensor
 from torch.distributed.tensor.experimental import local_map
 from torch.distributed.tensor.placement_types import Placement
+from torch.utils._pytree import tree_map
 
 from torchtitan.config import Configurable
 from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
+from torchtitan.distributed.spmd_types import (
+    current_spmd_mesh,
+    set_current_spmd_mesh,
+    spmd_distribute_tensor,
+    spmd_redistribute_per_axis,
+    spmd_validate_redistributions,
+)
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
 
 
@@ -88,7 +102,8 @@ class Module(nn.Module, Configurable):
             for name, buf in self._buffers.items()
             if isinstance(buf, DTensor)
         }
-        self._init_self_buffers(buffer_device=buffer_device)
+        with self._preserve_buffer_spmd_types():
+            self._init_self_buffers(buffer_device=buffer_device)
         for name, (mesh, placements) in dtensor_meta.items():
             new_buf = self._buffers.get(name)
             if new_buf is None or isinstance(new_buf, DTensor):
@@ -99,6 +114,45 @@ class Module(nn.Module, Configurable):
                 distribute_tensor(new_buf, mesh, list(placements)),
                 persistent=persistent,
             )
+
+    def _apply(self, fn, recurse=True):
+        """Override to preserve annotations across model.to_empty() in trainer.py"""
+        with self._preserve_buffer_spmd_types():
+            return super()._apply(fn, recurse=recurse)
+
+    @contextlib.contextmanager
+    def _preserve_buffer_spmd_types(self) -> Iterator[None]:
+        """
+        Preserve SPMD type annotations on buffers across reinitialization.
+
+        ``to_empty()`` and ``_init_self_buffers()`` re-materialize buffer data,
+        clobbering over SPMD annotations. Instead of attempting to typecheck over
+        this, we save-restore annotations on their respective mesh axes.
+        """
+        if get_spmd_backend() != "spmd_types":
+            yield
+            return
+
+        saved = {
+            fqn: SpmdLayout(
+                # pyrefly: ignore [bad-argument-type]
+                axis_types=get_local_type(buf),
+                partition_spec=get_partition_spec(buf),
+            )
+            for fqn, buf in self.named_buffers()
+            if has_local_type(buf)
+        }
+        try:
+            yield
+        finally:
+            for fqn, buf in self.named_buffers():
+                if fqn in saved and not has_local_type(buf):
+                    layout = saved[fqn]
+                    spmd.assert_type(
+                        buf,
+                        layout.axis_types,
+                        partition_spec=layout.partition_spec,
+                    )
 
     def _init_self_parameters(self) -> None:
         """Initialize this module's own direct parameters.
@@ -223,9 +277,11 @@ class Module(nn.Module, Configurable):
         if self._sharding_config is None:
             return
 
-        self._shard_states(parallel_dims)
+        if parallel_dims.spmd_backend == "spmd_types":
+            spmd_validate_redistributions(self._sharding_config)
+        self._distribute_states(parallel_dims)
         self._cache_pos_arg_names()
-        fn = self._maybe_wrap_with_local_map(self.forward, parallel_dims)
+        fn = self._maybe_wrap_with_local_region(self.forward, parallel_dims)
 
         def forward_with_redistribution(*args, **kwargs):
             args, kwargs = self._redistribute_inputs(parallel_dims, args, kwargs)
@@ -234,7 +290,42 @@ class Module(nn.Module, Configurable):
 
         self.forward = forward_with_redistribution
 
-    def _shard_states(self, parallel_dims: ParallelDims) -> None:
+    def _spmd_distribute_state(
+        self,
+        parallel_dims: ParallelDims,
+        name: str,
+        tensor: torch.Tensor,
+        layout: SpmdLayout,
+        *,
+        is_param: bool,
+    ) -> None:
+        # Call get_optional_mesh with include_singleton_axes=True, so we're able to call assert_type()
+        # using all axes, and defer size-1 axis filtering to spmd_types internals.
+        mesh = parallel_dims.get_optional_mesh(
+            [axis.value for axis in layout.axes()], include_singleton_axes=True
+        )
+        assert mesh is not None
+        assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
+
+        tensor = spmd_distribute_tensor(tensor, mesh, layout)
+        if is_param:
+            self.register_parameter(name, nn.Parameter(tensor))
+            registered = self._parameters[name]
+        else:
+            persistent = name not in self._non_persistent_buffers_set
+            self.register_buffer(name, tensor, persistent=persistent)
+            registered = self._buffers[name]
+
+        # assert_type resolves SpmdLayout's string mesh axis names to concrete
+        # runtime mesh-axis objects, so a mesh context is required here.
+        with set_current_spmd_mesh(mesh):
+            spmd.assert_type(
+                registered,
+                layout.axis_types,
+                layout.partition_spec,
+            )
+
+    def _distribute_states(self, parallel_dims: ParallelDims) -> None:
         """Distribute params and buffers per ``state_shardings``.
 
         Each entry resolves its own mesh via ``resolve_mesh``, so different
@@ -252,6 +343,15 @@ class Module(nn.Module, Configurable):
                     f"{type(self).__name__}.{name} has no placement declared "
                     "in sharding_config.state_shardings."
                 )
+            if parallel_dims.spmd_backend == "spmd_types":
+                self._spmd_distribute_state(
+                    parallel_dims,
+                    name,
+                    param,
+                    spmd_layout,
+                    is_param=True,
+                )
+                continue
             axes = spmd_layout.axes()
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
@@ -286,6 +386,15 @@ class Module(nn.Module, Configurable):
                 # ``register_buffer(name, None)`` reserves a slot to be filled
                 # by ``init_states`` later; nothing to distribute yet.
                 continue
+            if parallel_dims.spmd_backend == "spmd_types":
+                self._spmd_distribute_state(
+                    parallel_dims,
+                    name,
+                    buffer,
+                    spmd_layout,
+                    is_param=False,
+                )
+                continue
             axes = spmd_layout.axes()
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
@@ -298,38 +407,33 @@ class Module(nn.Module, Configurable):
                 persistent=persistent,
             )
 
-    def _maybe_wrap_with_local_map(
+    def _maybe_wrap_with_local_region(
         self,
         fn: Callable,
         parallel_dims: ParallelDims,
     ) -> Callable:
-        """Wrap ``fn`` with ``local_map`` if ``sharding_config.local_map`` is set.
+        """Wrap ``fn`` with a local-tensor region if local_map config is set.
 
         Input placements come from ``in_dst_shardings`` (the same dict
         ``_redistribute_inputs`` uses to pre-align inputs); output placements
-        from ``out_src_shardings``; only ``in_grad_placements`` lives on
-        ``LocalMapConfig``. ``local_map`` takes a single ``device_mesh``, so
-        all SpmdLayouts must resolve to the same mesh.
+        from ``out_src_shardings``. DTensor uses ``local_map``; the spmd_types
+        backend uses the analogous local SPMD wrapper.
         """
         sharding_config = self._sharding_config
         assert sharding_config is not None
         if sharding_config.local_map is None:
             return fn
 
-        lm = sharding_config.local_map
-        in_dst = sharding_config.in_dst_shardings or {}
+        in_dst = (
+            sharding_config.in_dst_shardings or sharding_config.in_src_shardings or {}
+        )
         pos_args = self._cache_pos_arg_names()
-        out_src = sharding_config.out_src_shardings
+        out_src = sharding_config.out_src_shardings or sharding_config.out_dst_shardings
         if out_src is None:
             raise AssertionError(
                 f"{type(self).__name__}: local_map is set but "
                 "out_src_shardings is None."
             )
-        if isinstance(out_src, tuple):
-            out_src_list: list[SpmdLayout] = [p for p in out_src if p is not None]
-        else:
-            out_src_list = [out_src]
-
         missing_in = [name for name in pos_args if name not in in_dst]
         if missing_in:
             raise AssertionError(
@@ -337,13 +441,34 @@ class Module(nn.Module, Configurable):
                 f"is missing entries for: {missing_in}"
             )
         in_named: list[SpmdLayout] = [in_dst[name] for name in pos_args]
-        out_named: list[SpmdLayout] = out_src_list
+
+        if parallel_dims.spmd_backend == "spmd_types":
+            return self._spmd_apply_local_map(fn, in_named, out_src)
+        return self._apply_local_map(fn, parallel_dims, in_named, out_src)
+
+    def _apply_local_map(
+        self,
+        fn: Callable,
+        parallel_dims: ParallelDims,
+        in_named: list[SpmdLayout],
+        out_src: SpmdLayout | tuple[SpmdLayout | None, ...],
+    ) -> Callable:
+        """Apply DTensor local_map for a local-tensor compute region."""
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
+        lm = sharding_config.local_map
+        assert lm is not None
+
+        if isinstance(out_src, tuple):
+            out_named: list[SpmdLayout] = [p for p in out_src if p is not None]
+        else:
+            out_named = [out_src]
         # in_grad_placements may contain None for non-tensor args; filter
         # them out for mesh resolution -- local_map passes None through.
-        grad_named: list[SpmdLayout | None] = list(lm.in_grad_placements)
+        grad_named = lm.in_grad_placements
 
         resolved_mesh = parallel_dims.resolve_shared_mesh(
-            in_named + out_named + grad_named
+            in_named + out_named + (list(grad_named) if grad_named else [])
         )
         if resolved_mesh is None:
             return fn
@@ -351,16 +476,41 @@ class Module(nn.Module, Configurable):
         out_placements: tuple[tuple[Placement, ...], ...] = tuple(
             resolve_placements(p, resolved_mesh) for p in out_named
         )
+        in_grad_placements = (
+            tuple(
+                resolve_placements(p, resolved_mesh) if p is not None else None
+                for p in grad_named
+            )
+            if grad_named is not None
+            else None
+        )
         return local_map(
             fn,
             in_placements=tuple(resolve_placements(p, resolved_mesh) for p in in_named),
             out_placements=out_placements,
-            in_grad_placements=tuple(
-                resolve_placements(p, resolved_mesh) if p is not None else None
-                for p in grad_named
-            ),
+            in_grad_placements=in_grad_placements,
             device_mesh=resolved_mesh,
         )
+
+    def _spmd_apply_local_map(
+        self,
+        fn: Callable,
+        in_named: list[SpmdLayout],
+        out_src: SpmdLayout | tuple[SpmdLayout | None, ...],
+    ) -> Callable:
+        """Apply spmd_types local_map for a local-tensor compute region."""
+        in_types = tuple(
+            (layout.axis_types, layout.partition_spec) for layout in in_named
+        )
+        out_types = tree_map(
+            lambda layout: (layout.axis_types, layout.partition_spec),
+            out_src,
+            is_leaf=lambda x: isinstance(x, SpmdLayout),
+        )
+        return spmd.local_map(
+            in_types=in_types,
+            out_types=out_types,
+        )(fn)
 
     def _redistribute_inputs(
         self,
@@ -399,6 +549,38 @@ class Module(nn.Module, Configurable):
                 continue
             src_spmd_layout = in_src_shardings.get(name)
             dst_spmd_layout = in_dst_shardings.get(name)
+
+            if parallel_dims.spmd_backend == "spmd_types":
+                if src_spmd_layout is None:
+                    if dst_spmd_layout is not None:
+                        raise ValueError(
+                            f"{type(self).__name__}.{name}: SPMD input "
+                            "redistribution requires explicit in_src_shardings."
+                        )
+                    continue
+
+                # SPMD source placements are part of the config contract: assert
+                # before redistributing so typechecking catches placement mismatch.
+                spmd.assert_type(
+                    value,
+                    src_spmd_layout.axis_types,
+                    src_spmd_layout.partition_spec,
+                )
+
+                if dst_spmd_layout is None:
+                    new_kwargs[name] = value
+                    continue
+                value = spmd_redistribute_per_axis(
+                    value,
+                    current_spmd_mesh(),
+                    # pyrefly: ignore [bad-argument-type]
+                    src_spmd_layout.per_axis_spmd_types(),
+                    # pyrefly: ignore [bad-argument-type]
+                    dst_spmd_layout.per_axis_spmd_types(),
+                )
+                new_kwargs[name] = value
+                continue
+
             mesh = parallel_dims.resolve_shared_mesh([src_spmd_layout, dst_spmd_layout])
             if mesh is None:
                 continue
@@ -441,6 +623,43 @@ class Module(nn.Module, Configurable):
         assert sharding_config is not None
 
         out_spmd_layout = sharding_config.out_dst_shardings
+        if parallel_dims.spmd_backend == "spmd_types":
+            if not isinstance(outputs, torch.Tensor):
+                return outputs
+
+            out_src = sharding_config.out_src_shardings
+            if out_src is None:
+                if sharding_config.out_dst_shardings is not None:
+                    raise ValueError(
+                        f"{type(self).__name__}: SPMD output redistribution "
+                        "requires explicit out_src_shardings."
+                    )
+                return outputs
+            if isinstance(out_src, tuple):
+                raise ValueError(
+                    f"{type(self).__name__}: SPMD output redistribution only "
+                    "supports a single tensor output."
+                )
+            # SPMD source placements are part of the config contract: assert
+            # before redistributing so typechecking catches placement mismatch.
+            spmd.assert_type(
+                outputs,
+                out_src.axis_types,
+                out_src.partition_spec,
+            )
+
+            out_dst = sharding_config.out_dst_shardings
+            if out_dst is None:
+                return outputs
+            return spmd_redistribute_per_axis(
+                outputs,
+                current_spmd_mesh(),
+                # pyrefly: ignore [bad-argument-type]
+                out_src.per_axis_spmd_types(),
+                # pyrefly: ignore [bad-argument-type]
+                out_dst.per_axis_spmd_types(),
+            )
+
         mesh = parallel_dims.resolve_shared_mesh([out_spmd_layout])
         if mesh is None:
             return outputs
