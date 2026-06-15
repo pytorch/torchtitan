@@ -1,10 +1,15 @@
 # Search-R1: multi-turn retrieval-augmented GRPO
 
 A [Search-R1](https://github.com/PeterGriffinJin/Search-R1) example in torchtitan's
-RL experiment. The model is given a `search` tool; it thinks natively
-(`enable_thinking=True`), calls `search` (a standard tool call) when it needs facts,
-gets the retrieved passages back as a `tool` message, and replies with a final answer.
-Reward is exact-match (EM) against gold answers (optionally plus a retrieval bonus).
+RL experiment. The model is given a `search` tool; it calls `search` (a standard tool
+call) when it needs facts, gets the retrieved passages back as a `tool` message, and
+replies with a final answer. Reward is exact-match (EM) against gold answers (optionally
+plus a retrieval bonus).
+
+Thinking is controlled purely by the renderer's `enable_thinking` flag (no prompt-injected
+`<think>` tags). This recipe sets it to `False`: the task is short-answer factoid QA where
+chain-of-thought doesn't help EM and would eat into the multi-turn token budget. Flip it to
+`True` in the config for tasks that benefit from reasoning.
 
 It is a multi-turn, tool-using RL example: each assistant turn ends at the renderer's
 role boundary, the env answers a `search` tool call with a `tool`-role message, and the
