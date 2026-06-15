@@ -30,6 +30,7 @@ from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollout
 from torchtitan.experiments.rl.generator_router import (
     GeneratorRouter,
     RoundRobinRoutingStrategy,
+    StickySessionRoutingStrategy,
 )
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
@@ -128,6 +129,20 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
             ),
         ),
     )
+
+
+def rl_grpo_qwen3_0_6b_varlen_sticky() -> RLTrainer.Config:
+    """Same as `rl_grpo_qwen3_0_6b_varlen` but with group-sticky generator routing.
+
+    For the multi-generator sweep: pins a GRPO group's siblings (and their turns) to one generator
+    so they reuse its prompt-prefix KV cache. With >1 generator, round-robin scatters siblings and
+    re-prefills the shared prefix on each; sticky prefills it once.
+    """
+    config = rl_grpo_qwen3_0_6b_varlen()
+    config.generator_router = GeneratorRouter.Config(
+        strategy=StickySessionRoutingStrategy.Config()
+    )
+    return config
 
 
 def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:

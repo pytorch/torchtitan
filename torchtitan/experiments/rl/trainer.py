@@ -281,6 +281,12 @@ class RLTrainer(Configurable):
         """GRPO groups the producer keeps generating concurrently.
         Rollouts in flight = `num_groups_per_rollout_batch * group_size`."""
 
+        max_num_seqs: int | None = None
+        """vLLM engine's max concurrent sequences (KV budget + cudagraph sizes). None =
+        `num_groups_per_rollout_batch * group_size` (legacy: no engine queue). Set it BELOW the
+        in-flight rollout count to keep a FCFS refill queue, so the engine stays at this batch
+        continuously instead of dipping during group tails (continuous feeding)."""
+
         group_size: int = 8
         """Sibling rollouts sampled per dataset row (the GRPO group). The generator
         is always called with `n=1`; prompts are pre-expanded by `group_size`."""
@@ -567,6 +573,10 @@ class RLTrainer(Configurable):
                 output_dir=config.dump_folder,
             )
 
+            # The generator runs vLLM's own cudagraph/inductor path; its per-layer torch.compile must
+            # stay aot_eager (inductor here crashes the engine). So the generator is pinned to
+            # aot_eager and `config.compile.backend` controls ONLY the trainer (which wants inductor).
+            generator_compile = replace(config.compile, backend="aot_eager")
             generators = []
             for idx, generator_mesh in enumerate(generator_meshes):
                 actor_name = (
@@ -578,10 +588,14 @@ class RLTrainer(Configurable):
                     config.generator,
                     model_spec=config.model_spec,
                     model_path=config.hf_assets_path,
-                    compile_config=config.compile,
-                    max_num_seqs=max(
-                        config.num_groups_per_rollout_batch * config.group_size,
-                        config.num_validation_samples,
+                    compile_config=generator_compile,
+                    max_num_seqs=(
+                        config.max_num_seqs
+                        if config.max_num_seqs is not None
+                        else max(
+                            config.num_groups_per_rollout_batch * config.group_size,
+                            config.num_validation_samples,
+                        )
                     ),
                     output_dir=config.dump_folder,
                     stop_token_ids=self._stop_token_ids,
@@ -1061,6 +1075,9 @@ class RLTrainer(Configurable):
         # The previous step's generator weight-load runs in the background and overlaps this step.
         # We await it before publishing again, and advance `_train_version` to the version it adopted.
         self._pending_pull: _PendingPull | None = None
+        # State for the true `perf/generated_tokens_per_second` (token delta / wall-clock delta).
+        self._prev_gen_tokens = 0.0
+        self._prev_gen_time: float | None = None
         for step in range(1, num_steps + 1):
             sl.set_step(step)
             await self.trainer.sync_log_step.call(
@@ -1078,6 +1095,9 @@ class RLTrainer(Configurable):
             wait_s = time.perf_counter() - t_wait
 
             # --- train: grad-accum microbatches; a NaN loss ends the run before optim/publish ---
+            # TODO(async): can't stream microbatches (interleave pack->train) — the loss is normalized
+            #   by batch.num_global_valid_tokens (sum over ALL microbatches), needed before any fwd/bwd.
+            #   To fix, defer normalization: accumulate raw loss + tokens, divide at the optim step.
             t_train = time.perf_counter()
             fwd_bwd = _reduce_microbatches(
                 [
@@ -1090,6 +1110,7 @@ class RLTrainer(Configurable):
             if not math.isfinite(fwd_bwd["loss/mean"]):
                 logger.error("Loss is NaN/Inf; training diverged")
                 break
+
             with sl.log_trace_span("trainer_optim_step_call"):
                 optim = self._get_rank_0_value(await self.trainer.optim_step.call())
             train_s = time.perf_counter() - t_train
@@ -1124,6 +1145,10 @@ class RLTrainer(Configurable):
             sync_s = time.perf_counter() - t_sync
             step_s = time.perf_counter() - t_step
 
+            # Poll generator saturation AFTER step_s is measured so the round-trip never inflates
+            # the step timing; the stats describe the generation that ran during this step.
+            generator_metrics = await self._collect_generator_metrics()
+
             # --- emit (buffer/rollout/episode/packing metrics ride out with the batch) ---
             self.metrics_processor.log(
                 step=step,
@@ -1138,7 +1163,8 @@ class RLTrainer(Configurable):
                     pull_wait_s=pull_wait_s,
                     sync_s=sync_s,
                     step_s=step_s,
-                ),
+                )
+                + generator_metrics,
             )
         if self._pending_pull is not None:
             await self._pending_pull.task  # drain the last weight-load before returning
@@ -1154,3 +1180,58 @@ class RLTrainer(Configurable):
                     microbatch, num_global_valid_tokens
                 )
             )
+
+    async def _collect_generator_metrics(self) -> list[m.Metric]:
+        """Poll each generator's vLLM engine-aggregate stats into the saturation panel.
+
+        Separates generation-bound from GPU-underutilized (metrics_census Concept 4a): KV-cache
+        util %, running/waiting queue depth, and prefix-cache hit rate, each Mean+Max across
+        replicas so an unbalanced generator shows up. Adds a true `perf/generated_tokens_per_second`
+        from the cumulative-token delta. Best-effort: a failed or pre-first-step poll adds nothing.
+        """
+        results = await self.generator_router.fanout(
+            "get_engine_stats", return_exceptions=True
+        )
+        now = time.perf_counter()
+        per_generator = [
+            value
+            for result in results
+            if not isinstance(result, BaseException)
+            and (
+                value := self._get_rank_0_value(result)
+            )  # empty until the engine has stepped
+        ]
+        if not per_generator:
+            return []
+
+        metrics: list[m.Metric] = []
+        for key in ("kv_cache_usage", "num_running", "num_waiting"):
+            values = [stats[key] for stats in per_generator if key in stats]
+            if values:
+                metrics.append(m.Metric(f"generator/{key}", m.Mean.from_list(values)))
+                metrics.append(m.Metric(f"generator/{key}", m.Max.from_list(values)))
+        hit_rates = [
+            stats["prefix_cache_hit_rate"]
+            for stats in per_generator
+            if "prefix_cache_hit_rate" in stats
+        ]
+        if hit_rates:
+            metrics.append(
+                m.Metric("generator/prefix_cache_hit_rate", m.Mean.from_list(hit_rates))
+            )
+
+        # True generated-tokens/s: cumulative engine tokens (summed over replicas) per wall second.
+        total_tokens = sum(s.get("total_generation_tokens", 0.0) for s in per_generator)
+        if self._prev_gen_time is not None:
+            elapsed = now - self._prev_gen_time
+            generated = total_tokens - self._prev_gen_tokens
+            if elapsed > 0 and generated >= 0:
+                metrics.append(
+                    m.Metric(
+                        "perf/generated_tokens_per_second",
+                        m.NoReduce(generated / elapsed),
+                    )
+                )
+        self._prev_gen_time = now
+        self._prev_gen_tokens = total_tokens
+        return metrics
