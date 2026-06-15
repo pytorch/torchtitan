@@ -132,9 +132,14 @@ def rl_grpo_qwen3_8b_search_r1() -> RLTrainer.Config:
             config.trainer.parallelism, tensor_parallel_degree=4
         ),
     )
-    # 8B TP=2 weights + a 0.9 KV cache leave no headroom for the trainer->generator
-    # weight sync, which OOMs the generator GPUs. 0.6 keeps ample paged-KV room while
-    # reserving room for the weight-sync transient.
+    # The trainer->generator weight sync transiently spikes generator GPU memory, so the
+    # default 0.9 gpu_memory_limit OOMs on 8B; 0.6 reserves room for the spike.
+    # TODO(@meetv18): the spike is likely GPU-Direct weight transfer (the RDMA/TorchStore
+    # weight-sync path in generator.py) being on by default — make the transfer device
+    # configurable and default to CPU to avoid the GPU-memory overhead. The update also
+    # doesn't seem to land in place (PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    # isn't taking effect), so the sync allocates instead of updating in place. Once
+    # fixed, this cap can likely be raised (~0.75).
     config.generator = dataclasses.replace(
         config.generator,
         gpu_memory_limit=0.6,
