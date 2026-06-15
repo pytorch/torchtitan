@@ -9,8 +9,10 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
+from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.rollout import Rollout, RolloutGroup, RolloutTurn
@@ -18,6 +20,14 @@ from torchtitan.observability import structured_logger as sl
 
 # TODO(recorders): if a second recorder appears (e.g. an episode recorder), generalize to a list of
 # recorders behind one interface, instead of bespoke per-type classes.
+
+
+def _json_default(value: Any) -> Any:
+    if is_dataclass(value) and not isinstance(value, type):
+        return asdict(value)
+    if isinstance(value, Enum):
+        return value.value
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 class KeepExtremeRewardsFilter(Configurable):
@@ -97,10 +107,9 @@ class RolloutSampleRecorder(Configurable):
                     "is_validation": is_validation,
                     **self._encode_rollout(rollout),
                 },
-                # Some renderer parse outputs (e.g. ParsedToolCall in a completion
-                # message's tool_calls) are not JSON-serializable; stringify them so
-                # recording never crashes the run.
-                default=str,
+                # Rollout messages can hold objects json.dumps can't serialize
+                # natively, e.g. tool-calling results
+                default=_json_default,
             )
             + "\n"
             for rollout in self._filter(rollout_groups)
