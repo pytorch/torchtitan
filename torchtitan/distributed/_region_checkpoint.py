@@ -226,10 +226,19 @@ class _region_save_hooks(torch.autograd.graph.saved_tensors_hooks):
                 if s.value is None:
                     raise RuntimeError(
                         "region SAC: a saved region's slot was read before the block "
-                        "recompute filled it. The _Trigger dummy save should make the "
-                        "recompute run first; this indicates it did not fire."
+                        "recompute filled it (or read twice, e.g. double-backward, "
+                        "which region SAC does not support). The _Trigger dummy save "
+                        "should make the recompute run first."
                     )
-                return s.value
+                # Release the refilled tensor as soon as the consumer's backward
+                # reads it, rather than pinning it in state.log for the whole
+                # block backward. Each slot is read once per backward (one saved
+                # tensor -> one backward node; verified for shared inputs across
+                # regions), so this frees the recomputed activation (e.g. the FFN
+                # product feeding w2) immediately instead of ~100 events later.
+                v = s.value
+                s.value = None
+                return v
             return s
 
         super().__init__(pack, unpack)
@@ -269,7 +278,8 @@ def _unit_impl(pol, inner_fn):
         gid = torch._C._current_graph_task_id()
         if gid != -1:
             # recompute pass: replay the forward decision from the log
-            is_save, val, slots = state.log[state.idx]
+            idx = state.idx
+            is_save, val, slots = state.log[idx]
             state.idx += 1
             if is_save:
                 # refill the saved region's slots from the recomputed sources
@@ -287,6 +297,11 @@ def _unit_impl(pol, inner_fn):
                         if isinstance(t, torch.Tensor) and t.requires_grad
                         else t
                     )
+                # Drop state.log's reference to the stashed output now that the
+                # recompute has handed it back: the recomputed graph holds `val`,
+                # so pinning it in the log would keep it resident for the rest of
+                # the block backward (read once per backward, like the slots).
+                state.log[idx] = (True, None, slots)
                 return val  # skip body, return stashed output
             return inner_fn(*args, **kwargs)
 
