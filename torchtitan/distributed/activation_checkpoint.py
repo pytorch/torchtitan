@@ -7,6 +7,7 @@
 # This file provides the util functions to apply activation checkpointing to the model.
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
+import contextlib
 import os
 
 import torch
@@ -23,6 +24,29 @@ from torch.utils.checkpoint import (
 
 from torchtitan.config import ActivationCheckpointConfig as ACConfig
 from torchtitan.tools.logging import logger
+
+
+def _checkpoint_contexts_without_typecheck(context_fn):
+    """Run checkpointed forwards outside SPMD typechecking.
+
+    The trainer typechecks the non-checkpointed forward graph. AC forwards are
+    implementation details that can run under PyTorch dispatch modes such as
+    SAC caching; keeping SPMD typechecking out of those regions avoids mixing
+    checker-internal propagation with checkpoint machinery.
+    """
+    forward_context, recompute_context = context_fn()
+
+    @contextlib.contextmanager
+    def without_typecheck(ctx):
+        import spmd_types as spmd
+
+        with ctx, spmd.no_typecheck():
+            yield
+
+    return (
+        without_typecheck(forward_context),
+        without_typecheck(recompute_context),
+    )
 
 
 def _get_save_ops() -> set:
@@ -159,7 +183,9 @@ def _apply_op_sac(
 
     return ptd_checkpoint_wrapper(
         module,
-        context_fn=lambda: create_selective_checkpoint_contexts(_get_custom_policy()),
+        context_fn=lambda: _checkpoint_contexts_without_typecheck(
+            lambda: create_selective_checkpoint_contexts(_get_custom_policy())
+        ),
         preserve_rng_state=ac_config.preserve_rng_state,
         determinism_check=ac_config.determinism_check,
         early_stop=ac_config.early_stop,
@@ -179,6 +205,9 @@ def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
     """
     return ptd_checkpoint_wrapper(
         module,
+        context_fn=lambda: _checkpoint_contexts_without_typecheck(
+            lambda: (contextlib.nullcontext(), contextlib.nullcontext())
+        ),
         preserve_rng_state=ac_config.preserve_rng_state,
         determinism_check=ac_config.determinism_check,
         early_stop=ac_config.early_stop,
