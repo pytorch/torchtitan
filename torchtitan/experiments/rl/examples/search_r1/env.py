@@ -44,8 +44,10 @@ SEARCH_TOOL: ToolSpec = {
 }
 
 INSTRUCTION = (
-    "Answer the question. Use the search tool to look up any facts you are unsure of, "
-    "then reply with a short final answer.\n\nQuestion: "
+    "Answer the question. Use the search tool to look up any facts you are unsure of. "
+    "When you know the answer, reply with only the answer itself — just the entity or "
+    'phrase, with no explanation or full sentence. For example: "Beijing".'
+    "\n\nQuestion: "
 )
 
 
