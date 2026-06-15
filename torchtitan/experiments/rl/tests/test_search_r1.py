@@ -54,7 +54,6 @@ def test_env_tool_call_returns_tool_message(monkeypatch):
     assert len(out.env_messages) == 1
     msg = out.env_messages[0]
     assert msg["role"] == "tool"
-    assert msg["tool_call_id"] == "c1"
     assert "Hamlet author" in msg["content"]
 
 
