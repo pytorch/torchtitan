@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import aiohttp
 
 from renderers import Message, ToolSpec
+from renderers.base import ParsedToolCall
 
 from torchtitan.experiments.rl.environment import (
     MessageEnv,
@@ -86,9 +87,9 @@ async def _search(query: str, *, url: str, topk: int, timeout_s: float = 60.0) -
     return _passages_to_string(results[0])
 
 
-def _query_from_tool_call(tool_call: dict) -> str:
-    """Pull the ``query`` argument out of a parsed ``search`` tool call."""
-    arguments = tool_call.get("function", {}).get("arguments")
+def _query_from_tool_call(tool_call: ParsedToolCall) -> str:
+    """Pull the ``query`` argument out of a renderer-parsed ``search`` tool call."""
+    arguments = tool_call.arguments
     if isinstance(arguments, str):
         try:
             arguments = json.loads(arguments)
@@ -133,7 +134,8 @@ class SearchR1Env(MessageEnv):
         )
 
     async def step(self, completion_message: Message) -> MessageEnvStepOutput:
-        tool_calls = completion_message.get("tool_calls")
+        # The renderer parses tool calls into ParsedToolCall objects (.name/.arguments).
+        tool_calls: list[ParsedToolCall] = completion_message.get("tool_calls") or []
         if not tool_calls:
             # No tool call -> the assistant's reply is the final answer.
             return MessageEnvStepOutput(done=True)
@@ -146,9 +148,9 @@ class SearchR1Env(MessageEnv):
             tool_message: Message = {
                 "role": "tool",
                 "content": passages,
-                "name": tool_call.get("function", {}).get("name", "search"),
+                "name": tool_call.name or "search",
             }
-            if tool_call.get("id"):
-                tool_message["tool_call_id"] = tool_call["id"]
+            if tool_call.id:
+                tool_message["tool_call_id"] = tool_call.id
             env_messages.append(tool_message)
         return MessageEnvStepOutput(env_messages=env_messages, done=False)

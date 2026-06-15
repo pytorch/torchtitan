@@ -11,6 +11,8 @@ No GPU, no retrieval server: the retrieval call is monkeypatched.
 
 import asyncio
 
+from renderers.base import ParsedToolCall
+
 from torchtitan.experiments.rl.examples.search_r1 import (
     env as sr1_env,
     RewardExactMatch,
@@ -31,12 +33,9 @@ def _build_env(monkeypatch, question="Who wrote Hamlet?"):
     )
 
 
-def _search_call(query: str, call_id: str = "c1") -> dict:
-    return {
-        "type": "function",
-        "id": call_id,
-        "function": {"name": "search", "arguments": {"query": query}},
-    }
+def _search_call(query, call_id: str = "c1") -> ParsedToolCall:
+    """A renderer-parsed search tool call (``arguments`` may be a dict or JSON str)."""
+    return ParsedToolCall(raw="", name="search", arguments={"query": query}, id=call_id)
 
 
 def test_env_init_exposes_search_tool(monkeypatch):
@@ -68,11 +67,9 @@ def test_env_no_tool_call_terminates(monkeypatch):
 
 def test_env_handles_json_string_arguments(monkeypatch):
     env = _build_env(monkeypatch)
-    call = {
-        "type": "function",
-        "id": "c1",
-        "function": {"name": "search", "arguments": '{"query": "stringified"}'},
-    }
+    call = ParsedToolCall(
+        raw="", name="search", arguments='{"query": "stringified"}', id="c1"
+    )
     out = asyncio.run(env.step({"role": "assistant", "tool_calls": [call]}))
     assert "stringified" in out.env_messages[0]["content"]
 
