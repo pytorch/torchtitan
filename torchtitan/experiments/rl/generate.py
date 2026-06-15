@@ -130,6 +130,10 @@ def generate() -> None:
         dtype=gen_config.model_dtype,
         # Parallelism configuration
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
+        # Generator-only convention: this config field is TorchTitan FSDP
+        # degree for trainers, but here it is intentionally mapped to vLLM's
+        # pure data-parallel degree. The vLLM wrapper skips FSDP/DDP.
+        data_parallel_size=gen_config.parallelism.data_parallel_shard_degree,
         enable_expert_parallel=enable_ep,
         # Use external_launcher only when launched via torchrun (multi-GPU);
         # for single-GPU, let vLLM pick the default executor.

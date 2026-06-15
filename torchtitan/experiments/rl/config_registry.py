@@ -333,7 +333,9 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
 def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
     """Debug MoE config with EP+TP on generator (8 GPUs: 4 gen + 4 train).
 
-    Generator uses TP=4 for dense layers and EP=4 for MoE experts.
+    Trainer uses data_parallel_shard_degree=2 as FSDP degree and TP=2.
+    Generator maps data_parallel_shard_degree=2 to vLLM pure DP, with TP=2.
+    MoE layers use EP=4.
     """
     group_size = 8
     return RLTrainer.Config(
@@ -360,8 +362,8 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
             ),
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=4,
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
                 disable_loss_parallel=True,
                 expert_parallel_degree=4,
@@ -379,8 +381,9 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
             # piecewise/full graph capture rejects.
             cudagraph=VLLMCudagraphConfig(enable=False),
             parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=4,
+                # Generator-only convention: mapped to vLLM pure DP, not FSDP.
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
@@ -399,7 +402,16 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
 def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
     """Batch-invariant MoE EP config for bitwise parity testing (8 GPUs).
 
-    Trainer: TP=4, EP=4 (4 GPUs). Generator: TP=4, EP=4 (4 GPUs).
+    Trainer uses data_parallel_shard_degree=2 as FSDP degree and TP=2.
+    Generator maps data_parallel_shard_degree=2 to vLLM pure DP, with TP=2.
+    MoE layers use EP=4.
+
+    Parity: trainer FSDP2 TP2 EP4 matches generator DP2 TP2 EP4 bitwise
+    (verified ``bit_wise/logprob_diff/max == 0``). Plain FSDP works ONLY because the FSDP all-gather runs in bf16
+    (``training.mixed_precision_param == "bfloat16"``, the default): it gathers
+    the full bf16 params before the forward, so the dense forward is numerically
+    identical to the generator's replicated bf16 dense DP.
+
     """
     group_size = 8
     return RLTrainer.Config(
@@ -428,8 +440,9 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
             ),
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=4,
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=2,
+                data_parallel_replicate_degree=1,
                 expert_parallel_degree=4,
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
@@ -446,8 +459,9 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
             model_dtype="bfloat16",
             cudagraph=VLLMCudagraphConfig(enable=False),
             parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=4,
+                # Generator-only convention: mapped to vLLM pure DP, not FSDP.
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
@@ -496,7 +510,8 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
-                tensor_parallel_degree=4,
+                data_parallel_replicate_degree=2,
+                tensor_parallel_degree=2,
                 disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
@@ -512,8 +527,9 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
             model_dtype="bfloat16",
             cudagraph=VLLMCudagraphConfig(enable=False),
             parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=4,
+                # Generator-only convention: mapped to vLLM pure DP, not FSDP.
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,

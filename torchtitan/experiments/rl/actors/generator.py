@@ -344,13 +344,20 @@ class VLLMGenerator(Actor, Configurable):
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only."""
 
         def __post_init__(self):
-            # VLLMGenerator supports TP plus MoE EP. vLLM handles its own
-            # process groups, and the wrapper applies the model parallelisms.
+            # RL uses data_parallel_shard_degree as vLLM DP size. TorchTitan's
+            # mesh still sees this as dp_shard so EP can borrow those ranks.
             p = self.parallelism
             if p.data_parallel_replicate_degree != 1:
                 raise ValueError(
-                    f"Generator does not support data parallel replication, "
-                    f"got dp_replicate={p.data_parallel_replicate_degree}"
+                    "Generator uses data_parallel_shard_degree for vLLM DP; "
+                    "data_parallel_replicate_degree must stay 1, got "
+                    f"dp_replicate={p.data_parallel_replicate_degree}"
+                )
+            if p.data_parallel_shard_degree == -1:
+                raise ValueError(
+                    "Generator maps data_parallel_shard_degree to vLLM's pure "
+                    "data_parallel_size, so it must be set explicitly instead "
+                    "of using -1 auto-inference."
                 )
             if p.pipeline_parallel_degree > 1:
                 raise ValueError(
@@ -467,6 +474,10 @@ class VLLMGenerator(Actor, Configurable):
             config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
+            # Generator-only convention: this config field is TorchTitan FSDP
+            # degree for trainers, but here it is intentionally mapped to vLLM's
+            # pure data-parallel degree. The vLLM wrapper skips FSDP/DDP.
+            data_parallel_size=config.parallelism.data_parallel_shard_degree,
             # NOTE: Monarch launches the generator workers and sets the torch
             # elastic distributed env; with external_launcher, vLLM uses that
             # world to build its process groups. vLLM does not take an
@@ -739,7 +750,10 @@ class VLLMGenerator(Actor, Configurable):
                 lambda: self._close_request is not None
                 or self._model_state_dict_pull_request is not None
                 or self._queued_generation_requests
-                or self._engine.has_unfinished_requests()
+                # rank-0-only decision: use the local (no DP all-reduce) check;
+                # ``engine.has_unfinished_requests()`` would do a DP collective
+                # that the follower ranks never join -> deadlock under vLLM DP>1.
+                or self._engine.output_processor.has_unfinished_requests()
             )
 
             if self._close_request is not None:

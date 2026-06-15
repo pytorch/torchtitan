@@ -123,9 +123,10 @@ class VLLMModelWrapper(Module):
         # validation lives in Generator.Config.__post_init__; these are
         # internal invariants — by the time we get here, parallelism has
         # already been validated.
-        assert parallelism.data_parallel_shard_degree == 1, (
-            "vLLM wrapper requires data_parallel_shard_degree=1, "
-            f"got {parallelism.data_parallel_shard_degree}"
+        assert parallelism.data_parallel_replicate_degree == 1, (
+            "vLLM wrapper uses data_parallel_shard_degree as the vLLM DP size; "
+            "data_parallel_replicate_degree must stay 1, "
+            f"got {parallelism.data_parallel_replicate_degree}"
         )
         assert parallelism.pipeline_parallel_degree == 1, (
             "vLLM wrapper requires pipeline_parallel_degree=1, "
