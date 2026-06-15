@@ -33,7 +33,8 @@ from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
 from torchtitan.experiments.rl.generator_router import (
     GeneratorRouter,
-    RoundRobinRoutingStrategy,
+    LeastLoadedRoutingStrategy,
+    StickySessionRoutingStrategy,
 )
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
@@ -91,7 +92,9 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
         group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         generator_router=GeneratorRouter.Config(
-            strategy=RoundRobinRoutingStrategy.Config()
+            strategy=StickySessionRoutingStrategy.Config(
+                fallback_strategy=LeastLoadedRoutingStrategy.Config()
+            )
         ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(

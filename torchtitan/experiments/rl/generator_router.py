@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-import logging
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Sequence
@@ -19,9 +18,6 @@ from enum import auto, Enum
 from typing import Any
 
 from torchtitan.config import Configurable
-from torchtitan.observability import structured_logger as sl
-
-logger = logging.getLogger(__name__)
 
 
 class _GeneratorState(Enum):
@@ -172,21 +168,22 @@ class StickySessionRoutingStrategy(RoutingStrategy):
         sticky_generator = self._sessions.get(routing_ctx.session_id)
         if sticky_generator is not None:
             if any(h is sticky_generator for h in candidates):
+                # End of the dict means it's the most-recently-used session.
                 self._sessions.move_to_end(routing_ctx.session_id)
                 return sticky_generator
-
-            logger.warning(
-                "sticky session %r pinned generator is not serving (e.g. draining "
-                "for a weight sync); re-pinning to a new generator (affinity lost)",
-                routing_ctx.session_id,
-            )
-            sl.log_trace_instant("router_sticky_session_repinned")
 
         # New session, or the pinned generator is unavailable: choose via the
         # fallback and (re)pin the session to that generator.
         chosen = self._fallback_strategy.choose(routing_ctx, candidates)
         self._sessions[routing_ctx.session_id] = chosen
+        # End of the dict means it's the most-recently-used session.
         self._sessions.move_to_end(routing_ctx.session_id)
+        # Evict the least-recently-used session if the map is full. We assume
+        # max_sessions is large enough that active sessions are never the LRU
+        # victim (only stale, finished sessions get evicted).
+        # TODO: relying solely on max_sessions to avoid premature eviction is
+        # easy to implement, but not robust for all scenarios. Revisit with an
+        # more robust approach.
         if len(self._sessions) > self._max_sessions:
             self._sessions.popitem(last=False)
         return chosen
