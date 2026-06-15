@@ -101,27 +101,36 @@ def spawn_proc_mesh(
     trainer_world_size: int,
     generator_world_size: int,
     host_meshes: HostMeshes | None = None,
-) -> tuple[ProcMesh, ProcMesh]:
+    *,
+    num_generators: int = 1,
+) -> tuple[ProcMesh, list[ProcMesh]]:
     """Spawn the trainer and generator proc meshes.
 
     Args:
         trainer_world_size: Number of GPU procs to spawn for the trainer.
-        generator_world_size: Number of GPU procs to spawn for the generator.
+        generator_world_size: Number of GPU procs to spawn for each generator.
         host_meshes: Caller-provided trainer/generator host meshes. When
             provided, each role is spawned on its provided host mesh. None means
-            both roles are spawned on ``this_host()``by using non-overlapping
+            both roles are spawned on ``this_host()`` by using non-overlapping
             GPU ranges.
+        num_generators: Number of generator proc meshes to spawn.
 
     Returns:
-        The ``(trainer_mesh, generator_mesh)`` proc meshes.
+        The ``(trainer_mesh, generator_meshes)`` proc meshes.
     """
-    total_gpus = trainer_world_size + generator_world_size
+    total_generator_gpus = num_generators * generator_world_size
+    total_gpus = trainer_world_size + total_generator_gpus
     logger.info(
-        f"{generator_world_size} generator GPUs + "
+        f"{num_generators} generator(s) * {generator_world_size} GPUs + "
         f"{trainer_world_size} trainer GPUs = {total_gpus} total"
     )
 
     if host_meshes is not None:
+        if num_generators > 1:
+            raise NotImplementedError(
+                "multi-host multi-generator topology is not yet supported"
+            )
+
         trainer_host_mesh = host_meshes.trainer
         generator_host_mesh = host_meshes.generator
         gpus_per_node = host_meshes.gpus_per_node
@@ -157,20 +166,25 @@ def spawn_proc_mesh(
             per_host={"gpus": generator_gpus_per_node},
             bootstrap=generator_provisioner.allocate(generator_gpus_per_node),
         )
+        generator_meshes = [generator_mesh]
     else:
         # Single-node mode: partition GPUs on this_host() via
         # CUDA_VISIBLE_DEVICES
+        host_mesh = this_host()
         provisioner = PerHostProvisioner(total_gpus=total_gpus)
-        trainer_mesh = this_host().spawn_procs(
+        trainer_mesh = host_mesh.spawn_procs(
             per_host={"gpus": trainer_world_size},
             bootstrap=provisioner.allocate(trainer_world_size),
         )
-        generator_mesh = this_host().spawn_procs(
-            per_host={"gpus": generator_world_size},
-            bootstrap=provisioner.allocate(generator_world_size),
-        )
+        generator_meshes = [
+            host_mesh.spawn_procs(
+                per_host={"gpus": generator_world_size},
+                bootstrap=provisioner.allocate(generator_world_size),
+            )
+            for _ in range(num_generators)
+        ]
 
-    return trainer_mesh, generator_mesh
+    return trainer_mesh, generator_meshes
 
 
 async def main():
@@ -188,14 +202,15 @@ async def main():
     try:
         trainer_world_size = _compute_world_size(config.trainer.parallelism)
         generator_world_size = _compute_world_size(config.generator.parallelism)
-        trainer_mesh, generator_mesh = spawn_proc_mesh(
+        trainer_mesh, generator_meshes = spawn_proc_mesh(
             trainer_world_size,
             generator_world_size,
             host_meshes=None,
+            num_generators=config.num_generators,
         )
         await rl_trainer.setup_async(
             trainer_mesh=trainer_mesh,
-            generator_meshes=[generator_mesh],
+            generator_meshes=generator_meshes,
         )
         await rl_trainer.train()
     except (KeyboardInterrupt, asyncio.CancelledError):
