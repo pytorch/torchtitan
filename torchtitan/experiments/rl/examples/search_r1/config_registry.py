@@ -115,14 +115,10 @@ def rl_grpo_qwen3_8b_search_r1() -> RLTrainer.Config:
     """GRPO Search-R1 for Qwen3-8B — same recipe as the 1.7B config.
 
     Only the model and GPU split differ. 8 GPUs: 2 generator (TP=2) + 4 trainer
-    (TP=4) + retriever on the spare GPUs. The trainer keeps fp32 master weights +
-    optimizer (default dtype), so 8B needs TP=4 to avoid OOM; the bf16 vLLM generator
-    fits on TP=2.
+    (TP=4) + retriever on the spare GPUs. The fp32 trainer needs TP=4 to avoid OOM.
     """
-    # TODO: switch to mixed precision (fp32 master + bf16 compute) via FSDP
-    # (data_parallel_shard_degree > 1, mixed_precision_param=bfloat16) + activation
-    # checkpointing, which is more memory-efficient and lets the split stay
-    # generator-heavy.
+    # TODO: use mixed precision (fp32 master + bf16 compute) via FSDP + activation
+    # checkpointing, which is more memory-efficient and could keep the split generator-heavy.
     config = rl_grpo_qwen3_1_7b_search_r1()
     config.model_spec = model_registry("8B", attn_backend="varlen")
     config.hf_assets_path = "torchtitan/experiments/rl/example_checkpoint/Qwen3-8B"
@@ -132,14 +128,10 @@ def rl_grpo_qwen3_8b_search_r1() -> RLTrainer.Config:
             config.trainer.parallelism, tensor_parallel_degree=4
         ),
     )
-    # The trainer->generator weight sync transiently spikes generator GPU memory, so the
-    # default 0.9 gpu_memory_limit OOMs on 8B; 0.6 reserves room for the spike.
-    # TODO(@meetv18): the spike is likely GPU-Direct weight transfer (the RDMA/TorchStore
-    # weight-sync path in generator.py) being on by default — make the transfer device
-    # configurable and default to CPU to avoid the GPU-memory overhead. The update also
-    # doesn't seem to land in place (PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-    # isn't taking effect), so the sync allocates instead of updating in place. Once
-    # fixed, this cap can likely be raised (~0.75).
+    # 0.6 (vs the 0.9 default) reserves room for the weight-sync memory spike, which
+    # OOMs the 8B generator otherwise.
+    # TODO(@meetv18): the spike is likely GPU-Direct weight transfer being on by default;
+    # make the transfer device configurable (CPU default) so this cap can be raised.
     config.generator = dataclasses.replace(
         config.generator,
         gpu_memory_limit=0.6,
