@@ -4,8 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 from torch.distributed._functional_collectives import (
     all_to_all_single,
@@ -14,6 +17,8 @@ from torch.distributed._functional_collectives import (
 from torch.distributed.tensor import DeviceMesh
 
 from torchtitan.config import Configurable
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 
 
@@ -57,9 +62,14 @@ class LocalTokenDispatcher(Configurable):
         *,
         ep_mesh: DeviceMesh | None,
         tp_mesh: DeviceMesh | None,
+        sparse_mesh: DeviceMesh | None,
     ) -> None:
         """No-op for the EP=1 dispatcher. Subclasses override."""
-        del ep_mesh, tp_mesh
+        del ep_mesh, tp_mesh, sparse_mesh
+
+    @contextmanager
+    def sparse_spmd_mesh(self) -> Iterator[None]:
+        yield
 
     def _local_reorder(
         self,
@@ -196,6 +206,7 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher):
     def __init__(self, config: Config):
         super().__init__(config)
         self.ep_mesh: DeviceMesh | None = None
+        self.sparse_mesh: DeviceMesh | None = None
         # Sequence-parallel split coordinates derived from tp_mesh.
         # ``sp_rank`` uses ``DeviceMesh._sym_get_coordinate`` so it is a
         # ``SymInt`` under CooR precompile, keeping the FX graph
@@ -208,12 +219,23 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher):
         *,
         ep_mesh: DeviceMesh | None,
         tp_mesh: DeviceMesh | None,
+        sparse_mesh: DeviceMesh | None,
     ) -> None:
         """Install the EP mesh and SP coordinates used by dispatch / combine."""
         self.ep_mesh = ep_mesh
+        self.sparse_mesh = sparse_mesh
         if tp_mesh is not None:
             self.sp_size = tp_mesh.size()
             self.sp_rank = tp_mesh._sym_get_coordinate(0)
+
+    @contextmanager
+    def sparse_spmd_mesh(self) -> Iterator[None]:
+        if self.ep_mesh is None or get_spmd_backend() != "spmd_types":
+            yield
+            return
+
+        with set_current_spmd_mesh(self.sparse_mesh):
+            yield
 
     def _sp_global_token_indices(
         self,
@@ -307,7 +329,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
 
         # generate the input splits and output splits for all-to-all
-        with torch.no_grad():
+        with torch.no_grad(), spmd.no_typecheck():
             num_global_tokens_per_local_expert_E = all_to_all_single(
                 num_local_tokens_per_expert_E,
                 None,
@@ -335,33 +357,57 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             input_splits_list = input_splits.tolist()
             output_splits_list = output_splits.tolist()
 
-        # All-to-all dispatch tokens to EP ranks
-        routed_input_RD = all_to_all_single_autograd(
-            routed_input_ND,
-            output_splits_list,
-            input_splits_list,
-            self.ep_mesh,
-        )
-
-        # Reorder from rank-major to expert-major via _permute.
-        #
-        # num_global_tokens_per_local_expert_E layout after all-to-all
-        # (e = local experts, EP = EP ranks):
-        #   (e0,r0), (e1,r0), ..., (e0,r1), (e1,r1), ...  (rank-major)
-        # _permute reshuffles to:
-        #   (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
-        # TODO: Consider using num_global_tokens_per_local_expert_e as the
-        # expert_bias_e update buffer, then all-gather on EP ranks. This
-        # is blocked by clarification on HybridEP token dropping.
-        (
-            input_shape,
-            routed_input_RD,
-            permuted_indices,
-            num_global_tokens_per_local_expert_e,
-        ) = self._permute(
-            routed_input_RD,
-            num_global_tokens_per_local_expert_E,
-        )
+        with set_current_spmd_mesh(self.sparse_mesh):
+            # All-to-all dispatch tokens to EP ranks
+            if get_spmd_backend() == "spmd_types":
+                if spmd.is_type_checking():
+                    routed_input_ND = spmd.reinterpret_mesh(
+                        routed_input_ND,
+                        {
+                            "dp_replicate": spmd.V,
+                            "efsdp": spmd.V,
+                            "ep": spmd.V,
+                        },
+                    )
+                routed_input_RD = spmd.all_to_all(
+                    routed_input_ND,
+                    self.sparse_mesh.get_group("ep"),
+                    src=spmd.S(0),
+                    dst=spmd.S(0),
+                    output_split_sizes=output_splits_list,
+                    input_split_sizes=input_splits_list,
+                )
+            else:
+                routed_input_RD = all_to_all_single_autograd(
+                    routed_input_ND,
+                    output_splits_list,
+                    input_splits_list,
+                    self.ep_mesh,
+                )
+            # Reorder from rank-major to expert-major via _permute.
+            #
+            # num_global_tokens_per_local_expert_E layout after all-to-all
+            # (e = local experts, EP = EP ranks):
+            #   (e0,r0), (e1,r0), ..., (e0,r1), (e1,r1), ...  (rank-major)
+            # _permute reshuffles to:
+            #   (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
+            # TODO: Consider using num_global_tokens_per_local_expert_e as the
+            # expert_bias_e update buffer, then all-gather on EP ranks. This
+            # is blocked by clarification on HybridEP token dropping.
+            if get_spmd_backend() == "spmd_types":
+                spmd.assert_type(
+                    num_global_tokens_per_local_expert_E,
+                    {"dp_replicate": spmd.V, "efsdp": spmd.V, "ep": spmd.S(0)},
+                )
+            (
+                input_shape,
+                routed_input_RD,
+                permuted_indices,
+                num_global_tokens_per_local_expert_e,
+            ) = self._permute(
+                routed_input_RD,
+                num_global_tokens_per_local_expert_E,
+            )
 
         metadata = AllToAllDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
@@ -474,19 +520,40 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 local_seq_len_after_padding=local_seq_len_after_padding,
             )
 
-        # Reverse expert-major reordering
-        routed_output_RD = self._unpermute(
-            routed_output_RD, metadata.input_shape, metadata.permuted_indices
-        )
+        with set_current_spmd_mesh(self.sparse_mesh):
+            # Reverse expert-major reordering
+            routed_output_RD = self._unpermute(
+                routed_output_RD, metadata.input_shape, metadata.permuted_indices
+            )
+            # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
+            # on the NCCL stream and won't block until the tensor is accessed.
+            if get_spmd_backend() == "spmd_types":
+                routed_output_RD = spmd.all_to_all(
+                    routed_output_RD,
+                    self.sparse_mesh.get_group("ep"),
+                    src=spmd.S(0),
+                    dst=spmd.S(0),
+                    output_split_sizes=metadata.input_splits,
+                    input_split_sizes=metadata.output_splits,
+                )
+            else:
+                routed_output_RD = all_to_all_single_autograd(
+                    routed_output_RD,
+                    metadata.input_splits,
+                    metadata.output_splits,
+                    self.ep_mesh,
+                )
 
-        # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
-        # on the NCCL stream and won't block until the tensor is accessed.
-        routed_output_RD = all_to_all_single_autograd(
-            routed_output_RD,
-            metadata.input_splits,
-            metadata.output_splits,
-            self.ep_mesh,
-        )
+        if get_spmd_backend() == "spmd_types":
+            if spmd.is_type_checking():
+                routed_output_RD = spmd.reinterpret_mesh(
+                    routed_output_RD,
+                    {
+                        "dp": spmd.V,
+                        "cp": spmd.V,
+                        "tp": spmd.V,
+                    },
+                )
 
         # With SP, create a full-size buffer for scatter_add so routed results
         # from all SP ranks can be placed at global positions.

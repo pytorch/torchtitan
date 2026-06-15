@@ -9,10 +9,14 @@ from typing import Literal
 
 import torch
 import torch.nn.functional as F
+import spmd_types as spmd
+from spmd_types.runtime import get_partition_spec
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
+from torchtitan.distributed.spmd_types import spmd_mesh_size
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
@@ -78,6 +82,13 @@ class GroupedExperts(Module):
             w3_EFD = self.w3_EFD
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
+        if (
+            get_spmd_backend() == "spmd_types"
+            and spmd.is_type_checking()
+            and spmd_mesh_size("ep") == 1
+        ):
+            for axis in ("dp", "cp"):
+                spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
         h_RF = F.silu(
             torch._grouped_mm(
@@ -103,6 +114,7 @@ class GroupedExperts(Module):
         num_local_tokens_per_expert_E: torch.Tensor,
         *,
         num_local_tokens_after_padding: int,
+        local_seq_len_after_padding: int,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
@@ -113,7 +125,6 @@ class GroupedExperts(Module):
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
         T = B * L
-        local_seq_len_after_padding = num_local_tokens_after_padding // B
         x_TD = x_BLD.view(T, D)
 
         topk_scores_TK = topk_scores_BLK.view(T, K)
@@ -128,9 +139,10 @@ class GroupedExperts(Module):
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
-        routed_output_RD = self._experts_forward(
-            routed_input_RD, num_global_tokens_per_local_expert_e
-        )
+        with self.token_dispatcher.sparse_spmd_mesh():
+            routed_output_RD = self._experts_forward(
+                routed_input_RD, num_global_tokens_per_local_expert_e
+            )
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
@@ -152,6 +164,10 @@ class GroupedExperts(Module):
         self.token_dispatcher.wire_meshes(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
+            sparse_mesh=parallel_dims.get_optional_mesh(
+                ["dp_replicate", "efsdp", "ep"],
+                include_singleton_axes=True,
+            ),
         )
 
 
@@ -384,15 +400,22 @@ class MoE(Module):
         the GroupedExperts boundary.
         """
         B, L, D = x_BLD.shape
-        T = B * L
         sp_size = getattr(self.experts.token_dispatcher, "sp_size", 1)
-        pad_tokens = (-T) % sp_size
-        # Padding is logically appended to the flattened global sequence tail,
+
+        if isinstance(x_BLD, DTensor):
+            local_B, local_L, _ = x_BLD.to_local().shape
+        else:
+            local_B, local_L, _ = x_BLD.shape
+
+        pad_tokens = (-local_L) % sp_size
+        # Padding is logically appended to the sequence tail of each batch,
         # not to a specific SP rank. This lets combine() infer each SP rank's
         # start/end offsets from the uniform padded shard length; for example,
-        # if T < sp_size, only the first T ranks have real tokens. No padded
-        # token is materialized or routed.
-        num_local_tokens_after_padding = (T + pad_tokens) // sp_size
+        # if the local sequence length is shorter than the SP size, only ranks
+        # with real local positions route tokens. No padded token is
+        # materialized or routed.
+        local_seq_len_after_padding = local_L + pad_tokens
+        num_local_tokens_after_padding = local_B * local_seq_len_after_padding
 
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # scores_BLE shape (B, L, E)
@@ -417,7 +440,14 @@ class MoE(Module):
                 True,
             )
 
-        if isinstance(topk_expert_ids_BLK, DTensor):
+        if get_spmd_backend() == "spmd_types":
+            generate_routing_map = spmd.local_map(
+                out_types=(
+                    spmd.get_local_type(scores_BLE),
+                    get_partition_spec(scores_BLE),
+                ),
+            )(_generate_routing_map)
+        elif isinstance(topk_expert_ids_BLK, DTensor):
             assert isinstance(
                 scores_BLE, DTensor
             ), "scores_BLE and topk_expert_ids_BLK should both be DTensors"
@@ -453,6 +483,7 @@ class MoE(Module):
             topk_expert_ids_BLK,
             num_local_tokens_per_expert_E,
             num_local_tokens_after_padding=num_local_tokens_after_padding,
+            local_seq_len_after_padding=local_seq_len_after_padding,
         )
 
         # shared_experts runs in parallel with deepep combine communication.
@@ -477,6 +508,7 @@ class MoE(Module):
             # physically padded, so trim the logical tail padding before
             # restoring the original (B, L, D) shape.
             out_TD = out_BLD.view(-1, D)
+            T = B * L
             out_BLD = out_TD[:T].view(B, L, D)
 
         if shared_out_BLD is not None:
