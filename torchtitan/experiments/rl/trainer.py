@@ -201,6 +201,14 @@ class RLTrainer(Configurable):
         generator: VLLMGenerator.Config = field(default_factory=VLLMGenerator.Config)
         """VLLMGenerator actor configuration (vLLM engine, sampling)."""
 
+        num_generators: int = 1
+        """Number of generator replicas to spawn as separate proc meshes.
+
+        This is distinct from intra-generator parallelism controlled by
+        ``generator.parallelism``. Total generator GPU/process usage is
+        ``num_generators * generator_world_size``.
+        """
+
         generator_router: GeneratorRouter.Config = field(
             default_factory=GeneratorRouter.Config
         )
@@ -211,6 +219,10 @@ class RLTrainer(Configurable):
         )
 
         def __post_init__(self):
+            if self.num_generators < 1:
+                raise ValueError(
+                    f"num_generators must be at least 1, got {self.num_generators}"
+                )
             if self.generator.checkpoint.enable:
                 raise ValueError(
                     "Generator checkpoint must be disabled in the RL loop "

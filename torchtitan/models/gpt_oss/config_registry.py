@@ -10,11 +10,8 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.validate import Validator
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.trainer import Trainer
 
@@ -49,9 +46,7 @@ def gpt_oss_debugmodel() -> Trainer.Config:
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="none",
-        ),
+        activation_checkpoint=None,
         validator=Validator.Config(
             freq=5,
             steps=10,
@@ -81,7 +76,7 @@ def gpt_oss_20b() -> Trainer.Config:
             expert_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(interval=500),
-        activation_checkpoint=ActivationCheckpointConfig(mode="full"),
+        activation_checkpoint=FullAC.Config(),
     )
 
 
@@ -107,5 +102,5 @@ def gpt_oss_120b() -> Trainer.Config:
             expert_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(interval=500),
-        activation_checkpoint=ActivationCheckpointConfig(mode="full"),
+        activation_checkpoint=FullAC.Config(),
     )
