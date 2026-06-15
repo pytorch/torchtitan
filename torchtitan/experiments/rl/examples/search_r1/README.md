@@ -1,29 +1,26 @@
 # Search-R1: multi-turn retrieval-augmented GRPO
 
 A [Search-R1](https://github.com/PeterGriffinJin/Search-R1) example in torchtitan's
-RL experiment. The model reasons in `<think>`, issues `<search>query</search>` calls
-(answered with retrieved `<information>...</information>`), and finishes with
-`<answer>...</answer>`. Reward is exact-match (EM) against gold answers (optionally
-plus a graded format/retrieval bonus).
+RL experiment. The model is given a `search` tool; it thinks natively
+(`enable_thinking=True`), calls `search` (a standard tool call) when it needs facts,
+gets the retrieved passages back as a `tool` message, and replies with a final answer.
+Reward is exact-match (EM) against gold answers (optionally plus a retrieval bonus).
 
-It is a multi-turn, tool-using RL example: each `<search>` ends an assistant turn, the
-env returns the retrieved passages as the next user message, and the rollout continues
-until the model answers or the turn budget is hit. It runs entirely on the framework's
-multi-turn rollouter (`rollout/rollouter.py`) and continuous-batching generator — the
-only example-specific pieces are this folder plus its config.
+It is a multi-turn, tool-using RL example: each assistant turn ends at the renderer's
+role boundary, the env answers a `search` tool call with a `tool`-role message, and the
+rollout continues until the model stops calling tools or the turn budget is hit. It
+runs entirely on the framework's multi-turn rollouter (`rollout/rollouter.py`) and
+continuous-batching generator — the only example-specific pieces are this folder plus
+its config.
 
 ## Files
-- `data.py` — `SearchR1Dataset` / `SearchR1Sample`: reads the Search-R1 NQ/HotpotQA parquet.
-- `env.py` — `SearchR1Env(MessageEnv)`: text-tag `<search>`/`<answer>` protocol, injects
-  `<information>`, and contains the local dense-retrieval client. The per-rollout turn
-  budget is enforced by `TokenEnv.max_num_turns`.
-- `rubric.py` — `RewardExactMatch` (`compute_score_em`). **Default = pure-EM 0/1**
-  (correct answer → 1.0, else 0). Opt into the fine-grained
-  graded reward by setting the sub-scores > 0
-  (`structure_format_score=0.2, retrieval_score=0.1, final_format_score=0.1`): it adds
-  a `<think>→<search>→<information>→<answer>` format state-machine + retrieval-correctness
-  credit, so a bare correct answer (0.8) scores less than a searched one (1.0) and the
-  policy can't reward-hack by skipping search.
+- `data.py` — `SearchR1Dataset` / `SearchR1Sample`: reads the NQ/HotpotQA parquet.
+- `env.py` — `SearchR1Env(MessageEnv)`: defines the `search` `ToolSpec`, reads the
+  renderer-parsed `tool_calls`, runs retrieval, and returns the passages as a `tool`
+  message. The per-rollout turn budget is enforced by `TokenEnv.max_num_turns`.
+- `rubric.py` — `RewardExactMatch`. **Default = pure-EM 0/1** on the final answer
+  (correct → 1.0, else 0). Set `retrieval_score` > 0 to give partial credit when a
+  search surfaced the gold answer (puts search on the gradient, anti closed-book).
 - `rollouter.py` — wires datasets + env + rubric into a `Rollouter.Config`.
 
 ## Prerequisites

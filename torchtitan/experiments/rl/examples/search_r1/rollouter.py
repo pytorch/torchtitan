@@ -56,9 +56,8 @@ class SearchR1Rollouter(Rollouter):
             default_factory=lambda: Rubric.Config(
                 reward_fns=[
                     # Default = pure-EM 0/1. Put search on the gradient (anti
-                    # closed-book reward hacking) by enabling the graded levers, e.g.
-                    #   RewardExactMatch.Config(weight=1.0, structure_format_score=0.2,
-                    #                         retrieval_score=0.1, final_format_score=0.1)
+                    # closed-book reward hacking) by setting retrieval_score > 0, e.g.
+                    #   RewardExactMatch.Config(weight=1.0, retrieval_score=0.1)
                     RewardExactMatch.Config(weight=1.0),
                 ],
                 # No <answer> on a truncated rollout -> no reward, no learning signal.

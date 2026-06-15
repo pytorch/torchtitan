@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for the Search-R1 example: env action parsing + EM/format rubric.
+"""Unit tests for the Search-R1 example: tool-call env + exact-match rubric.
 
 No GPU, no retrieval server: the retrieval call is monkeypatched.
 """
@@ -31,173 +31,123 @@ def _build_env(monkeypatch, question="Who wrote Hamlet?"):
     )
 
 
-def test_env_search_action_injects_information(monkeypatch):
+def _search_call(query: str, call_id: str = "c1") -> dict:
+    return {
+        "type": "function",
+        "id": call_id,
+        "function": {"name": "search", "arguments": {"query": query}},
+    }
+
+
+def test_env_init_exposes_search_tool(monkeypatch):
+    env = _build_env(monkeypatch)
+    out = asyncio.run(env.init())
+    assert [t["name"] for t in out.tools] == ["search"]
+    assert "Hamlet" in out.init_prompt_messages[0]["content"]
+
+
+def test_env_tool_call_returns_tool_message(monkeypatch):
     env = _build_env(monkeypatch)
     out = asyncio.run(
-        env.step(
-            {
-                "role": "assistant",
-                "content": "<think>hm</think><search>Hamlet author</search>",
-            }
-        )
+        env.step({"role": "assistant", "tool_calls": [_search_call("Hamlet author")]})
     )
     assert out.done is False
     assert len(out.env_messages) == 1
-    content = out.env_messages[0]["content"]
-    assert "<information>" in content and "</information>" in content
-    assert "Hamlet author" in content
+    msg = out.env_messages[0]
+    assert msg["role"] == "tool"
+    assert msg["tool_call_id"] == "c1"
+    assert "Hamlet author" in msg["content"]
 
 
-def test_env_answer_action_terminates(monkeypatch):
+def test_env_no_tool_call_terminates(monkeypatch):
     env = _build_env(monkeypatch)
-    out = asyncio.run(
-        env.step({"role": "assistant", "content": "<answer>Shakespeare</answer>"})
-    )
+    out = asyncio.run(env.step({"role": "assistant", "content": "Shakespeare"}))
     assert out.done is True
     assert out.env_messages == []
 
 
-def test_env_invalid_action_nudges(monkeypatch):
+def test_env_handles_json_string_arguments(monkeypatch):
     env = _build_env(monkeypatch)
-    out = asyncio.run(env.step({"role": "assistant", "content": "no tags here"}))
-    assert out.done is False
-    assert "invalid" in out.env_messages[0]["content"].lower()
+    call = {
+        "type": "function",
+        "id": "c1",
+        "function": {"name": "search", "arguments": '{"query": "stringified"}'},
+    }
+    out = asyncio.run(env.step({"role": "assistant", "tool_calls": [call]}))
+    assert "stringified" in out.env_messages[0]["content"]
 
 
-def _answer_rollout(text: str) -> Rollout:
-    return Rollout(
-        group_id="g",
-        sample_id="s",
-        status=RolloutStatus.COMPLETED,
-        turns=[
+def _rollout(*, answer: str | None, tool_results: list[str] | None = None) -> Rollout:
+    """Build a rollout: one search turn (with a tool result) then a final-answer turn.
+
+    ``answer=None`` means the rollout ended on a tool call (truncated, no final answer).
+    """
+    turns = []
+    for res in tool_results or []:
+        turns.append(
             RolloutTurn(
                 prompt_token_ids=[1],
                 completion_token_ids=[2],
                 completion_logprobs=[-0.1],
-                completion_message={"role": "assistant", "content": text},
+                completion_message={
+                    "role": "assistant",
+                    "tool_calls": [_search_call("q")],
+                },
+                env_messages=[{"role": "tool", "content": res}],
             )
-        ],
+        )
+    final = (
+        {"role": "assistant", "tool_calls": [_search_call("q")]}
+        if answer is None
+        else {"role": "assistant", "content": answer}
     )
-
-
-def test_reward_em_exact_match_normalized():
-    em = RewardExactMatch(RewardExactMatch.Config())
-    ex = SearchR1Sample(question="q", golden_answers=["Shakespeare"])
-    # normalization lowercases + strips punctuation/articles.
-    r = asyncio.run(em(_answer_rollout("<answer>The Shakespeare.</answer>"), ex))
-    assert r == 1.0
-
-
-def test_reward_em_mismatch():
-    em = RewardExactMatch(RewardExactMatch.Config())
-    ex = SearchR1Sample(question="q", golden_answers=["Shakespeare"])
-    r = asyncio.run(em(_answer_rollout("<answer>Marlowe</answer>"), ex))
-    assert r == 0.0
-
-
-def test_reward_em_uses_last_answer():
-    em = RewardExactMatch(RewardExactMatch.Config())
-    ex = SearchR1Sample(question="q", golden_answers=["Paris"])
-    r = asyncio.run(
-        em(_answer_rollout("<answer>London</answer> ... <answer>Paris</answer>"), ex)
+    turns.append(
+        RolloutTurn(
+            prompt_token_ids=[3],
+            completion_token_ids=[4],
+            completion_logprobs=[-0.1],
+            completion_message=final,
+        )
     )
-    assert r == 1.0
-
-
-def _search_rollout(
-    answer: str, *, info: str = "passage", think: str = "ok"
-) -> Rollout:
-    """A valid two-turn trajectory: search turn (with injected <information>) then
-    an answer turn — reconstructs to think->search->information->think->answer."""
     return Rollout(
-        group_id="g",
-        sample_id="s",
-        status=RolloutStatus.COMPLETED,
-        turns=[
-            RolloutTurn(
-                prompt_token_ids=[1],
-                completion_token_ids=[2],
-                completion_logprobs=[-0.1],
-                completion_message={
-                    "role": "assistant",
-                    "content": f"<think>{think}</think><search>q</search>",
-                },
-                env_messages=[
-                    {
-                        "role": "user",
-                        "content": f"\n\n<information>{info}</information>\n\n",
-                    }
-                ],
-            ),
-            RolloutTurn(
-                prompt_token_ids=[3],
-                completion_token_ids=[4],
-                completion_logprobs=[-0.1],
-                completion_message={
-                    "role": "assistant",
-                    "content": f"<think>{think}</think><answer>{answer}</answer>",
-                },
-            ),
-        ],
+        group_id="g", sample_id="s", status=RolloutStatus.COMPLETED, turns=turns
     )
 
-
-def _approx(a: float, b: float) -> bool:
-    return abs(a - b) < 1e-9
-
-
-# Fine-grained (graded) opt-in config: search/format/retrieval on the gradient.
-_GRADED = dict(structure_format_score=0.2, retrieval_score=0.1, final_format_score=0.1)
 
 EX = SearchR1Sample(question="q", golden_answers=["Paris"])
 
 
-# --- default = pure-EM 0/1 (sub-scores 0): correct -> 1.0, else 0 ---
-def test_searchr1_default_is_pure_em_correct():
+def test_reward_final_answer_exact_match():
     r = RewardExactMatch(RewardExactMatch.Config())
-    # both a searched and a bare correct answer score 1.0 under the default.
-    assert _approx(
-        asyncio.run(r(_search_rollout("Paris", info="capital is Paris"), EX)), 1.0
-    )
-    assert _approx(asyncio.run(r(_answer_rollout("<answer>Paris</answer>"), EX)), 1.0)
+    # normalization lowercases + strips punctuation/articles.
+    assert asyncio.run(r(_rollout(answer="The Paris."), EX)) == 1.0
 
 
-def test_searchr1_default_is_pure_em_wrong():
+def test_reward_final_answer_mismatch():
     r = RewardExactMatch(RewardExactMatch.Config())
-    assert _approx(
-        asyncio.run(r(_search_rollout("London", info="capital is Paris"), EX)), 0.0
-    )
-    assert _approx(asyncio.run(r(_answer_rollout("<answer>London</answer>"), EX)), 0.0)
+    assert asyncio.run(r(_rollout(answer="London"), EX)) == 0.0
 
 
-# --- fine-grained (graded) mode: bare correct < searched correct, partial credit ---
-def test_searchr1_graded_searched_correct_full():
-    r = RewardExactMatch(RewardExactMatch.Config(**_GRADED))
-    assert _approx(
-        asyncio.run(r(_search_rollout("Paris", info="capital is Paris"), EX)), 1.0
+def test_reward_truncated_no_answer_is_zero():
+    r = RewardExactMatch(RewardExactMatch.Config())
+    assert (
+        asyncio.run(r(_rollout(answer=None, tool_results=["capital is Paris"]), EX))
+        == 0.0
     )
 
 
-def test_searchr1_graded_bare_correct_penalized():
-    # The anti-collapse case: correct but no <think>/<search> -> 1.0 - 0.2 = 0.8.
-    r = RewardExactMatch(RewardExactMatch.Config(**_GRADED))
-    assert _approx(asyncio.run(r(_answer_rollout("<answer>Paris</answer>"), EX)), 0.8)
-
-
-def test_searchr1_graded_wrong_valid_with_retrieval():
-    r = RewardExactMatch(RewardExactMatch.Config(**_GRADED))
-    assert _approx(
-        asyncio.run(r(_search_rollout("London", info="capital is Paris"), EX)), 0.3
+def test_reward_retrieval_credit_when_wrong_but_gold_retrieved():
+    r = RewardExactMatch(RewardExactMatch.Config(retrieval_score=0.1))
+    # wrong final answer, but a search surfaced the gold -> partial credit.
+    got = asyncio.run(
+        r(_rollout(answer="London", tool_results=["capital is Paris"]), EX)
     )
+    assert abs(got - 0.1) < 1e-9
 
 
-def test_searchr1_graded_wrong_valid_no_retrieval():
-    r = RewardExactMatch(RewardExactMatch.Config(**_GRADED))
-    assert _approx(
-        asyncio.run(r(_search_rollout("London", info="irrelevant"), EX)), 0.2
+def test_reward_no_retrieval_credit_by_default():
+    r = RewardExactMatch(RewardExactMatch.Config())  # retrieval_score=0
+    got = asyncio.run(
+        r(_rollout(answer="London", tool_results=["capital is Paris"]), EX)
     )
-
-
-def test_searchr1_graded_wrong_invalid_floor():
-    r = RewardExactMatch(RewardExactMatch.Config(**_GRADED))
-    assert _approx(asyncio.run(r(_answer_rollout("<answer>London</answer>"), EX)), 0.1)
+    assert got == 0.0

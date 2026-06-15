@@ -61,7 +61,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
         rollouter=SearchR1Rollouter.Config(
             advantage=GRPOAdvantage.Config(std_normalize=True),
         ),
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        renderer=RendererConfig(name="qwen3", enable_thinking=True),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=1, global_batch_size=48, seq_len=4096),
@@ -109,8 +109,8 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
                 temperature=1.0,
                 top_p=1.0,
                 max_tokens=512,
-                # Stop each turn at its action tag so the env can run retrieval.
-                stop=["</search>", "</answer>"],
+                # No string stop: each assistant turn ends at the renderer's role
+                # boundary (<|im_end|>) after the model's tool call or final answer.
             ),
         ),
     )

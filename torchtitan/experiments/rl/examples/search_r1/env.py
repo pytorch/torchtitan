@@ -6,12 +6,12 @@
 
 from __future__ import annotations
 
-import re
+import json
 from dataclasses import dataclass
 
 import aiohttp
 
-from renderers import Message
+from renderers import Message, ToolSpec
 
 from torchtitan.experiments.rl.environment import (
     MessageEnv,
@@ -21,39 +21,35 @@ from torchtitan.experiments.rl.environment import (
 from torchtitan.experiments.rl.examples.search_r1.data import SearchR1Sample
 
 
-# Search-R1 protocol tags (open, close).
-_THINK_TAG = ("<think>", "</think>")
-_SEARCH_TAG = ("<search>", "</search>")
-_ANSWER_TAG = ("<answer>", "</answer>")
-_INFORMATION_TAG = ("<information>", "</information>")
+# The `search` tool the model calls (OpenAI function-calling schema). The renderer
+# injects this into the prompt and parses the model's `<tool_call>` back into
+# `completion_message["tool_calls"]`; the model uses native thinking + tool calling.
+SEARCH_TOOL: ToolSpec = {
+    "name": "search",
+    "description": (
+        "Search a Wikipedia-derived knowledge base and return the top passages for "
+        "a query. Use it whenever you need external facts to answer the question."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The natural-language search query.",
+            },
+        },
+        "required": ["query"],
+    },
+}
 
-
-# Search-R1 instruction prompt. The model reasons in <think>, searches via
-# <search> query </search> (results come back in <information>...</information>),
-# and answers in <answer>...</answer>.
-SEARCH_R1_INSTRUCTION = (
-    "Answer the given question. You must conduct reasoning inside <think> and "
-    "</think> first every time you get new information. After reasoning, if you "
-    "find you lack some knowledge, you can call a search engine by <search> query "
-    "</search> and it will return the top searched results between <information> "
-    "and </information>. You can search as many times as your want. If you find no "
-    "further external knowledge needed, you can directly provide the answer inside "
-    "<answer> and </answer>, without detailed illustrations. For example, <answer> "
-    "Beijing </answer>. Question: "
+INSTRUCTION = (
+    "Answer the question. Use the search tool to look up any facts you are unsure of, "
+    "then reply with a short final answer.\n\nQuestion: "
 )
-
-_INVALID_ACTION_MESSAGE = (
-    "\nMy previous action is invalid. If I want to search, I should put the query "
-    "between <search> and </search>. If I want to give the final answer, I should "
-    "put the answer between <answer> and </answer>. Let me try again.\n"
-)
-
-# First well-formed <search>...</search> or <answer>...</answer> block.
-_ACTION_RE = re.compile(r"<(search|answer)>(.*?)</\1>", re.DOTALL)
 
 
 def _passages_to_string(docs: list[dict]) -> str:
-    """Format retrieved docs into the block fed back to the model.
+    """Format retrieved docs into the block returned to the model.
 
     Each doc's ``contents`` is ``"<title>\\n<body>"``. Example::
 
@@ -75,8 +71,7 @@ async def _search(query: str, *, url: str, topk: int, timeout_s: float = 60.0) -
 
     POSTs ``{"queries": [query], "topk": topk}`` and reads back
     ``{"result": [[{"contents": ...}, ...]]}``. On any transport/server error
-    returns ``""`` (an empty ``<information>`` block) instead of raising, so one
-    flaky request doesn't crash the whole rollout.
+    returns ``""`` instead of raising, so one flaky request doesn't crash the rollout.
     """
     payload = {"queries": [query], "topk": topk, "return_scores": False}
     timeout = aiohttp.ClientTimeout(total=timeout_s)
@@ -91,18 +86,29 @@ async def _search(query: str, *, url: str, topk: int, timeout_s: float = 60.0) -
     return _passages_to_string(results[0])
 
 
+def _query_from_tool_call(tool_call: dict) -> str:
+    """Pull the ``query`` argument out of a parsed ``search`` tool call."""
+    arguments = tool_call.get("function", {}).get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            return ""
+    if isinstance(arguments, dict):
+        query = arguments.get("query", "")
+        return query if isinstance(query, str) else ""
+    return ""
+
+
 class SearchR1Env(MessageEnv):
-    """Multi-turn open-domain QA env with a search tool (Search-R1).
+    """Multi-turn open-domain QA env with a ``search`` tool.
 
-    Each assistant turn either issues a ``<search>query</search>`` — which the env
-    answers with a ``<information>...</information>`` user message — or gives a final
-    ``<answer>...</answer>``, which ends the rollout. Malformed turns get a corrective
-    nudge. The per-rollout turn budget is enforced by ``TokenEnv.max_num_turns``.
-
-    Uses the text-tag protocol (not function-calling tools); pair it with a
-    renderer configured with ``enable_thinking=False`` so the model's ``<think>``
-    tags stay in the completion text, and a generator ``SamplingConfig`` with
-    ``stop=["</search>", "</answer>"]`` so each turn halts at its action tag.
+    Each assistant turn either calls the ``search`` tool — which the env answers with
+    a ``role="tool"`` message containing the retrieved passages — or stops calling
+    tools, which ends the rollout with the assistant's reply as the final answer. The
+    model uses native thinking and tool calling (the renderer renders the tool schema
+    and parses the tool calls); the per-rollout turn budget is enforced by
+    ``TokenEnv.max_num_turns``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -121,35 +127,28 @@ class SearchR1Env(MessageEnv):
     async def init(self) -> MessageEnvInitOutput:
         return MessageEnvInitOutput(
             init_prompt_messages=[
-                {"role": "user", "content": SEARCH_R1_INSTRUCTION + self._question},
-            ]
+                {"role": "user", "content": INSTRUCTION + self._question},
+            ],
+            tools=[SEARCH_TOOL],
         )
 
     async def step(self, completion_message: Message) -> MessageEnvStepOutput:
-        # The text-tag protocol only uses plain-text content.
-        content = completion_message.get("content")
-        content = content if isinstance(content, str) else ""
-        tag_match = _ACTION_RE.search(content)
-        action = tag_match.group(1) if tag_match else None
-        search_argument = tag_match.group(2).strip() if tag_match else ""
-
-        if action == "answer":
-            # Final answer: end the rollout.
+        tool_calls = completion_message.get("tool_calls")
+        if not tool_calls:
+            # No tool call -> the assistant's reply is the final answer.
             return MessageEnvStepOutput(done=True)
 
-        if action == "search":
-            search_results = await _search(
-                search_argument, url=self._search_url, topk=self._topk
-            )
-            info_open, info_close = _INFORMATION_TAG
-            observation = f"\n\n{info_open}{search_results.strip()}{info_close}\n\n"
-            return MessageEnvStepOutput(
-                env_messages=[{"role": "user", "content": observation}],
-                done=False,
-            )
-
-        # No valid action: nudge the model and let it try again.
-        return MessageEnvStepOutput(
-            env_messages=[{"role": "user", "content": _INVALID_ACTION_MESSAGE}],
-            done=False,
-        )
+        # Answer each search call with a tool-role message holding the passages.
+        env_messages: list[Message] = []
+        for tool_call in tool_calls:
+            query = _query_from_tool_call(tool_call)
+            passages = await _search(query, url=self._search_url, topk=self._topk)
+            tool_message: Message = {
+                "role": "tool",
+                "content": passages,
+                "name": tool_call.get("function", {}).get("name", "search"),
+            }
+            if tool_call.get("id"):
+                tool_message["tool_call_id"] = tool_call["id"]
+            env_messages.append(tool_message)
+        return MessageEnvStepOutput(env_messages=env_messages, done=False)
