@@ -750,7 +750,10 @@ class VLLMGenerator(Actor, Configurable):
                 lambda: self._close_request is not None
                 or self._model_state_dict_pull_request is not None
                 or self._queued_generation_requests
-                or self._engine_has_local_unfinished_requests()
+                # rank-0-only decision: use the local (no DP all-reduce) check;
+                # ``engine.has_unfinished_requests()`` would do a DP collective
+                # that the follower ranks never join -> deadlock under vLLM DP>1.
+                or self._engine.output_processor.has_unfinished_requests()
             )
 
             if self._close_request is not None:
@@ -770,20 +773,6 @@ class VLLMGenerator(Actor, Configurable):
                 [],
             )
             return LoopDecision(action=LoopAction.STEP, requests=requests)
-
-    def _engine_has_local_unfinished_requests(self) -> bool:
-        """Return local pending request state without vLLM DP collectives.
-
-        ``_decide_next_action`` runs only on rank 0 before broadcasting the
-        decision to follower ranks. vLLM's public ``has_unfinished_requests()``
-        performs a DP all-reduce when vLLM data parallelism is enabled, so
-        calling it only on rank 0 deadlocks with followers waiting in the
-        decision broadcast.
-        """
-        output_processor = getattr(self._engine, "output_processor", None)
-        if output_processor is not None:
-            return output_processor.has_unfinished_requests()
-        return self._engine.get_num_unfinished_requests() > 0
 
     def _process_finished_requests(self, request_outputs: list[RequestOutput]) -> None:
         """RANK 0: resolve each finished request's future with its `Completion` (metrics included)."""

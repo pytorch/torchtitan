@@ -405,6 +405,13 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
     Trainer uses data_parallel_shard_degree=2 as FSDP degree and TP=2.
     Generator maps data_parallel_shard_degree=2 to vLLM pure DP, with TP=2.
     MoE layers use EP=4.
+
+    Parity: trainer FSDP2 TP2 EP4 matches generator DP2 TP2 EP4 bitwise
+    (verified ``bit_wise/logprob_diff/max == 0``). Plain FSDP works ONLY because the FSDP all-gather runs in bf16
+    (``training.mixed_precision_param == "bfloat16"``, the default): it gathers
+    the full bf16 params before the forward, so the dense forward is numerically
+    identical to the generator's replicated bf16 dense DP.
+
     """
     group_size = 8
     return RLTrainer.Config(
@@ -503,7 +510,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
-                data_parallel_replicate_degree=1,
+                data_parallel_replicate_degree=2,
                 tensor_parallel_degree=2,
                 disable_loss_parallel=True,
                 expert_parallel_degree=4,
