@@ -100,8 +100,9 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
                 disable_loss_parallel=True,
             ),
             # Eager generation (cudagraph off). Full cudagraph capture at large batch
-            # corrupts generation on this vLLM build; until that's root-caused we run
-            # eager (tracked separately).
+            # corrupts generation on this vLLM build (random tokens + NaN logprobs);
+            # until that's root-caused we run eager. Tracked in
+            # https://github.com/pytorch/torchtitan/issues/3668
             cudagraph=VLLMCudagraphConfig(enable=False),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
