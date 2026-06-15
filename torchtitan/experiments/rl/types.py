@@ -11,6 +11,26 @@ import torch
 from torchtitan.experiments.rl.observability import metrics as m
 
 
+@dataclass(frozen=True, slots=True)
+class RolloutID:
+    """Identifies a rollout/turn end-to-end, so nothing parses an id out of a string.
+
+    Example:
+
+        RolloutID("step=3/group=5", rollout_id=2, turn_id=0).request_id
+        # -> "step=3/group=5/rollout=2/turn=0"
+    """
+
+    group_id: str  # globally unique per GRPO group (e.g. "step=3/group=5"); the sticky-routing key
+    rollout_id: int  # sibling index within the group (0..group_size-1)
+    turn_id: int  # turn index within the rollout (for an Episode: the turn its segment begins at)
+
+    @property
+    def request_id(self) -> str:
+        """Unique per generation call (the id handed to the generator + logs)."""
+        return f"{self.group_id}/rollout={self.rollout_id}/turn={self.turn_id}"
+
+
 @dataclass(kw_only=True, slots=True)
 class Completion:
     """A single generated sequence from the generator.
@@ -50,7 +70,7 @@ class Episode:
     """
 
     policy_version: int
-    sample_id: str
+    rollout_id: RolloutID  # turn_id = the turn this episode's segment begins at
     token_ids: list[int]  # [L] packed prompt + completions + env replies
     loss_mask: list[bool]  # [L] True on assistant tokens to train
     logprobs: list[float]  # [L] generator logprobs; 0.0 where loss_mask is False
@@ -58,7 +78,7 @@ class Episode:
 
     version_intervals: list[tuple[int, int]] = field(default_factory=list)
     """Policy-version boundaries `(start_token_index, version)` in this packed sequence, one per
-    turn's completion; the off-policy filter reads the earliest version (see `earliest_version`)."""
+    turn's completion; the off-policy filter reads the oldest version (see `oldest_sampled_version`)."""
 
 
 @dataclass(kw_only=True, slots=True)

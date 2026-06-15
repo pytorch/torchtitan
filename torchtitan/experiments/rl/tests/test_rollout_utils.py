@@ -14,6 +14,9 @@ from torchtitan.experiments.rl.rollout import (
     RolloutStatus,
     RolloutTurn,
 )
+from torchtitan.experiments.rl.types import RolloutID
+
+_GROUP_ID = "step=1/group=0"
 
 
 def _turn(
@@ -24,6 +27,7 @@ def _turn(
     content: str = "x",
 ) -> RolloutTurn:
     return RolloutTurn(
+        rollout_id=RolloutID(group_id=_GROUP_ID, rollout_id=0, turn_id=0),
         prompt_token_ids=prompt_token_ids,
         completion_token_ids=completion_token_ids,
         completion_logprobs=[-0.1] * len(completion_token_ids),
@@ -37,8 +41,8 @@ def _scored_rollout(
     turns: list[RolloutTurn], *, reward: float, advantage: float
 ) -> Rollout:
     return Rollout(
-        group_id="step=1/group=0",
-        sample_id="step=1/group=0/sample=0",
+        group_id=_GROUP_ID,
+        rollout_id=0,
         status=RolloutStatus.COMPLETED,
         turns=turns,
         reward=reward,
@@ -59,7 +63,7 @@ def test_single_turn_packs_one_episode() -> None:
     assert episode.policy_version == 2
     # advantage on the two completion tokens, 0.0 on the prompt
     assert episode.advantage == [0.0, 0.0, 0.5, 0.5]
-    assert episode.sample_id == rollout.sample_id
+    assert episode.rollout_id == RolloutID(group_id=_GROUP_ID, rollout_id=0, turn_id=0)
     # one interval at the completion offset (token 2), at the turn's sampling version
     assert episode.version_intervals == [(2, 2)]
 
@@ -109,7 +113,7 @@ def test_multiturn_with_growing_prefix_packs_into_one_episode() -> None:
     assert episode.logprobs == [0.0, 0.0, -0.1, 0.0, -0.1, -0.1, 0.0, -0.1]
     # advantage broadcast onto every assistant token, 0.0 on prompt/env tokens
     assert episode.advantage == [0.0, 0.0, -0.2, 0.0, -0.2, -0.2, 0.0, -0.2]
-    assert episode.sample_id == rollout.sample_id
+    assert episode.rollout_id == RolloutID(group_id=_GROUP_ID, rollout_id=0, turn_id=0)
 
 
 def test_history_edit_branches_into_separate_episodes() -> None:
@@ -126,10 +130,11 @@ def test_history_edit_branches_into_separate_episodes() -> None:
     first, second = rollout_to_episodes(rollout)
     assert first.token_ids == [1, 2, 4]
     assert first.loss_mask == [False, False, True]
-    assert first.sample_id == rollout.sample_id
+    # first segment opens at turn 0, the branch (history edit) opens at turn 1
+    assert first.rollout_id == RolloutID(group_id=_GROUP_ID, rollout_id=0, turn_id=0)
     assert second.token_ids == [90, 91, 5]
     assert second.loss_mask == [False, False, True]
-    assert second.sample_id == f"{rollout.sample_id}/branch=1"
+    assert second.rollout_id == RolloutID(group_id=_GROUP_ID, rollout_id=0, turn_id=1)
     assert first.advantage == [0.0, 0.0, 0.1]
     assert second.advantage == [0.0, 0.0, 0.1]
 

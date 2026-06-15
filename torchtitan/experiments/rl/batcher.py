@@ -51,9 +51,9 @@ class BatchConfig:
     local_batch_size: int = 8
     """Per-DP-rank batch size (rows per forward pass)."""
 
-    global_batch_size: int = -1
+    global_batch_size: int | None = None
     """Target number of rows per optimizer step. Defaults to
-    ``local_batch_size * data-parallel degree`` when set to -1."""
+    ``local_batch_size * data-parallel degree`` when None."""
 
     seq_len: int = 2048
     """Tokens per row (packed sequence length)."""
@@ -69,7 +69,7 @@ class PackedBatch:
     Example:
 
         # global_batch_size=2, seq_len=10, three 5-token episodes
-        result = batcher.pack_one_batch([e5, e5, e5], dp_degree=1)
+        result = batcher.pack_batch([e5, e5, e5], dp_degree=1)
         # -> microbatches [grad_accum][dp], num_episodes_consumed=3 (rows [e5,e5] and [e5])
     """
 
@@ -100,11 +100,11 @@ class Batcher(Configurable):
         self.pad_id = pad_id
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
 
-    def num_tokens_target(self, dp_degree: int) -> int:
+    def target_batch_tokens(self, dp_degree: int) -> int:
         """Token slots in one full batch: ``global_batch_size`` rows * ``seq_len``."""
         return self._resolve_global_batch_size(dp_degree) * self.seq_len
 
-    def trainable_tokens(self, episode: Episode) -> int:
+    def num_packed_tokens(self, episode: Episode) -> int:
         """Tokens this episode contributes to a packed row.
 
         The loss-target split drops the last token (``input_ids = raw[:-1]``), and batch-invariant
@@ -121,13 +121,13 @@ class Batcher(Configurable):
             length = ((length + align - 1) // align) * align
         return length
 
-    def pack_one_batch(self, episodes: list[Episode], *, dp_degree: int) -> PackedBatch:
+    def pack_batch(self, episodes: list[Episode], *, dp_degree: int) -> PackedBatch:
         """Pack the front of ``episodes`` into ONE training batch; report how many it consumed.
 
         Greedy next-fit fills rows up to the global batch's row budget, then stops — the surplus is
         left for the next batch (never truncated). Every packing decision lives here: next-fit
-        (``_fill_rows``), the ``[:-1]`` loss-target split (``trainable_tokens`` / ``_pack_row``), and
-        per-sample padding.
+        (``_pack_episodes_into_rows``), the ``[:-1]`` loss-target split (``num_packed_tokens`` /
+        ``_pack_episode_row``), and per-sample padding.
 
         Args:
             episodes: Buffered episodes, oldest first. The caller must have at least one full batch
@@ -138,12 +138,12 @@ class Batcher(Configurable):
             A `PackedBatch`. Pop ``num_episodes_consumed`` from the front and keep the rest.
         """
         global_batch_size = self._resolve_global_batch_size(dp_degree)
-        rows = self._fill_rows(episodes, max_rows=global_batch_size)
+        rows = self._pack_episodes_into_rows(episodes, max_rows=global_batch_size)
         # A single episode longer than seq_len can't pack and would silently under-fill the batch;
         # setup_async's seq-len guard promises this can't happen, so assert rather than drop quietly.
         # Checked over the CONSUMED episodes only (O(batch), not O(whole buffer)).
         assert all(
-            self.trainable_tokens(episode) <= self.seq_len
+            self.num_packed_tokens(episode) <= self.seq_len
             for row in rows
             for episode in row
         ), "episode longer than seq_len; setup_async's seq-len guard should have prevented this"
@@ -152,7 +152,7 @@ class Batcher(Configurable):
             "(the buffer's readiness gate should guarantee enough fresh tokens)"
         )
         num_episodes_consumed = sum(len(row) for row in rows)
-        packed_rows = [self._pack_row(row) for row in rows]
+        packed_rows = [self._pack_episode_row(row) for row in rows]
 
         gradient_accumulation_steps = global_batch_size // (
             self.local_batch_size * dp_degree
@@ -188,29 +188,29 @@ class Batcher(Configurable):
         )
 
     def _resolve_global_batch_size(self, dp_degree: int) -> int:
-        if self.global_batch_size == -1:
+        if self.global_batch_size is None:
             return self.local_batch_size * dp_degree
         return self.global_batch_size
 
-    def _fill_rows(
+    def _pack_episodes_into_rows(
         self, episodes: list[Episode], *, max_rows: int
     ) -> list[list[Episode]]:
         """Next-fit episodes into rows of <= ``seq_len`` tokens, up to ``max_rows`` rows.
 
-        The single source of packing geometry: ``pack_one_batch`` materializes exactly these row
+        The single source of packing geometry: ``pack_batch`` materializes exactly these row
         groups, so the row count and the packed tensors can never drift. Surplus beyond ``max_rows``
         is left for the next batch.
 
         Example:
 
             # seq_len=10, episode effective lengths [5, 5, 5], max_rows=2
-            _fill_rows([e5, e5, e5], max_rows=2)  # -> [[e5, e5], [e5]]
+            _pack_episodes_into_rows([e5, e5, e5], max_rows=2)  # -> [[e5, e5], [e5]]
         """
         rows: list[list[Episode]] = []
         current_row: list[Episode] = []
         current_len = 0
         for episode in episodes:
-            length = self.trainable_tokens(episode)
+            length = self.num_packed_tokens(episode)
             if (
                 current_row and current_len + length > self.seq_len
             ):  # doesn't fit -> close the row
@@ -226,7 +226,7 @@ class Batcher(Configurable):
             rows.append(current_row)
         return rows
 
-    def _pack_row(self, episodes: list[Episode]) -> dict:
+    def _pack_episode_row(self, episodes: list[Episode]) -> dict:
         """Concatenate one row's episodes into a single ``[1, seq_len]`` padded row.
 
         Each episode's raw tokens (length N) split into ``input_ids = raw[:-1]`` and
@@ -274,8 +274,8 @@ class Batcher(Configurable):
         packed["seq_lens"] = seq_lens
         return packed
 
-    # TODO: Make collate configurable (passed as an argument to Batcher),
-    # similar to how the pre-trainer accepts a collate_fn for its dataloader.
+    # TODO: accept a collate_fn on Batcher.Config (like the pre-trainer's dataloader) and wire a
+    # non-pretraining collate only when a caller actually needs one.
     @staticmethod
     def collate(rows: list[dict]) -> TrainingBatch:
         """Concatenate packed rows into a single ``[B, L]`` TrainingBatch."""

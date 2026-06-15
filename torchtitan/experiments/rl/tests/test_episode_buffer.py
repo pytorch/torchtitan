@@ -6,10 +6,10 @@
 
 """Unit tests for `torchtitan.experiments.rl.episode_buffer.EpisodeBuffer`.
 
-The buffer is a dumb FIFO: producers `put`; the pack loop `take_full_batch`es a snapshot, packs it via
-the batcher, and `commit`s the consumed count. `_consume_one` below plays the pack loop's role. The
-buffer reads the trainer's version through a getter (`_version_box` here), so tests advance the
-version mid-flight to exercise the staleness drop.
+The buffer is a dumb FIFO: rollout workers `add_episodes`; the batcher loop `wait_for_batch_episodes`
+(a snapshot), packs it via the batcher, and `pop_consumed_episodes` for the consumed count.
+`_consume_one` below plays the batcher loop's role. The buffer reads the trainer's version through a
+getter, so tests advance the version mid-flight to exercise the staleness drop.
 """
 
 from __future__ import annotations
@@ -19,14 +19,17 @@ import asyncio
 import pytest
 
 from torchtitan.experiments.rl.batcher import PackedBatch
-from torchtitan.experiments.rl.episode_buffer import earliest_version, EpisodeBuffer
+from torchtitan.experiments.rl.episode_buffer import (
+    EpisodeBuffer,
+    oldest_sampled_version,
+)
 from torchtitan.experiments.rl.observability import metrics as m
-from torchtitan.experiments.rl.types import Episode
+from torchtitan.experiments.rl.types import Episode, RolloutID
 
 
 class _FakeBatcher:
-    """Stub batcher exposing the seam the buffer uses: `num_tokens_target`, `trainable_tokens`, and
-    `pack_one_batch` (next-fit over episodes, stops at `target // seq_len` rows, reports consumed).
+    """Stub batcher exposing the seam the buffer uses: `target_batch_tokens`, `num_packed_tokens`, and
+    `pack_batch` (next-fit over episodes, stops at `target // seq_len` rows, reports consumed).
 
     The default huge `seq_len` packs every episode into one row (so one batch = all buffered episodes);
     tests that exercise the per-row peel pass a small `seq_len` to force episodes into separate rows.
@@ -39,23 +42,23 @@ class _FakeBatcher:
         self.seq_len = seq_len
         self._per_sample_pad_multiple = per_sample_pad_multiple
 
-    def num_tokens_target(self, dp_degree: int) -> int:
+    def target_batch_tokens(self, dp_degree: int) -> int:
         return self._target
 
-    def trainable_tokens(self, episode: Episode) -> int:
+    def num_packed_tokens(self, episode: Episode) -> int:
         length = len(episode.token_ids) - 1
         if self._per_sample_pad_multiple:
             align = self._per_sample_pad_multiple
             length = ((length + align - 1) // align) * align
         return length
 
-    def pack_one_batch(self, episodes, *, dp_degree) -> PackedBatch:
+    def pack_batch(self, episodes, *, dp_degree) -> PackedBatch:
         max_rows = max(1, self._target // self.seq_len)
         rows: list[list[Episode]] = []
         current: list[Episode] = []
         current_len = 0
         for episode in episodes:
-            length = self.trainable_tokens(episode)
+            length = self.num_packed_tokens(episode)
             if current and current_len + length > self.seq_len:
                 rows.append(current)
                 if len(rows) == max_rows:
@@ -77,10 +80,10 @@ class _FakeBatcher:
 
 
 def _episode(*, version: int, prompt: int = 1, completion: int = 4) -> Episode:
-    """A packed episode of `prompt + completion` tokens (so `trainable_tokens` = prompt+completion-1)."""
+    """A packed episode of `prompt + completion` tokens (so `num_packed_tokens` = prompt+completion-1)."""
     return Episode(
         policy_version=version,
-        sample_id="s",
+        rollout_id=RolloutID(group_id="g", rollout_id=0, turn_id=0),
         token_ids=list(range(prompt + completion)),
         loss_mask=[False] * prompt + [True] * completion,
         logprobs=[0.0] * prompt + [-0.1] * completion,
@@ -89,13 +92,21 @@ def _episode(*, version: int, prompt: int = 1, completion: int = 4) -> Episode:
     )
 
 
-def _make_buffer(batcher, *, max_offpolicy_steps, max_buffered_batches, version=0):
+def _make_buffer(
+    batcher,
+    *,
+    max_offpolicy_steps,
+    max_buffered_batches,
+    version=0,
+    drop_rollout_group_if_any_stale=False,
+):
     """An EpisodeBuffer plus a mutable version box; set `box["v"] = N` to advance the trainer version."""
     box = {"v": version}
     buffer = EpisodeBuffer(
         batcher=batcher,
         dp_degree=1,
         max_offpolicy_steps=max_offpolicy_steps,
+        drop_rollout_group_if_any_stale=drop_rollout_group_if_any_stale,
         max_buffered_batches=max_buffered_batches,
         train_version=lambda: box["v"],
     )
@@ -103,16 +114,16 @@ def _make_buffer(batcher, *, max_offpolicy_steps, max_buffered_batches, version=
 
 
 def _num_buffered(buffer: EpisodeBuffer) -> int:
-    return sum(len(group.episodes) for group in buffer._groups)
+    return sum(len(group.episodes) for group in buffer._buffered)
 
 
 async def _consume_one(buffer: EpisodeBuffer, batcher: _FakeBatcher):
     """Play the pack loop: take a full fresh batch, pack it, commit. Returns (packed, metrics) or None."""
-    episodes = await buffer.take_full_batch()
+    episodes = await buffer.wait_for_batch_episodes()
     if episodes is None:
         return None
-    packed = batcher.pack_one_batch(episodes, dp_degree=1)
-    metrics = await buffer.commit(packed.num_episodes_consumed)
+    packed = batcher.pack_batch(episodes, dp_degree=1)
+    metrics = await buffer.pop_consumed_episodes(packed.num_episodes_consumed)
     return packed, metrics
 
 
@@ -123,17 +134,17 @@ def _metric_value(metrics, key, reducer_cls):
     return None
 
 
-def test_earliest_version_uses_oldest_interval():
-    assert earliest_version(_episode(version=5)) == 5
+def test_oldest_sampled_version_uses_oldest_interval():
+    assert oldest_sampled_version(_episode(version=5)) == 5
     multi = _episode(version=5)
     multi.version_intervals = [(0, 5), (100, 6)]
-    assert earliest_version(multi) == 5  # oldest, conservative
+    assert oldest_sampled_version(multi) == 5  # oldest, conservative
 
 
-def test_earliest_version_falls_back_to_policy_version():
+def test_oldest_sampled_version_falls_back_to_policy_version():
     episode = _episode(version=7)
     episode.version_intervals = []
-    assert earliest_version(episode) == 7
+    assert oldest_sampled_version(episode) == 7
 
 
 def test_rejects_invalid_config():
@@ -147,11 +158,11 @@ def test_take_blocks_until_full_then_packs():
     async def main():
         batcher = _FakeBatcher(target=10)
         buffer, _ = _make_buffer(batcher, max_offpolicy_steps=5, max_buffered_batches=2)
-        take = asyncio.create_task(buffer.take_full_batch())
+        take = asyncio.create_task(buffer.wait_for_batch_episodes())
         await asyncio.sleep(0.01)
         assert not take.done()  # blocked: buffer empty
 
-        await buffer.put(
+        await buffer.add_episodes(
             [_episode(version=0, prompt=6, completion=5)], []
         )  # 6+5-1 = 10 >= target
         episodes = await take
@@ -167,18 +178,93 @@ def test_drops_stale_at_take_R1():
             batcher, max_offpolicy_steps=1, max_buffered_batches=3, version=3
         )
         # version=3: v2 is 1 stale (kept), v1 is 2 stale (dropped). v2 alone is 5 tokens >= 4.
-        await buffer.put(
+        await buffer.add_episodes(
             [_episode(version=2, completion=5), _episode(version=1, completion=5)], []
         )
         packed, _ = await _consume_one(buffer, batcher)
         assert packed.num_episodes_consumed == 1  # only the v2 episode survived
-        assert buffer._num_dropped_stale == 1
+        assert buffer._num_stale_episodes_dropped_total == 1
+
+    asyncio.run(main())
+
+
+def test_max_offpolicy_none_never_drops():
+    # max_offpolicy_steps=None: measurement-only. Stale episodes are kept (logged, never dropped).
+    async def main():
+        batcher = _FakeBatcher(target=5, seq_len=5)
+        buffer, box = _make_buffer(
+            batcher, max_offpolicy_steps=None, max_buffered_batches=5
+        )
+        await buffer.add_episodes([_episode(version=0, completion=5)], [])
+        box["v"] = 100  # wildly stale under any finite bound
+        packed, _ = await _consume_one(buffer, batcher)
+        assert packed.num_episodes_consumed == 1  # kept despite staleness
+        assert buffer._num_stale_episodes_dropped_total == 0
+
+    asyncio.run(main())
+
+
+def test_drop_rollout_group_if_any_stale_drops_whole_round():
+    # drop_rollout_group_if_any_stale: one stale episode condemns its whole add_episodes round (group),
+    # so GRPO groups stay intact rather than losing only the stale siblings.
+    async def main():
+        batcher = _FakeBatcher(target=5, seq_len=5)
+        buffer, box = _make_buffer(
+            batcher,
+            max_offpolicy_steps=0,
+            max_buffered_batches=5,
+            drop_rollout_group_if_any_stale=True,
+        )
+        # round 1 (one group): a v0 + a v1 episode; round 2: a fresh v1 episode.
+        await buffer.add_episodes(
+            [_episode(version=0, completion=5), _episode(version=1, completion=5)], []
+        )
+        await buffer.add_episodes([_episode(version=1, completion=5)], [])
+        box["v"] = 1  # v0 is now 1 stale (> 0) -> whole round 1 (both episodes) dropped
+        episodes = await buffer.wait_for_batch_episodes()
+        assert (
+            buffer._num_stale_episodes_dropped_total == 2
+        )  # the fresh v1 sibling went too
+        assert len(episodes) == 1 and all(e.policy_version == 1 for e in episodes)
+
+    asyncio.run(main())
+
+
+def test_on_round_drained_fires_per_round_consumed_and_dropped():
+    # The AdmissionBudget release hook fires once per round (group) that leaves the buffer — whether
+    # consumed by a batch or dropped for staleness — so permits balance acquisitions.
+    async def main():
+        batcher = _FakeBatcher(target=5, seq_len=5)
+        box = {"v": 0}
+        drained: list[int] = []
+        buffer = EpisodeBuffer(
+            batcher=batcher,
+            dp_degree=1,
+            max_offpolicy_steps=0,
+            max_buffered_batches=5,
+            train_version=lambda: box["v"],
+            on_round_drained=lambda: drained.append(1),
+        )
+        await buffer.add_episodes([_episode(version=0, completion=5)], [])
+        await _consume_one(buffer, batcher)  # round consumed -> drained once
+        assert len(drained) == 1
+
+        await buffer.add_episodes([_episode(version=0, completion=5)], [])  # a v0 round
+        box["v"] = 1  # now stale; the next wait drops the whole round
+        take = asyncio.create_task(buffer.wait_for_batch_episodes())
+        await asyncio.sleep(0.01)
+        assert len(drained) == 2  # the dropped round also fired the hook
+        take.cancel()
+        try:
+            await take
+        except asyncio.CancelledError:
+            pass
 
     asyncio.run(main())
 
 
 def test_drops_stale_against_live_version_during_wait_C1():
-    # Codex blocker 1: while take_full_batch waits, the trainer advances its version. The drop must use
+    # Codex blocker 1: while wait_for_batch_episodes waits, the trainer advances its version. The drop must use
     # the LIVE version, not the one at take-call time — otherwise an episode that aged past the bound
     # during the wait would still be packed and train (R1 broken).
     async def main():
@@ -188,24 +274,24 @@ def test_drops_stale_against_live_version_during_wait_C1():
         buffer, box = _make_buffer(
             batcher, max_offpolicy_steps=0, max_buffered_batches=5
         )
-        await buffer.put(
+        await buffer.add_episodes(
             [_episode(version=0, completion=5)], []
         )  # 5 tokens < 10 -> take waits
-        take = asyncio.create_task(buffer.take_full_batch())
+        take = asyncio.create_task(buffer.wait_for_batch_episodes())
         await asyncio.sleep(0.01)
         assert not take.done()
 
         box["v"] = 1  # version advances: the banked v0 episode is now 1 stale (> 0)
-        await buffer.put(
+        await buffer.add_episodes(
             [_episode(version=1, completion=5)], []
         )  # wakes take; drop runs at v=1
         await asyncio.sleep(0.01)
         assert (
             not take.done()
         )  # v0 dropped (live version), only the fresh v1 left -> still < 10
-        assert buffer._num_dropped_stale == 1
+        assert buffer._num_stale_episodes_dropped_total == 1
 
-        await buffer.put(
+        await buffer.add_episodes(
             [_episode(version=1, completion=5)], []
         )  # second fresh v1 -> full
         episodes = await take
@@ -222,7 +308,7 @@ def test_peels_one_batch_leaves_remainder_R4():
             target=5, seq_len=5
         )  # 1 row of 5 tokens -> one 5-token episode/batch
         buffer, _ = _make_buffer(batcher, max_offpolicy_steps=5, max_buffered_batches=5)
-        await buffer.put(
+        await buffer.add_episodes(
             [_episode(version=0, completion=5), _episode(version=0, completion=5)], []
         )
         first, _ = await _consume_one(buffer, batcher)
@@ -239,7 +325,7 @@ def test_pack_respects_pad_multiple_R5():
         batcher = _FakeBatcher(target=10, seq_len=10, per_sample_pad_multiple=8)
         buffer, _ = _make_buffer(batcher, max_offpolicy_steps=5, max_buffered_batches=5)
         # Two 5-token episodes share one row unpadded; padded to 8 they need two rows (budget=1).
-        await buffer.put(
+        await buffer.add_episodes(
             [_episode(version=0, completion=5), _episode(version=0, completion=5)], []
         )
         packed, _ = await _consume_one(buffer, batcher)
@@ -258,7 +344,7 @@ def test_producer_running_ahead_makes_staleness_exceed_one():
             batcher, max_offpolicy_steps=5, max_buffered_batches=5
         )
         for _ in range(3):  # bank 3 batches ahead, all at v0
-            await buffer.put([_episode(version=0, completion=5)], [])
+            await buffer.add_episodes([_episode(version=0, completion=5)], [])
         _, m0 = await _consume_one(buffer, batcher)
         box["v"] = 1
         _, m1 = await _consume_one(buffer, batcher)
@@ -278,16 +364,18 @@ def test_batch_aged_past_bound_is_dropped_at_consume():
             batcher, max_offpolicy_steps=1, max_buffered_batches=5
         )
         for _ in range(2):
-            await buffer.put([_episode(version=0, completion=5)], [])
+            await buffer.add_episodes([_episode(version=0, completion=5)], [])
         await _consume_one(buffer, batcher)  # consume one fresh batch at v0
         box["v"] = 2  # the remaining v0 batch is now 2 versions stale (> 1)
         take = asyncio.create_task(
-            buffer.take_full_batch()
+            buffer.wait_for_batch_episodes()
         )  # re-dropped, take re-waits
         await asyncio.sleep(0.01)
         assert not take.done()
-        assert buffer._num_dropped_stale == 1
-        await buffer.put([_episode(version=2, completion=5)], [])  # fresh v2 unblocks
+        assert buffer._num_stale_episodes_dropped_total == 1
+        await buffer.add_episodes(
+            [_episode(version=2, completion=5)], []
+        )  # fresh v2 unblocks
         episodes = await take
         assert len(episodes) == 1
 
@@ -300,7 +388,7 @@ def test_close_returns_none_when_drained():
             _FakeBatcher(target=100), max_offpolicy_steps=5, max_buffered_batches=2
         )
         await buffer.close()
-        assert await buffer.take_full_batch() is None
+        assert await buffer.wait_for_batch_episodes() is None
 
     asyncio.run(main())
 
@@ -310,9 +398,11 @@ def test_partial_on_close_returns_none_R2():
         buffer, _ = _make_buffer(
             _FakeBatcher(target=100), max_offpolicy_steps=5, max_buffered_batches=2
         )
-        await buffer.put([_episode(version=0, completion=5)], [])  # far below target
+        await buffer.add_episodes(
+            [_episode(version=0, completion=5)], []
+        )  # far below target
         await buffer.close()
-        assert await buffer.take_full_batch() is None  # partial discarded
+        assert await buffer.wait_for_batch_episodes() is None  # partial discarded
 
     asyncio.run(main())
 
@@ -325,7 +415,9 @@ def test_producer_consumer_no_deadlock_R3():
 
         async def producer():
             for _ in range(100):
-                await buffer.put([_episode(version=0, prompt=6, completion=5)], [])
+                await buffer.add_episodes(
+                    [_episode(version=0, prompt=6, completion=5)], []
+                )
 
         async def consumer():
             nonlocal consumed
@@ -350,11 +442,11 @@ def test_all_stale_redrop_keeps_waiting_not_none():
         buffer, _ = _make_buffer(
             batcher, max_offpolicy_steps=0, max_buffered_batches=2, version=1
         )
-        take = asyncio.create_task(buffer.take_full_batch())
-        await buffer.put([_episode(version=0, prompt=1, completion=5)], [])
+        take = asyncio.create_task(buffer.wait_for_batch_episodes())
+        await buffer.add_episodes([_episode(version=0, prompt=1, completion=5)], [])
         await asyncio.sleep(0.01)
         assert not take.done()  # all-stale re-drop re-waits, does NOT return None
-        await buffer.put([_episode(version=1, prompt=1, completion=5)], [])
+        await buffer.add_episodes([_episode(version=1, prompt=1, completion=5)], [])
         episodes = await take
         assert len(episodes) == 1  # the fresh v1 episode
 
@@ -366,7 +458,7 @@ def test_commit_reports_depth_R10():
         batcher = _FakeBatcher(target=5, seq_len=5)
         buffer, _ = _make_buffer(batcher, max_offpolicy_steps=5, max_buffered_batches=5)
         for _ in range(3):  # 3 batches buffered
-            await buffer.put([_episode(version=0, completion=5)], [])
+            await buffer.add_episodes([_episode(version=0, completion=5)], [])
         _, metrics = await _consume_one(buffer, batcher)
         # one batch consumed -> 2 batches (10 tokens) of 5-token target remain
         assert _metric_value(metrics, "perf/buffer_depth_batches", m.NoReduce) == 2.0
@@ -381,14 +473,16 @@ def test_stale_drop_rate_R7():
         buffer, box = _make_buffer(
             batcher, max_offpolicy_steps=0, max_buffered_batches=10
         )
-        await buffer.put([_episode(version=0, completion=5)], [])
-        await buffer.put(
+        await buffer.add_episodes([_episode(version=0, completion=5)], [])
+        await buffer.add_episodes(
             [_episode(version=1, completion=5)], []
         )  # put leaves the aged v0 in place
-        assert _num_buffered(buffer) == 2 and buffer._num_dropped_stale == 0
+        assert (
+            _num_buffered(buffer) == 2 and buffer._num_stale_episodes_dropped_total == 0
+        )
         box["v"] = 1
         _, metrics = await _consume_one(buffer, batcher)  # drops v0, keeps v1
-        assert buffer._num_dropped_stale == 1
+        assert buffer._num_stale_episodes_dropped_total == 1
         # 1 dropped / (1 dropped + 1 consumed) since the last commit.
         assert _metric_value(metrics, "perf/buffer_stale_drop_rate", m.NoReduce) == 0.5
 
@@ -401,16 +495,16 @@ def test_metrics_ride_with_their_batch_R13():
     async def main():
         batcher = _FakeBatcher(target=5, seq_len=5)
         buffer, _ = _make_buffer(batcher, max_offpolicy_steps=5, max_buffered_batches=5)
-        await buffer.put(
+        await buffer.add_episodes(
             [_episode(version=0, completion=5)], [m.Metric("rollout/a", m.Sum(1.0))]
         )
-        episodes = await buffer.take_full_batch()
+        episodes = await buffer.wait_for_batch_episodes()
         # A put lands DURING the (here, simulated) pack, before commit.
-        await buffer.put(
+        await buffer.add_episodes(
             [_episode(version=0, completion=5)], [m.Metric("rollout/b", m.Sum(1.0))]
         )
-        packed = batcher.pack_one_batch(episodes, dp_degree=1)
-        ride_out = await buffer.commit(packed.num_episodes_consumed)
+        packed = batcher.pack_batch(episodes, dp_degree=1)
+        ride_out = await buffer.pop_consumed_episodes(packed.num_episodes_consumed)
         assert "rollout/a" in [metric.key for metric in ride_out]  # this batch's group
         assert "rollout/b" not in [
             metric.key for metric in ride_out
@@ -430,11 +524,11 @@ def test_dropped_group_metrics_never_emitted_C2():
         buffer, box = _make_buffer(
             batcher, max_offpolicy_steps=0, max_buffered_batches=5
         )
-        await buffer.put(
+        await buffer.add_episodes(
             [_episode(version=0, completion=5)], [m.Metric("rollout/stale", m.Sum(1.0))]
         )
         box["v"] = 1  # the v0 group is now stale (> 0) and will be dropped whole
-        await buffer.put(
+        await buffer.add_episodes(
             [_episode(version=1, completion=5)], [m.Metric("rollout/fresh", m.Sum(1.0))]
         )
         _, ride_out = await _consume_one(buffer, batcher)
@@ -443,7 +537,7 @@ def test_dropped_group_metrics_never_emitted_C2():
         assert (
             "rollout/stale" not in keys
         )  # the dropped group's metrics are gone, not logged
-        assert buffer._num_dropped_stale == 1
+        assert buffer._num_stale_episodes_dropped_total == 1
 
     asyncio.run(main())
 
@@ -454,10 +548,10 @@ def test_surplus_group_keeps_its_metrics_C3():
     async def main():
         batcher = _FakeBatcher(target=5, seq_len=5)  # one 5-token episode per batch
         buffer, _ = _make_buffer(batcher, max_offpolicy_steps=5, max_buffered_batches=5)
-        await buffer.put(
+        await buffer.add_episodes(
             [_episode(version=0, completion=5)], [m.Metric("rollout/first", m.Sum(1.0))]
         )
-        await buffer.put(
+        await buffer.add_episodes(
             [_episode(version=0, completion=5)],
             [m.Metric("rollout/second", m.Sum(1.0))],
         )
@@ -481,8 +575,10 @@ def test_failed_round_metrics_drain_with_next_commit():
     async def main():
         batcher = _FakeBatcher(target=5, seq_len=5)
         buffer, _ = _make_buffer(batcher, max_offpolicy_steps=5, max_buffered_batches=5)
-        await buffer.put([], [m.Metric("rollout/failures", m.Sum(2.0))])  # no episodes
-        await buffer.put(
+        await buffer.add_episodes(
+            [], [m.Metric("rollout/failures", m.Sum(2.0))]
+        )  # no episodes
+        await buffer.add_episodes(
             [_episode(version=0, completion=5)], [m.Metric("rollout/ok", m.Sum(1.0))]
         )
         _, ride_out = await _consume_one(buffer, batcher)
@@ -500,8 +596,8 @@ def test_commit_after_take_is_unconditional_safe_R6():
     async def main():
         batcher = _FakeBatcher(target=5, seq_len=5)
         buffer, _ = _make_buffer(batcher, max_offpolicy_steps=5, max_buffered_batches=5)
-        await buffer.put([_episode(version=0, completion=5)], [])
-        episodes = await buffer.take_full_batch()
+        await buffer.add_episodes([_episode(version=0, completion=5)], [])
+        episodes = await buffer.wait_for_batch_episodes()
         assert episodes is not None and _num_buffered(buffer) == 1  # take did NOT pop
         # Simulate cancellation before commit: the episode is still buffered and consumable.
         packed, _ = await _consume_one(buffer, batcher)

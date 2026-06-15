@@ -29,7 +29,7 @@ class _FakeRLTrainer:
         if getattr(self.config, "fail_setup", False):
             raise RuntimeError("setup failed")
 
-    async def train(self):
+    async def run(self):
         self.events.append("train")
         if getattr(self.config, "fail_train", False):
             raise RuntimeError("train failed")

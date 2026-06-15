@@ -23,6 +23,7 @@ from torchtitan.experiments.rl.rollout.types import (
     RolloutTurn,
 )
 from torchtitan.experiments.rl.rubrics import Rubric, RubricOutput
+from torchtitan.experiments.rl.types import RolloutID
 
 if TYPE_CHECKING:
     # Type-only: importing the generator module here would pull in vLLM at import time.
@@ -188,7 +189,7 @@ class Rollouter(Configurable):
                         env=env,
                         sampling=sampling,
                         group_id=group_id,
-                        rollout_id=f"{group_id}/sample={sample_idx}",
+                        rollout_id=sample_idx,
                     )
                     for sample_idx, env in enumerate(envs)
                 )
@@ -214,7 +215,7 @@ class Rollouter(Configurable):
         env: TokenEnv,
         sampling: SamplingConfig,
         group_id: str,
-        rollout_id: str,
+        rollout_id: int,
     ) -> Rollout:
         """Produce a single rollout, alternating between env and generator calls,
         until the env is terminal (env `done`, truncation, errors).
@@ -228,8 +229,8 @@ class Rollouter(Configurable):
             env: The env for this rollout; `run_group_rollouts` closes it.
             sampling: Sampling config for every generate call.
             group_id: The GRPO group id.
-            rollout_id: Stable id for this rollout, unique within the group; the per-turn
-                `request_id` prefix, and stored as `Rollout.sample_id`.
+            rollout_id: Sibling index within the group; combined with the turn index into the
+                per-turn `RolloutID`, and stored as `Rollout.rollout_id`.
 
         Returns:
             One unscored `Rollout` (reward filled later by the controller).
@@ -239,11 +240,14 @@ class Rollouter(Configurable):
         try:
             step = await env.init()
             while not step.status.is_terminal():
+                turn_rollout_id = RolloutID(
+                    group_id=group_id, rollout_id=rollout_id, turn_id=len(turns)
+                )
 
                 # generator call
                 completion = await generate_fn(
                     prompt_token_ids=step.next_prompt_token_ids,
-                    request_id=f"{rollout_id}/turn={len(turns)}",
+                    rollout_id=turn_rollout_id,
                     sampling_config=sampling,
                 )
 
@@ -253,6 +257,7 @@ class Rollouter(Configurable):
                 # full snapshot of this turn from a token and message perspective
                 turns.append(
                     RolloutTurn(
+                        rollout_id=turn_rollout_id,
                         prompt_token_ids=step.next_prompt_token_ids or [],
                         prompt_messages=step.next_prompt_messages or [],
                         completion_token_ids=completion.token_ids,
@@ -272,7 +277,8 @@ class Rollouter(Configurable):
             status = step.status
         except Exception:
             logger.exception(
-                "rollout %s failed after %d turn(s); marking ERROR",
+                "rollout %s/rollout=%d failed after %d turn(s); marking ERROR",
+                group_id,
                 rollout_id,
                 len(turns),
             )
@@ -280,7 +286,7 @@ class Rollouter(Configurable):
 
         return Rollout(
             group_id=group_id,
-            sample_id=rollout_id,
+            rollout_id=rollout_id,
             status=status,
             turns=turns,
         )

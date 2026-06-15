@@ -108,7 +108,7 @@ class RolloutSampleRecorder(Configurable):
         """One JSON object per rollout: its scalar fields + each turn (see `_encode_turn`)."""
         return {
             "group_id": rollout.group_id,
-            "sample_id": rollout.sample_id,
+            "rollout_id": rollout.rollout_id,
             "status": rollout.status,
             "reward": rollout.reward,
             "reward_breakdown": rollout.reward_breakdown,
@@ -120,6 +120,7 @@ class RolloutSampleRecorder(Configurable):
         """One JSON object per turn. The large token / logprob arrays are opt-in
         (`log_tensors` / `log_logprobs`)."""
         encoded = {
+            "turn_id": turn.rollout_id.turn_id,
             "policy_version": turn.policy_version,
             "prompt_messages": turn.prompt_messages,
             "completion_message": turn.completion_message,

@@ -4,14 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Trainer-loop tests: the overlapped weight-sync order, the divergence gate, the producer-crash
-supervisor, and the pure metric/reduce helpers. Lifecycle is driven through stub actors; no GPUs."""
+"""Trainer-loop tests: the overlapped weight-sync order, the divergence gate, the batcher-loop
+sentinel, and the pure metric/reduce helpers. Lifecycle is driven through stub actors; no GPUs."""
 
 from __future__ import annotations
 
 import asyncio
 import math
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -89,27 +90,34 @@ def _stub_trainer_for_step(calls, *, loss):
 
     async def _fanout(method_name, *args, **kwargs):
         calls.append(f"router_fanout/{method_name}")
-        return [None]
+        return (
+            []
+        )  # no generators reporting (e.g. get_engine_stats); the poll adds nothing
 
     async def _pull(*, policy_version):
         calls.append("pull")
 
     rl.generator_router = SimpleNamespace(fanout=_fanout, pull_model_state_dict=_pull)
     rl.metrics_processor = SimpleNamespace(log=lambda **kwargs: None)
-    rl._train_version = 0
+    rl._trainer_policy_version = 0
+    rl._generator_policy_version = 0
+    rl._pending_pull = None  # `run()` sets this before `_trainer_loop`; the direct-call tests set it here
     return rl
 
 
 def test_overlapped_weight_sync_advances_on_completion():
     # Must-preserve: fwd/bwd -> optim -> push -> (fire) pull. The pull is fired as a task and awaited
-    # before the next publish / at the final drain; _train_version advances to the version that pull
-    # made the generator adopt (advance ON completion, §5.2).
+    # before the next publish / at the final drain; _generator_policy_version advances to the version
+    # the pull made the generator adopt (on completion), while _trainer_policy_version bumps at optim.
     async def main():
         calls: list[str] = []
         rl = _stub_trainer_for_step(calls, loss=0.5)
-        await rl._consume_and_train(_ready_with(_BATCH), num_steps=5)
+        await rl._trainer_loop(_ready_with(_BATCH), num_steps=5)
         assert [c for c in calls if c in _WEIGHT_SYNC_ORDER] == _WEIGHT_SYNC_ORDER
-        assert rl._train_version == 7  # advanced to the pulled version, on completion
+        assert rl._trainer_policy_version == 7  # bumped at the optim step
+        assert (
+            rl._generator_policy_version == 7
+        )  # advanced to the pulled version, on completion
 
     asyncio.run(main())
 
@@ -120,32 +128,62 @@ def test_nan_loss_skips_optim_and_sync():
     async def main():
         calls: list[str] = []
         rl = _stub_trainer_for_step(calls, loss=math.nan)
-        await rl._consume_and_train(_ready_with(_BATCH), num_steps=5)
+        await rl._trainer_loop(_ready_with(_BATCH), num_steps=5)
         assert "forward_backward" in calls
         assert "optim_step" not in calls
         assert "push" not in calls and "pull" not in calls
-        assert rl._train_version == 0  # never advanced
+        assert rl._trainer_policy_version == 0  # never advanced (optim skipped)
+        assert rl._generator_policy_version == 0  # never advanced (pull never fired)
 
     asyncio.run(main())
 
 
-def test_run_rollout_producer_closes_buffer_on_crash_and_reraises():
-    # Must-preserve: the producer supervisor closes the buffer on the way out (so the pack loop's
-    # take_full_batch returns None and the trainer unblocks) and re-raises the real exception.
+def test_run_surfaces_a_stage_crash_and_closes_buffer():
+    # Must-preserve (replaces the old producer-supervisor test): a rollout-stage crash must propagate
+    # out of run() instead of hanging the trainer, and the buffer must be closed on the way out.
     async def main():
-        rl = _make_stub_rl_trainer()
+        import torchtitan.experiments.rl.trainer as trainer_mod
+
         closed: list[bool] = []
 
-        class _Buffer:
+        class _FakeBuffer:
+            def __init__(self, **kwargs):
+                pass
+
             async def close(self):
                 closed.append(True)
 
-        async def _boom(_buffer):
-            raise RuntimeError("producer blew up")
+        rl = _make_stub_rl_trainer()
+        rl.config = SimpleNamespace(
+            num_rollout_workers=2,
+            num_steps=5,
+            max_offpolicy_steps=3,
+            drop_rollout_group_if_any_stale=False,
+            max_buffered_batches=2,
+            max_queued_batches=1,
+            max_active_rollout_groups=None,
+        )
+        rl.trainer_dp_degree = 1
 
-        rl._produce_rollouts = _boom
-        with pytest.raises(RuntimeError, match="producer blew up"):
-            await rl._run_rollout_producer(_Buffer())
+        async def _noop_validate(*, step):
+            return {}
+
+        async def _block(*args, **kwargs):
+            await asyncio.Event().wait()  # the trainer would hang here waiting for batches
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("rollout blew up")
+
+        rl._validate_and_log = _noop_validate
+        rl._log_reward_delta = lambda pre, post: None
+        rl._input_loop = _block
+        rl._batcher_loop = _block
+        rl._trainer_loop = _block
+        rl._rollout_loop = _boom
+
+        with patch.object(trainer_mod, "EpisodeBuffer", _FakeBuffer):
+            with pytest.raises(RuntimeError, match="rollout blew up"):
+                await asyncio.wait_for(rl.run(), timeout=5.0)  # must not hang
         assert closed == [True]  # buffer closed in finally despite the crash
 
     asyncio.run(main())
@@ -216,7 +254,7 @@ def test_setup_async_rejects_rollouts_that_can_exceed_batch_seq_len():
     async def main():
         rl = _make_stub_rl_trainer()
         rl.config = SimpleNamespace(
-            num_groups_per_rollout_batch=1,
+            num_rollout_workers=1,
             group_size=1,
             num_validation_samples=1,
             batcher=SimpleNamespace(batch=SimpleNamespace(seq_len=2048)),
@@ -231,10 +269,10 @@ def test_setup_async_rejects_rollouts_that_can_exceed_batch_seq_len():
     asyncio.run(main())
 
 
-def test_pack_loop_sentinel_does_not_deadlock_when_ready_is_full():
-    # The pack loop's finally must put the None sentinel NON-blocking. At a clean stop the trainer has
-    # stopped consuming and `ready` may hold an unconsumed pre-packed batch (full); a blocking put there
-    # deadlocks the cancel (the single cancel was already consumed). Regression test for that hang.
+def test_batcher_loop_sentinel_does_not_deadlock_when_batch_queue_is_full():
+    # The batcher loop's finally must put the None sentinel NON-blocking. At a clean stop the trainer
+    # has stopped consuming and `batch_queue` may hold an unconsumed packed batch (full); a blocking put
+    # there deadlocks the cancel (the single cancel was already consumed). Regression test for that hang.
     async def main():
         from torchtitan.experiments.rl.episode_buffer import EpisodeBuffer
         from torchtitan.experiments.rl.tests.test_episode_buffer import (
@@ -253,22 +291,22 @@ def test_pack_loop_sentinel_does_not_deadlock_when_ready_is_full():
             max_buffered_batches=5,
             train_version=lambda: rl._train_version,
         )
-        ready: asyncio.Queue = asyncio.Queue(maxsize=1)
+        batch_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         for _ in range(
             4
-        ):  # enough for several batches, so the pack loop fills `ready` and blocks
-            await buffer.put([_episode(version=0, completion=5)], [])
+        ):  # enough for several batches, so the batcher loop fills `batch_queue` and blocks
+            await buffer.add_episodes([_episode(version=0, completion=5)], [])
 
-        pack_task = asyncio.create_task(rl._run_pack_loop(buffer, ready))
+        batcher_task = asyncio.create_task(rl._batcher_loop(buffer, batch_queue))
         await asyncio.sleep(
             0.05
-        )  # let it pre-pack one batch into `ready` and block on the next put
-        assert ready.full()  # a pre-packed batch is waiting, unconsumed
+        )  # let it pack one batch into `batch_queue` and block on the next put
+        assert batch_queue.full()  # a packed batch is waiting, unconsumed
 
-        pack_task.cancel()
+        batcher_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(
-                pack_task, timeout=2.0
+                batcher_task, timeout=2.0
             )  # must finish, not hang on the sentinel put
 
     asyncio.run(main())

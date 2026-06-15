@@ -32,9 +32,10 @@ from torchtitan.experiments.rl.generator_router import (
     RoundRobinRoutingStrategy,
     StickySessionRoutingStrategy,
 )
+from torchtitan.experiments.rl.losses.grpo import GRPOLoss
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
-from torchtitan.experiments.rl.trainer import GRPOLoss, RLTrainer
+from torchtitan.experiments.rl.trainer import RLTrainer
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.protocols.model import ModelConfigConverter
@@ -80,7 +81,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
         model_spec=model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
-        num_groups_per_rollout_batch=5,
+        num_rollout_workers=16,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
@@ -152,7 +153,7 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
         model_spec=model_registry("0.6B", attn_backend="flex"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
-        num_groups_per_rollout_batch=5,
+        num_rollout_workers=16,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
@@ -234,7 +235,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         model_spec=model_registry("1.7B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         num_steps=10,
-        num_groups_per_rollout_batch=5,
+        num_rollout_workers=16,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
@@ -290,7 +291,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
         model_spec=model_registry("14B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-14B",
         num_steps=10,
-        num_groups_per_rollout_batch=5,
+        num_rollout_workers=16,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
@@ -349,7 +350,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
         model_spec=model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
-        num_groups_per_rollout_batch=5,
+        num_rollout_workers=16,
         num_validation_samples=20,
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),

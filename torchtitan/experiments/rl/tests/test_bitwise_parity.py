@@ -219,7 +219,7 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
     engine_kwargs["max_model_len"] = config.model_spec.model.max_seq_len
-    max_num_seqs = config.num_groups_per_rollout_batch * config.group_size
+    max_num_seqs = config.num_rollout_workers * config.group_size
     engine_kwargs["max_num_seqs"] = max_num_seqs
     vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,

@@ -13,7 +13,7 @@ from typing import Protocol, TYPE_CHECKING
 from renderers import Message
 
 from torchtitan.experiments.rl.observability import metrics as m
-from torchtitan.experiments.rl.types import Completion
+from torchtitan.experiments.rl.types import Completion, RolloutID
 
 if TYPE_CHECKING:
     # Type-only: importing the generator module here would pull in vLLM at import time.
@@ -35,14 +35,14 @@ class GenerateFn(Protocol):
         self,
         prompt_token_ids: list[int],
         *,
-        request_id: str,
+        rollout_id: RolloutID,
         sampling_config: SamplingConfig | None = None,
     ) -> Completion | None:
         """Run one generation.
 
         Args:
             prompt_token_ids: The tokenized prompt to generate from.
-            request_id: Unique per call; identifies the exact turn (e.g. ".../turn=2") in logs.
+            rollout_id: Identifies this turn; supplies the generator request id and routing key.
             sampling_config: Optional per-call sampling overrides.
 
         Returns:
@@ -80,6 +80,9 @@ class RolloutTurn:
 
     # TODO: add a `logs` field (raw prompt/response text, finish_reason, timings)
     # so a turn can be dumped and inspected without re-deriving from tokens.
+
+    rollout_id: RolloutID
+    """Identifies this turn (group, sibling index, turn index)."""
 
     # Fields needed for training
     prompt_token_ids: list[int]  # [num_prompt_tokens]
@@ -132,8 +135,8 @@ class Rollout:
     group_id: str
     """Prompt-group ID; siblings share it for advantage centering."""
 
-    sample_id: str
-    """Unique rollout id within the step, e.g. `"step=3/group=5/sample=2"`."""
+    rollout_id: int
+    """Sibling index within the group (0..group_size-1)."""
 
     turns: list[RolloutTurn] = field(default_factory=list)  # [num_turns]
     """Ordered rollout turns. Each turn stores its full prompt (redundant across turns); kept so a

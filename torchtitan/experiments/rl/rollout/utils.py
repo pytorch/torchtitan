@@ -10,7 +10,7 @@ from collections import defaultdict
 
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.rollout.types import Rollout
-from torchtitan.experiments.rl.types import Episode
+from torchtitan.experiments.rl.types import Episode, RolloutID
 
 
 # TODO: evaluate renaming Episode -> TrainingSample once we align overloaded "sample" names. E.g. Dataset also uses it.
@@ -39,9 +39,9 @@ def rollout_to_episodes(rollout: Rollout) -> list[Episode]:
         turn2 (v6): prompt=[P1,C1,E1,C2,E2]  completion=[C3]
         turn3 (v6): prompt=[P2]              completion=[C4]   # history compacted -> prefix breaks
         turn4 (v7): prompt=[P2,C4,E4]        completion=[C5]
-        # -> episode 0: token_ids=[P1,C1,E1,C2,E2,C3], loss_mask=[0,1,0,1,0,1]   sample_id=<rollout id>
+        # -> episode 0: token_ids=[P1,C1,E1,C2,E2,C3], loss_mask=[0,1,0,1,0,1]   rollout_id.turn_id=0
         #              version_intervals=[(1,5),(3,6),(5,6)]   # each completion at its sampling version
-        #    episode 1: token_ids=[P2,C4,E4,C5],        loss_mask=[0,1,0,1]       sample_id=".../branch=1"
+        #    episode 1: token_ids=[P2,C4,E4,C5],        loss_mask=[0,1,0,1]       rollout_id.turn_id=3
         #              version_intervals=[(1,6),(3,7)]
     """
     rollout_advantage = rollout.advantage
@@ -56,7 +56,8 @@ def rollout_to_episodes(rollout: Rollout) -> list[Episode]:
         if not rollout_turn.completion_token_ids:
             if turn_idx != len(rollout.turns) - 1:
                 raise ValueError(
-                    f"rollout {rollout.sample_id!r}: non-final turn {turn_idx} has no completion"
+                    f"rollout {rollout.group_id}/rollout={rollout.rollout_id}: "
+                    f"non-final turn {turn_idx} has no completion"
                 )
             continue
 
@@ -67,14 +68,14 @@ def rollout_to_episodes(rollout: Rollout) -> list[Episode]:
             prompt[: len(prev_prompt_and_completion)] == prev_prompt_and_completion
         )
         if not episodes or not extends_prev:
-            # start a new episode
+            # Start a new episode; its rollout_id.turn_id marks the turn the segment begins at.
             episodes.append(
                 Episode(
                     policy_version=rollout_turn.policy_version,
-                    sample_id=(
-                        rollout.sample_id
-                        if not episodes
-                        else f"{rollout.sample_id}/branch={len(episodes)}"
+                    rollout_id=RolloutID(
+                        group_id=rollout.group_id,
+                        rollout_id=rollout.rollout_id,
+                        turn_id=turn_idx,
                     ),
                     token_ids=[],
                     loss_mask=[],

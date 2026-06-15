@@ -49,18 +49,18 @@ logger = logging.getLogger(__name__)
 
 
 # Latest vLLM engine-aggregate stats, written by `_EngineStatsCapture.record` on every engine
-# step and read by the `get_engine_stats` endpoint. One engine per process (DP=1), so a single
-# module-level slot is enough; the in-process V1 path (external_launcher) shares it directly.
+# step and snapshotted onto each `Completion`'s metrics as it resolves. One engine per process
+# (DP=1), so a single module-level slot is enough; the in-process V1 path shares it directly.
 _LATEST_ENGINE_STATS: dict[str, float] = {}
 
 
 class _EngineStatsCapture(StatLoggerBase):
     """Captures the signals `RequestOutput.metrics` can't: engine-aggregate KV-cache utilization,
-    queue depth (running/waiting), prefix-cache hit rate, and cumulative generated tokens.
+    queue depth (running/waiting), preemptions, and prefix-cache hit rate.
 
-    vLLM calls `record` once per `engine.step`; we keep the latest scheduler snapshot plus a
-    running token count, which the actor surfaces via `get_engine_stats`. Registered as a
-    per-engine `stat_loggers` factory in `from_engine_args`.
+    vLLM calls `record` once per `engine.step`; we keep the latest scheduler snapshot, which the
+    actor attaches to each completion's metrics. Registered as a per-engine `stat_loggers` factory
+    in `from_engine_args`.
     """
 
     def __init__(self, vllm_config, engine_index: int = 0):
@@ -69,12 +69,16 @@ class _EngineStatsCapture(StatLoggerBase):
             CachingMetrics()
         )  # cumulative hit-rate over a recent-request window
         self._total_generation_tokens = 0.0
+        self._num_preempted_reqs = (
+            0.0  # latest iteration's preemptions (KV-pressure signal)
+        )
 
     def record(
         self, scheduler_stats, iteration_stats, mm_cache_stats=None, engine_idx: int = 0
     ) -> None:
         if iteration_stats is not None:
             self._total_generation_tokens += iteration_stats.num_generation_tokens
+            self._num_preempted_reqs = float(iteration_stats.num_preempted_reqs)
         if scheduler_stats is None:
             return
         self._prefix_cache.observe(scheduler_stats.prefix_cache_stats)
@@ -82,6 +86,7 @@ class _EngineStatsCapture(StatLoggerBase):
             kv_cache_usage=float(scheduler_stats.kv_cache_usage),
             num_running=float(scheduler_stats.num_running_reqs),
             num_waiting=float(scheduler_stats.num_waiting_reqs),
+            num_preempted_reqs=self._num_preempted_reqs,
             prefix_cache_hit_rate=float(self._prefix_cache.hit_rate),
             total_generation_tokens=self._total_generation_tokens,
         )
@@ -382,7 +387,7 @@ class VLLMGenerator(Actor, Configurable):
         # the upper bound for concurrent sequences, determines KV-cache
         # block allocation (and therefore GPU memory usage), and bounds
         # the CUDA graph capture sizes.  Always computed by the caller
-        # (RLTrainer) as num_groups_per_rollout_batch * group_size.
+        # (RLTrainer) as num_rollout_workers * group_size.
         self._max_num_seqs = max_num_seqs
 
         # Renderer role-boundary stop tokens (e.g. Qwen3 `<|im_end|>`), injected by the
@@ -460,8 +465,8 @@ class VLLMGenerator(Actor, Configurable):
 
         with sl.log_trace_span("vllm_init"):
             logger.info("Initializing LLMEngine from EngineArgs...")
-            # `_EngineStatsCapture` records per-step KV-cache util / queue depth / prefix-cache
-            # hit rate into `_LATEST_ENGINE_STATS` for the `get_engine_stats` endpoint.
+            # `_EngineStatsCapture` records per-step KV-cache util / queue depth / preemptions /
+            # prefix-cache hit rate into `_LATEST_ENGINE_STATS`, snapshotted onto each completion.
             self._engine = LLMEngine.from_engine_args(
                 engine_args, stat_loggers=[_EngineStatsCapture]
             )
@@ -519,15 +524,6 @@ class VLLMGenerator(Actor, Configurable):
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
-
-    @endpoint
-    async def get_engine_stats(self) -> dict[str, float]:
-        """Latest vLLM engine-aggregate stats (KV-cache util, running/waiting queue depth,
-        prefix-cache hit rate, cumulative generated tokens) captured by `_EngineStatsCapture`.
-
-        Empty until the first `engine.step`. Rank 0 runs the scheduler; the controller reads
-        rank 0's value (followers may report zeros)."""
-        return dict(_LATEST_ENGINE_STATS)
 
     @endpoint
     @sl.log_trace_span("generate")
@@ -773,6 +769,25 @@ class VLLMGenerator(Actor, Configurable):
                         metric_type(inflight_requests_at_completion),
                     )
                 )
+
+            # The engine-aggregate snapshot rides out with this completion (no controller poll):
+            # KV-cache util, queue depth, preemptions, and prefix-hit, as of the latest engine step.
+            snapshot_keys = (
+                "kv_cache_usage",
+                "num_running",
+                "num_waiting",
+                "num_preempted_reqs",
+                "prefix_cache_hit_rate",
+            )
+            for key in snapshot_keys:
+                if key in _LATEST_ENGINE_STATS:
+                    for metric_type in (m.Mean, m.Max):
+                        metrics.append(
+                            m.Metric(
+                                f"{metrics_prefix}/{key}",
+                                metric_type(_LATEST_ENGINE_STATS[key]),
+                            )
+                        )
             # Attribute the completion to the version it was ADMITTED (sampled) at, not the
             # current `self.policy_version` (a mid-flight hotswap may have advanced it): the
             # off-policy filter must see the oldest version the tokens were sampled at.

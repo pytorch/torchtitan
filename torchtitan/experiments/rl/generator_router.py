@@ -132,7 +132,7 @@ class StickySessionRoutingStrategy(RoutingStrategy):
         pass
 
     # Cap on remembered pins. Only sessions in flight need a pin (a finished session's key never
-    # recurs), and at most ~num_groups_per_rollout_batch are in flight; this LRU bound keeps the map
+    # recurs), and at most ~num_rollout_workers are in flight; this LRU bound keeps the map
     # from growing without limit over a long run while never evicting an active session.
     _MAX_PINS = 1024
 
