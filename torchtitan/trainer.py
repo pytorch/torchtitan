@@ -31,7 +31,6 @@ from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import (
-    ActivationCheckpointConfig,
     CommConfig,
     CompileConfig,
     DebugConfig,
@@ -40,6 +39,11 @@ from torchtitan.config.configs import (
 )
 from torchtitan.config.override import apply_overrides, OverrideConfig
 from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
+from torchtitan.distributed.activation_checkpoint import (
+    ActivationCheckpointingConfig,
+    MemoryBudgetAC,
+    SelectiveAC,
+)
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
@@ -92,8 +96,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         checkpoint: CheckpointManager.Config = field(
             default_factory=CheckpointManager.Config
         )
-        activation_checkpoint: ActivationCheckpointConfig = field(
-            default_factory=ActivationCheckpointConfig
+        activation_checkpoint: ActivationCheckpointingConfig = field(
+            default_factory=SelectiveAC.Config
         )
         compile: CompileConfig = field(default_factory=CompileConfig)
         comm: CommConfig = field(default_factory=CommConfig)
@@ -107,6 +111,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise ValueError(
                     "Batch-invariant mode is not supported in pre-training."
                 )
+
             if (
                 self.parallelism.spmd_backend == "spmd_types"
                 and self.debug.spmd_typechecking
@@ -117,6 +122,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "SPMD typechecking is not supported with pipeline parallelism. "
                     "Validate the same config without PP "
                     "(--parallelism.pipeline_parallel_degree 1)."
+                )
+
+            if isinstance(self.activation_checkpoint, MemoryBudgetAC.Config) and not (
+                self.compile.enable and "model" in self.compile.components
+            ):
+                raise ValueError(
+                    "Memory budget activation checkpointing requires the model to be "
+                    "compiled: set --compile.enable and include 'model' in "
+                    "--compile.components."
                 )
 
             # Pretraining inputs are shaped by TrainingConfig.seq_len when

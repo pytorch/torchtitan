@@ -11,12 +11,8 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.quantization import Float8LinearConverter
 from torchtitan.components.validate import Validator
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    CompileConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import (
     ChatDataLoader,
     HuggingFaceTextDataLoader,
@@ -53,9 +49,7 @@ def llama3_debugmodel() -> Trainer.Config:
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
         validator=Validator.Config(
             freq=5,
             steps=10,
@@ -139,9 +133,7 @@ def llama3_8b() -> Trainer.Config:
             dataset="c4",
         ),
         checkpoint=CheckpointManager.Config(interval=500),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
         validator=Validator.Config(
             freq=500,
             steps=1200,
@@ -174,7 +166,7 @@ def llama3_70b() -> Trainer.Config:
             tensor_parallel_degree=8,
         ),
         checkpoint=CheckpointManager.Config(interval=500),
-        activation_checkpoint=ActivationCheckpointConfig(mode="full"),
+        activation_checkpoint=FullAC.Config(),
         validator=Validator.Config(
             freq=500,
             steps=1200,
@@ -220,7 +212,7 @@ def llama3_405b() -> Trainer.Config:
             enable_async_tensor_parallel=True,
         ),
         checkpoint=CheckpointManager.Config(interval=500),
-        activation_checkpoint=ActivationCheckpointConfig(mode="full"),
+        activation_checkpoint=FullAC.Config(),
         compile=compile_config,
         validator=Validator.Config(
             freq=500,
@@ -269,7 +261,5 @@ def sft_debugmodel() -> Trainer.Config:
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )

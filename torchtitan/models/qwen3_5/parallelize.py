@@ -17,7 +17,6 @@ from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.fsdp import MixedPrecisionPolicy
 
 from torchtitan.config import (
-    ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
     TORCH_DTYPE_MAP,
@@ -25,7 +24,7 @@ from torchtitan.config import (
 )
 
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
@@ -67,7 +66,7 @@ def parallelize_qwen3_5(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
+    ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
     """
@@ -101,21 +100,11 @@ def parallelize_qwen3_5(
     if parallel_dims.tp_enabled:
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
-    if ac_config.mode != "none":
-        apply_ac(
-            model,
-            ac_config,
-            model_compile_enabled=model_compile_enabled,
-            base_folder=dump_folder,
-        )
+    if ac_config is not None:
+        ac_policy = ac_config.build(dump_folder=dump_folder)
+        ac_policy.apply(model)
         if model.vision_encoder is not None:
-            apply_ac(
-                # pyrefly: ignore [bad-argument-type]
-                model.vision_encoder,
-                ac_config,
-                model_compile_enabled=model_compile_enabled,
-                base_folder=dump_folder,
-            )
+            ac_policy.apply(model.vision_encoder)
 
     if model_compile_enabled:
         apply_compile(model, compile_config)
