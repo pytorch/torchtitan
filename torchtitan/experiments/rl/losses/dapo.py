@@ -47,7 +47,7 @@ class DAPOLoss(Configurable):
 
     def __call__(
         self,
-        policy_logprobs: torch.Tensor,
+        trainer_logprobs: torch.Tensor,
         generator_logprobs: torch.Tensor,
         loss_mask: torch.Tensor,
         advantages: torch.Tensor,
@@ -56,7 +56,7 @@ class DAPOLoss(Configurable):
         """Compute the per-token clip-higher surrogate loss.
 
         Args:
-            policy_logprobs: [B, L] log π_θ(a_t | s_t) from the current policy.
+            trainer_logprobs: [B, L] log π_θ(a_t | s_t) from the current policy.
             generator_logprobs: [B, L] log π_old(a_t | s_t) from the sampling policy.
             loss_mask: [B, L] bool mask; True for response tokens.
             advantages: [B, L] per-token advantages (0.0 for prompt/padding).
@@ -72,7 +72,7 @@ class DAPOLoss(Configurable):
         # than nan->0, which trains it as if it were on-policy). `response_mask` keeps
         # the original tokens for the nan-frac metric.
         response_mask = loss_mask
-        raw_log_ratio = policy_logprobs - generator_logprobs
+        raw_log_ratio = trainer_logprobs - generator_logprobs
         loss_mask = loss_mask & torch.isfinite(raw_log_ratio)
         log_ratio = torch.clamp(
             torch.nan_to_num(raw_log_ratio), -_MAX_LOG_RATIO, _MAX_LOG_RATIO

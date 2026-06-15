@@ -35,9 +35,10 @@ from torchtitan.experiments.rl.generator_router import (
     GeneratorRouter,
     RoundRobinRoutingStrategy,
 )
+from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
-from torchtitan.experiments.rl.trainer import GRPOLoss, RLTrainer
+from torchtitan.experiments.rl.trainer import RLTrainer
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.protocols.model import ModelConfigConverter

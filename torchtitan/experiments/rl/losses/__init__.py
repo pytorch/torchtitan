@@ -5,5 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.experiments.rl.losses.dapo import DAPOLoss
+from torchtitan.experiments.rl.losses.grpo import GRPOLoss
 
-__all__ = ["DAPOLoss"]
+__all__ = ["DAPOLoss", "GRPOLoss"]

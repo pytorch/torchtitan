@@ -1,3 +1,0 @@
-# Extra dependencies for the Search-R1 example (not required by core torchtitan).
-# Install with: pip install -r torchtitan/experiments/rl/examples/search_r1/requirements.txt
-aiohttp  # async HTTP client for the dense-retrieval server (env.py)
