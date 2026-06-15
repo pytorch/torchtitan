@@ -10,7 +10,6 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 import spmd_types as spmd
-from spmd_types.runtime import get_partition_spec
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
@@ -81,15 +80,15 @@ class GroupedExperts(Module):
             w2_EDF = self.w2_EDF
             w3_EFD = self.w3_EFD
 
-        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         if (
             get_spmd_backend() == "spmd_types"
             and spmd.is_type_checking()
             and spmd_mesh_size("ep") == 1
         ):
-            for axis in ("dp", "cp"):
-                spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
+            for axis in ("dp", "cp"):  # if no EP, convert to V for grouped_mm
+                spmd.mutate_type(num_tokens_per_expert_E, axis, src=spmd.P, dst=spmd.V)
 
+        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         h_RF = F.silu(
             torch._grouped_mm(
                 x_RD.bfloat16(),
@@ -443,8 +442,8 @@ class MoE(Module):
         if get_spmd_backend() == "spmd_types":
             generate_routing_map = spmd.local_map(
                 out_types=(
-                    spmd.get_local_type(scores_BLE),
-                    get_partition_spec(scores_BLE),
+                    {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
+                    spmd.PartitionSpec("dp", "cp", None),
                 ),
             )(_generate_routing_map)
         elif isinstance(topk_expert_ids_BLK, DTensor):
