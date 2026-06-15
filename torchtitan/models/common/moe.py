@@ -385,6 +385,26 @@ class MoE(Module):
         """
         B, L, D = x_BLD.shape
         sp_size = getattr(self.experts.token_dispatcher, "sp_size", 1)
+        # ---------------------------------------------------------------------
+        # TODO: Temporary workaround for #3622. Remove it once short-sequence
+        # routing counts can remain Partial.
+        # Real padding when seq_len < sp_size: EP routes over sequence-parallel
+        # token shards. A sequence shorter than ``sp_size`` cannot shard across
+        # all SP ranks, so physically pad to ``sp_size`` and trim before returning.
+        seq_pad = sp_size - L if L < sp_size else 0
+        if seq_pad:
+            if self.training:
+                raise ValueError(
+                    "MoE short-sequence padding for L < sp_size: "
+                    f"got L={L}, sp_size={sp_size} while the module is in training mode."
+                )
+            x_BLD = F.pad(x_BLD, (0, 0, 0, seq_pad))
+            L = L + seq_pad
+        # ---------------------------------------------------------------------
+
+        # Virtual padding: pad each batch's (post real-pad) sequence length up to
+        # a multiple of ``sp_size`` so combine() can infer per-rank offsets from a
+        # uniform shard length.
         seq_dim_pad_tokens = (-L) % sp_size
         # Padding is logically appended to the sequence tail of each batch,
         # not to a specific SP rank. This lets combine() infer each SP rank's
@@ -483,6 +503,15 @@ class MoE(Module):
 
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD
+
+        # ---------------------------------------------------------------------
+        # TODO: Temporary workaround for #3622. Paired with the short-sequence
+        # padding above; remove it once short-sequence routing counts can remain
+        # Partial.
+        if seq_pad:
+            # Drop the tokens padded on for SP sharding, restoring (B, L, D).
+            out_BLD = out_BLD[:, : L - seq_pad, :]
+        # ---------------------------------------------------------------------
         return out_BLD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
