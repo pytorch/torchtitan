@@ -6,10 +6,10 @@
 
 """Search-R1 exact-match reward over a tool-calling rollout.
 
-By default this is a pure-EM 0/1 reward: the assistant's final answer matching a gold
+By default this is a pure-EM 0/1 reward: the assistant's final answer matching a golden
 answer -> 1.0, else 0. Two opt-in levers reward searching over answering from parametric
 memory: ``no_search_penalty`` (a correct answer that never searched scores less) and
-``retrieval_score`` (a wrong answer still gets credit if a search surfaced the gold).
+``retrieval_score`` (a wrong answer still gets credit if a search surfaced the golden answer).
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def _normalize_answer(s: str) -> str:
 
 
 def _is_exact_match(prediction: str, golden_answers: list[str]) -> bool:
-    """True if the normalized prediction exactly equals any normalized gold answer."""
+    """True if the normalized prediction exactly equals any normalized golden answer."""
     normalized = _normalize_answer(prediction)
     return any(normalized == _normalize_answer(g) for g in golden_answers)
 
@@ -60,7 +60,7 @@ def _made_search_call(rollout: Rollout) -> bool:
 
 
 def _retrieval_surfaced_gold(rollout: Rollout, golden_answers: list[str]) -> bool:
-    """True if a gold answer (normalized) appears in any search (tool) result."""
+    """True if a golden answer appears (as whole words) in any search (tool) result."""
     normalized_golds = [_normalize_answer(g) for g in golden_answers]
     for turn in rollout.turns:
         for message in turn.env_messages or []:
@@ -69,8 +69,9 @@ def _retrieval_surfaced_gold(rollout: Rollout, golden_answers: list[str]) -> boo
             content = message.get("content")
             if not isinstance(content, str):
                 continue
-            normalized = _normalize_answer(content)
-            if any(g in normalized for g in normalized_golds):
+            # Pad with spaces so the match is on whole words (" us " won't hit "bus").
+            padded = f" {_normalize_answer(content)} "
+            if any(f" {g} " in padded for g in normalized_golds):
                 return True
     return False
 
@@ -85,7 +86,7 @@ class RewardExactMatch(RewardFn):
     - ``no_search_penalty`` > 0: a correct answer that never called the search tool
       scores ``score - no_search_penalty``.
     - ``retrieval_score`` > 0: a wrong/missing answer still gets this credit if a
-      search surfaced a gold answer.
+      search surfaced a golden answer.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -99,7 +100,7 @@ class RewardExactMatch(RewardFn):
         one."""
 
         retrieval_score: float = 0.0
-        """Credit when a gold answer was surfaced by a search but the final answer is
+        """Credit when a golden answer was surfaced by a search but the final answer is
         wrong/missing. 0 (default) = pure EM."""
 
     def __init__(self, config: Config) -> None:
@@ -115,7 +116,7 @@ class RewardExactMatch(RewardFn):
                 return self._score
             return self._score - self._no_search_penalty
         # Reached only when the final answer is wrong/missing: partial credit if a
-        # search still surfaced the gold answer.
+        # search still surfaced the golden answer.
         if self._retrieval_score and _retrieval_surfaced_gold(
             rollout, env_input.golden_answers
         ):

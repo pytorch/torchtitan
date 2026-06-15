@@ -49,10 +49,8 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
         model_spec=model_registry("1.7B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         num_steps=500,
-        # 32 prompts x group 8 = 256 rollouts/step.
         num_groups_per_rollout_batch=32,
         group_size=8,
-        # Validate on a fixed file-order held-out set every 5 steps.
         num_validation_samples=500,
         validation_freq=5,
         compile=CompileConfig(enable=True, backend="aot_eager"),

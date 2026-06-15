@@ -23,7 +23,7 @@ class SearchR1Sample:
     """The natural-language question the model must answer."""
 
     golden_answers: list[str]  # [num_answers]
-    """Accepted gold answer strings; a prediction matching any one is correct (EM)."""
+    """Accepted golden answer strings; a prediction matching any one is correct (EM)."""
 
 
 class SearchR1Dataset(Configurable):
@@ -55,7 +55,8 @@ class SearchR1Dataset(Configurable):
 
         shuffle: bool = True
         """Shuffle row order (with ``seed``), reshuffling on each wrap. Set False for
-        validation so the first N rows are a fixed, file-order held-out set."""
+        validation so the order is deterministic — each validation pass draws the same
+        held-out samples."""
 
     def __init__(self, config: Config) -> None:
         source = config.data_path or f"{config.repo_id}/{config.filename}"

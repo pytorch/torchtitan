@@ -3,7 +3,7 @@
 A [Search-R1](https://github.com/PeterGriffinJin/Search-R1) example in torchtitan's
 RL experiment. The model is given a `search` tool; it calls `search` (a standard tool
 call) when it needs facts, gets the retrieved passages back as a `tool` message, and
-replies with a final answer. Reward is exact-match (EM) against gold answers (optionally
+replies with a final answer. Reward is exact-match (EM) against golden answers (optionally
 plus a retrieval bonus).
 
 Thinking is controlled purely by the renderer's `enable_thinking` flag (no prompt-injected
@@ -25,17 +25,13 @@ its config.
   renderer-parsed `tool_calls`, runs retrieval, and returns the passages as a `tool`
   message. The per-rollout turn budget is enforced by `TokenEnv.max_num_turns`.
 - `rubric.py` — `RewardExactMatch`. **Default = pure-EM 0/1** on the final answer
-  (correct → 1.0, else 0). Set `retrieval_score` > 0 to give partial credit when a
-  search surfaced the gold answer (puts search on the gradient, anti closed-book).
+  (correct → 1.0, else 0). Two opt-in levers put search on the gradient (anti
+  closed-book reward hacking): `no_search_penalty` (a correct answer that never
+  searched scores less) and `retrieval_score` (a wrong answer still gets partial
+  credit if a search surfaced the golden answer).
 - `rollouter.py` — wires datasets + env + rubric into a `Rollouter.Config`.
 
 ## Prerequisites
-
-Install the example's extra Python dependencies (not in core torchtitan):
-
-```bash
-pip install -r torchtitan/experiments/rl/examples/search_r1/requirements.txt
-```
 
 ### 1. Data
 Nothing to prepare — the NQ/HotpotQA parquet is pulled straight from the HF dataset
@@ -60,7 +56,7 @@ Override `message_env.search_url` / `message_env.topk` in the config if needed.
 ## Run
 
 ```bash
-# eval run (Qwen3-1.7B), W&B on
+# example run (Qwen3-1.7B), W&B on
 python torchtitan/experiments/rl/train.py \
   --module torchtitan.experiments.rl.examples.search_r1 \
   --config rl_grpo_qwen3_1_7b_search_r1

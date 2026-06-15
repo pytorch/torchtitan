@@ -20,7 +20,7 @@ from torchtitan.experiments.rl.rubrics import Rubric
 
 class SearchR1Rollouter(Rollouter):
     """Search-R1 rollouter: the QA datasets, the multi-turn search env, and the
-    EM/format rubric wired together. All behavior is inherited from ``Rollouter``;
+    exact-match rubric wired together. All behavior is inherited from ``Rollouter``;
     this only supplies the default configs.
     """
 
@@ -33,7 +33,8 @@ class SearchR1Rollouter(Rollouter):
         )
         validation_dataset: SearchR1Dataset.Config = field(
             default_factory=lambda: SearchR1Dataset.Config(
-                # Evaluate on the NQ split only; fixed file order for a stable eval set.
+                # NQ split only; deterministic order (no shuffle) so every validation
+                # pass draws the same held-out samples.
                 filename="test.parquet",
                 seed=99,
                 data_source="nq",

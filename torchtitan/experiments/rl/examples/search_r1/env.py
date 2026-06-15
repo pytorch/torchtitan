@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 
 import aiohttp
@@ -21,6 +22,8 @@ from torchtitan.experiments.rl.environment import (
     MessageEnvStepOutput,
 )
 from torchtitan.experiments.rl.examples.search_r1.data import SearchR1Sample
+
+logger = logging.getLogger(__name__)
 
 
 # The `search` tool the model calls (OpenAI function-calling schema). The renderer
@@ -84,7 +87,10 @@ async def _search(query: str, *, url: str, topk: int, timeout_s: float = 60.0) -
             async with session.post(url, json=payload) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
-    except Exception:
+    except Exception as exc:
+        # Warn (don't raise) so one flaky request doesn't crash the rollout — but a
+        # persistent failure is visible rather than silently training on empty results.
+        logger.warning("search request to %s failed: %s", url, exc)
         return ""
     results = data.get("result") or [[]]
     return _passages_to_string(results[0])
@@ -123,10 +129,14 @@ class SearchR1Env(MessageEnv):
         topk: int = 3
         """Number of passages to retrieve per search query."""
 
+        timeout_s: float = 60.0
+        """Per-request timeout for a retrieval call, in seconds."""
+
     def __init__(self, config: Config, *, env_input: SearchR1Sample) -> None:
         self._question = env_input.question
         self._search_url = config.search_url
         self._topk = config.topk
+        self._timeout_s = config.timeout_s
 
     async def init(self) -> MessageEnvInitOutput:
         return MessageEnvInitOutput(
@@ -147,7 +157,10 @@ class SearchR1Env(MessageEnv):
         passages = await asyncio.gather(
             *(
                 _search(
-                    _query_from_tool_call(tc), url=self._search_url, topk=self._topk
+                    _query_from_tool_call(tc),
+                    url=self._search_url,
+                    topk=self._topk,
+                    timeout_s=self._timeout_s,
                 )
                 for tc in tool_calls
             )
