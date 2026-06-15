@@ -67,3 +67,16 @@ python torchtitan/experiments/rl/train.py \
 ```
 
 Watch `validation_reward/_mean` (NQ test EM) trend up.
+
+## Results
+
+Validation exact-match (held-out NQ test split, greedy decoding) climbs steadily as the
+policy learns to call `search` and answer concisely.
+
+**Qwen3-1.7B** — EM ~0.05 → ~0.40 (peak ~0.41):
+
+![Qwen3-1.7B validation EM](./assets/validation_em_1.7b.png)
+
+**Qwen3-8B** — EM ~0.26 → ~0.45 (peak ~0.45):
+
+![Qwen3-8B validation EM](./assets/validation_em_8b.png)
