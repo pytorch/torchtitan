@@ -2040,7 +2040,14 @@
       "<|vision_start|>": 2005,
       "<|vision_end|>": 2006,
       "<|image_pad|>": 2007,
-      "<|video_pad|>": 2008
+      "<|video_pad|>": 2008,
+      "<|im_start|>": 2009,
+      "<|im_end|>": 2010,
+      "<tool_call>": 2011,
+      "</tool_call>": 2012,
+      "<tool_response>": 2013,
+      "</tool_response>": 2014,
+      "</think>": 2015
     },
     "merges": []
   }

@@ -20,12 +20,7 @@ import torch.distributed as dist
 from torch.distributed._tensor import DTensor, Replicate
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    CompileConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.protocols.model_spec import ModelSpec
@@ -128,6 +123,10 @@ class VLLMModelWrapper(Module):
         # validation lives in Generator.Config.__post_init__; these are
         # internal invariants — by the time we get here, parallelism has
         # already been validated.
+        assert parallelism.data_parallel_shard_degree == 1, (
+            "vLLM wrapper requires data_parallel_shard_degree=1, "
+            f"got {parallelism.data_parallel_shard_degree}"
+        )
         assert parallelism.pipeline_parallel_degree == 1, (
             "vLLM wrapper requires pipeline_parallel_degree=1, "
             f"got {parallelism.pipeline_parallel_degree}"
@@ -169,14 +168,15 @@ class VLLMModelWrapper(Module):
         self.config = dataclasses.replace(model_config, layers=new_layers)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
-        # Build ParallelDims from the torchtitan ParallelismConfig (the
-        # controller's source of truth) rather than vLLM's parallel_config.
+        # Build ParallelDims from the TorchTitan ParallelismConfig so TP/EP
+        # sharding sees the same mesh shape as vLLM. In the generator,
+        # data_parallel_shard_degree means vLLM pure DP, not TorchTitan FSDP.
         self.parallel_dims = ParallelDims(
             dp_replicate=parallelism.data_parallel_replicate_degree,
-            dp_shard=1,
-            cp=1,
+            dp_shard=parallelism.data_parallel_shard_degree,
+            cp=parallelism.context_parallel_degree,
             tp=parallelism.tensor_parallel_degree,
-            pp=1,
+            pp=parallelism.pipeline_parallel_degree,
             ep=parallelism.expert_parallel_degree,
             world_size=dist.get_world_size(),
         )
@@ -193,8 +193,9 @@ class VLLMModelWrapper(Module):
 
         self.config.update_from_config(config=_InferenceConfig(parallelism=parallelism))
 
-        # TODO: Check if it's possible to apply meta init
-        self.model = self.config.build()
+        # Build model on meta device to avoid allocating full model on every GPU
+        with torch.device("meta"):
+            self.model = self.config.build()
 
         # With TP, collectives may return AsyncCollectiveTensor (overlap
         # path) or plain Tensor (sync path) depending on timing.  Dynamo
@@ -211,13 +212,26 @@ class VLLMModelWrapper(Module):
             training=TrainingConfig(),
             parallelism=parallelism,
             compile_config=compile_config,
-            ac_config=ActivationCheckpointConfig(mode="none"),
+            ac_config=None,
             dump_folder="",
+            # Generator inference replicates parameters across vLLM DP groups.
+            # Keep TP/EP sharding above, but do not translate dp_shard into
+            # TorchTitan FSDP/DDP here.
             skip_dp=True,
         )
 
         # Load initial weights based on checkpoint config.
         self._checkpoint_config = checkpoint_config
+
+        # Materialize model on GPU — only allocates local shards (not full
+        # model) thanks to EP/TP DTensor sharding applied above.
+        self.model.to_empty(device=vllm_config.device_config.device)
+        # HF checkpoints do not necessarily contain every TorchTitan buffer
+        # (for example MoE expert_bias_E).
+        # TODO: When checkpoint doesn't contains expert_bias_E, check the config
+        # should use loss based load balancing strategy.
+        with torch.no_grad():
+            self.model.init_weights(buffer_device=None)
         self._maybe_initial_load_weights()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -303,6 +317,7 @@ class VLLMModelWrapper(Module):
         logits = self.model.lm_head(hidden_states)
 
         # Full DTensor path returns logits as DTensor; vLLM expects plain tensors.
+        # disable_loss_parallel=True already makes lm_head output Replicate
         if isinstance(logits, DTensor):
             logits = logits.to_local()
 
