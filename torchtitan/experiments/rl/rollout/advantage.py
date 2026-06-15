@@ -19,11 +19,12 @@ from torchtitan.config import Configurable
 from torchtitan.experiments.rl.rollout.types import RolloutGroup
 
 
-class GRPOAdvantage(Configurable):
-    """Group-relative advantage: ``A_i = (r_i - mean(r)) / denom``.
+class AdvantageEstimator(Configurable):
+    """Group-relative advantage estimator: ``A_i = (r_i - mean(r)) / denom``.
 
     ``denom = std(r) + eps`` when ``should_std_normalize`` (standard GRPO), else
-    ``1.0`` (Dr.GRPO mean-baseline).
+    ``1.0`` (Dr.GRPO mean-baseline). The name is intentionally general — other
+    advantage schemes can live here later.
     """
 
     @dataclass(kw_only=True, slots=True)

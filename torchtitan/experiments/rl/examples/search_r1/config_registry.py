@@ -33,7 +33,7 @@ from torchtitan.experiments.rl.examples.search_r1.rollouter import SearchR1Rollo
 from torchtitan.experiments.rl.losses import DAPOLoss
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
-from torchtitan.experiments.rl.rollout.advantage import GRPOAdvantage
+from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.experiments.rl.trainer import RLTrainer
 from torchtitan.models.qwen3 import model_registry
 
@@ -59,7 +59,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
         # Standard GRPO (advantage normalized by group reward std). Advantage is a
         # post-scoring step on the rollouter; the trainer just consumes it.
         rollouter=SearchR1Rollouter.Config(
-            advantage=GRPOAdvantage.Config(should_std_normalize=True),
+            advantage=AdvantageEstimator.Config(should_std_normalize=True),
         ),
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
