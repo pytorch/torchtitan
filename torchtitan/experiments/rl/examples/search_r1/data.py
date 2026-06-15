@@ -10,8 +10,7 @@ import random
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-import pandas as pd
-from huggingface_hub import hf_hub_download
+from datasets import load_dataset
 
 from torchtitan.config import Configurable
 
@@ -59,26 +58,29 @@ class SearchR1Dataset(Configurable):
         validation so the first N rows are a fixed, file-order held-out set."""
 
     def __init__(self, config: Config) -> None:
-        columns = ["question", "golden_answers"]
+        source = config.data_path or f"{config.repo_id}/{config.filename}"
+        # A local parquet overrides the HF download; `datasets` handles both.
+        if config.data_path:
+            dataset = load_dataset(
+                "parquet", data_files=config.data_path, split="train"
+            )
+        else:
+            dataset = load_dataset(
+                config.repo_id, data_files=config.filename, split="train"
+            )
         if config.data_source is not None:
-            columns.append("data_source")
-        path = config.data_path or hf_hub_download(
-            repo_id=config.repo_id, filename=config.filename, repo_type="dataset"
-        )
-        df = pd.read_parquet(path, columns=columns)
-        if config.data_source is not None:
-            df = df[df["data_source"] == config.data_source].reset_index(drop=True)
-            if df.empty:
+            dataset = dataset.filter(lambda ex: ex["data_source"] == config.data_source)
+            if len(dataset) == 0:
                 raise ValueError(
-                    f"no rows with data_source={config.data_source!r} in {path}"
+                    f"no rows with data_source={config.data_source!r} in {source}"
                 )
-        self._questions: list[str] = [str(q) for q in df["question"].tolist()]
+        self._questions: list[str] = [str(q) for q in dataset["question"]]
         # golden_answers is a per-row array of strings; normalize to list[str].
         self._golden_answers: list[list[str]] = [
-            [str(a) for a in answers] for answers in df["golden_answers"].tolist()
+            [str(a) for a in answers] for answers in dataset["golden_answers"]
         ]
         if not self._questions:
-            raise ValueError(f"no rows found in {path}")
+            raise ValueError(f"no rows found in {source}")
 
         self._rng = random.Random(config.seed)
         self._shuffle = config.shuffle
