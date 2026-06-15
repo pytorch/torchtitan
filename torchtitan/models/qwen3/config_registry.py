@@ -13,11 +13,8 @@ from torchtitan.components.optimizer import (
     OptimizersContainer,
     ParamGroupConfig,
 )
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import (
     ChatDataLoader,
     HuggingFaceTextDataLoader,
@@ -50,9 +47,7 @@ def qwen3_debugmodel() -> Trainer.Config:
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
 
 
@@ -113,9 +108,7 @@ def qwen3_debugmodel_flex_flash() -> Trainer.Config:
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
 
 
@@ -140,9 +133,7 @@ def qwen3_0_6b() -> Trainer.Config:
             last_save_model_only=False,
             export_dtype="float16",
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
 
 
@@ -166,9 +157,7 @@ def qwen3_1_7b() -> Trainer.Config:
             last_save_model_only=False,
             export_dtype="float16",
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
 
 
@@ -198,9 +187,7 @@ def qwen3_14b() -> Trainer.Config:
             last_save_model_only=False,
             export_dtype="float16",
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="full",
-        ),
+        activation_checkpoint=FullAC.Config(),
     )
 
 
@@ -230,9 +217,7 @@ def qwen3_30b_a3b() -> Trainer.Config:
             last_save_model_only=False,
             export_dtype="float16",
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="full",
-        ),
+        activation_checkpoint=FullAC.Config(),
     )
 
 
@@ -262,9 +247,7 @@ def qwen3_32b() -> Trainer.Config:
             last_save_model_only=False,
             export_dtype="float16",
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="full",
-        ),
+        activation_checkpoint=FullAC.Config(),
     )
 
 
@@ -291,9 +274,7 @@ def qwen3_debugmodel_fused_qkv() -> Trainer.Config:
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
 
 
@@ -321,9 +302,7 @@ def qwen3_moe_debug() -> Trainer.Config:
             last_save_model_only=False,
             export_dtype="float16",
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
 
 
@@ -371,7 +350,5 @@ def sft_qwen3_8b_math() -> Trainer.Config:
             enable=True,
             initial_load_in_hf=True,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
