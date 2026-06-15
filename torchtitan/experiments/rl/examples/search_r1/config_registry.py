@@ -99,14 +99,10 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
-            # cudagraph ON, but cap the capture size. Full cudagraph capture at large
-            # batch (our max_num_seqs hits 256-500) corrupts generation in this stack
-            # ("locklock" degenerate tokens + NaN logprobs at step-0); the working
-            # alphabet_sort config only captures up to 40. Capping capture at 64 keeps
-            # cudagraph for the small decode batches (speed) and falls back to eager for
-            # larger batches, avoiding the bad large-graph capture. The GRPOLoss NaN-drop
-            # additionally tolerates any residual NaN logprobs. (cap tuned empirically.)
-            cudagraph=VLLMCudagraphConfig(enable=True, max_capture_size=64),
+            # Eager generation (cudagraph off). Full cudagraph capture at large batch
+            # corrupts generation on this vLLM build; until that's root-caused we run
+            # eager (tracked separately).
+            cudagraph=VLLMCudagraphConfig(enable=False),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 temperature=1.0,
