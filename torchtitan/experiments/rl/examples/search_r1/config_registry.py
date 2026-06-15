@@ -61,7 +61,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
         rollouter=SearchR1Rollouter.Config(
             advantage=GRPOAdvantage.Config(std_normalize=True),
         ),
-        renderer=RendererConfig(name="qwen3", enable_thinking=True),
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=1, global_batch_size=48, seq_len=4096),

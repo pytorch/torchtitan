@@ -7,9 +7,9 @@
 """Search-R1 exact-match reward over a tool-calling rollout.
 
 By default this is a pure-EM 0/1 reward: the assistant's final answer matching a gold
-answer -> 1.0, else 0. Set ``retrieval_score`` > 0 to also give partial credit when a
-gold answer was actually surfaced by a search (rewards searching over answering from
-parametric memory).
+answer -> 1.0, else 0. Two opt-in levers reward searching over answering from parametric
+memory: ``no_search_penalty`` (a correct answer that never searched scores less) and
+``retrieval_score`` (a wrong answer still gets credit if a search surfaced the gold).
 """
 
 from __future__ import annotations
@@ -52,6 +52,13 @@ def _final_answer(rollout: Rollout) -> str | None:
     return content.strip() if isinstance(content, str) and content.strip() else None
 
 
+def _made_search_call(rollout: Rollout) -> bool:
+    """True if the assistant called the search tool at least once."""
+    return any(
+        (turn.completion_message or {}).get("tool_calls") for turn in rollout.turns
+    )
+
+
 def _retrieval_surfaced_gold(rollout: Rollout, golden_answers: list[str]) -> bool:
     """True if a gold answer (normalized) appears in any search (tool) result."""
     for turn in rollout.turns:
@@ -70,15 +77,25 @@ def _retrieval_surfaced_gold(rollout: Rollout, golden_answers: list[str]) -> boo
 class RewardExactMatch(RewardFn):
     """Exact-match reward over the tool-calling rollout's final answer.
 
-    Default = pure-EM 0/1. Set ``retrieval_score`` > 0 to give partial credit to a
-    wrong/unanswered rollout that nonetheless retrieved a gold answer, putting search
-    on the gradient so the policy can't max reward by answering from parametric memory.
+    Default = pure-EM 0/1. Two opt-in levers put search on the gradient (anti
+    closed-book reward hacking, i.e. answering from parametric memory without
+    searching):
+
+    - ``no_search_penalty`` > 0: a correct answer that never called the search tool
+      scores ``score - no_search_penalty`` (< a searched correct answer's ``score``).
+    - ``retrieval_score`` > 0: a wrong/missing answer still gets this credit if a
+      search surfaced a gold answer.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(RewardFn.Config):
         score: float = 1.0
-        """Reward for a correct final answer."""
+        """Reward for a correct final answer (that used search)."""
+
+        no_search_penalty: float = 0.0
+        """Deducted from a correct answer that never called search. 0 (default) = pure
+        EM; set > 0 (e.g. 0.2) so a closed-book correct answer scores below a searched
+        one."""
 
         retrieval_score: float = 0.0
         """Credit when a gold answer was surfaced by a search but the final answer is
@@ -87,12 +104,15 @@ class RewardExactMatch(RewardFn):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         self._score = config.score
+        self._no_search_penalty = config.no_search_penalty
         self._retrieval_score = config.retrieval_score
 
     async def __call__(self, rollout: Rollout, env_input: SearchR1Sample) -> float:
         answer = _final_answer(rollout)
         if answer is not None and _is_exact_match(answer, env_input.golden_answers):
-            return self._score
+            if _made_search_call(rollout):
+                return self._score
+            return self._score - self._no_search_penalty
         if self._retrieval_score and _retrieval_surfaced_gold(
             rollout, env_input.golden_answers
         ):

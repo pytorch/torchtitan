@@ -151,3 +151,15 @@ def test_reward_no_retrieval_credit_by_default():
         r(_rollout(answer="London", tool_results=["capital is Paris"]), EX)
     )
     assert got == 0.0
+
+
+def test_reward_no_search_penalty_anti_closed_book():
+    r = RewardExactMatch(RewardExactMatch.Config(no_search_penalty=0.2))
+    # correct but never searched (closed-book) -> 1.0 - 0.2 = 0.8
+    closed_book = asyncio.run(r(_rollout(answer="Paris"), EX))
+    assert abs(closed_book - 0.8) < 1e-9
+    # correct and searched -> full 1.0
+    searched = asyncio.run(
+        r(_rollout(answer="Paris", tool_results=["capital is Paris"]), EX)
+    )
+    assert searched == 1.0
