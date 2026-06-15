@@ -80,13 +80,13 @@ class ModelWrapper(Stateful):
            with them through a unified interface.
         2. Stable-storage caching: It caches the flattened state dict and, on
            every `state_dict()` call, returns tensors backed by the same
-           storage. Async DCP staging caches pinned host buffers keyed by the
+           storage. Async DCP staging may cache pinned host buffers keyed by the
            source storage, so keeping the storage stable lets it reuse those
            buffers across saves (the fast checkpoint path). Parameter tensors
            already satisfy this because the cached view shares the parameter
            storage; tensors produced by module `state_dict` hooks (e.g. one that
-           splits a fused parameter) are freshly allocated each call, so they are
-           refreshed in place to keep their storage stable while their values
+           splits a fused parameter) may be freshly allocated each call, so they
+           are refreshed in place to keep their storage stable while their values
            track the current parameters.
 
     Notes:
@@ -100,33 +100,24 @@ class ModelWrapper(Stateful):
     def __init__(self, model: nn.Module | list[nn.Module]) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
         self.cached_state_dict = self._get_state_dict()
-        self._refreshed_keys = self._find_refreshed_keys()
 
     def _get_state_dict(self) -> dict[str, Any]:
         # TorchTitan already makes model state_dict keys canonical.
         return {k: v for model in self.model for k, v in model.state_dict().items()}
 
-    def _find_refreshed_keys(self) -> set[str]:
-        # Tensors emitted by a module `state_dict` hook are freshly allocated on
-        # each call instead of being a view into a parameter's storage. Detect
-        # them by comparing two probes: a parameter view keeps the same storage,
-        # a fresh allocation does not. Only these need refreshing each save.
-        probe = self._get_state_dict()
-        return {
-            key
-            for key, value in self.cached_state_dict.items()
-            if key not in probe or not _shares_storage(value, probe[key])
-        }
-
     def state_dict(self) -> dict[str, Any]:
-        # Refresh hook-produced tensors in place: copy current values into the
-        # cached tensors so their storage objects stay stable (keeping the async
-        # pinned-memory staging buffers reusable). Parameter-backed tensors share
-        # storage with the live parameter and need no refresh.
-        if self._refreshed_keys:
-            fresh = self._get_state_dict()
-            for key in self._refreshed_keys:
-                self.cached_state_dict[key].copy_(fresh[key])
+        # Recompute the state dict so hook-produced tensors reflect the current
+        # parameters, then merge into the cache without changing storage objects.
+        for key, value in self._get_state_dict().items():
+            cached = self.cached_state_dict.get(key)
+            if (
+                cached is None
+                or cached.shape != value.shape
+                or cached.dtype != value.dtype
+            ):
+                self.cached_state_dict[key] = value
+            elif not _shares_storage(cached, value):
+                cached.copy_(value)
         return self.cached_state_dict
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
