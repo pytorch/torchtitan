@@ -82,6 +82,7 @@ def _shared_expert_colwise_config() -> ShardingConfig:
         },
         in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
         in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
+        out_src_shardings=dense_activation_placement(tp=spmd.S(2)),
         out_dst_shardings=dense_activation_placement(tp=spmd.S(2)),
     )
 
@@ -102,6 +103,7 @@ def _shared_expert_rowwise_config() -> ShardingConfig:
             "bias": dense_param_placement(tp=spmd.R),
         },
         in_src_shardings={"input": dense_activation_placement(tp=spmd.S(2))},
+        out_src_shardings=dense_activation_placement(tp=spmd.P),
         out_dst_shardings=dense_activation_placement(tp=spmd.P),
     )
 
