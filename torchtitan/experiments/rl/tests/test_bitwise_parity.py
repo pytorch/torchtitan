@@ -62,10 +62,11 @@ from torchtitan.experiments.rl.actors.trainer import compute_logprobs
 from torchtitan.experiments.rl.config_registry import (
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
-    rl_grpo_qwen3_moe_debug_ep_batch_invariant,
+    rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
 from torchtitan.experiments.rl.models.vllm_registry import (
     registry_to_vllm,
+    TORCHTITAN_CONFIG_FORMAT,
     VLLM_MODEL_NAME,
 )
 from torchtitan.experiments.rl.trainer import RLTrainer
@@ -208,6 +209,9 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     engine_kwargs = dict(
         model=config.hf_assets_path,
         trust_remote_code=True,
+        # Build the model config from torchtitan's ModelSpec via the custom
+        # parser registered by registry_to_vllm, instead of reading config.json.
+        config_format=TORCHTITAN_CONFIG_FORMAT,
         dtype=gen_config.model_dtype,
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         # Generator-only convention: this config field is TorchTitan FSDP
@@ -730,8 +734,8 @@ class TestBitwiseParityFlex(BitwiseParityTestBase):
 class TestBitwiseParityMoEEP(BitwiseParityTestBase):
     """Test bitwise parity between trainer and vLLM generator with MoE EP.
 
-    Generator uses TP=4, EP=4 on 4 GPUs. Trainer uses TP=4, EP=4 on
-    the same 4 GPUs.
+    On 4 GPUs: trainer uses dp_shard=2, TP=2, EP=4; the generator maps
+    dp_shard=2 to vLLM data parallelism with TP=2, EP=4.
 
     Uses the bundled debug MoE assets by default. Override with
     MOE_HF_ASSETS_PATH if needed.
@@ -743,7 +747,7 @@ class TestBitwiseParityMoEEP(BitwiseParityTestBase):
     PROMPT_LENGTH = 100
     MAX_GEN_TOKENS = 30
 
-    config_fn = staticmethod(rl_grpo_qwen3_moe_debug_ep_batch_invariant)
+    config_fn = staticmethod(rl_grpo_qwen3_moe_debug_varlen_batch_invariant)
     attn_backend = "varlen"
     min_world_size = 4
     hf_assets_env_var = "MOE_HF_ASSETS_PATH"
