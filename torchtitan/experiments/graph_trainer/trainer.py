@@ -110,6 +110,16 @@ class GraphTrainer(Trainer):
         # Lazy state for aot_fx_trace mode
         self._traced_step: TracedResult | None = None
 
+        if self.config.compile.memory_policy == "sac_and_offload":
+            from torch._functorch._activation_offloading.offload_ops import (
+                pinned_memory_pool,
+            )
+
+            self._pinned_pool_ctx = pinned_memory_pool()
+            self._pinned_pool_ctx.__enter__()
+        else:
+            self._pinned_pool_ctx = None
+
         # Run post-init hook for the active pass pipeline
         POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
 
@@ -238,6 +248,10 @@ class GraphTrainer(Trainer):
         super().train_step(data_iterator)
 
     def close(self) -> None:
+        if self._pinned_pool_ctx is not None:
+            self._pinned_pool_ctx.__exit__(None, None, None)
+            self._pinned_pool_ctx = None
+
         super().close()
 
         # See Note [explicit cudagraph teardown] in cudagraph.py

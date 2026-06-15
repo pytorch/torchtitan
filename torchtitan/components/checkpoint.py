@@ -31,6 +31,7 @@ from torch.distributed.checkpoint.state_dict_saver import (
     AsyncSaveResponse,
 )
 from torch.distributed.checkpoint.stateful import Stateful
+from torch.distributed.tensor import DTensor
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
@@ -53,6 +54,20 @@ class AsyncMode(str, enum.Enum):
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
 
 
+def _shares_storage(a: torch.Tensor, b: torch.Tensor) -> bool:
+    """Whether ``a`` and ``b`` are backed by the same storage.
+
+    For ``DTensor`` the local shard's storage is compared. This is a read-only
+    identity check on already-detached ``state_dict`` tensors, so there is no
+    autograd interaction.
+    """
+    if isinstance(a, DTensor):
+        a = a.to_local()
+    if isinstance(b, DTensor):
+        b = b.to_local()
+    return a.untyped_storage().data_ptr() == b.untyped_storage().data_ptr()
+
+
 class ModelWrapper(Stateful):
     """
     A wrapper for `nn.Module` (or a list of modules) that provides a unified `Stateful`
@@ -63,11 +78,16 @@ class ModelWrapper(Stateful):
            different modules (like individual chunks in Pipeline Parallelism)
            into a single flat view so checkpointing code can interact
            with them through a unified interface.
-        2. State Dict Caching: It caches the flattened state dict and returns
-           the same dictionary object on subsequent `state_dict()` calls.
-           This avoids repeatedly reconstructing the aggregated state dict and
-           allows downstream checkpointing implementations to reuse the cached
-           mapping when stable object references are beneficial.
+        2. Stable-storage caching: It caches the flattened state dict and, on
+           every `state_dict()` call, returns tensors backed by the same
+           storage. Async DCP staging caches pinned host buffers keyed by the
+           source storage, so keeping the storage stable lets it reuse those
+           buffers across saves (the fast checkpoint path). Parameter tensors
+           already satisfy this because the cached view shares the parameter
+           storage; tensors produced by module `state_dict` hooks (e.g. one that
+           splits a fused parameter) are freshly allocated each call, so they are
+           refreshed in place to keep their storage stable while their values
+           track the current parameters.
 
     Notes:
         - Calling `load_state_dict` updates the underlying modules and
@@ -80,12 +100,33 @@ class ModelWrapper(Stateful):
     def __init__(self, model: nn.Module | list[nn.Module]) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
         self.cached_state_dict = self._get_state_dict()
+        self._refreshed_keys = self._find_refreshed_keys()
 
     def _get_state_dict(self) -> dict[str, Any]:
         # TorchTitan already makes model state_dict keys canonical.
         return {k: v for model in self.model for k, v in model.state_dict().items()}
 
+    def _find_refreshed_keys(self) -> set[str]:
+        # Tensors emitted by a module `state_dict` hook are freshly allocated on
+        # each call instead of being a view into a parameter's storage. Detect
+        # them by comparing two probes: a parameter view keeps the same storage,
+        # a fresh allocation does not. Only these need refreshing each save.
+        probe = self._get_state_dict()
+        return {
+            key
+            for key, value in self.cached_state_dict.items()
+            if key not in probe or not _shares_storage(value, probe[key])
+        }
+
     def state_dict(self) -> dict[str, Any]:
+        # Refresh hook-produced tensors in place: copy current values into the
+        # cached tensors so their storage objects stay stable (keeping the async
+        # pinned-memory staging buffers reusable). Parameter-backed tensors share
+        # storage with the live parameter and need no refresh.
+        if self._refreshed_keys:
+            fresh = self._get_state_dict()
+            for key in self._refreshed_keys:
+                self.cached_state_dict[key].copy_(fresh[key])
         return self.cached_state_dict
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:

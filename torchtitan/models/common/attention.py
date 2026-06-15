@@ -27,6 +27,7 @@ from torch.nn.attention.flex_attention import (
 )
 from torch.nn.attention.varlen import varlen_attn
 
+from torchtitan.distributed.compile import maybe_regional_inductor
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
@@ -231,16 +232,21 @@ class FlexAttention(Module):
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
         #    `FlexAttention._compiled_flex_attn` is correct.
-        out, aux = FlexAttention._compiled_flex_attn(
-            q,
-            k,
-            v,
-            block_mask=attention_masks,
-            scale=scale,
-            enable_gqa=enable_gqa,
-            return_aux=AuxRequest(lse=return_lse),
-            kernel_options=self.kernel_options,
-        )
+        # Mark the flex region so that, when the enclosing model is compiled with
+        # a non-inductor backend, regional_inductor scoops just this region into
+        # an inductor sub-compile (see distributed/compile.py). A null context on
+        # the default inductor / eager paths, so no dead metadata is emitted.
+        with maybe_regional_inductor(FlexAttention.inductor_configs):
+            out, aux = FlexAttention._compiled_flex_attn(
+                q,
+                k,
+                v,
+                block_mask=attention_masks,
+                scale=scale,
+                enable_gqa=enable_gqa,
+                return_aux=AuxRequest(lse=return_lse),
+                kernel_options=self.kernel_options,
+            )
         # Transpose back to (bs, seq, heads, dim)
         if return_lse:
             return out.transpose(1, 2), aux.lse.transpose(1, 2)
