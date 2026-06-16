@@ -69,10 +69,12 @@ Watch `validation_reward/_mean` (NQ test EM) trend up.
 Validation exact-match (held-out NQ test split, greedy decoding) climbs steadily as the
 policy learns to call `search` and answer concisely.
 
-**Qwen3-1.7B** — EM ~0.05 → ~0.40 (peak ~0.41):
+**Qwen3-1.7B** — EM ~0.05 → ~0.40 (peak ~0.41), run at commit
+[`e28796e0`](https://github.com/pytorch/torchtitan/pull/3602/changes/e28796e0df801a5b5b30c34043cdd8bba14a6ea5):
 
 ![Qwen3-1.7B validation EM](./assets/validation_em_1.7b.png)
 
-**Qwen3-8B** — EM ~0.26 → ~0.45 (peak ~0.45):
+**Qwen3-8B** — EM ~0.26 → ~0.45 (peak ~0.45), run at commit
+[`4b183e3a`](https://github.com/pytorch/torchtitan/pull/3602/changes/4b183e3aa26cce5da4689593ffd0cd419a32a32e):
 
 ![Qwen3-8B validation EM](./assets/validation_em_8b.png)
