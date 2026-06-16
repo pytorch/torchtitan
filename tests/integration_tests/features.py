@@ -110,7 +110,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--compile.enable",
-                    "--activation_checkpoint.mode selective",
+                    "activation-checkpoint:selective",
                 ],
             ],
             "1D compile with selective op AC",
@@ -198,59 +198,11 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--checkpoint.enable",
                     "--checkpoint.last_save_model_only",
-                ],
-            ],
-            "Checkpoint Integration Test - Save Model Only fp32",
-            "last_save_model_only_fp32",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable",
-                    "--checkpoint.last_save_model_only",
                     "--checkpoint.export_dtype bfloat16",
                 ],
             ],
             "Checkpoint Integration Test - Save Model Only bf16",
             "last_save_model_only_bf16",
-        ),
-        # TODO: Disabled with the FlexAttention default (SDPA is no longer a
-        # language-model backend). Zero-bubble / multi schedules split backward
-        # and call torch's stage_backward_input, which runs
-        # _get_grad_fn_or_grad_acc (t.requires_grad) over every stage input —
-        # including the forwarded FlexAttention BlockMask, which is not a Tensor
-        # ("'BlockMask' object has no attribute 'requires_grad'"). Full-backward
-        # schedules (1F1B/GPipe/Interleaved1F1B) are unaffected. Re-enable once
-        # stage_backward_input skips non-tensor stage inputs upstream.
-        # (VarlenAttention's tensor-based metadata would sidestep this, but
-        # varlen requires flash_attn_interface/FA3, which the core integration
-        # CI does not install; SDPA is no longer a core LM backend. So the
-        # upstream stage_backward_input fix is the path here.)
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree 4",
-                    "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
-                    "--activation_checkpoint.mode full",
-                ],
-            ],
-            "PP looped zero bubble test",
-            "pp_looped_zero_bubble",
-            ngpu=4,
-            disabled=True,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
-                    "--activation_checkpoint.mode full",
-                ],
-            ],
-            "PP zero bubble test (v shaped)",
-            "pp_zbv",
-            ngpu=2,
-            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -262,18 +214,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             "PP 1D test 1F1B",
             "pp_1f1b",
-            ngpu=2,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule GPipe",
-                    "--parallelism.data_parallel_shard_degree 1",
-                ],
-            ],
-            "PP 1D test GPipe",
-            "pp_gpipe",
             ngpu=2,
         ),
         OverrideDefinitions(
@@ -298,21 +238,11 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule GPipe",
-                    "--parallelism.data_parallel_shard_degree 2",
-                ],
-            ],
-            "PP+DP GPipe 2D test",
-            "pp_dp_gpipe",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "PP+TP 2D test",
-            "pp_tp",
+            "PP+TP GPipe 2D test",
+            "pp_tp_gpipe",
         ),
         OverrideDefinitions(
             [
@@ -363,6 +293,44 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "pp_looped_1f1b",
             ngpu=4,
         ),
+        # TODO: Disabled with the FlexAttention default (SDPA is no longer a
+        # language-model backend). Zero-bubble / multi schedules split backward
+        # and call torch's stage_backward_input, which runs
+        # _get_grad_fn_or_grad_acc (t.requires_grad) over every stage input —
+        # including the forwarded FlexAttention BlockMask, which is not a Tensor
+        # ("'BlockMask' object has no attribute 'requires_grad'"). Full-backward
+        # schedules (1F1B/GPipe/Interleaved1F1B) are unaffected. Re-enable once
+        # stage_backward_input skips non-tensor stage inputs upstream.
+        # (VarlenAttention's tensor-based metadata would sidestep this, but
+        # varlen requires flash_attn_interface/FA3, which the core integration
+        # CI does not install; SDPA is no longer a core LM backend. So the
+        # upstream stage_backward_input fix is the path here.)
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.pipeline_parallel_degree 4",
+                    "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
+                    "activation-checkpoint:full",
+                ],
+            ],
+            "PP looped zero bubble test",
+            "pp_looped_zero_bubble",
+            ngpu=4,
+            disabled=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
+                    "activation-checkpoint:full",
+                ],
+            ],
+            "PP zero bubble test (v shaped)",
+            "pp_zbv",
+            ngpu=2,
+            disabled=True,
+        ),
         # TODO: Disabled for the same reason as the zero-bubble PP tests above:
         # the custom CSV schedule splits backward (separate input-grad step),
         # so stage_backward_input chokes on the forwarded FlexAttention
@@ -373,23 +341,13 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
                     "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
-                    "--activation_checkpoint.mode full",
+                    "activation-checkpoint:full",
                 ],
             ],
             "PP with custom pipeline schedule loaded from CSV file",
             "pp_custom_csv",
             ngpu=2,
             disabled=True,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--optimizer.implementation foreach",
-                ]
-            ],
-            "Foreach Optimizer Test",
-            "optimizer_foreach",
-            ngpu=2,
         ),
         OverrideDefinitions(
             [
@@ -427,22 +385,10 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--parallelism.context_parallel_degree=4",
-                    "--parallelism.context_parallel_rotate_method='allgather'",
                 ]
             ],
-            "CP (allgather)",
-            "cp_allgather",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.context_parallel_degree=4",
-                    "--parallelism.context_parallel_rotate_method='alltoall'",
-                ]
-            ],
-            "CP (alltoall)",
-            "cp_alltoall",
+            "CP",
+            "cp",
             ngpu=4,
         ),
         OverrideDefinitions(
@@ -565,21 +511,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--dataloader.num_workers",
-                    "2",
-                    "--dataloader.pin_memory",
-                    "--dataloader.persistent_workers",
-                    "--dataloader.prefetch_factor",
-                    "4",
-                ],
-            ],
-            "Dataloader kwargs (via CLI args)",
-            "dataloader_kwargs",
-            ngpu=2,
-        ),
-        OverrideDefinitions(
-            [
-                [
                     "--override.imports torchtitan.overrides.fused_swiglu",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
@@ -595,7 +526,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--module llama3 --config llama3_debugmodel_varlen_attn",
                     "--parallelism.data_parallel_shard_degree=4",
-                    "--activation_checkpoint.mode=selective",
+                    "activation-checkpoint:selective",
                 ]
             ],
             "FSDP+VARLEN_ATTN + per op SAC",

@@ -40,6 +40,11 @@ def rollout_to_episodes(rollout: Rollout) -> list[Episode]:
         #    episode 1: token_ids=[P2,C4,E4,C5],        loss_mask=[0,1,0,1]       sample_id=".../branch=1"
     """
     rollout_advantage = rollout.advantage
+    if rollout_advantage is None:
+        raise ValueError(
+            f"rollout {rollout.sample_id!r} has no advantage; the Rollouter must fill it "
+            "(via its advantage estimator) before episodes are built."
+        )
     episodes: list[Episode] = []
 
     # Used to check if [P1, C1] is prefix of [P1,C1,E1] in the docstring example
