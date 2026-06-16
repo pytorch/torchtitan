@@ -22,7 +22,7 @@ Per-instance targeting is first-class: ``@override(..., fqns=[...])`` selects
 Config class. This supports e.g. "fused MoE on these layers only" and A/B-ing a
 kernel across layers.
 
-See ``torchtitan/config/OVERRIDE.md`` for the full design document.
+See ``torchtitan/overrides/README.md`` for the full design document.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ class OverrideConfig:
 
     Example: ``["torchtitan.overrides.fused_swiglu", "vendor_x.kernels"]``
 
-    See ``torchtitan/config/OVERRIDE.md`` for details.
+    See ``torchtitan/overrides/README.md`` for details.
     """
 
 
