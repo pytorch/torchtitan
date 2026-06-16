@@ -25,10 +25,17 @@ IGNORE_INDEX = -100
 LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 
-def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+def cross_entropy_loss(
+    pred: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    loss_parallel: bool = True,
+) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
     if isinstance(pred, DTensor) and isinstance(labels, DTensor):
-        return _cross_entropy_via_local_map(pred, labels)
+        return _cross_entropy_via_local_map(
+            pred, labels, loss_parallel=loss_parallel
+        )
 
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
@@ -173,7 +180,12 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         return grad_logits, None, None, None
 
 
-def _cross_entropy_via_local_map(pred: DTensor, labels: DTensor) -> torch.Tensor:
+def _cross_entropy_via_local_map(
+    pred: DTensor,
+    labels: DTensor,
+    *,
+    loss_parallel: bool,
+) -> torch.Tensor:
     mesh = pred.device_mesh
     # Labels don't have a vocab dim.
     expected_labels_placements = tuple(
@@ -217,6 +229,11 @@ def _cross_entropy_via_local_map(pred: DTensor, labels: DTensor) -> torch.Tensor
                 flat_labels,
                 reduction="sum",
                 ignore_index=IGNORE_INDEX,
+            )
+        if not loss_parallel:
+            raise ValueError(
+                "cross_entropy_loss received vocab-sharded logits with "
+                "loss_parallel=False."
             )
 
         return _LossParallelCrossEntropy.apply(
@@ -470,6 +487,7 @@ class ChunkedCELoss(BaseLoss):
         self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
+        self.loss_parallel: bool = False
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Set the lm_head module. Must be called before the first __call__."""
@@ -575,7 +593,11 @@ class ChunkedCELoss(BaseLoss):
 
                 logits = lm_head(h_chunk)
 
-                chunk_loss = self.fn(logits, label_chunk)
+                chunk_loss = self.fn(
+                    logits,
+                    label_chunk,
+                    loss_parallel=self.loss_parallel,
+                )
                 if global_valid_tokens is not None:
                     chunk_loss = chunk_loss / global_valid_tokens
                 total_loss = total_loss + chunk_loss.detach()
