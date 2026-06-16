@@ -8,14 +8,13 @@
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
 from torchtitan.config import (
-    ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
@@ -31,7 +30,7 @@ def parallelize_llama(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
+    ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
     """
@@ -67,13 +66,8 @@ def parallelize_llama(
         compile_config.enable and "model" in compile_config.components
     )
 
-    if ac_config.mode != "none":
-        apply_ac(
-            model,
-            ac_config,
-            model_compile_enabled=model_compile_enabled,
-            base_folder=dump_folder,
-        )
+    if ac_config is not None:
+        ac_config.build(dump_folder=dump_folder).apply(model)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:

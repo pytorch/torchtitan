@@ -23,16 +23,20 @@ from torchtitan.config import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
+from torchtitan.experiments.rl.actors.generator import (
+    SamplingConfig,
+    VLLMCudagraphConfig,
+    VLLMGenerator,
+)
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
 from torchtitan.experiments.rl.generator_router import (
     GeneratorRouter,
-    RoundRobinRoutingStrategy,
+    LeastLoadedRoutingStrategy,
     StickySessionRoutingStrategy,
 )
-from torchtitan.experiments.rl.losses.grpo import GRPOLoss
+from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.trainer import RLTrainer
@@ -88,7 +92,9 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
         group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         generator_router=GeneratorRouter.Config(
-            strategy=RoundRobinRoutingStrategy.Config()
+            strategy=StickySessionRoutingStrategy.Config(
+                fallback_strategy=LeastLoadedRoutingStrategy.Config()
+            )
         ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
@@ -117,6 +123,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
@@ -130,20 +137,6 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
             ),
         ),
     )
-
-
-def rl_grpo_qwen3_0_6b_varlen_sticky() -> RLTrainer.Config:
-    """Same as `rl_grpo_qwen3_0_6b_varlen` but with group-sticky generator routing.
-
-    For the multi-generator sweep: pins a GRPO group's siblings (and their turns) to one generator
-    so they reuse its prompt-prefix KV cache. With >1 generator, round-robin scatters siblings and
-    re-prefills the shared prefix on each; sticky prefills it once.
-    """
-    config = rl_grpo_qwen3_0_6b_varlen()
-    config.generator_router = GeneratorRouter.Config(
-        strategy=StickySessionRoutingStrategy.Config()
-    )
-    return config
 
 
 def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
@@ -186,6 +179,7 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
@@ -324,10 +318,210 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=8,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=700,
+            ),
+        ),
+    )
+
+
+def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
+    """Debug MoE config with EP+TP on generator (8 GPUs: 4 gen + 4 train).
+
+    Generator uses TP=4 for dense layers and EP=4 for MoE experts.
+    """
+    group_size = 8
+    return RLTrainer.Config(
+        model_spec=model_registry("debugmodel_moe", attn_backend="varlen"),
+        hf_assets_path="tests/assets/tokenizer",
+        num_steps=5,
+        num_rollout_workers=5,
+        num_validation_samples=20,
+        # MoE EP all-to-all path issues unpinned D2H copies that block
+        # torch.compile and CUDA graph capture; disable both.
+        compile=CompileConfig(enable=False),
+        rollouter=AlphabetSortRollouter.Config(),
+        group_size=group_size,
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        batcher=Batcher.Config(
+            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
+        ),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=8e-4),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=4,
+                data_parallel_replicate_degree=1,
+                disable_loss_parallel=True,
+                expert_parallel_degree=4,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=False,
+                interval=10,
+                last_save_model_only=False,
+            ),
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            # Disable torch.compile + CUDA graph capture: the EP all-to-all
+            # path issues an unpinned D2H copy of split sizes that the
+            # piecewise/full graph capture rejects.
+            cudagraph=VLLMCudagraphConfig(enable=False),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=4,
+                data_parallel_replicate_degree=1,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
+                expert_parallel_degree=4,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=1.0,
+                top_p=0.95,
+                max_tokens=50,
+            ),
+        ),
+    )
+
+
+def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
+    """Batch-invariant MoE EP config for bitwise parity testing (8 GPUs).
+
+    Trainer: TP=4, EP=4 (4 GPUs). Generator: TP=4, EP=4 (4 GPUs).
+    """
+    group_size = 8
+    return RLTrainer.Config(
+        model_spec=model_registry(
+            "debugmodel_moe", attn_backend="varlen", moe_comm_backend="standard"
+        ),
+        hf_assets_path="tests/assets/tokenizer",
+        num_steps=10,
+        num_rollout_workers=5,
+        num_validation_samples=20,
+        # MoE EP all-to-all path issues unpinned D2H copies that block
+        # torch.compile and CUDA graph capture; disable both.
+        compile=CompileConfig(enable=False),
+        rollouter=AlphabetSortRollouter.Config(),
+        group_size=group_size,
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        batcher=Batcher.Config(
+            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
+        ),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=8e-4),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=4,
+                expert_parallel_degree=4,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=False,
+                interval=10,
+                last_save_model_only=False,
+            ),
+            debug=_BATCH_INVARIANT_DEBUG,
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            cudagraph=VLLMCudagraphConfig(enable=False),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=4,
+                data_parallel_replicate_degree=1,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
+                expert_parallel_degree=4,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=1.0,
+                top_p=0.95,
+                max_tokens=50,
+            ),
+            debug=_BATCH_INVARIANT_DEBUG,
+        ),
+    )
+
+
+def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
+    """GRPO training config for Qwen3-30B-A3B MoE (8 GPUs: 4 gen + 4 train).
+
+    Generator uses TP=4 for dense layers and EP=4 for MoE experts.
+    Trainer uses TP=4 for all layers.
+
+    Note: Qwen3-30B-A3B has 4 KV heads, so TP degree cannot exceed 4.
+    """
+    group_size = 8
+    return RLTrainer.Config(
+        model_spec=model_registry("30B-A3B", attn_backend="varlen"),
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-30B-A3B",
+        num_steps=10,
+        num_rollout_workers=5,
+        num_validation_samples=20,
+        compile=CompileConfig(enable=False),
+        rollouter=AlphabetSortRollouter.Config(),
+        group_size=group_size,
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        batcher=Batcher.Config(
+            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
+        ),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=1e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=4,
+                disable_loss_parallel=True,
+                expert_parallel_degree=4,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
+            ),
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            cudagraph=VLLMCudagraphConfig(enable=False),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=4,
+                data_parallel_replicate_degree=1,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
+                expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -387,6 +581,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,

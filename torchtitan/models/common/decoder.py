@@ -10,6 +10,10 @@ from dataclasses import dataclass
 import torch
 from torch.nn.attention.flex_attention import and_masks
 
+from torchtitan.distributed.minimal_async_ep.api import (
+    maybe_update_minimal_async_ep_config,
+)
+
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -21,11 +25,13 @@ from torchtitan.models.common.attention import (
     get_efficient_causal_mask_mod_for_packed_document,
     VarlenAttention,
 )
+from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.nn_modules import Embedding, Linear, RMSNorm
+from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
+
 
 __all__ = ["Decoder", "TransformerBlock"]
 
@@ -175,6 +181,8 @@ class Decoder(BaseModel):
                             "requires expert parallelism "
                             "(expert_parallel_degree > 1)."
                         )
+
+            maybe_update_minimal_async_ep_config(self, config)
 
             # NOTE: Inference-only callers such as the RL generator skip
             # training.seq_len sync. Generated sequence length is not known

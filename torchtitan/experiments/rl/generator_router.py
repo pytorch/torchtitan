@@ -18,7 +18,6 @@ from enum import auto, Enum
 from typing import Any
 
 from torchtitan.config import Configurable
-from torchtitan.observability import structured_logger as sl
 
 
 class _GeneratorState(Enum):
@@ -52,9 +51,10 @@ class RoutingContext:
     estimated_cost: int = 1
     """Estimated request cost used by load-aware routing strategies."""
 
-    session_key: str | None = None
-    """Sticky-routing key: requests sharing a key route to the same generator so its KV/prefix cache
-    is reused (e.g. a multi-turn rollout's turns). `None` opts out (the request is routed by load)."""
+    session_id: str | None = None
+    """Stable session key consumed only by sticky routing strategies; other
+    strategies ignore it. ``None`` means the request is unpinned and uses fallback
+    routing without session affinity."""
 
 
 class RoutingStrategy(Configurable, ABC):
@@ -115,55 +115,77 @@ class LeastLoadedRoutingStrategy(RoutingStrategy):
         """Return the serving generator with the lowest reserved load."""
 
         del routing_ctx
-        return min(candidates, key=lambda handle: handle.reserved_load)
+        return min(candidates, key=lambda h: h.reserved_load)
 
 
 class StickySessionRoutingStrategy(RoutingStrategy):
-    """Pin each session (e.g. one multi-turn rollout) to the generator it first landed on, so its turns
-    reuse that generator's KV/prefix cache. Least-loaded scatters a session's turns across generators
-    and misses the prefix cache; sticky keeps them together.
-
-    Falls back to least-loaded for a session with no key, an unseen key, or when the pinned generator
-    is no longer serving (e.g. draining for a non-hotswap weight sync).
-    """
+    """Keep requests from the same session on the same generator."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        pass
+        max_sessions: int = 4096
+        """Maximum number of session-to-generator assignments to retain,
+        evicting least-recently-used sessions first."""
 
-    # Cap on remembered pins. Only sessions in flight need a pin (a finished session's key never
-    # recurs), and at most ~num_rollout_workers are in flight; this LRU bound keeps the map
-    # from growing without limit over a long run while never evicting an active session.
-    _MAX_PINS = 1024
+        fallback_strategy: RoutingStrategy.Config = field(
+            default_factory=LeastLoadedRoutingStrategy.Config
+        )
+        """Routing strategy used for new sessions and requests without a session."""
+
+        def __post_init__(self):
+            if self.max_sessions <= 0:
+                raise ValueError(
+                    f"max_sessions must be positive, got {self.max_sessions}"
+                )
 
     def __init__(self, config: Config):
-        del config
-        # session_key -> pinned generator handle (by identity), LRU-ordered (oldest first).
-        self._pinned: OrderedDict[str, _GeneratorHandle] = OrderedDict()
+        self._max_sessions = config.max_sessions
+        self._fallback_strategy = config.fallback_strategy.build()
+        self._sessions: OrderedDict[str, _GeneratorHandle] = OrderedDict()
 
     def choose(
         self,
         routing_ctx: RoutingContext,
         candidates: Sequence[_GeneratorHandle],
     ) -> _GeneratorHandle:
-        key = routing_ctx.session_key
-        if key is not None:
-            pinned = self._pinned.get(key)
-            if pinned is not None and any(
-                pinned is candidate for candidate in candidates
-            ):
-                self._pinned.move_to_end(key)  # mark recently used
-                return pinned  # still serving: keep the session on its generator
-        chosen = min(candidates, key=lambda handle: handle.reserved_load)
-        if key is not None:
-            self._pinned[
-                key
-            ] = chosen  # pin a new (or displaced) session to a least-loaded generator
-            self._pinned.move_to_end(key)
-            if len(self._pinned) > self._MAX_PINS:
-                self._pinned.popitem(
-                    last=False
-                )  # evict the oldest (a long-finished session)
+        """Return the session's assigned generator, or assign a new one.
+
+        Unpinned requests (no ``session_id``) and first-seen sessions defer to
+        the fallback strategy; a session's first assignment is then remembered so
+        every later request with that key reuses the same generator. If a
+        session's pinned generator is no longer a serving candidate (e.g. it is
+        draining for a weight sync), the request falls back and the session is
+        re-pinned to the newly chosen generator. The map is bounded by
+        ``max_sessions`` and evicts the least-recently-used session.
+        """
+
+        # Unpinned request: no affinity, defer entirely to the fallback.
+        if routing_ctx.session_id is None:
+            return self._fallback_strategy.choose(routing_ctx, candidates)
+
+        # Reuse the pinned generator, but only while it is still a serving
+        # candidate (e.g. not draining for a weight sync).
+        sticky_generator = self._sessions.get(routing_ctx.session_id)
+        if sticky_generator is not None:
+            if any(h is sticky_generator for h in candidates):
+                # End of the dict means it's the most-recently-used session.
+                self._sessions.move_to_end(routing_ctx.session_id)
+                return sticky_generator
+
+        # New session, or the pinned generator is unavailable: choose via the
+        # fallback and (re)pin the session to that generator.
+        chosen = self._fallback_strategy.choose(routing_ctx, candidates)
+        self._sessions[routing_ctx.session_id] = chosen
+        # End of the dict means it's the most-recently-used session.
+        self._sessions.move_to_end(routing_ctx.session_id)
+        # Evict the least-recently-used session if the map is full. We assume
+        # max_sessions is large enough that active sessions are never the LRU
+        # victim (only stale, finished sessions get evicted).
+        # TODO: relying solely on max_sessions to avoid premature eviction is
+        # easy to implement, but not robust for all scenarios. Revisit with an
+        # more robust approach.
+        if len(self._sessions) > self._max_sessions:
+            self._sessions.popitem(last=False)
         return chosen
 
 
@@ -185,13 +207,15 @@ class GeneratorRouter(Configurable):
         ``RoundRobinRoutingStrategy.Config()`` or
         ``LeastLoadedRoutingStrategy.Config()``."""
 
-        hot_swap: bool = True
-        """Default True: pull the state dict concurrently with in-flight generation (no draining).
+        hot_swap: bool = False
+        """When True, pulls model's state dict concurrently with in-flight
+        generation (no draining). When False, each generator is drained before
+        its pull.
 
-        False drains each generator before its pull, which blocks on the in-flight ``route`` (a full
-        turn) — so under long generations the drain dominates weight-sync time. Either way a sync can
-        land between turns of a multi-turn rollout, so successive turns may run under different policy
-        versions (tracked per-turn via ``version_intervals``)."""
+        Draining only waits for a generator's in-flight ``route`` call (one
+        turn) to finish; between turns of a multi-turn rollout the generator is
+        idle, so a weight sync may land mid-rollout and successive turns can run
+        under different policy versions."""
 
     def __init__(
         self,
@@ -314,11 +338,7 @@ class GeneratorRouter(Configurable):
                 # work to finish before pulling, then re-admit it.
                 self._set_state(h, _GeneratorState.SYNCING)
                 try:
-                    # The drain wait IS the weight-sync cost under load: it blocks until the
-                    # generator's in-flight `route` (one full turn) finishes — ~6s for a long
-                    # thinking=True turn, ~ms for a short one. Spanned so the gantt shows it.
-                    with sl.log_trace_span("router_drain_wait"):
-                        await h.idle.wait()
+                    await h.idle.wait()
                     await h.actor.pull_model_state_dict.call(policy_version)
                 finally:
                     self._set_state(h, _GeneratorState.SERVING)

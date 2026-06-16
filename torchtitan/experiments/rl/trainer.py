@@ -28,6 +28,7 @@ from typing import NamedTuple
 # since __init__ can import torch before this is set.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+import torch  # noqa: F401  # force torch import after PYTORCH_CUDA_ALLOC_CONF is set
 import torchstore as ts
 from monarch.actor import ProcMesh
 from monarch.spmd import setup_torch_elastic_env_async
@@ -39,7 +40,7 @@ from torchtitan.experiments.rl.admission_budget import AdmissionBudget
 from torchtitan.experiments.rl.batcher import Batcher, PackedBatch
 from torchtitan.experiments.rl.episode_buffer import EpisodeBuffer
 from torchtitan.experiments.rl.generator_router import GeneratorRouter, RoutingContext
-from torchtitan.experiments.rl.losses.grpo import GRPOLoss
+from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout import (
@@ -205,10 +206,6 @@ class RLTrainer(Configurable):
         """Sibling rollouts sampled per dataset row (the GRPO group). The generator
         is always called with `n=1`; prompts are pre-expanded by `group_size`."""
 
-        num_generators: int = 1
-        """Data-parallel vLLM generators behind the router. >1 raises decode throughput; pair with
-        `generator_router.strategy=StickySessionRoutingStrategy` for prefix-cache locality."""
-
         num_validation_samples: int = 20
         """Number of held-out prompts scored greedily (temp=0, n=1) per validation pass."""
 
@@ -230,6 +227,11 @@ class RLTrainer(Configurable):
         them (`AdmissionBudget`). None = unbounded. A scale knob — bound it to ~2 batches of groups so
         generation can't run far ahead and produce born-stale work; leave None at small scale where
         the depth bound suffices and a tight gate would idle workers."""
+
+        validation_freq: int = 0
+        """Steps between mid-training validation passes. 0 = validate only before/after training.
+        TODO(async): not yet wired into run()'s async loop (only pre/post validation runs); periodic
+        validation is generation-only and must overlap the rollout workers (see `_trainer_loop`)."""
 
         rollouter: Rollouter.Config
         """The rollouter: its datasets, envs, and rubric."""
@@ -257,6 +259,14 @@ class RLTrainer(Configurable):
         generator: VLLMGenerator.Config = field(default_factory=VLLMGenerator.Config)
         """VLLMGenerator actor configuration (vLLM engine, sampling)."""
 
+        num_generators: int = 1
+        """Number of generator replicas to spawn as separate proc meshes.
+
+        This is distinct from intra-generator parallelism controlled by
+        ``generator.parallelism``. Total generator GPU/process usage is
+        ``num_generators * generator_world_size``.
+        """
+
         generator_router: GeneratorRouter.Config = field(
             default_factory=GeneratorRouter.Config
         )
@@ -267,6 +277,10 @@ class RLTrainer(Configurable):
         )
 
         def __post_init__(self):
+            if self.num_generators < 1:
+                raise ValueError(
+                    f"num_generators must be at least 1, got {self.num_generators}"
+                )
             if self.generator.checkpoint.enable:
                 raise ValueError(
                     "Generator checkpoint must be disabled in the RL loop "
@@ -332,9 +346,14 @@ class RLTrainer(Configurable):
         )
         self.renderer = config.renderer.build(tokenizer_path=config.hf_assets_path)
 
-        # Renderer stop tokens are injected into the generator at spawn
-        self._stop_token_ids = list(self.renderer.get_stop_token_ids())
-        self._sampling = config.generator.sampling
+        # Carry the base seed and renderer stop tokens on the sampling config so
+        # the generator reads them off each request; the rollouter offsets the
+        # seed per sample. Avoids the generator depending on request_id format.
+        self._sampling = replace(
+            config.generator.sampling,
+            seed=config.generator.debug.seed,
+            stop_token_ids=list(self.renderer.get_stop_token_ids()),
+        )
         # TODO: pass our own tokenizer to the renderer and read pad/eos off it
         # once `renderers` supports bring-your-own-tokenizer
         # (https://github.com/PrimeIntellect-ai/renderers/pull/70).
@@ -533,7 +552,6 @@ class RLTrainer(Configurable):
                         )
                     ),
                     output_dir=config.dump_folder,
-                    stop_token_ids=self._stop_token_ids,
                 )
                 generators.append(generator)
             self.generator_router = config.generator_router.build(generators=generators)
@@ -657,18 +675,16 @@ class RLTrainer(Configurable):
     def _build_episodes(
         rollout_groups: list[RolloutGroup],
     ) -> tuple[list[Episode], list[m.Metric]]:
-        """Build training episodes and GRPO advantages from scored rollout groups.
+        """Flatten scored rollout groups into training episodes.
 
-        Centers each group's rewards by its mean, skips rollouts without
-        training tokens, and emits reward/advantage metrics.
+        Skips rollouts without training tokens and emits episode-level metrics.
 
         Args:
-            rollout_groups: Scored rollout groups from one collection round.
+            rollout_groups: Scored rollout groups from one round.
 
         Returns:
             Train episodes plus episode-level metrics.
         """
-        # Mean-baseline advantage per group
         episodes: list[Episode] = []
         group_stds: list[float] = []
         # Iteratate over `Rollouts` and `Episode`s. More than one `Episode` may be produced
@@ -687,13 +703,12 @@ class RLTrainer(Configurable):
                 )
                 continue
 
-            rewards = [rollout.reward for rollout in group.rollouts]
-            group_mean = sum(rewards) / len(rewards)
-            group_stds.append(statistics.pstdev(rewards))
-
-            # Center the advantage per rollout; each rollout packs into one or more episodes.
+            # Advantage was already filled by the Rollouter's advantage estimator; here
+            # we only collect each group's reward std for the metric emitted below.
+            group_stds.append(
+                statistics.pstdev([rollout.reward for rollout in group.rollouts])
+            )
             for rollout in group.rollouts:
-                rollout.advantage = rollout.reward - group_mean
                 rollout_episodes = rollout_to_episodes(rollout)
                 episodes.extend(rollout_episodes)
                 branches_per_rollout.append(float(len(rollout_episodes)))
@@ -745,6 +760,8 @@ class RLTrainer(Configurable):
         # TODO: investigate using pass@k for validation.
         t_validate_start = time.perf_counter()
         num_samples = self.config.num_validation_samples
+        if num_samples == 0:  # skip validation (e.g. loss guard CI)
+            return []
         greedy = replace(self._sampling, temperature=0.0, top_p=1.0)
 
         rollout_groups, validation_metrics = await self._collect_rollouts(

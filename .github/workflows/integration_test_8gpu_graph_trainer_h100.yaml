@@ -30,7 +30,10 @@ permissions:
 jobs:
   # Step 1: Dynamically compute the matrix based on conditions
   set-matrix:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8')
+    # Skip scheduled runs on forks, where they would only fail and email the fork owner
+    if: >-
+      (github.repository_owner == 'pytorch' || github.event_name != 'schedule') &&
+      (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8'))
     uses: ./.github/workflows/set-matrix.yaml
     with:
       runner-cuda: mt-l-bx86iamx-176-1800-h100-8

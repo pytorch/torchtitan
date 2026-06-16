@@ -22,12 +22,12 @@ from .attention import (
     VarlenMetadata,
 )
 from .decoder import Decoder, TransformerBlock
+from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .moe import MoE
 from .nn_modules import (
     Conv1d,
     Conv2d,
-    Embedding,
     GELU,
     GroupNorm,
     Identity,

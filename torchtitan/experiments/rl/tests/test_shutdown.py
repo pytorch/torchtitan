@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from torchtitan.experiments.rl import train
-from torchtitan.experiments.rl.actors.generator import VLLMGenerator
+from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.batcher import Batcher
 from torchtitan.experiments.rl.generator_router import GeneratorRouter
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
@@ -22,10 +22,14 @@ class _FakeRLTrainer:
     def __init__(self, config=None):
         self.config = config
         self.events = []
+        self.setup_trainer_mesh = None
+        self.setup_generator_meshes = None
         self.instances.append(self)
 
     async def setup_async(self, *, trainer_mesh=None, generator_meshes=None):
         self.events.append("setup")
+        self.setup_trainer_mesh = trainer_mesh
+        self.setup_generator_meshes = generator_meshes
         if getattr(self.config, "fail_setup", False):
             raise RuntimeError("setup failed")
 
@@ -59,7 +63,7 @@ class _FakeConfig:
     trainer = _FakeTrainerConfig()
     # main() also reads config.generator.parallelism (same stubbing applies).
     generator = SimpleNamespace(parallelism=None)
-    num_generators = 1  # main() passes this to spawn_proc_mesh
+    num_generators = 1
 
     @property
     def __class__(self):
@@ -100,7 +104,10 @@ def _make_stub_rl_trainer():
                 _tokenizer=SimpleNamespace(eos_token_id=0),
             )
         )
-        generator = SimpleNamespace(sampling=SimpleNamespace())
+        # __init__ reads generator.sampling (a dataclass, for replace) + generator.debug.seed.
+        generator = SimpleNamespace(
+            sampling=SamplingConfig(), debug=SimpleNamespace(seed=None)
+        )
         rollouter = SimpleNamespace(build=lambda: SimpleNamespace())
 
         def to_dict(self):
@@ -118,9 +125,13 @@ def stub_mesh_provisioning(monkeypatch):
     both and let the test intercept at the ``_FakeRLTrainer`` boundary.
     """
     monkeypatch.setattr(train, "_compute_world_size", lambda p: 1)
-    monkeypatch.setattr(
-        train, "spawn_proc_mesh", lambda *args, **kwargs: (object(), [object()])
-    )
+
+    def _spawn_proc_mesh(*args, num_generators=1, **kwargs):
+        return "trainer_mesh", [
+            f"generator_mesh_{idx}" for idx in range(num_generators)
+        ]
+
+    monkeypatch.setattr(train, "spawn_proc_mesh", _spawn_proc_mesh)
 
 
 def test_main_shuts_down_after_success(monkeypatch, stub_mesh_provisioning):
@@ -130,7 +141,25 @@ def test_main_shuts_down_after_success(monkeypatch, stub_mesh_provisioning):
 
     asyncio.run(train.main())
 
-    assert _FakeRLTrainer.instances[0].events == ["setup", "train", "close"]
+    trainer = _FakeRLTrainer.instances[0]
+    assert trainer.events == ["setup", "train", "close"]
+    assert trainer.setup_trainer_mesh == "trainer_mesh"
+    assert trainer.setup_generator_meshes == ["generator_mesh_0"]
+
+
+def test_main_passes_configured_num_generators(monkeypatch, stub_mesh_provisioning):
+    _FakeConfigManager.config = _FakeConfig(num_generators=2)
+    _FakeRLTrainer.instances = []
+    monkeypatch.setattr(train, "ConfigManager", _FakeConfigManager)
+
+    asyncio.run(train.main())
+
+    trainer = _FakeRLTrainer.instances[0]
+    assert trainer.events == ["setup", "train", "close"]
+    assert trainer.setup_generator_meshes == [
+        "generator_mesh_0",
+        "generator_mesh_1",
+    ]
 
 
 def test_main_shuts_down_after_train_failure(monkeypatch, stub_mesh_provisioning):

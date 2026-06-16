@@ -45,6 +45,11 @@ def rollout_to_episodes(rollout: Rollout) -> list[Episode]:
         #              version_intervals=[(1,6),(3,7)]
     """
     rollout_advantage = rollout.advantage
+    if rollout_advantage is None:
+        raise ValueError(
+            f"rollout {rollout.group_id}/rollout={rollout.rollout_id} has no advantage; the Rollouter "
+            "must fill it (via its advantage estimator) before episodes are built."
+        )
     episodes: list[Episode] = []
 
     # Used to check if [P1, C1] is prefix of [P1,C1,E1] in the docstring example

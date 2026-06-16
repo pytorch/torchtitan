@@ -66,7 +66,7 @@ def _get_default_groups(model, config):
     """Helper: build param groups and return the AdamW optimizer's groups."""
     impl_kwargs = OptimizersContainer._build_impl_kwargs(config)
     param_groups = config.param_groups
-    groups_by_opt = OptimizersContainer._build_param_groups(
+    groups_by_opt, _ = OptimizersContainer._build_param_groups(
         model, param_groups, impl_kwargs
     )
     return groups_by_opt.get("AdamW", [])
@@ -276,7 +276,7 @@ class TestParamGroupConfig(unittest.TestCase):
             ],
         )
         impl_kwargs = OptimizersContainer._build_impl_kwargs(config)
-        groups_by_opt = OptimizersContainer._build_param_groups(
+        groups_by_opt, _ = OptimizersContainer._build_param_groups(
             model, config.param_groups, impl_kwargs
         )
 
@@ -425,34 +425,8 @@ class TestMixedOptimizers(unittest.TestCase):
         self.assertEqual(adam.param_groups[0]["lr"], 5e-4)
         self.assertEqual(adam.param_groups[0]["betas"], (0.9, 0.95))
 
-    def test_model_part_indices(self):
-        """_model_part_indices correctly maps optimizers to model parts."""
-        model1 = SimpleModel()
-        model2 = SimpleModel()
-        config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
-                    pattern=r"output\.",
-                    optimizer_name="Adam",
-                    optimizer_kwargs={"lr": 5e-4, "betas": (0.9, 0.95), "eps": 1e-8},
-                ),
-                ParamGroupConfig(
-                    pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
-                ),
-            ],
-        )
-        container = config.build(model_parts=[model1, model2])
-        self.assertEqual(len(container.optimizers), 4)
-        self.assertEqual(container._model_part_indices[0], 0)
-        self.assertEqual(container._model_part_indices[1], 0)
-        self.assertEqual(container._model_part_indices[2], 1)
-        self.assertEqual(container._model_part_indices[3], 1)
-
-    def test_param_group_patterns(self):
-        """Param groups have correct pattern for logging."""
+    def test_pattern_not_leaked_to_state_dict(self):
+        """Pattern is logging-only; it must not enter the optimizer or state dict."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
             implementation="for-loop",
@@ -470,9 +444,12 @@ class TestMixedOptimizers(unittest.TestCase):
             ],
         )
         container = config.build(model_parts=[model])
-        adamw = container.optimizers[0]
-        self.assertEqual(adamw.param_groups[0]["pattern"], r"output\.")
-        self.assertEqual(adamw.param_groups[1]["pattern"], ".*")
+        # Pattern is popped before optimizer construction, so it never reaches
+        # the optimizer's param groups or the saved (flat) state dict.
+        for opt in container.optimizers:
+            for group in opt.param_groups:
+                self.assertNotIn("pattern", group)
+        self.assertFalse(any(".pattern" in key for key in container.state_dict()))
 
     def test_mixed_optimizer_state_dict_round_trip(self):
         """State dict save/load works with mixed optimizer types."""
@@ -543,6 +520,30 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
             scheduler.step()
         lr = scheduler.schedulers[0].optimizer.param_groups[0]["lr"]
         self.assertAlmostEqual(lr, 1e-3, places=6)
+
+    def test_get_metrics_reports_lr_per_group(self):
+        """get_metrics reports a learning rate per optimizer param group."""
+        model = SimpleModel()
+        config = OptimizersContainer.Config(
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r"output\.",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"lr": 5e-4, "weight_decay": 0.0},
+                ),
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
+                ),
+            ],
+        )
+        lr_config = LRSchedulersContainer.Config(warmup_steps=10, decay_type="linear")
+        scheduler, _ = self._build_scheduler(config, lr_config, model)
+        metrics = scheduler.get_metrics()
+        # One AdamW optimizer with two param groups -> indexed lr keys.
+        self.assertEqual(set(metrics), {"lr/AdamW/0", "lr/AdamW/1"})
 
     def test_mixed_optimizer_gets_separate_schedulers(self):
         """Mixed optimizers should each get their own scheduler."""

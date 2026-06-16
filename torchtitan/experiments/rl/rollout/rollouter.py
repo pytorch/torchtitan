@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from renderers import Renderer
 
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.environment import MessageEnv, TokenEnv
+from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.experiments.rl.rollout.types import (
     GenerateFn,
     Rollout,
@@ -83,10 +84,17 @@ class Rollouter(Configurable):
         token_env: TokenEnv.Config = field(default_factory=TokenEnv.Config)
         """`TokenEnv` limits (e.g. `max_rollout_tokens`) passed to `make_env_group`."""
 
+        advantage: Configurable.Config = field(
+            default_factory=AdvantageEstimator.Config
+        )
+        """Post-scoring advantage estimator. Default = Dr.GRPO (mean-baseline only);
+        set `AdvantageEstimator.Config(should_std_normalize=True)` for standard GRPO."""
+
     def __init__(self, config: Config) -> None:
         self._train_dataset = config.train_dataset.build()
         self._validation_dataset = config.validation_dataset.build()
         self.rubric: Rubric = config.rubric.build()
+        self.advantage_estimator = config.advantage.build()
         self._message_env_config = config.message_env
         self._token_env_config = config.token_env
 
@@ -187,7 +195,13 @@ class Rollouter(Configurable):
                     self._run_single_rollout(
                         generate_fn=generate_fn,
                         env=env,
-                        sampling=sampling,
+                        # Offset the base seed per sample so a group's n=1
+                        # requests are diverse yet reproducible run-to-run.
+                        sampling=(
+                            sampling
+                            if sampling.seed is None
+                            else replace(sampling, seed=sampling.seed + sample_idx)
+                        ),
                         group_id=group_id,
                         rollout_id=sample_idx,
                     )
@@ -204,9 +218,12 @@ class Rollouter(Configurable):
             rollout.reward = output.reward
             rollout.reward_breakdown = output.reward_breakdown
 
-        # TODO: move advantage calculation to here
-
-        return RolloutGroup(group_id=group_id, rollouts=rollouts)
+        # Post-scoring: turn group rewards into per-rollout advantages.
+        group = RolloutGroup(group_id=group_id, rollouts=rollouts)
+        advantages = self.advantage_estimator(group)
+        for rollout, advantage in zip(group.rollouts, advantages, strict=True):
+            rollout.advantage = advantage
+        return group
 
     async def _run_single_rollout(
         self,
@@ -247,7 +264,9 @@ class Rollouter(Configurable):
                 # generator call
                 completion = await generate_fn(
                     prompt_token_ids=env_step.next_prompt_token_ids,
-                    rollout_id=turn_rollout_id,
+                    request_id=turn_rollout_id.request_id,
+                    # Per-sample sticky key: a sample's turns reuse one generator's prefix cache.
+                    routing_session_id=f"{group_id}/sample={rollout_id}",
                     sampling_config=sampling,
                 )
 

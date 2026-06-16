@@ -152,6 +152,85 @@ def _prepare_generation_request_metrics(
     ]
 
 
+_batch_invariant_bmm_lib: torch.library.Library | None = None
+
+
+def _patch_bmm_for_batch_invariance() -> None:
+    """Override ``aten::bmm`` with vLLM's batch-invariant bmm kernel.
+
+    torchtitan's batch-invariant mode (``batch_invariant_ops``, applied by
+    ``set_batch_invariance``) overrides ``mm``/``addmm``/``_log_softmax``/
+    ``mean.dim`` but not ``bmm``. The MoE router gate (3-D activation @ 2-D
+    weight) lowers to ``aten::bmm`` in the generator but ``aten::mm`` in the
+    trainer, so without this the generator's gate scores drift from the
+    trainer's and flip top-k expert routing, breaking on-policy logprob parity.
+
+    TODO: Investigate how to drop bmm batch invariant patch in generator.
+    """
+    global _batch_invariant_bmm_lib
+    if _batch_invariant_bmm_lib is not None:
+        return
+    from vllm.model_executor.layers.batch_invariant import bmm_batch_invariant
+
+    _batch_invariant_bmm_lib = torch.library.Library("aten", "IMPL")
+    _batch_invariant_bmm_lib.impl("bmm", bmm_batch_invariant, "CUDA")
+    # pyrefly: ignore[bad-assignment]
+    torch.bmm = bmm_batch_invariant
+
+
+def _force_logprobs_fn_for_batch_invariance() -> None:
+    """Make vLLM's v2 logprob path dispatch.
+
+    The v2 GPU sampler computes per-token logprobs with a fused Triton kernel
+    (``compute_token_logprobs`` -> ``_topk_log_softmax_kernel``) that inlines
+    ``log(softmax(logits))`` and never calls PyTorch ops.
+
+    Swapping the kernel to routes the generator and the trainer through
+    the same set of ops, so logprobs match bit-for-bit.
+    """
+    import vllm.v1.worker.gpu.sample.logprob as vllm_logprob
+
+    from torchtitan.experiments.rl.actors.trainer import compute_logprobs
+
+    def generator_compute_token_logprobs(
+        logits: torch.Tensor, token_ids: torch.Tensor
+    ) -> torch.Tensor:
+        """Per-token logprobs for vLLM's v2 sampler (replaces its fused kernel).
+
+        Args:
+            logits: ``[N, V]`` next-token logits for N sampled positions
+                (V = vocab_size).
+            token_ids: ``[N, K]`` the K token ids to score per position (vLLM
+                passes the sampled token's logprob plus any top-k logprobs it requested).
+
+        Returns:
+            ``[N, K]`` logprob of each of the K token ids at each position.
+        """
+        # vLLM gives token_ids [N, K]. SamplingParams(logprobs=0) makes real
+        # requests K=1, but we can't assert that: vLLM's kernel warmup probes
+        # this patched fn with K>1 (e.g. K=6), so we must handle any K. Map the
+        # N positions to one sequence (B=1, S=N) and reuse the trainer's
+        # compute_logprobs (one token per position) once per column.
+        #
+        # NOTE: each element of token_ids is scored independently, after the
+        # whole generated sequence is marterialized. We iterate column-by-column
+        # purely because torchtitan's compute_logprobs takes one token id per
+        # position; it is not a cross-column/cross-position dependency.
+        logits = logits.unsqueeze(0)  # [1, N, V]  (B=1, S=N)
+        token_ids = token_ids.to(torch.int64)
+        per_column = [
+            compute_logprobs(logits, token_ids[:, k].unsqueeze(0))  # [1, N]
+            for k in range(token_ids.shape[1])
+        ]
+        return torch.stack(per_column, dim=-1).squeeze(0)  # [N, K]
+
+    vllm_logprob.compute_token_logprobs = generator_compute_token_logprobs
+    logger.info(
+        "Patched vLLM compute_token_logprobs with trainer's implementation "
+        "so generator and trainer share one logprob code path"
+    )
+
+
 @dataclass(kw_only=True, slots=True)
 class VLLMCudagraphConfig:
     """CUDA graph capture settings for the vLLM inference engine.
@@ -184,17 +263,17 @@ class VLLMCudagraphConfig:
         """Build a vLLM ``CompilationConfig``, or return ``None`` when
         CUDA graphs are disabled.
 
-        ``max_num_seqs`` determines CUDA graph capture sizes: powers of
-        2 from 1 up to ``max_num_seqs``, plus ``max_num_seqs`` itself
-        if it isn't already a power of 2.
+        Capture sizes are powers of 2 from 1 up to ``max_num_seqs``, plus
+        ``max_num_seqs`` itself if it isn't a power of 2.
         """
         if not self.enable:
             return None
         if max_num_seqs <= 0:
             raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}")
-        sizes = [1 << i for i in range(int(math.log2(max_num_seqs)) + 1)]
-        if max_num_seqs not in sizes:
-            sizes.append(max_num_seqs)
+        cap = max_num_seqs
+        sizes = [1 << i for i in range(int(math.log2(cap)) + 1)]
+        if cap not in sizes:
+            sizes.append(cap)
         return CompilationConfig(
             cudagraph_mode="full",
             mode=0,
@@ -214,6 +293,13 @@ class SamplingConfig:
 
     max_tokens: int = 100
     """Maximum number of tokens to generate per completion."""
+
+    seed: int | None = None
+    """Per-request RNG seed. The rollouter offsets this per sample so a group's
+    n=1 requests stay diverse while remaining reproducible (None = nondeterministic)."""
+
+    stop_token_ids: list[int] | None = None
+    """Renderer role-boundary stop tokens; filled by the controller."""
 
 
 class VLLMGenerator(Actor, Configurable):
@@ -258,7 +344,6 @@ class VLLMGenerator(Actor, Configurable):
             trainer so both sides compile identically.
         max_num_seqs: vLLM's max concurrent sequences (KV budget + CUDA-graph sizes).
         output_dir: Structured-logger output directory.
-        stop_token_ids: Renderer role-boundary stop tokens injected by the controller.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -307,8 +392,8 @@ class VLLMGenerator(Actor, Configurable):
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only."""
 
         def __post_init__(self):
-            # VLLMGenerator only supports TP. vLLM handles its own parallelism;
-            # we only apply TP via the core parallelize function.
+            # VLLMGenerator supports TP plus MoE EP. vLLM handles its own
+            # process groups, and the wrapper applies the model parallelisms.
             p = self.parallelism
             if p.data_parallel_replicate_degree != 1:
                 raise ValueError(
@@ -324,11 +409,6 @@ class VLLMGenerator(Actor, Configurable):
                 raise ValueError(
                     f"Generator does not support context parallelism, "
                     f"got cp={p.context_parallel_degree}"
-                )
-            if p.expert_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support expert parallelism, "
-                    f"got ep={p.expert_parallel_degree}"
                 )
             if p.enable_sequence_parallel:
                 raise ValueError(
@@ -369,7 +449,6 @@ class VLLMGenerator(Actor, Configurable):
         compile_config: CompileConfig,
         max_num_seqs: int,
         output_dir: str,
-        stop_token_ids: list[int],
     ):
         init_logger()
         sl.init_structured_logger(
@@ -390,10 +469,6 @@ class VLLMGenerator(Actor, Configurable):
         # (RLTrainer) as num_rollout_workers * group_size.
         self._max_num_seqs = max_num_seqs
 
-        # Renderer role-boundary stop tokens (e.g. Qwen3 `<|im_end|>`), injected by the
-        # controller;
-        self._stop_token_ids = stop_token_ids
-
         # Register TorchTitan model + parser with vLLM
         registry_to_vllm(
             model_spec,
@@ -411,12 +486,21 @@ class VLLMGenerator(Actor, Configurable):
 
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
         set_batch_invariance(config.debug.batch_invariant)
+        if config.debug.batch_invariant:
+            # batch_invariant_ops (via set_batch_invariance) covers
+            # mm/addmm/_log_softmax/mean but not bmm; the MoE router gate lowers
+            # to bmm in the vLLM inference graph, so override it generator-side.
+            _patch_bmm_for_batch_invariance()
+            # The vLLM v2 logprob Triton kernel bypasses the aten overrides above;
+            # route it through trainer's function to match the trainer exactly.
+            _force_logprobs_fn_for_batch_invariance()
 
         self._set_determinism(config.debug)
 
         self.model_path = model_path
 
         # Build vLLM engine
+        enable_ep = config.parallelism.expert_parallel_degree > 1
         engine_kwargs = dict(
             # ``model`` is the path to the HF checkpoint directory. The
             # config is sourced from torchtitan's ModelSpec via
@@ -431,6 +515,12 @@ class VLLMGenerator(Actor, Configurable):
             config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
+            # NOTE: Monarch launches the generator workers and sets the torch
+            # elastic distributed env; with external_launcher, vLLM uses that
+            # world to build its process groups. vLLM does not take an
+            # explicit EP degree: when this boolean is set, it converts all
+            # DP * TP ranks into the expert-parallel group for MoE layers.
+            enable_expert_parallel=enable_ep,
             # Monarch already spawned TP workers via proc mesh. "external_launcher"
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",
@@ -818,14 +908,20 @@ class VLLMGenerator(Actor, Configurable):
             self._model_state_dict_pull_request = None
 
     def _build_sampling_params(self, sampling: SamplingConfig) -> SamplingParams:
-        """Translate a `SamplingConfig` into vLLM `SamplingParams` (n=1; seed from debug)."""
+        """Translate a `SamplingConfig` into vLLM `SamplingParams` (n=1).
+
+        ``seed`` and ``stop_token_ids`` are carried on the ``SamplingConfig``
+        (the controller fills ``stop_token_ids`` and the rollouter offsets
+        ``seed`` per sample), so each sample in a group is a distinct ``n=1``
+        request that stays diverse and bitwise-reproducible.
+        """
         return SamplingParams(
             temperature=sampling.temperature,
             top_p=sampling.top_p,
             max_tokens=sampling.max_tokens,
             n=1,  # always expects a single sample per request. Caller can call N times.
-            stop_token_ids=self._stop_token_ids or None,
-            seed=self.config.debug.seed,
+            stop_token_ids=sampling.stop_token_ids or None,
+            seed=sampling.seed,
             logprobs=0,  # return only the sampled token's logprob (for the GRPO ratio)
             # Return each request's result once, when it is fully done, instead of streaming partial
             # outputs as tokens arrive.

@@ -7,7 +7,7 @@
 """
 Example override: a SwiGLU feed-forward with a single fused gate+up weight.
 
-This is the worked example referenced in ``torchtitan/config/OVERRIDE.md``. It
+This is the worked example referenced in ``torchtitan/overrides/README.md``. It
 demonstrates the pieces a non-trivial fused module needs to plug in via the
 override mechanism, *without touching core*:
 
@@ -30,22 +30,14 @@ at any degree. The layout is contiguous and transpose-free, so it costs nothing
 at compute time: the single GEMM is expressed with ``einsum`` (which contracts
 ``dim`` and keeps ``hidden`` sharded), and never reshapes across the sharded axis.
 
-NOTE (checkpoint compatibility) — this module checkpoints its own ``w13``
-parameter (FQN ``...feed_forward.w13``); it is **not** interchangeable with stock
-``FeedForward`` checkpoints (``w1.weight`` / ``w3.weight``). A checkpoint saved
-with this override only loads back into a run that also uses it, and vice-versa.
-torchtitan's checkpointing uses DCP ``get_model_state_dict`` /
-``set_model_state_dict``, which resolve every state-dict key back to a real
-module attribute for DTensor/FSDP handling. A module-level ``state_dict`` hook
-that fabricates ``w1``/``w3`` keys is therefore bypassed and in fact errors
-(``'FusedSwiGLU' object has no attribute 'w1'``). Cross-layout interop with stock
-checkpoints requires a model-level ``BaseStateDictAdapter`` (the same mechanism
-used for HF conversion), which operates on the flat key→tensor dict after
-``get_model_state_dict``. The override mechanism does not yet expose a hook to
-contribute such an adapter; a candidate design (an optional
-``state_dict_translator`` on ``@override`` feeding ``from_hf``/``to_hf``) is
-tracked in https://github.com/pytorch/torchtitan/issues/3569. See ``OVERRIDE.md``
-"Checkpoint Compatibility".
+NOTE (checkpoint compatibility) -- although the parameter is the fused ``w13``,
+this module checkpoints in the stock ``FeedForward`` layout
+(``w1.weight`` / ``w3.weight``), so its checkpoints **are** interchangeable with
+the non-fused module (and with the HF adapter, which targets the stock layout). A
+``register_state_dict_post_hook`` splits ``w13`` into ``w1.weight``/``w3.weight``
+on save, and a ``register_load_state_dict_pre_hook`` merges them back into ``w13``
+on load (a native ``w13`` key is still accepted for back-compat). See
+``torchtitan/overrides/README.md`` "Checkpoint Compatibility".
 """
 
 from collections.abc import Callable
@@ -61,7 +53,6 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
-from torchtitan.tools.logging import logger, warn_once
 
 __all__ = ["FusedSwiGLU"]
 
@@ -90,12 +81,42 @@ class FusedSwiGLU(Module):
         # Fused gate+up weight, gate=w13[:, 0], up=w13[:, 1] (see class docstring).
         self.w13 = torch.nn.Parameter(torch.empty(config.hidden_dim, 2, config.dim))
         self.w2 = config.w2.build()
+        # Checkpoint in the stock FeedForward layout (w1.weight / w3.weight) so
+        # checkpoints interoperate with the non-fused module. See class docstring.
+        self.register_state_dict_post_hook(self._split_w13_on_save)
+        self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # One GEMM contracting `dim`; keeps the `hidden` axis (TP-sharded),
         # without ever reshaping across the sharded axis.
         gate, up = torch.einsum("...d,hgd->...hg", x, self.w13).unbind(-1)
         return self.w2(F.silu(gate) * up)
+
+    @staticmethod
+    def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
+        """Emit the fused ``w13`` as the stock ``w1.weight`` / ``w3.weight``.
+
+        Runs after the default ``state_dict`` (which produced ``{prefix}w13``),
+        so the saved checkpoint is in the stock FeedForward layout. ``w13[:, 0]``
+        is the gate (stock ``w1``) and ``w13[:, 1]`` the up (stock ``w3``).
+        """
+        w13 = state_dict.pop(f"{prefix}w13")
+        state_dict[f"{prefix}w1.weight"] = w13[:, 0].contiguous()
+        state_dict[f"{prefix}w3.weight"] = w13[:, 1].contiguous()
+
+    @staticmethod
+    def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
+        """Merge stock ``w1.weight`` / ``w3.weight`` back into the fused ``w13``.
+
+        Runs before the default ``_load_from_state_dict``, so it loads ``w13``
+        (the real parameter) normally afterwards. A native ``w13`` key is left
+        untouched, keeping back-compat with checkpoints saved as ``w13``.
+        """
+        w1_key, w3_key = f"{prefix}w1.weight", f"{prefix}w3.weight"
+        if w1_key in state_dict and w3_key in state_dict:
+            state_dict[f"{prefix}w13"] = torch.stack(
+                [state_dict.pop(w1_key), state_dict.pop(w3_key)], dim=1
+            )
 
 
 @override(
@@ -104,17 +125,6 @@ class FusedSwiGLU(Module):
     description="Fuse SwiGLU gate+up into one weight (FSDP + TP).",
 )
 def fused_swiglu(cfg: FeedForward.Config) -> FusedSwiGLU.Config:
-    # Warn once: fused checkpoints (`w13`) are not interchangeable with stock
-    # FeedForward checkpoints (`w1.weight`/`w3.weight`). See module docstring.
-    warn_once(
-        logger,
-        "fused_swiglu override active: the fused module stores a single 'w13' "
-        "parameter, so its checkpoints are NOT interchangeable with stock "
-        "FeedForward checkpoints ('w1.weight'/'w3.weight'). A checkpoint saved "
-        "with this override only loads into a run that also uses it. See "
-        "torchtitan/config/OVERRIDE.md 'Checkpoint Compatibility'.",
-    )
-
     # Initialize each half of the fused weight with its own initializer:
     # `w13[:, 0]` is the gate (stock `w1`) and `w13[:, 1]` the up (stock `w3`).
     # In stock FeedForward these differ — `w1` uses the plain linear init while

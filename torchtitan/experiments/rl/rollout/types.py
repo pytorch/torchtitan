@@ -20,7 +20,9 @@ if TYPE_CHECKING:
     from torchtitan.experiments.rl.actors.generator import SamplingConfig
 
 
-_TRUNCATED = frozenset({"truncated_length", "truncated_prompt_too_long"})
+_TRUNCATED = frozenset(
+    {"truncated_length", "truncated_prompt_too_long", "truncated_max_turns"}
+)
 _ERROR = frozenset({"error_parse", "error_timeout", "error_abort", "error"})
 
 
@@ -35,14 +37,18 @@ class GenerateFn(Protocol):
         self,
         prompt_token_ids: list[int],
         *,
-        rollout_id: RolloutID,
+        request_id: str,
+        routing_session_id: str | None = None,
         sampling_config: SamplingConfig | None = None,
     ) -> Completion | None:
         """Run one generation.
 
         Args:
             prompt_token_ids: The tokenized prompt to generate from.
-            rollout_id: Identifies this turn; supplies the generator request id and routing key.
+            request_id: Unique per call; identifies the exact turn (e.g. ".../turn=2") in logs.
+            routing_session_id: Optional stable key for the routing session this call
+                belongs to. A router may use it for session affinity, routing same-key
+                calls to the same generator when possible. `None` means no affinity.
             sampling_config: Optional per-call sampling overrides.
 
         Returns:
@@ -57,6 +63,7 @@ class RolloutStatus(StrEnum):
     COMPLETED = "completed"
     TRUNCATED_LENGTH = "truncated_length"
     TRUNCATED_PROMPT_TOO_LONG = "truncated_prompt_too_long"
+    TRUNCATED_MAX_TURNS = "truncated_max_turns"
     ERROR_PARSE = "error_parse"
     ERROR_TIMEOUT = "error_timeout"
     ERROR_ABORT = "error_abort"
