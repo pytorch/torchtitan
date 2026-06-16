@@ -54,8 +54,6 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
         num_validation_samples=500,
         validation_freq=5,
         compile=CompileConfig(enable=True, backend="aot_eager"),
-        # Standard GRPO (advantage normalized by group reward std). Advantage is a
-        # post-scoring step on the rollouter; the trainer just consumes it.
         rollouter=SearchR1Rollouter.Config(
             advantage=AdvantageEstimator.Config(should_std_normalize=True),
         ),
