@@ -31,6 +31,8 @@ permissions:
 jobs:
   # Step 1: Dynamically compute the matrix based on conditions
   set-matrix:
+    # Skip scheduled runs on forks, where they would only fail and email the fork owner
+    if: github.repository_owner == 'pytorch' || github.event_name != 'schedule'
     uses: ./.github/workflows/set-matrix.yaml
 
   # Step 2: Use the dynamic matrix in the build-test job
