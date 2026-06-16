@@ -51,7 +51,7 @@ from torchtitan.experiments.rl.rollout import (
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
 from torchtitan.experiments.rl.rollout.types import GenerateFn
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
-from torchtitan.experiments.rl.types import Completion, Episode, RolloutID
+from torchtitan.experiments.rl.types import Completion, Episode
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -414,25 +414,26 @@ class RLTrainer(Configurable):
 
     def _make_generate_fn(self, metrics_prefix: str) -> GenerateFn:
         """Build the rollouter's `GenerateFn`: route a completion via the generator router, namespacing
-        metrics with `metrics_prefix` and routing stickily on `rollout_id.group_id` (so a GRPO group's
+        metrics with `metrics_prefix` and pinning sticky routing on `routing_session_id` (a sample's
         turns reuse one generator's prefix KV)."""
 
         @sl.log_trace_span("generate")
         async def generate(
             prompt_token_ids: list[int],
             *,
-            rollout_id: RolloutID,
+            request_id: str,
+            routing_session_id: str | None = None,
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
             result = await self.generator_router.route(
                 "generate",
                 prompt_token_ids,
-                request_id=rollout_id.request_id,
+                request_id=request_id,
                 sampling_config=sampling_config,
                 metrics_prefix=metrics_prefix,
                 routing_ctx=RoutingContext(
                     estimated_cost=len(prompt_token_ids),
-                    session_key=rollout_id.group_id,
+                    session_id=routing_session_id,
                 ),
             )
             return self._get_rank_0_value(result)
