@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
-from torchtitan.components.checkpoint import CheckpointManager, MODEL
+from torchtitan.components.checkpoint import CheckpointManager, MODEL, ModelWrapper
 
 
 class FakeOptimizersContainer:
@@ -843,6 +843,70 @@ class TestConfigPostInit(unittest.TestCase):
         mock_logger.warning.assert_any_call(
             "initial_load_model_only=True has no effect without an initial_load_path."
         )
+
+
+class TestModelWrapper(unittest.TestCase):
+    """ModelWrapper.state_dict() must keep stable tensor storage across calls so
+    the async pinned-memory stager (keyed by source storage) reuses its host
+    buffers, while still reflecting current parameter values -- including for
+    modules whose state_dict hooks emit freshly allocated tensors. CPU-only:
+    checks storage identity and values, no actual staging.
+    """
+
+    def test_plain_param_cached_and_reflects_updates(self):
+        class Plain(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = nn.Parameter(torch.zeros(4))
+
+        model = Plain()
+        wrapper = ModelWrapper(model)
+
+        sd1 = wrapper.state_dict()
+        ptr = sd1["w"].untyped_storage().data_ptr()
+
+        with torch.no_grad():
+            model.w.fill_(2.0)
+
+        sd2 = wrapper.state_dict()
+        # Same dict and same storage; the cached view shares the parameter's
+        # storage, so the update shows through with no copy.
+        self.assertIs(sd2, sd1)
+        self.assertEqual(sd2["w"].untyped_storage().data_ptr(), ptr)
+        self.assertTrue(torch.all(sd2["w"] == 2.0))
+
+    def test_hook_tensor_storage_stable_and_refreshed(self):
+        class HookedModule(nn.Module):
+            # Slice a non-leading dim so .contiguous() allocates new storage
+            # disconnected from the parameter, mirroring FusedSwiGLU's split.
+            def __init__(self):
+                super().__init__()
+                self.w = nn.Parameter(torch.zeros(4, 2, 3))
+                self.register_state_dict_post_hook(self._split)
+
+            @staticmethod
+            def _split(module, state_dict, prefix, local_metadata):
+                w = state_dict.pop(f"{prefix}w")
+                state_dict[f"{prefix}a"] = w[:, 0].contiguous()
+                state_dict[f"{prefix}b"] = w[:, 1].contiguous()
+
+        model = HookedModule()
+        wrapper = ModelWrapper(model)
+
+        sd1 = wrapper.state_dict()
+        self.assertIn("a", sd1)
+        self.assertNotIn("w", sd1)
+        ptr_a = sd1["a"].untyped_storage().data_ptr()
+        self.assertTrue(torch.all(sd1["a"] == 0.0))
+
+        with torch.no_grad():
+            model.w.fill_(1.0)
+
+        sd2 = wrapper.state_dict()
+        # The storage object is reused (pinned staging buffers stay valid) ...
+        self.assertEqual(sd2["a"].untyped_storage().data_ptr(), ptr_a)
+        # ... and the in-place refresh picked up the updated parameter.
+        self.assertTrue(torch.all(sd2["a"] == 1.0))
 
 
 if __name__ == "__main__":

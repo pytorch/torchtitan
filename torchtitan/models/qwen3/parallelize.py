@@ -8,14 +8,13 @@
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
 from torchtitan.config import (
-    ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
@@ -35,7 +34,7 @@ def parallelize_qwen3(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
+    ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
     skip_dp: bool = False,
 ):
@@ -50,7 +49,7 @@ def parallelize_qwen3(
         compile_config.enable and "model" in compile_config.components
     )
 
-    if parallelism.spmd_backend in ("full_dtensor", "spmd_types"):
+    if parallelism.spmd_backend == "full_dtensor":
         validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)
     else:
@@ -68,13 +67,8 @@ def parallelize_qwen3(
     if parallel_dims.tp_enabled:
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
-    if ac_config.mode != "none":
-        apply_ac(
-            model,
-            ac_config,
-            model_compile_enabled=model_compile_enabled,
-            base_folder=dump_folder,
-        )
+    if ac_config is not None:
+        ac_config.build(dump_folder=dump_folder).apply(model)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
@@ -86,7 +80,7 @@ def parallelize_qwen3(
     if skip_dp:
         return model
 
-    if parallelism.spmd_backend in ("full_dtensor", "spmd_types"):
+    if parallelism.spmd_backend == "full_dtensor":
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
         edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
     else:

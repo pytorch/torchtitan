@@ -14,7 +14,6 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
-from spmd_types.runtime import get_partition_spec
 from torchtitan.distributed.spmd_types import spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.feed_forward import FeedForward
@@ -440,14 +439,7 @@ class MoE(Module):
                 True,
             )
 
-        if get_spmd_backend() == "spmd_types":
-            generate_routing_map = spmd.local_map(
-                out_types=(
-                    spmd.get_local_type(scores_BLE),
-                    get_partition_spec(scores_BLE),
-                ),
-            )(_generate_routing_map)
-        elif isinstance(topk_expert_ids_BLK, DTensor):
+        if isinstance(topk_expert_ids_BLK, DTensor):
             assert isinstance(
                 scores_BLE, DTensor
             ), "scores_BLE and topk_expert_ids_BLK should both be DTensors"
