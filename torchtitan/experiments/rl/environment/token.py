@@ -94,7 +94,9 @@ class TokenEnv(Configurable):
         step_timeout_s: float | None = 1800.0
         """Wall-clock timeout for one `MessageEnv.step` call."""
 
-        # TODO: add max_num_turns
+        max_num_turns: int | None = None
+        """Cap on assistant turns. If the env would continue past this many turns,
+        the rollout ends as `TRUNCATED_MAX_TURNS`; `None` disables the check."""
 
     def __init__(
         self,
@@ -109,6 +111,7 @@ class TokenEnv(Configurable):
         self._tools: list[ToolSpec] | None = None
         self._messages: list[Message] = []
         self._last_prompt_token_ids: list[int] = []
+        self._num_turns = 0
 
     async def init(self) -> TokenEnvOutput:
         """Render the initial conversation into the first generator prompt."""
@@ -151,6 +154,8 @@ class TokenEnv(Configurable):
             `TokenEnvOutput` for the next generator call, or a terminal turn
             when the rollout completes, truncates, or errors.
         """
+        self._num_turns += 1
+
         # Parse first, so a truncated / aborted response still carries its message
         try:
             parsed = await asyncio.to_thread(
@@ -228,6 +233,20 @@ class TokenEnv(Configurable):
                 next_prompt_token_ids=None,
                 next_prompt_messages=None,
                 status=RolloutStatus.COMPLETED,
+                completion_message=completion_message,
+                env_messages=step_output.env_messages,
+                env_rewards=step_output.env_rewards,
+            )
+
+        # Out of turn budget: the env would continue, but we stop here.
+        if (
+            self._config.max_num_turns is not None
+            and self._num_turns >= self._config.max_num_turns
+        ):
+            return TokenEnvOutput(
+                next_prompt_token_ids=None,
+                next_prompt_messages=None,
+                status=RolloutStatus.TRUNCATED_MAX_TURNS,
                 completion_message=completion_message,
                 env_messages=step_output.env_messages,
                 env_rewards=step_output.env_rewards,
