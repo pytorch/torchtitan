@@ -20,14 +20,10 @@ import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
 from monarch.rdma import is_rdma_available
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config import (
-    CompileConfig,
-    Configurable,
-    DebugConfig,
-    ParallelismConfig,
-)
+from torchtitan.config import CompileConfig, Configurable, DebugConfig
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.models.vllm_registry import (
+    InferenceParallelismConfig,
     registry_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
 )
@@ -303,7 +299,9 @@ class VLLMGenerator(Actor, Configurable):
         """Generator actor configuration.
         TODO: Expose a EngineConfig field to passing config to vLLM Engine"""
 
-        parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
+        parallelism: InferenceParallelismConfig = field(
+            default_factory=InferenceParallelismConfig
+        )
         """Parallelism configuration for the vLLM engine."""
 
         sampling: SamplingConfig = field(default_factory=SamplingConfig)
@@ -344,44 +342,6 @@ class VLLMGenerator(Actor, Configurable):
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only."""
 
         def __post_init__(self):
-            # RL uses data_parallel_shard_degree as vLLM DP size. TorchTitan's
-            # mesh still sees this as dp_shard so EP can borrow those ranks.
-            p = self.parallelism
-            if p.data_parallel_replicate_degree != 1:
-                raise ValueError(
-                    "Generator uses data_parallel_shard_degree for vLLM DP; "
-                    "data_parallel_replicate_degree must stay 1, got "
-                    f"dp_replicate={p.data_parallel_replicate_degree}"
-                )
-            if p.data_parallel_shard_degree == -1:
-                raise ValueError(
-                    "Generator maps data_parallel_shard_degree to vLLM's pure "
-                    "data_parallel_size, so it must be set explicitly instead "
-                    "of using -1 auto-inference."
-                )
-            if p.pipeline_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support pipeline parallelism, "
-                    f"got pp={p.pipeline_parallel_degree}"
-                )
-            if p.context_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support context parallelism, "
-                    f"got cp={p.context_parallel_degree}"
-                )
-            if p.enable_sequence_parallel:
-                raise ValueError(
-                    "Generator does not support sequence parallelism: "
-                    "spmd_types erasure mode requires sequence length to be "
-                    "evenly divisible by TP, which doesn't hold for inference "
-                    "(uneven batches). Set enable_sequence_parallel=False."
-                )
-            if not p.disable_loss_parallel:
-                raise ValueError(
-                    "Generator requires disable_loss_parallel=True, "
-                    f"got disable_loss_parallel={p.disable_loss_parallel}"
-                )
-
             if (
                 self.debug.batch_invariant
                 and not self.reset_prefix_cache_on_weight_sync
@@ -474,10 +434,7 @@ class VLLMGenerator(Actor, Configurable):
             config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
-            # Generator-only convention: this config field is TorchTitan FSDP
-            # degree for trainers, but here it is intentionally mapped to vLLM's
-            # pure data-parallel degree. The vLLM wrapper skips FSDP/DDP.
-            data_parallel_size=config.parallelism.data_parallel_shard_degree,
+            data_parallel_size=config.parallelism.data_parallel_degree,
             # NOTE: Monarch launches the generator workers and sets the torch
             # elastic distributed env; with external_launcher, vLLM uses that
             # world to build its process groups. vLLM does not take an

@@ -35,6 +35,7 @@ from torchtitan.experiments.rl.generator_router import (
     GeneratorRouter,
     RoundRobinRoutingStrategy,
 )
+from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.trainer import GRPOLoss, RLTrainer
@@ -118,12 +119,9 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
                 tensor_parallel_degree=4,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -174,12 +172,9 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
                 tensor_parallel_degree=2,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -257,12 +252,9 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
                 tensor_parallel_degree=4,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -313,12 +305,9 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
                 tensor_parallel_degree=8,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -334,7 +323,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
     """Debug MoE config with EP+TP on generator (8 GPUs: 4 gen + 4 train).
 
     Trainer uses data_parallel_shard_degree=2 as FSDP degree and TP=2.
-    Generator maps data_parallel_shard_degree=2 to vLLM pure DP, with TP=2.
+    Generator uses data_parallel_degree=2 (vLLM pure DP), with TP=2.
     MoE layers use EP=4.
     """
     group_size = 8
@@ -380,13 +369,9 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
             # path issues an unpinned D2H copy of split sizes that the
             # piecewise/full graph capture rejects.
             cudagraph=VLLMCudagraphConfig(enable=False),
-            parallelism=ParallelismConfig(
-                # Generator-only convention: mapped to vLLM pure DP, not FSDP.
-                data_parallel_shard_degree=2,
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=2,
                 tensor_parallel_degree=2,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
@@ -403,7 +388,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
     """Batch-invariant MoE EP config for bitwise parity testing (8 GPUs).
 
     Trainer uses data_parallel_shard_degree=2 as FSDP degree and TP=2.
-    Generator maps data_parallel_shard_degree=2 to vLLM pure DP, with TP=2.
+    Generator uses data_parallel_degree=2 (vLLM pure DP), with TP=2.
     MoE layers use EP=4.
 
     Parity: trainer FSDP2 TP2 EP4 matches generator DP2 TP2 EP4 bitwise
@@ -458,13 +443,9 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             cudagraph=VLLMCudagraphConfig(enable=False),
-            parallelism=ParallelismConfig(
-                # Generator-only convention: mapped to vLLM pure DP, not FSDP.
-                data_parallel_shard_degree=2,
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=2,
                 tensor_parallel_degree=2,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
@@ -526,13 +507,9 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             cudagraph=VLLMCudagraphConfig(enable=False),
-            parallelism=ParallelismConfig(
-                # Generator-only convention: mapped to vLLM pure DP, not FSDP.
-                data_parallel_shard_degree=2,
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=2,
                 tensor_parallel_degree=2,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
@@ -592,12 +569,9 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
                 tensor_parallel_degree=2,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(

@@ -201,7 +201,9 @@ async def main():
     rl_trainer: RLTrainer = config.build()
     try:
         trainer_world_size = _compute_world_size(config.trainer.parallelism)
-        generator_world_size = _compute_world_size(config.generator.parallelism)
+        generator_world_size = _compute_world_size(
+            config.generator.parallelism.to_torchtitan_parallelism_config()
+        )
         trainer_mesh, generator_meshes = spawn_proc_mesh(
             trainer_world_size,
             generator_world_size,

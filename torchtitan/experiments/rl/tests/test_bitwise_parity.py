@@ -228,10 +228,7 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
         config_format=TORCHTITAN_CONFIG_FORMAT,
         dtype=gen_config.model_dtype,
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
-        # Generator-only convention: this config field is TorchTitan FSDP
-        # degree for trainers, but here it is intentionally mapped to vLLM's
-        # pure data-parallel degree. The vLLM wrapper skips FSDP/DDP.
-        data_parallel_size=gen_config.parallelism.data_parallel_shard_degree,
+        data_parallel_size=gen_config.parallelism.data_parallel_degree,
         enable_expert_parallel=enable_ep,
         distributed_executor_backend="external_launcher",
         gpu_memory_utilization=gen_config.gpu_memory_limit,

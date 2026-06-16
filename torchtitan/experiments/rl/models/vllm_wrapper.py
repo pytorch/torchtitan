@@ -23,6 +23,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
+from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 from vllm.compilation import codegen as _codegen
@@ -109,7 +110,7 @@ class VLLMModelWrapper(Module):
         self,
         *,
         model_spec: ModelSpec,
-        parallelism: ParallelismConfig,
+        parallelism: InferenceParallelismConfig,
         compile_config: CompileConfig,
         checkpoint_config: CheckpointManager.Config,
         vllm_config: VllmConfig,
@@ -118,24 +119,6 @@ class VLLMModelWrapper(Module):
         super().__init__()
 
         assert vllm_config is not None, "vllm_config is required"
-
-        # PP and CP are not supported on this inference path. User-facing
-        # validation lives in Generator.Config.__post_init__; these are
-        # internal invariants — by the time we get here, parallelism has
-        # already been validated.
-        assert parallelism.data_parallel_replicate_degree == 1, (
-            "vLLM wrapper uses data_parallel_shard_degree as the vLLM DP size; "
-            "data_parallel_replicate_degree must stay 1, "
-            f"got {parallelism.data_parallel_replicate_degree}"
-        )
-        assert parallelism.pipeline_parallel_degree == 1, (
-            "vLLM wrapper requires pipeline_parallel_degree=1, "
-            f"got {parallelism.pipeline_parallel_degree}"
-        )
-        assert parallelism.context_parallel_degree == 1, (
-            "vLLM wrapper requires context_parallel_degree=1, "
-            f"got {parallelism.context_parallel_degree}"
-        )
 
         # Store components from model_spec
         self.state_dict_adapter = model_spec.state_dict_adapter
@@ -169,16 +152,20 @@ class VLLMModelWrapper(Module):
         self.config = dataclasses.replace(model_config, layers=new_layers)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
-        # Build ParallelDims from the TorchTitan ParallelismConfig so TP/EP
-        # sharding sees the same mesh shape as vLLM. In the generator,
-        # data_parallel_shard_degree means vLLM pure DP, not TorchTitan FSDP.
+        # Translate the inference parallelism into torchtitan's full
+        # ParallelismConfig that ParallelDims / parallelize_fn consume.
+        torchtitan_parallelism = parallelism.to_torchtitan_parallelism_config()
+
+        # Build ParallelDims from the translated ParallelismConfig so TP/EP
+        # sharding sees the same mesh shape as vLLM. data_parallel_shard_degree
+        # carries vLLM's pure DP here (skip_dp=True below), not TorchTitan FSDP.
         self.parallel_dims = ParallelDims(
-            dp_replicate=parallelism.data_parallel_replicate_degree,
-            dp_shard=parallelism.data_parallel_shard_degree,
-            cp=parallelism.context_parallel_degree,
-            tp=parallelism.tensor_parallel_degree,
-            pp=parallelism.pipeline_parallel_degree,
-            ep=parallelism.expert_parallel_degree,
+            dp_replicate=torchtitan_parallelism.data_parallel_replicate_degree,
+            dp_shard=torchtitan_parallelism.data_parallel_shard_degree,
+            cp=torchtitan_parallelism.context_parallel_degree,
+            tp=torchtitan_parallelism.tensor_parallel_degree,
+            pp=torchtitan_parallelism.pipeline_parallel_degree,
+            ep=torchtitan_parallelism.expert_parallel_degree,
             world_size=dist.get_world_size(),
         )
 
@@ -192,7 +179,9 @@ class VLLMModelWrapper(Module):
         class _InferenceConfig:
             parallelism: ParallelismConfig
 
-        self.config.update_from_config(config=_InferenceConfig(parallelism=parallelism))
+        self.config.update_from_config(
+            config=_InferenceConfig(parallelism=torchtitan_parallelism)
+        )
 
         # Build model on meta device to avoid allocating full model on every GPU
         with torch.device("meta"):
@@ -211,7 +200,7 @@ class VLLMModelWrapper(Module):
             model=self.model,
             parallel_dims=self.parallel_dims,
             training=TrainingConfig(),
-            parallelism=parallelism,
+            parallelism=torchtitan_parallelism,
             compile_config=compile_config,
             ac_config=None,
             dump_folder="",
