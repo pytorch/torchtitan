@@ -96,23 +96,11 @@ class Qwen3Model(Decoder):
                     "Varlen attention is not supported with CP."
                 )
 
-            from torchtitan.components.loss import ChunkedCELoss
             from torchtitan.models.qwen3.sharding import set_qwen3_sharding_config
 
-            chunked_loss = isinstance(config.loss, ChunkedCELoss.Config)
-            loss_parallel = not parallelism.disable_loss_parallel
-            if (
-                parallelism.spmd_backend == "spmd_types"
-                and loss_parallel
-                and not chunked_loss
-            ):
-                raise ValueError(
-                    "Qwen3 local SPMD loss parallel requires ChunkedCELoss. "
-                    "Use ChunkedCELoss or set parallelism.disable_loss_parallel=True."
-                )
             set_qwen3_sharding_config(
                 self,
-                loss_parallel=loss_parallel,
+                loss_parallel=not parallelism.disable_loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
