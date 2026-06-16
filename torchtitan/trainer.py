@@ -393,17 +393,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     self.loss_fn.set_lm_head(
                         lm_head  # pyrefly: ignore[bad-argument-type]
                     )
-                    self.model_parts[
-                        -1
-                    ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+                    self.model_parts[-1]._skip_lm_head = (
+                        True  # pyrefly: ignore[bad-argument-type]
+                    )
             else:
                 assert len(self.model_parts) == 1
                 lm_head = self.model_parts[0].lm_head
                 assert lm_head is not None, "Model must have lm_head for ChunkedCELoss"
                 self.loss_fn.set_lm_head(lm_head)  # pyrefly: ignore[bad-argument-type]
-                self.model_parts[
-                    0
-                ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+                self.model_parts[0]._skip_lm_head = (
+                    True  # pyrefly: ignore[bad-argument-type]
+                )
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -593,17 +593,25 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # maskless backend (e.g. the SDPA config used by the graph_trainer
         # tests) still receives positions for RoPE but no masks — it relies on
         # is_causal instead.
-        if isinstance(self.model_config, Decoder.Config) and positions is not None:
-            inner_attention = getattr(
-                self.model_config.first_attention, "inner_attention", None
-            )
-            if isinstance(
-                inner_attention, (FlexAttention.Config, VarlenAttention.Config)
-            ):
-                model = cast(Decoder, self.model_parts[0])
-                extra_kwargs["attention_masks"] = model.get_attention_masks(
-                    positions=positions,
+        if positions is not None:
+            if isinstance(self.model_config, Decoder.Config):
+                inner_attention = getattr(
+                    self.model_config.first_attention, "inner_attention", None
                 )
+                if isinstance(
+                    inner_attention, (FlexAttention.Config, VarlenAttention.Config)
+                ):
+                    model = cast(Decoder, self.model_parts[0])
+                    extra_kwargs["attention_masks"] = model.get_attention_masks(
+                        positions=positions,
+                    )
+            elif hasattr(self.model_parts[0], "get_attention_masks"):
+                # Non-Decoder models (e.g. the HF transformers backend) opt in by
+                # implementing get_attention_masks. It returns None when no mask
+                # is needed, so this stays a no-op for maskless configs.
+                masks = self.model_parts[0].get_attention_masks(positions=positions)
+                if masks is not None:
+                    extra_kwargs["attention_masks"] = masks
 
         if self.parallel_dims.cp_enabled:
             inputs, labels, extra_kwargs = prepare_context_parallel_input(

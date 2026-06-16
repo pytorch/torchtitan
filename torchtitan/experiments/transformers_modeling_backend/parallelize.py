@@ -60,6 +60,17 @@ def parallelize_hf_transformers(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
+    # Flex attention works with FSDP and TP (the TP path runs flex under
+    # local_map; see _flex_attention_torchtitan), but not yet with context
+    # parallelism — that needs a CP-sharded BlockMask and local_map over the CP
+    # axis. Fail loud rather than silently mis-attend across the CP shards.
+    if getattr(model.model.config, "use_flex_attn", False) and parallel_dims.cp_enabled:
+        raise NotImplementedError(
+            "use_flex_attn=True is not yet supported with context parallelism in "
+            "the HF transformers backend (needs a CP-sharded BlockMask + local_map "
+            "over the CP axis). Use flex with FSDP/TP, or disable context parallel."
+        )
+
     # 0. Un-tie embedding/lm_head weights for FSDP compatibility.
     # Some models (Gemma4) share the embedding and lm_head weight
     # (tie_word_embeddings=True). FSDP2 cannot handle parameters shared

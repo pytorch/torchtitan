@@ -11,16 +11,67 @@ from dataclasses import dataclass, field, fields, MISSING
 
 import torch
 from torch import nn
+from torch.distributed.tensor import DTensor, Shard
+from torch.distributed.tensor.experimental import local_map
 from torch.nn import init
+from torch.nn.attention.flex_attention import and_masks
 from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
+from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
 from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
+from torchtitan.models.common.attention import (
+    create_attention_mask,
+    get_causal_mask_mod,
+    get_efficient_causal_mask_mod_for_packed_document,
+)
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import ModuleDict
 from torchtitan.tools.logging import logger
+
+
+def _flex_attention_torchtitan(module, query, key, value, attention_mask, **kwargs):
+    """Flex attention for the HF backend, ``local_map``-ed for tensor parallelism.
+
+    Under TP, q/k/v reach the attention function as ``(b, heads, seq, dim)``
+    DTensors with heads sharded (``Shard(1)``). HF's flex path runs the flex HOP
+    directly on those DTensors, but the document ``mask_mod`` closes over a plain
+    ``positions`` tensor, so the kernel mixes plain + DTensor and fails. Instead
+    we ``local_map`` the kernel: q/k/v -> local, run flex (the ``mask_mod`` now
+    sees local tensors), then wrap the output back heads-sharded. The BlockMask
+    rides as a closure (not a ``local_map`` arg, so its container/None args don't
+    need placements); under TP the sequence isn't sharded, so the full replicated
+    mask matches the full-seq local q/k/v.
+
+    Without TP (q/k/v are plain tensors, e.g. FSDP-only), runs flex directly.
+    CP is not handled here yet (see the guard in ``parallelize_hf_transformers``).
+    """
+    if not isinstance(query, DTensor):
+        return flex_attention_forward(
+            module, query, key, value, attention_mask, **kwargs
+        )
+
+    block_mask = attention_mask
+
+    def _kernel(q, k, v):
+        # flex_attention_forward returns (output, attn_weights); output is
+        # transposed to (b, seq, heads, dim) inside it.
+        out, _ = flex_attention_forward(module, q, k, v, block_mask, **kwargs)
+        return out
+
+    heads_in = (Shard(1),)  # q/k/v: (b, heads, seq, dim) -> heads on dim 1
+    heads_out = (Shard(2),)  # output: (b, seq, heads, dim) -> heads on dim 2
+    mapped = local_map(
+        _kernel,
+        out_placements=(heads_out,),
+        in_placements=(heads_in, heads_in, heads_in),
+        in_grad_placements=(heads_in, heads_in, heads_in),
+        device_mesh=query.device_mesh,
+    )
+    return mapped(query, key, value), None
 
 
 class SliceableModuleDict(ModuleDict):
@@ -160,7 +211,8 @@ class HFTransformerModel(BaseModel):
             self._create_getter_setter_dynamically(is_moe=self.is_moe)
 
             self._titan_injected_model_args = {}
-            self._configure_hf_attention(attn_implementation)
+            use_flex = getattr(model_config, "use_flex_attn", False)
+            self._configure_hf_attention(attn_implementation, use_flex=use_flex)
 
             self._initialize_attributes(model_config)
 
@@ -243,14 +295,37 @@ class HFTransformerModel(BaseModel):
                 if attr_name not in self._tt_to_hf_attribute_map:
                     self._titan_injected_model_args[attr_name] = value
 
-        def _configure_hf_attention(self, attn_implementation: str):
-            """Configure HuggingFace attention settings."""
+        def _configure_hf_attention(
+            self, attn_implementation: str, use_flex: bool = False
+        ):
+            """Configure HuggingFace attention settings.
+
+            Default is SDPA with is_causal and no explicit mask. When ``use_flex``
+            is set, route attention through flex instead so a document/packing
+            BlockMask can be applied — ``is_causal`` cannot express cross-sample
+            (packed) masking. We pass the titan-built BlockMask through HF's
+            normal ``attention_mask`` argument (HF returns an already-4D/BlockMask
+            mask as-is), so no custom mask plumbing is needed. The custom impl
+            name only exists to bypass HF's per-model ``_supports_flex_attn`` gate.
+            """
+            if use_flex:
+                attn_implementation = "flex_torchtitan"
+                AttentionInterface._global_mapping[attn_implementation] = (
+                    _flex_attention_torchtitan
+                )
+            else:
+                # NOTE:(3outeille):This will force create_causal_mask to return None
+                AttentionInterface._global_mapping[attn_implementation] = (
+                    sdpa_attention_forward
+                )
             self._titan_injected_model_args["attn_implementation"] = attn_implementation
             self.attn_implementation = attn_implementation
-            # NOTE:(3outeille):This will force create_causal_mask to return None
-            AttentionInterface._global_mapping[
-                attn_implementation
-            ] = sdpa_attention_forward
+            # HF selects the attention function from ``config._attn_implementation``.
+            # PretrainedConfig has no ``attn_implementation`` property in this
+            # version, so the line above only sets a dead plain attribute — set the
+            # underscore field directly (it is preserved through update_from_config,
+            # which skips underscore keys when copying the loaded HF config).
+            self._attn_implementation = attn_implementation
 
         def _create_getter_setter_dynamically(self, is_moe: bool):
             """
@@ -881,17 +956,61 @@ class HFTransformerModel(BaseModel):
                 "Could not find rotary_emb in the model. Please check the model structure."
             )
 
-    def forward(self, *args, **kwargs):
-        local_seq_len = self.max_seq_len
-        local_seq_len //= (
-            self.cp_mesh.size()
-            if self.cp_mesh is not None and self.cp_mesh.size() > 1
-            else 1
+    def get_attention_masks(self, positions: torch.Tensor):
+        """Build a document-causal flex BlockMask for packed sequences.
+
+        Returns None unless flex attention is enabled (``use_flex_attn``); the
+        trainer's capability-based gate calls this and threads the result into
+        ``forward`` as ``attention_masks``. The mask is causal AND same-document,
+        so packed samples don't attend across boundaries — which ``is_causal``
+        alone (the SDPA path) cannot express.
+        """
+        if not getattr(self.model.config, "use_flex_attn", False):
+            return None
+        mask_mod = and_masks(
+            get_causal_mask_mod(),
+            get_efficient_causal_mask_mod_for_packed_document(positions),
         )
-        kwargs["position_ids"] = torch.arange(
-            local_seq_len, device=args[0].device
-        ).unsqueeze(0)
+        batch_size, seq_len = positions.shape
+        return create_attention_mask(
+            mask_mod,
+            batch_size,
+            None,
+            seq_len,
+            seq_len,
+            device=positions.device,
+            BLOCK_SIZE=128,
+            separate_full_blocks=not is_in_batch_invariant_mode(),
+        )
+
+    def forward(self, *args, **kwargs):
+        positions = kwargs.pop("positions", None)
+        attention_masks = kwargs.pop("attention_masks", None)
+        use_flex = getattr(self.model.config, "use_flex_attn", False)
+
+        if use_flex and positions is not None:
+            # Per-document positions (reset at packed-sample boundaries) drive
+            # RoPE under flex; the BlockMask handles cross-sample masking.
+            kwargs["position_ids"] = positions
+        else:
+            local_seq_len = self.max_seq_len
+            local_seq_len //= (
+                self.cp_mesh.size()
+                if self.cp_mesh is not None and self.cp_mesh.size() > 1
+                else 1
+            )
+            kwargs["position_ids"] = torch.arange(
+                local_seq_len, device=args[0].device
+            ).unsqueeze(0)
+
+        if attention_masks is not None:
+            # HF returns an already-4D mask / BlockMask as-is (see
+            # masking_utils._preprocess_mask_arguments), so the titan-built
+            # BlockMask flows straight through to the flex attention function.
+            kwargs["attention_mask"] = attention_masks
+
         output = self.model.model(*args, **kwargs)
+
         if self._skip_lm_head:
             return output.last_hidden_state
         output = self.model.lm_head(output.last_hidden_state)
