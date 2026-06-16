@@ -482,28 +482,35 @@ class HFTransformerModel(BaseModel):
                 "Weight initialization might not match TorchTitan."
             )
 
-        # Select the HF experts forward kernel. Default is "grouped_mm"
-        # (fused, deterministic via reshape+sum instead of index_add_).
-        # Override via TitanMoeModelConfig.experts_implementation. Works
-        # transparently with hook-based EP/TP because all hooks preserve
-        # the standard (hidden_states, top_k_index, top_k_weights) interface.
-        # Some models (Llama4) do not support setting experts implementation;
-        # skip silently for those.
-        if config.is_moe and hasattr(config, "_experts_implementation"):
-            config._experts_implementation = config.experts_implementation
-
-        try:
-            self.model = model_cls(config=config)
-        except ValueError as e:
-            if "does not support setting experts implementation" in str(e):
-                logger.warning(
-                    f"{model_class_name} does not support grouped_mm; "
-                    "falling back to native expert implementation."
-                )
+        # Select the HF experts forward kernel from the explicit request in
+        # TitanMoeModelConfig.experts_implementation. Honor it or fail — never
+        # silently substitute a different kernel than the user asked for.
+        #
+        # - "native": use the model's own built-in experts unchanged (valid for
+        #   every model; the only valid choice for models that can't take a
+        #   settable implementation, e.g. Llama4 which uses bmm).
+        # - "grouped_mm"/"batched_mm"/"eager": require a model that supports a
+        #   settable experts implementation (the @use_experts_implementation
+        #   decorator, probed up front as a classmethod). If the model can't, the
+        #   request cannot be honored -> raise rather than ignore it.
+        #
+        # All paths work transparently with hook-based EP/TP because the hooks
+        # preserve the (hidden_states, top_k_index, top_k_weights) interface.
+        if config.is_moe:
+            impl = config.experts_implementation
+            if impl == "native":
                 config._experts_implementation = None
-                self.model = model_cls(config=config)
+            elif model_cls._can_set_experts_implementation():
+                config._experts_implementation = impl
             else:
-                raise
+                raise ValueError(
+                    f"{model_class_name} does not support a settable experts "
+                    f"implementation, so experts_implementation='{impl}' cannot "
+                    "be honored. Set experts_implementation='native' to use the "
+                    "model's built-in experts kernel."
+                )
+
+        self.model = model_cls(config=config)
         self.max_seq_len = config.max_seq_len
         self.cp_mesh = None
 

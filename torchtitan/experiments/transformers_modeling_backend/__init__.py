@@ -62,11 +62,17 @@ class TitanMoeModelConfig(TitanModelConfig):
     None or 0 disables MTP.
     """
 
-    experts_implementation: Literal["grouped_mm", "batched_mm", "eager"] = "grouped_mm"
+    experts_implementation: Literal["grouped_mm", "batched_mm", "eager", "native"] = (
+        "grouped_mm"
+    )
     """
     Selects the HF experts forward kernel via `PretrainedConfig._experts_implementation`.
     "grouped_mm" is the fused fast path; "eager" is HF's original for-loop
-    (numerical reference for debugging).
+    (numerical reference for debugging). "grouped_mm"/"batched_mm"/"eager" require
+    a model that supports a settable experts implementation (the
+    `@use_experts_implementation` decorator) — requesting one on a model that does
+    not (e.g. Llama4) raises. "native" uses the model's own built-in experts
+    kernel unchanged (the only valid choice for non-settable models like Llama4).
     """
 
     load_balance_coeff: float | None = 1e-3
