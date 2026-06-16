@@ -106,9 +106,9 @@ class VarlenAttention(Module):
         scale: float | None = None,
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert isinstance(
-            attention_masks, VarlenMetadata
-        ), f"attention_masks must be instance of VarlenMetadata but got {type(attention_masks)}"
+        assert isinstance(attention_masks, VarlenMetadata), (
+            f"attention_masks must be instance of VarlenMetadata but got {type(attention_masks)}"
+        )
 
         cu_seq_q = attention_masks.cu_seq_q
         cu_seq_k = attention_masks.cu_seq_k
@@ -216,9 +216,9 @@ class FlexAttention(Module):
         enable_gqa: bool = False,
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert isinstance(
-            attention_masks, BlockMask
-        ), f"attention_masks must be instance of BlockMask, got {type(attention_masks)}"
+        assert isinstance(attention_masks, BlockMask), (
+            f"attention_masks must be instance of BlockMask, got {type(attention_masks)}"
+        )
 
         # Transpose to (bs, heads, seq, dim) for flex_attention
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)

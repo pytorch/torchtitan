@@ -104,9 +104,9 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
-        assert (
-            self.vllm_flash_attn_version is not None
-        ), "FlashAttention version not detected."
+        assert self.vllm_flash_attn_version is not None, (
+            "FlashAttention version not detected."
+        )
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
@@ -138,9 +138,9 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(1)
 
-        assert not self.kv_cache_dtype.startswith(
-            "fp8"
-        ), "FP8 KV cache not supported yet."
+        assert not self.kv_cache_dtype.startswith("fp8"), (
+            "FP8 KV cache not supported yet."
+        )
 
         assert not attn_metadata.use_cascade, "Cascade not supported yet."
 
