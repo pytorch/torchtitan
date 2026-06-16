@@ -74,7 +74,7 @@ diff.
 - **Router:** sigmoid with e_score_correction_bias, group routing — supported
 - **Experts:** fused gate_up_proj, SwiGLU — fully supported
 - **Shared experts:** additive (FeedForward) — supported
-- **Attention:** MLA (q_lora_rank, kv_lora_rank) — supported via NoParallel TP plan
+- **Attention:** MLA (q_lora_rank, kv_lora_rank) — supported via ShardingConfig TP plan
 - **Differences from titan native:** dispatcher precision only
 
 ### OLMoE-1B-7B (olmoe)
@@ -100,7 +100,10 @@ diff.
 - **Router:** sigmoid with e_score_correction_bias, group routing — supported
 - **Experts:** fused gate_up_proj, SwiGLU — fully supported
 - **Shared experts:** additive — supported
-- **Attention:** MLA + Dynamic Sparse Attention (DSA) indexer — supported via NoParallel TP plan
+- **Attention:** MLA + Dynamic Sparse Attention (DSA) indexer — MLA supported via
+  ShardingConfig; the DSA indexer is **not supported under TP** (its no_grad forward
+  uses scatter_/index ops needing local tensors; supporting it requires local_map
+  execution of the indexer). Runs under FSDP/EP without TP.
 - **Differences from titan native:** dispatcher precision only
 
 ### Llama-4-Scout (llama4_text)
@@ -108,7 +111,7 @@ diff.
 - **Experts:** transposed layout (E, H, 2*I) — supported (transpose in state dict adapter)
 - **Shared experts:** additive, singular form (`shared_expert`) — supported
 - **MoE attribute:** `feed_forward` instead of `mlp` — supported
-- **Expert kernel:** does not support `grouped_mm`, uses `bmm` — causes kernel-level numerical diff
+- **Expert kernel:** no settable experts implementation — requires `experts_implementation="native"` (uses the model's built-in `bmm`); any other value raises. Causes kernel-level numerical diff vs grouped_mm
 - **score_before_experts:** True (top_k=1) — supported
 - **Differences from titan native:** dispatcher precision + expert kernel (bmm vs grouped_mm)
 

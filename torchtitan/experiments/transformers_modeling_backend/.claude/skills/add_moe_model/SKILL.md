@@ -10,8 +10,18 @@ Add support for a new HuggingFace MoE model in the
 
 ## Scope of changes
 
-**NEVER modify core torchtitan** (`torchtitan/models/`, `torchtitan/distributed/`,
-`torchtitan/components/`, etc.).
+**ONLY modify code under `torchtitan/experiments/transformers_modeling_backend/`.**
+If supporting the new model appears to require a change outside this folder
+(e.g. in `torchtitan/models/`, `torchtitan/distributed/`, `torchtitan/components/`,
+or any other core path), **STOP and escalate to the user** — describe the change
+you believe is needed and why, and wait for their decision instead of editing
+core yourself.
+
+The one exception is the **temporary, must-be-reverted diagnostic patches** in
+Phase 3c (numerical-gap analysis): those edit core only to measure where titan
+diverges from HF, are reverted before the change is done, and are never
+committed. Any *permanent* change outside the experiment folder still requires
+escalation.
 
 **DO modify experiment code** to support the new model. The experiment folder
 (`torchtitan/experiments/transformers_modeling_backend/`) is designed to be
@@ -22,10 +32,23 @@ extended for new models. Expected changes include:
 - `moe_replacement.py` — add detection logic for new scoring functions, router
   types, expert layouts, or shared expert patterns in `_probe_hf_moe_block`
   and its helper functions
-- `hf_sharding.py` — add ShardingConfig entries for new attention projection
-  names or norm patterns in `_set_layer_sharding_configs`
-- `model.py` — handle alternative layer attribute names (e.g. `feed_forward`
-  instead of `mlp`)
+- `hf_sharding.py` — give **every parameter/buffer-bearing module** the model
+  introduces a sharding config. This is not limited to attention projections:
+  `set_hf_sharding_configs` covers the root-level `tok_embeddings`, `norm`,
+  `lm_head`, and `rotary_emb` (and their buffers), and `_set_layer_sharding_configs`
+  covers per-layer norms, the attention block, and the dense MLP. A module with
+  params/buffers but no config will mix a plain tensor with a DTensor and crash
+  under TP (the `_assert_all_states_sharded` backstop now makes that a loud
+  setup-time error for any param/buffer-bearing dense-path module — root
+  modules and every decoder layer, excluding the natively-configured MoE). For a genuinely new module, shard it
+  (`colwise_config`/`rowwise_config`) if it has a clear TP layout, otherwise
+  default to `_replicate_config(module)` (replicate weights, no TP). If a new
+  module type doesn't fit any existing helper, that's a signal to stop and think
+  (or escalate) rather than leave it unconfigured.
+- `model.py` — handle alternative submodule names: HF models name the same
+  component differently (feed-forward `mlp` vs `feed_forward`, final norm `norm`
+  vs `final_layernorm`). Add a new model's variant to the relevant lookup
+  (`_get_moe_attr_name`, the `HFTransformerModel` accessor properties).
 - `tests/numerical_equivalence.py` — add the model's synthetic test config
 
 When blockers are found in Phase 1, fix them in the experiment code before
@@ -139,16 +162,23 @@ Call `_probe_hf_moe_block(moe_block, config)` from
 Check which sharding configs `_set_layer_sharding_configs` (in
 `hf_sharding.py`) needs:
 
+Q and KV are detected **independently**, so any mix of full-rank/low-rank
+works (e.g. DeepSeek-V2-Lite has full-rank `q_proj` + low-rank KV):
+
 | Pattern | Projections | Already supported? |
 |---------|-------------|--------------------|
-| Standard GQA | `q_proj`, `k_proj`, `v_proj`, `o_proj` | Yes (`colwise_config`/`rowwise_config`) |
-| MLA (DeepSeek) | `q_a_proj`, `q_b_proj`, `kv_a_proj_with_mqa`, `kv_b_proj` | Yes (`_replicate_config`/`colwise_config`) |
-| Q/K norms | `q_norm`, `k_norm` | Yes (`_replicate_config`) |
-| DSA indexer | `indexer` | Yes (`_replicate_config`) |
-| Alt output | `dense` instead of `o_proj` | Yes |
+| Full-rank Q | `q_proj` | Yes (`colwise_config`) |
+| Low-rank Q (MLA) | `q_a_proj`, `q_b_proj` | Yes (`_replicate_config`/`colwise_config`) |
+| Standard KV (GQA) | `k_proj`, `v_proj` | Yes (`colwise_config`) |
+| Low-rank KV (MLA) | `kv_a_proj_with_mqa`, `kv_b_proj` | Yes (`_replicate_config`/`colwise_config`) |
+| Output | `o_proj` or `dense` | Yes (`rowwise_config`) |
+| Q/K norms | `q_norm`, `k_norm` | Yes (`_replicate_config`, each independent) |
 | V-norm | `v_norm` | Yes (`_replicate_config`) |
+| DSA indexer | `indexer` | FSDP/EP only — **NOT under TP** (fails loud; the indexer's scatter_/index ops need the `spmd_types` backend, see `hf_sharding.py`) |
 
-Check for any projection names NOT in the above list. If found, report:
+The `_assert_all_states_sharded` backstop will fail loud at setup if any
+param/buffer-bearing attention (or other dense-path) module is left without a
+config, so an unhandled projection surfaces immediately. If found, report:
 "attention has unsupported projection `<name>`, needs
 `_set_layer_sharding_configs` update in `hf_sharding.py`."
 
