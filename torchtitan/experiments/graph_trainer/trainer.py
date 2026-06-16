@@ -22,6 +22,7 @@ from torchtitan.experiments.graph_trainer.configs import (
     trace_input_preparer_keys,
 )
 from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
+from torchtitan.experiments.graph_trainer.xpugraph import xpugraph_teardown
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
@@ -97,6 +98,12 @@ def make_fwd_bwd_step(model, loss_fn):
 
     return fwd_bwd_step
 
+def _graph_capture_enabled(compile_config: GraphTrainerCompileConfig) -> bool:
+    return compile_config.enable_xpugraph or compile_config.enable_cudagraph
+
+
+def _graph_passes_enabled(compile_config: GraphTrainerCompileConfig) -> bool:
+    return compile_config.enable_passes or _graph_capture_enabled(compile_config)
 
 class GraphTrainer(Trainer):
     @dataclass(kw_only=True, slots=True)
@@ -248,10 +255,10 @@ class GraphTrainer(Trainer):
                         extra_kwargs,
                     )
 
-            if self.config.compile.enable_passes:
+            if _graph_passes_enabled(self.config.compile):
                 pipeline_fn = PASS_PIPELINE_REGISTRY.get(
-                    self.config.compile.pass_pipeline,
-                    construct_default_graph_passes,
+                self.config.compile.pass_pipeline,
+                construct_default_graph_passes,
                 )
                 passes = pipeline_fn(
                     self._traced_step,
@@ -260,10 +267,10 @@ class GraphTrainer(Trainer):
                 )
 
                 self._traced_step.gm = apply_graph_passes(
-                    self._traced_step.gm,
-                    self._traced_step.example_inputs,
-                    passes,
-                    compile_config=self.config.compile,
+                self._traced_step.gm,
+                self._traced_step.example_inputs,
+                passes,
+                compile_config=self.config.compile,
                 )
         with self.train_context():
             outputs = run_traced(self._traced_step, module=model)(
@@ -318,3 +325,4 @@ class GraphTrainer(Trainer):
 
         # See Note [explicit cudagraph teardown] in cudagraph.py
         cudagraph_teardown()
+        xpugraph_teardown()
