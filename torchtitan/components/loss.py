@@ -17,7 +17,7 @@ from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
-from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
+from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.tools.logging import logger
 
@@ -27,10 +27,33 @@ IGNORE_INDEX = -100
 LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 
-def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+def cross_entropy_loss(
+    pred: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    loss_parallel: bool = True,
+    global_vocab_size: int | None = None,
+) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
     if isinstance(pred, DTensor) and isinstance(labels, DTensor):
-        return _cross_entropy_via_local_map(pred, labels)
+        return _cross_entropy_via_local_map(
+            pred, labels, loss_parallel=loss_parallel
+        )
+
+    if loss_parallel and get_spmd_backend() == "spmd_types":
+        if global_vocab_size is None:
+            raise ValueError(
+                "cross_entropy_loss requires global_vocab_size for "
+                "spmd_types loss_parallel on local tensors."
+            )
+        mesh = current_spmd_mesh()
+        assert mesh is not None, "spmd_types loss_parallel requires current_spmd_mesh"
+        return _LossParallelCrossEntropy.apply(
+            pred,
+            labels,
+            mesh.get_group("tp"),
+            global_vocab_size,
+        )
 
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
@@ -175,7 +198,12 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         return grad_logits, None, None, None
 
 
-def _cross_entropy_via_local_map(pred: DTensor, labels: DTensor) -> torch.Tensor:
+def _cross_entropy_via_local_map(
+    pred: DTensor,
+    labels: DTensor,
+    *,
+    loss_parallel: bool,
+) -> torch.Tensor:
     mesh = pred.device_mesh
     # Labels don't have a vocab dim.
     expected_labels_placements = tuple(
@@ -219,6 +247,11 @@ def _cross_entropy_via_local_map(pred: DTensor, labels: DTensor) -> torch.Tensor
                 flat_labels,
                 reduction="sum",
                 ignore_index=IGNORE_INDEX,
+            )
+        if not loss_parallel:
+            raise ValueError(
+                "cross_entropy_loss received vocab-sharded logits with "
+                "loss_parallel=False."
             )
 
         return _LossParallelCrossEntropy.apply(
@@ -473,6 +506,7 @@ class ChunkedCELoss(BaseLoss):
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
         self.loss_parallel: bool = False
+        self.global_vocab_size: int | None = None
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Set the lm_head module. Must be called before the first __call__."""
@@ -563,12 +597,6 @@ class ChunkedCELoss(BaseLoss):
                 lm_head.set_reshard_after_backward(False)
                 lm_head.set_requires_gradient_sync(False, recurse=False)
 
-            # TODO(pianpwk): migrate DTensor backend off pytorch's loss_parallel to simplify this.
-            use_loss_parallel_autograd_fn = (
-                get_spmd_backend() == "spmd_types"
-                and self.loss_parallel
-                and spmd_mesh_size("tp") > 1
-            )
             last_idx = len(h_chunks) - 1
             for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
                 if fsdp_enabled and i == last_idx:
@@ -577,15 +605,13 @@ class ChunkedCELoss(BaseLoss):
                     )
 
                 logits = lm_head(h_chunk)
-                if use_loss_parallel_autograd_fn:
-                    chunk_loss = _LossParallelCrossEntropy.apply(
-                        logits,
-                        label_chunk,
-                        current_spmd_mesh().get_group("tp"),
-                        lm_head.out_features,
-                    )
-                else:
-                    chunk_loss = self.fn(logits, label_chunk)
+
+                chunk_loss = self.fn(
+                    logits,
+                    label_chunk,
+                    loss_parallel=self.loss_parallel,
+                    global_vocab_size=self.global_vocab_size,
+                )
                 if global_valid_tokens is not None:
                     chunk_loss = chunk_loss / global_valid_tokens
                 if get_spmd_backend() == "spmd_types":  # V -> P reinterpret, after exiting local region
