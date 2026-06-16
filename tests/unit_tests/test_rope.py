@@ -9,6 +9,7 @@ import unittest
 
 import torch
 from torchtitan.models.common.attention import (
+    create_varlen_metadata_for_document,
     GQAttention,
     QKVLinear,
     ScaledDotProductAttention,
@@ -187,6 +188,109 @@ class TestMRoPECache(unittest.TestCase):
 
         self.assertEqual(xq_out.shape, xq.shape)
         self.assertEqual(xk_out.shape, xk.shape)
+
+
+class TestQwen35DeltaNetVarlen(unittest.TestCase):
+    def _make_deltanet(self):
+        try:
+            from torchtitan.models.common import Conv1d, Linear
+            from torchtitan.models.qwen3_5.model import (
+                GatedDeltaKernel,
+                GatedDeltaNet,
+                RMSNormGated,
+            )
+        except ModuleNotFoundError as exc:
+            raise unittest.SkipTest(
+                f"Qwen3.5 optional dependency unavailable: {exc.name}"
+            ) from exc
+
+        dim = 4
+        key_head_dim = 2
+        value_head_dim = 2
+        num_key_heads = 1
+        num_value_heads = 1
+        key_dim = num_key_heads * key_head_dim
+        value_dim = num_value_heads * value_head_dim
+
+        def linear(out_features: int) -> Linear.Config:
+            return Linear.Config(
+                in_features=dim,
+                out_features=out_features,
+                bias=False,
+            )
+
+        def conv(channels: int) -> Conv1d.Config:
+            return Conv1d.Config(
+                in_channels=channels,
+                out_channels=channels,
+                kernel_size=3,
+                groups=channels,
+                bias=False,
+            )
+
+        model = GatedDeltaNet.Config(
+            key_head_dim=key_head_dim,
+            value_head_dim=value_head_dim,
+            conv_kernel_size=3,
+            in_proj_q=linear(key_dim),
+            in_proj_k=linear(key_dim),
+            in_proj_v=linear(value_dim),
+            in_proj_z=linear(value_dim),
+            in_proj_a=linear(num_value_heads),
+            in_proj_b=linear(num_value_heads),
+            conv_q=conv(key_dim),
+            conv_k=conv(key_dim),
+            conv_v=conv(value_dim),
+            kernel=GatedDeltaKernel.Config(backend="torch_native"),
+            norm=RMSNormGated.Config(dim=value_head_dim),
+            out_proj=Linear.Config(
+                in_features=value_dim,
+                out_features=dim,
+                bias=False,
+            ),
+        ).build()
+
+        with torch.no_grad():
+            for param in model.parameters():
+                values = torch.linspace(
+                    -0.2,
+                    0.2,
+                    param.numel(),
+                    dtype=param.dtype,
+                    device=param.device,
+                )
+                param.copy_(values.reshape_as(param))
+            model.A_log.fill_(0.0)
+            model.dt_bias.zero_()
+            model.norm.weight.fill_(1.0)
+        return model
+
+    def test_varlen_matches_independent_document_forwards(self):
+        torch.manual_seed(42)
+        model = self._make_deltanet()
+        x = torch.randn(2, 5, 4)
+        positions = torch.tensor(
+            [
+                [0, 1, 0, 1, 2],
+                [0, 1, 2, 0, 1],
+            ],
+            dtype=torch.int32,
+        )
+
+        attention_masks = create_varlen_metadata_for_document(positions)
+        actual = model(x, attention_masks)
+
+        expected = torch.empty_like(actual)
+        for batch_idx in range(positions.shape[0]):
+            doc_starts = (positions[batch_idx] == 0).nonzero(as_tuple=True)[0]
+            starts = doc_starts.tolist()
+            ends = starts[1:] + [positions.shape[1]]
+            for start, end in zip(starts, ends, strict=False):
+                expected[batch_idx : batch_idx + 1, start:end] = model(
+                    x[batch_idx : batch_idx + 1, start:end]
+                )
+
+        self.assertTrue(torch.allclose(actual, expected, rtol=0.0, atol=1e-6))
 
 
 class TestPerLayerRoPECache(unittest.TestCase):

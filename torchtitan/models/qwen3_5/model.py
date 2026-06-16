@@ -20,7 +20,11 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.models.common import Conv1d, FeedForward, Linear
-from torchtitan.models.common.attention import AttentionMasksType, BaseAttention
+from torchtitan.models.common.attention import (
+    AttentionMasksType,
+    BaseAttention,
+    VarlenMetadata,
+)
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
@@ -81,6 +85,80 @@ def _torch_native_gated_delta(
         output[:, t] = torch.einsum("bhkv,bhk->bhv", state, q_t)
 
     return output.to(dtype)
+
+
+def _torch_native_gated_delta_varlen(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+) -> torch.Tensor:
+    outputs: list[torch.Tensor] = []
+    cu_seqlens_list = cu_seqlens.tolist()
+    for start, end in zip(cu_seqlens_list[:-1], cu_seqlens_list[1:], strict=False):
+        outputs.append(
+            _torch_native_gated_delta(
+                q[:, start:end],
+                k[:, start:end],
+                v[:, start:end],
+                g[:, start:end],
+                beta[:, start:end],
+            )
+        )
+    return torch.cat(outputs, dim=1)
+
+
+def _torch_native_causal_conv1d_varlen(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    conv_kernel_size: int,
+) -> torch.Tensor:
+    outputs: list[torch.Tensor] = []
+    cu_seqlens_list = cu_seqlens.tolist()
+    for start, end in zip(cu_seqlens_list[:-1], cu_seqlens_list[1:], strict=False):
+        x_segment = F.pad(
+            x[:, start:end].transpose(1, 2),
+            [conv_kernel_size - 1, 0],
+        )
+        output = F.conv1d(
+            x_segment,
+            weight,
+            None,
+            groups=weight.size(0),
+        ).transpose(1, 2)
+        outputs.append(output)
+    return F.silu(torch.cat(outputs, dim=1))
+
+
+def _causal_conv1d_varlen(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    conv_kernel_size: int,
+) -> torch.Tensor:
+    if x.is_cuda:
+        from fla.modules.conv.causal_conv1d import (
+            causal_conv1d as _fla_causal_conv1d,
+        )
+
+        output, _ = _fla_causal_conv1d(
+            x=x,
+            weight=weight.squeeze(1),
+            bias=None,
+            activation="silu",
+            backend="triton",
+            cu_seqlens=cu_seqlens,
+        )
+        return output
+    return _torch_native_causal_conv1d_varlen(
+        x,
+        weight,
+        cu_seqlens,
+        conv_kernel_size,
+    )
 
 
 class SharedExperts(FeedForward):
@@ -170,9 +248,9 @@ class GatedDeltaKernel(Module):
         # "fla_chunked": parallel within chunks, fast for training (default)
         # "fla_fused_recurrent": token-by-token, lower memory for long sequences
         # "torch_native": pure-Python reference, for numerical testing only
-        backend: Literal[
-            "fla_chunked", "fla_fused_recurrent", "torch_native"
-        ] = "fla_chunked"
+        backend: Literal["fla_chunked", "fla_fused_recurrent", "torch_native"] = (
+            "fla_chunked"
+        )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -185,6 +263,8 @@ class GatedDeltaKernel(Module):
         v: torch.Tensor,
         g: torch.Tensor,
         beta: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Expand Q/K heads to match V when n_value_heads > n_key_heads
         if q.shape[2] != v.shape[2]:
@@ -194,7 +274,15 @@ class GatedDeltaKernel(Module):
             k = k.repeat_interleave(repeat, dim=2)
 
         if self.backend == "torch_native":
-            return _torch_native_gated_delta(q, k, v, g, beta)
+            if cu_seqlens is None:
+                return _torch_native_gated_delta(q, k, v, g, beta)
+            return _torch_native_gated_delta_varlen(q, k, v, g, beta, cu_seqlens)
+
+        if cu_seqlens is not None and q.shape[0] != 1:
+            raise ValueError(
+                f"Gated DeltaNet varlen kernels require flattened inputs with "
+                f"batch size 1, got batch size {q.shape[0]}."
+            )
 
         if self.backend == "fla_chunked":
             result = _fla_chunk_gated_delta_rule(
@@ -204,6 +292,7 @@ class GatedDeltaKernel(Module):
                 g,
                 beta,
                 use_qk_l2norm_in_kernel=True,
+                cu_seqlens=cu_seqlens,
             )
         elif self.backend == "fla_fused_recurrent":
             result = _fla_fused_recurrent_gated_delta_rule(
@@ -213,6 +302,7 @@ class GatedDeltaKernel(Module):
                 g,
                 beta=beta,
                 use_qk_l2norm_in_kernel=True,
+                cu_seqlens=cu_seqlens,
             )
         else:
             raise ValueError(
@@ -228,8 +318,8 @@ class GatedDeltaNet(Module):
     """Gated DeltaNet linear attention.
 
     Uses recurrent state + gated delta rule instead of softmax attention.
-    No RoPE, no attention masks, different head structure from standard
-    attention.
+    No RoPE, different head structure from standard attention. Varlen
+    metadata is used to reset conv and recurrent state at document boundaries.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -279,7 +369,49 @@ class GatedDeltaNet(Module):
         self.norm = config.norm.build()
         self.out_proj = config.out_proj.build()
 
-    def _causal_conv(self, x: torch.Tensor, conv: nn.Module) -> torch.Tensor:
+    def _causal_conv(
+        self,
+        x: torch.Tensor,
+        conv: nn.Module,
+        cu_seqlens: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if cu_seqlens is not None:
+            if isinstance(x, DTensor):
+                # TODO: Remove once the DTensor Conv1d dispatch fix for sharded
+                # groups lands in a released torch. local_map runs the conv on
+                # local shards (channel-sharded input + Shard(0) weight) and
+                # restores DTensor-ness, with explicit gradient placements.
+                x_plc = x.placements
+                w = conv.weight
+                w_plc = w.placements  # pyrefly: ignore [missing-attribute]
+
+                def _conv_varlen(
+                    x_local: torch.Tensor,
+                    w_local: torch.Tensor,
+                    cu_seqlens_local: torch.Tensor,
+                ) -> torch.Tensor:
+                    return _causal_conv1d_varlen(
+                        x_local,
+                        w_local,
+                        cu_seqlens_local,
+                        self.conv_kernel_size,
+                    )
+
+                conv_dt = local_map(
+                    _conv_varlen,
+                    out_placements=(x_plc,),
+                    in_placements=(x_plc, w_plc, None),
+                    in_grad_placements=(x_plc, w_plc, None),
+                    device_mesh=x.device_mesh,
+                )
+                return conv_dt(x, w, cu_seqlens)  # pyrefly: ignore
+            return _causal_conv1d_varlen(
+                x,
+                conv.weight,
+                cu_seqlens,
+                self.conv_kernel_size,
+            )
+
         x = F.pad(x.transpose(1, 2), [self.conv_kernel_size - 1, 0])
         if isinstance(x, DTensor):
             # TODO: Remove once the DTensor Conv1d dispatch fix for sharded
@@ -315,23 +447,46 @@ class GatedDeltaNet(Module):
             x = conv(x)
         return F.silu(x).transpose(1, 2)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        attention_masks: AttentionMasksType | None = None,
+    ) -> torch.Tensor:
         bs, seqlen, _ = x.shape
+        cu_seqlens = None
+        if isinstance(attention_masks, VarlenMetadata):
+            cu_seqlens = attention_masks.cu_seq_q
+
+        if cu_seqlens is None:
+            kernel_bs, kernel_seqlen = bs, seqlen
+        else:
+            kernel_bs, kernel_seqlen = 1, bs * seqlen
+
+        def _maybe_flatten(tensor: torch.Tensor) -> torch.Tensor:
+            if cu_seqlens is None:
+                return tensor
+            return tensor.reshape(1, bs * seqlen, *tensor.shape[2:])
 
         # Shapes:
         #   xq, xk: (bs, seqlen, n_key_heads * key_head_dim)
         #   xv, xz: (bs, seqlen, n_value_heads * value_head_dim)
         #   xa, xb: (bs, seqlen, n_value_heads)
-        xq = self._causal_conv(self.in_proj_q(x), self.conv_q)
-        xk = self._causal_conv(self.in_proj_k(x), self.conv_k)
-        xv = self._causal_conv(self.in_proj_v(x), self.conv_v)
-        xz = self.in_proj_z(x)
-        xa = self.in_proj_a(x)
-        xb = self.in_proj_b(x)
+        xq = self._causal_conv(
+            _maybe_flatten(self.in_proj_q(x)), self.conv_q, cu_seqlens
+        )
+        xk = self._causal_conv(
+            _maybe_flatten(self.in_proj_k(x)), self.conv_k, cu_seqlens
+        )
+        xv = self._causal_conv(
+            _maybe_flatten(self.in_proj_v(x)), self.conv_v, cu_seqlens
+        )
+        xz = _maybe_flatten(self.in_proj_z(x))
+        xa = _maybe_flatten(self.in_proj_a(x))
+        xb = _maybe_flatten(self.in_proj_b(x))
 
-        xq = xq.view(bs, seqlen, -1, self.key_head_dim)
-        xk = xk.view(bs, seqlen, -1, self.key_head_dim)
-        xv = xv.view(bs, seqlen, -1, self.value_head_dim)
+        xq = xq.view(kernel_bs, kernel_seqlen, -1, self.key_head_dim)
+        xk = xk.view(kernel_bs, kernel_seqlen, -1, self.key_head_dim)
+        xv = xv.view(kernel_bs, kernel_seqlen, -1, self.value_head_dim)
 
         # Gating signals, shape (bs, seqlen, n_value_heads):
         #   g:    decay rate per head, always negative
@@ -339,12 +494,14 @@ class GatedDeltaNet(Module):
         g = -torch.exp(self.A_log.float()) * F.softplus(xa.float() + self.dt_bias)
         beta = torch.sigmoid(xb)
 
-        output = self.kernel(xq, xk, xv, g, beta)
+        output = self.kernel(xq, xk, xv, g, beta, cu_seqlens=cu_seqlens)
 
-        xz = xz.view(bs, seqlen, -1, self.value_head_dim)
+        xz = xz.view(kernel_bs, kernel_seqlen, -1, self.value_head_dim)
         output = self.norm(output, xz)
 
-        output = output.reshape(bs, seqlen, -1)
+        output = output.reshape(kernel_bs, kernel_seqlen, -1)
+        if cu_seqlens is not None:
+            output = output.reshape(bs, seqlen, -1)
         return self.out_proj(output)
 
 
@@ -488,7 +645,7 @@ class Qwen35TransformerBlock(Module):
         if self.full_attn:
             h = self.attn(h, attention_masks, positions)
         else:
-            h = self.attn(h)
+            h = self.attn(h, attention_masks)
         x = x + h
 
         h = self.ffn_norm(x)
@@ -555,7 +712,11 @@ class Qwen35Model(Decoder):
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
                 dn_cfg = next(
-                    (l.delta_net for l in self.layers if l.delta_net is not None),
+                    (
+                        layer_cfg.delta_net
+                        for layer_cfg in self.layers
+                        if layer_cfg.delta_net is not None
+                    ),
                     None,
                 )
                 if dn_cfg is not None:
@@ -677,9 +838,9 @@ class Qwen35Model(Decoder):
             Updated embeddings
         """
         for item_idx, sample_idx, vision_start, n_tokens in vision_positions:
-            inputs_embeds[
-                sample_idx, vision_start : vision_start + n_tokens, :
-            ] = merged_embeds[item_idx, :n_tokens, :]
+            inputs_embeds[sample_idx, vision_start : vision_start + n_tokens, :] = (
+                merged_embeds[item_idx, :n_tokens, :]
+            )
         return inputs_embeds
 
     def _prepare_multimodal_embeds(
