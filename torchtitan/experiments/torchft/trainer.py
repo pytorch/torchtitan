@@ -297,9 +297,8 @@ class FaultTolerantTrainer(Trainer):
             ft_manager=self.ft_manager,
         )
 
-        loss_parallel_enabled = parallel_dims.tp_enabled
         self.train_context = dist_utils.get_train_context(
-            enable_loss_parallel=loss_parallel_enabled,
+            enable_loss_parallel=config.parallelism.tensor_parallel_degree > 1,
             parallel_dims=parallel_dims,
         )
 
