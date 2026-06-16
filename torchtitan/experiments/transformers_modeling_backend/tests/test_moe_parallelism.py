@@ -18,10 +18,43 @@ import unittest
 import torch
 
 from torchtitan.components.optimizer import (
-    OptimizersContainer,
+    default_adamw,
     register_moe_load_balancing_hook,
 )
 from torchtitan.models.common.moe import MoE
+
+
+def _expert_weights(experts):
+    """Return (w1, w2, w3) expert params by their dynamically-discovered names.
+
+    GroupedExperts param names carry dimension suffixes (e.g. ``w1_EFD``), so
+    resolve the canonical (gate, down, up) roles via the same helper the
+    production state-dict adapter uses instead of hardcoding ``w1``/``w2``/``w3``.
+    """
+    from torchtitan.experiments.transformers_modeling_backend.state_dict_adapter import (
+        _expert_names,
+    )
+
+    gate_name, down_name, up_name = _expert_names()
+    return (
+        getattr(experts, gate_name),
+        getattr(experts, down_name),
+        getattr(experts, up_name),
+    )
+
+
+def _moe_buffer(moe, prefix):
+    """Return an MoE buffer by canonical role, tolerating dimension suffixes.
+
+    MoE load-balancing buffers carry a dimension suffix (e.g.
+    ``tokens_per_expert_E``, ``expert_bias_E``), so match by prefix instead of
+    hardcoding the exact name.
+    """
+    for name, buf in moe.named_buffers(recurse=False):
+        if name == prefix or name.startswith(prefix + "_"):
+            return buf
+    raise AttributeError(f"{type(moe).__name__} has no buffer matching '{prefix}*'")
+
 
 try:
     from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -140,6 +173,7 @@ class _FakeParallelDims:
     """Minimal ParallelDims stub for tests that don't use full distributed setup."""
 
     full_dtensor = False
+    spmd_backend = "default"
     tp_enabled = False
     ep_enabled = False
     tp = 1
@@ -296,9 +330,10 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
             native_moe = moe_config.build()
 
         self.assertIsInstance(native_moe, MoE)
-        self.assertEqual(native_moe.experts.w1.shape, (4, 32, 64))
-        self.assertEqual(native_moe.experts.w2.shape, (4, 64, 32))
-        self.assertEqual(native_moe.experts.w3.shape, (4, 32, 64))
+        w1, w2, w3 = _expert_weights(native_moe.experts)
+        self.assertEqual(w1.shape, (4, 32, 64))
+        self.assertEqual(w2.shape, (4, 64, 32))
+        self.assertEqual(w3.shape, (4, 32, 64))
         self.assertEqual(native_moe.router.gate.weight.shape, (4, 64))
 
     def test_init_states_materializes_params(self):
@@ -321,14 +356,16 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
         with torch.device("meta"):
             native_moe = moe_config.build()
 
-        self.assertTrue(native_moe.experts.w1.device.type == "meta")
+        self.assertTrue(_expert_weights(native_moe.experts)[0].device.type == "meta")
 
         native_moe.to_empty(device=torch.device("cpu"))
         native_moe.init_states(buffer_device=torch.device("cpu"))
 
-        self.assertTrue(native_moe.experts.w1.device.type == "cpu")
+        self.assertTrue(_expert_weights(native_moe.experts)[0].device.type == "cpu")
         self.assertTrue(native_moe.router.gate.weight.device.type == "cpu")
-        self.assertTrue(native_moe.tokens_per_expert.device.type == "cpu")
+        self.assertTrue(
+            _moe_buffer(native_moe, "tokens_per_expert").device.type == "cpu"
+        )
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for MoE forward")
     def test_native_moe_forward(self):
@@ -387,9 +424,10 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
         output.sum().backward()
 
         self.assertIsNotNone(x.grad)
-        self.assertIsNotNone(native_moe.experts.w1.grad)
-        self.assertIsNotNone(native_moe.experts.w2.grad)
-        self.assertIsNotNone(native_moe.experts.w3.grad)
+        w1, w2, w3 = _expert_weights(native_moe.experts)
+        self.assertIsNotNone(w1.grad)
+        self.assertIsNotNone(w2.grad)
+        self.assertIsNotNone(w3.grad)
 
 
 # ---------------------------------------------------------------------------
@@ -423,8 +461,8 @@ class TestNativeMoeLoadBalancing(unittest.TestCase):
         native_moe.init_states(buffer_device=torch.device("cpu"))
 
         self.assertEqual(native_moe.load_balance_coeff, 1e-3)
-        self.assertEqual(native_moe.tokens_per_expert.shape, (4,))
-        self.assertEqual(native_moe.expert_bias.shape, (4,))
+        self.assertEqual(_moe_buffer(native_moe, "tokens_per_expert").shape, (4,))
+        self.assertEqual(_moe_buffer(native_moe, "expert_bias").shape, (4,))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for MoE forward")
     def test_forward_accumulates_tokens_per_expert(self):
@@ -453,7 +491,9 @@ class TestNativeMoeLoadBalancing(unittest.TestCase):
         native_moe(x)
 
         # 2*8 tokens, top_k=2 → 32 total expert assignments
-        self.assertEqual(native_moe.tokens_per_expert.sum().item(), 2 * 8 * 2)
+        self.assertEqual(
+            _moe_buffer(native_moe, "tokens_per_expert").sum().item(), 2 * 8 * 2
+        )
 
     def test_optimizer_hook_updates_expert_bias(self):
         """register_moe_load_balancing_hook works with native MoE."""
@@ -483,13 +523,14 @@ class TestNativeMoeLoadBalancing(unittest.TestCase):
 
         # Set unbalanced token counts
         with torch.no_grad():
-            native_moe.tokens_per_expert.copy_(torch.tensor([10.0, 0.0, 0.0, 0.0]))
+            _moe_buffer(native_moe, "tokens_per_expert").copy_(
+                torch.tensor([10.0, 0.0, 0.0, 0.0])
+            )
 
         # Build optimizer and register hook
-        optimizers = OptimizersContainer.Config(
-            lr=1e-3,
-            implementation="for-loop",
-        ).build(model_parts=[model.model])
+        opt_config = default_adamw(lr=1e-3)
+        opt_config.implementation = "for-loop"
+        optimizers = opt_config.build(model_parts=[model.model])
         register_moe_load_balancing_hook(
             optimizers,
             [model.model],
@@ -499,9 +540,13 @@ class TestNativeMoeLoadBalancing(unittest.TestCase):
         optimizers.step()
 
         # Counts should be reset
-        self.assertTrue(torch.equal(native_moe.tokens_per_expert, torch.zeros(4)))
+        self.assertTrue(
+            torch.equal(_moe_buffer(native_moe, "tokens_per_expert"), torch.zeros(4))
+        )
         # Bias should be updated (non-zero for the imbalanced expert)
-        self.assertFalse(torch.equal(native_moe.expert_bias, torch.zeros(4)))
+        self.assertFalse(
+            torch.equal(_moe_buffer(native_moe, "expert_bias"), torch.zeros(4))
+        )
 
 
 # ---------------------------------------------------------------------------

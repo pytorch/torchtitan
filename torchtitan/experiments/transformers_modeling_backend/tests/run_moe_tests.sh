@@ -32,7 +32,10 @@ run_test() {
 
     local result_file="$RESULTS_DIR/$(echo "$name" | tr ' /+()' '_____')"
 
-    if CUDA_VISIBLE_DEVICES=$gpus NGPU=$ngpu MODULE=$MODULE CONFIG=$CONFIG \
+    # Log from the last rank so PP runs report the real loss (the loss lives on
+    # the last pipeline stage; rank 0 prints the -1.0 placeholder). For non-PP
+    # runs every rank has the same loss, so this is always safe.
+    if CUDA_VISIBLE_DEVICES=$gpus NGPU=$ngpu LOG_RANK=$((ngpu - 1)) MODULE=$MODULE CONFIG=$CONFIG \
         ./run_train.sh --training.steps $STEPS "$@" > "$result_file.log" 2>&1; then
         echo "PASSED" > "$result_file.status"
         echo "  PASSED: $name"
@@ -250,13 +253,19 @@ fi
 # Set SKIP_MODEL_SWEEP=1 to skip in offline environments.
 if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
     SWEEP_STEPS=${3:-2}
+    # Supported MoE models, kept in sync with MODEL_COMPATIBILITY.md
+    # (model_type in comments). Llama4/Gemma4 are gated on HF Hub — set
+    # HF_TOKEN and uncomment to include them (verify the Gemma4 repo id).
     SWEEP_MODELS=(
-        "Qwen/Qwen3-30B-A3B"
-        "mistralai/Mixtral-8x7B-Instruct-v0.1"
-        "Qwen/Qwen2-57B-A14B"
-        "zai-org/GLM-4.7"
-        "deepseek-ai/DeepSeek-V3"
-        "zai-org/GLM-5"
+        "Qwen/Qwen3-30B-A3B"                          # qwen3_moe
+        "mistralai/Mixtral-8x7B-Instruct-v0.1"        # mixtral
+        "deepseek-ai/DeepSeek-V3"                     # deepseek_v3
+        "allenai/OLMoE-1B-7B-0924"                    # olmoe
+        "deepseek-ai/DeepSeek-V2-Lite"                # deepseek_v2
+        "zai-org/GLM-4.7"                             # glm4_moe
+        "zai-org/GLM-5"                               # glm_moe_dsa
+        # "meta-llama/Llama-4-Scout-17B-16E-Instruct" # llama4_text (gated: needs HF_TOKEN)
+        # "google/gemma-4-..."                        # gemma4_text (gated: needs HF_TOKEN; set correct id)
     )
 
     # 4-GPU configs (run as parallel pairs or single halves)

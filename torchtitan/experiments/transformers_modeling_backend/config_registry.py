@@ -64,7 +64,7 @@ def transformers_modeling_backend_debugmodel_moe() -> TransformersBackendConfig:
         debug=DebugConfig(print_config=True),
         model_spec=model_registry("debugmodel_moe"),
         profiler=Profiler.Config(profile_freq=5),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -95,7 +95,7 @@ def transformers_modeling_backend_full_moe() -> TransformersBackendConfig:
         debug=DebugConfig(print_config=True),
         model_spec=model_registry("full_moe"),
         profiler=Profiler.Config(profile_freq=5),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=200,
             decay_ratio=0.8,

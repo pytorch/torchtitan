@@ -20,9 +20,8 @@ Parameter names (e.g. ``w1`` vs ``w1_EFD``) are discovered dynamically from
 
 import re
 
+import spmd_types as spmd
 import torch
-
-from torch.distributed.tensor import Shard
 
 from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
     _get_expert_param_info,
@@ -46,8 +45,8 @@ def _expert_names() -> tuple[str, str, str]:
     (e.g. ``w1`` or ``w1_EFD`` depending on the torchtitan version).
     """
     _, layout = _get_expert_param_info()
-    colwise = [n for n, p in layout.items() if p == Shard(1)]
-    rowwise = [n for n, p in layout.items() if p == Shard(2)]
+    colwise = [n for n, p in layout.items() if p == spmd.S(1)]
+    rowwise = [n for n, p in layout.items() if p == spmd.S(2)]
     return colwise[0], rowwise[0], colwise[1]
 
 

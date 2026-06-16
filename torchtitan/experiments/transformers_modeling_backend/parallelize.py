@@ -26,9 +26,6 @@ from torchtitan.distributed.fsdp import (
     get_fsdp_reshard_after_forward_policy,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.experiments.transformers_modeling_backend.compile import (
-    apply_compile_sparse,
-)
 from torchtitan.tools.logging import logger
 
 
@@ -126,13 +123,12 @@ def parallelize_hf_transformers(
     if ac_config.mode != "none":
         apply_ac(model, ac_config)
 
-    # Compile after AC wrapping and before FSDP
+    # Compile after AC wrapping and before FSDP. Compile the whole transformer
+    # block (including native MoE) via the shared core helper — the previous
+    # MoE-only ``apply_compile_sparse`` workaround is obsolete now that
+    # whole-block MoE compile works (pytorch/torchtitan#3409 fixed upstream).
     if model_compile_enabled:
-        has_moe = any(getattr(b, "moe_enabled", False) for b in model.layers)
-        if has_moe:
-            apply_compile_sparse(model, compile_config)
-        else:
-            apply_compile(model, compile_config)
+        apply_compile(model, compile_config)
 
     dp_mesh_dim_names = (
         ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]

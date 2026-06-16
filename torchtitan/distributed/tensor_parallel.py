@@ -20,16 +20,6 @@ from torchtitan.config import CompileConfig, ParallelismConfig
 from torchtitan.tools.logging import logger
 
 
-def _to_local_if_dtensor(
-    t: torch.Tensor, output_layout: Placement, use_local_output: bool
-) -> torch.Tensor:
-    if isinstance(t, DTensor):
-        if t.placements != (output_layout,):
-            t = t.redistribute(placements=(output_layout,), async_op=True)
-        return t.to_local() if use_local_output else t
-    return t
-
-
 class NoParallel(ParallelStyle):
     """Replicate computation on the TP mesh without sharding.
 
@@ -84,15 +74,12 @@ class NoParallel(ParallelStyle):
         output_layout: Placement,
         use_local_output: bool,
         mod: nn.Module,
-        outputs: DTensor | tuple,
+        outputs: DTensor,
         device_mesh: DeviceMesh,
-    ) -> torch.Tensor | DTensor | tuple:
-        if isinstance(outputs, tuple):
-            return tuple(
-                _to_local_if_dtensor(o, output_layout, use_local_output)
-                for o in outputs
-            )
-        return _to_local_if_dtensor(outputs, output_layout, use_local_output)
+    ) -> torch.Tensor | DTensor:
+        if outputs.placements != (output_layout,):
+            outputs = outputs.redistribute(placements=(output_layout,), async_op=True)
+        return outputs.to_local() if use_local_output else outputs
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(

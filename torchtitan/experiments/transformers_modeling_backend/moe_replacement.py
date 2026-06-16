@@ -18,9 +18,9 @@ Two-phase replacement:
 from dataclasses import dataclass
 from functools import partial
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
-from torch.distributed.tensor import Shard
 
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.config_utils import (
@@ -534,7 +534,7 @@ _LINEAR_INIT = {
 _expert_param_info_cache: tuple[dict, dict] | None = None
 
 
-def _get_expert_param_info() -> tuple[dict, dict[str, Shard]]:
+def _get_expert_param_info() -> tuple[dict, dict[str, spmd.PerMeshAxisSpmdType]]:
     """Discover GroupedExperts parameter names and their TP shard placements.
 
     Builds a tiny throwaway instance on meta device to introspect actual
@@ -559,16 +559,16 @@ def _get_expert_param_info() -> tuple[dict, dict[str, Shard]]:
 
     init_fn = partial(nn.init.trunc_normal_, std=0.02)
     param_init: dict = {}
-    param_layout: dict[str, Shard] = {}
+    param_layout: dict[str, spmd.PerMeshAxisSpmdType] = {}
 
     for name, param in temp.named_parameters(recurse=False):
         param_init[name] = init_fn
-        # (E, hidden_dim, dim) → colwise Shard(1)  [w1/w3 pattern]
-        # (E, dim, hidden_dim) → rowwise Shard(2)  [w2 pattern]
+        # (E, hidden_dim, dim) → colwise S(1)  [w1/w3 pattern]
+        # (E, dim, hidden_dim) → rowwise S(2)  [w2 pattern]
         if param.shape[1] >= param.shape[2]:
-            param_layout[name] = Shard(1)
+            param_layout[name] = spmd.S(1)
         else:
-            param_layout[name] = Shard(2)
+            param_layout[name] = spmd.S(2)
 
     _expert_param_info_cache = (param_init, param_layout)
     del temp
