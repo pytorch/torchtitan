@@ -28,6 +28,9 @@ class LocalDispatchMetadata:
 
     token_indices_experts_sorted_N: torch.Tensor  # noqa: N815
     topk_scores_experts_sorted_N: torch.Tensor  # noqa: N815
+    num_tokens_per_local_expert_e: torch.Tensor | None = None
+    padded_num_tokens_per_local_expert_e: torch.Tensor | None = None
+    dispatcher: str = "local"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -133,6 +136,9 @@ class LocalTokenDispatcher(Configurable):
         metadata = LocalDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
+            num_tokens_per_local_expert_e=num_local_tokens_per_expert_E,
+            padded_num_tokens_per_local_expert_e=num_local_tokens_per_expert_E,
+            dispatcher="local",
         )
         return routed_input_RD, num_local_tokens_per_expert_E, metadata
 
@@ -191,6 +197,10 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher):
     def __init__(self, config: Config):
         super().__init__(config)
         self.ep_mesh: DeviceMesh | None = None
+        # Expert-parallel coordinates for metrics attribution, populated in
+        # wire_meshes() from the EP mesh. Defaults are the EP=1 values.
+        self.ep_size: int = 1
+        self.ep_rank: int = 0
         # Sequence-parallel split coordinates derived from tp_mesh.
         # ``sp_rank`` uses ``DeviceMesh._sym_get_coordinate`` so it is a
         # ``SymInt`` under CooR precompile, keeping the FX graph
@@ -206,6 +216,9 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher):
     ) -> None:
         """Install the EP mesh and SP coordinates used by dispatch / combine."""
         self.ep_mesh = ep_mesh
+        if ep_mesh is not None:
+            self.ep_size = ep_mesh.size()
+            self.ep_rank = ep_mesh.get_local_rank()
         if tp_mesh is not None:
             self.sp_size = tp_mesh.size()
             self.sp_rank = tp_mesh._sym_get_coordinate(0)
@@ -358,6 +371,10 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             num_global_tokens_per_local_expert_E,
         )
 
+        num_active_tokens_per_local_expert_e = (
+            num_global_tokens_per_local_expert_E.view(ep_size, -1).sum(0)
+        )
+
         metadata = AllToAllDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
@@ -365,6 +382,11 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             permuted_indices=permuted_indices,
             input_splits=input_splits_list,
             output_splits=output_splits_list,
+            num_tokens_per_local_expert_e=num_active_tokens_per_local_expert_e,
+            padded_num_tokens_per_local_expert_e=num_global_tokens_per_local_expert_e,
+            dispatcher=(
+                "torchao" if isinstance(self, TorchAOTokenDispatcher) else "alltoall"
+            ),
         )
         return routed_input_RD, num_global_tokens_per_local_expert_e, metadata
 
@@ -598,6 +620,9 @@ class DeepEPDispatchMetadata:
     """Metadata for DeepEP, HybridEP, and MinimalAsyncEP token dispatch."""
 
     state: object  # Backend-specific dispatch state.
+    num_tokens_per_local_expert_e: torch.Tensor | None = None
+    padded_num_tokens_per_local_expert_e: torch.Tensor | None = None
+    dispatcher: str = "deepep"
 
 
 class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
@@ -648,7 +673,12 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             ep_group,
         )
 
-        metadata = DeepEPDispatchMetadata(state=state)
+        metadata = DeepEPDispatchMetadata(
+            state=state,
+            num_tokens_per_local_expert_e=num_global_tokens_per_local_expert_e,
+            padded_num_tokens_per_local_expert_e=num_global_tokens_per_local_expert_e,
+            dispatcher="deepep",
+        )
         return hidden_states_RD, num_global_tokens_per_local_expert_e, metadata
 
     # pyrefly: ignore [bad-override]
@@ -778,7 +808,12 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
             pad_multiple=self.pad_multiple,
         )
 
-        metadata = DeepEPDispatchMetadata(state=state)
+        metadata = DeepEPDispatchMetadata(
+            state=state,
+            num_tokens_per_local_expert_e=num_global_tokens_per_local_expert_e,
+            padded_num_tokens_per_local_expert_e=num_global_tokens_per_local_expert_e,
+            dispatcher="hybridep",
+        )
         return hidden_states_RD, num_global_tokens_per_local_expert_e, metadata
 
     # pyrefly: ignore [bad-override]

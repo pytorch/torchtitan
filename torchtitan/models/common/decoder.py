@@ -223,7 +223,14 @@ class Decoder(BaseModel):
 
         self.layers = ModuleDict()
         for i, layer_config in enumerate(config.layers):
-            self.layers[str(i)] = layer_config.build()
+            block = layer_config.build()
+            # Tag MoE expert groups with their layer index so runtime metrics
+            # can attribute grouped-GEMM records to a specific layer.
+            for module in block.modules():
+                if isinstance(module, MoE):
+                    module.experts.layer_id = i
+                    module.experts.top_k = module.router.top_k
+            self.layers[str(i)] = block
 
         self.norm = config.norm.build()
         self.lm_head = config.lm_head.build()

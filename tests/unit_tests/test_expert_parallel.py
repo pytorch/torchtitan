@@ -9,7 +9,10 @@ import unittest.mock
 
 import torch
 
-from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
+from torchtitan.models.common.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    LocalTokenDispatcher,
+)
 
 
 class TestPermute(unittest.TestCase):
@@ -142,6 +145,40 @@ class TestPermute(unittest.TestCase):
         self.assertEqual(
             set(permuted_indices.tolist()),
             set(range(total)),
+        )
+
+
+class TestDispatchMetadata(unittest.TestCase):
+    def test_local_dispatch_metadata_contains_token_metrics(self):
+        dispatcher = LocalTokenDispatcher(
+            LocalTokenDispatcher.Config(
+                num_experts=2,
+                top_k=1,
+            )
+        )
+
+        x_TD = torch.randn(4, 8)
+        topk_scores_TK = torch.ones(4, 1)
+        topk_expert_ids_TK = torch.tensor([[0], [1], [1], [0]], dtype=torch.int64)
+        num_local_tokens_per_expert_E = torch.tensor([2, 2], dtype=torch.int64)
+
+        _, _, metadata = dispatcher.dispatch(
+            x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
+        )
+
+        assert metadata.num_tokens_per_local_expert_e is not None
+        assert metadata.padded_num_tokens_per_local_expert_e is not None
+        self.assertEqual(metadata.dispatcher, "local")
+        torch.testing.assert_close(
+            metadata.num_tokens_per_local_expert_e,
+            num_local_tokens_per_expert_E,
+        )
+        torch.testing.assert_close(
+            metadata.padded_num_tokens_per_local_expert_e,
+            num_local_tokens_per_expert_E,
         )
 
 

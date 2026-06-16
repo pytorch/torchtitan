@@ -314,6 +314,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             pp_schedule=config.parallelism.pipeline_parallel_schedule,
             config_dict=config.to_dict(),
             has_quantization=has_quantization(model_config),
+            model_config=model_config,
         )
         color = self.metrics_processor.color
 
@@ -486,6 +487,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         self.metrics_processor.optimizers = self.optimizers
         self.metrics_processor.model_parts = self.model_parts
+        # Capture static dense nn.Linear (N, K) shapes for the MoE/GEMM metrics
+        # manifest. No-op when the collector is disabled.
+        self.metrics_processor.moe_metric_collector.capture_dense_gemm_templates(
+            self.model_parts
+        )
 
         # Initialize trainer states that will be saved in checkpoint.
         # These attributes must be initialized before checkpoint loading.
@@ -900,6 +906,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             while self.should_continue_training():
                 self.step += 1
                 sl.set_step(self.step, relative_step=self.step - loaded_step)
+                self.metrics_processor.begin_step(self.step)
 
                 with sl.log_trace_span("step"):
                     self.gc_handler.run(self.step)
@@ -909,6 +916,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     except DataloaderExhaustedError:
                         logger.warning("Ran out of data; last step was canceled.")
                         break
+
+                    self.metrics_processor.end_step()
 
                     self.checkpointer.save(
                         self.step,
