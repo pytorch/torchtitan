@@ -90,17 +90,17 @@ def convnext_xxlarge() -> PathTrainer.Config:
 
 
 def _path(flavor: str) -> PathTrainer.Config:
-    steps = 512*100
-    validation_freq = 512
+    steps = 1024*100
+    validation_freq = 1024
     reports = {
-        name: list(range(validation_freq, steps + 1, 50 * validation_freq))
+        name: [validation_freq, steps //2 , steps]
         for name in (
             "analyse_driving",
-            #"analyse_lat_no_noise",
-            #"analyse_cones",
-            #"analyse_lights",
-            #"analyse_stop",
-            #"analyse_hard_brake",
+            "analyse_lat_no_noise",
+            "analyse_cones",
+            "analyse_lights",
+            "analyse_stop",
+            "analyse_hard_brake",
         )
     }
     reports["analyse_dataset"] = [validation_freq]

@@ -4,7 +4,7 @@ import os
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, List
 
 import torch
 import torch.distributed as dist
@@ -19,6 +19,7 @@ from torchtitan.components.validate import BaseValidator
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from xx.common.helpers import parse_info
+from xx.training.lib.checkpoint import wait_for_checkpoint
 from xx.release_tests.lib.base_report import ReportFormat
 from xx.training.path.test import (
     DATASET_REPORTS,
@@ -157,14 +158,18 @@ class PathValidator(BaseValidator):
             self.dataloader.close()
 
     def _submit_reports(self, step: int) -> None:
-        def _run_report(TestCls: type, test_config: Any) -> tuple[Any, ...]:
+        current_checkpoint = f'{self.training_id}/{step}'
+
+        def _run_report(TestCls: type, test_config: Any, wait_for_checkpoint_keys: List[str]) -> tuple[Any, ...]:
+            for k in wait_for_checkpoint_keys:
+                wait_for_checkpoint(current_checkpoint, k)
             return (TestCls(test_config).run_report(),)
 
         dataloader_config = self.config.dataloader
         report_specs: dict[str, ReportSpec] = {}
         for report_name, (TestCls, ReportConfigCls) in MODEL_REPORTS.items():
             report_config = ReportConfigCls(
-                rollout={'agent': {'supercombo': f'{self.training_id}/{step}', 'model_trained_fps': dataloader_config.fps}},
+                rollout={'agent': {'supercombo': current_checkpoint, 'model_trained_fps': dataloader_config.fps}},
                 report_name=f'path_{report_name}',
                 save_tmp=False,
                 format=ReportFormat.HTML,
@@ -175,7 +180,7 @@ class PathValidator(BaseValidator):
                 output_types=('html',),
                 steps=self.config.reports.get(report_name, []),
                 func=_run_report,
-                arguments=[TestCls, report_config],
+                arguments=[TestCls, report_config, ['vision.onnx', 'vision.onnx.data', 'temporal_policy.onnx']],
             )
 
         for report_name, (TestCls, ReportConfigCls) in DATASET_REPORTS.items():
@@ -192,7 +197,7 @@ class PathValidator(BaseValidator):
                 output_types=('html',),
                 steps=self.config.reports.get(report_name, []),
                 func=_run_report,
-                arguments=[TestCls, report_config],
+                arguments=[TestCls, report_config, []],
             )
 
         self.report_runner.submit_due(step=step, report_specs=report_specs)

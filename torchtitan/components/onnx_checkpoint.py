@@ -5,6 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import io
+import os
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, cast, Literal
@@ -172,21 +175,110 @@ class OnnxCheckpointManager(CheckpointManager):
         return model
 
     def _export_onnx(self, model: nn.Module, path: str) -> None:
-        inputs = self._build_onnx_inputs()
-        input_names = self.input_names or None
-        output_names = self.output_names or None
-        buffer = io.BytesIO()
-        torch.onnx.export(
+        self._export_one(
             model,
-            tuple(inputs),
-            cast(Any, buffer),
-            input_names=input_names,
-            output_names=output_names,
+            tuple(self._build_onnx_inputs()),
+            path,
+            input_names=self.input_names or None,
+            output_names=self.output_names or None,
             dynamic_axes=self._dynamic_axes(),
-            external_data=False,
         )
-        with fs.open_file(path, "wb") as f:
-            f.write(buffer.getvalue())
+
+    def _export_one(
+        self,
+        model: nn.Module,
+        inputs: tuple[Any, ...] | dict[str, torch.Tensor],
+        path: str,
+        *,
+        input_names: list[str] | None = None,
+        output_names: list[str] | None = None,
+        dynamic_axes: dict[str, dict[int, str]] | None = None,
+        dynamic_shapes: Any | None = None,
+        dynamo: bool = True,
+        optimize: bool = True,
+        external_data: bool = False,
+        export_params: bool = True,
+        keep_initializers_as_inputs: bool = False,
+    ) -> None:
+        export_inputs: tuple[Any, ...]
+        if isinstance(inputs, dict):
+            input_names = input_names or list(inputs.keys())
+            output_names = output_names or self._output_names(model, (inputs,))
+            dynamic_shapes = dynamic_shapes or (
+                {name: {0: "b"} for name in input_names},
+            )
+            # Keep dict inputs as one positional model argument.
+            export_inputs = (inputs, {})
+        else:
+            export_inputs = inputs
+
+        buffer = io.BytesIO()
+        with torch.no_grad():
+            torch.onnx.export(
+                model,
+                export_inputs,
+                cast(Any, buffer),
+                input_names=input_names,
+                output_names=output_names,
+                dynamic_axes=dynamic_axes,
+                dynamic_shapes=dynamic_shapes,
+                dynamo=dynamo,
+                optimize=optimize,
+                external_data=False,
+                export_params=export_params,
+                keep_initializers_as_inputs=keep_initializers_as_inputs,
+            )
+
+        onnx_data = self._post_export_hook(buffer.getvalue())
+        self._write_onnx_data(onnx_data, path, external_data=external_data)
+
+    def _post_export_hook(self, onnx_data: bytes) -> bytes:
+        return onnx_data
+
+    @staticmethod
+    def _output_names(
+        model: nn.Module,
+        inputs: tuple[Any, ...],
+    ) -> list[str] | None:
+        with torch.no_grad():
+            outputs = model(*inputs)
+        return list(outputs.keys()) if isinstance(outputs, dict) else None
+
+    @staticmethod
+    def _write_onnx_data(
+        onnx_data: bytes,
+        path: str,
+        *,
+        external_data: bool,
+    ) -> None:
+        if not external_data:
+            with fs.open_file(path, "wb") as f:
+                f.write(onnx_data)
+            return
+
+        import onnx
+
+        onnx_model = onnx.load_from_string(onnx_data)
+        filename = fs.basename(path)
+        data_filename = f"{filename}.data"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_path = os.path.join(tmpdir, filename)
+            local_data_path = os.path.join(tmpdir, data_filename)
+            onnx.save_model(
+                onnx_model,
+                local_path,
+                save_as_external_data=True,
+                all_tensors_to_one_file=True,
+                location=data_filename,
+                size_threshold=1024,
+            )
+            with open(local_path, "rb") as src, fs.open_file(path, "wb") as dst:
+                shutil.copyfileobj(src, dst, length=8 * 1024 * 1024)
+            if os.path.exists(local_data_path):
+                with open(local_data_path, "rb") as src, fs.open_file(
+                    f"{path}.data", "wb"
+                ) as dst:
+                    shutil.copyfileobj(src, dst, length=8 * 1024 * 1024)
 
     def _dynamic_axes(self) -> dict[str, dict[int, str]] | None:
         if self.dynamic_axes is not None:
