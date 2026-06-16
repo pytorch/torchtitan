@@ -27,7 +27,12 @@ from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
-from .model import Attention, GptOssModel, GptOssTransformerBlock
+from .model import (
+    Attention,
+    GptOssModel,
+    GptOssTransformerBlock,
+    ScaledBiasRowwiseLinear,
+)
 from .moe import GptOssGroupedExperts, GptOssMoE
 from .parallelize import parallelize_gptoss
 from .state_dict_adapter import GptOssStateDictAdapter
@@ -114,7 +119,7 @@ def _make_gptoss_attn_config(
         head_dim=head_dim,
         dim=dim,
         qkv_linear=qkv,
-        wo=Linear.Config(
+        wo=ScaledBiasRowwiseLinear.Config(
             in_features=n_heads * head_dim,
             out_features=dim,
             bias=True,
