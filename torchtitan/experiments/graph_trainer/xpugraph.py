@@ -222,15 +222,11 @@ class XPUGraphWrapper:
             )
 
     def __call__(self, *args):
-        # First run: warm up operators and runtime state normally.
-        #
-        # Unlike the CUDA version, this first version does not use
-        # _use_cuda_memory_pool_manager because that helper is CUDA-specific.
+
         if not self._has_warmup:
             self._has_warmup = True
             return self._runnable(*args)
 
-        # Second run: record the XPU graph.
         if self._xpugraph is None:
             self._validate_inputs(args)
             self._args = args
@@ -252,8 +248,6 @@ class XPUGraphWrapper:
         if self._should_check_address:
             self._check_static_inputs_address()
 
-        # Later runs: copy dynamic tensor inputs into the captured input buffers
-        # and replay the graph.
         self._copy_non_static_inputs(*args)
         self._xpugraph.replay()
         return self._output
