@@ -288,12 +288,12 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
         Tests loss-parallel cross-entropy loss bitwise parity, with torch.distributed.tensor.parallel.loss_parallel().
         Tests even/uneven vocab sharding, TP, DP+TP, and IGNORE_INDEX labels.
 
-        Runs _LossParallelCrossEntropy under typing checking: logits S(1)@TP, labels I@TP -> I@TP.
+        Runs _LossParallelCrossEntropy under typing checking: logits S(2)@TP, labels I@TP -> I@TP.
         """
-        num_tokens = 128
+        B, L = 4, 32
         mesh_configs = (
-            ((4,), ("tp",), (Shard(1),), (Replicate(),)),
-            ((2, 2), ("dp", "tp"), (Shard(0), Shard(1)), (Shard(0), Replicate())),
+            ((4,), ("tp",), (Shard(2),), (Replicate(),)),
+            ((2, 2), ("dp", "tp"), (Shard(0), Shard(2)), (Shard(0), Replicate())),
         )
         cases = ((32000, 109, False), (32003, 211, False), (32000, 307, True))
 
@@ -312,7 +312,8 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         seed
                     )
                     global_logits = torch.randn(
-                        num_tokens,
+                        B,
+                        L,
                         vocab_size,
                         device=self.device_type,
                         generator=generator,
@@ -320,14 +321,15 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                     global_labels = torch.randint(
                         0,
                         vocab_size,
-                        (num_tokens,),
+                        (B, L),
                         device=self.device_type,
                         dtype=torch.long,
                         generator=generator,
                     )
                     if ignore:
                         mask = torch.rand(
-                            num_tokens,
+                            B,
+                            L,
                             device=self.device_type,
                             generator=generator,
                         )
@@ -344,17 +346,19 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         mesh,
                         label_placements,
                     )
-                    # pytorch loss_parallel() as ground truth
+
+                    # pytorch loss_parallel() as ground truth. F.cross_entropy
+                    # expects the class dimension at dim 1.
                     with loss_parallel():
                         wrapper_loss = F.cross_entropy(
-                            logits_dtensor.float(),
+                            logits_dtensor.float().transpose(1, 2),
                             labels_dtensor,
                             reduction="sum",
                             ignore_index=IGNORE_INDEX,
                         )
 
-                    # typecheck S(1)@TP, I@TP -> I@TP
-                    logits_type = {tp_group: spmd.S(1)}
+                    # typecheck S(2)@TP, I@TP -> I@TP
+                    logits_type = {tp_group: spmd.S(2)}
                     labels_type = {tp_group: spmd.I}
                     if "dp" in axis_names:
                         dp_group = mesh.get_group("dp")
@@ -391,8 +395,8 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         local_logits.grad,
                         mesh,
                         logits_placements,
-                        shape=torch.Size((num_tokens, vocab_size)),
-                        stride=(vocab_size, 1),
+                        shape=torch.Size((B, L, vocab_size)),
+                        stride=(L * vocab_size, vocab_size, 1),
                     )
                     self.assertTrue(
                         torch.equal(

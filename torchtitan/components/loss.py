@@ -192,11 +192,6 @@ def _cross_entropy_via_local_map(pred: DTensor, labels: DTensor) -> torch.Tensor
     # Per-axis placement:
     #   Shard on batch/seq -> Shard(0) (valid because reduction is sum)
     #   Shard on vocab -> Shard(1)
-    def _flatten_placement(p):
-        if isinstance(p, Shard):
-            return Shard(0 if p.dim == 0 else p.dim - 1)
-        return p
-
     vocab_sharded = any(isinstance(p, Shard) and p.dim == 2 for p in pred.placements)
 
     # Per-axis output placement for sum reduction:
@@ -226,24 +221,12 @@ def _cross_entropy_via_local_map(pred: DTensor, labels: DTensor) -> torch.Tensor
                 ignore_index=IGNORE_INDEX,
             )
 
-        # vocab_sharded == True => loss parallel case
-        # TODO: rewrite the entire loss parallel using megatron style.
-        flat_pred_placements = tuple(_flatten_placement(p) for p in pred.placements)
-        flat_labels_placements = tuple(_flatten_placement(p) for p in labels.placements)
-        pred_dtensor = DTensor.from_local(
-            flat_pred, mesh, flat_pred_placements, run_check=False
+        return _LossParallelCrossEntropy.apply(
+            flat_pred,
+            flat_labels,
+            mesh.get_group("tp"),
+            pred.shape[-1],
         )
-        labels_dtensor = DTensor.from_local(
-            flat_labels, mesh, flat_labels_placements, run_check=False
-        )
-        loss_dtensor = torch.nn.functional.cross_entropy(
-            pred_dtensor,
-            labels_dtensor,
-            reduction="sum",
-            ignore_index=IGNORE_INDEX,
-        )
-        assert isinstance(loss_dtensor, DTensor)
-        return loss_dtensor.to_local()
 
     return _local_cross_entropy(pred, labels)
 
