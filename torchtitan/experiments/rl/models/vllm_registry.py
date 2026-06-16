@@ -66,8 +66,7 @@ class InferenceParallelismConfig:
     """Tensor parallelism degree. 1 means disabled."""
 
     expert_parallel_degree: int = 1
-    """Expert parallelism degree for MoE layers. vLLM forms the EP group from
-    the data_parallel * tensor_parallel ranks. 1 means disabled."""
+    """Expert parallelism degree for MoE layers. 1 means disabled."""
 
     def to_torchtitan_parallelism_config(self) -> ParallelismConfig:
         """Translate to the training ``ParallelismConfig`` for utils that need
