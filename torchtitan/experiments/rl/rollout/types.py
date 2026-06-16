@@ -46,9 +46,9 @@ class GenerateFn(Protocol):
         Args:
             prompt_token_ids: The tokenized prompt to generate from.
             request_id: Unique per call; identifies the exact turn (e.g. ".../turn=2") in logs.
-            routing_session_id: Stable key grouping calls that share a prompt prefix; lets
-                sticky routing keep them on the same generator for prefix-cache reuse.
-                `None` means no session affinity.
+            routing_session_id: Optional stable key for the routing session this call
+                belongs to. A router may use it for session affinity, routing same-key
+                calls to the same generator when possible. `None` means no affinity.
             sampling_config: Optional per-call sampling overrides.
 
         Returns:
