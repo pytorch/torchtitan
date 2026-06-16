@@ -82,10 +82,9 @@ class Llama3Model(Decoder):
 
             from torchtitan.models.llama3.sharding import set_llama3_sharding_config
 
-            loss_parallel = parallelism.tensor_parallel_degree > 1
             set_llama3_sharding_config(
                 self,
-                loss_parallel=loss_parallel,
+                loss_parallel=parallelism.tensor_parallel_degree > 1,
                 enable_sp=parallelism.enable_sequence_parallel,
             )
 
