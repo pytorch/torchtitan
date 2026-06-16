@@ -27,8 +27,10 @@ from torch.nn.attention.flex_attention import (
 )
 from torch.nn.attention.varlen import varlen_attn
 
+import spmd_types as spmd
+
 from torchtitan.distributed.compile import maybe_regional_inductor
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
+from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
 
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -201,11 +203,42 @@ class FlexAttention(Module):
     _compiled_flex_attn: ClassVar[Callable] = torch.compile(
         flex_attention,
         options=inductor_configs,
+        name="torchtitan.FlexAttention",
     )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.kernel_options = config.kernel_options
+
+    @staticmethod
+    def compiled_flex_attn(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        block_mask: BlockMask | None,
+        scale: float | None,
+        enable_gqa: bool,
+        return_aux: AuxRequest,
+        kernel_options: dict,
+    ):
+        """Run compiled FlexAttention outside SPMD typechecking, and propagate types."""
+        with spmd.no_typecheck():
+            out, aux = FlexAttention._compiled_flex_attn(
+                q,
+                k,
+                v,
+                block_mask=block_mask,
+                scale=scale,
+                enable_gqa=enable_gqa,
+                return_aux=return_aux,
+                kernel_options=kernel_options,
+            )
+        if get_spmd_backend() == "spmd_types":
+            spmd.assert_type(out, spmd.V, spmd.PartitionSpec("dp", "tp", "cp", None))
+            if return_aux.lse:
+                spmd.assert_type(aux.lse, spmd.V, spmd.PartitionSpec("dp", "tp", "cp"))
+        return out, aux
 
     def forward(
         self,
@@ -237,7 +270,7 @@ class FlexAttention(Module):
         # an inductor sub-compile (see distributed/compile.py). A null context on
         # the default inductor / eager paths, so no dead metadata is emitted.
         with maybe_regional_inductor(FlexAttention.inductor_configs):
-            out, aux = FlexAttention._compiled_flex_attn(
+            out, aux = FlexAttention.compiled_flex_attn(
                 q,
                 k,
                 v,
@@ -599,9 +632,19 @@ class QKVLinear(BaseQKVLinear):
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
         # Use -1 instead of n_heads (or n_kv_heads) to infer the
         # actual local heads from sizes as TP may have sharded them.
-        xq = xq.view(bs, seqlen, -1, self.head_dim)
-        xk = xk.view(bs, seqlen, -1, self.head_dim)
-        xv = xv.view(bs, seqlen, -1, self.head_dim)
+
+        def local_head_split(x):
+            # Drop into local region, we can't propagate S(2) -> qkv head unflatten.
+            # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
+            with spmd.local():
+                x_ = x.view(bs, seqlen, -1, self.head_dim)
+                if get_spmd_backend() == "spmd_types":
+                    spmd.assert_type(
+                        x_, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None)
+                    )
+            return x_
+
+        xq, xk, xv = local_head_split(xq), local_head_split(xk), local_head_split(xv)
         return xq, xk, xv
 
 
@@ -640,7 +683,11 @@ class FusedQKVLinear(BaseQKVLinear):
         # [B, L, n_kv_heads * R * head_dim] -> [B, L, n_kv_heads, R, head_dim]
         # Use -1 for n_kv_heads so TP sharding is handled automatically.
         qkv = self.wqkv(x)
-        qkv = qkv.view(bs, seqlen, -1, self.r_dim, self.head_dim)
+        with spmd.local():  # TODO(pianpwk): same QKV:S(2) unflatten case handled by even sharding
+            qkv = qkv.view(bs, seqlen, -1, self.r_dim, self.head_dim)
+        if get_spmd_backend() == "spmd_types":
+            spmd.assert_type(qkv, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None, None))
+
         # torch.split returns contiguous views for size-1 splits (xk, xv).
         # xq (size heads_per_kv) is non-contiguous; reshape triggers a copy.
         xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
