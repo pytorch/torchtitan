@@ -42,7 +42,7 @@ def _make_model_and_loss(dim, vocab_size, num_chunks=4, with_param_grads=False):
 
 def _chunked_loss_and_grads(model, chunked_loss, hidden_states, labels, gvt):
     h = hidden_states.detach().requires_grad_(True)
-    loss = chunked_loss(h, labels, gvt)
+    loss, _ = chunked_loss(h, labels, gvt)
     if isinstance(chunked_loss, ChunkedLossWithParamGrads):
         h_grad, w_grad = torch.autograd.grad(loss, [h, model.output.weight])
     else:
@@ -81,7 +81,7 @@ class TestChunkedLossWithParamGrads(TestCase):
         model, chunked_loss = _make_model_and_loss(D, V, with_param_grads=True)
         h = torch.randn(B, L, D, requires_grad=True)
         labels = torch.randint(0, V, (B, L))
-        loss = chunked_loss(h, labels)
+        loss, _ = chunked_loss(h, labels)
         torch.autograd.grad(loss, [h, model.output.weight])
         self.assertIsNone(h.grad)  # pyrefly: ignore[missing-attribute]
         self.assertIsNone(

@@ -12,11 +12,15 @@ from typing import Any
 import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
-import torch.nn.functional as F
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.loss import (
+    BaseLoss,
+    ChunkedLoss,
+    GRPOLoss,
+    logits_to_logprobs,
+)
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
@@ -42,30 +46,6 @@ from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger
 
 logger = logging.getLogger(__name__)
-
-
-@sl.log_trace_span("compute_logprobs")
-def compute_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """Compute per-position logprobs from logits and pre-shifted labels.
-
-    ``labels`` is pre-shifted per episode in the batcher
-    (``labels[i] = raw_token_ids[i+1]``), matching the pre-training
-    dataloader convention.  No internal shift is needed.
-    Output shape matches input: ``[batch, seq_len]``.
-    """
-    from torch.distributed.tensor import DTensor
-
-    if isinstance(logits, DTensor):
-        # TODO: pass `grad_placements=[Replicate(), ...]` to make the autograd
-        # contract explicit (see .claude/rules/distributed.md).
-        logits = logits.to_local()
-    B, S, V = logits.shape
-    return -F.cross_entropy(
-        logits.float().reshape(B * S, V),
-        labels.reshape(B * S),
-        reduction="none",
-        ignore_index=IGNORE_INDEX,
-    ).reshape(B, S)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,8 +122,8 @@ class PolicyTrainer(Actor, Configurable):
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         comm: CommConfig = field(default_factory=CommConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
-        loss: Configurable.Config = field(default_factory=Configurable.Config)
-        ac_config: ActivationCheckpointingConfig = field(
+        loss: BaseLoss.Config = field(default_factory=GRPOLoss.Config)
+        ac_config: ActivationCheckpointConfig = field(
             default_factory=SelectiveAC.Config
         )
         checkpoint: CheckpointManager.Config = field(
@@ -175,7 +155,19 @@ class PolicyTrainer(Actor, Configurable):
 
         self.config = config
         self.compile_config = compile_config
+        # Keep the loss uncompiled in RL: GRPOLoss has no compilable ``self.fn``
+        # and ChunkedLoss compiles only its inner leaf loss, so passing
+        # compile_config here would only emit a warning for GRPOLoss.
         self.loss_fn = config.loss.build()
+        # ChunkedLoss reduces logits to logprobs per chunk and never holds the
+        # full [B, L, V] logits, so the full-sequence logprob verification can't
+        # run for it. Decide once here (and warn) rather than per step.
+        self._verify_logprobs = not isinstance(self.loss_fn, ChunkedLoss)
+        if not self._verify_logprobs:
+            logger.warning(
+                "ChunkedLoss is in use; skipping per-step logprob identity "
+                "verification (bit_wise/* metrics will be absent)."
+            )
 
         # Only cast if generator dtype differs from training dtype, otherwise
         # staging buffers would be allocated for a no-op cast.
@@ -220,6 +212,16 @@ class PolicyTrainer(Actor, Configurable):
         model.train()
         self.model = model
         self.model_parts = [model]
+
+        # Wire the lm_head into ChunkedLoss and skip it in the model forward so
+        # the model emits hidden states and the loss applies lm_head per chunk
+        # (mirrors torchtitan.Trainer's non-PP path). RL has no pipeline
+        # parallelism, so there is always one model part that owns the lm_head.
+        if isinstance(self.loss_fn, ChunkedLoss):
+            lm_head = model.lm_head
+            assert lm_head is not None, "Model must have lm_head for ChunkedLoss"
+            self.loss_fn.set_lm_head(lm_head)
+            model._skip_lm_head = True
 
         # Build optimizer and LR scheduler
         self.optimizers = config.optimizer.build(model_parts=self.model_parts)
@@ -422,41 +424,59 @@ class PolicyTrainer(Actor, Configurable):
 
         attention_masks = model.get_attention_masks(positions)
 
+        # ``out`` is logits [B, L, V] for a leaf loss (e.g. GRPOLoss), or hidden
+        # states [B, L, D] when the loss is a ChunkedLoss (the model skips its
+        # lm_head and the loss applies it per chunk). The loss call below is
+        # identical for both: the per-token tensors reach GRPOLoss's keyword-only
+        # args directly, or flow through ChunkedLoss into the inner loss.
         with sl.log_trace_span("model_forward"):
-            logits = model(
+            out = model(
                 token_ids, attention_masks=attention_masks, positions=positions
             )
-        trainer_logprobs = compute_logprobs(logits, labels)
 
         with sl.log_trace_span("loss_fn"):
             loss, loss_metrics = self.loss_fn(
-                trainer_logprobs=trainer_logprobs,
+                out,
+                labels,
+                num_global_valid_tokens,
                 generator_logprobs=generator_logprobs,
-                loss_mask=loss_mask,
                 advantages=advantages,
-                num_global_valid_tokens=num_global_valid_tokens,
+                loss_mask=loss_mask,
             )
 
         with sl.log_trace_span("model_backward"):
             loss.backward()
 
-        # Metrics for bitwise verification of policy logprobs.
-        verification: PartialLogprobDrift = verify_logprob_identity(
-            generator_logprobs=generator_logprobs,
-            trainer_logprobs=trainer_logprobs,
-            loss_mask=loss_mask,
-            num_global_valid_tokens=num_global_valid_tokens,
-        )
+        # Core GRPOLoss does not emit ``loss/mean`` (ChunkedLoss does); inject it
+        # uniformly so the metric is present regardless of which loss is used.
+        loss_metrics["loss/mean"] = loss.detach()
 
-        # Per-rank pre-normalized metrics, so SUM-reducing reconstructs the global.
-        sum_reduced_metrics = {
-            **loss_metrics,
-            "bit_wise/logprob_diff/mean": verification.logprob_diff_mean,
-            "bit_wise/ratio_tokens_different/mean": verification.ratio_tokens_different,
-        }
-        max_reduced_metrics = {
-            "bit_wise/logprob_diff/max": verification.logprob_diff_max,
-        }
+        sum_reduced_metrics = dict(loss_metrics)
+        max_reduced_metrics: dict[str, torch.Tensor] = {}
+
+        # Logprob identity verification needs the full-sequence policy logprobs.
+        # The non-chunked path still has the logits in scope, so recompute the
+        # logprobs cheaply under no_grad. The chunked path never materializes the
+        # full logits, so verification is skipped (decided in __init__).
+        if self._verify_logprobs:
+            with torch.no_grad():
+                policy_logprobs = logits_to_logprobs(out, labels)
+            verification = verify_logprob_identity(
+                generator_logprobs=generator_logprobs,
+                policy_logprobs=policy_logprobs,
+                loss_mask=loss_mask,
+                num_global_valid_tokens=num_global_valid_tokens,
+            )
+            # Per-rank pre-normalized metrics; SUM-reducing reconstructs the global.
+            sum_reduced_metrics["bit_wise/logprob_diff/mean"] = (
+                verification.logprob_diff_mean
+            )
+            sum_reduced_metrics["bit_wise/ratio_tokens_different/mean"] = (
+                verification.ratio_tokens_different
+            )
+            max_reduced_metrics["bit_wise/logprob_diff/max"] = (
+                verification.logprob_diff_max
+            )
 
         return self.reduce_forward_backward_metrics(
             sum_reduced_metrics=sum_reduced_metrics,

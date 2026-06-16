@@ -739,7 +739,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     and self.config.parallelism.disable_loss_parallel
                 ):
                     pred = pred.to_local()
-                loss = self.loss_fn(pred, labels, global_valid_tokens)
+                loss, _ = self.loss_fn(pred, labels, global_valid_tokens)
                 del pred
                 with spmd.no_typecheck():
                     # this propagates types through BWD, causing unnecessary conflicts

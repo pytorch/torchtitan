@@ -51,14 +51,13 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.loss import IGNORE_INDEX, logits_to_logprobs
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
-from torchtitan.experiments.rl.actors.trainer import compute_logprobs
 from torchtitan.experiments.rl.config_registry import (
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
@@ -305,7 +304,7 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
         labels[0, offset : offset + sl - 1] = packed_ids[0, offset + 1 : offset + sl]
         offset += psl
 
-    logprobs = compute_logprobs(logits, labels)
+    logprobs = logits_to_logprobs(logits, labels)
 
     results = []
     offset = 0
@@ -339,7 +338,7 @@ def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
         seq_len = t.shape[0]
         labels[i, : seq_len - 1] = t[1:seq_len]
 
-    logprobs = compute_logprobs(logits, labels)
+    logprobs = logits_to_logprobs(logits, labels)
 
     results = []
     for i, t in enumerate(input_tensors):

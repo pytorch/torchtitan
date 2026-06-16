@@ -391,7 +391,7 @@ class TestTraceModule(unittest.TestCase):
                 ChunkedLossWithParamGrads.Config(num_chunks=num_chunks)
             )
             loss_fn.set_lm_head(lm_head)
-            loss = loss_fn(hidden_states, labels)
+            loss, _ = loss_fn(hidden_states, labels)
             grads = torch.autograd.grad(loss, [hidden_states, *lm_head.parameters()])
             return [loss, *grads]
 

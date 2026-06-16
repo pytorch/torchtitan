@@ -456,7 +456,7 @@ class TestChunkedLoss(unittest.TestCase):
         # Chunked path
         hidden_chunked = hidden_states.detach().requires_grad_(True)
 
-        loss_chunked = chunked_loss(hidden_chunked, labels, global_valid_tokens)
+        loss_chunked, _ = chunked_loss(hidden_chunked, labels, global_valid_tokens)
         loss_chunked.backward()
         grad_chunked = hidden_chunked.grad.clone()
         lm_head_grad_chunked = model_chunked.output.weight.grad.clone()
@@ -507,7 +507,7 @@ class TestChunkedLoss(unittest.TestCase):
 
             h = hidden_states.detach().requires_grad_(True)
 
-            loss = chunked_loss(h, labels, global_valid_tokens)
+            loss, _ = chunked_loss(h, labels, global_valid_tokens)
             loss.backward()
             losses.append(loss.item())
 
