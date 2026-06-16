@@ -383,6 +383,23 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             ngpu=4,
             disabled=True,
         ),
+        # MinimalAsyncEP avoids the standard all-to-all load-balancing path and
+        # is expected to remain CUDA-graphable under its constrained topology.
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel_minimal_async_ep",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.memory_policy full",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.expert_parallel_degree 4",
+                ],
+            ],
+            "aot_fx_trace deepseek_v3 MinimalAsyncEP",
+            "aot_fx_trace_deepseek_v3_minimal_async_ep",
+            ngpu=4,
+        ),
     ]
 
 
