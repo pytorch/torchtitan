@@ -20,7 +20,9 @@ if TYPE_CHECKING:
     from torchtitan.experiments.rl.actors.generator import SamplingConfig
 
 
-_TRUNCATED = frozenset({"truncated_length", "truncated_prompt_too_long"})
+_TRUNCATED = frozenset(
+    {"truncated_length", "truncated_prompt_too_long", "truncated_max_turns"}
+)
 _ERROR = frozenset({"error_parse", "error_timeout", "error_abort", "error"})
 
 
@@ -57,6 +59,7 @@ class RolloutStatus(StrEnum):
     COMPLETED = "completed"
     TRUNCATED_LENGTH = "truncated_length"
     TRUNCATED_PROMPT_TOO_LONG = "truncated_prompt_too_long"
+    TRUNCATED_MAX_TURNS = "truncated_max_turns"
     ERROR_PARSE = "error_parse"
     ERROR_TIMEOUT = "error_timeout"
     ERROR_ABORT = "error_abort"

@@ -67,16 +67,24 @@ You should NEVER use `--debug.deterministic_warn_only`.
 
 ## Code Style
 
+### Unicode
+ASCII only in newly added or rewritten code comments and docstrings. Don't
+introduce Unicode characters (e.g. smart quotes, em dashes, arrows, non-ASCII
+letters) in comments or docstrings you add or change. Use ASCII equivalents:
+`->` for arrows, `<-` for left arrows, `<->` for bidirectional arrows, `--` for
+em dashes. Leave preexisting Unicode in untouched comments alone; only enforce
+this for the comments and docstrings you are adding or rewriting.
+
 ### Naming
 - Names must be **accurate, descriptive, and reflect actual scope**. Don't use
-  "toy/test/temp" in production names — put that context in docstrings instead.
+  "toy/test/temp" in production names -- put that context in docstrings instead.
 - Follow upstream conventions: match torchao and PyTorch naming where applicable.
   E.g. if torchao calls it `Float8Linear`, use `Float8Linear` not `Float8Config`.
 - Use `num_` prefix for counts (e.g. `num_expert_groups` not `n_expert_groups`)
   when not directly matching an upstream API.
 - **`axis` names a specific mesh axis; `dim` is for tensors and mesh shape.**
-  In any name we own — variables, parameters, attributes, helpers, comments,
-  docstrings, error messages — use ``axis``/``axes`` when referring to a
+  In any name we own -- variables, parameters, attributes, helpers, comments,
+  docstrings, error messages -- use ``axis``/``axes`` when referring to a
   specific ``DeviceMesh`` axis (TP axis, ``dp_shard`` axis, the list of axes
   a spec references). Use ``dim``/``dimensional`` for the mesh's *shape*
   ("1D mesh", "multi-dimensional SPMD mesh") and for tensor dimensions; bare
@@ -88,9 +96,9 @@ You should NEVER use `--debug.deterministic_warn_only`.
 
 ### Code Placement
 - Put code in the **most general applicable location**:
-  - Model-agnostic parallelism helpers → `torchtitan/distributed/`
-  - Shared model components (attention, MoE, embeddings) → `torchtitan/models/common/`
-  - Model-specific code → the specific model folder
+  - Model-agnostic parallelism helpers -> `torchtitan/distributed/`
+  - Shared model components (attention, MoE, embeddings) -> `torchtitan/models/common/`
+  - Model-specific code -> the specific model folder
 - Don't put model-agnostic functionality in model-specific files just because
   that's where you first needed it.
 
@@ -98,7 +106,7 @@ You should NEVER use `--debug.deterministic_warn_only`.
 - **`ValueError`** for user-facing errors (bad config, invalid input).
 - **`assert`** only for internal invariants that indicate programmer error.
 - Always validate mesh axes, tensor placements, and config values explicitly
-  in distributed code — don't assume a 1D mesh or specific placements.
+  in distributed code -- don't assume a 1D mesh or specific placements.
 - When a code path silently skips user configuration, **emit a warning**.
 
 ### Parameters and Config
