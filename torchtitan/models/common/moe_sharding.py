@@ -142,8 +142,9 @@ def _tokens_per_expert_placement(*, enable_ep: bool) -> SpmdLayout:
 
     Each DP/CP rank processes different data and accumulates partial token
     counts, so DP/CP axes are ``Partial``. TP is ``Partial`` when EP is
-    enabled (TP axis doubles as SP, each rank sees different tokens) or
-    ``Replicate`` when EP is disabled (all TP ranks see the same tokens).
+    enabled (MoE reuses the mesh axis named TP for sequence-token sharding, so
+    each rank sees different tokens) or ``Replicate`` when EP is disabled (all
+    TP ranks see the same tokens).
     """
     return SpmdLayout(
         {

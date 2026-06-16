@@ -397,9 +397,11 @@ def dispatch_tokens(
     num_local_experts: int,
     num_experts: int,
     group: ProcessGroup,
-    score_before_experts: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via DeepEP.
+
+    Routing scores are applied to the expert outputs in ``combine_tokens``,
+    after expert computation.
 
     Args:
         hidden_states: Input tokens [num_tokens, hidden_dim]
@@ -408,7 +410,6 @@ def dispatch_tokens(
         num_local_experts: Number of experts on this rank
         num_experts: Total number of experts across all ranks
         group: EP process group
-        score_before_experts: If True, apply routing scores before expert computation.
 
     Returns:
         (permuted_tokens, tokens_per_expert, state_for_combine)
@@ -467,20 +468,12 @@ def dispatch_tokens(
     # num_tokens_per_expert is returned from dispatch as int32 on CPU, move to GPU
     num_tokens_per_expert = num_tokens_per_expert.to(hidden_states.device)
 
-    if score_before_experts and permuted_scores is not None:
-        # Avoid float32 conversion to save memory
-        hidden_states = hidden_states * permuted_scores.to(hidden_states.dtype).reshape(
-            -1, 1
-        )
-        permuted_scores_for_state = None
-    else:
-        permuted_scores_for_state = permuted_scores
-
+    # Routing scores are applied to expert outputs in combine_tokens.
     state = DispatchState(
         handle_id=handle_id,
         permuted_indices=permuted_indices,
         num_recv_tokens=num_recv_tokens,
-        permuted_scores=permuted_scores_for_state,
+        permuted_scores=permuted_scores,
     )
 
     return hidden_states, num_tokens_per_expert, state
