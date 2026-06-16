@@ -116,14 +116,15 @@ class VLLMCudagraphConfig:
     ``RLTrainer`` level, shared by both trainer and generator.  Only CUDA
     graph capture, which is vLLM-specific, is controlled here.
 
-    When enabled, vLLM captures the forward pass as a single CUDA graph
-    ("full" mode).  "piecewise" modes are intentionally excluded: they
-    require vLLM's whole-model torch.compile to split the graph around
-    non-capturable ops, which conflicts with per-layer compile.
+    vLLM captures full graphs for decode batches only (``FULL_DECODE_ONLY``);
+    prefill / mixed batches run eager. Full graphs for mixed batches (plain
+    ``FULL``) corrupt generation at large batch with the varlen/FA3 backend
+    (see #3668), and the piecewise modes need vLLM's whole-model compile, which
+    conflicts with our per-layer compile.
     """
 
     enable: bool = True
-    """Whether to enable CUDA graph capture (vLLM "full" mode)."""
+    """Whether to enable CUDA graph capture (vLLM ``FULL_DECODE_ONLY`` mode)."""
 
     # TODO: Validate CUDA graph capture with MoE / Expert Parallelism.
     # MoE routing produces dynamic shapes that may conflict with full
@@ -137,8 +138,8 @@ class VLLMCudagraphConfig:
     def get_vllm_compilation_config(
         self, *, max_num_seqs: int
     ) -> CompilationConfig | None:
-        """Build a vLLM ``CompilationConfig``, or return ``None`` when
-        CUDA graphs are disabled.
+        """Build a vLLM ``CompilationConfig`` (``FULL_DECODE_ONLY``), or return
+        ``None`` when CUDA graphs are disabled.
 
         Capture sizes are powers of 2 from 1 up to ``max_num_seqs``, plus
         ``max_num_seqs`` itself if it isn't a power of 2.
@@ -152,7 +153,7 @@ class VLLMCudagraphConfig:
         if cap not in sizes:
             sizes.append(cap)
         return CompilationConfig(
-            cudagraph_mode="full",
+            cudagraph_mode="FULL_DECODE_ONLY",
             mode=0,
             cudagraph_capture_sizes=sorted(sizes),
         )

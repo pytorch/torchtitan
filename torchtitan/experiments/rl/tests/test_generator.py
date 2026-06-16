@@ -24,6 +24,7 @@ from torchtitan.experiments.rl.actors.generator import (
     _prepare_generation_request_metrics,
     GenerationFuture,
     SamplingConfig,
+    VLLMCudagraphConfig,
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.observability import metrics as m
@@ -241,3 +242,31 @@ def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
                 config.generator, reset_prefix_cache_on_weight_sync=False
             ),
         )
+
+
+# --- CUDA graph config (VLLMCudagraphConfig.get_vllm_compilation_config) ---
+
+
+def test_cudagraph_disabled_returns_none():
+    assert (
+        VLLMCudagraphConfig(enable=False).get_vllm_compilation_config(max_num_seqs=256)
+        is None
+    )
+
+
+def test_cudagraph_uses_full_decode_only_mode():
+    # Decode-only graphs avoid the mixed-batch full-graph corruption. See #3668.
+    cfg = VLLMCudagraphConfig(enable=True).get_vllm_compilation_config(max_num_seqs=256)
+    assert cfg.cudagraph_mode.name == "FULL_DECODE_ONLY"
+    assert int(cfg.mode) == 0
+
+
+def test_cudagraph_capture_sizes_cover_max_num_seqs():
+    # Powers of 2 up to max_num_seqs, plus max_num_seqs itself when not a power of 2.
+    cfg = VLLMCudagraphConfig(enable=True).get_vllm_compilation_config(max_num_seqs=500)
+    assert cfg.cudagraph_capture_sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256, 500]
+
+
+def test_cudagraph_rejects_nonpositive_max_num_seqs():
+    with pytest.raises(ValueError, match="max_num_seqs must be positive"):
+        VLLMCudagraphConfig(enable=True).get_vllm_compilation_config(max_num_seqs=0)
