@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components.loss import CrossEntropyLoss
-from torchtitan.config import ActivationCheckpointConfig
+from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.distributed.utils import get_train_context
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.trainer import Trainer
@@ -33,7 +33,7 @@ def build_minimal_trainer(
     trainer.model_parts = [model]
     trainer.loss_fn = CrossEntropyLoss.Config().build()
     trainer.parallel_dims = SimpleNamespace(pp_enabled=False, cp_enabled=False)
-    trainer.train_context = get_train_context(False)
+    trainer.train_context = get_train_context(enable_loss_parallel=False)
     trainer.model_config = model_config
     trainer.device = torch.device("cuda")
     trainer.tokenizer = tokenizer
@@ -57,9 +57,11 @@ def build_minimal_trainer(
                 cpu_offload_budget_gb=100.0,
             ),
             model_spec=SimpleNamespace(model=model_config),
-            activation_checkpoint=ActivationCheckpointConfig(
-                mode=activation_checkpoint_mode
-            ),
+            activation_checkpoint={
+                "none": None,
+                "selective": SelectiveAC.Config(),
+                "full": FullAC.Config(),
+            }[activation_checkpoint_mode],
             parallelism=SimpleNamespace(
                 pipeline_parallel_degree=1,
                 fsdp_reshard_after_forward=fsdp_reshard_after_forward,
