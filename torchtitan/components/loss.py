@@ -36,9 +36,7 @@ def cross_entropy_loss(
 ) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
     if isinstance(pred, DTensor) and isinstance(labels, DTensor):
-        return _cross_entropy_via_local_map(
-            pred, labels, loss_parallel=loss_parallel
-        )
+        return _cross_entropy_via_local_map(pred, labels, loss_parallel=loss_parallel)
 
     if loss_parallel and get_spmd_backend() == "spmd_types":
         if global_vocab_size is None:
