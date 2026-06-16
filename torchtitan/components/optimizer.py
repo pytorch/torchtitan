@@ -393,16 +393,20 @@ def register_moe_load_balancing_hook(
         parallel_dims: Parallel dimensions for distributed communication.
     """
 
-    def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
+    def _iter_moe_layers(model_parts: list[nn.Module]) -> Iterator[nn.Module]:
         for model_part in model_parts:
             layers = model_part.get_submodule("layers")
             assert isinstance(layers, nn.ModuleDict)
             for transformer_block in layers.values():
-                if transformer_block.moe_enabled:
-                    # Assumption: load_balance_coeff is set universally on all moe blocks.
-                    # pyrefly: ignore [missing-attribute]
-                    return bool(transformer_block.moe.load_balance_coeff)
-        return False
+                if getattr(transformer_block, "moe_enabled", False):
+                    yield transformer_block
+
+    def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
+        return any(
+            # pyrefly: ignore [missing-attribute]
+            transformer_block.moe.load_balance_coeff is not None
+            for transformer_block in _iter_moe_layers(model_parts)
+        )
 
     # for MoE auxiliary-loss-free load balancing
     def _is_recomputation_enabled(module):
@@ -416,24 +420,22 @@ def register_moe_load_balancing_hook(
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
         tokens_per_expert_E_list = []
-        for model_part in model_parts:
-            layers = model_part.get_submodule("layers")
-            assert isinstance(layers, nn.ModuleDict)
-            for transformer_block in layers.values():
-                if not transformer_block.moe_enabled:
-                    continue
-                # pyrefly: ignore [missing-attribute]
-                if transformer_block.moe.load_balance_coeff is None:
-                    return
-                # pyrefly: ignore [missing-attribute]
-                tokens_per_expert_E = transformer_block.moe.tokens_per_expert_E
-                if _is_recomputation_enabled(transformer_block):
-                    # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
-                    # This does not affect to expert choice, but affects the experts usage metrics.
-                    # We divide by 2 to correct for this double-counting due to recomputation
-                    # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
-                    tokens_per_expert_E = tokens_per_expert_E // 2
-                tokens_per_expert_E_list.append(tokens_per_expert_E)
+        for transformer_block in _iter_moe_layers(model_parts):
+            # pyrefly: ignore [missing-attribute]
+            if transformer_block.moe.load_balance_coeff is None:
+                continue
+            # pyrefly: ignore [missing-attribute]
+            tokens_per_expert_E = transformer_block.moe.tokens_per_expert_E
+            if _is_recomputation_enabled(transformer_block):
+                # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
+                # This does not affect to expert choice, but affects the experts usage metrics.
+                # We divide by 2 to correct for this double-counting due to recomputation
+                # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
+                tokens_per_expert_E = tokens_per_expert_E // 2
+            tokens_per_expert_E_list.append(tokens_per_expert_E)
+
+        if not tokens_per_expert_E_list:
+            return
 
         tokens_per_expert_E_by_layer = torch.vstack(tokens_per_expert_E_list)
 
@@ -487,6 +489,8 @@ def register_moe_load_balancing_hook(
                     if not transformer_block.moe_enabled:
                         continue
                     moe = transformer_block.moe
+                    if moe.load_balance_coeff is None:
+                        continue
 
                     tokens_per_expert_E = tokens_per_expert_E_by_layer[
                         moe_layer_idx
