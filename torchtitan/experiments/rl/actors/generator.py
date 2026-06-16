@@ -369,12 +369,6 @@ class VLLMGenerator(Actor, Configurable):
                     "evenly divisible by TP, which doesn't hold for inference "
                     "(uneven batches). Set enable_sequence_parallel=False."
                 )
-            if not p.disable_loss_parallel:
-                raise ValueError(
-                    "Generator requires disable_loss_parallel=True, "
-                    f"got disable_loss_parallel={p.disable_loss_parallel}"
-                )
-
             if (
                 self.debug.batch_invariant
                 and not self.reset_prefix_cache_on_weight_sync
