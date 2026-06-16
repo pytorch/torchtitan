@@ -316,10 +316,9 @@ class VLLMModelWrapper(Module):
 
         logits = self.model.lm_head(hidden_states)
 
-        # Full DTensor path returns logits as DTensor; vLLM expects plain tensors.
-        # disable_loss_parallel=True already makes lm_head output Replicate
+        # Full DTensor path returns logits as DTensor; vLLM expects full plain tensors.
         if isinstance(logits, DTensor):
-            logits = logits.to_local()
+            logits = logits.full_tensor()
 
         return logits
 

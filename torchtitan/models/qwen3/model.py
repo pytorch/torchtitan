@@ -98,9 +98,10 @@ class Qwen3Model(Decoder):
 
             from torchtitan.models.qwen3.sharding import set_qwen3_sharding_config
 
+            loss_parallel = parallelism.tensor_parallel_degree > 1
             set_qwen3_sharding_config(
                 self,
-                loss_parallel=not parallelism.disable_loss_parallel,
+                loss_parallel=loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
