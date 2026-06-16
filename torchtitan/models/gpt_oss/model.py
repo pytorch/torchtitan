@@ -215,20 +215,9 @@ class GptOssModel(Decoder):
             Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
 
-            from torchtitan.components.loss import ChunkedCELoss
             from torchtitan.models.gpt_oss.sharding import set_gpt_oss_sharding_config
 
-            chunked_loss = isinstance(config.loss, ChunkedCELoss.Config)
-            loss_parallel = not parallelism.disable_loss_parallel
-            if (
-                parallelism.spmd_backend == "spmd_types"
-                and loss_parallel
-                and not chunked_loss
-            ):
-                raise ValueError(
-                    "GPT-OSS local SPMD loss parallel requires ChunkedCELoss. "
-                    "Use ChunkedCELoss or set parallelism.disable_loss_parallel=True."
-                )
+            loss_parallel = parallelism.tensor_parallel_degree > 1
             set_gpt_oss_sharding_config(
                 self,
                 loss_parallel=loss_parallel,

@@ -318,6 +318,24 @@ class CrossEntropyLoss(BaseLoss):
     def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
         self.fn: LossFunction = cross_entropy_loss
         self._maybe_compile(compile_config)
+        self.loss_parallel: bool = False
+        self.global_vocab_size: int | None = None
+
+    def __call__(
+        self,
+        pred: torch.Tensor,
+        labels: torch.Tensor,
+        global_valid_tokens: float | None = None,
+    ) -> torch.Tensor:
+        loss = self.fn(
+            pred,
+            labels,
+            loss_parallel=self.loss_parallel,
+            global_vocab_size=self.global_vocab_size,
+        )
+        if global_valid_tokens is not None:
+            loss = loss / global_valid_tokens
+        return loss
 
 
 class MSELoss(BaseLoss):
