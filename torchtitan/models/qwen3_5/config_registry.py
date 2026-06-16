@@ -11,11 +11,8 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.tokenizer import MultiModalTokenizer
 
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
 from torchtitan.trainer import Trainer
 
@@ -62,9 +59,7 @@ def qwen35_debugmodel() -> Trainer.Config:
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
 
 
@@ -93,9 +88,7 @@ def qwen35_debugmodel_moe() -> Trainer.Config:
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
 
 
@@ -120,9 +113,7 @@ def qwen35_0_8b() -> Trainer.Config:
             interval=500,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
 
 
@@ -147,9 +138,7 @@ def qwen35_2b() -> Trainer.Config:
             interval=500,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
 
 
@@ -173,9 +162,7 @@ def qwen35_4b() -> Trainer.Config:
         checkpoint=CheckpointManager.Config(
             interval=500,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="full",
-        ),
+        activation_checkpoint=FullAC.Config(),
     )
 
 
@@ -201,9 +188,7 @@ def qwen35_9b() -> Trainer.Config:
             interval=500,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="full",
-        ),
+        activation_checkpoint=FullAC.Config(),
     )
 
 
@@ -229,9 +214,7 @@ def qwen35_27b() -> Trainer.Config:
             interval=500,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="full",
-        ),
+        activation_checkpoint=FullAC.Config(),
     )
 
 
@@ -258,9 +241,7 @@ def qwen35_35b_a3b() -> Trainer.Config:
             interval=500,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="full",
-        ),
+        activation_checkpoint=FullAC.Config(),
     )
 
 
@@ -287,9 +268,7 @@ def qwen35_122b_a10b() -> Trainer.Config:
             interval=500,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="full",
-        ),
+        activation_checkpoint=FullAC.Config(),
     )
 
 
@@ -316,7 +295,5 @@ def qwen35_397b_a17b() -> Trainer.Config:
             interval=500,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="full",
-        ),
+        activation_checkpoint=FullAC.Config(),
     )
