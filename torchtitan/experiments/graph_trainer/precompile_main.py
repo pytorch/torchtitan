@@ -239,10 +239,9 @@ def _precompile_aot_fx_trace(
     # cross_entropy fails with "mixed torch.Tensor and DTensor" because
     # the TP-parallelized model outputs Shard'd DTensors but labels
     # remain plain tensors.
-    loss_parallel_enabled = parallel_dims.tp_enabled
     loss_parallel_ctx = (
         torch.distributed.tensor.parallel.loss_parallel()
-        if loss_parallel_enabled
+        if config.parallelism.tensor_parallel_degree > 1
         else contextlib.nullcontext()
     )
 
