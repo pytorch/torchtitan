@@ -356,6 +356,24 @@ class PolicyTrainer(Actor, Configurable):
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
 
+    @endpoint
+    async def verify_dp_rank(self, expected_dp_rank: int) -> int:
+        """Return this rank's actual data-parallel rank; log on mismatch.
+
+        The controller calls this on ``slice(batch=d)`` (passing ``d``) after
+        reshaping the trainer mesh into ("batch", "within_batch"), then raises
+        if any returned dp_rank differs from its batch slice. Returning the
+        actual dp_rank lets the controller report actual-vs-expected.
+        """
+        if self.dp_rank != expected_dp_rank:
+            logger.error(
+                "Trainer mesh rank %d reports dp_rank=%d but expected %d.",
+                current_rank().rank,
+                self.dp_rank,
+                expected_dp_rank,
+            )
+        return self.dp_rank
+
     def reduce_forward_backward_metrics(
         self,
         *,
@@ -397,14 +415,13 @@ class PolicyTrainer(Actor, Configurable):
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        training_data: list[TrainingBatch],
+        local_batch: TrainingBatch,
         num_global_valid_tokens: int,
     ) -> dict[str, float]:
         """Run forward pass, compute loss, call backward, and reduce metrics.
 
         Args:
-            training_data: List of TrainingBatch, one per DP rank. Local rank
-                picks training_data[self.dp_rank].
+            local_batch: This rank's TrainingBatch.
             num_global_valid_tokens: Total response tokens across all DP
                 ranks for this step. The controller computes this before
                 sharding episodes.
@@ -427,7 +444,6 @@ class PolicyTrainer(Actor, Configurable):
             )
         model = self.model_parts[0]
 
-        local_batch = training_data[self.dp_rank]
         device = self.device
         token_ids = local_batch.token_ids.to(device)
         labels = local_batch.labels.to(device)

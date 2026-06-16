@@ -280,13 +280,6 @@ class RLTrainer(Configurable):
         """
         return result.get(0)
 
-    def _shard_episodes(self, episodes: list[Episode]) -> list[list[Episode]]:
-        """Round-robin partition episodes across DP ranks."""
-        return [
-            [episodes[i] for i in range(rank, len(episodes), self.trainer_dp_degree)]
-            for rank in range(self.trainer_dp_degree)
-        ]
-
     @sl.log_trace_span("setup_async")
     async def setup_async(
         self,
@@ -374,6 +367,27 @@ class RLTrainer(Configurable):
                 )
                 generators.append(generator)
             self.generator_router = config.generator_router.build(generators=generators)
+
+        # Reshape trainer mesh into ("batch", "within_batch") so controller can
+        # scatter microbatches by the DP dimension.
+        self.trainer = self.trainer.flatten("flat").split(
+            flat=("batch", "within_batch"), batch=self.trainer_dp_degree
+        )
+        # Verify the reshape result against the actual dp rank on each trainer actor.
+        with sl.log_trace_span("verify_trainer_dp_layout"):
+            verifications = await asyncio.gather(
+                *[
+                    self.trainer.slice(batch=dp_rank).verify_dp_rank.call(dp_rank)
+                    for dp_rank in range(self.trainer_dp_degree)
+                ]
+            )
+            for dp_rank, value_mesh in enumerate(verifications):
+                actual = list(value_mesh.values())
+                if any(reported != dp_rank for reported in actual):
+                    raise ValueError(
+                        "Trainer mesh reshape is inconsistent with the DeviceMesh "
+                        f"batch axis: expected all to be {dp_rank}, but got {actual}."
+                    )
 
         # Initialize TorchStore for weight sync between trainer and generator.
         # StorageVolumes are spawned on the trainer mesh so they are colocated
@@ -747,11 +761,16 @@ class RLTrainer(Configurable):
             fwd_bwd_metrics: dict[str, float] = {}
             for microbatch in microbatches:
                 with sl.log_trace_span("trainer_forward_backward_call"):
-                    mb_metrics = self._get_rank_0_value(
-                        await self.trainer.forward_backward.call(
-                            microbatch, num_global_valid_tokens
-                        )
+                    # Scatter microbatches by the DP dimension.
+                    shard_results = await asyncio.gather(
+                        *[
+                            self.trainer.slice(batch=dp_rank).forward_backward.call(
+                                microbatch[dp_rank], num_global_valid_tokens
+                            )
+                            for dp_rank in range(self.trainer_dp_degree)
+                        ]
                     )
+                    mb_metrics = self._get_rank_0_value(shard_results[0])
                     for k, v in mb_metrics.items():
                         if k not in fwd_bwd_metrics:
                             fwd_bwd_metrics[k] = v
