@@ -20,7 +20,7 @@ from dataclasses import dataclass, field, replace
 # must run before torch import
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-import torch
+import torch  # noqa: F401  # force torch import after PYTORCH_CUDA_ALLOC_CONF is set
 import torchstore as ts
 from monarch.actor import ProcMesh
 from monarch.spmd import setup_torch_elastic_env_async
@@ -30,6 +30,7 @@ from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGener
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import Batcher
 from torchtitan.experiments.rl.generator_router import GeneratorRouter, RoutingContext
+from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout import (
@@ -44,89 +45,6 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
-
-
-class GRPOLoss(Configurable):
-    """Per-token clipped surrogate loss for GRPO.
-
-    Computes the PPO-style clipped objective at the token level::
-
-        ratio_t = exp(policy_logprob_t - ref_logprob_t)     # π_θ / π_old
-        clipped_t = clamp(ratio_t, 1 - ε, 1 + ε)
-        loss_t = -min(ratio_t * A_t, clipped_t * A_t)
-
-    The final scalar loss is the sum of per-token losses over loss
-    positions (where ``loss_mask == 1``), divided by
-    ``num_global_valid_tokens`` (total loss positions across all
-    microbatches and DP ranks).  This normalization ensures that
-    gradient accumulation across microbatches produces the same
-    result as a single large-batch forward pass.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
-        clip_eps: float = 0.2
-        """PPO clipping epsilon for the probability ratio."""
-
-    def __init__(self, config: Config):
-        self.clip_eps = config.clip_eps
-
-    def __call__(
-        self,
-        policy_logprobs: torch.Tensor,
-        generator_logprobs: torch.Tensor,
-        loss_mask: torch.Tensor,
-        advantages: torch.Tensor,
-        num_global_valid_tokens: int,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        """Compute per-token GRPO clipped surrogate loss.
-
-        Args:
-            policy_logprobs: [B, L] log π_θ(a_t | s_t) from the current policy.
-            generator_logprobs: [B, L] log π_old(a_t | s_t) from the sampling policy.
-            loss_mask: [B, L] bool mask; True for response tokens.
-            advantages: [B, L] per-token advantages (0.0 for prompt/padding).
-            num_global_valid_tokens: total response tokens across all microbatches
-                and DP ranks; used as the loss denominator so gradient
-                accumulation is equivalent to a single large-batch step.
-
-        Returns:
-            (loss, metrics) where loss is a scalar tensor and metrics is a
-            dict of scalar tensors pre-normalized for SUM reduction across
-            DP ranks.
-        """
-        # Per-token importance sampling ratio: π_θ / π_old
-        log_ratio = policy_logprobs - generator_logprobs
-
-        # TODO: debug why vLLM+cudagraph emits nan generator logprobs
-        log_ratio = torch.nan_to_num(log_ratio, nan=0.0)
-        log_ratio = torch.clamp(log_ratio, -20.0, 20.0)
-        ratio = torch.exp(log_ratio)
-
-        clipped_ratio = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
-        token_pg_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
-
-        masked_loss = token_pg_loss * loss_mask
-        loss_denominator = max(num_global_valid_tokens, 1)
-        loss = masked_loss.sum() / loss_denominator
-
-        with torch.no_grad():
-            masked_ratio = ratio * loss_mask
-            metrics = {
-                "loss/mean": loss.detach(),
-                "loss/ratio_mean": masked_ratio.sum() / loss_denominator,
-                "loss/ratio_clipped_frac": (
-                    (torch.abs(ratio - clipped_ratio) > 1e-6).float() * loss_mask
-                ).sum()
-                / loss_denominator,
-                # Fraction of response tokens whose generator (vLLM) logprob is nan.
-                "loss/generator_logprob_nan_frac": (
-                    (~torch.isfinite(generator_logprobs)).float() * loss_mask
-                ).sum()
-                / loss_denominator,
-            }
-
-        return loss, metrics
 
 
 class RLTrainer(Configurable):
@@ -175,6 +93,11 @@ class RLTrainer(Configurable):
         num_validation_samples: int = 20
         """Number of held-out prompts scored greedily (temp=0, n=1) per validation pass."""
 
+        validation_freq: int = 0
+        """How often (in training steps) to run a mid-training validation pass. 0
+        (the default) only validates once before and once after training; set it to,
+        say, 5 to watch the eval metric move as training proceeds."""
+
         rollouter: Rollouter.Config
         """The rollouter: its datasets, envs, and rubric."""
         # TODO: support multiple rollouters for data mixing.
@@ -201,6 +124,14 @@ class RLTrainer(Configurable):
         generator: VLLMGenerator.Config = field(default_factory=VLLMGenerator.Config)
         """VLLMGenerator actor configuration (vLLM engine, sampling)."""
 
+        num_generators: int = 1
+        """Number of generator replicas to spawn as separate proc meshes.
+
+        This is distinct from intra-generator parallelism controlled by
+        ``generator.parallelism``. Total generator GPU/process usage is
+        ``num_generators * generator_world_size``.
+        """
+
         generator_router: GeneratorRouter.Config = field(
             default_factory=GeneratorRouter.Config
         )
@@ -211,6 +142,10 @@ class RLTrainer(Configurable):
         )
 
         def __post_init__(self):
+            if self.num_generators < 1:
+                raise ValueError(
+                    f"num_generators must be at least 1, got {self.num_generators}"
+                )
             if self.generator.checkpoint.enable:
                 raise ValueError(
                     "Generator checkpoint must be disabled in the RL loop "
@@ -271,9 +206,14 @@ class RLTrainer(Configurable):
         )
         self.renderer = config.renderer.build(tokenizer_path=config.hf_assets_path)
 
-        # Renderer stop tokens are injected into the generator at spawn
-        self._stop_token_ids = list(self.renderer.get_stop_token_ids())
-        self._sampling = config.generator.sampling
+        # Carry the base seed and renderer stop tokens on the sampling config so
+        # the generator reads them off each request; the rollouter offsets the
+        # seed per sample. Avoids the generator depending on request_id format.
+        self._sampling = replace(
+            config.generator.sampling,
+            seed=config.generator.debug.seed,
+            stop_token_ids=list(self.renderer.get_stop_token_ids()),
+        )
         # TODO: pass our own tokenizer to the renderer and read pad/eos off it
         # once `renderers` supports bring-your-own-tokenizer
         # (https://github.com/PrimeIntellect-ai/renderers/pull/70).
@@ -423,7 +363,6 @@ class RLTrainer(Configurable):
                         config.num_validation_samples,
                     ),
                     output_dir=config.dump_folder,
-                    stop_token_ids=self._stop_token_ids,
                 )
                 generators.append(generator)
             self.generator_router = config.generator_router.build(generators=generators)
@@ -479,14 +418,23 @@ class RLTrainer(Configurable):
         group_id_prefix = "val/" if is_validation else ""
 
         # Pass a callable to the rollouter, so it stays decoupled from the generator router
-        async def generate_fn(prompt_token_ids, *, request_id, sampling_config=None):
+        async def generate_fn(
+            prompt_token_ids,
+            *,
+            request_id,
+            routing_session_id=None,
+            sampling_config=None,
+        ):
             result = await self.generator_router.route(
                 "generate",
                 prompt_token_ids,
                 request_id=request_id,
                 sampling_config=sampling_config,
                 metrics_prefix=generation_metrics_prefix,
-                routing_ctx=RoutingContext(estimated_cost=len(prompt_token_ids)),
+                routing_ctx=RoutingContext(
+                    estimated_cost=len(prompt_token_ids),
+                    session_id=routing_session_id,
+                ),
             )
             return self._get_rank_0_value(result)
 
@@ -535,7 +483,7 @@ class RLTrainer(Configurable):
         # Metrics ride with the rollout: flatten each turn's per-generation metrics, add failures.
         # TODO: it is confusing what metrics belong in the rollout turn and what metrics
         # should be calculated here in the controller. It seems that we should move
-        # all metrics calculation to the rollout loop, including advantage calculation.
+        # all metrics calculation to the rollout loop.
         # TODO: we may also have some metrics at the Rollout level, i.e. not turn specific.
         # TODO: we also need a "logs" field, so that if there were errors/warnings
         # they can be made available for the rollout_logger
@@ -563,18 +511,16 @@ class RLTrainer(Configurable):
     def _build_episodes(
         rollout_groups: list[RolloutGroup],
     ) -> tuple[list[Episode], list[m.Metric]]:
-        """Build training episodes and GRPO advantages from scored rollout groups.
+        """Flatten scored rollout groups into training episodes.
 
-        Centers each group's rewards by its mean, skips rollouts without
-        training tokens, and emits reward/advantage metrics.
+        Skips rollouts without training tokens and emits episode-level metrics.
 
         Args:
-            rollout_groups: Scored rollout groups from one collection round.
+            rollout_groups: Scored rollout groups from one round.
 
         Returns:
             Train episodes plus episode-level metrics.
         """
-        # Mean-baseline advantage per group
         episodes: list[Episode] = []
         group_stds: list[float] = []
 
@@ -594,14 +540,12 @@ class RLTrainer(Configurable):
                 )
                 continue
 
-            # TODO: move advantage calculation to Rollouter
-            rewards = [rollout.reward for rollout in group.rollouts]
-            group_mean = sum(rewards) / len(rewards)
-            group_stds.append(statistics.pstdev(rewards))
-
-            # Center the advantage per rollout; each rollout packs into one or more episodes.
+            # Advantage was already filled by the Rollouter's advantage estimator; here
+            # we only collect each group's reward std for the metric emitted below.
+            group_stds.append(
+                statistics.pstdev([rollout.reward for rollout in group.rollouts])
+            )
             for rollout in group.rollouts:
-                rollout.advantage = rollout.reward - group_mean
                 rollout_episodes = rollout_to_episodes(rollout)
                 episodes.extend(rollout_episodes)
                 branches_per_rollout.append(float(len(rollout_episodes)))
@@ -659,6 +603,8 @@ class RLTrainer(Configurable):
         # TODO: investigate using pass@k for validation.
         t_validate_start = time.perf_counter()
         num_samples = self.config.num_validation_samples
+        if num_samples == 0:  # skip validation (e.g. loss guard CI)
+            return []
         greedy = replace(self._sampling, temperature=0.0, top_p=1.0)
 
         rollout_groups, validation_metrics = await self._collect_rollouts(
@@ -860,6 +806,21 @@ class RLTrainer(Configurable):
             if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
                 logger.error("Loss is NaN/Inf; training diverged")
                 break
+
+            # --- periodic validation ---
+            # TODO(async): validation is generation-only, so overlap it with the next
+            # step's training instead of blocking here.
+            if (
+                self.config.validation_freq
+                and step % self.config.validation_freq == 0
+                and step != num_steps
+            ):
+                periodic_validation_metrics = await self.validate(step=step)
+                self.metrics_processor.log(
+                    step=step,
+                    metrics=periodic_validation_metrics,
+                    is_validation=True,
+                )
 
         post_validation_metrics = await self.validate(step=num_steps)
         self.metrics_processor.log(
