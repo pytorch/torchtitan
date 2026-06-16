@@ -43,6 +43,18 @@ class TransformerBlock(Module):
         return final_out.sum()
 
 
+class CudaToCpuIntMetadataBlock(Module):
+    def __init__(self):
+        super().__init__()
+        linear_config = Linear.Config(in_features=8, out_features=8, bias=False)
+        self.linear = linear_config.build()
+
+    def forward(self, x, offsets):
+        copied_offsets = offsets.to(device="cpu")
+        scale = copied_offsets[-1].to(device=x.device, dtype=x.dtype)
+        return self.linear(x).mul(scale).sum()
+
+
 class TestApplyAC(unittest.TestCase):
     def test_flops(self):
         def get_bw_flops(model_fn):
@@ -51,7 +63,7 @@ class TestApplyAC(unittest.TestCase):
             out.backward()
 
             x = torch.randn(512, 512, requires_grad=True)
-            with FlopCounterMode(display=False) as fwd_mode:
+            with FlopCounterMode(display=False):
                 out = model_fn(x)
             with FlopCounterMode(display=False) as bwd_mode:
                 out.backward()
@@ -265,6 +277,36 @@ class TestApplyAC(unittest.TestCase):
         # force_recompute="output": shape (512,1024) is unique to output,
         # gate and wq still alternate (gate saved, wq recomputed)
         self.assertEqual(get_recomputed(["output"]), {"wq", "output"})
+
+    def test_selective_ac_recomputes_cuda_to_cpu_int_metadata(self):
+        if not torch.cuda.is_available():
+            raise unittest.SkipTest("CUDA is unavailable")
+        if not torch.cuda.is_bf16_supported():
+            raise unittest.SkipTest("BF16 is unavailable")
+
+        model = CudaToCpuIntMetadataBlock().cuda().to(torch.bfloat16)
+        model = (
+            SelectiveAC.Config(
+                force_recompute_mm_shapes_by_fqns=[],
+            )
+            .build()
+            ._wrap_block(model, base_fqn="metadata")
+        )
+
+        x = torch.randn(
+            4,
+            8,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        offsets = torch.tensor([0, 4], device="cuda", dtype=torch.int32)
+
+        out = model(x, offsets)
+        out.backward()
+
+        self.assertIsNotNone(x.grad)
+        self.assertEqual(x.grad.dtype, torch.bfloat16)
 
 
 if __name__ == "__main__":

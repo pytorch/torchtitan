@@ -244,11 +244,16 @@ class SelectiveAC(ActivationCheckpointing):
             meta = {"forward_mm_count": 0, "recompute_mm_count": 0}
 
             def wrapped_policy(ctx, func, *args, **kwargs) -> CheckpointPolicy:
-                # Always save CUDA→CPU results to avoid recomputing them
-                # (e.g. MoE D2H sync for all-to-all metadata).
+                # Save differentiable CUDA→CPU results to avoid recomputing them.
+                # Integer metadata copies must be recomputed; saving them can make
+                # checkpoint replay attach autograd history to tensors that cannot
+                # participate in autograd.
+                source = args[0]
                 if (
                     func == torch.ops.aten._to_copy.default
-                    and "cuda" in str(args[0].device)
+                    and isinstance(source, torch.Tensor)
+                    and "cuda" in str(source.device)
+                    and (source.is_floating_point() or source.is_complex())
                     and "device" in kwargs
                     and str(kwargs["device"]) == "cpu"
                 ):
