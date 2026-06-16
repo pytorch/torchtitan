@@ -160,18 +160,19 @@ def set_determinism(
         # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
+        # Ensure flex_attention is compiled without max-autotune. This is needed to ensure
+        # reproducibility, since the autotune results may not be deterministic. We disable
+        # autotune in-place on FlexAttention.inductor_configs (rather than recompiling with
+        # no options) so the regional-inductor scoop configs are preserved.
         from torch.nn.attention.flex_attention import flex_attention
 
         from torchtitan.models.common.attention import FlexAttention
 
         FlexAttention.inductor_configs["max_autotune"] = False
         FlexAttention.inductor_configs["coordinate_descent_tuning"] = False
-
         # pyrefly: ignore [no-matching-overload]
         FlexAttention._compiled_flex_attn = torch.compile(
-            flex_attention,
-            options=FlexAttention.inductor_configs,
-            name="torchtitan.FlexAttention",
+            flex_attention, options=FlexAttention.inductor_configs
         )
 
     if debug_config.detect_anomaly:

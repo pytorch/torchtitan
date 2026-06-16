@@ -116,9 +116,7 @@ def parallelize_autoparallel_llama(
         possible_input_shardings[name] for name in dense_mesh.mesh_dim_names
     )
 
-    loss_parallel_enabled = (
-        parallel_dims.tp_enabled and not parallelism.disable_loss_parallel
-    )
+    loss_parallel_enabled = parallel_dims.tp_enabled
     if not loss_parallel_enabled:
         raise ValueError(
             "AutoParallel Llama3 graph_trainer currently requires loss parallel "
