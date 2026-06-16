@@ -67,24 +67,13 @@ class DispatchState:
 
     Attributes:
         handle: Opaque dispatch handle wrapping the deep_ep handle.
-        permuted_scores: Scores for score_before_experts=False mode.
+        permuted_scores: Routing scores applied to expert outputs in combine.
         num_tokens: Original input token count (for combine fake shape inference).
     """
 
     handle: DispatchHandle
     permuted_scores: torch.Tensor | None = None
     num_tokens: int = 0
-
-
-def _apply_scores(
-    hidden: torch.Tensor,
-    scores: torch.Tensor,
-    apply_now: bool,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Apply routing scores to hidden states if apply_now, else defer."""
-    if apply_now and scores is not None and scores.numel() > 0:
-        return hidden * scores.to(hidden.dtype).reshape(-1, 1), None
-    return hidden, scores
 
 
 def _num_permuted_tokens_for_non_blocking(
@@ -472,11 +461,13 @@ def dispatch_tokens(
     num_local_experts: int,
     num_experts: int,
     group: dist.ProcessGroup,
-    score_before_experts: bool = True,
     non_blocking_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via HybridEP all-to-all.
+
+    Routing scores are applied to the expert outputs in ``combine_tokens``,
+    after expert computation.
 
     Args:
         hidden_states: [num_tokens, hidden_dim]
@@ -485,7 +476,6 @@ def dispatch_tokens(
         num_local_experts: Experts on this EP rank
         num_experts: Total experts across all ranks
         group: EP ProcessGroup
-        score_before_experts: Apply scores before expert computation
         non_blocking_expert_capacity_factor: None = blocking mode (default).
             float in (0, 1] = non-blocking mode; pre-sizes the permute output
             tensor as num_tokens × ep_size × min(num_local_experts, top_k) × cf,
@@ -521,9 +511,7 @@ def dispatch_tokens(
         pad_multiple,
     )
 
-    hidden, permuted_scores = _apply_scores(
-        hidden, permuted_scores, score_before_experts
-    )
+    # Routing scores are applied to expert outputs in combine_tokens.
     if permuted_scores is not None and permuted_scores.dtype != hidden.dtype:
         permuted_scores = permuted_scores.to(hidden.dtype)
 
