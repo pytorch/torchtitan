@@ -52,8 +52,8 @@ class InferenceParallelismConfig:
     standalone inference) uses it. Inference replicates parameters across pure
     data-parallel groups (the vLLM wrapper skips FSDP/DDP), so
     ``data_parallel_degree`` is vLLM's pure DP size, not the trainer's
-    ``data_parallel_shard_degree`` (FSDP). The vLLM wrapper translates this to a
-    full ``ParallelismConfig`` via :meth:`to_torchtitan_parallelism_config`
+    ``data_parallel_shard_degree`` (FSDP). The vLLM wrapper translates this to
+    the training ``ParallelismConfig`` via :meth:`to_training_parallelism_config`
     before building ``ParallelDims``; other utils (e.g. world-size calc) call it
     too.
     """
@@ -68,7 +68,7 @@ class InferenceParallelismConfig:
     expert_parallel_degree: int = 1
     """Expert parallelism degree for MoE layers. 1 means disabled."""
 
-    def to_torchtitan_parallelism_config(self) -> ParallelismConfig:
+    def to_training_parallelism_config(self) -> ParallelismConfig:
         """Translate to the training ``ParallelismConfig`` for utils that need
         the full shape (``ParallelDims``, ``parallelize_fn``, world-size calc).
 

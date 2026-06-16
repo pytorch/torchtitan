@@ -154,18 +154,18 @@ class VLLMModelWrapper(Module):
 
         # Translate the inference parallelism into torchtitan's full
         # ParallelismConfig that ParallelDims / parallelize_fn consume.
-        torchtitan_parallelism = parallelism.to_torchtitan_parallelism_config()
+        training_parallelism = parallelism.to_training_parallelism_config()
 
         # Build ParallelDims from the translated ParallelismConfig so TP/EP
         # sharding sees the same mesh shape as vLLM. data_parallel_shard_degree
         # carries vLLM's pure DP here (skip_dp=True below), not TorchTitan FSDP.
         self.parallel_dims = ParallelDims(
-            dp_replicate=torchtitan_parallelism.data_parallel_replicate_degree,
-            dp_shard=torchtitan_parallelism.data_parallel_shard_degree,
-            cp=torchtitan_parallelism.context_parallel_degree,
-            tp=torchtitan_parallelism.tensor_parallel_degree,
-            pp=torchtitan_parallelism.pipeline_parallel_degree,
-            ep=torchtitan_parallelism.expert_parallel_degree,
+            dp_replicate=training_parallelism.data_parallel_replicate_degree,
+            dp_shard=training_parallelism.data_parallel_shard_degree,
+            cp=training_parallelism.context_parallel_degree,
+            tp=training_parallelism.tensor_parallel_degree,
+            pp=training_parallelism.pipeline_parallel_degree,
+            ep=training_parallelism.expert_parallel_degree,
             world_size=dist.get_world_size(),
         )
 
@@ -180,7 +180,7 @@ class VLLMModelWrapper(Module):
             parallelism: ParallelismConfig
 
         self.config.update_from_config(
-            config=_InferenceConfig(parallelism=torchtitan_parallelism)
+            config=_InferenceConfig(parallelism=training_parallelism)
         )
 
         # Build model on meta device to avoid allocating full model on every GPU
@@ -200,7 +200,7 @@ class VLLMModelWrapper(Module):
             model=self.model,
             parallel_dims=self.parallel_dims,
             training=TrainingConfig(),
-            parallelism=torchtitan_parallelism,
+            parallelism=training_parallelism,
             compile_config=compile_config,
             ac_config=None,
             dump_folder="",

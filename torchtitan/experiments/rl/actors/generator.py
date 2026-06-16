@@ -355,7 +355,7 @@ class VLLMGenerator(Actor, Configurable):
                     f"* tensor_parallel_degree ({full_ep}); vLLM forms the EP "
                     f"group from all DP*TP ranks."
                 )
-            
+
             if (
                 self.debug.batch_invariant
                 and not self.reset_prefix_cache_on_weight_sync
@@ -722,8 +722,6 @@ class VLLMGenerator(Actor, Configurable):
                 or self._model_state_dict_pull_request is not None
                 or self._queued_generation_requests
                 # rank-0-only decision: use the local (no DP all-reduce) check;
-                # ``engine.has_unfinished_requests()`` would do a DP collective
-                # that the follower ranks never join -> deadlock under vLLM DP>1.
                 or self._engine.output_processor.has_unfinished_requests()
             )
 

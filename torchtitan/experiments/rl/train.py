@@ -35,6 +35,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 from monarch.actor import HostMesh, ProcMesh, this_host
 
 from torchtitan.config import ConfigManager, ParallelismConfig
+from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.trainer import RLTrainer
 from torchtitan.observability import structured_logger as sl
 
@@ -85,7 +86,7 @@ class HostMeshes:
     gpus_per_node: int
 
 
-def _compute_world_size(p: ParallelismConfig) -> int:
+def _compute_trainer_world_size(p: ParallelismConfig) -> int:
     """Compute world size from all parallel dimensions."""
     dp_shard = max(p.data_parallel_shard_degree, 1)
     return (
@@ -95,6 +96,11 @@ def _compute_world_size(p: ParallelismConfig) -> int:
         * p.pipeline_parallel_degree
         * p.context_parallel_degree
     )
+
+
+def _compute_generator_world_size(p: InferenceParallelismConfig) -> int:
+    """Number of GPU processes for one generator (vLLM) instance."""
+    return p.data_parallel_degree * p.tensor_parallel_degree
 
 
 def spawn_proc_mesh(
@@ -200,9 +206,9 @@ async def main():
 
     rl_trainer: RLTrainer = config.build()
     try:
-        trainer_world_size = _compute_world_size(config.trainer.parallelism)
-        generator_world_size = _compute_world_size(
-            config.generator.parallelism.to_torchtitan_parallelism_config()
+        trainer_world_size = _compute_trainer_world_size(config.trainer.parallelism)
+        generator_world_size = _compute_generator_world_size(
+            config.generator.parallelism
         )
         trainer_mesh, generator_meshes = spawn_proc_mesh(
             trainer_world_size,
