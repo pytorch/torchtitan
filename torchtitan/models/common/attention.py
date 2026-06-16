@@ -613,6 +613,10 @@ class FusedQKVLinear(BaseQKVLinear):
     Reduces kernel launch overhead compared to three separate projections.
 
     Compatible with ColwiseParallel on the ``wqkv`` linear layer.
+
+    Checkpoints in the stock ``QKVLinear`` layout (``wq.weight`` / ``wk.weight`` /
+    ``wv.weight``) via state_dict hooks, so checkpoints interoperate with the
+    non-fused module and the HF adapter.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -631,6 +635,8 @@ class FusedQKVLinear(BaseQKVLinear):
         self.wqkv = config.wqkv.build()
         self.heads_per_kv = config.n_heads // config.n_kv_heads
         self.r_dim = self.heads_per_kv + 2
+        self.register_state_dict_post_hook(self._split_qkv_on_save)
+        self.register_load_state_dict_pre_hook(self._merge_qkv_on_load)
 
     def forward(
         self, x: torch.Tensor
@@ -648,6 +654,68 @@ class FusedQKVLinear(BaseQKVLinear):
         xk = xk.reshape(bs, seqlen, -1, self.head_dim)
         xv = xv.reshape(bs, seqlen, -1, self.head_dim)
         return xq, xk, xv
+
+    @staticmethod
+    def _split_qkv_on_save(module, state_dict, prefix, local_metadata) -> None:
+        """Split fused ``wqkv`` into stock ``wq.weight``/``wk.weight``/``wv.weight``."""
+        hd, hpk, r = module.head_dim, module.heads_per_kv, module.r_dim
+
+        wqkv_w = state_dict.pop(f"{prefix}wqkv.weight")
+        n_kv, in_f = wqkv_w.shape[0] // (r * hd), wqkv_w.shape[1]
+        w = wqkv_w.reshape(n_kv, r, hd, in_f)
+        state_dict[f"{prefix}wq.weight"] = w[:, :hpk].reshape(-1, in_f).contiguous()
+        state_dict[f"{prefix}wk.weight"] = w[:, hpk].reshape(-1, in_f).contiguous()
+        state_dict[f"{prefix}wv.weight"] = w[:, hpk + 1].reshape(-1, in_f).contiguous()
+
+        b_key = f"{prefix}wqkv.bias"
+        if b_key in state_dict:
+            b = state_dict.pop(b_key).reshape(n_kv, r, hd)
+            state_dict[f"{prefix}wq.bias"] = b[:, :hpk].reshape(-1).contiguous()
+            state_dict[f"{prefix}wk.bias"] = b[:, hpk].reshape(-1).contiguous()
+            state_dict[f"{prefix}wv.bias"] = b[:, hpk + 1].reshape(-1).contiguous()
+
+    @staticmethod
+    def _merge_qkv_on_load(module, state_dict, prefix, *args) -> None:
+        """Merge stock ``wq.weight``/``wk.weight``/``wv.weight`` back into ``wqkv``."""
+        hd, hpk = module.head_dim, module.heads_per_kv
+        wq_key, wk_key, wv_key = (
+            f"{prefix}wq.weight",
+            f"{prefix}wk.weight",
+            f"{prefix}wv.weight",
+        )
+
+        if wq_key in state_dict and wk_key in state_dict and wv_key in state_dict:
+            wq, wk, wv = (
+                state_dict.pop(wq_key),
+                state_dict.pop(wk_key),
+                state_dict.pop(wv_key),
+            )
+            n_kv, in_f = wk.shape[0] // hd, wq.shape[1]
+            q = wq.reshape(n_kv, hpk, hd, in_f)
+            k = wk.reshape(n_kv, 1, hd, in_f)
+            v = wv.reshape(n_kv, 1, hd, in_f)
+            state_dict[f"{prefix}wqkv.weight"] = torch.cat([q, k, v], dim=1).reshape(
+                -1, in_f
+            )
+
+        bq_key, bk_key, bv_key = (
+            f"{prefix}wq.bias",
+            f"{prefix}wk.bias",
+            f"{prefix}wv.bias",
+        )
+        if bq_key in state_dict and bk_key in state_dict and bv_key in state_dict:
+            bq, bk, bv = (
+                state_dict.pop(bq_key),
+                state_dict.pop(bk_key),
+                state_dict.pop(bv_key),
+            )
+            n_kv = bk.shape[0] // hd
+            q_b = bq.reshape(n_kv, hpk, hd)
+            k_b = bk.reshape(n_kv, 1, hd)
+            v_b = bv.reshape(n_kv, 1, hd)
+            state_dict[f"{prefix}wqkv.bias"] = torch.cat(
+                [q_b, k_b, v_b], dim=1
+            ).reshape(-1)
 
 
 class GQAttention(BaseAttention):
