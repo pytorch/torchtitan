@@ -201,6 +201,7 @@ class FlexAttention(Module):
     _compiled_flex_attn: ClassVar[Callable] = torch.compile(
         flex_attention,
         options=inductor_configs,
+        name="torchtitan.FlexAttention",
     )
 
     def __init__(self, config: Config) -> None:
