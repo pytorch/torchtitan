@@ -215,17 +215,17 @@ class VLLMCudagraphConfig:
         """Build a vLLM ``CompilationConfig``, or return ``None`` when
         CUDA graphs are disabled.
 
-        ``max_num_seqs`` determines CUDA graph capture sizes: powers of
-        2 from 1 up to ``max_num_seqs``, plus ``max_num_seqs`` itself
-        if it isn't already a power of 2.
+        Capture sizes are powers of 2 from 1 up to ``max_num_seqs``, plus
+        ``max_num_seqs`` itself if it isn't a power of 2.
         """
         if not self.enable:
             return None
         if max_num_seqs <= 0:
             raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}")
-        sizes = [1 << i for i in range(int(math.log2(max_num_seqs)) + 1)]
-        if max_num_seqs not in sizes:
-            sizes.append(max_num_seqs)
+        cap = max_num_seqs
+        sizes = [1 << i for i in range(int(math.log2(cap)) + 1)]
+        if cap not in sizes:
+            sizes.append(cap)
         return CompilationConfig(
             cudagraph_mode="full",
             mode=0,

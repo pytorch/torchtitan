@@ -15,6 +15,7 @@ from renderers import Renderer
 
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.environment import MessageEnv, TokenEnv
+from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.experiments.rl.rollout.types import (
     GenerateFn,
     Rollout,
@@ -82,10 +83,17 @@ class Rollouter(Configurable):
         token_env: TokenEnv.Config = field(default_factory=TokenEnv.Config)
         """`TokenEnv` limits (e.g. `max_rollout_tokens`) passed to `make_env_group`."""
 
+        advantage: Configurable.Config = field(
+            default_factory=AdvantageEstimator.Config
+        )
+        """Post-scoring advantage estimator. Default = Dr.GRPO (mean-baseline only);
+        set `AdvantageEstimator.Config(should_std_normalize=True)` for standard GRPO."""
+
     def __init__(self, config: Config) -> None:
         self._train_dataset = config.train_dataset.build()
         self._validation_dataset = config.validation_dataset.build()
         self.rubric: Rubric = config.rubric.build()
+        self.advantage_estimator = config.advantage.build()
         self._message_env_config = config.message_env
         self._token_env_config = config.token_env
 
@@ -209,9 +217,12 @@ class Rollouter(Configurable):
             rollout.reward = output.reward
             rollout.reward_breakdown = output.reward_breakdown
 
-        # TODO: move advantage calculation to here
-
-        return RolloutGroup(group_id=group_id, rollouts=rollouts)
+        # Post-scoring: turn group rewards into per-rollout advantages.
+        group = RolloutGroup(group_id=group_id, rollouts=rollouts)
+        advantages = self.advantage_estimator(group)
+        for rollout, advantage in zip(group.rollouts, advantages, strict=True):
+            rollout.advantage = advantage
+        return group
 
     async def _run_single_rollout(
         self,
