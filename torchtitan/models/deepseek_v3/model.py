@@ -199,19 +199,8 @@ class DeepSeekV3Model(Decoder):
             from torchtitan.models.deepseek_v3.sharding import (
                 set_deepseek_v3_sharding_config,
             )
-            from torchtitan.components.loss import ChunkedCELoss
 
-            chunked_loss = isinstance(config.loss, ChunkedCELoss.Config)
-            loss_parallel = not parallelism.disable_loss_parallel
-            if (
-                parallelism.spmd_backend == "spmd_types"
-                and loss_parallel
-                and not chunked_loss
-            ):
-                raise ValueError(
-                    "DeepSeek V3 local SPMD loss parallel requires ChunkedCELoss. "
-                    "Use ChunkedCELoss or set parallelism.disable_loss_parallel=True."
-                )
+            loss_parallel = parallelism.tensor_parallel_degree > 1
             set_deepseek_v3_sharding_config(
                 self,
                 loss_parallel=loss_parallel,
