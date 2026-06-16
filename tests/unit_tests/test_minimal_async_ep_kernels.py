@@ -8,7 +8,10 @@ import unittest
 
 import torch
 
+from torchtitan.distributed.minimal_async_ep import active_swiglu_op
 from torchtitan.distributed.minimal_async_ep.kernels import (
+    active_swiglu_backward_kernel,
+    active_swiglu_forward_kernel,
     copy_full_counts_to_peers_kernel,
     copy_rows_to_peers_kernel,
     expand_topk_grad_kernel,
@@ -31,6 +34,72 @@ def assert_equal(actual: torch.Tensor, expected: torch.Tensor) -> None:
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestMinimalAsyncEPKernels(unittest.TestCase):
+    def test_active_swiglu_custom_op_matches_reference_on_active_rows(self):
+        gate = torch.randn(3, 2, device="cuda", requires_grad=True)
+        up = torch.randn(3, 2, device="cuda", requires_grad=True)
+        active_rows = torch.tensor([2], device="cuda", dtype=torch.int32)
+
+        out = active_swiglu_op(gate, up, active_rows)
+        out[:2].sum().backward()
+
+        ref_gate = gate.detach().clone().requires_grad_()
+        ref_up = up.detach().clone().requires_grad_()
+        expected = torch.nn.functional.silu(ref_gate) * ref_up
+        expected[:2].sum().backward()
+
+        assert gate.grad is not None
+        assert up.grad is not None
+        assert ref_gate.grad is not None
+        assert ref_up.grad is not None
+        torch.testing.assert_close(out[:2], expected[:2])
+        torch.testing.assert_close(gate.grad[:2], ref_gate.grad[:2])
+        torch.testing.assert_close(up.grad[:2], ref_up.grad[:2])
+
+    def test_active_swiglu_kernels_match_reference_on_active_rows(self):
+        gate = torch.tensor(
+            [
+                [0.0, 1.0],
+                [2.0, -3.0],
+                [4.0, 5.0],
+            ],
+            device="cuda",
+            requires_grad=True,
+        )
+        up = torch.tensor(
+            [
+                [2.0, 3.0],
+                [5.0, 7.0],
+                [11.0, 13.0],
+            ],
+            device="cuda",
+            requires_grad=True,
+        )
+        active_rows = torch.tensor([2], device="cuda", dtype=torch.int32)
+
+        out = active_swiglu_forward_kernel(gate, up, active_rows)
+        expected = torch.nn.functional.silu(gate) * up
+        torch.testing.assert_close(out[:2], expected[:2])
+
+        grad_out = torch.tensor(
+            [
+                [17.0, 19.0],
+                [23.0, 29.0],
+                [31.0, 37.0],
+            ],
+            device="cuda",
+        )
+        grad_gate, grad_up = active_swiglu_backward_kernel(
+            grad_out,
+            gate,
+            up,
+            active_rows,
+        )
+        expected[:2].backward(grad_out[:2])
+        assert gate.grad is not None
+        assert up.grad is not None
+        torch.testing.assert_close(grad_gate[:2], gate.grad[:2])
+        torch.testing.assert_close(grad_up[:2], up.grad[:2])
+
     def test_topk_index_kernels_match_reference(self):
         flat_indices = torch.tensor([2, 0, 3, 1], device="cuda", dtype=torch.int64)
         slot_to_row = invert_flat_indices_kernel(flat_indices, num_rows=4)

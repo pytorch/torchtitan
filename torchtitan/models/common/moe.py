@@ -13,11 +13,17 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
+from torchtitan.distributed.minimal_async_ep import active_swiglu_op
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
 
-from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
+from .token_dispatcher import (
+    DeepEPTokenDispatcher,
+    HybridEPTokenDispatcher,
+    LocalTokenDispatcher,
+    MinimalAsyncEPTokenDispatcher,
+)
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
@@ -50,6 +56,10 @@ class GroupedExperts(Module):
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
         self.token_dispatcher = config.token_dispatcher.build()
+        self._use_active_swiglu = isinstance(
+            self.token_dispatcher,
+            (HybridEPTokenDispatcher, MinimalAsyncEPTokenDispatcher),
+        )
 
     def _experts_forward(
         self,
@@ -79,18 +89,20 @@ class GroupedExperts(Module):
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
 
-        h_RF = F.silu(
-            torch._grouped_mm(
-                x_RD.bfloat16(),
-                w1_EFD.bfloat16().transpose(-2, -1),
-                offs=offsets_E,
-            )
+        gate_RF = torch._grouped_mm(
+            x_RD.bfloat16(),
+            w1_EFD.bfloat16().transpose(-2, -1),
+            offs=offsets_E,
         )
-        h_RF = h_RF * torch._grouped_mm(
+        up_RF = torch._grouped_mm(
             x_RD.bfloat16(),
             w3_EFD.bfloat16().transpose(-2, -1),
             offs=offsets_E,
         )
+        if self._use_active_swiglu:
+            h_RF = active_swiglu_op(gate_RF, up_RF, offsets_E[-1:])
+        else:
+            h_RF = F.silu(gate_RF) * up_RF
         return torch._grouped_mm(
             h_RF, w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
         ).type_as(x_RD)

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.distributed.minimal_async_ep.api import (
+    active_swiglu_op,
     combine_op,
     dispatch_op,
     init_buffer,
@@ -14,6 +15,7 @@ from torchtitan.distributed.minimal_async_ep.api import (
 
 __all__ = [
     "MinimalAsyncEPDispatchMetadata",
+    "active_swiglu_op",
     "combine_op",
     "dispatch_op",
     "init_buffer",
