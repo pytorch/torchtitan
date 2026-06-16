@@ -82,7 +82,6 @@ def _generator():
     generator._engine = _FakeEngine()
     generator._rank = 0
     generator.policy_version = 7
-    generator._stop_token_ids = []
     generator._generation_futures = {}
     generator.config = SimpleNamespace(
         sampling=SamplingConfig(temperature=0.0, top_p=1.0, max_tokens=4),
@@ -141,10 +140,17 @@ def test_process_finished_requests_noop_on_followers():
 
 
 def test_build_sampling_params_matches_contract():
+    # seed and stop_token_ids are carried on the SamplingConfig (the rollouter
+    # offsets the seed per sample); _build_sampling_params just reads them.
     generator = _generator()
-    generator._stop_token_ids = [99]
     params = generator._build_sampling_params(
-        SamplingConfig(temperature=0.3, top_p=0.9, max_tokens=64)
+        SamplingConfig(
+            temperature=0.3,
+            top_p=0.9,
+            max_tokens=64,
+            seed=44,
+            stop_token_ids=[99],
+        )
     )
     assert params.temperature == 0.3 and params.top_p == 0.9
     assert params.max_tokens == 64
@@ -152,6 +158,16 @@ def test_build_sampling_params_matches_contract():
     assert params.logprobs == 0
     assert params.output_kind == RequestOutputKind.FINAL_ONLY
     assert params.stop_token_ids == [99]
+    assert params.seed == 44
+
+
+def test_build_sampling_params_seed_and_stop_default_to_none():
+    generator = _generator()
+    params = generator._build_sampling_params(
+        SamplingConfig(temperature=0.8, top_p=0.95, max_tokens=8)
+    )
+    assert params.seed is None
+    assert not params.stop_token_ids  # vLLM normalizes None -> []
 
 
 # --- vLLM metric timing math (the `_prepare_generation_request_metrics` helper) ---
