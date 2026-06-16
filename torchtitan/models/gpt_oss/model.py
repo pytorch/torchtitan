@@ -217,10 +217,9 @@ class GptOssModel(Decoder):
 
             from torchtitan.models.gpt_oss.sharding import set_gpt_oss_sharding_config
 
-            loss_parallel = parallelism.tensor_parallel_degree > 1
             set_gpt_oss_sharding_config(
                 self,
-                loss_parallel=loss_parallel,
+                loss_parallel=parallelism.tensor_parallel_degree > 1,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
