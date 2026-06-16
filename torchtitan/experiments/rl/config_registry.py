@@ -110,7 +110,6 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -127,7 +126,6 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -166,7 +164,6 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -183,7 +180,6 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -249,7 +245,6 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -266,7 +261,6 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -305,7 +299,6 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=8,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -322,7 +315,6 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
                 tensor_parallel_degree=8,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -367,7 +359,6 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
-                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(
@@ -387,7 +378,6 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
-                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
@@ -436,7 +426,6 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 expert_parallel_degree=4,
                 enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=False,
@@ -454,7 +443,6 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
-                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
@@ -501,7 +489,6 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=4,
-                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(
@@ -520,7 +507,6 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
-                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
@@ -567,7 +553,6 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -585,7 +570,6 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
