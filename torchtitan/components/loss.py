@@ -25,10 +25,15 @@ IGNORE_INDEX = -100
 LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 
-def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+def cross_entropy_loss(
+    pred: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    loss_parallel: bool = True,
+) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
     if isinstance(pred, DTensor) and isinstance(labels, DTensor):
-        return _cross_entropy_via_local_map(pred, labels)
+        return _cross_entropy_via_local_map(pred, labels, loss_parallel=loss_parallel)
 
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
@@ -173,7 +178,12 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         return grad_logits, None, None, None
 
 
-def _cross_entropy_via_local_map(pred: DTensor, labels: DTensor) -> torch.Tensor:
+def _cross_entropy_via_local_map(
+    pred: DTensor,
+    labels: DTensor,
+    *,
+    loss_parallel: bool,
+) -> torch.Tensor:
     mesh = pred.device_mesh
     # Labels don't have a vocab dim.
     expected_labels_placements = tuple(
@@ -190,11 +200,6 @@ def _cross_entropy_via_local_map(pred: DTensor, labels: DTensor) -> torch.Tensor
     # Per-axis placement:
     #   Shard on batch/seq -> Shard(0) (valid because reduction is sum)
     #   Shard on vocab -> Shard(1)
-    def _flatten_placement(p):
-        if isinstance(p, Shard):
-            return Shard(0 if p.dim == 0 else p.dim - 1)
-        return p
-
     vocab_sharded = any(isinstance(p, Shard) and p.dim == 2 for p in pred.placements)
 
     # Per-axis output placement for sum reduction:
@@ -223,25 +228,18 @@ def _cross_entropy_via_local_map(pred: DTensor, labels: DTensor) -> torch.Tensor
                 reduction="sum",
                 ignore_index=IGNORE_INDEX,
             )
+        if not loss_parallel:
+            raise ValueError(
+                "cross_entropy_loss received vocab-sharded logits with "
+                "loss_parallel=False."
+            )
 
-        # vocab_sharded == True => loss parallel case
-        # TODO: rewrite the entire loss parallel using megatron style.
-        flat_pred_placements = tuple(_flatten_placement(p) for p in pred.placements)
-        flat_labels_placements = tuple(_flatten_placement(p) for p in labels.placements)
-        pred_dtensor = DTensor.from_local(
-            flat_pred, mesh, flat_pred_placements, run_check=False
+        return _LossParallelCrossEntropy.apply(
+            flat_pred,
+            flat_labels,
+            mesh.get_group("tp"),
+            pred.shape[-1],
         )
-        labels_dtensor = DTensor.from_local(
-            flat_labels, mesh, flat_labels_placements, run_check=False
-        )
-        loss_dtensor = torch.nn.functional.cross_entropy(
-            pred_dtensor,
-            labels_dtensor,
-            reduction="sum",
-            ignore_index=IGNORE_INDEX,
-        )
-        assert isinstance(loss_dtensor, DTensor)
-        return loss_dtensor.to_local()
 
     return _local_cross_entropy(pred, labels)
 
@@ -487,6 +485,7 @@ class ChunkedCELoss(BaseLoss):
         self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
+        self.loss_parallel: bool = False
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Set the lm_head module. Must be called before the first __call__."""
@@ -591,7 +590,11 @@ class ChunkedCELoss(BaseLoss):
 
             logits = lm_head(h_chunk)
 
-            chunk_loss = self.fn(logits, label_chunk)
+            chunk_loss = self.fn(
+                logits,
+                label_chunk,
+                loss_parallel=self.loss_parallel,
+            )
             if global_valid_tokens is not None:
                 chunk_loss = chunk_loss / global_valid_tokens
             total_loss = total_loss + chunk_loss.detach()
