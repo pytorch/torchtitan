@@ -17,8 +17,6 @@ from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
-from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -472,7 +470,6 @@ class ChunkedCELoss(BaseLoss):
         self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
-        self.loss_parallel: bool = False
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Set the lm_head module. Must be called before the first __call__."""
@@ -504,6 +501,18 @@ class ChunkedCELoss(BaseLoss):
         assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
         fsdp_enabled = isinstance(lm_head, FSDPModule)
 
+        # If SP is enabled, hidden states are Shard(1) on the TP mesh dim.
+        # Redistribute only the TP dim to Replicate before chunking so that
+        # the lm_head receives Replicate input on TP.
+        if isinstance(hidden_states, DTensor):
+            mesh = hidden_states.device_mesh
+            if mesh.mesh_dim_names is not None and "tp" in mesh.mesh_dim_names:
+                tp_dim = mesh.mesh_dim_names.index("tp")
+                placements = list(hidden_states.placements)
+                if not isinstance(placements[tp_dim], Replicate):
+                    placements[tp_dim] = Replicate()
+                    hidden_states = hidden_states.redistribute(mesh, tuple(placements))
+
         # Check if it's training model or validation mode
         requires_grad = hidden_states.requires_grad
 
@@ -530,93 +539,64 @@ class ChunkedCELoss(BaseLoss):
             )
             return wrapped(t)
 
-        with spmd.local():
-            # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
-            # accumulates ``.grad`` for ``GradAccumulator``.
-            h_chunks = [
-                c.detach().requires_grad_(requires_grad) for c in _chunk(hidden_states)
-            ]
-            label_chunks = list(_chunk(labels))
+        # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
+        # accumulates ``.grad`` for ``GradAccumulator``.
+        h_chunks = [
+            c.detach().requires_grad_(requires_grad) for c in _chunk(hidden_states)
+        ]
+        label_chunks = list(_chunk(labels))
 
-            grad_accumulator = None
-            if requires_grad:
-                grad_accumulator = GradAccumulator(
-                    hidden_states,
-                    num_chunks=num_chunks,
-                    dtype=torch.float32,
+        grad_accumulator = None
+        if requires_grad:
+            grad_accumulator = GradAccumulator(
+                hidden_states,
+                num_chunks=num_chunks,
+                dtype=torch.float32,
+            )
+
+        total_loss = hidden_states.new_zeros((), dtype=torch.float32)
+
+        # Disable FSDP reshard on lm_head to keep weight unsharded across
+        # all chunks, avoiding repeated all-gathers. Coalesce per-chunk
+        # grad sync into a single reduce-scatter at the last chunk by
+        # disabling gradient sync for chunks 0..N-2.
+        if fsdp_enabled:
+            lm_head.set_reshard_after_forward(False)
+            lm_head.set_reshard_after_backward(False)
+            lm_head.set_requires_gradient_sync(False, recurse=False)
+
+        last_idx = len(h_chunks) - 1
+        for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
+            if fsdp_enabled and i == last_idx:
+                lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
+                    True, recurse=False
                 )
 
-            total_loss = hidden_states.new_zeros((), dtype=torch.float32)
-            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-                # TODO(pianpwk): would be nice if mutate_type accepted multiple axes.
-                for axis_name, dst in {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}.items():
-                    total_loss = spmd.mutate_type(
-                        total_loss, axis_name, src=spmd.R, dst=dst
-                    )
+            logits = lm_head(h_chunk)
 
-            # Disable FSDP reshard on lm_head to keep weight unsharded across
-            # all chunks, avoiding repeated all-gathers. Coalesce per-chunk
-            # grad sync into a single reduce-scatter at the last chunk by
-            # disabling gradient sync for chunks 0..N-2.
-            if fsdp_enabled:
-                lm_head.set_reshard_after_forward(False)
-                lm_head.set_reshard_after_backward(False)
-                lm_head.set_requires_gradient_sync(False, recurse=False)
+            chunk_loss = self.fn(logits, label_chunk)
+            if global_valid_tokens is not None:
+                chunk_loss = chunk_loss / global_valid_tokens
+            total_loss = total_loss + chunk_loss.detach()
 
-            # TODO(pianpwk): migrate DTensor backend off pytorch's loss_parallel to simplify this.
-            use_loss_parallel_autograd_fn = (
-                get_spmd_backend() == "spmd_types"
-                and self.loss_parallel
-                and spmd_mesh_size("tp") > 1
-            )
-            last_idx = len(h_chunks) - 1
-            for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
-                if fsdp_enabled and i == last_idx:
-                    lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
-                        True, recurse=False
-                    )
+            if requires_grad:
+                chunk_loss.backward()
+                assert h_chunk.grad is not None
+                assert grad_accumulator is not None
+                grad_accumulator.add(h_chunk.grad)
+                h_chunk.grad = None
 
-                logits = lm_head(h_chunk)
-                if use_loss_parallel_autograd_fn:
-                    chunk_loss = _LossParallelCrossEntropy.apply(
-                        logits,
-                        label_chunk,
-                        current_spmd_mesh().get_group("tp"),
-                        lm_head.out_features,
-                    )
-                else:
-                    chunk_loss = self.fn(logits, label_chunk)
-                if global_valid_tokens is not None:
-                    chunk_loss = chunk_loss / global_valid_tokens
-                if get_spmd_backend() == "spmd_types":  # V -> P reinterpret, after exiting local region
-                    spmd.assert_type(chunk_loss, {"dp": spmd.P, "cp": spmd.P})
-                total_loss = total_loss + chunk_loss.detach()
+        if fsdp_enabled:
+            lm_head.set_reshard_after_forward(True)
+            lm_head.set_reshard_after_backward(True)
+            lm_head.set_requires_gradient_sync(True, recurse=False)
+            lm_head.reshard()
+        if not requires_grad:
+            return total_loss
 
-                if requires_grad:
-                    with spmd.no_typecheck():
-                        chunk_loss.backward()
-                        assert h_chunk.grad is not None
-                        assert grad_accumulator is not None
-                        grad_accumulator.add(h_chunk.grad)
-                        h_chunk.grad = None
+        assert grad_accumulator is not None
+        accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
-            if fsdp_enabled:
-                lm_head.set_reshard_after_forward(True)
-                lm_head.set_reshard_after_backward(True)
-                lm_head.set_requires_gradient_sync(True, recurse=False)
-                lm_head.reshard()
-            if not requires_grad:
-                return total_loss
-
-            assert grad_accumulator is not None
-            accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
-
-        if get_spmd_backend() == "spmd_types":
-            spmd.assert_type(
-                accumulated_grad,
-                {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
-                spmd.PartitionSpec("dp", "cp", None),
-            )
         return self._gradient_backprop(
             hidden_states, accumulated_grad, total_loss, lm_head, fsdp_enabled
         )
@@ -641,7 +621,6 @@ class ChunkedCELoss(BaseLoss):
         )
 
 
-@spmd.register_autograd_function
 class _DecoderOutputGradientBackProp(torch.autograd.Function):
     """Bridges chunked lm_head backward with decoder backward via autograd.
 
@@ -680,17 +659,3 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         # to properly handle. The complicated part is that grad_output might not be
         # on the same device mesh as accumlated_grad.
         return accumulated_grad, None, None
-
-    @staticmethod
-    def typecheck_forward(
-        hidden_states: torch.Tensor,
-        accumulated_grad: torch.Tensor,
-        loss: torch.Tensor,
-    ) -> torch.Tensor:
-        # The hidden activation type depends on the model's sharding config;
-        # we'll defer hidden_states typechecking to previous module boundaries.
-        result = _DecoderOutputGradientBackProp.apply(
-            hidden_states, accumulated_grad, loss
-        )
-        spmd.assert_type(result, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I})
-        return result

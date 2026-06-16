@@ -409,10 +409,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # Non-PP: single model part always has lm_head.
         # PP: only the last stage has lm_head; non-last stages skip this.
         if isinstance(self.loss_fn, ChunkedCELoss):
-            self.loss_fn.loss_parallel = (
-                parallel_dims.tp_enabled
-                and not config.parallelism.disable_loss_parallel
-            )
             if parallel_dims.pp_enabled:
                 if self.pp_has_last_stage:
                     lm_head = self.model_parts[-1].lm_head
@@ -725,8 +721,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # Remove once non-full_dtensor is no longer supported.
                 if (
                     isinstance(pred, DTensor)
-                    and not isinstance(self.loss_fn, ChunkedCELoss)
-                    and self.config.parallelism.spmd_backend == "default"
+                    and self.config.parallelism.spmd_backend != "full_dtensor"
                     and self.config.parallelism.disable_loss_parallel
                 ):
                     pred = pred.to_local()
