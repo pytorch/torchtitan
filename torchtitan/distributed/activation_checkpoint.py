@@ -247,13 +247,13 @@ class SelectiveAC(ActivationCheckpointing):
                 # Save differentiable CUDA→CPU results to avoid recomputing them.
                 # Integer metadata copies must be recomputed; saving them can make
                 # checkpoint replay attach autograd history to tensors that cannot
-                # participate in autograd.
-                source = args[0]
+                # participate in autograd. ``_to_copy.default``'s first positional
+                # arg is always the source tensor, so the ``func`` check guards the
+                # ``args[0]`` access below.
                 if (
                     func == torch.ops.aten._to_copy.default
-                    and isinstance(source, torch.Tensor)
-                    and "cuda" in str(source.device)
-                    and (source.is_floating_point() or source.is_complex())
+                    and "cuda" in str(args[0].device)
+                    and (args[0].is_floating_point() or args[0].is_complex())
                     and "device" in kwargs
                     and str(kwargs["device"]) == "cpu"
                 ):

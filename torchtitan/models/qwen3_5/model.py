@@ -318,8 +318,12 @@ class GatedDeltaNet(Module):
     """Gated DeltaNet linear attention.
 
     Uses recurrent state + gated delta rule instead of softmax attention.
-    No RoPE, different head structure from standard attention. Varlen
-    metadata is used to reset conv and recurrent state at document boundaries.
+    No RoPE, different head structure from standard attention. When varlen
+    metadata (``VarlenMetadata``) is provided — i.e. under the ``varlen``
+    attention backend — conv and recurrent state are reset at document
+    boundaries. Under other backends (e.g. ``flex``, which passes a
+    ``BlockMask``) no reset occurs and the packed sequence is processed as a
+    single continuous stream.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -499,9 +503,9 @@ class GatedDeltaNet(Module):
         xz = xz.view(kernel_bs, kernel_seqlen, -1, self.value_head_dim)
         output = self.norm(output, xz)
 
-        output = output.reshape(kernel_bs, kernel_seqlen, -1)
-        if cu_seqlens is not None:
-            output = output.reshape(bs, seqlen, -1)
+        # Merge value heads and restore (bs, seqlen); under varlen the kernel ran
+        # on a flattened (1, bs*seqlen) layout, so this also unpacks the batch.
+        output = output.reshape(bs, seqlen, -1)
         return self.out_proj(output)
 
 

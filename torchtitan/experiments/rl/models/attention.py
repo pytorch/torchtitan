@@ -104,9 +104,9 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
-        assert self.vllm_flash_attn_version is not None, (
-            "FlashAttention version not detected."
-        )
+        assert (
+            self.vllm_flash_attn_version is not None
+        ), "FlashAttention version not detected."
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
@@ -138,9 +138,9 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(1)
 
-        assert not self.kv_cache_dtype.startswith("fp8"), (
-            "FP8 KV cache not supported yet."
-        )
+        assert not self.kv_cache_dtype.startswith(
+            "fp8"
+        ), "FP8 KV cache not supported yet."
 
         assert not attn_metadata.use_cascade, "Cascade not supported yet."
 
@@ -171,10 +171,14 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             cu_seqlens_k[1:] = torch.cumsum(seqused_k, dim=0)
         extra_kwargs = {}
 
-        # num_splits is only supported by registered FA3. Use it there in
-        # batch-invariant mode to prevent non-deterministic split-k reductions.
+        # TODO(pytorch/pytorch#179760): FA2's auto num_splits heuristic
+        # produces NaN intermittently with paged KV (block_table). Force
+        # num_splits=1 as a workaround until the root cause is fixed
+        # upstream. current_flash_attention_impl() returns None when FA2
+        # is the implicit default (SM < 9.0). For FA3, only force
+        # num_splits=1 in batch-invariant mode (determinism).
         fa_impl = current_flash_attention_impl()
-        if fa_impl == "FA3" and is_in_batch_invariant_mode():
+        if fa_impl in (None, "FA2") or is_in_batch_invariant_mode():
             extra_kwargs["num_splits"] = 1
 
         if self.enable_gqa:
