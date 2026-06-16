@@ -15,5 +15,5 @@ nothing here runs unless the user lists the module in ``--override.imports``.
 External packages (e.g. hardware vendors) follow the same pattern in their own
 namespace; this folder is the in-repo example of the convention.
 
-See ``torchtitan/config/OVERRIDE.md``.
+See ``torchtitan/overrides/README.md``.
 """
