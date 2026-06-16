@@ -71,11 +71,11 @@ policy learns to call `search` and answer concisely. The recipe keeps evolving, 
 curve below is a snapshot — the link goes to the exact recipe it was produced with.
 
 **Qwen3-1.7B** — EM ~0.05 → ~0.41
-([recipe @ `e28796e0`](https://github.com/pytorch/torchtitan/blob/e28796e0df801a5b5b30c34043cdd8bba14a6ea5/torchtitan/experiments/rl/examples/search_r1/config_registry.py)):
+([recipe @ `e28796e0`](https://github.com/pytorch/torchtitan/blob/e28796e0df801a5b5b30c34043cdd8bba14a6ea5/torchtitan/experiments/rl/examples/search_r1/config_registry.py#L41)):
 
 ![Qwen3-1.7B validation EM](./assets/validation_em_1.7b.png)
 
 **Qwen3-8B** — EM ~0.26 → ~0.45
-([recipe @ `4b183e3a`](https://github.com/pytorch/torchtitan/blob/4b183e3aa26cce5da4689593ffd0cd419a32a32e/torchtitan/experiments/rl/examples/search_r1/config.py)):
+([recipe @ `4b183e3a`](https://github.com/pytorch/torchtitan/blob/4b183e3aa26cce5da4689593ffd0cd419a32a32e/torchtitan/experiments/rl/examples/search_r1/config.py#L130)):
 
 ![Qwen3-8B validation EM](./assets/validation_em_8b.png)
