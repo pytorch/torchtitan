@@ -554,6 +554,7 @@ class TestChunkedCELossSPMD(DTensorTestBase):
         chunked_loss = ChunkedCELoss(ChunkedCELoss.Config(num_chunks=num_chunks))
         chunked_loss.set_lm_head(lm_head)
         chunked_loss.loss_parallel = loss_parallel
+        chunked_loss.global_vocab_size = lm_head.out_features
         return chunked_loss
 
     def _make_vocab_parallel_lm_head(
@@ -571,7 +572,11 @@ class TestChunkedCELossSPMD(DTensorTestBase):
         lm_head gathers logits back to TP-invariant form before CE.
         """
         tp_degree = dist.get_world_size(tp_group)
-        lm_head = nn.Linear(dim, global_vocab_size // tp_degree, bias=False)
+        tp_rank = dist.get_rank(tp_group)
+        chunk_size = (global_vocab_size + tp_degree - 1) // tp_degree
+        vocab_start = min(global_vocab_size, chunk_size * tp_rank)
+        vocab_end = min(global_vocab_size, vocab_start + chunk_size)
+        lm_head = nn.Linear(dim, vocab_end - vocab_start, bias=False)
         lm_head.out_features = global_vocab_size
         if loss_parallel:
             return lm_head
@@ -636,15 +641,18 @@ class TestChunkedCELossSPMD(DTensorTestBase):
                 )
 
                 # copy over vocab shard
-                vocab_start = tp_rank * (V // tp_degree)
-                vocab_end = vocab_start + (V // tp_degree)
+                chunk_size = (V + tp_degree - 1) // tp_degree
+                vocab_start = min(V, chunk_size * tp_rank)
+                vocab_end = min(V, vocab_start + chunk_size)
                 lm_head_spmd.weight.data.copy_(
                     lm_head_ref.weight.data[vocab_start:vocab_end]
                 )
 
                 # run reference path for loss, grad
                 h_ref = hidden_states.clone().detach().requires_grad_(True)
-                loss_ref = cross_entropy_loss(lm_head_ref(h_ref), labels)
+                loss_ref = cross_entropy_loss(
+                    lm_head_ref(h_ref), labels, loss_parallel=False
+                )
                 loss_ref.backward()
                 h_grad_ref = h_ref.grad.clone()
 
