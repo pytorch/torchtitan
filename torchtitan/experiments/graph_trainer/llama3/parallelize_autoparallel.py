@@ -116,8 +116,7 @@ def parallelize_autoparallel_llama(
         possible_input_shardings[name] for name in dense_mesh.mesh_dim_names
     )
 
-    loss_parallel_enabled = parallel_dims.tp_enabled
-    if not loss_parallel_enabled:
+    if parallelism.tensor_parallel_degree <= 1:
         raise ValueError(
             "AutoParallel Llama3 graph_trainer currently requires loss parallel "
             "so the model-only graph can return vocab-sharded DTensor logits."
