@@ -245,8 +245,7 @@ class Rollouter(Configurable):
             env: The env for this rollout; `run_group_rollouts` closes it.
             sampling: Sampling config for every generate call.
             group_id: The GRPO group id.
-            rollout_id: Stable id for this rollout, unique within the group; the per-turn
-                `request_id` prefix, and stored as `Rollout.sample_id`.
+            rollout_id: Stable id for this rollout. Unique globally.
 
         Returns:
             One unscored `Rollout` (reward filled later by the controller).
@@ -261,6 +260,9 @@ class Rollouter(Configurable):
                 completion = await generate_fn(
                     prompt_token_ids=step.next_prompt_token_ids,
                     request_id=f"{rollout_id}/turn={len(turns)}",
+                    # TODO: improve router so it can take both rollout_id and
+                    # group_id to make more optimal routing decisions.
+                    routing_session_id=rollout_id,
                     sampling_config=sampling,
                 )
 
