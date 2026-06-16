@@ -22,6 +22,8 @@ concurrency:
 
 jobs:
   docker-build:
+    # Skip scheduled runs on forks, where they would only fail and email the fork owner
+    if: github.repository_owner == 'pytorch' || github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
