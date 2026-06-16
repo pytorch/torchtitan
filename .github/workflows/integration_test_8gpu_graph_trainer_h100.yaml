@@ -3,6 +3,8 @@ name: GraphTrainer 8 GPU H100 Integration Tests
 on:
   push:
     branches: [ main ]
+    tags:
+      - ciflow/graph-trainer/*
     paths:
       - 'torchtitan/experiments/graph_trainer/**'
       - '.github/workflows/integration_test_8gpu_graph_trainer_h100.yaml'
