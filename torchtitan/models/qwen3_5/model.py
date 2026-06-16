@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -373,6 +374,37 @@ class GatedDeltaNet(Module):
         self.norm = config.norm.build()
         self.out_proj = config.out_proj.build()
 
+    @staticmethod
+    def _local_map_conv(
+        x: DTensor,
+        conv: nn.Module,
+        conv_fn: Callable[..., torch.Tensor],
+        *extra_args: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run a depthwise, channel-sharded conv on local shards via local_map.
+
+        ``conv_fn`` receives the local (x, weight, *extra_args) tensors. Trailing
+        ``extra_args`` (e.g. ``cu_seqlens``) are plain replicated tensors passed
+        through with a ``None`` placement (unmapped). Input is channel-sharded
+        and the weight is ``Shard(0)``; DTensor-ness and gradient placements are
+        restored explicitly.
+
+        TODO: Remove once the DTensor Conv1d dispatch fix for sharded groups
+        lands in a released torch.
+        """
+        x_plc = x.placements
+        w = conv.weight
+        w_plc = w.placements  # pyrefly: ignore [missing-attribute]
+        extra_plc = (None,) * len(extra_args)
+        conv_dt = local_map(
+            conv_fn,
+            out_placements=(x_plc,),
+            in_placements=(x_plc, w_plc, *extra_plc),
+            in_grad_placements=(x_plc, w_plc, *extra_plc),
+            device_mesh=x.device_mesh,
+        )
+        return conv_dt(x, w, *extra_args)  # pyrefly: ignore
+
     def _causal_conv(
         self,
         x: torch.Tensor,
@@ -381,13 +413,6 @@ class GatedDeltaNet(Module):
     ) -> torch.Tensor:
         if cu_seqlens is not None:
             if isinstance(x, DTensor):
-                # TODO: Remove once the DTensor Conv1d dispatch fix for sharded
-                # groups lands in a released torch. local_map runs the conv on
-                # local shards (channel-sharded input + Shard(0) weight) and
-                # restores DTensor-ness, with explicit gradient placements.
-                x_plc = x.placements
-                w = conv.weight
-                w_plc = w.placements  # pyrefly: ignore [missing-attribute]
 
                 def _conv_varlen(
                     x_local: torch.Tensor,
@@ -401,14 +426,7 @@ class GatedDeltaNet(Module):
                         self.conv_kernel_size,
                     )
 
-                conv_dt = local_map(
-                    _conv_varlen,
-                    out_placements=(x_plc,),
-                    in_placements=(x_plc, w_plc, None),
-                    in_grad_placements=(x_plc, w_plc, None),
-                    device_mesh=x.device_mesh,
-                )
-                return conv_dt(x, w, cu_seqlens)  # pyrefly: ignore
+                return self._local_map_conv(x, conv, _conv_varlen, cu_seqlens)
             return _causal_conv1d_varlen(
                 x,
                 conv.weight,
@@ -418,13 +436,6 @@ class GatedDeltaNet(Module):
 
         x = F.pad(x.transpose(1, 2), [self.conv_kernel_size - 1, 0])
         if isinstance(x, DTensor):
-            # TODO: Remove once the DTensor Conv1d dispatch fix for sharded
-            # groups lands in a released torch. local_map runs the conv on
-            # local shards (channel-sharded input + Shard(0) weight) and
-            # restores DTensor-ness, with explicit gradient placements.
-            x_plc = x.placements
-            w = conv.weight
-            w_plc = w.placements  # pyrefly: ignore [missing-attribute]
 
             def _conv(x_local: torch.Tensor, w_local: torch.Tensor) -> torch.Tensor:
                 # groups == local out-channels (depthwise, channel-sharded)
@@ -439,14 +450,7 @@ class GatedDeltaNet(Module):
                     w_local.size(0),
                 )
 
-            conv_dt = local_map(
-                _conv,
-                out_placements=(x_plc,),
-                in_placements=(x_plc, w_plc),
-                in_grad_placements=(x_plc, w_plc),
-                device_mesh=x.device_mesh,
-            )
-            x = conv_dt(x, w)  # pyrefly: ignore
+            x = self._local_map_conv(x, conv, _conv)
         else:
             x = conv(x)
         return F.silu(x).transpose(1, 2)
