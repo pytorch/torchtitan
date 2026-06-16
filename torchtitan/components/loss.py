@@ -33,9 +33,7 @@ def cross_entropy_loss(
 ) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
     if isinstance(pred, DTensor) and isinstance(labels, DTensor):
-        return _cross_entropy_via_local_map(
-            pred, labels, loss_parallel=loss_parallel
-        )
+        return _cross_entropy_via_local_map(pred, labels, loss_parallel=loss_parallel)
 
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
