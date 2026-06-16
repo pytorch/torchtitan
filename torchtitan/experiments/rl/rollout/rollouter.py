@@ -238,43 +238,43 @@ class Rollouter(Configurable):
         turns: list[RolloutTurn] = []
         status = RolloutStatus.ERROR
         try:
-            step = await env.init()
-            while not step.status.is_terminal():
+            env_step = await env.init()
+            while not env_step.status.is_terminal():
                 turn_rollout_id = RolloutID(
                     group_id=group_id, rollout_id=rollout_id, turn_id=len(turns)
                 )
 
                 # generator call
                 completion = await generate_fn(
-                    prompt_token_ids=step.next_prompt_token_ids,
+                    prompt_token_ids=env_step.next_prompt_token_ids,
                     rollout_id=turn_rollout_id,
                     sampling_config=sampling,
                 )
 
                 # env call
-                next_step = await env.step(completion)
+                next_env_step = await env.step(completion)
 
                 # full snapshot of this turn from a token and message perspective
                 turns.append(
                     RolloutTurn(
                         rollout_id=turn_rollout_id,
-                        prompt_token_ids=step.next_prompt_token_ids or [],
-                        prompt_messages=step.next_prompt_messages or [],
+                        prompt_token_ids=env_step.next_prompt_token_ids or [],
+                        prompt_messages=env_step.next_prompt_messages or [],
                         completion_token_ids=completion.token_ids,
                         completion_logprobs=completion.token_logprobs,
                         version_intervals=completion.version_intervals,
-                        completion_message=next_step.completion_message,
-                        env_messages=next_step.env_messages,
-                        env_rewards=next_step.env_rewards,
+                        completion_message=next_env_step.completion_message,
+                        env_messages=next_env_step.env_messages,
+                        env_rewards=next_env_step.env_rewards,
                         policy_version=completion.policy_version,
                         metrics=completion.metrics,
                     )
                 )
 
                 # holds the input for next generation call
-                step = next_step
+                env_step = next_env_step
 
-            status = step.status
+            status = env_step.status
         except Exception:
             logger.exception(
                 "rollout %s/rollout=%d failed after %d turn(s); marking ERROR",

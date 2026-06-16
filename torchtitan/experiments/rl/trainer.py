@@ -24,9 +24,10 @@ from dataclasses import dataclass, field, replace
 from typing import NamedTuple
 
 # must run before torch import
+# TODO: this should be defined earlier, in the .sh script
+# since __init__ can import torch before this is set.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-import torch  # noqa: F401  (pins torch's first load after the alloc-conf setdefault above)
 import torchstore as ts
 from monarch.actor import ProcMesh
 from monarch.spmd import setup_torch_elastic_env_async
@@ -187,7 +188,7 @@ class RLTrainer(Configurable):
 
         num_rollout_workers: int = 16
         """Rollout workers generating GRPO groups concurrently (one group each).
-        Rollouts in flight = `num_rollout_workers * group_size`. Size it to overproduce ~4x the
+        Rollouts in flight = `num_rollout_workers * group_size`. Recommendation: Size it to overproduce ~4x the
         trainer's per-step consumption (`~4 * groups_consumed_per_step`) and let the stale-drop trim
         the surplus, rather than sizing it exactly."""
 
@@ -214,8 +215,7 @@ class RLTrainer(Configurable):
         max_offpolicy_steps: int | None = 3
         """Off-policy bound: drop an episode whose oldest token is more than this many versions behind
         the trainer's optimizer version. The generator adopts weights >=1 version behind the trainer,
-        so 1 is the effective on-policy floor (0 deadlocks — rejected in `__post_init__`). None = never
-        drop (log staleness only). See `EpisodeBuffer`."""
+        so 1 is the effective on-policy floor. None = never drop (log staleness only). See `EpisodeBuffer`."""
 
         drop_rollout_group_if_any_stale: bool = False
         """Drop a whole GRPO group if ANY of its episodes is stale, keeping groups intact (instead of
@@ -260,8 +260,7 @@ class RLTrainer(Configurable):
         generator_router: GeneratorRouter.Config = field(
             default_factory=GeneratorRouter.Config
         )
-        """Router over one or more generator actors. `hot_swap` defaults True: a weight pull doesn't
-        drain in-flight generation (the async producer keeps generating across the swap)."""
+        """Generator routing strategy configuration."""
 
         metrics: m.MetricsProcessor.Config = field(
             default_factory=m.MetricsProcessor.Config
@@ -274,6 +273,15 @@ class RLTrainer(Configurable):
                     "(weights are synced from the trainer via TorchStore). "
                     "Set generator.checkpoint.enable=False."
                 )
+            # RL policy inputs are shaped by BatchConfig, not TrainingConfig.
+            if self.trainer.parallelism.enable_sequence_parallel:
+                sp_degree = self.trainer.parallelism.tensor_parallel_degree
+                seq_len = self.batcher.batch.seq_len
+                if sp_degree > 1 and seq_len % sp_degree != 0:
+                    raise ValueError(
+                        f"RL batcher sequence length ({seq_len}) must be divisible "
+                        f"by sequence parallel degree ({sp_degree})."
+                    )
             if self.max_offpolicy_steps == 0:
                 raise ValueError(
                     "max_offpolicy_steps=0 deadlocks the async loop: staleness is measured against the "
@@ -315,7 +323,7 @@ class RLTrainer(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
-        self.trainer = None
+        self.trainer: PolicyTrainer | None = None
         self.generator_router: GeneratorRouter | None = None
         self._proc_meshes = []
         self.metrics_processor: m.MetricsProcessor = config.metrics.build(
@@ -450,10 +458,11 @@ class RLTrainer(Configurable):
         if not generator_meshes:
             raise ValueError("setup_async requires at least one generator mesh")
 
-        # Fail fast on a seq-len mismatch: the batcher's `pack()` silently drops any episode longer
-        # than `seq_len`, which then under-fills the batch and crashes the trainer mid-run. A rollout
-        # can produce episodes up to the generator's context (`model.max_seq_len`) unless it self-caps
-        # via `max_rollout_tokens`, so the packed row must be able to hold the longest possible episode.
+        # We have 3 knobs for sequence length:
+        # a) the packed batch `batcher.batch.seq_len`
+        # b) the generator's context `model.max_seq_len`
+        # c) the rollout's max tokens `token_env.max_rollout_tokens`
+        # We need it to be `a >= b >= c`.
         seq_len = config.batcher.batch.seq_len
         model_max_seq_len = config.model_spec.model.max_seq_len
         rollout_cap = getattr(
@@ -538,7 +547,9 @@ class RLTrainer(Configurable):
         with sl.log_trace_span("torchstore_init"):
             await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
 
-        # Initial weight sync from trainer to generator (engine is idle, so no drain needed)
+        # TODO: can we avoid this and just have both trainer and generator initialize from the same checkpoint
+        # in parallel?
+        # Initial weight sync from trainer to generator
         with sl.log_trace_span("trainer_push_model_state_dict"):
             await self.trainer.push_model_state_dict.call(version=0)
         with sl.log_trace_span("generator_initial_weight_sync"):
@@ -646,7 +657,7 @@ class RLTrainer(Configurable):
     def _build_episodes(
         rollout_groups: list[RolloutGroup],
     ) -> tuple[list[Episode], list[m.Metric]]:
-        """Build train episodes and GRPO advantages from scored rollout groups.
+        """Build training episodes and GRPO advantages from scored rollout groups.
 
         Centers each group's rewards by its mean, skips rollouts without
         training tokens, and emits reward/advantage metrics.
@@ -660,14 +671,12 @@ class RLTrainer(Configurable):
         # Mean-baseline advantage per group
         episodes: list[Episode] = []
         group_stds: list[float] = []
-        # Episodes a rollout packs into: 1 when the trajectory shares one prefix,
-        # >1 when the env edited history mid-rollout and `rollout_to_episodes` branched.
+        # Iteratate over `Rollouts` and `Episode`s. More than one `Episode` may be produced
+        # per rollout if the history up to turn N is not a prefix of turn N+1, indicating history branching.
         branches_per_rollout: list[float] = []
         advantages_per_rollout: list[float] = []
         for group in rollout_groups:
-            # Drop the whole group if any sibling has no trainable tokens; we need at
-            # least one turn with assistant tokens per rollout to build an episode (and
-            # the group must stay intact for mean-baseline advantage centering).
+            # Drop the whole group if no sibling has trainable tokens
             if any(
                 not any(turn.completion_token_ids for turn in rollout.turns)
                 for rollout in group.rollouts
@@ -690,17 +699,11 @@ class RLTrainer(Configurable):
                 branches_per_rollout.append(float(len(rollout_episodes)))
                 advantages_per_rollout.append(rollout.advantage)
 
-        # Fraction of groups whose siblings all scored the same (std 0 -> no GRPO signal). A
-        # per-group 0/1 indicator under Mean, not NoReduce: the async producer banks many groups
-        # between train steps, so the metric must aggregate across them (NoReduce takes one entry).
+        # TODO: drop groups with zero std
         zero_std = [1.0 if std == 0.0 else 0.0 for std in group_stds]
-        # Rollout reward rides `rollout_reward` (see `prepare_rollout_metrics`); here we emit
-        # only the GRPO-specific signals — advantage, per-group reward std, zero-std fraction.
         episode_metrics: list[m.Metric] = [
             m.Metric("advantage", m.SummaryStats.from_list(advantages_per_rollout)),
-            m.Metric("reward/group_std", m.Mean.from_list(group_stds)),
-            m.Metric("reward/group_std", m.Max.from_list(group_stds)),
-            m.Metric("reward/zero_std_frac", m.Mean.from_list(zero_std)),
+            m.Metric("rollout_reward/group_zero_std_frac", m.Mean.from_list(zero_std)),
             m.Metric(
                 "rollout/branches_per_rollout", m.Mean.from_list(branches_per_rollout)
             ),
@@ -768,7 +771,7 @@ class RLTrainer(Configurable):
 
     async def run(self) -> None:
         """Orchestrate the async loop: `_trainer_loop` drives; when it finishes or any stage crashes,
-        cancel the rest and close the buffer (fairplay `run`)."""
+        cancel and close the rest."""
         num_steps = self.config.num_steps
         logger.info(
             f"Pre-training validation; then {num_steps} steps of async RL training"
@@ -777,11 +780,12 @@ class RLTrainer(Configurable):
         pre_validation = await self._validate_and_log(step=0)
         sl.log_trace_instant("training_start")
 
-        # Two clocks (split): the trainer version advances at the optimizer step (the off-policy
-        # filter reference); the generator version advances when a weight pull completes.
+        # Two policy version pointers: the trainer advances at the optimizer step;
+        # the generator version advances when a weight pull completes.
         self._trainer_policy_version = 0
         self._generator_policy_version = 0
-        # the in-flight generator weight-load (set by _trainer_loop)
+
+        # the in-flight generator weight-load. Used to overlap weight-pull with
         self._pending_pull: _PendingPull | None = None
 
         # Pre-generation gate: workers acquire before generating a group, released as the group drains.
@@ -969,10 +973,9 @@ class RLTrainer(Configurable):
         # We await it before publishing again, advancing `_generator_policy_version` to the version it
         # adopted. `_pending_pull` is initialized by the caller (`run`).
         for step in range(1, num_steps + 1):
+            # propagate the step counter to actors
             sl.set_step(step)
-            await self.trainer.sync_log_step.call(
-                step
-            )  # propagate the step counter to actors
+            await self.trainer.sync_log_step.call(step)
             await self.generator_router.fanout("sync_log_step", step)
             t_step = time.perf_counter()
 
@@ -984,10 +987,10 @@ class RLTrainer(Configurable):
                 break
             wait_s = time.perf_counter() - t_wait
 
-            # --- train: grad-accum microbatches; a NaN loss ends the run before optim/publish ---
+            # --- train: grad-accum microbatches ---
             # TODO(async): can't stream microbatches (interleave pack->train) — the loss is normalized
             #   by batch.num_global_valid_tokens (sum over ALL microbatches), needed before any fwd/bwd.
-            #   To fix, defer normalization: accumulate raw loss + tokens, divide at the optim step.
+            #   To fix, grad has to be scaled later
             t_train = time.perf_counter()
             fwd_bwd = _reduce_microbatches(
                 [
@@ -1003,21 +1006,19 @@ class RLTrainer(Configurable):
 
             with sl.log_trace_span("trainer_optim_step_call"):
                 optim = self._get_rank_0_value(await self.trainer.optim_step.call())
-            # The off-policy filter compares against the version being TRAINED, advanced now (the
-            # generator adopts it later, on the pull) — so episodes are as stale as the live weights.
             self._trainer_policy_version = optim.policy_version
             train_s = time.perf_counter() - t_train
 
-            # --- weight sync (overlapped): stage to CPU, await the prior pull (advance the generator
-            #     version to the one it adopted), then fire this pull so its load overlaps the NEXT step ---
+            # --- weight sync: stage to CPU, await the prior pull,
+            # then fire this pull so its load overlaps the NEXT step ---
             t_sync = time.perf_counter()
             with sl.log_trace_span("trainer_push_model_state_dict"):
                 await self.trainer.push_model_state_dict.call(
                     version=optim.policy_version
                 )
-            push_s = (
-                time.perf_counter() - t_sync
-            )  # the GPU->CPU stage cost (on the critical path)
+            # the GPU->CPU stage cost (on the critical path)
+            push_s = time.perf_counter() - t_sync
+
             if self._pending_pull is not None:
                 await self._pending_pull.task  # prior pull landed: the generator has adopted that version
                 self._generator_policy_version = (

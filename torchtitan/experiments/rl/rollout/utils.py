@@ -125,16 +125,23 @@ def prepare_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
     """
     # Lengths, truncation, reward
     # TODO: adapt for multi-turn rollouts
-    completion_lens = [len(t.completion_token_ids) for r in rollouts for t in r.turns]
-    prompt_lens = [len(r.turns[0].prompt_token_ids) for r in rollouts if r.turns]
+    completion_lens = [
+        len(rollout_turn.completion_token_ids)
+        for rollout in rollouts
+        for rollout_turn in rollout.turns
+    ]
+    prompt_lens = [
+        len(rollout.turns[0].prompt_token_ids) for rollout in rollouts if rollout.turns
+    ]
     total_lens = [
-        len(r.turns[-1].prompt_token_ids) + len(r.turns[-1].completion_token_ids)
-        for r in rollouts
-        if r.turns
+        len(rollout.turns[-1].prompt_token_ids)
+        + len(rollout.turns[-1].completion_token_ids)
+        for rollout in rollouts
+        if rollout.turns
     ]
 
-    truncated = [float(r.status.is_truncated()) for r in rollouts]
-    rewards = [r.reward for r in rollouts if r.reward is not None]
+    truncated = [float(rollout.status.is_truncated()) for rollout in rollouts]
+    rewards = [rollout.reward for rollout in rollouts if rollout.reward is not None]
     num_turns = [float(len(rollout.turns)) for rollout in rollouts]
 
     out: list[m.Metric] = [

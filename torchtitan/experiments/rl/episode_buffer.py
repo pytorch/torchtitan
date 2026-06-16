@@ -49,6 +49,26 @@ def oldest_sampled_version(episode: Episode) -> int:
     return min(version for _start, version in episode.version_intervals)
 
 
+def token_weighted_avg_version(episode: Episode) -> float | None:
+    """Mean of an episode's sampled versions, weighted by each turn's token span (None if absent).
+
+    Example:
+
+        # 6 tokens, intervals [(0, 5), (3, 6)]: 3 tokens at v5, 3 at v6 -> 5.5
+        token_weighted_avg_version(Episode(token_ids=[...6...], version_intervals=[(0, 5), (3, 6)]))
+        # -> 5.5
+    """
+    intervals = episode.version_intervals
+    num_tokens = len(episode.token_ids)
+    if not intervals or num_tokens == 0:
+        return None
+    weighted = 0.0
+    for i, (start, version) in enumerate(intervals):
+        end = intervals[i + 1][0] if i + 1 < len(intervals) else num_tokens
+        weighted += version * (end - start)  # this turn's token span
+    return weighted / num_tokens
+
+
 @dataclass(slots=True)
 class _BufferedEpisodes:
     """One `add_episodes` round's episodes plus the metrics that describe them.
@@ -350,10 +370,17 @@ class EpisodeBuffer:
         # update that landed mid-generation shows up as an extra interval, so an episode can be born
         # stale even when first sampled on-policy. initial = vs the first turn's version, final = vs
         # the last turn's version.
-        intervals = [e.version_intervals for e in consumed if e.version_intervals]
-        num_inflight_weight_updates = [len(iv) - 1 for iv in intervals]
-        initial_staleness = [version - iv[0][1] for iv in intervals]
-        final_staleness = [version - iv[-1][1] for iv in intervals]
+        with_intervals = [e for e in consumed if e.version_intervals]
+        num_inflight_weight_updates = [
+            len(e.version_intervals) - 1 for e in with_intervals
+        ]
+        initial_staleness = [
+            version - e.version_intervals[0][1] for e in with_intervals
+        ]
+        final_staleness = [version - e.version_intervals[-1][1] for e in with_intervals]
+        avg_staleness = [
+            version - token_weighted_avg_version(e) for e in with_intervals
+        ]
 
         return [
             m.Metric(
@@ -378,4 +405,5 @@ class EpisodeBuffer:
             ),
             m.Metric("buffer/initial_staleness", m.Mean.from_list(initial_staleness)),
             m.Metric("buffer/final_staleness", m.Mean.from_list(final_staleness)),
+            m.Metric("buffer/avg_staleness", m.Mean.from_list(avg_staleness)),
         ]
