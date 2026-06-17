@@ -113,8 +113,7 @@ class GroupedExperts(Module):
         topk_expert_ids_BLK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
         *,
-        num_local_tokens_after_padding: int,
-        local_seq_len_after_padding: int,
+        num_local_tokens_after_seq_dim_padding: int,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
@@ -125,6 +124,7 @@ class GroupedExperts(Module):
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
         T = B * L
+        local_seq_len_after_padding = num_local_tokens_after_seq_dim_padding // B
         x_TD = x_BLD.view(T, D)
 
         topk_scores_TK = topk_scores_BLK.view(T, K)
@@ -147,7 +147,7 @@ class GroupedExperts(Module):
             routed_output_RD,
             metadata,
             x_TD,
-            num_local_tokens_after_padding=num_local_tokens_after_padding,
+            num_local_tokens_after_padding=num_local_tokens_after_seq_dim_padding,
             local_seq_len_after_padding=local_seq_len_after_padding,
         )
         # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
@@ -352,11 +352,13 @@ class MoE(Module):
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None
+        enable_sp_for_dense_activations: bool = True
 
     def __init__(self, config: Config):
         super().__init__()
 
         num_experts = config.num_experts
+        self.enable_sp_for_dense_activations = config.enable_sp_for_dense_activations
         self.experts = config.experts.build()
         self.router = config.router.build()
         self.shared_experts = (
@@ -401,21 +403,45 @@ class MoE(Module):
         """
         B, L, D = x_BLD.shape
         sp_size = getattr(self.experts.token_dispatcher, "sp_size", 1)
+        # ---------------------------------------------------------------------
+        # TODO: Temporary workaround for #3622. Remove it once short-sequence
+        # routing counts can remain Partial.
+        # Real padding when seq_len < sp_size: EP routes over sequence-parallel
+        # token shards. A sequence shorter than ``sp_size`` cannot shard across
+        # all SP ranks, so physically pad to ``sp_size`` and trim before returning.
+        seq_pad = sp_size - L if L < sp_size else 0
+        if seq_pad:
+            if self.training:
+                raise ValueError(
+                    "MoE short-sequence padding for L < sp_size: "
+                    f"got L={L}, sp_size={sp_size} while the module is in training mode."
+                )
+            x_BLD = F.pad(x_BLD, (0, 0, 0, seq_pad))
+            L = L + seq_pad
+        # ---------------------------------------------------------------------
 
-        if isinstance(x_BLD, DTensor):
-            local_B, local_L, _ = x_BLD.to_local().shape
+        local_batch_size = (
+            x_BLD._local_tensor.shape[0] if isinstance(x_BLD, DTensor) else B
+        )
+        if get_spmd_backend() == "spmd_types":
+            seq_dim_pad_tokens = 0
+            sp_divisor = 1 if self.enable_sp_for_dense_activations else sp_size
+            if self.training and L % sp_divisor != 0:
+                raise ValueError(
+                    "spmd_types MoE requires the local sequence length to shard "
+                    f"evenly over TP: got L={L}, TP={sp_divisor}."
+                )
+            num_local_tokens_after_seq_dim_padding = local_batch_size * L // sp_divisor
         else:
-            local_B, local_L, _ = x_BLD.shape
-
-        pad_tokens = (-local_L) % sp_size
-        # Padding is logically appended to the sequence tail of each batch,
-        # not to a specific SP rank. This lets combine() infer each SP rank's
-        # start/end offsets from the uniform padded shard length; for example,
-        # if the local sequence length is shorter than the SP size, only ranks
-        # with real local positions route tokens. No padded token is
-        # materialized or routed.
-        local_seq_len_after_padding = local_L + pad_tokens
-        num_local_tokens_after_padding = local_B * local_seq_len_after_padding
+            # Virtual padding: pad each batch's (post real-pad) sequence length
+            # up to a multiple of ``sp_size`` so combine() can infer per-rank
+            # offsets from a uniform shard length. The padding is logically
+            # appended to the sequence tail of each batch; no padded token is
+            # materialized or routed.
+            seq_dim_pad_tokens = (-L) % sp_size
+            num_local_tokens_after_seq_dim_padding = (
+                local_batch_size * (L + seq_dim_pad_tokens) // sp_size
+            )
 
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # scores_BLE shape (B, L, E)
@@ -482,8 +508,7 @@ class MoE(Module):
             topk_scores_BLK,
             topk_expert_ids_BLK,
             num_local_tokens_per_expert_E,
-            num_local_tokens_after_padding=num_local_tokens_after_padding,
-            local_seq_len_after_padding=local_seq_len_after_padding,
+            num_local_tokens_after_seq_dim_padding=num_local_tokens_after_seq_dim_padding,
         )
 
         # shared_experts runs in parallel with deepep combine communication.
@@ -502,17 +527,23 @@ class MoE(Module):
 
             sync_combine()
 
-        if pad_tokens:
-            # Combine constructs the full logically padded SP view so each rank
-            # uses the same stride for global token offsets. The input was not
-            # physically padded, so trim the logical tail padding before
-            # restoring the original (B, L, D) shape.
-            out_TD = out_BLD.view(-1, D)
-            T = B * L
-            out_BLD = out_TD[:T].view(B, L, D)
+        if seq_dim_pad_tokens:
+            # Combine constructs a sequence-dim padded SP view for each batch
+            # row. The input was not physically padded, so trim that logical
+            # sequence tail before adding the shared expert output.
+            out_BLD = out_BLD[:, :L, :]
 
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD
+
+        # ---------------------------------------------------------------------
+        # TODO: Temporary workaround for #3622. Paired with the short-sequence
+        # padding above; remove it once short-sequence routing counts can remain
+        # Partial.
+        if seq_pad:
+            # Drop the tokens padded on for SP sharding, restoring (B, L, D).
+            out_BLD = out_BLD[:, : L - seq_pad, :]
+        # ---------------------------------------------------------------------
         return out_BLD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:

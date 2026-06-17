@@ -127,7 +127,10 @@ def build_trainer_model(
     # so each Module is constructed with its ShardingConfig / LocalMapConfig.
     # Without this the trainer side would run un-parallelized while the vLLM
     # generator runs fully TP-parallelized, breaking trainer-vs-vLLM parity.
-    model_spec.model.update_from_config(config=trainer_config)
+    model_spec.model.update_from_config(
+        config=trainer_config,
+        tp_gather_logits=True,
+    )
 
     with torch.device("meta"):
         with utils.set_default_dtype(TORCH_DTYPE_MAP[trainer_config.training.dtype]):
