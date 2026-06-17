@@ -65,7 +65,7 @@ from torchtitan.experiments.rl.config_registry import (
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
 from torchtitan.experiments.rl.models.vllm_registry import (
-    registry_to_vllm,
+    register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     VLLM_MODEL_NAME,
 )
@@ -224,7 +224,7 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
         model=config.hf_assets_path,
         trust_remote_code=True,
         # Build the model config from torchtitan's ModelSpec via the custom
-        # parser registered by registry_to_vllm, instead of reading config.json.
+        # parser registered by register_to_vllm, instead of reading config.json.
         config_format=TORCHTITAN_CONFIG_FORMAT,
         dtype=gen_config.model_dtype,
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
@@ -583,7 +583,7 @@ class BitwiseParityTestBase(unittest.TestCase):
         if not dist.is_initialized():
             dist_utils.init_distributed(CommConfig())
 
-        registry_to_vllm(
+        register_to_vllm(
             config.model_spec,
             parallelism=config.generator.parallelism,
             compile_config=config.compile,

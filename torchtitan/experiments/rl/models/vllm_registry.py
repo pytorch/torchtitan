@@ -13,11 +13,11 @@ subclasses — vLLM's ``hf_config`` only carries HF-shaped fields.
 
 Usage:
     from torchtitan.experiments.rl.models.vllm_registry import (
-        registry_to_vllm,
+        register_to_vllm,
         TORCHTITAN_CONFIG_FORMAT,
     )
 
-    registry_to_vllm(
+    register_to_vllm(
         model_spec,
         parallelism=parallelism_config,
         compile_config=compile_config,
@@ -53,7 +53,7 @@ class InferenceParallelismConfig:
     data-parallel groups (the vLLM wrapper skips FSDP/DDP), so
     ``data_parallel_degree`` is vLLM's pure DP size, not the trainer's
     ``data_parallel_shard_degree`` (FSDP). The vLLM wrapper translates this to
-    the training ``ParallelismConfig`` via :meth:`to_training_parallelism_config`
+    the training ``ParallelismConfig`` via :meth:`to_training`
     before building ``ParallelDims``; other utils (e.g. world-size calc) call it
     too.
     """
@@ -68,7 +68,7 @@ class InferenceParallelismConfig:
     expert_parallel_degree: int = 1
     """Expert parallelism degree for MoE layers. 1 means disabled."""
 
-    def to_training_parallelism_config(self) -> ParallelismConfig:
+    def to_training(self) -> ParallelismConfig:
         """Translate to the training ``ParallelismConfig`` for utils that need
         the full shape (``ParallelDims``, ``parallelize_fn``, world-size calc).
 
@@ -176,7 +176,7 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     return hf
 
 
-def registry_to_vllm(
+def register_to_vllm(
     model_spec: ModelSpec,
     *,
     parallelism: InferenceParallelismConfig,

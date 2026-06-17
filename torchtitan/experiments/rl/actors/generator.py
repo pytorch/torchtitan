@@ -24,7 +24,7 @@ from torchtitan.config import CompileConfig, Configurable, DebugConfig
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.models.vllm_registry import (
     InferenceParallelismConfig,
-    registry_to_vllm,
+    register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
 )
 from torchtitan.experiments.rl.observability import metrics as m
@@ -403,7 +403,7 @@ class VLLMGenerator(Actor, Configurable):
         self._max_num_seqs = max_num_seqs
 
         # Register TorchTitan model + parser with vLLM
-        registry_to_vllm(
+        register_to_vllm(
             model_spec,
             parallelism=config.parallelism,
             compile_config=compile_config,
@@ -443,7 +443,7 @@ class VLLMGenerator(Actor, Configurable):
             model=model_path,
             trust_remote_code=True,
             # Use the torchtitan custom config parser (registered by
-            # registry_to_vllm above). It builds PretrainedConfig from
+            # register_to_vllm above). It builds PretrainedConfig from
             # ModelSpec instead of reading config.json from disk.
             config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=config.model_dtype,

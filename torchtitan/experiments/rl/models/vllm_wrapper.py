@@ -154,7 +154,7 @@ class VLLMModelWrapper(Module):
 
         # Translate the inference parallelism into torchtitan's full
         # ParallelismConfig that ParallelDims / parallelize_fn consume.
-        training_parallelism = parallelism.to_training_parallelism_config()
+        training_parallelism = parallelism.to_training()
 
         # Build ParallelDims from the translated ParallelismConfig so TP/EP
         # sharding sees the same mesh shape as vLLM. data_parallel_shard_degree

@@ -34,7 +34,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl import config_registry
 from torchtitan.experiments.rl.models.vllm_registry import (
-    registry_to_vllm,
+    register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
 )
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
@@ -86,7 +86,7 @@ def generate() -> None:
     is_rank0 = os.environ.get("RANK", "0") == "0"
 
     # Register TorchTitan model with vLLM before engine creation
-    registry_to_vllm(
+    register_to_vllm(
         config.model_spec,
         parallelism=gen_config.parallelism,
         compile_config=config.compile,
