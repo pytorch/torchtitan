@@ -191,7 +191,10 @@ class VLLMModelWrapper(Module):
         class _InferenceConfig:
             parallelism: ParallelismConfig
 
-        self.config.update_from_config(config=_InferenceConfig(parallelism=parallelism))
+        self.config.update_from_config(
+            config=_InferenceConfig(parallelism=parallelism),
+            tp_gather_logits=True,
+        )
 
         # Build model on meta device to avoid allocating full model on every GPU
         with torch.device("meta"):
@@ -317,7 +320,7 @@ class VLLMModelWrapper(Module):
         logits = self.model.lm_head(hidden_states)
 
         # Full DTensor path returns logits as DTensor; vLLM expects plain tensors.
-        # disable_loss_parallel=True already makes lm_head output Replicate
+        # Generator sharding gathers TP logits, so the local value is full logits.
         if isinstance(logits, DTensor):
             logits = logits.to_local()
 
