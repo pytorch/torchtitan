@@ -572,7 +572,7 @@ class Qwen35Model(Decoder):
 
             set_qwen35_sharding_config(
                 self,
-                loss_parallel=parallelism.tensor_parallel_degree > 1,
+                is_inference=config.is_inference,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 

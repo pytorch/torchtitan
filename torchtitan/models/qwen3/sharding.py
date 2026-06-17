@@ -37,7 +37,7 @@ _GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
 def set_qwen3_sharding_config(
     config: "Qwen3Model.Config",
     *,
-    loss_parallel: bool,
+    is_inference: bool,
     enable_sp: bool,
     enable_ep: bool,
 ) -> None:
@@ -53,7 +53,7 @@ def set_qwen3_sharding_config(
     """
 
     set_decoder_sharding_config(
-        config, loss_parallel=loss_parallel, enable_sp=enable_sp
+        config, is_inference=is_inference, enable_sp=enable_sp
     )
     for layer_cfg in config.layers:
         _set_qwen3_layer_sharding(layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep)
