@@ -97,7 +97,7 @@ Notes:
   cross-rank arrival-spin, not comm; pure-local removes it to reach 0.949. The
   last ~5% is native-only fusion not ported.
 
-## spmd_types execution as a vLLM runtime (W1, 32B TP=8)
+## spmd_types execution as a vLLM runtime (32B TP=8)
 
 `--model-2d spmd`: same plain-local forward as `localfused` (vLLM paged
 attn/rope/silu, threaded residual + fused add+RMSNorm) but the Partial ->
@@ -106,6 +106,8 @@ through `spmd_types.redistribute(P->R)` with typecheck OFF, instead of vLLM's
 custom all-reduce. spmd_types is otherwise a typechecking tool, not a runtime;
 this measures it AS a runtime.
 
+W1 (bs8/in1024/gen128):
+
 | path | tok/s | ratio | TP all-reduce |
 |------|-------|-------|---------------|
 | DTensor ceiling (vLLM-AR + vLLM-RMSNorm) | 656.2 | 0.742 | vLLM custom |
@@ -113,6 +115,15 @@ this measures it AS a runtime.
 | spmd_types, vLLM AR (--model-2d spmd + set_dist shim) | 747.8 | 0.846 | spmd.redistribute -> vLLM custom |
 | pure-local (--model-2d localfused) | 787.5 | 0.891 | vLLM custom (direct) |
 | native | 883.9 | 1.000 | -- |
+
+W2 (bs32/in4096/gen1024):
+
+| path | tok/s | ratio | TP all-reduce |
+|------|-------|-------|---------------|
+| DTensor ceiling (vLLM-AR + vLLM-RMSNorm) | 1797.1 | 0.759 | vLLM custom |
+| spmd_types, vLLM AR (--model-2d spmd + set_dist shim) | 2075.7 | 0.877 | spmd.redistribute -> vLLM custom |
+| pure-local (--model-2d localfused) | 2191.5 | 0.926 | vLLM custom (direct) |
+| native | 2366.5 | 1.000 | -- |
 
 Finding: the TP all-reduce backend dominates. With spmd's default dist (NCCL),
 spmd_types execution (0.698x) is SLOWER than pure-local (0.891x) and even below
