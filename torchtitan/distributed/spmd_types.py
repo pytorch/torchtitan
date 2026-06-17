@@ -307,9 +307,18 @@ def spmd_redistribute_per_axis(
     if mesh is None:
         return x
 
+    def _norm_shard(t: spmd.PerMeshAxisSpmdType) -> spmd.PerMeshAxisSpmdType:
+        # Normalize negative shard dims against the actual tensor rank so a
+        # config-declared S(-1) compares/redistributes equal to a propagated
+        # S(ndim-1) (e.g. lm_head vocab shard on a 3D [B, L, vocab] output).
+        if isinstance(t, spmd.Shard) and t.dim < 0:
+            return spmd.S(x.ndim + t.dim)
+        return t
+
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
     for axis_name, dst_t in dst_types.items():
-        src_t = src_types.get(axis_name)
+        src_t = _norm_shard(src_types.get(axis_name))
+        dst_t = _norm_shard(dst_t)
         # pyrefly: ignore [missing-attribute]
         axis = axis_name.value
         axis_size = (

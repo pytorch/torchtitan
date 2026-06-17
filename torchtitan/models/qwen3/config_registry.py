@@ -51,6 +51,23 @@ def qwen3_debugmodel() -> Trainer.Config:
     )
 
 
+def qwen3_debugmodel_ce_loss() -> Trainer.Config:
+    """Debug model with standard (non-chunked) CrossEntropyLoss.
+
+    Used to validate the Qwen3 forward under ``spmd_backend=spmd_types``
+    typechecking: ChunkedCELoss chunks the sequence dim, which conflicts with
+    sequence-parallel (S(1)) activations under SPMD typechecking.
+    """
+    from torchtitan.components.loss import CrossEntropyLoss
+
+    config = qwen3_debugmodel()
+    config.loss = CrossEntropyLoss.Config()
+    # No activation checkpointing: AC recompute of the compiled FlexAttention
+    # region is unrelated to SPMD typechecking and breaks the backward pass.
+    config.activation_checkpoint = None
+    return config
+
+
 def qwen3_debugmodel_moe_param_groups() -> Trainer.Config:
     config = qwen3_moe_debug()
     config.optimizer = OptimizersContainer.Config(
