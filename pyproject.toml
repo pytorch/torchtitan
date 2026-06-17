@@ -53,8 +53,8 @@ skip = ["*.json"]
 ignore-words-list = ["assertin", "datas" ,"indx", "inpt", "nd", "socio-economic"]
 
 [tool.uv.sources]
-gigashuffle = { git = "https://github.com/commaai/gigashuffle.git", rev = "1202a38259614cbd72f03cf9dac1ca20e72a67ad" }
-reporterv2 = { git = "https://github.com/commaai/reporterv2.git", rev = "5c393dac9d18d9f3f71326037a5aec0af6a1db62" }
+gigashuffle = { git = "https://github.com/commaai/gigashuffle.git" }
+reporterv2 = { git = "https://github.com/commaai/reporterv2.git" }
 
 # ---- Explicit project build information ---- #
 [build-system]
