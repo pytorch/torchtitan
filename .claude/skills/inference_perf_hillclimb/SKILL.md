@@ -107,7 +107,7 @@ native-style paths: `--model-2d {local,localfused,local3d,dtensor}` (mutually
 exclusive with kernel rungs); `localfused` (pure-local + fused add+RMSNorm) is
 the best, 0.91x.
 
-Two workloads (Qwen3-32B, TP=8): W1 bs=8/in=1024/out=1024 (priority);
+Two workloads (Qwen3-32B, TP=8): W1 bs=8/in=1024/out=128 (priority);
 W2 bs=32/in=4096/out=1024 (needs `--max-seq-len 8192`).
 
 ## The hill-climbing loop
