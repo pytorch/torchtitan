@@ -33,7 +33,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module rl",
+                    "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen",
                     "--num_steps 5",
                     "--trainer.parallelism.tensor_parallel_degree 2",
@@ -57,7 +57,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module rl",
+                    "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen",
                     "--num_steps 5",
                     "--trainer.parallelism.tensor_parallel_degree 2",
@@ -78,7 +78,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module rl",
+                    "--module alphabet_sort",
                     "--config rl_grpo_qwen3_moe_debug_varlen",
                     "--num_steps 5",
                     "--hf_assets_path tests/assets/tokenizer",
@@ -111,7 +111,7 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module rl",
+                    "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen_batch_invariant",
                     "--num_steps 5",
                     "--group_size 2",
@@ -128,7 +128,7 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module rl",
+                    "--module alphabet_sort",
                     "--config rl_grpo_qwen3_moe_debug_varlen_batch_invariant",
                     "--num_steps 5",
                     "--hf_assets_path tests/assets/tokenizer",

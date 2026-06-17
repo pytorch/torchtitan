@@ -71,6 +71,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # NOTE: model_spec is suppressed from tyro CLI parsing and is always
         # set programmatically by the model registry before Trainer construction.
         model_spec: Annotated[ModelSpec | None, tyro.conf.Suppress] = None
+        is_inference: bool = False
 
         hf_assets_path: str = "./tests/assets/tokenizer"
         """
@@ -111,10 +112,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
 
-        @staticmethod
-        def _uses_flex_attention(config: Configurable.Config) -> bool:
-            return any(config.traverse(FlexAttention.Config))
-
         def __post_init__(self):
             if self.debug.batch_invariant:
                 raise ValueError(
@@ -138,8 +135,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 and self.debug.spmd_typechecking
                 and isinstance(self.activation_checkpoint, SelectiveAC.Config)
                 and self.model_spec is not None
-                and self._uses_flex_attention(self.model_spec.model)
+                and any(self.model_spec.model.traverse(FlexAttention.Config))
             ):
+                # TODO(pianpwk): Enable SAC with FlexAttention under SPMD typechecking.
                 raise ValueError(
                     "Selective activation checkpointing (SAC) is not supported "
                     "with FlexAttention while SPMD typechecking is enabled. "
@@ -534,7 +532,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         self.train_context = dist_utils.get_train_context(
-            enable_loss_parallel=parallel_dims.tp_enabled,
             parallel_dims=parallel_dims,
             spmd_typechecking=(
                 config.parallelism.spmd_backend == "spmd_types"
