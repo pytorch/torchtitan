@@ -121,6 +121,7 @@ W2 (bs32/in4096/gen1024):
 | path | tok/s | ratio | TP all-reduce |
 |------|-------|-------|---------------|
 | DTensor ceiling (vLLM-AR + vLLM-RMSNorm) | 1797.1 | 0.759 | vLLM custom |
+| spmd_types, NCCL AR (--model-2d spmd, TT_SPMD_NCCL_AR=1) | 1884.3 | 0.796 | spmd.redistribute -> NCCL |
 | spmd_types, vLLM AR (--model-2d spmd + set_dist shim) | 2075.7 | 0.877 | spmd.redistribute -> vLLM custom |
 | pure-local (--model-2d localfused) | 2191.5 | 0.926 | vLLM custom (direct) |
 | native | 2366.5 | 1.000 | -- |

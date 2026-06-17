@@ -30,6 +30,7 @@ Both are dense-only (Qwen3-32B / 1.7B); MoE blocks are not supported here.
 from __future__ import annotations
 
 import logging
+import os
 
 import spmd_types as spmd
 
@@ -473,8 +474,12 @@ def _prepare_2d(wrapper, variant: str) -> None:
         global _SPMD_REDIST_GROUP
         _SPMD_REDIST_GROUP = mesh.get_group()
         # Route spmd's all_reduce through vLLM's custom AR (not NCCL) so the
-        # redistribute matches the pure-local collective.
-        spmd.set_dist(_VLLMAllReduceDist())
+        # redistribute matches the pure-local collective. Set TT_SPMD_NCCL_AR=1
+        # to keep spmd's default NCCL all_reduce (A/B against the vLLM AR shim).
+        if not os.environ.get("TT_SPMD_NCCL_AR"):
+            spmd.set_dist(_VLLMAllReduceDist())
+        else:
+            logger.info("TT_SPMD_NCCL_AR set: spmd redistribute uses NCCL all_reduce")
 
     for name, layer in model.layers.items():
         if getattr(layer, "moe_enabled", False):
