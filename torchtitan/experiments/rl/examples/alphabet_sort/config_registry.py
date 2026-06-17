@@ -4,15 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""
-Config entry points for the RL/unified experiment.
+"""Config entry points for the alphabet-sort example.
 
-Each function returns a complete ``RLTrainer.Config`` and is discoverable by
-``ConfigManager`` via ``--module rl --config <function_name>``.
+Each function returns a complete ``RLTrainer.Config``, discoverable by
+``ConfigManager`` via
+``--module alphabet_sort --config rl_grpo_qwen3_*``.
 """
 
 import dataclasses
-from dataclasses import dataclass
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -29,6 +28,7 @@ from torchtitan.experiments.rl.actors.generator import (
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
+from torchtitan.experiments.rl.batch_invariance import BatchInvariantFlexConverter
 from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
 from torchtitan.experiments.rl.generator_router import (
@@ -40,42 +40,9 @@ from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.trainer import RLTrainer
-from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.qwen3 import model_registry
-from torchtitan.protocols.model import ModelConfigConverter
 
 _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
-
-
-class BatchInvariantFlexConverter(ModelConfigConverter):
-    """Pin flex attention kernel options for batch-invariant mode.
-
-    Sets fixed BLOCK_M/BLOCK_N=16 and BACKEND=TRITON on all
-    FlexAttention layers.
-
-    BACKEND=TRITON is to avoid flex_decode kernel.
-    """
-
-    # the triton BLOCK_N tile size needs to be pinned for stable numerics and
-    # needs to match vLLM's for identical results, today vLLM default is 16
-    # TODO: run some experiments to determine impact of small vs large tile sizes
-    _BLOCK_M = 16
-    _BLOCK_N = 16
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ModelConfigConverter.Config):
-        pass
-
-    def __init__(self, config: Config):
-        pass
-
-    def convert(self, model_config) -> None:
-        for layer_cfg in model_config.layers:
-            inner = layer_cfg.attention.inner_attention
-            if isinstance(inner, FlexAttention.Config):
-                inner.kernel_options["BACKEND"] = "TRITON"
-                inner.kernel_options["BLOCK_M"] = self._BLOCK_M
-                inner.kernel_options["BLOCK_N"] = self._BLOCK_N
 
 
 def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
@@ -110,6 +77,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -126,6 +94,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -164,6 +133,7 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -180,6 +150,7 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -245,6 +216,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -261,6 +233,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -299,6 +272,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=8,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -315,6 +289,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
                 tensor_parallel_degree=8,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -359,6 +334,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
+                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(
@@ -378,6 +354,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
@@ -426,6 +403,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 expert_parallel_degree=4,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=False,
@@ -443,6 +421,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
@@ -489,6 +468,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=4,
+                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(
@@ -507,6 +487,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
@@ -553,6 +534,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -570,6 +552,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(

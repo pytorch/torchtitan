@@ -201,7 +201,7 @@ def test_decode_metrics_absent_for_single_generated_token():
 # --- config guards (weight-sync invariants) ---
 
 # Parallelism the generator accepts (TP-only); the weight-sync guards run after these checks.
-_TP_ONLY = ParallelismConfig(enable_sequence_parallel=False)
+_TP_ONLY = ParallelismConfig(enable_sequence_parallel=False, disable_loss_parallel=True)
 
 
 def test_batch_invariant_requires_prefix_cache_reset():
@@ -226,7 +226,9 @@ def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
     # Strict drain (hot_swap=False) needs the prefix cache reset so post-pull requests don't reuse old-weight KV.
     import dataclasses
 
-    from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b_varlen
+    from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
+        rl_grpo_qwen3_0_6b_varlen,
+    )
 
     config = rl_grpo_qwen3_0_6b_varlen()
     assert (

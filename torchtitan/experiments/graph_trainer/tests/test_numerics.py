@@ -270,6 +270,7 @@ def _run_autoparallel_llama3_loss_compare() -> bool:
 AUTOPARALLEL_DSV3_PARALLELISM = (
     "--parallelism.data_parallel_shard_degree=4"
     " --parallelism.expert_parallel_degree=2"
+    " --parallelism.disable_loss_parallel"
 )
 
 
