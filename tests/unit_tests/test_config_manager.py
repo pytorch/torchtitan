@@ -61,6 +61,18 @@ class TestConfigManager(unittest.TestCase):
         with pytest.raises(ValueError, match="Available config functions"):
             config_manager.parse_args(["--module", "llama3", "--config", "nonexistent"])
 
+    def test_rl_examples_registered_as_shorthands(self):
+        """RL examples are valid --module shorthands (resolved under rl/examples).
+
+        End-to-end resolution + build is covered by the RL integration tests
+        (they run ``--module alphabet_sort``); kept out of here since importing an
+        example's config_registry pulls in vLLM, which isn't available on CPU.
+        """
+        from torchtitan.experiments import _supported_experiments
+
+        assert "alphabet_sort" in _supported_experiments
+        assert "search_r1" in _supported_experiments
+
     def test_cli_overrides(self):
         """CLI args override config defaults."""
         config_manager = ConfigManager()
