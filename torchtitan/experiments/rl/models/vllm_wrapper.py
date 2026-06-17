@@ -13,6 +13,7 @@ TorchTitan models for vLLM.
 
 import dataclasses
 from dataclasses import dataclass
+from functools import partial
 
 import torch
 import torch._dynamo
@@ -143,8 +144,9 @@ class VLLMModelWrapper(Module):
                 num_heads=n_heads,
                 num_kv_heads=n_kv_heads,
                 head_dim=head_dim,
-                mask_mod=getattr(inner, "mask_mod", None),
-                sliding_window=sliding_window,
+                sliding_window_size=getattr(
+                    layer_cfg.attention, "sliding_window_size", None
+                ),
             )
             new_layers.append(
                 dataclasses.replace(
@@ -197,9 +199,13 @@ class VLLMModelWrapper(Module):
         # specializes on tensor type, so each switch triggers a
         # recompile.  Because of this, the default recompile_limit (8) is
         # too low; exceeding it fails under
-        # fullgraph=True so set to 10 for now
+        # fullgraph=True so set to 10 for now and bump to 12 for sliding window
+        has_sliding_window = any(
+            getattr(layer_cfg.attention, "sliding_window_size", None) is not None
+            for layer_cfg in model_config.layers
+        )
         if compile_config.enable:
-            torch._dynamo.config.recompile_limit = 10
+            torch._dynamo.config.recompile_limit = 12 if has_sliding_window else 10
 
         self.model = self.parallelize_fn(
             model=self.model,
@@ -229,6 +235,23 @@ class VLLMModelWrapper(Module):
             self.model.init_weights(buffer_device=None)
         self._maybe_initial_load_weights()
 
+        # Give each gpt-oss attention's vLLM backend its sink rescale.
+        # Need to do it here after parallelize + weight load so sinks are
+        # TP-sharded.
+        self._inject_attention_sinks()
+
+    def _inject_attention_sinks(self) -> None:
+        """Give each gpt-oss attention's vLLM backend its sink-rescale hook."""
+        from torchtitan.models.gpt_oss.model import apply_attention_sink
+
+        for module in self.model.modules():
+            sinks = getattr(module, "sinks", None)
+            if sinks is None:
+                continue
+            local_sinks = sinks.to_local() if isinstance(sinks, DTensor) else sinks
+            module.inner_attention.vllm_attn.impl.out_transform = partial(
+                apply_attention_sink, sinks=local_sinks
+            )
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """vLLM required API.
         Convert input token IDs to embeddings."""

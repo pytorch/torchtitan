@@ -187,9 +187,7 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     attention_cfg.wo.sharding_config = rowwise_config(output_sp=enable_sp)
 
 
-def set_gqa_inner_attention_local_map(
-    inner_attention_cfg, *, return_lse: bool = False
-) -> None:
+def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
     """Install a ``LocalMapConfig`` on an inner-attention config.
 
     q/k/v arrive as ``(bs, seq, heads, head_dim)`` DTensors with heads
@@ -207,18 +205,12 @@ def set_gqa_inner_attention_local_map(
     (matching the BlockMask's kv dimension). Q's local grad is naturally
     seq-sharded; k/v's local grads accumulate as ``Partial`` on CP and
     DTensor reduces them on the way out.
-
-    ``return_lse=True`` is for kernels that return ``(output, lse)`` (e.g.,
-    GPT-OSS's flash attention with ``return_lse=True``); both outputs share
-    the same heads-sharded placement.
     """
     q_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2))
     kv_src_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2))
     kv_dst_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2), cp=spmd.R)
     kv_grad_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2), cp=spmd.P)
-    out_src: SpmdLayout | tuple[SpmdLayout, ...] = (
-        (q_placements, q_placements) if return_lse else q_placements
-    )
+    out_src: SpmdLayout = q_placements
     inner_attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={
             "q_BLNH": q_placements,

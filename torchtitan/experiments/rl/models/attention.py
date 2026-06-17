@@ -7,14 +7,16 @@
 import itertools
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
 )
+from torch.nn.attention.varlen import AuxRequest
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
-from torchtitan.models.common.attention import AttentionMasksType, MaskMod
+from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import warn_once
 from torchtitan.tools.utils import has_cuda_capability
@@ -63,6 +65,10 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+
+        # optional post-attention epilogue transform (out, lse) -> out
+        # set by VLLMModelWrapper in vllm_wrapper.py
+        self.out_transform = None
 
         self.enable_gqa = self.num_heads > self.num_kv_heads
 
@@ -152,10 +158,12 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
 
         assert self.dcp_world_size == 1, "DCP not supported yet."
 
-        if attn_metadata.causal:
+        if not attn_metadata.causal:
+            raise RuntimeError("Non-causal attention not supported yet.")
+        if self.sliding_window == (-1, -1):
             sliding_window_size = (-1, 0)
         else:
-            raise RuntimeError("Non-causal attention not supported yet.")
+            sliding_window_size = self.sliding_window
 
         assert self.alibi_slopes is None, "Alibi slopes not supported yet."
 
@@ -169,7 +177,7 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
                 num_seqs + 1, dtype=torch.int32, device=query.device
             )
             cu_seqlens_k[1:] = torch.cumsum(seqused_k, dim=0)
-        extra_kwargs = {}
+        extra_kwargs: dict[str, Any] = {}
 
         # TODO(pytorch/pytorch#179760): FA2's auto num_splits heuristic
         # produces NaN intermittently with paged KV (block_table). Force
@@ -184,7 +192,10 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
         if self.enable_gqa:
             extra_kwargs["enable_gqa"] = True
 
-        return torch.nn.attention.varlen.varlen_attn_out(
+        if self.out_transform is not None:
+            extra_kwargs["return_aux"] = AuxRequest(lse=True)
+
+        result = torch.nn.attention.varlen.varlen_attn_out(
             output[:num_actual_tokens],
             query[:num_actual_tokens],
             key_cache,
@@ -199,6 +210,14 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             seqused_k=seqused_k,
             **extra_kwargs,
         )
+        if self.out_transform is None:
+            return result
+
+        out, lse = result
+        lse = lse.transpose(0, 1)
+        out = self.out_transform(out, lse)
+        output[:num_actual_tokens].copy_(out)
+        return output[:num_actual_tokens]
 
 
 class VLLMAttentionWrapper(Module):
@@ -226,9 +245,8 @@ class VLLMAttentionWrapper(Module):
         num_kv_heads: int
         head_dim: int
         scale: float | None = None
-        mask_mod: MaskMod.Config | None = None
-        sliding_window: int | None = None
-        """Causal sliding-window size"""
+        sliding_window_size: int | None = None
+        """Causal sliding-window size (``None`` => full attention)."""
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -272,8 +290,6 @@ class VLLMAttentionWrapper(Module):
             vllm_config.cache_config if hasattr(vllm_config, "cache_config") else None
         )
 
-        mask_mod_cfg = config.mask_mod
-
         # TODO: This need to be compatible with Pipeline Parallelism
         layer_id = next(VLLMAttentionWrapper._layer_counter)
         self.vllm_attn = Attention(
@@ -283,12 +299,9 @@ class VLLMAttentionWrapper(Module):
             num_kv_heads=num_kv_heads,
             cache_config=cache_config,
             quant_config=None,
-            per_layer_sliding_window=config.sliding_window,
+            per_layer_sliding_window=config.sliding_window_size,
             prefix=f"model.layers.{layer_id}.attention.inner_attention",
         )
-
-        if mask_mod_cfg is not None and config.sliding_window is None:
-            self.vllm_attn.logical_mask_mod = mask_mod_cfg.build().get_mask_mod()
 
     def forward(
         self,

@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 
+from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
@@ -96,8 +98,7 @@ def _set_gpt_oss_layer_sharding(
     set_qkv_linear_sharding(attention.qkv_linear)
     attention.wo.sharding_config = rowwise_config(output_sp=enable_sp)
 
-    # GPT-OSS flash attention always returns (output, lse).
-    set_gqa_inner_attention_local_map(attention.inner_attention, return_lse=True)
+    set_gqa_inner_attention_local_map(attention.inner_attention)
 
     # MoE FFN (all GPT-OSS blocks are MoE).
     if layer_cfg.moe is not None:
