@@ -19,13 +19,14 @@ from types import SimpleNamespace
 import pytest
 from vllm.sampling_params import RequestOutputKind
 
-from torchtitan.config import DebugConfig, ParallelismConfig
+from torchtitan.config import DebugConfig
 from torchtitan.experiments.rl.actors.generator import (
     _prepare_generation_request_metrics,
     GenerationFuture,
     SamplingConfig,
     VLLMGenerator,
 )
+from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability import metrics as m
 
 
@@ -200,14 +201,14 @@ def test_decode_metrics_absent_for_single_generated_token():
 
 # --- config guards (weight-sync invariants) ---
 
-# Parallelism the generator accepts (TP-only); the weight-sync guards run after these checks.
-_TP_ONLY = ParallelismConfig(enable_sequence_parallel=False, disable_loss_parallel=True)
+# A valid inference parallelism; the weight-sync guards run after it is accepted.
+_PARALLELISM = InferenceParallelismConfig()
 
 
 def test_batch_invariant_requires_prefix_cache_reset():
     with pytest.raises(ValueError, match="reset_prefix_cache_on_weight_sync"):
         VLLMGenerator.Config(
-            parallelism=_TP_ONLY,
+            parallelism=_PARALLELISM,
             debug=DebugConfig(batch_invariant=True),
             reset_prefix_cache_on_weight_sync=False,
         )
@@ -216,7 +217,7 @@ def test_batch_invariant_requires_prefix_cache_reset():
 def test_reset_running_requests_requires_prefix_cache_reset():
     with pytest.raises(ValueError, match="reset_prefix_cache_on_weight_sync"):
         VLLMGenerator.Config(
-            parallelism=_TP_ONLY,
+            parallelism=_PARALLELISM,
             reset_running_requests_on_weight_sync=True,
             reset_prefix_cache_on_weight_sync=False,
         )
