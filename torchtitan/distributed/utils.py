@@ -546,7 +546,10 @@ def set_pg_timeouts(
         for mesh in parallel_dims.get_all_one_dimensional_meshes().values()
     ] + [None]
     for group in groups:
-        torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+        if torch.distributed.get_backend(group) == torch.distributed.Backend.FAKE:
+            logger.debug("Skipping timeout update for fake ProcessGroup")
+            continue
+        torch.distributed.set_timeout(timeout, group)
 
 
 @torch.no_grad()
