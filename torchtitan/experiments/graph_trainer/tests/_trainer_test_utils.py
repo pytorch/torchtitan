@@ -33,7 +33,7 @@ def build_minimal_trainer(
     trainer.model_parts = [model]
     trainer.loss_fn = CrossEntropyLoss.Config().build()
     trainer.parallel_dims = SimpleNamespace(pp_enabled=False, cp_enabled=False)
-    trainer.train_context = get_train_context(enable_loss_parallel=False)
+    trainer.train_context = get_train_context()
     trainer.model_config = model_config
     trainer.device = torch.device("cuda")
     trainer.tokenizer = tokenizer
