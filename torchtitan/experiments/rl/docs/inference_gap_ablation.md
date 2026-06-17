@@ -109,17 +109,21 @@ this measures it AS a runtime.
 | path | tok/s | ratio | TP all-reduce |
 |------|-------|-------|---------------|
 | DTensor ceiling (vLLM-AR + vLLM-RMSNorm) | 656.2 | 0.742 | vLLM custom |
-| spmd_types (--model-2d spmd) | 617.3 | 0.698 | spmd.redistribute -> NCCL |
-| pure-local (--model-2d localfused) | 785.7 | 0.889 | vLLM custom |
+| spmd_types, NCCL AR (--model-2d spmd, default dist) | 617.3 | 0.698 | spmd.redistribute -> NCCL |
+| spmd_types, vLLM AR (--model-2d spmd + set_dist shim) | 747.8 | 0.846 | spmd.redistribute -> vLLM custom |
+| pure-local (--model-2d localfused) | 787.5 | 0.891 | vLLM custom (direct) |
 | native | 883.9 | 1.000 | -- |
 
-Finding: spmd_types execution (0.698x) is SLOWER than pure-local (0.889x) and
-even slightly below the DTensor ceiling, despite being plain-local (no DTensor
-dispatch). The entire deficit is the collective: `spmd.redistribute` routes to
-`dist.all_reduce` (NCCL), while pure-local uses vLLM's custom one-shot AR. Since
-the AR is the dominant decode cost (see W1/W2 ladders), the NCCL backend drags
-spmd_types below the vLLM-AR paths. To use spmd_types as a runtime at
-plain-tensor speed, its redistribute must route through vLLM's custom AR.
+Finding: the TP all-reduce backend dominates. With spmd's default dist (NCCL),
+spmd_types execution (0.698x) is SLOWER than pure-local (0.891x) and even below
+the DTensor ceiling, despite being plain-local (no DTensor dispatch). Routing
+`spmd.redistribute(P->R)` through vLLM's custom one-shot AR (a `spmd.set_dist`
+shim, `_VLLMAllReduceDist`) lifts it to 747.8 (0.846x), +21% -- closing most of
+the gap. The residual ~5% vs pure-local is `spmd.redistribute`'s out-of-place
+path (`result = x.clone()`) plus the shim's `copy_` back (vLLM AR is
+out-of-place), i.e. extra elementwise kernels per AR, not the collective. So
+spmd_types ~= plain tensor as a runtime once its redistribute uses the same
+collective; an in-place redistribute would recover the last few percent.
 
 ## Cross-workload summary (vs native eager)
 
