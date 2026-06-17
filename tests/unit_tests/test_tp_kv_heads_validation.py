@@ -48,12 +48,9 @@ def _make_trainer_config(tp: int, seq_len: int = 2048):
     training = SimpleNamespace(seq_len=seq_len)
     parallelism = ParallelismConfig(
         tensor_parallel_degree=tp,
+        disable_loss_parallel=True,
     )
-    return SimpleNamespace(
-        training=training,
-        parallelism=parallelism,
-        is_inference=False,
-    )
+    return SimpleNamespace(training=training, parallelism=parallelism)
 
 
 def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Config":

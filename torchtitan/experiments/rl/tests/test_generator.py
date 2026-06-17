@@ -201,7 +201,7 @@ def test_decode_metrics_absent_for_single_generated_token():
 # --- config guards (weight-sync invariants) ---
 
 # Parallelism the generator accepts (TP-only); the weight-sync guards run after these checks.
-_TP_ONLY = ParallelismConfig(enable_sequence_parallel=False)
+_TP_ONLY = ParallelismConfig(enable_sequence_parallel=False, disable_loss_parallel=True)
 
 
 def test_batch_invariant_requires_prefix_cache_reset():
