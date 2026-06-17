@@ -71,7 +71,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # NOTE: model_spec is suppressed from tyro CLI parsing and is always
         # set programmatically by the model registry before Trainer construction.
         model_spec: Annotated[ModelSpec | None, tyro.conf.Suppress] = None
-        is_inference: bool = False
 
         hf_assets_path: str = "./tests/assets/tokenizer"
         """
@@ -254,6 +253,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
+        if parallel_dims.tp_enabled and config.parallelism.disable_loss_parallel:
+            raise ValueError(
+                "Tensor-parallel training without loss parallel is deprecated. "
+                "Remove --parallelism.disable_loss_parallel; TP training now "
+                "uses loss parallel by default."
+            )
         # TODO(pianpwk): Transitional until the local-SPMD and full-DTensor
         # backends share one runtime mesh/type mechanism.
         dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
@@ -759,7 +764,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     isinstance(pred, DTensor)
                     and not isinstance(self.loss_fn, ChunkedCELoss)
                     and self.config.parallelism.spmd_backend == "default"
-                    and not self.parallel_dims.tp_enabled
+                    and self.config.parallelism.disable_loss_parallel
                 ):
                     pred = pred.to_local()
                 loss = self.loss_fn(pred, labels, global_valid_tokens)
