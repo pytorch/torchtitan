@@ -23,6 +23,7 @@ from spmd_types.checker import typecheck as spmd_typecheck
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.placement_types import Placement, Shard
 
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.tools.logging import logger
@@ -44,6 +45,34 @@ def set_spmd_backend(spmd_backend: str) -> None:
 def get_spmd_backend() -> str:
     """Return the active SPMD backend."""
     return _spmd_backend
+
+
+def check_dtensor_placements_match(
+    actual: tuple[Placement, ...],
+    expected: tuple[Placement, ...],
+    tensor_ndim: int,
+) -> bool:
+    """Compare DTensor placements, normalizing negative Shard dims to tensor rank."""
+    if len(actual) != len(expected):
+        return False
+
+    def normalize_dim(dim: int, ndim: int) -> int:
+        return dim + ndim if dim < 0 else dim
+
+    for actual_placement, expected_placement in zip(actual, expected, strict=True):
+        if isinstance(actual_placement, Shard) and isinstance(
+            expected_placement, Shard
+        ):
+            if normalize_dim(actual_placement.dim, tensor_ndim) != normalize_dim(
+                expected_placement.dim, tensor_ndim
+            ):
+                return False
+            continue
+
+        if actual_placement != expected_placement:
+            return False
+
+    return True
 
 
 def _dist_reduce(
@@ -341,15 +370,12 @@ class TrainContext(Protocol):
 
 def get_train_context(
     *,
-    enable_loss_parallel: bool,
     parallel_dims: "ParallelDims | None" = None,
     spmd_typechecking: bool = False,
 ) -> TrainContext:
     @contextlib.contextmanager
     def context():
         with contextlib.ExitStack() as stack:
-            if enable_loss_parallel:
-                stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
             if parallel_dims is not None and parallel_dims.spmd_backend == "spmd_types":
                 if not parallel_dims._single_axis_meshes:
                     parallel_dims.build_mesh()
