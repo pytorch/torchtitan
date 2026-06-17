@@ -233,15 +233,18 @@ def _precompile_aot_fx_trace(
             "Set --parallelism.context_parallel_degree 1."
         )
 
-    # Enable loss_parallel when TP is active. This matches the training path
-    # which wraps tracing + execution inside train_context() → loss_parallel().
-    # Without it,
+    # Enable loss_parallel when TP is active and loss_parallel is not
+    # disabled. This matches the training path which wraps tracing +
+    # execution inside train_context() → loss_parallel(). Without it,
     # cross_entropy fails with "mixed torch.Tensor and DTensor" because
     # the TP-parallelized model outputs Shard'd DTensors but labels
     # remain plain tensors.
+    loss_parallel_enabled = (
+        parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
+    )
     loss_parallel_ctx = (
         torch.distributed.tensor.parallel.loss_parallel()
-        if config.parallelism.tensor_parallel_degree > 1
+        if loss_parallel_enabled
         else contextlib.nullcontext()
     )
 

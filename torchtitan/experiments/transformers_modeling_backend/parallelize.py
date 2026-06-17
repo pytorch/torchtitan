@@ -66,7 +66,7 @@ def parallelize_hf_transformers(
         apply_non_moe_tp(
             model,
             parallel_dims.get_mesh("tp"),
-            enable_loss_parallel=True,
+            enable_loss_parallel=not parallelism.disable_loss_parallel,
         )
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
