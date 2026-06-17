@@ -87,6 +87,7 @@ def _set_qwen3_layer_sharding(
             state_shardings={"weight": dense_param_placement(tp=spmd.R)},
             in_src_shardings={"input": dense_activation_placement(tp=spmd.S(2))},
             in_dst_shardings={"input": dense_activation_placement(tp=spmd.S(2))},
+            out_src_shardings=dense_activation_placement(tp=spmd.S(2)),
             out_dst_shardings=dense_activation_placement(tp=spmd.S(2)),
         )
 
@@ -95,7 +96,7 @@ def _set_qwen3_layer_sharding(
         attn_x_layout = (
             dense_sequence_parallel_placement()
             if enable_sp
-            else dense_activation_placement(tp=spmd.R)
+            else dense_activation_placement(tp=spmd.I)
         )
         set_dense_ffn_sharding(
             layer_cfg.feed_forward,
