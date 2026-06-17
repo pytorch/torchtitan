@@ -265,7 +265,7 @@ def set_dense_ffn_sharding(
 
 
 def set_decoder_sharding_config(
-    config, *, loss_parallel: bool, enable_sp: bool
+    config, *, tp_gather_logits: bool, enable_sp: bool
 ) -> None:
     """Set sharding on root-level configs only: ``tok_embeddings``, ``norm``,
     and ``output``.
@@ -277,13 +277,14 @@ def set_decoder_sharding_config(
     the embedding, norm, and output layers.
     ``enable_sp=False`` -> activations stay ``Replicate``; root norm is left
     unsharded (equivalent to the legacy ``NoParallel`` plan).
+    ``tp_gather_logits=True`` -> ``lm_head`` returns full logits.
     """
     activation_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
         else dense_activation_placement(tp=spmd.I)
     )
-    loss_tp = spmd.S(-1) if loss_parallel else spmd.I
+    loss_tp = spmd.I if tp_gather_logits else spmd.S(-1)
 
     embed_out_src = dense_activation_placement(tp=spmd.P)
     embed_input = dense_activation_placement(tp=spmd.R)
