@@ -301,6 +301,63 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
     )
 
 
+def rl_grpo_qwen3_32b() -> RLTrainer.Config:
+    """GRPO config for Qwen3-32B (TP=8 generator). Used for the inference
+    benchmark (generate.py --benchmark); training side mirrors 14B."""
+    group_size = 8
+    return RLTrainer.Config(
+        model_spec=model_registry("32B", attn_backend="varlen"),
+        hf_assets_path="/data/users/jianiw/model/Qwen3-32B",
+        num_steps=10,
+        num_groups_per_rollout_batch=5,
+        num_validation_samples=20,
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        rollouter=AlphabetSortRollouter.Config(),
+        group_size=group_size,
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        batcher=Batcher.Config(
+            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
+        ),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=1e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=8,
+                disable_loss_parallel=True,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
+            ),
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=8,
+                data_parallel_replicate_degree=1,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=700,
+            ),
+        ),
+    )
+
+
 def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
     """Debug MoE config with EP+TP on generator (8 GPUs: 4 gen + 4 train).
 
