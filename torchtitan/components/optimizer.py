@@ -8,7 +8,7 @@ import re
 from collections import defaultdict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any, Generic, Literal, Protocol, cast, overload, TypeVar
+from typing import Any, cast, Generic, Literal, overload, Protocol, TypeVar
 
 import torch
 import torch.distributed.tensor
@@ -71,8 +71,8 @@ T = TypeVar("T", bound=Optimizer)
 
 class _MoELike(Protocol):
     load_balance_coeff: float | None
-    tokens_per_expert_E: torch.Tensor
-    expert_bias_E: torch.Tensor
+    tokens_per_expert_E: torch.Tensor  # noqa: N815
+    expert_bias_E: torch.Tensor  # noqa: N815
 
 
 class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
