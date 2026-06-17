@@ -29,6 +29,7 @@ from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
+from torchtitan.components.weight_hash import WeightHashConfig, WeightHasher
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import (
     CommConfig,
@@ -105,6 +106,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         debug: DebugConfig = field(default_factory=DebugConfig)
         override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
+        weight_hash: WeightHashConfig = field(default_factory=WeightHashConfig)
 
         def __post_init__(self):
             if self.debug.batch_invariant:
@@ -524,6 +526,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             base_folder=config.dump_folder,
         )
 
+        self.weight_hasher = WeightHasher(
+            config=config.weight_hash,
+            dump_folder=config.dump_folder,
+            rank=torch.distributed.get_rank(),
+        )
+
         loss_parallel_enabled = (
             parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
         )
@@ -827,6 +835,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self.optimizers.step()
             self.lr_schedulers.step()
 
+        if self.weight_hasher.should_hash(self.step):
+            self.weight_hasher.hash_step(
+                step=self.step, model_parts=self.model_parts
+            )
+
         # Reduce the data collected over gradient accumulation steps.
         loss = torch.sum(torch.stack(accumulated_losses))
 
@@ -956,3 +969,5 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self.checkpointer.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:
             self.metrics_processor.close()
+        if hasattr(self, "weight_hasher") and self.weight_hasher:
+            self.weight_hasher.close()
