@@ -8,7 +8,7 @@
 
 Each function returns a complete ``RLTrainer.Config``, discoverable by
 ``ConfigManager`` via
-``--module torchtitan.experiments.rl.examples.alphabet_sort --config rl_grpo_qwen3_*``.
+``--module alphabet_sort --config rl_grpo_qwen3_*``.
 """
 
 import dataclasses

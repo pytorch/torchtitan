@@ -120,7 +120,7 @@ def run_training(
         "-m",
         "torchtitan.experiments.rl.train",
         "--module",
-        "torchtitan.experiments.rl.examples.alphabet_sort",
+        "alphabet_sort",
         "--config",
         config,
         f"--hf_assets_path={hf_assets_path}",
