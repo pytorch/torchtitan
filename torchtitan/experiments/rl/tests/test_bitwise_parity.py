@@ -208,13 +208,13 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
             # (the MoE router gate lowers to bmm in the vLLM inference graph), and
             # the v2 logprob Triton kernel bypasses the aten overrides. Apply the
             # same generator-side patches the production VLLMGenerator does.
-            from torchtitan.experiments.rl.actors.generator import (
-                _force_logprobs_fn_for_batch_invariance,
-                _patch_bmm_for_batch_invariance,
+            from torchtitan.experiments.rl.batch_invariance import (
+                force_logprobs_fn_for_batch_invariance,
+                patch_bmm_for_batch_invariance,
             )
 
-            _patch_bmm_for_batch_invariance()
-            _force_logprobs_fn_for_batch_invariance()
+            patch_bmm_for_batch_invariance()
+            force_logprobs_fn_for_batch_invariance()
         backend_enum = AttentionBackendEnum.CUSTOM
 
     _set_generator_determinism(gen_config.debug)
