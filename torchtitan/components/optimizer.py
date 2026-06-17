@@ -410,10 +410,19 @@ def register_moe_load_balancing_hook(
                     yield transformer_block, cast(_MoELike, transformer_block.moe)
 
     def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
-        return any(
-            moe.load_balance_coeff is not None
-            for _transformer_block, moe in _iter_moe_layers(model_parts)
-        )
+        moe_layers = list(_iter_moe_layers(model_parts))
+        if not moe_layers:
+            return False
+
+        load_balance_enabled = moe_layers[0][1].load_balance_coeff is not None
+        for _transformer_block, moe in moe_layers[1:]:
+            if (moe.load_balance_coeff is not None) != load_balance_enabled:
+                raise ValueError(
+                    "MoE load_balance_coeff must be configured consistently "
+                    "across all MoE layers. Either set it for every MoE layer "
+                    "or leave it unset for all MoE layers."
+                )
+        return load_balance_enabled
 
     # for MoE auxiliary-loss-free load balancing
     def _is_recomputation_enabled(module):
@@ -428,8 +437,6 @@ def register_moe_load_balancing_hook(
         # default compute stream. Need to assess if this is OK performance-wise.
         tokens_per_expert_E_list = []
         for transformer_block, moe in _iter_moe_layers(model_parts):
-            if moe.load_balance_coeff is None:
-                continue
             tokens_per_expert_E = moe.tokens_per_expert_E
             if _is_recomputation_enabled(transformer_block):
                 # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
@@ -494,8 +501,8 @@ def register_moe_load_balancing_hook(
                     if not transformer_block.moe_enabled:
                         continue
                     moe = cast(_MoELike, transformer_block.moe)
-                    if moe.load_balance_coeff is None:
-                        continue
+                    load_balance_coeff = moe.load_balance_coeff
+                    assert load_balance_coeff is not None
 
                     tokens_per_expert_E = tokens_per_expert_E_by_layer[
                         moe_layer_idx
@@ -504,7 +511,7 @@ def register_moe_load_balancing_hook(
 
                     # update the expert bias
                     # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
-                    expert_bias_delta_E = moe.load_balance_coeff * torch.sign(
+                    expert_bias_delta_E = load_balance_coeff * torch.sign(
                         tokens_per_expert_E.mean() - tokens_per_expert_E
                     )
                     expert_bias_delta_E = (

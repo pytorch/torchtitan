@@ -63,14 +63,13 @@ class FakeMoEBlock(nn.Module):
 
 
 class FakeMoEModel(nn.Module):
-    def __init__(self):
+    def __init__(self, load_balance_coeffs=(0.1, 0.2)):
         super().__init__()
         self.weight = nn.Parameter(torch.tensor([1.0]))
         self.layers = nn.ModuleDict(
             {
-                "0": FakeMoEBlock(0.1, [10, 0]),
-                "1": FakeMoEBlock(None, [3, 7]),
-                "2": FakeMoEBlock(0.2, [0, 10]),
+                "0": FakeMoEBlock(load_balance_coeffs[0], [10, 0]),
+                "1": FakeMoEBlock(load_balance_coeffs[1], [0, 10]),
             }
         )
 
@@ -145,8 +144,7 @@ class TestParamGroupConfig(unittest.TestCase):
         self.assertEqual(adam.param_groups[0]["lr"], 1e-2)
         self.assertEqual(adam.param_groups[0]["betas"], (0.9, 0.95))
 
-    def test_moe_load_balancing_skips_disabled_layers(self):
-        """A disabled MoE layer should not stop later enabled layers from updating."""
+    def test_moe_load_balancing_updates_all_enabled_layers(self):
         model = FakeMoEModel()
         config = OptimizersContainer.Config(
             implementation="for-loop",
@@ -171,13 +169,8 @@ class TestParamGroupConfig(unittest.TestCase):
             model.layers["0"].moe.expert_bias_E,
             torch.tensor([-0.1, 0.1]),
         )
-        self.assertIsNone(model.layers["1"].moe.expert_bias_E)
         torch.testing.assert_close(
-            model.layers["1"].moe.tokens_per_expert_E,
-            torch.tensor([3, 7]),
-        )
-        torch.testing.assert_close(
-            model.layers["2"].moe.expert_bias_E,
+            model.layers["1"].moe.expert_bias_E,
             torch.tensor([0.2, -0.2]),
         )
         torch.testing.assert_close(
@@ -185,9 +178,31 @@ class TestParamGroupConfig(unittest.TestCase):
             torch.tensor([0, 0]),
         )
         torch.testing.assert_close(
-            model.layers["2"].moe.tokens_per_expert_E,
+            model.layers["1"].moe.tokens_per_expert_E,
             torch.tensor([0, 0]),
         )
+
+    def test_moe_load_balancing_rejects_inconsistent_coeffs(self):
+        model = FakeMoEModel(load_balance_coeffs=(None, 0.2))
+        config = OptimizersContainer.Config(
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"lr": 0.0, "weight_decay": 0.0},
+                ),
+            ],
+        )
+        container = config.build(model_parts=[model])
+        with self.assertRaisesRegex(
+            ValueError, "load_balance_coeff must be configured consistently"
+        ):
+            register_moe_load_balancing_hook(
+                container,
+                [model],
+                FakeParallelDims(),
+            )
 
     def test_single_pattern_weight_decay_zero(self):
         """Pattern matching bias params with weight_decay=0."""
