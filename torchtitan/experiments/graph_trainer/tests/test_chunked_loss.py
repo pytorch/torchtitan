@@ -11,9 +11,7 @@ import torch.nn as nn
 from torch.testing._internal.common_utils import TestCase
 
 from torchtitan.components.loss import ChunkedLoss, IGNORE_INDEX
-from torchtitan.experiments.graph_trainer.chunked_loss import (
-    ChunkedLossWithParamGrads,
-)
+from torchtitan.experiments.graph_trainer.chunked_loss import ChunkedLossWithParamGrads
 
 
 class _FakeDecoder(nn.Module):
@@ -53,6 +51,11 @@ def _chunked_loss_and_grads(model, chunked_loss, hidden_states, labels, gvt):
 
 
 class TestChunkedLossWithParamGrads(TestCase):
+    def test_config_builds_param_grads_loss(self):
+        loss = ChunkedLossWithParamGrads.Config(num_chunks=4).build()
+        self.assertIsInstance(loss, ChunkedLossWithParamGrads)
+        self.assertEqual(loss.num_chunks, 4)
+
     def test_bitwise_equal_with_chunked_loss(self):
         torch.manual_seed(42)
         B, L, D, V = 2, 8, 32, 64

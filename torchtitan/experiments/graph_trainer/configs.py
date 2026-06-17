@@ -11,6 +11,7 @@ from typing import Literal
 from torchtitan.components.loss import ChunkedLoss
 from torchtitan.config.configs import CompileConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.experiments.graph_trainer.chunked_loss import ChunkedLossWithParamGrads
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
@@ -154,14 +155,13 @@ def to_graph_trainer_config(
     if ac is not None:
         d["activation_checkpoint"] = SelectiveAC.Config()
 
-    # graph_trainer doesn't support ChunkedLoss's per-chunk lm_head execution.
-    # ChunkedLoss is only a memory-saving executor around a logits-domain inner
-    # loss, so unwrap it to that inner loss_fn and run it un-chunked on full
-    # logits -- numerically equivalent and valid for any leaf loss. Plain
-    # CrossEntropyLoss / MSELoss configs aren't wrapped and pass through as-is.
+    # graph_trainer's tracer requires explicit autograd outputs for lm_head
+    # params instead of relying on .grad side effects from chunk_loss.backward().
     loss_cfg = d.get("loss")
     if isinstance(loss_cfg, ChunkedLoss.Config):
-        d["loss"] = loss_cfg.loss_fn
+        d["loss"] = ChunkedLossWithParamGrads.Config(
+            **{f.name: getattr(loss_cfg, f.name) for f in fields(loss_cfg)}
+        )
 
     # Merge CUDA graph kernel annotations into profiler traces when profiling
     # is active.  No-op otherwise (and no-op when requirements aren't met).

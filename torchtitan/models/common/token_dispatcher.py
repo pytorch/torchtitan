@@ -1011,8 +1011,12 @@ class MinimalAsyncEPTokenDispatcher(LocalTokenDispatcher):
         routed_output_RD: torch.Tensor,
         metadata: DeepEPDispatchMetadata,
         x_TD: torch.Tensor,
+        *,
+        num_local_tokens_after_padding: int,
+        local_seq_len_after_padding: int,
     ) -> torch.Tensor:
         """Combine tokens via MinimalAsyncEP."""
+        del num_local_tokens_after_padding, local_seq_len_after_padding
         state = cast(MinimalAsyncEPDispatchMetadata, metadata.state)
         combined_TD, _routed_output_ND = minimal_async_ep_combine_op(  # noqa: N806
             routed_output_RD,

@@ -298,7 +298,7 @@ class Validator(BaseValidator):
             else:
                 with self.validation_context():
                     assert len(model_parts) == 1
-                    predictions = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                    predictions = model_parts[0](inputs, **extra_kwargs)
                     loss_sum, _ = self.loss_fn(predictions, labels)
 
             accumulated_losses.append(loss_sum.detach() / global_valid_tokens)

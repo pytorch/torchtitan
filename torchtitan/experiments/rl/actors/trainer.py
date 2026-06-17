@@ -123,7 +123,7 @@ class PolicyTrainer(Actor, Configurable):
         comm: CommConfig = field(default_factory=CommConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
         loss: BaseLoss.Config = field(default_factory=GRPOLoss.Config)
-        ac_config: ActivationCheckpointConfig = field(
+        ac_config: ActivationCheckpointingConfig = field(
             default_factory=SelectiveAC.Config
         )
         checkpoint: CheckpointManager.Config = field(
@@ -430,9 +430,7 @@ class PolicyTrainer(Actor, Configurable):
         # identical for both: the per-token tensors reach GRPOLoss's keyword-only
         # args directly, or flow through ChunkedLoss into the inner loss.
         with sl.log_trace_span("model_forward"):
-            out = model(
-                token_ids, attention_masks=attention_masks, positions=positions
-            )
+            out = model(token_ids, attention_masks=attention_masks, positions=positions)
 
         with sl.log_trace_span("loss_fn"):
             loss, loss_metrics = self.loss_fn(
@@ -460,23 +458,23 @@ class PolicyTrainer(Actor, Configurable):
         # full logits, so verification is skipped (decided in __init__).
         if self._verify_logprobs:
             with torch.no_grad():
-                policy_logprobs = logits_to_logprobs(out, labels)
+                trainer_logprobs = logits_to_logprobs(out, labels)
             verification = verify_logprob_identity(
                 generator_logprobs=generator_logprobs,
-                policy_logprobs=policy_logprobs,
+                trainer_logprobs=trainer_logprobs,
                 loss_mask=loss_mask,
                 num_global_valid_tokens=num_global_valid_tokens,
             )
             # Per-rank pre-normalized metrics; SUM-reducing reconstructs the global.
-            sum_reduced_metrics["bit_wise/logprob_diff/mean"] = (
-                verification.logprob_diff_mean
-            )
-            sum_reduced_metrics["bit_wise/ratio_tokens_different/mean"] = (
-                verification.ratio_tokens_different
-            )
-            max_reduced_metrics["bit_wise/logprob_diff/max"] = (
-                verification.logprob_diff_max
-            )
+            sum_reduced_metrics[
+                "bit_wise/logprob_diff/mean"
+            ] = verification.logprob_diff_mean
+            sum_reduced_metrics[
+                "bit_wise/ratio_tokens_different/mean"
+            ] = verification.ratio_tokens_different
+            max_reduced_metrics[
+                "bit_wise/logprob_diff/max"
+            ] = verification.logprob_diff_max
 
         return self.reduce_forward_backward_metrics(
             sum_reduced_metrics=sum_reduced_metrics,

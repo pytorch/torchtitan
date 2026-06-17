@@ -418,14 +418,23 @@ class RLTrainer(Configurable):
         group_id_prefix = "val/" if is_validation else ""
 
         # Pass a callable to the rollouter, so it stays decoupled from the generator router
-        async def generate_fn(prompt_token_ids, *, request_id, sampling_config=None):
+        async def generate_fn(
+            prompt_token_ids,
+            *,
+            request_id,
+            routing_session_id=None,
+            sampling_config=None,
+        ):
             result = await self.generator_router.route(
                 "generate",
                 prompt_token_ids,
                 request_id=request_id,
                 sampling_config=sampling_config,
                 metrics_prefix=generation_metrics_prefix,
-                routing_ctx=RoutingContext(estimated_cost=len(prompt_token_ids)),
+                routing_ctx=RoutingContext(
+                    estimated_cost=len(prompt_token_ids),
+                    session_id=routing_session_id,
+                ),
             )
             return self._get_rank_0_value(result)
 

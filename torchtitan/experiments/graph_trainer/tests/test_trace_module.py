@@ -13,9 +13,7 @@ import torch.nn as nn
 from torch.optim import swap_in_optimizer_params_and_state
 from torch.testing._internal.common_fsdp import FSDPTest
 
-from torchtitan.experiments.graph_trainer.chunked_loss import (
-    ChunkedLossWithParamGrads,
-)
+from torchtitan.experiments.graph_trainer.chunked_loss import ChunkedLossWithParamGrads
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )

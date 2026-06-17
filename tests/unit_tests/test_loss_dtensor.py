@@ -96,5 +96,29 @@ class TestCrossEntropyDTensor(DTensorTestBase):
         self._run_one(full_dtensor=True, tp_shard_v=False)
 
 
+class TestCrossEntropyLossParallelGuard(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 2
+
+    @with_comms
+    def test_vocab_sharded_disable_loss_parallel_raises(self):
+        # Vocab-sharded logits (Shard(2)) require the loss-parallel path; passing
+        # loss_parallel=False is a contradictory config and must be rejected
+        # rather than silently producing wrong numerics. world_size=2 suffices:
+        # the guard fires inside local_map before any collective runs.
+        mesh = init_device_mesh(self.device_type, (2,), mesh_dim_names=("tp",))
+        B, S, V = 2, 8, 16
+        gen = torch.Generator(device=self.device_type).manual_seed(0)
+        pred = torch.randn(B, S, V, device=self.device_type, generator=gen)
+        labels = torch.randint(
+            0, V, (B, S), device=self.device_type, dtype=torch.long, generator=gen
+        )
+        pred_dt = distribute_tensor(pred, mesh, (Shard(2),))
+        labels_dt = distribute_tensor(labels, mesh, (Replicate(),))
+        with self.assertRaisesRegex(ValueError, "loss_parallel=False"):
+            cross_entropy_loss(pred_dt, labels_dt, loss_parallel=False)
+
+
 if __name__ == "__main__":
     unittest.main()

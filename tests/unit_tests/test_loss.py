@@ -29,8 +29,11 @@ from torchtitan.components.loss import (
     _LossParallelCrossEntropy,
     ChunkedLoss,
     cross_entropy_loss,
+    CrossEntropyLoss,
     GradAccumulator,
+    GRPOLoss,
     IGNORE_INDEX,
+    MSELoss,
 )
 
 
@@ -286,12 +289,12 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
         Tests loss-parallel cross-entropy loss bitwise parity, with torch.distributed.tensor.parallel.loss_parallel().
         Tests even/uneven vocab sharding, TP, DP+TP, and IGNORE_INDEX labels.
 
-        Runs _LossParallelCrossEntropy under typing checking: logits S(1)@TP, labels I@TP -> I@TP.
+        Runs _LossParallelCrossEntropy under typing checking: logits S(2)@TP, labels I@TP -> I@TP.
         """
-        num_tokens = 128
+        B, L = 4, 32
         mesh_configs = (
-            ((4,), ("tp",), (Shard(1),), (Replicate(),)),
-            ((2, 2), ("dp", "tp"), (Shard(0), Shard(1)), (Shard(0), Replicate())),
+            ((4,), ("tp",), (Shard(2),), (Replicate(),)),
+            ((2, 2), ("dp", "tp"), (Shard(0), Shard(2)), (Shard(0), Replicate())),
         )
         cases = ((32000, 109, False), (32003, 211, False), (32000, 307, True))
 
@@ -310,7 +313,8 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         seed
                     )
                     global_logits = torch.randn(
-                        num_tokens,
+                        B,
+                        L,
                         vocab_size,
                         device=self.device_type,
                         generator=generator,
@@ -318,14 +322,15 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                     global_labels = torch.randint(
                         0,
                         vocab_size,
-                        (num_tokens,),
+                        (B, L),
                         device=self.device_type,
                         dtype=torch.long,
                         generator=generator,
                     )
                     if ignore:
                         mask = torch.rand(
-                            num_tokens,
+                            B,
+                            L,
                             device=self.device_type,
                             generator=generator,
                         )
@@ -342,17 +347,19 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         mesh,
                         label_placements,
                     )
-                    # pytorch loss_parallel() as ground truth
+
+                    # pytorch loss_parallel() as ground truth. F.cross_entropy
+                    # expects the class dimension at dim 1.
                     with loss_parallel():
                         wrapper_loss = F.cross_entropy(
-                            logits_dtensor.float(),
+                            logits_dtensor.float().transpose(1, 2),
                             labels_dtensor,
                             reduction="sum",
                             ignore_index=IGNORE_INDEX,
                         )
 
-                    # typecheck S(1)@TP, I@TP -> I@TP
-                    logits_type = {tp_group: spmd.S(1)}
+                    # typecheck S(2)@TP, I@TP -> I@TP
+                    logits_type = {tp_group: spmd.S(2)}
                     labels_type = {tp_group: spmd.I}
                     if "dp" in axis_names:
                         dp_group = mesh.get_group("dp")
@@ -389,8 +396,8 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         local_logits.grad,
                         mesh,
                         logits_placements,
-                        shape=torch.Size((num_tokens, vocab_size)),
-                        stride=(vocab_size, 1),
+                        shape=torch.Size((B, L, vocab_size)),
+                        stride=(L * vocab_size, vocab_size, 1),
                     )
                     self.assertTrue(
                         torch.equal(
@@ -518,6 +525,86 @@ class TestChunkedLoss(unittest.TestCase):
                 places=5,
                 msg=f"Loss with {2**i} chunks should match loss with 1 chunk",
             )
+
+
+class TestLossParallelThreading(unittest.TestCase):
+    """Tests for threading ``loss_parallel`` through the refactored loss design.
+
+    Covers the ``_fn_kwargs`` seam on ``BaseLoss``, the settable ``loss_parallel``
+    on ``CrossEntropyLoss``, and the propagating ``loss_parallel`` property on
+    ``ChunkedLoss``. All run on plain CPU tensors -- ``cross_entropy_loss``
+    ignores ``loss_parallel`` for non-DTensor inputs, so these exercise the
+    Python wiring rather than the distributed code path.
+    """
+
+    @staticmethod
+    def _ce() -> CrossEntropyLoss:
+        return CrossEntropyLoss(CrossEntropyLoss.Config())
+
+    def test_standalone_ce_defaults_loss_parallel_true(self):
+        # Matches main: a standalone CrossEntropyLoss defaults to True so the
+        # SFT path is unchanged by the refactor.
+        self.assertTrue(self._ce().loss_parallel)
+
+    def test_ce_fn_kwargs_reflects_flag(self):
+        ce = self._ce()
+        self.assertEqual(ce._fn_kwargs(), {"loss_parallel": True})
+        ce.loss_parallel = False
+        self.assertEqual(ce._fn_kwargs(), {"loss_parallel": False})
+
+    def test_mse_fn_kwargs_empty_and_call_unaffected(self):
+        # Non-CE leaf losses keep the empty default so ``self.fn`` is called with
+        # no extra kwargs (``mse_loss`` has no ``loss_parallel`` parameter). This
+        # also guards against the ``_fn_kwargs`` seam breaking a non-CE leaf.
+        mse = MSELoss(MSELoss.Config())
+        self.assertEqual(mse._fn_kwargs(), {})
+        pred = torch.randn(2, 4, 8)
+        labels = torch.randn(2, 4, 8)
+        loss, metrics = mse(pred, labels)
+        self.assertEqual(metrics, {})
+        self.assertTrue(torch.isfinite(loss))
+
+    def test_chunked_defaults_loss_parallel_false(self):
+        chunked = ChunkedLoss(ChunkedLoss.Config())
+        self.assertFalse(chunked.loss_parallel)
+
+    def test_chunked_setter_propagates_to_inner_ce(self):
+        chunked = ChunkedLoss(ChunkedLoss.Config())
+        self.assertIsInstance(chunked.loss_fn, CrossEntropyLoss)
+        chunked.loss_parallel = True
+        self.assertTrue(chunked.loss_parallel)
+        self.assertTrue(chunked.loss_fn.loss_parallel)
+        chunked.loss_parallel = False
+        self.assertFalse(chunked.loss_parallel)
+        self.assertFalse(chunked.loss_fn.loss_parallel)
+
+    def test_chunked_setter_skips_non_ce_inner(self):
+        # GRPOLoss disables loss parallel and does not consume the flag, so the
+        # setter must not attach ``loss_parallel`` to a non-CrossEntropyLoss inner.
+        chunked = ChunkedLoss(ChunkedLoss.Config(loss_fn=GRPOLoss.Config()))
+        self.assertIsInstance(chunked.loss_fn, GRPOLoss)
+        chunked.loss_parallel = True  # must not raise
+        self.assertTrue(chunked.loss_parallel)
+        self.assertFalse(hasattr(chunked.loss_fn, "loss_parallel"))
+
+    def test_fn_kwargs_reaches_self_fn(self):
+        # White-box: prove ``_fn_kwargs()`` forwards ``loss_parallel`` into
+        # ``self.fn`` on each ``__call__``.
+        ce = self._ce()
+        captured = {}
+
+        def spy(pred, labels, *, loss_parallel=True):
+            captured["loss_parallel"] = loss_parallel
+            return cross_entropy_loss(pred, labels, loss_parallel=loss_parallel)
+
+        ce.fn = spy
+        pred = torch.randn(2, 4, 8)
+        labels = torch.randint(0, 8, (2, 4))
+        ce(pred, labels)
+        self.assertTrue(captured["loss_parallel"])
+        ce.loss_parallel = False
+        ce(pred, labels)
+        self.assertFalse(captured["loss_parallel"])
 
 
 if __name__ == "__main__":

@@ -58,7 +58,7 @@ from torchtitan.distributed.utils import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
-from torchtitan.experiments.rl.config_registry import (
+from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
 )
