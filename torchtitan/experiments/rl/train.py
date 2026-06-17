@@ -103,22 +103,22 @@ def _compute_generator_world_size(p: InferenceParallelismConfig) -> int:
     return p.data_parallel_degree * p.tensor_parallel_degree
 
 
-def _spawn_role_proc_mesh(
+def _spawn_proc_mesh(
     host_mesh: HostMesh,
-    world_size: int,
+    role_world_size: int,
     gpus_per_node: int,
     *,
     role: str,
 ) -> ProcMesh:
-    """Spawn one role's proc mesh on ``host_mesh``, splitting ``world_size``
+    """Spawn one role's proc mesh on ``host_mesh``, splitting ``role_world_size``
     evenly across the mesh's hosts.
     """
     nodes = len(host_mesh)
-    assert world_size % nodes == 0, (
-        f"{role} world size ({world_size}) must be evenly divisible by its "
+    assert role_world_size % nodes == 0, (
+        f"{role} world size ({role_world_size}) must be evenly divisible by its "
         f"host count ({nodes})"
     )
-    role_gpus_per_node = world_size // nodes
+    role_gpus_per_node = role_world_size // nodes
     provisioner = PerHostProvisioner(total_gpus=gpus_per_node)
     return host_mesh.spawn_procs(
         per_host={"gpus": role_gpus_per_node},
@@ -128,7 +128,7 @@ def _spawn_role_proc_mesh(
 
 def spawn_proc_mesh(
     trainer_world_size: int,
-    generator_world_size: int,
+    per_generator_world_size: int,
     host_meshes: HostMeshes | None = None,
     *,
     num_generators: int = 1,
@@ -137,7 +137,7 @@ def spawn_proc_mesh(
 
     Args:
         trainer_world_size: Number of GPU procs to spawn for the trainer.
-        generator_world_size: Number of GPU procs to spawn for each generator.
+        per_generator_world_size: Number of GPU procs to spawn for each generator.
         host_meshes: Caller-provided trainer/generator host meshes. When
             provided, each role is spawned on its provided host mesh. None means
             both roles are spawned on ``this_host()`` by using non-overlapping
@@ -147,10 +147,10 @@ def spawn_proc_mesh(
     Returns:
         The ``(trainer_mesh, generator_meshes)`` proc meshes.
     """
-    total_generator_gpus = num_generators * generator_world_size
+    total_generator_gpus = num_generators * per_generator_world_size
     total_gpus = trainer_world_size + total_generator_gpus
     logger.info(
-        f"{num_generators} generator(s) * {generator_world_size} GPUs + "
+        f"{num_generators} generator(s) * {per_generator_world_size} GPUs + "
         f"{trainer_world_size} trainer GPUs = {total_gpus} total"
     )
 
@@ -164,13 +164,13 @@ def spawn_proc_mesh(
             f"got {len(generator_host_meshes)}"
         )
 
-        trainer_mesh = _spawn_role_proc_mesh(
+        trainer_mesh = _spawn_proc_mesh(
             trainer_host_mesh, trainer_world_size, gpus_per_node, role="trainer"
         )
         generator_meshes = [
-            _spawn_role_proc_mesh(
+            _spawn_proc_mesh(
                 gen_host_mesh,
-                generator_world_size,
+                per_generator_world_size,
                 gpus_per_node,
                 role="generator",
             )
@@ -187,8 +187,8 @@ def spawn_proc_mesh(
         )
         generator_meshes = [
             host_mesh.spawn_procs(
-                per_host={"gpus": generator_world_size},
-                bootstrap=provisioner.allocate(generator_world_size),
+                per_host={"gpus": per_generator_world_size},
+                bootstrap=provisioner.allocate(per_generator_world_size),
             )
             for _ in range(num_generators)
         ]
@@ -210,12 +210,12 @@ async def main():
     rl_trainer: RLTrainer = config.build()
     try:
         trainer_world_size = _compute_trainer_world_size(config.trainer.parallelism)
-        generator_world_size = _compute_generator_world_size(
+        per_generator_world_size = _compute_generator_world_size(
             config.generator.parallelism
         )
         trainer_mesh, generator_meshes = spawn_proc_mesh(
             trainer_world_size,
-            generator_world_size,
+            per_generator_world_size,
             host_meshes=None,
             num_generators=config.num_generators,
         )
