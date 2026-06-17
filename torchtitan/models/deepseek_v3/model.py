@@ -65,9 +65,9 @@ class Attention(BaseAttention):
             assert config.wq is not None, "wq is required when q_lora_rank == 0"
             self.wq = config.wq.build()
         else:
-            assert config.wq_a is not None and config.wq_b is not None, (
-                "wq_a and wq_b are required when q_lora_rank > 0"
-            )
+            assert (
+                config.wq_a is not None and config.wq_b is not None
+            ), "wq_a and wq_b are required when q_lora_rank > 0"
             self.wq_a = config.wq_a.build()
             self.q_norm = config.q_norm.build()
             self.wq_b = config.wq_b.build()
