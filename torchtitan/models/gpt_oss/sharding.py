@@ -38,7 +38,7 @@ _GPT_OSS_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
 def set_gpt_oss_sharding_config(
     config: "GptOssModel.Config",
     *,
-    loss_parallel: bool,
+    is_inference: bool,
     enable_sp: bool,
     enable_ep: bool,
 ) -> None:
@@ -52,7 +52,7 @@ def set_gpt_oss_sharding_config(
     """
 
     set_decoder_sharding_config(
-        config, loss_parallel=loss_parallel, enable_sp=enable_sp
+        config, is_inference=is_inference, enable_sp=enable_sp
     )
     for layer_cfg in config.layers:
         _set_gpt_oss_layer_sharding(layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep)
