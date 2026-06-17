@@ -34,6 +34,7 @@ import logging
 import spmd_types as spmd
 
 import torch
+import torch.distributed as _torch_dist
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.experimental import register_sharding
@@ -284,10 +285,30 @@ class Qwen3VLLMBlockLocalFused(Qwen3VLLMBlockLocal):
         return ffn_out, residual
 
 
-# Process group for spmd_types redistribute, set in _prepare_2d. spmd's
-# redistribute(P -> R) routes through dist.all_reduce (NCCL), unlike pure-local's
-# vLLM custom all-reduce -- this is the cost of the principled spmd_types path.
+# Process group for spmd_types redistribute, set in _prepare_2d.
 _SPMD_REDIST_GROUP = None
+
+
+class _VLLMAllReduceDist:
+    """A ``torch.distributed``-like shim that routes ``all_reduce`` through
+    vLLM's custom (one-shot/multimem) all-reduce instead of NCCL, so
+    ``spmd_types.redistribute(P -> R)`` uses the same fast collective as the
+    pure-local path. Every other attribute delegates to ``torch.distributed``.
+
+    Installed process-wide via ``spmd.set_dist`` for the ``spmd`` variant.
+    spmd's all_reduce is in-place (``all_reduce(result, ...)``), so we write
+    vLLM's out-of-place result back into the buffer.
+    """
+
+    ReduceOp = _torch_dist.ReduceOp
+
+    @staticmethod
+    def all_reduce(tensor, op=_torch_dist.ReduceOp.SUM, group=None, async_op=False):
+        tensor.copy_(tensor_model_parallel_all_reduce(tensor))
+        return None
+
+    def __getattr__(self, name):
+        return getattr(_torch_dist, name)
 
 
 class Qwen3VLLMBlockSpmdFused(Qwen3VLLMBlockLocalFused):
@@ -451,6 +472,9 @@ def _prepare_2d(wrapper, variant: str) -> None:
         # weights are sharded on). typecheck stays OFF for the perf run.
         global _SPMD_REDIST_GROUP
         _SPMD_REDIST_GROUP = mesh.get_group()
+        # Route spmd's all_reduce through vLLM's custom AR (not NCCL) so the
+        # redistribute matches the pure-local collective.
+        spmd.set_dist(_VLLMAllReduceDist())
 
     for name, layer in model.layers.items():
         if getattr(layer, "moe_enabled", False):
