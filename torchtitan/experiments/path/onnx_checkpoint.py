@@ -1,14 +1,20 @@
 from __future__ import annotations
 
-import io
 from dataclasses import dataclass, field
 
+import onnx
 import torch
 import torch.nn as nn
 
-from torchtitan.components import fs
-from torchtitan.components.onnx_checkpoint import _ONNX_DTYPE_MAP, OnnxCheckpointManager, OnnxInputDType
 from xx.ml_tools.constants.model import ModelInputs
+from xx.training.lib.onnx_helpers import add_onnx_metadata, patch_depthwise_convs
+
+from torchtitan.components import fs
+from torchtitan.components.onnx_checkpoint import (
+    _ONNX_DTYPE_MAP,
+    OnnxCheckpointManager,
+    OnnxInputDType,
+)
 
 from .model import PathModel
 
@@ -63,42 +69,27 @@ class PathOnnxCheckpointManager(OnnxCheckpointManager):
             _VisionOnnxModel(model).eval(),
             self._input_dict(self.vision_input_names),
             fs.join_path(path, "vision.onnx"),
+            dynamo=True,
+            optimize=True,
+            external_data=True,
         )
         self._export_one(
             _TemporalPolicyOnnxModel(model).eval(),
             self._input_dict(self.temporal_policy_input_names),
             fs.join_path(path, "temporal_policy.onnx"),
+            dynamo=True,
+            optimize=True,
         )
 
-    def _export_one(
-        self,
-        model: nn.Module,
-        inputs: dict[str, torch.Tensor],
-        path: str,
-    ) -> None:
-        with torch.no_grad():
-            outputs = model(inputs)
-        output_names = list(outputs.keys())
-        input_names = list(inputs.keys())
-        dynamic_shapes = ({name: {0: "b"} for name in input_names},)
-
-        buffer = io.BytesIO()
-        with torch.no_grad():
-            torch.onnx.export(
-                model,
-                (inputs, {}),
-                buffer,
-                dynamo=True,
-                external_data=False,
-                optimize=True,
-                input_names=input_names,
-                output_names=output_names,
-                dynamic_shapes=dynamic_shapes,
-                export_params=True,
-                keep_initializers_as_inputs=False,
-            )
-        with fs.open_file(path, "wb") as f:
-            f.write(buffer.getvalue())
+    def _post_export_hook(self, onnx_data: bytes) -> bytes:
+        onnx_data = patch_depthwise_convs(onnx_data)
+        onnx_model = onnx.load_from_string(onnx_data)
+        add_onnx_metadata(
+            onnx_model,
+            exporter_name="comma_torchtitan",
+            exporter_version="0.1",
+        )
+        return onnx_model.SerializeToString()
 
     def _input_dict(self, names: list[str]) -> dict[str, torch.Tensor]:
         shapes = dict(zip(self.input_names, self.input_shapes, strict=True))

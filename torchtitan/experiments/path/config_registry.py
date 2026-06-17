@@ -22,6 +22,7 @@ from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.protocols.model_spec import ModelSpec
 from xx.datasets.helpers import DEFAULT_BIG_TRAIN_LIST
 from xx.ml_tools.constants.model import (
+    SUPERCOMBO_FPS,
     FRAME_TYPE,
     INPUT_FRAMES_NAMES,
     N_FRAMES,
@@ -90,6 +91,19 @@ def convnext_xxlarge() -> PathTrainer.Config:
 
 def _path(flavor: str) -> PathTrainer.Config:
     steps = 1024*100
+    validation_freq = 1024
+    reports = {
+        name: [validation_freq, steps //2 , steps]
+        for name in (
+            "analyse_driving",
+            "analyse_lat_no_noise",
+            "analyse_cones",
+            "analyse_lights",
+            "analyse_stop",
+            "analyse_hard_brake",
+        )
+    }
+    reports["analyse_dataset"] = [validation_freq]
     mixed_precision_param = "bfloat16"
     local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
     world_size = int(os.environ.get("WORLD_SIZE", str(local_world_size)))
@@ -97,11 +111,13 @@ def _path(flavor: str) -> PathTrainer.Config:
     reporterv2_host = os.getenv("REPORTERV2_HOST")
     reporterv2_training_id = os.getenv("REPORTERV2_TRAINING_ID")
     checkpoint_base_folder = f"{reporterv2_host.rstrip('/')}/checkpoint" if reporterv2_host else ""
+    fps = SUPERCOMBO_FPS
+    plan_only = False
     return PathTrainer.Config(
         loss=PathLoss.Config(),
         model_spec=model_registry(flavor),
         tokenizer=NoOpTokenizer.Config(),
-        dataloader=_dataloader_config(split="train"),
+        dataloader=_dataloader_config(split="train", fps=fps, plan_only=plan_only),
         optimizer=_optimizer_config(),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=round(steps * 0.01),
@@ -132,16 +148,19 @@ def _path(flavor: str) -> PathTrainer.Config:
         checkpoint=_checkpoint_config(
             folder=reporterv2_training_id or "checkpoint",
             base_folder=checkpoint_base_folder,
+            interval=validation_freq,
         ),
+        fps=fps,
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
         compile=CompileConfig(enable=True, components=["model"]),
-        metrics=MetricsProcessor.Config(log_freq=16, enable_reporterv2=True, save_freq=1024),
+        metrics=MetricsProcessor.Config(log_freq=16, enable_reporterv2=True, save_freq=validation_freq),
         validator=PathValidator.Config(
             enable=True,
-            freq=1024,
+            freq=validation_freq,
             steps=32,
-            dataloader=_dataloader_config(split="val"),
+            dataloader=_dataloader_config(split="val", fps=fps, plan_only=plan_only),
             mixed_precision_param=mixed_precision_param,
+            reports=reports,
         ),
         debug=DebugConfig(seed=0),
     )
@@ -149,16 +168,22 @@ def _path(flavor: str) -> PathTrainer.Config:
 
 def _model_config(flavor: str) -> PathModel.Config:
     vision_features = 512
-    frame_constants = frame_constants_from_fps(n_frames=N_FRAMES, frame_type=FRAME_TYPE)
-    in_channels = sum(frame_constants["frame_shapes"][name][0] for name in INPUT_FRAMES_NAMES)
+    n_frames_input = N_FRAMES
+    input_frame_names = INPUT_FRAMES_NAMES
+    input_frame_type = FRAME_TYPE
+    frame_constants = frame_constants_from_fps(n_frames=n_frames_input, frame_type=input_frame_type)
+    in_channels = sum(frame_constants["frame_shapes"][name][0] for name in input_frame_names)
     block_size = len(frame_constants["history_idxs"])
     temporal_len = frame_constants["temporal_len"]
     dim = vision_features
 
     return PathModel.Config(
+        n_frames_input=n_frames_input,
+        input_frame_names=tuple(input_frame_names),
+        frame_type=input_frame_type,
         vision=Vision.Config(
             flavor=flavor,
-            input_frame_names=tuple(INPUT_FRAMES_NAMES),
+            input_frame_names=tuple(input_frame_names),
             in_channels=in_channels,
             vision_features=vision_features,
             pretrained=False,
@@ -199,8 +224,8 @@ def _model_config(flavor: str) -> PathModel.Config:
     )
 
 
-def _dataloader_config(*, split: str) -> PathDataLoader.Config:
-    base = XXPathDatasetConfig()
+def _dataloader_config(*, split: str, fps: int, plan_only: bool) -> PathDataLoader.Config:
+    base = XXPathDatasetConfig(fps=fps, plan_only=plan_only)
     return PathDataLoader.Config(
         dataset=DEFAULT_BIG_TRAIN_LIST,
         split=split,
@@ -218,7 +243,7 @@ def _dataloader_config(*, split: str) -> PathDataLoader.Config:
     )
 
 
-def _checkpoint_config(folder: str, base_folder: str) -> PathOnnxCheckpointManager.Config:
+def _checkpoint_config(folder: str, base_folder: str, interval: int) -> PathOnnxCheckpointManager.Config:
     frame_constants = frame_constants_from_fps(n_frames=N_FRAMES, frame_type=FRAME_TYPE)
     temporal_len = frame_constants["temporal_len"]
     vision_input_names = [ModelInputs.IMG, ModelInputs.BIG_IMG]
@@ -248,7 +273,7 @@ def _checkpoint_config(folder: str, base_folder: str) -> PathOnnxCheckpointManag
         export_onnx=True,
         enable_first_step_checkpoint=True,
         folder=folder,
-        interval=1024,
+        interval=interval,
         input_names=input_names,
         input_shapes=input_shapes,
         input_dtypes=["float16"] * len(input_names),

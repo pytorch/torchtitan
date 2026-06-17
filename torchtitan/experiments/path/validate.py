@@ -3,20 +3,28 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, List
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.metrics import MetricsProcessor
+from torchtitan.components.report_runner import ReportRunner, ReportSpec
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.unique_counter import StringUniqueCounter
 from torchtitan.components.validate import BaseValidator
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from xx.common.helpers import parse_info
+from xx.training.lib.checkpoint import wait_for_checkpoint
+from xx.release_tests.lib.base_report import ReportFormat
+from xx.training.path.test import (
+    DATASET_REPORTS,
+    MODEL_REPORTS,
+)
 
 from .loss import PathLoss
 
@@ -27,6 +35,10 @@ def segment_names_from_info(info: torch.Tensor) -> list[str]:
     return [parse_info(x)["name"] for x in info.cpu().numpy()]
 
 
+def global_rank() -> int:
+    return dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+
+
 class PathValidator(BaseValidator):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseValidator.Config):
@@ -34,6 +46,8 @@ class PathValidator(BaseValidator):
         steps: int
         dataloader: BaseDataLoader.Config
         mixed_precision_param: str
+        reports: dict[str, list[int]] = field(default_factory=dict)
+        miniray: dict[str, Any] = field(default_factory=dict)
 
     def __init__(
         self,
@@ -62,6 +76,7 @@ class PathValidator(BaseValidator):
         self.metrics_processor = metrics_processor
         self.seq_len = seq_len
         self.local_batch_size = local_batch_size
+        self.miniray = dict(self.config.miniray)
         self.dataloader = self.config.dataloader.build(
             dp_world_size=self.dp_world_size,
             dp_rank=self.dp_rank,
@@ -70,8 +85,10 @@ class PathValidator(BaseValidator):
             local_batch_size=self.local_batch_size,
             validation_steps=self.config.steps,
         )
-        training_id = os.getenv("REPORTERV2_TRAINING_ID") or "local"
-        self.unique_segment_counter = StringUniqueCounter(f"unique_ids:{training_id}:path:validation")
+        #TODO centralize training_id
+        self.training_id = os.getenv("REPORTERV2_TRAINING_ID") or "local"
+        self.unique_segment_counter = StringUniqueCounter(f"unique_ids:{self.training_id}:path:validation")
+        self.report_runner = ReportRunner(metrics_processor=self.metrics_processor, enabled=global_rank() == 0)
 
     @torch.no_grad()
     def validate(self, model_parts: list[nn.Module], step: int) -> None:
@@ -129,9 +146,58 @@ class PathValidator(BaseValidator):
                 else self.unique_segment_counter.local_count()
             )
             self.metrics_processor.log_validation(loss=loss, step=step, extra_metrics=extra_metrics)
+            self._submit_reports(step)
         finally:
             for model in model_parts:
                 model.train()
 
     def close(self) -> None:
-        self.dataloader.close()
+        try:
+            self.report_runner.close()
+        finally:
+            self.dataloader.close()
+
+    def _submit_reports(self, step: int) -> None:
+        current_checkpoint = f'{self.training_id}/{step}'
+
+        def _run_report(TestCls: type, test_config: Any, wait_for_checkpoint_keys: List[str]) -> tuple[Any, ...]:
+            for k in wait_for_checkpoint_keys:
+                wait_for_checkpoint(current_checkpoint, k)
+            return (TestCls(test_config).run_report(),)
+
+        dataloader_config = self.config.dataloader
+        report_specs: dict[str, ReportSpec] = {}
+        for report_name, (TestCls, ReportConfigCls) in MODEL_REPORTS.items():
+            report_config = ReportConfigCls(
+                rollout={'agent': {'supercombo': current_checkpoint, 'model_trained_fps': dataloader_config.fps}},
+                report_name=f'path_{report_name}',
+                save_tmp=False,
+                format=ReportFormat.HTML,
+                miniray=self.miniray,
+            )
+            report_specs[report_name] = ReportSpec(
+                output_names=(report_name,),
+                output_types=('html',),
+                steps=self.config.reports.get(report_name, []),
+                func=_run_report,
+                arguments=[TestCls, report_config, ['vision.onnx', 'vision.onnx.data', 'temporal_policy.onnx']],
+            )
+
+        for report_name, (TestCls, ReportConfigCls) in DATASET_REPORTS.items():
+            report_config = ReportConfigCls(
+                route_list=dataloader_config.dataset,
+                pipeline_dir=dataloader_config.pipeline_dir,
+                report_name=f'path_{report_name}',
+                save_tmp=False,
+                format=ReportFormat.HTML,
+                miniray=self.miniray,
+            )
+            report_specs[report_name] = ReportSpec(
+                output_names=(report_name,),
+                output_types=('html',),
+                steps=self.config.reports.get(report_name, []),
+                func=_run_report,
+                arguments=[TestCls, report_config, []],
+            )
+
+        self.report_runner.submit_due(step=step, report_specs=report_specs)

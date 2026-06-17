@@ -71,6 +71,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         dump_folder: str = "./outputs"
         """Folder to dump job outputs"""
 
+        codedir: str = ""
+        """Path to cached code source"""
+
         profiler: Profiler.Config = field(default_factory=Profiler.Config)
         metrics: MetricsProcessor.Config = field(
             default_factory=MetricsProcessor.Config
@@ -114,8 +117,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     d["model_spec"] = {
                         "name": self.model_spec.name,
                         "flavor": self.model_spec.flavor,
-                        "model": self.model_spec.model.to_dict(),
                     }
+                    d["model"] = self.model_spec.model.to_dict()
                 else:
                     val = getattr(self, f.name)
                     if hasattr(val, "to_dict"):

@@ -177,6 +177,9 @@ class CheckpointManager(Configurable):
         When enable is set to true, checkpoints will be in {--dump_folder}/{--checkpoint.folder}.
         """
 
+        checkpoint_id_format: str = "step-"
+        """Prefix for per-step checkpoint directory names. Empty string means ``str(step)``."""
+
         interval: int = 500
         """Checkpointing interval in steps."""
 
@@ -348,6 +351,7 @@ class CheckpointManager(Configurable):
         self.pg: dist.ProcessGroup | None = None
 
         self.folder = fs.join_path(base_folder, config.folder)
+        self.checkpoint_id_format = config.checkpoint_id_format
 
         # Checkpoint policy related fields.
         self.initial_load_model_only = config.initial_load_model_only
@@ -752,7 +756,7 @@ class CheckpointManager(Configurable):
 
     def _create_checkpoint_id(self, step: int, folder: str = "") -> str:
         folder = folder if folder else self.folder
-        return fs.join_path(folder, f"step-{step}")
+        return fs.join_path(folder, f"{self.checkpoint_id_format}{step}")
 
     def _checkpoint_folder_exists(self, folder: str = "") -> bool:
         folder = folder if folder else self.folder
@@ -769,9 +773,10 @@ class CheckpointManager(Configurable):
         self, folder: str, *, require_metadata: bool
     ) -> list[int]:
         steps = []
+        step_re = re.compile(rf"{re.escape(self.checkpoint_id_format)}(\d+)")
         for path in fs.ls(folder):
             name = fs.basename(path)
-            match = re.fullmatch(r"step-(\d+)", name)
+            match = step_re.fullmatch(name)
             if not match:
                 continue
             step = int(match.group(1))
@@ -786,7 +791,7 @@ class CheckpointManager(Configurable):
         folder = folder if folder else self.folder
 
         return [
-            (step, fs.join_path(folder, f"step-{step}"))
+            (step, self._create_checkpoint_id(step, folder))
             for step in self._list_checkpoint_steps(folder, require_metadata=False)
         ]
 

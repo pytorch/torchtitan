@@ -108,7 +108,7 @@ class BaseLogger:
     def log(self, metrics: dict[str, Any], step: int) -> None:
         pass
 
-    def write_report(self, html: str, step: int, name: str, output_type: str) -> None:
+    def write_report(self, data: Any, step: int, name: str, output_type: str) -> None:
         raise NotImplementedError(
             f"{type(self).__name__} does not support write_report"
         )
@@ -231,8 +231,12 @@ class ReporterV2Logger(BaseLogger):
         if step == 1 or step % self.save_freq == 0:
             self.reporter.save_metrics()
 
-    def write_report(self, html: str, step: int, name: str, output_type: str) -> None:
-        self.reporter.write_report(html, step=step, name=name, output_type=output_type)
+    def write_report(self, data: Any, step: int, name: str, output_type: str) -> None:
+        if output_type == "scalar":
+            self.reporter.buffer_metrics(step=step, epoch=step, metrics={name: data})
+            self.reporter.save_metrics()
+            return
+        self.reporter.write_report(data, step=step, name=name, output_type=output_type)
 
     def close(self) -> None:
         self.reporter.close()
@@ -251,12 +255,12 @@ class LoggerContainer(BaseLogger):
         for logger_instance in self._loggers:
             logger_instance.log(metrics, step)
 
-    def write_report(self, html: str, step: int, name: str, output_type: str) -> None:
+    def write_report(self, data: Any, step: int, name: str, output_type: str) -> None:
         found_report_logger = False
         for logger_instance in self._loggers:
             if type(logger_instance).write_report is BaseLogger.write_report:
                 continue
-            logger_instance.write_report(html, step, name, output_type)
+            logger_instance.write_report(data, step, name, output_type)
             found_report_logger = True
         if not found_report_logger:
             raise NotImplementedError("No configured logger supports write_report")
@@ -677,8 +681,8 @@ class MetricsProcessor(Configurable):
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 
-    def write_report(self, html: str, step: int, name: str, output_type: str) -> None:
-        self.logger.write_report(html, step, name, output_type)
+    def write_report(self, data: Any, step: int, name: str, output_type: str) -> None:
+        self.logger.write_report(data, step, name, output_type)
 
     def close(self):
         self.logger.close()
