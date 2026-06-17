@@ -326,11 +326,37 @@ def _patch_allreduce_vllm(
             y = DTensor.from_local(y, mesh, [Replicate()] * mesh.ndim)
         return y
 
+    def fused_swiglu_ffn_forward(self, x):
+        # Fused gate_up override (w13): einsum gate_up on local shards, silu,
+        # then local w2 + vLLM all-reduce (mirrors ffn_forward for FusedSwiGLU).
+        x_local = _to_local(x)
+        w13 = _to_local(self.w13)  # [hidden_local, 2, dim]
+        gate_up = torch.einsum("...d,hgd->...hg", x_local, w13)  # [.., hidden_local, 2]
+        gate, up = gate_up[..., 0], gate_up[..., 1]
+        if use_vllm_silu:
+            fused = silu_and_mul(torch.cat([gate, up], dim=-1))
+        else:
+            fused = F.silu(gate) * up
+        y = F.linear(fused, _to_local(self.w2.weight))
+        y = tensor_model_parallel_all_reduce(y)
+        if isinstance(x, DTensor):
+            mesh = x.device_mesh
+            y = DTensor.from_local(y, mesh, [Replicate()] * mesh.ndim)
+        return y
+
     GQAttention.forward = attn_forward
     FeedForward.forward = ffn_forward
+    # GQAttention.attn_forward already uses self.qkv_linear, so FusedQKVLinear is
+    # covered; only the fused FFN (FusedSwiGLU) needs its own reimplementation.
+    try:
+        from torchtitan.overrides.fused_swiglu import FusedSwiGLU
+
+        FusedSwiGLU.forward = fused_swiglu_ffn_forward
+    except ImportError:
+        pass
     logger.info(
-        "allreduce_vllm: patched GQAttention/FeedForward output projections "
-        "with local matmul + vLLM all-reduce (vllm_silu=%s)",
+        "allreduce_vllm: patched GQAttention/FeedForward/FusedSwiGLU output "
+        "projections with local matmul + vLLM all-reduce (vllm_silu=%s)",
         use_vllm_silu,
     )
 
@@ -463,7 +489,25 @@ def _patch_silu_vllm() -> None:
         return self.w2(fused)
 
     FeedForward.forward = fused_forward
-    logger.info("silu_vllm: patched FeedForward.forward with fused silu_and_mul")
+
+    # Also handle the fused_swiglu override's FusedSwiGLU (single w13 param) when
+    # --fused-qkv-gateup is active: replace its F.silu(gate)*up with vLLM's kernel.
+    try:
+        from torchtitan.overrides.fused_swiglu import FusedSwiGLU
+
+        def fused_swiglu_silu(self, x):
+            gate, up = torch.einsum("...d,hgd->...hg", x, self.w13).unbind(-1)
+            g = gate.to_local() if isinstance(gate, DTensor) else gate
+            u = up.to_local() if isinstance(up, DTensor) else up
+            fused = silu_and_mul(torch.cat([g, u], dim=-1))
+            if isinstance(gate, DTensor):
+                fused = DTensor.from_local(fused, gate.device_mesh, gate.placements)
+            return self.w2(fused)
+
+        FusedSwiGLU.forward = fused_swiglu_silu
+    except ImportError:
+        pass
+    logger.info("silu_vllm: patched FeedForward/FusedSwiGLU with fused silu_and_mul")
 
 
 def _patch_rmsnorm_vllm() -> None:
