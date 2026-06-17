@@ -202,7 +202,7 @@ class DeepSeekV3Model(Decoder):
 
             set_deepseek_v3_sharding_config(
                 self,
-                is_inference=config.is_inference,
+                tp_gather_logits=parallelism.disable_loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
