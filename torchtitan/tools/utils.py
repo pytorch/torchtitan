@@ -182,7 +182,15 @@ def get_peak_flops(device_name: str) -> float:
                 f"Unknown neuron device: {neuron_device_name}, fallback to trn2/trn3"
             )
             return 79e12 * 2
-
+    elif "5090" in device_name:
+        # FP16/FP16 data from https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtx-blackwell-gpu-architecture.pdf
+        return 419.0e12
+    elif "4090" in device_name:
+        # FP16/FP16 data from https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtx-blackwell-gpu-architecture.pdf
+        return 330.3e12
+    elif "3090" in device_name:
+        # FP16/FP16 data from https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtx-blackwell-gpu-architecture.pdf
+        return 142.4e12
     else:  # for other GPU types, assume A100
         logger.warning(f"Peak flops undefined for: {device_name}, fallback to A100")
         return 312e12
