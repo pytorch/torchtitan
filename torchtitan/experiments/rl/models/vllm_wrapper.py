@@ -61,7 +61,10 @@ _original_node_ref = _codegen._node_ref
 
 # TODO: Followup with core vLLM fix
 # https://github.com/pytorch/torchtitan/issues/3067
-def _patched_node_ref(arg):
+def _patched_node_ref(arg, *args, **kwargs):
+    # vLLM's piecewise codegen (FULL_AND_PIECEWISE) calls _node_ref with extra
+    # positional args; accept and forward them so the patch composes with the
+    # piecewise path.
     try:
         from torch.distributed.tensor.placement_types import Partial, Placement
 
@@ -74,7 +77,7 @@ def _patched_node_ref(arg):
             return f"{cls.__module__}.{repr(arg)}"
     except ImportError:
         pass
-    return _original_node_ref(arg)
+    return _original_node_ref(arg, *args, **kwargs)
 
 
 _codegen._node_ref = _patched_node_ref
