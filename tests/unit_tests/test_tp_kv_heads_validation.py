@@ -49,7 +49,11 @@ def _make_trainer_config(tp: int, seq_len: int = 2048):
     parallelism = ParallelismConfig(
         tensor_parallel_degree=tp,
     )
-    return SimpleNamespace(training=training, parallelism=parallelism)
+    return SimpleNamespace(
+        training=training,
+        parallelism=parallelism,
+        is_inference=False,
+    )
 
 
 def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Config":
