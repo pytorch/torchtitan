@@ -17,7 +17,6 @@ from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
-from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.tools.logging import logger
 
@@ -32,30 +31,24 @@ def cross_entropy_loss(
     labels: torch.Tensor,
     *,
     loss_parallel: bool = True,
-    global_vocab_size: int | None = None,
 ) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
     if isinstance(pred, DTensor) and isinstance(labels, DTensor):
         return _cross_entropy_via_local_map(pred, labels, loss_parallel=loss_parallel)
 
-    if loss_parallel:
-        if isinstance(pred, DTensor):
-            assert pred.placements == (Shard(pred.ndim - 1),)
-            tp_group = pred.device_mesh.get_group("tp")
-            global_vocab_size = pred.shape[-1]
-            pred = pred.to_local()
-        else:
-            tp_group = current_spmd_mesh().get_group("tp")
-        return _LossParallelCrossEntropy.apply(
-            pred.flatten(0, 1).float(),
-            labels.flatten(0, 1),
-            tp_group,
-            global_vocab_size,
-        )
-
     if isinstance(pred, DTensor):
-        assert pred.placements == (Replicate(),)
-        pred = pred.to_local()
+        assert get_spmd_backend() == "default"
+        if loss_parallel:
+            assert pred.placements == (Shard(pred.ndim - 1),)
+            return _LossParallelCrossEntropy.apply(
+                pred.to_local().flatten(0, 1).float(),
+                labels.flatten(0, 1),
+                pred.device_mesh.get_group("tp"),
+                pred.shape[-1],
+            )
+        else:
+            assert pred.placements == (Replicate(),)
+            pred = pred.to_local()
 
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
@@ -519,7 +512,6 @@ class ChunkedCELoss(BaseLoss):
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
         self.loss_parallel: bool = False
-        self.global_vocab_size: int | None = None
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Set the lm_head module. Must be called before the first __call__."""
@@ -594,16 +586,6 @@ class ChunkedCELoss(BaseLoss):
                 )
 
             total_loss = hidden_states.new_zeros((), dtype=torch.float32)
-            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-                # TODO(pianpwk): would be nice if mutate_type accepted multiple axes.
-                for axis_name, dst in {
-                    "dp": spmd.P,
-                    "cp": spmd.P,
-                    "tp": spmd.I,
-                }.items():
-                    total_loss = spmd.mutate_type(
-                        total_loss, axis_name, src=spmd.R, dst=dst
-                    )
 
             # Disable FSDP reshard on lm_head to keep weight unsharded across
             # all chunks, avoiding repeated all-gathers. Coalesce per-chunk
@@ -627,23 +609,17 @@ class ChunkedCELoss(BaseLoss):
                     logits,
                     label_chunk,
                     loss_parallel=self.loss_parallel,
-                    global_vocab_size=self.global_vocab_size,
                 )
                 if global_valid_tokens is not None:
                     chunk_loss = chunk_loss / global_valid_tokens
-                if (
-                    get_spmd_backend() == "spmd_types"
-                ):  # V -> P reinterpret, after exiting local region
-                    spmd.assert_type(chunk_loss, {"dp": spmd.P, "cp": spmd.P})
                 total_loss = total_loss + chunk_loss.detach()
 
                 if requires_grad:
-                    with spmd.no_typecheck():
-                        chunk_loss.backward()
-                        assert h_chunk.grad is not None
-                        assert grad_accumulator is not None
-                        grad_accumulator.add(h_chunk.grad)
-                        h_chunk.grad = None
+                    chunk_loss.backward()
+                    assert h_chunk.grad is not None
+                    assert grad_accumulator is not None
+                    grad_accumulator.add(h_chunk.grad)
+                    h_chunk.grad = None
 
             if fsdp_enabled:
                 lm_head.set_reshard_after_forward(True)
@@ -656,12 +632,6 @@ class ChunkedCELoss(BaseLoss):
             assert grad_accumulator is not None
             accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
-        if get_spmd_backend() == "spmd_types":
-            spmd.assert_type(
-                accumulated_grad,
-                {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
-                spmd.PartitionSpec("dp", "cp", None),
-            )
         return self._gradient_backprop(
             hidden_states, accumulated_grad, total_loss, lm_head, fsdp_enabled
         )
@@ -686,7 +656,6 @@ class ChunkedCELoss(BaseLoss):
         )
 
 
-@spmd.register_autograd_function
 class _DecoderOutputGradientBackProp(torch.autograd.Function):
     """Bridges chunked lm_head backward with decoder backward via autograd.
 
@@ -725,17 +694,3 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         # to properly handle. The complicated part is that grad_output might not be
         # on the same device mesh as accumlated_grad.
         return accumulated_grad, None, None
-
-    @staticmethod
-    def typecheck_forward(
-        hidden_states: torch.Tensor,
-        accumulated_grad: torch.Tensor,
-        loss: torch.Tensor,
-    ) -> torch.Tensor:
-        # The hidden activation type depends on the model's sharding config;
-        # we'll defer hidden_states typechecking to previous module boundaries.
-        result = _DecoderOutputGradientBackProp.apply(
-            hidden_states, accumulated_grad, loss
-        )
-        spmd.assert_type(result, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I})
-        return result
