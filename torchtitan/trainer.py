@@ -439,10 +439,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.model_parts = [model]
 
         if isinstance(self.loss_fn, (CrossEntropyLoss, ChunkedCELoss)):
-            self.loss_fn.loss_parallel = (
-                parallel_dims.tp_enabled
-                and not config.parallelism.disable_loss_parallel
-            )
+            self.loss_fn.loss_parallel = parallel_dims.tp_enabled
 
         # Set lm_head reference for ChunkedCELoss after model construction.
         # Non-PP: single model part always has lm_head.
@@ -530,11 +527,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             base_folder=config.dump_folder,
         )
 
-        loss_parallel_enabled = (
-            parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
-        )
         self.train_context = dist_utils.get_train_context(
-            enable_loss_parallel=loss_parallel_enabled,
             parallel_dims=parallel_dims,
             spmd_typechecking=(
                 config.parallelism.spmd_backend == "spmd_types"

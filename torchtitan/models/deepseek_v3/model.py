@@ -65,9 +65,9 @@ class Attention(BaseAttention):
             assert config.wq is not None, "wq is required when q_lora_rank == 0"
             self.wq = config.wq.build()
         else:
-            assert (
-                config.wq_a is not None and config.wq_b is not None
-            ), "wq_a and wq_b are required when q_lora_rank > 0"
+            assert config.wq_a is not None and config.wq_b is not None, (
+                "wq_a and wq_b are required when q_lora_rank > 0"
+            )
             self.wq_a = config.wq_a.build()
             self.q_norm = config.q_norm.build()
             self.wq_b = config.wq_b.build()
@@ -176,6 +176,7 @@ class DeepSeekV3Model(Decoder):
             self,
             *,
             config,
+            tp_gather_logits: bool = False,
             **kwargs,
         ) -> None:
             Decoder.Config.update_from_config(self, config=config, **kwargs)
@@ -187,7 +188,7 @@ class DeepSeekV3Model(Decoder):
 
             set_deepseek_v3_sharding_config(
                 self,
-                loss_parallel=not parallelism.disable_loss_parallel,
+                tp_gather_logits=tp_gather_logits,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )

@@ -36,10 +36,19 @@ def cross_entropy_loss(
     if isinstance(pred, DTensor) and isinstance(labels, DTensor):
         return _cross_entropy_via_local_map(pred, labels, loss_parallel=loss_parallel)
 
-    if isinstance(pred, DTensor) and not loss_parallel:
+    if isinstance(pred, DTensor):
         assert get_spmd_backend() == "default"
-        assert pred.placements == (Replicate(),)
-        pred = pred.to_local()
+        if loss_parallel:
+            assert pred.placements == (Shard(pred.ndim - 1),)
+            return _LossParallelCrossEntropy.apply(
+                pred.to_local().flatten(0, 1).float(),
+                labels.flatten(0, 1),
+                pred.device_mesh.get_group("tp"),
+                pred.shape[-1],
+            )
+        else:
+            assert pred.placements == (Replicate(),)
+            pred = pred.to_local()
 
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
