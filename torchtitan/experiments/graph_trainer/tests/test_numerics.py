@@ -255,7 +255,7 @@ def _run_autoparallel_llama3_loss_compare() -> bool:
         baseline_module="graph_trainer.llama3",
         baseline_config="graph_trainer_llama3_debugmodel_sdpa_eager",
         test_module="graph_trainer.llama3",
-        test_config="graph_trainer_llama3_debugmodel_sdpa",
+        test_config="graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss",
         baseline_options=AUTOPARALLEL_LLAMA3_PARALLELISM,
         test_options=(
             f"{AUTOPARALLEL_LLAMA3_PARALLELISM}"
