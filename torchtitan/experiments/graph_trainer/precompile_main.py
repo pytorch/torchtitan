@@ -175,6 +175,7 @@ def _precompile_aot_fx_trace(
     tokenizer,
 ):
     """aot_fx_trace mode precompilation: make_fx tracing + Inductor."""
+    from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
     from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
     from torchtitan.experiments.graph_trainer.precompile import (
         compute_config_fingerprint,
@@ -183,6 +184,8 @@ def _precompile_aot_fx_trace(
     from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
     loss_fn = config.loss.build(compile_config=compile_config)
+    if isinstance(loss_fn, (CrossEntropyLoss, ChunkedCELoss)):
+        loss_fn.loss_parallel = parallel_dims.tp_enabled
 
     fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
 
@@ -233,18 +236,9 @@ def _precompile_aot_fx_trace(
             "Set --parallelism.context_parallel_degree 1."
         )
 
-    # Enable loss_parallel when TP is active and loss_parallel is not
-    # disabled. This matches the training path which wraps tracing +
-    # execution inside train_context() → loss_parallel(). Without it,
-    # cross_entropy fails with "mixed torch.Tensor and DTensor" because
-    # the TP-parallelized model outputs Shard'd DTensors but labels
-    # remain plain tensors.
-    loss_parallel_enabled = (
-        parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
-    )
     loss_parallel_ctx = (
         torch.distributed.tensor.parallel.loss_parallel()
-        if loss_parallel_enabled
+        if parallel_dims.tp_enabled
         else contextlib.nullcontext()
     )
 

@@ -18,7 +18,6 @@ import torch
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
-from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
@@ -253,12 +252,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
-        if parallel_dims.tp_enabled and config.parallelism.disable_loss_parallel:
-            raise ValueError(
-                "Tensor-parallel training without loss parallel is deprecated. "
-                "Remove --parallelism.disable_loss_parallel; TP training now "
-                "uses loss parallel by default."
-            )
         # TODO(pianpwk): Transitional until the local-SPMD and full-DTensor
         # backends share one runtime mesh/type mechanism.
         dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
@@ -445,15 +438,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
                 self.model_parts = [model]
 
-        # Set loss-parallel metadata for CE losses after model construction.
         if isinstance(self.loss_fn, (CrossEntropyLoss, ChunkedCELoss)):
             self.loss_fn.loss_parallel = parallel_dims.tp_enabled
-            self.loss_fn.global_vocab_size = self.model_config.vocab_size
 
         # Set lm_head reference for ChunkedCELoss after model construction.
         # Non-PP: single model part always has lm_head.
         # PP: only the last stage has lm_head; non-last stages skip this.
         if isinstance(self.loss_fn, ChunkedCELoss):
+            assert isinstance(self.model_config, Decoder.Config)
+            self.loss_fn.global_vocab_size = self.model_config.vocab_size
             if parallel_dims.pp_enabled:
                 if self.pp_has_last_stage:
                     lm_head = self.model_parts[-1].lm_head
@@ -757,16 +750,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             assert len(model_parts) == 1
             with self.train_context():
                 pred = model_parts[0](inputs, **extra_kwargs)
-                # Under non-full_dtensor, labels stay as plain tensors. See
-                # ``cross_entropy_loss`` for why pred must also be plain.
-                # Remove once non-full_dtensor is no longer supported.
-                if (
-                    isinstance(pred, DTensor)
-                    and not isinstance(self.loss_fn, ChunkedCELoss)
-                    and self.config.parallelism.spmd_backend == "default"
-                    and self.config.parallelism.disable_loss_parallel
-                ):
-                    pred = pred.to_local()
                 loss = self.loss_fn(pred, labels, global_valid_tokens)
                 del pred
                 with spmd.no_typecheck():
