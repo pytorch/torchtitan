@@ -542,67 +542,68 @@ class ChunkedCELoss(BaseLoss):
             )
             return wrapped(t)
 
-        # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
-        # accumulates ``.grad`` for ``GradAccumulator``.
-        h_chunks = [
-            c.detach().requires_grad_(requires_grad) for c in _chunk(hidden_states)
-        ]
-        label_chunks = list(_chunk(labels))
+        with spmd.local():
+            # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
+            # accumulates ``.grad`` for ``GradAccumulator``.
+            h_chunks = [
+                c.detach().requires_grad_(requires_grad) for c in _chunk(hidden_states)
+            ]
+            label_chunks = list(_chunk(labels))
 
-        grad_accumulator = None
-        if requires_grad:
-            grad_accumulator = GradAccumulator(
-                hidden_states,
-                num_chunks=num_chunks,
-                dtype=torch.float32,
-            )
-
-        total_loss = hidden_states.new_zeros((), dtype=torch.float32)
-
-        # Disable FSDP reshard on lm_head to keep weight unsharded across
-        # all chunks, avoiding repeated all-gathers. Coalesce per-chunk
-        # grad sync into a single reduce-scatter at the last chunk by
-        # disabling gradient sync for chunks 0..N-2.
-        if fsdp_enabled:
-            lm_head.set_reshard_after_forward(False)
-            lm_head.set_reshard_after_backward(False)
-            lm_head.set_requires_gradient_sync(False, recurse=False)
-
-        last_idx = len(h_chunks) - 1
-        for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
-            if fsdp_enabled and i == last_idx:
-                lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
-                    True, recurse=False
+            grad_accumulator = None
+            if requires_grad:
+                grad_accumulator = GradAccumulator(
+                    hidden_states,
+                    num_chunks=num_chunks,
+                    dtype=torch.float32,
                 )
 
-            logits = lm_head(h_chunk)
+            total_loss = hidden_states.new_zeros((), dtype=torch.float32)
 
-            chunk_loss = self.fn(
-                logits,
-                label_chunk,
-                loss_parallel=self.loss_parallel,
-            )
-            if global_valid_tokens is not None:
-                chunk_loss = chunk_loss / global_valid_tokens
-            total_loss = total_loss + chunk_loss.detach()
+            # Disable FSDP reshard on lm_head to keep weight unsharded across
+            # all chunks, avoiding repeated all-gathers. Coalesce per-chunk
+            # grad sync into a single reduce-scatter at the last chunk by
+            # disabling gradient sync for chunks 0..N-2.
+            if fsdp_enabled:
+                lm_head.set_reshard_after_forward(False)
+                lm_head.set_reshard_after_backward(False)
+                lm_head.set_requires_gradient_sync(False, recurse=False)
 
-            if requires_grad:
-                chunk_loss.backward()
-                assert h_chunk.grad is not None
-                assert grad_accumulator is not None
-                grad_accumulator.add(h_chunk.grad)
-                h_chunk.grad = None
+            last_idx = len(h_chunks) - 1
+            for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
+                if fsdp_enabled and i == last_idx:
+                    lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
+                        True, recurse=False
+                    )
 
-        if fsdp_enabled:
-            lm_head.set_reshard_after_forward(True)
-            lm_head.set_reshard_after_backward(True)
-            lm_head.set_requires_gradient_sync(True, recurse=False)
-            lm_head.reshard()
-        if not requires_grad:
-            return total_loss
+                logits = lm_head(h_chunk)
 
-        assert grad_accumulator is not None
-        accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
+                chunk_loss = self.fn(
+                    logits,
+                    label_chunk,
+                    loss_parallel=self.loss_parallel,
+                )
+                if global_valid_tokens is not None:
+                    chunk_loss = chunk_loss / global_valid_tokens
+                total_loss = total_loss + chunk_loss.detach()
+
+                if requires_grad:
+                    chunk_loss.backward()
+                    assert h_chunk.grad is not None
+                    assert grad_accumulator is not None
+                    grad_accumulator.add(h_chunk.grad)
+                    h_chunk.grad = None
+
+            if fsdp_enabled:
+                lm_head.set_reshard_after_forward(True)
+                lm_head.set_reshard_after_backward(True)
+                lm_head.set_requires_gradient_sync(True, recurse=False)
+                lm_head.reshard()
+            if not requires_grad:
+                return total_loss
+
+            assert grad_accumulator is not None
+            accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
         return self._gradient_backprop(
             hidden_states, accumulated_grad, total_loss, lm_head, fsdp_enabled
