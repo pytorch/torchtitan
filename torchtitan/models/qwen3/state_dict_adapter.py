@@ -46,35 +46,6 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                 "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.qkv_linear.wv.weight",
             }
 
-        # Detect the fused gate+up FFN (the fused_swiglu override's FusedSwiGLU,
-        # one ``w13`` param instead of ``w1``/``w3``). Duck-typed (no ``w1``
-        # attribute) so core does not import the opt-in override. HF gate/up are
-        # packed into ``w13`` in from_hf (and split back in to_hf), mirroring the
-        # fuse_qkv path -- the override's nn.Module load hooks do not fire under
-        # the DCP/adapter load.
-        ff0 = next(
-            (
-                layer.feed_forward
-                for layer in model_config.layers
-                if getattr(layer, "feed_forward", None) is not None
-            ),
-            None,
-        )
-        self.fused_swiglu = ff0 is not None and not hasattr(ff0, "w1")
-        ffn_map: dict[str, str | None]
-        if self.fused_swiglu:
-            ffn_map = {
-                "model.layers.{}.mlp.gate_proj.weight": None,
-                "model.layers.{}.mlp.up_proj.weight": None,
-                "model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
-            }
-        else:
-            ffn_map = {
-                "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
-                "model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
-                "model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
-            }
-
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention module
@@ -83,8 +54,10 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.self_attn.q_norm.weight": "layers.{}.attention.q_norm.weight",
             "model.layers.{}.self_attn.k_norm.weight": "layers.{}.attention.k_norm.weight",
             "model.layers.{}.self_attn.rotary_emb.inv_freq": None,
-            # MLP module for non-MoE (w1/w3 separate, or fused w13)
-            **ffn_map,
+            # MLP module for non-MoE
+            "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
+            "model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
+            "model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
             # Transformer layer
             "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
@@ -219,8 +192,6 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
         # Collect Q/K/V per layer for fusing (only used when fuse_qkv=True)
         pending_qkv: dict[str, dict[str, torch.Tensor]] = {}
-        # Collect gate/up per layer for fusing (only used when fused_swiglu=True)
-        pending_gateup: dict[str, dict[str, torch.Tensor]] = {}
 
         if self.fuse_qkv:
             n_heads, n_kv_heads, head_dim = self._get_attention_dims()
@@ -302,27 +273,6 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                         del pending_qkv[layer_num]
                     continue
 
-                if self.fused_swiglu and abstract_key in (
-                    "model.layers.{}.mlp.gate_proj.weight",
-                    "model.layers.{}.mlp.up_proj.weight",
-                ):
-                    pending_gateup.setdefault(layer_num, {})
-                    proj = abstract_key.split(".")[-2]  # gate_proj, up_proj
-                    pending_gateup[layer_num][proj] = value
-                    if len(pending_gateup[layer_num]) == 2:
-                        # w13: (hidden_dim, 2, dim), w13[:, 0]=gate, w13[:, 1]=up
-                        # (matches FusedSwiGLU.forward einsum unbind order).
-                        w13 = torch.stack(
-                            [
-                                pending_gateup[layer_num]["gate_proj"],
-                                pending_gateup[layer_num]["up_proj"],
-                            ],
-                            dim=1,
-                        )
-                        state_dict[f"layers.{layer_num}.feed_forward.w13"] = w13
-                        del pending_gateup[layer_num]
-                    continue
-
                 new_key = self.from_hf_map[abstract_key]
                 if new_key is None:
                     continue
@@ -338,11 +288,6 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
         if self.fuse_qkv and pending_qkv:
             raise ValueError(
                 f"Incomplete Q/K/V projections for layers: {list(pending_qkv.keys())}"
-            )
-        if self.fused_swiglu and pending_gateup:
-            raise ValueError(
-                f"Incomplete gate/up projections for layers: "
-                f"{list(pending_gateup.keys())}"
             )
 
         return state_dict
