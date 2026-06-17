@@ -15,6 +15,7 @@ from renderers import Renderer
 
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.environment import MessageEnv, TokenEnv
+from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.experiments.rl.rollout.types import (
     GenerateFn,
     Rollout,
@@ -82,10 +83,17 @@ class Rollouter(Configurable):
         token_env: TokenEnv.Config = field(default_factory=TokenEnv.Config)
         """`TokenEnv` limits (e.g. `max_rollout_tokens`) passed to `make_env_group`."""
 
+        advantage: Configurable.Config = field(
+            default_factory=AdvantageEstimator.Config
+        )
+        """Post-scoring advantage estimator. Default = Dr.GRPO (mean-baseline only);
+        set `AdvantageEstimator.Config(should_std_normalize=True)` for standard GRPO."""
+
     def __init__(self, config: Config) -> None:
         self._train_dataset = config.train_dataset.build()
         self._validation_dataset = config.validation_dataset.build()
         self.rubric: Rubric = config.rubric.build()
+        self.advantage_estimator = config.advantage.build()
         self._message_env_config = config.message_env
         self._token_env_config = config.token_env
 
@@ -209,9 +217,12 @@ class Rollouter(Configurable):
             rollout.reward = output.reward
             rollout.reward_breakdown = output.reward_breakdown
 
-        # TODO: move advantage calculation to here
-
-        return RolloutGroup(group_id=group_id, rollouts=rollouts)
+        # Post-scoring: turn group rewards into per-rollout advantages.
+        group = RolloutGroup(group_id=group_id, rollouts=rollouts)
+        advantages = self.advantage_estimator(group)
+        for rollout, advantage in zip(group.rollouts, advantages, strict=True):
+            rollout.advantage = advantage
+        return group
 
     async def _run_single_rollout(
         self,
@@ -234,8 +245,7 @@ class Rollouter(Configurable):
             env: The env for this rollout; `run_group_rollouts` closes it.
             sampling: Sampling config for every generate call.
             group_id: The GRPO group id.
-            rollout_id: Stable id for this rollout, unique within the group; the per-turn
-                `request_id` prefix, and stored as `Rollout.sample_id`.
+            rollout_id: Stable id for this rollout. Unique globally.
 
         Returns:
             One unscored `Rollout` (reward filled later by the controller).
@@ -250,6 +260,9 @@ class Rollouter(Configurable):
                 completion = await generate_fn(
                     prompt_token_ids=step.next_prompt_token_ids,
                     request_id=f"{rollout_id}/turn={len(turns)}",
+                    # TODO: improve router so it can take both rollout_id and
+                    # group_id to make more optimal routing decisions.
+                    routing_session_id=rollout_id,
                     sampling_config=sampling,
                 )
 

@@ -4,15 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""
-Config entry points for the RL/unified experiment.
+"""Config entry points for the alphabet-sort example.
 
-Each function returns a complete ``RLTrainer.Config`` and is discoverable by
-``ConfigManager`` via ``--module rl --config <function_name>``.
+Each function returns a complete ``RLTrainer.Config``, discoverable by
+``ConfigManager`` via
+``--module alphabet_sort --config rl_grpo_qwen3_*``.
 """
 
 import dataclasses
-from dataclasses import dataclass
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -29,52 +28,22 @@ from torchtitan.experiments.rl.actors.generator import (
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
+from torchtitan.experiments.rl.batch_invariance import BatchInvariantFlexConverter
 from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
 from torchtitan.experiments.rl.generator_router import (
     GeneratorRouter,
-    RoundRobinRoutingStrategy,
+    LeastLoadedRoutingStrategy,
+    StickySessionRoutingStrategy,
 )
+from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
-from torchtitan.experiments.rl.trainer import GRPOLoss, RLTrainer
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.experiments.rl.trainer import RLTrainer
 from torchtitan.models.qwen3 import model_registry
-from torchtitan.protocols.model import ModelConfigConverter
 
 _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
-
-
-class BatchInvariantFlexConverter(ModelConfigConverter):
-    """Pin flex attention kernel options for batch-invariant mode.
-
-    Sets fixed BLOCK_M/BLOCK_N=16 and BACKEND=TRITON on all
-    FlexAttention layers.
-
-    BACKEND=TRITON is to avoid flex_decode kernel.
-    """
-
-    # the triton BLOCK_N tile size needs to be pinned for stable numerics and
-    # needs to match vLLM's for identical results, today vLLM default is 16
-    # TODO: run some experiments to determine impact of small vs large tile sizes
-    _BLOCK_M = 16
-    _BLOCK_N = 16
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ModelConfigConverter.Config):
-        pass
-
-    def __init__(self, config: Config):
-        pass
-
-    def convert(self, model_config) -> None:
-        for layer_cfg in model_config.layers:
-            inner = layer_cfg.attention.inner_attention
-            if isinstance(inner, FlexAttention.Config):
-                inner.kernel_options["BACKEND"] = "TRITON"
-                inner.kernel_options["BLOCK_M"] = self._BLOCK_M
-                inner.kernel_options["BLOCK_N"] = self._BLOCK_N
 
 
 def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
@@ -91,7 +60,9 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
         group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         generator_router=GeneratorRouter.Config(
-            strategy=RoundRobinRoutingStrategy.Config()
+            strategy=StickySessionRoutingStrategy.Config(
+                fallback_strategy=LeastLoadedRoutingStrategy.Config()
+            )
         ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(

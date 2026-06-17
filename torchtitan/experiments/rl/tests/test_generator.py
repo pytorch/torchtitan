@@ -227,7 +227,9 @@ def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
     # Strict drain (hot_swap=False) needs the prefix cache reset so post-pull requests don't reuse old-weight KV.
     import dataclasses
 
-    from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b_varlen
+    from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
+        rl_grpo_qwen3_0_6b_varlen,
+    )
 
     config = rl_grpo_qwen3_0_6b_varlen()
     assert (

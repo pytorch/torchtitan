@@ -32,7 +32,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.distributed.utils import set_batch_invariance
-from torchtitan.experiments.rl import config_registry
+from torchtitan.experiments.rl.examples.alphabet_sort import config_registry
 from torchtitan.experiments.rl.models.vllm_registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -107,11 +107,11 @@ def generate() -> None:
     if gen_config.debug.batch_invariant:
         # batch_invariant_ops doesn't cover bmm; the MoE router gate is a bmm in
         # the vLLM inference graph, so override it generator-side (not in core).
-        from torchtitan.experiments.rl.actors.generator import (
-            _patch_bmm_for_batch_invariance,
+        from torchtitan.experiments.rl.batch_invariance import (
+            patch_bmm_for_batch_invariance,
         )
 
-        _patch_bmm_for_batch_invariance()
+        patch_bmm_for_batch_invariance()
     enable_ep = gen_config.parallelism.expert_parallel_degree > 1
 
     logger.debug("Initializing vLLM LLMEngine with TorchTitan model")

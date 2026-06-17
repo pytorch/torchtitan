@@ -111,6 +111,29 @@ def norm_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
+def pre_lm_head_norm_config(*, enable_sp: bool) -> ShardingConfig:
+    """Root decoder norm sharding before ``lm_head`` / chunked CE loss.
+
+    Decoder blocks emit sequence-sharded hidden states when sequence
+    parallelism is enabled. The root norm is the last clean module boundary to
+    all-gather the TP sequence shard back to replicated hidden states before
+    either the model forward or ``ChunkedCELoss`` applies ``lm_head``.
+    """
+    activation = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I)
+    )
+    return ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.R if enable_sp else spmd.I)
+        },
+        in_src_shardings={"input": activation},
+        out_src_shardings=activation,
+        out_dst_shardings=dense_activation_placement(tp=spmd.R),
+    )
+
+
 def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
     """Colwise-shard each Q/K/V projection of a ``BaseQKVLinear``.
 
@@ -266,11 +289,11 @@ def set_decoder_sharding_config(
         out_dst_shardings=activation_layout,
         local_map=LocalMapConfig(in_grad_placements=None),
     )
-    config.norm.sharding_config = norm_config(enable_sp=enable_sp)
+    config.norm.sharding_config = pre_lm_head_norm_config(enable_sp=enable_sp)
 
     config.lm_head.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={"input": activation_layout},
+        in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
         in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
         out_src_shardings=dense_activation_placement(tp=spmd.S(-1)),
         out_dst_shardings=dense_activation_placement(tp=loss_tp),
