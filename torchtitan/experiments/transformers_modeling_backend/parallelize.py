@@ -66,7 +66,7 @@ def parallelize_hf_transformers(
         apply_non_moe_tp(
             model,
             parallel_dims.get_mesh("tp"),
-            enable_loss_parallel=not parallelism.disable_loss_parallel,
+            tp_gather_logits=False,
         )
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
@@ -110,7 +110,7 @@ def parallelize_hf_transformers(
 def apply_non_moe_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,
-    enable_loss_parallel: bool,
+    tp_gather_logits: bool,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -142,8 +142,8 @@ def apply_non_moe_tp(
         else:
             root_plan["lm_head"] = ColwiseParallel(
                 input_layouts=Shard(1),
-                output_layouts=Shard(-1) if enable_loss_parallel else Replicate(),
-                use_local_output=not enable_loss_parallel,
+                output_layouts=Replicate() if tp_gather_logits else Shard(-1),
+                use_local_output=tp_gather_logits,
             )
     if root_plan:  # Only call if there's something to parallelize
         parallelize_module(model, tp_mesh, root_plan)

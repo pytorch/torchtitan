@@ -17,6 +17,7 @@ from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -34,6 +35,20 @@ def cross_entropy_loss(
     """Cross-entropy loss with sum reduction for token-based normalization."""
     if isinstance(pred, DTensor) and isinstance(labels, DTensor):
         return _cross_entropy_via_local_map(pred, labels, loss_parallel=loss_parallel)
+
+    if isinstance(pred, DTensor):
+        assert get_spmd_backend() == "default"
+        if loss_parallel:
+            assert pred.placements == (Shard(pred.ndim - 1),)
+            return _LossParallelCrossEntropy.apply(
+                pred.to_local().flatten(0, 1).float(),
+                labels.flatten(0, 1),
+                pred.device_mesh.get_group("tp"),
+                pred.shape[-1],
+            )
+        else:
+            assert pred.placements == (Replicate(),)
+            pred = pred.to_local()
 
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
@@ -300,6 +315,18 @@ class CrossEntropyLoss(BaseLoss):
     def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
         self.fn: LossFunction = cross_entropy_loss
         self._maybe_compile(compile_config)
+        self.loss_parallel: bool = False
+
+    def __call__(
+        self,
+        pred: torch.Tensor,
+        labels: torch.Tensor,
+        global_valid_tokens: float | None = None,
+    ) -> torch.Tensor:
+        loss = self.fn(pred, labels, loss_parallel=self.loss_parallel)
+        if global_valid_tokens is not None:
+            loss = loss / global_valid_tokens
+        return loss
 
 
 class MSELoss(BaseLoss):

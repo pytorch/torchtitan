@@ -370,15 +370,12 @@ class TrainContext(Protocol):
 
 def get_train_context(
     *,
-    enable_loss_parallel: bool,
     parallel_dims: "ParallelDims | None" = None,
     spmd_typechecking: bool = False,
 ) -> TrainContext:
     @contextlib.contextmanager
     def context():
         with contextlib.ExitStack() as stack:
-            if enable_loss_parallel:
-                stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
             if parallel_dims is not None and parallel_dims.spmd_backend == "spmd_types":
                 if not parallel_dims._single_axis_meshes:
                     parallel_dims.build_mesh()
