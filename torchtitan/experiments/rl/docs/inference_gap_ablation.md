@@ -62,4 +62,49 @@ Notes:
 
 ## W2 -- bs=32, input_len=4096, generate=1024 tokens
 
-(running; appended when complete)
+Ladder (cumulative, full_decode_only). Ratio vs native = 2366.5 tok/s.
+
+| # | rung | tok/s | ratio |
+|---|------|-------|-------|
+| 1 | baseline (eager DTensor, SP off) | 98.0 | 0.041 |
+| 2 | + compile (aot_eager, per-layer) | 249.5 | 0.105 |
+| 3 | + cudagraph (FULL_DECODE_ONLY) | 1334.3 | 0.564 |
+| 4 | + tree all-reduce (NCCL Ring,Tree) | 1335.6 | 0.564 |
+| 5 | + Helion RoPE | 1476.6 | 0.624 |
+| 6 | + FusedQKV + fused gate_up (proper) | 1528.5 | 0.646 |
+| 7 | + SiluAndMul (vLLM kernel) | 1518.0 | 0.642 |
+| 8 | + FlashAttention (FA3, vs CUSTOM varlen) | 1542.6 | 0.652 |
+| 9 | + fused add+RMSNorm (vLLM kernel) | 1557.5 | 0.658 |
+| 10 | + vLLM all-reduce | 1742.4 | 0.736 |
+| 11 | + vLLM RMSNorm | 1797.1 | 0.759 |
+| -- | (alt) vLLM RoPE instead of Helion | 1704.3 | 0.720 |
+| 12 | pure-local 2D model (localfused) | 2246.7 | 0.949 |
+| T | vLLM native (eager) | 2366.5 | 1.000 |
+
+Notes:
+- Same shape as W1, but every ratio is HIGHER: the larger workload amortizes the
+  DTensor overhead. cudagraph floor 0.564 (vs 0.484 W1); DTensor ceiling 0.759
+  (vs 0.742 W1); **pure-local 0.949 (vs 0.906 W1)** -- nearly closes the gap.
+- vLLM all-reduce is still the biggest kernel lever but **smaller than W1
+  (+11.9% vs +27%)**: at bs=32/in=4096 the AR messages are larger and less
+  latency-bound, so swapping NCCL ring -> vLLM one-shot/multimem helps less.
+  This is the expected decode-latency signature -- the AR win shrinks as the
+  workload grows.
+- SiluAndMul is a slight regression here (-0.7%), FA3 +0.9%, fused add+RMSNorm
+  +0.1%, vLLM RMSNorm +3.1%: all near-neutral, same as W1. vLLM RoPE again
+  regresses vs Helion (1704.3 < 1797.1).
+- Residual above the DTensor ceiling (0.759) is again DTensor dispatch /
+  cross-rank arrival-spin, not comm; pure-local removes it to reach 0.949. The
+  last ~5% is native-only fusion not ported.
+
+## Cross-workload summary (vs native eager)
+
+| stage | W1 (bs8/in1024/gen128) | W2 (bs32/in4096/gen1024) |
+|---|---|---|
+| cudagraph floor | 0.484 | 0.564 |
+| + all kernel rungs (DTensor ceiling) | 0.742 | 0.759 |
+| pure-local 2D model | 0.906 | 0.949 |
+
+The DTensor path plateaus at ~0.74-0.76x; closing the rest requires leaving
+DTensor in the hot path (pure-local), which reaches 0.91-0.95x. The remaining
+~5-9% is vLLM-native-only fusion.
