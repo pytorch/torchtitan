@@ -87,6 +87,11 @@ def _set_qwen3_layer_sharding(
             state_shardings={"weight": dense_param_placement(tp=spmd.R)},
             in_src_shardings={"input": dense_activation_placement(tp=spmd.S(2))},
             in_dst_shardings={"input": dense_activation_placement(tp=spmd.S(2))},
+            # RMSNorm normalizes over the last dim, so the head-dim shard (S(2))
+            # is preserved: src == dst (no redistribution). spmd_types requires
+            # an explicit out_src to assert the plain-tensor output type, since
+            # (unlike DTensor) it carries no runtime placement.
+            out_src_shardings=dense_activation_placement(tp=spmd.S(2)),
             out_dst_shardings=dense_activation_placement(tp=spmd.S(2)),
         )
 
