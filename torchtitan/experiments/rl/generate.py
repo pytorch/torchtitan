@@ -267,14 +267,16 @@ def _parse_args() -> argparse.Namespace:
     )
     kern.add_argument(
         "--model-2d",
-        choices=["local", "localfused", "local3d", "dtensor"],
+        choices=["local", "localfused", "spmd", "local3d", "dtensor"],
         default=None,
         help="Replace the model with a native-style path (whole-model, mutually "
         "exclusive with kernel rungs): 'local' = pure-local 2D forward (no "
         "DTensor, mirrors native); 'localfused' = local + native-style residual "
-        "fusion (threaded residual, in-place fused add+RMSNorm); 'local3d' = "
-        "pure-local (1,T,D) 3D linears (isolates tensor-rank); 'dtensor' = "
-        "qwen3_vllm.py 2D-DTensor (register_sharding).",
+        "fusion (threaded residual, in-place fused add+RMSNorm); 'spmd' = "
+        "localfused execution but the TP all-reduce goes through spmd_types' "
+        "redistribute (NCCL, typecheck off) instead of vLLM's custom kernel; "
+        "'local3d' = pure-local (1,T,D) 3D linears (isolates tensor-rank); "
+        "'dtensor' = qwen3_vllm.py 2D-DTensor (register_sharding).",
     )
     kern.add_argument(
         "--no-double-transpose",

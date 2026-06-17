@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import logging
 
+import spmd_types as spmd
+
 import torch
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor, Replicate, Shard
@@ -242,13 +244,18 @@ class Qwen3VLLMBlockLocal(Qwen3TransformerBlock):
             attn._vllm_layer_name,
         )
         h = F.linear(out, attn._local_wo_weight)
-        return tensor_model_parallel_all_reduce(h)
+        return self._all_reduce(h)
 
     def _ffn_core(self, normed):
         ff = self.feed_forward
         gate_up = F.linear(normed, ff._fused_gate_up_weight_local)
         h = silu_and_mul(gate_up)
         h = F.linear(h, ff._local_w2_weight)
+        return self._all_reduce(h)
+
+    def _all_reduce(self, h: torch.Tensor) -> torch.Tensor:
+        """Partial -> Replicate over the TP group. Pure-local uses vLLM's custom
+        all-reduce; the spmd_types subclass overrides this to use spmd's."""
         return tensor_model_parallel_all_reduce(h)
 
 
@@ -275,6 +282,22 @@ class Qwen3VLLMBlockLocalFused(Qwen3VLLMBlockLocal):
         )
         ffn_out = self._ffn_core(normed)
         return ffn_out, residual
+
+
+# Process group for spmd_types redistribute, set in _prepare_2d. spmd's
+# redistribute(P -> R) routes through dist.all_reduce (NCCL), unlike pure-local's
+# vLLM custom all-reduce -- this is the cost of the principled spmd_types path.
+_SPMD_REDIST_GROUP = None
+
+
+class Qwen3VLLMBlockSpmdFused(Qwen3VLLMBlockLocalFused):
+    """spmd_types execution: identical plain-local fused forward as the pure-local
+    fused block, but the Partial -> Replicate all-reduce after wo/w2 goes through
+    spmd_types' redistribute (typecheck off) instead of vLLM's custom kernel.
+    """
+
+    def _all_reduce(self, h: torch.Tensor) -> torch.Tensor:
+        return spmd.redistribute(h, _SPMD_REDIST_GROUP, src=spmd.P, dst=spmd.R)
 
 
 class Qwen3VLLMBlockLocal3D(Qwen3TransformerBlock):
@@ -418,9 +441,16 @@ def _prepare_2d(wrapper, variant: str) -> None:
     block_cls = {
         "local": Qwen3VLLMBlockLocal,
         "localfused": Qwen3VLLMBlockLocalFused,
+        "spmd": Qwen3VLLMBlockSpmdFused,
         "local3d": Qwen3VLLMBlockLocal3D,
         "dtensor": Qwen3VLLMBlockDTensor,
     }[variant]
+
+    if variant == "spmd":
+        # spmd_types redistribute targets this TP process group (the axis the
+        # weights are sharded on). typecheck stays OFF for the perf run.
+        global _SPMD_REDIST_GROUP
+        _SPMD_REDIST_GROUP = mesh.get_group()
 
     for name, layer in model.layers.items():
         if getattr(layer, "moe_enabled", False):
@@ -529,6 +559,31 @@ def _forward_localfused(
     return normed
 
 
+def _forward_spmd(self, input_ids=None, positions=None, inputs_embeds=None, **kwargs):
+    """spmd_types forward: same as _forward_localfused but the vocab-parallel
+    embedding all-reduce uses spmd_types' redistribute (NCCL) instead of vLLM's
+    custom all-reduce. The block all-reduces use Qwen3VLLMBlockSpmdFused."""
+    if inputs_embeds is not None:
+        raise NotImplementedError("inputs_embeds not yet supported")
+    if input_ids is None:
+        raise ValueError("Either input_ids or inputs_embeds must be provided")
+
+    emb = self.model.tok_embeddings
+    w = emb._vllm_local_weight
+    offset = emb._vllm_offset
+    mask = (input_ids >= offset) & (input_ids < offset + w.shape[0])
+    local_ids = (input_ids - offset).clamp(0, w.shape[0] - 1)
+    hidden = F.embedding(local_ids, w) * mask.unsqueeze(-1).to(w.dtype)
+    hidden = spmd.redistribute(hidden, _SPMD_REDIST_GROUP, src=spmd.P, dst=spmd.R)
+
+    residual = None
+    for layer in self.model.layers.values():
+        hidden, residual = layer(hidden, residual, positions)
+
+    normed, _ = _add_rmsnorm(hidden, residual, self._norm_w, self._norm_eps)
+    return normed
+
+
 def _forward_local3d(
     self, input_ids=None, positions=None, inputs_embeds=None, **kwargs
 ):
@@ -581,7 +636,7 @@ def apply_2d_model(variant: str) -> None:
     """Patch VLLMModelWrapper to swap in the 2D model after weight load and use
     the 2D forward. variant: "local" (pure-local) or "dtensor" (register_sharding).
     """
-    if variant not in ("local", "localfused", "local3d", "dtensor"):
+    if variant not in ("local", "localfused", "spmd", "local3d", "dtensor"):
         raise ValueError(f"Unknown 2D model variant {variant!r}")
 
     from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
@@ -599,6 +654,7 @@ def apply_2d_model(variant: str) -> None:
     VLLMModelWrapper.forward = {
         "local": _forward_local,
         "localfused": _forward_localfused,
+        "spmd": _forward_spmd,
         "local3d": _forward_local3d,
         "dtensor": _forward_dtensor,
     }[variant]
