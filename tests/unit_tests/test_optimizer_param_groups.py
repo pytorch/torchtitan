@@ -13,6 +13,7 @@ from torchtitan.components.optimizer import (
     default_adamw,
     OptimizersContainer,
     ParamGroupConfig,
+    register_moe_load_balancing_hook,
 )
 
 
@@ -41,6 +42,43 @@ class SimpleModel(nn.Module):
         x = self.layers["0"]["norm"](x)
         x = self.layers["0"]["ff"](x)
         return self.output(x)
+
+
+class FakeMoE(nn.Module):
+    def __init__(self, load_balance_coeff, tokens):
+        super().__init__()
+        self.load_balance_coeff = load_balance_coeff
+        self.register_buffer("tokens_per_expert_E", torch.tensor(tokens))
+        if load_balance_coeff is not None:
+            self.register_buffer("expert_bias_E", torch.zeros(len(tokens)))
+        else:
+            self.expert_bias_E = None
+
+
+class FakeMoEBlock(nn.Module):
+    def __init__(self, load_balance_coeff, tokens):
+        super().__init__()
+        self.moe_enabled = True
+        self.moe = FakeMoE(load_balance_coeff, tokens)
+
+
+class FakeMoEModel(nn.Module):
+    def __init__(self, load_balance_coeffs=(0.1, 0.2)):
+        super().__init__()
+        self.weight = nn.Parameter(torch.tensor([1.0]))
+        self.layers = nn.ModuleDict(
+            {
+                "0": FakeMoEBlock(load_balance_coeffs[0], [10, 0]),
+                "1": FakeMoEBlock(load_balance_coeffs[1], [0, 10]),
+            }
+        )
+
+
+class FakeParallelDims:
+    spmd_backend = "none"
+
+    def get_optional_mesh(self, name):
+        return None
 
 
 # Default AdamW param group for catch-all
@@ -105,6 +143,66 @@ class TestParamGroupConfig(unittest.TestCase):
         self.assertIsInstance(adam, torch.optim.Adam)
         self.assertEqual(adam.param_groups[0]["lr"], 1e-2)
         self.assertEqual(adam.param_groups[0]["betas"], (0.9, 0.95))
+
+    def test_moe_load_balancing_updates_all_enabled_layers(self):
+        model = FakeMoEModel()
+        config = OptimizersContainer.Config(
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"lr": 0.0, "weight_decay": 0.0},
+                ),
+            ],
+        )
+        container = config.build(model_parts=[model])
+        register_moe_load_balancing_hook(
+            container,
+            [model],
+            FakeParallelDims(),
+        )
+
+        container.step()
+
+        torch.testing.assert_close(
+            model.layers["0"].moe.expert_bias_E,
+            torch.tensor([-0.1, 0.1]),
+        )
+        torch.testing.assert_close(
+            model.layers["1"].moe.expert_bias_E,
+            torch.tensor([0.2, -0.2]),
+        )
+        torch.testing.assert_close(
+            model.layers["0"].moe.tokens_per_expert_E,
+            torch.tensor([0, 0]),
+        )
+        torch.testing.assert_close(
+            model.layers["1"].moe.tokens_per_expert_E,
+            torch.tensor([0, 0]),
+        )
+
+    def test_moe_load_balancing_rejects_inconsistent_coeffs(self):
+        model = FakeMoEModel(load_balance_coeffs=(None, 0.2))
+        config = OptimizersContainer.Config(
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"lr": 0.0, "weight_decay": 0.0},
+                ),
+            ],
+        )
+        container = config.build(model_parts=[model])
+        with self.assertRaisesRegex(
+            ValueError, "load_balance_coeff must be configured consistently"
+        ):
+            register_moe_load_balancing_hook(
+                container,
+                [model],
+                FakeParallelDims(),
+            )
 
     def test_single_pattern_weight_decay_zero(self):
         """Pattern matching bias params with weight_decay=0."""
