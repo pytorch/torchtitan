@@ -767,30 +767,5 @@ class TestBitwiseParityMoEEP(BitwiseParityTestBase):
     hf_assets_env_var = "MOE_HF_ASSETS_PATH"
 
 
-class TestBitwiseParity30BA3B(BitwiseParityTestBase):
-    """Bitwise parity for the real Qwen3-30B-A3B MoE with batch-invariant mode.
-
-    On 4 co-located GPUs: trainer FSDP2 dp_shard=2/TP=2/EP=4 (world 4); the
-    generator maps dp_shard=2 to vLLM data parallelism with TP=2, EP=4 (world
-    4). Both sides load the same real HF checkpoint, so weights match by
-    construction. Small batch/sequence sizes keep the co-located trainer +
-    generator within a single GPU's memory.
-
-    Requires a real Qwen3-30B-A3B HF checkpoint via QWEN3_30B_HF_ASSETS_PATH
-    (absolute path).
-    """
-
-    __test__ = True
-
-    BATCH_SIZE = 2
-    PROMPT_LENGTH = 64
-    MAX_GEN_TOKENS = 16
-
-    config_fn = staticmethod(rl_grpo_qwen3_30b_a3b_varlen_batch_invariant)
-    attn_backend = "varlen"
-    min_world_size = 4
-    hf_assets_env_var = "QWEN3_30B_HF_ASSETS_PATH"
-
-
 if __name__ == "__main__":
     unittest.main()

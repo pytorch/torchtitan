@@ -267,18 +267,16 @@ class VLLMGenerator(Actor, Configurable):
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only."""
 
         def __post_init__(self):
-            # vLLM forms the expert-parallel group from all DP*TP ranks (full
-            # EP, efsdp = dp*tp // ep == 1), and the torchtitan model is sharded
-            # to match. So EP, when used, must span exactly the DP*TP grid; a
-            # smaller degree would shard experts differently than vLLM expects.
+            # The generator runs vLLM full expert parallelism: vLLM forms the EP
+            # group from all DP*TP ranks, so expert_parallel_degree must equal
+            # data_parallel_degree * tensor_parallel_degree (or 1 to disable EP).
             p = self.parallelism
             full_ep = p.data_parallel_degree * p.tensor_parallel_degree
             if p.expert_parallel_degree not in (1, full_ep):
                 raise ValueError(
-                    f"expert_parallel_degree ({p.expert_parallel_degree}) must "
-                    f"be 1 (no expert parallelism) or equal data_parallel_degree "
-                    f"* tensor_parallel_degree ({full_ep}); vLLM forms the EP "
-                    f"group from all DP*TP ranks."
+                    f"expert_parallel_degree ({p.expert_parallel_degree}) must be 1 "
+                    f"(no expert parallelism) or equal data_parallel_degree * "
+                    f"tensor_parallel_degree ({full_ep}) in the generator."
                 )
 
             if (
