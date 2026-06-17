@@ -644,9 +644,12 @@ class FusedQKVLinear(BaseQKVLinear):
         # torch.split returns contiguous views for size-1 splits (xk, xv).
         # xq (size heads_per_kv) is non-contiguous; reshape triggers a copy.
         xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
-        xq = xq.reshape(bs, seqlen, -1, self.head_dim)
-        xk = xk.reshape(bs, seqlen, -1, self.head_dim)
-        xv = xv.reshape(bs, seqlen, -1, self.head_dim)
+        # .contiguous() is REQUIRED: torch.split leaves xq/xk/xv non-contiguous,
+        # and vLLM's attention / reshape_and_cache CUDA kernels read raw strided
+        # memory (unlike PyTorch ops) -> silent garbage / kv-cache corruption.
+        xq = xq.reshape(bs, seqlen, -1, self.head_dim).contiguous()
+        xk = xk.reshape(bs, seqlen, -1, self.head_dim).contiguous()
+        xv = xv.reshape(bs, seqlen, -1, self.head_dim).contiguous()
         return xq, xk, xv
 
 
