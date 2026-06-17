@@ -48,7 +48,6 @@ def _make_trainer_config(tp: int, seq_len: int = 2048):
     training = SimpleNamespace(seq_len=seq_len)
     parallelism = ParallelismConfig(
         tensor_parallel_degree=tp,
-        disable_loss_parallel=True,
     )
     return SimpleNamespace(training=training, parallelism=parallelism)
 
