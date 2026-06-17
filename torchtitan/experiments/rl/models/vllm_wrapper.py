@@ -190,6 +190,7 @@ class VLLMModelWrapper(Module):
         @dataclass(kw_only=True, slots=True)
         class _InferenceConfig:
             parallelism: ParallelismConfig
+            is_inference: bool = True
 
         self.config.update_from_config(config=_InferenceConfig(parallelism=parallelism))
 

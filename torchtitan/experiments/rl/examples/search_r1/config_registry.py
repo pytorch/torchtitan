@@ -10,7 +10,7 @@ These set the full Search-R1 recipe entirely from the example's config — the c
 defaults are unchanged, so every other config keeps vanilla GRPO. ``ConfigManager``
 discovers these directly from the example module::
 
-    --module torchtitan.experiments.rl.examples.search_r1 \\
+    --module search_r1 \\
         --config rl_grpo_qwen3_1_7b_search_r1
 """
 

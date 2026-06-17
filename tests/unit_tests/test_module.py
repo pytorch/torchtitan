@@ -6,12 +6,22 @@
 
 import unittest
 from dataclasses import dataclass
+from unittest.mock import patch
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
+from expecttest import assert_expected_inline
+from torch.distributed.tensor import distribute_tensor, Shard
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 
+from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims, SpmdLayout
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList, Sequential
+from torchtitan.protocols.sharding import ShardingConfig
 
 
 class TestModuleInitStates(unittest.TestCase):
@@ -343,6 +353,65 @@ class TestConfigBuildPropagatesParamInit(unittest.TestCase):
         nn.init.zeros_(m.linear.weight)
         m.init_states()
         self.assertTrue(torch.all(m.linear.weight == 1))
+
+
+class TestModuleRedistributionDTensor(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 2
+
+    def _parallel_dims(self):
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=self.world_size,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+        )
+        with patch(
+            "torchtitan.distributed.parallel_dims.device_type", self.device_type
+        ):
+            parallel_dims.build_mesh()
+        return parallel_dims
+
+    class Identity(Module):
+        def forward(self, x):
+            return x
+
+    @with_comms
+    def test_dtensor_must_match_declared_src_shardings(self):
+        parallel_dims = self._parallel_dims()
+        mesh = parallel_dims.get_mesh("tp")
+        module = self.Identity()
+        module._sharding_config = ShardingConfig()
+        module._sharding_config.in_src_shardings = {
+            "x": SpmdLayout({MeshAxisName.TP: spmd.R})
+        }
+        module._sharding_config.out_src_shardings = SpmdLayout(
+            {MeshAxisName.TP: spmd.R}
+        )
+        module._cache_pos_arg_names()
+        x = distribute_tensor(
+            torch.randn(4, 4, device=self.device_type),
+            mesh,
+            (Shard(0),),
+        )
+
+        with self.assertRaises(ValueError) as cm:
+            module._redistribute_inputs(parallel_dims, (x,), {})
+        assert_expected_inline(
+            str(cm.exception),
+            """Identity.x: input DTensor has placements (Shard(dim=0),), but in_src_shardings expects (Replicate(),).""",
+        )
+
+        with self.assertRaises(ValueError) as cm:
+            module._redistribute_outputs(parallel_dims, x)
+        assert_expected_inline(
+            str(cm.exception),
+            """Identity: output DTensor has placements (Shard(dim=0),), but out_src_shardings expects (Replicate(),).""",
+        )
 
 
 class TestVerifyModuleProtocol(unittest.TestCase):

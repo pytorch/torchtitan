@@ -71,6 +71,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # NOTE: model_spec is suppressed from tyro CLI parsing and is always
         # set programmatically by the model registry before Trainer construction.
         model_spec: Annotated[ModelSpec | None, tyro.conf.Suppress] = None
+        is_inference: bool = False
 
         hf_assets_path: str = "./tests/assets/tokenizer"
         """
@@ -127,6 +128,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "SPMD typechecking is not supported with pipeline parallelism. "
                     "Validate the same config without PP "
                     "(--parallelism.pipeline_parallel_degree 1)."
+                )
+
+            if (
+                self.parallelism.spmd_backend == "spmd_types"
+                and self.debug.spmd_typechecking
+                and isinstance(self.activation_checkpoint, SelectiveAC.Config)
+                and self.model_spec is not None
+                and any(self.model_spec.model.traverse(FlexAttention.Config))
+            ):
+                # TODO(pianpwk): Enable SAC with FlexAttention under SPMD typechecking.
+                raise ValueError(
+                    "Selective activation checkpointing (SAC) is not supported "
+                    "with FlexAttention while SPMD typechecking is enabled. "
+                    "Use full activation checkpointing, disable activation "
+                    "checkpointing, or switch to a non-Flex attention backend."
                 )
 
             if isinstance(self.activation_checkpoint, MemoryBudgetAC.Config) and not (
@@ -516,7 +532,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         self.train_context = dist_utils.get_train_context(
-            enable_loss_parallel=parallel_dims.tp_enabled,
             parallel_dims=parallel_dims,
             spmd_typechecking=(
                 config.parallelism.spmd_backend == "spmd_types"
