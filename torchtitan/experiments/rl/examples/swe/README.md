@@ -12,9 +12,14 @@ multi-turn machinery and keeps the whole rollout on-policy.
 
 ## Layout
 
+The sandbox layer is task-agnostic and lives outside this example, in
+`torchtitan/experiments/rl/sandbox/` (`Sandbox` protocol + `ExecResult` in
+`base.py`; abstract `SandboxFactory` backend seam; `DockerSandbox` /
+`DockerSandboxFactory` in `docker.py`). Any "run commands in an isolated env" RL
+task reuses it. This example is the task-specific layer on top:
+
 | file | role |
 | --- | --- |
-| `sandbox.py` | `Sandbox` protocol (one-shot `exec` + files + `close`), `DockerSandbox` (podman/docker), `SandboxFactory` (backend seam + provisioning semaphore/retries) |
 | `data.py` | `R2EGymSample` + `R2EGymDataset` (jsonl stream) |
 | `env.py` | `SweEnv(MessageEnv)`: `bash`/`submit` agent loop; grades in the live sandbox on the terminal step |
 | `grading.py` | R2E-Gym grading: inject hidden tests, run pytest (junit), compare to `expected_output_json` |
@@ -89,7 +94,7 @@ python -m torchtitan.experiments.rl.examples.swe.smoke_check
 Sandboxes are removed when each rollout ends. To reap containers leaked by a
 hard-killed run:
 ```bash
-podman rm -f $(podman ps -aq --filter label=ttrl-swe-sandbox)
+podman rm -f $(podman ps -aq --filter label=ttrl-sandbox)
 ```
 
 ## What to expect
@@ -107,5 +112,5 @@ instances, and long training. See slime's `RUNBOOK_R2E.md` for the same caveat.
 | `eval_timeout_s` | `SweEnv.Config` | hidden-test timeout; keep below `token_env.step_timeout_s` |
 | `max_rollout_tokens` | `token_env` | must stay below the trainer `seq_len` or the rollout truncates without grading |
 | `max_concurrent_provision` | `SandboxFactory.Config` | global cap on simultaneous container boots |
-| `network` | `SandboxFactory.Config` | `none` (default) enforces egress lock; `host` only if an eval truly needs network |
+| `network` | `DockerSandboxFactory.Config` | `none` (default) enforces egress lock; `host` only if an eval truly needs network |
 ```

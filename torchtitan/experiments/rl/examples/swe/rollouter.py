@@ -15,9 +15,9 @@ from torchtitan.experiments.rl.environment import TokenEnv
 from torchtitan.experiments.rl.examples.swe.data import R2EGymDataset
 from torchtitan.experiments.rl.examples.swe.env import SweEnv
 from torchtitan.experiments.rl.examples.swe.rubric import RewardR2EGym
-from torchtitan.experiments.rl.examples.swe.sandbox import SandboxFactory
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
 from torchtitan.experiments.rl.rubrics import Rubric
+from torchtitan.experiments.rl.sandbox import SandboxFactory
 
 # Bundled smoke set: the two orange3 R2E-Gym instances whose images are small and
 # commonly cached. Point ``train_dataset.data_path`` at a larger jsonl for real runs.

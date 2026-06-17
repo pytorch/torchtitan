@@ -22,8 +22,8 @@ from torchtitan.experiments.rl.examples.swe import (
     RewardR2EGym,
     SweEnv,
 )
-from torchtitan.experiments.rl.examples.swe.sandbox import ExecResult
 from torchtitan.experiments.rl.rollout import Rollout, RolloutStatus, RolloutTurn
+from torchtitan.experiments.rl.sandbox import ExecResult
 
 
 # --------------------------------------------------------------------------- #

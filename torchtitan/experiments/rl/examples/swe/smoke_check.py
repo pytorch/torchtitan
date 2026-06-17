@@ -24,7 +24,7 @@ import os
 
 from torchtitan.experiments.rl.examples.swe import grading
 from torchtitan.experiments.rl.examples.swe.data import R2EGymDataset
-from torchtitan.experiments.rl.examples.swe.sandbox import SandboxFactory
+from torchtitan.experiments.rl.sandbox import DockerSandboxFactory
 
 _SMOKE_DATA = os.path.join(os.path.dirname(__file__), "data", "r2e_smoke.jsonl")
 
@@ -34,7 +34,7 @@ async def _main() -> int:
     sample = next(iter(ds))
     print(f"instance: {sample.instance_id}  image: {sample.image}")
 
-    factory = SandboxFactory(SandboxFactory.Config(runtime="podman"))
+    factory = DockerSandboxFactory(DockerSandboxFactory.Config(runtime="podman"))
     print("provisioning sandbox (first-use image pull can take a while) ...")
     sandbox = await factory.provision(image=sample.image)
     try:

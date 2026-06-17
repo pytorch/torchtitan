@@ -34,7 +34,11 @@ from torchtitan.experiments.rl.environment import (
 )
 from torchtitan.experiments.rl.examples.swe import grading
 from torchtitan.experiments.rl.examples.swe.data import R2EGymSample
-from torchtitan.experiments.rl.examples.swe.sandbox import Sandbox, SandboxFactory
+from torchtitan.experiments.rl.sandbox import (
+    DockerSandboxFactory,
+    Sandbox,
+    SandboxFactory,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +103,11 @@ class SweEnv(MessageEnv):
 
     @dataclass(kw_only=True, slots=True)
     class Config(MessageEnv.Config):
-        sandbox: SandboxFactory.Config = field(default_factory=SandboxFactory.Config)
-        """Backend selection for the work/eval sandbox."""
+        sandbox: SandboxFactory.Config = field(
+            default_factory=DockerSandboxFactory.Config
+        )
+        """Backend for the work/eval sandbox; default = docker/podman. Swap the
+        concrete ``SandboxFactory.Config`` subclass to change backend."""
 
         max_turns: int = 30
         """Self-imposed cap on assistant turns. On reaching it the env grades and

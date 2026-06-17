@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from torchtitan.experiments.rl.examples.swe.data import R2EGymSample
-    from torchtitan.experiments.rl.examples.swe.sandbox import Sandbox
+    from torchtitan.experiments.rl.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
 

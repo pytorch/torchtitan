@@ -8,19 +8,11 @@ from torchtitan.experiments.rl.examples.swe.data import R2EGymDataset, R2EGymSam
 from torchtitan.experiments.rl.examples.swe.env import SweEnv
 from torchtitan.experiments.rl.examples.swe.rollouter import SweRollouter
 from torchtitan.experiments.rl.examples.swe.rubric import RewardR2EGym
-from torchtitan.experiments.rl.examples.swe.sandbox import (
-    ExecResult,
-    Sandbox,
-    SandboxFactory,
-)
 
 __all__ = [
-    "ExecResult",
     "R2EGymDataset",
     "R2EGymSample",
     "RewardR2EGym",
-    "Sandbox",
-    "SandboxFactory",
     "SweEnv",
     "SweRollouter",
 ]
