@@ -5,10 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import operator
+from unittest.mock import patch
 
 import torch
+from torch._inductor.fx_passes.fuse_regions import FUSE_REGION
 from torch.testing._internal.common_utils import TestCase
 
+from torchtitan.experiments.graph_trainer.inductor_passes import (
+    full_inductor_compilation_pass,
+)
 from torchtitan.experiments.graph_trainer.performance_passes import (
     annotate_rmsnorm_for_regional_inductor_pass,
 )
@@ -118,6 +123,36 @@ class TestAnnotateRMSNormForRegionalInductorPass(TestCase):
             annotation = node.meta.get("custom", {}).get("compile_with_inductor")
             if annotation is not None:
                 self.assertEqual(annotation["inductor_configs"], config)
+
+
+class TestFullInductorCompilationPass(TestCase):
+    def test_preserves_fuse_region_metadata(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        add = graph.call_function(torch.ops.aten.add.Tensor, args=(x, x))
+        graph.output(add)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        add.meta["custom"] = {FUSE_REGION: "source_region"}
+
+        with (
+            patch(
+                "torchtitan.experiments.graph_trainer.cudagraph.is_cudagraph_compatible",
+                return_value=True,
+            ),
+            patch(
+                "torchtitan.experiments.graph_trainer.inductor_passes.regional_inductor_pass",
+                side_effect=lambda gm, example_inputs: gm,
+            ),
+        ):
+            result = full_inductor_compilation_pass(gm, ())
+
+        annotation = add.meta["custom"]["compile_with_inductor"]
+        self.assertEqual(annotation[FUSE_REGION], "source_region")
+        self.assertEqual(
+            annotation["inductor_configs"],
+            {"size_threshold_for_succ_based_strategy": 1},
+        )
+        self.assertTrue(result.meta["cudagraph_compatible"])
 
 
 if __name__ == "__main__":

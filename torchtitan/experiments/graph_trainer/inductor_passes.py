@@ -14,6 +14,7 @@ regional_inductor.
 from __future__ import annotations
 
 import torch
+from torch._inductor.fx_passes.fuse_regions import FUSE_REGION
 from torch.fx.passes.regional_inductor import regional_inductor
 
 from torchtitan.tools.logging import logger
@@ -212,6 +213,20 @@ def _migrate_cpu_get_attrs_to_cuda(gm: torch.fx.GraphModule) -> None:
                 _assign_attr(attr.cuda(), module, node.target)
 
 
+def _strip_nested_fuse_region_metadata(gm: torch.fx.GraphModule) -> None:
+    for module in gm.modules():
+        if module is gm or not isinstance(module, torch.fx.GraphModule):
+            continue
+        for node in module.graph.nodes:
+            custom = node.meta.get("custom")
+            if not isinstance(custom, dict):
+                continue
+            custom.pop(FUSE_REGION, None)
+            compile_with_inductor = custom.get("compile_with_inductor")
+            if isinstance(compile_with_inductor, dict):
+                compile_with_inductor.pop(FUSE_REGION, None)
+
+
 def full_inductor_compilation_pass(
     gm: torch.fx.GraphModule, example_inputs: tuple
 ) -> torch.fx.GraphModule:
@@ -243,6 +258,12 @@ def full_inductor_compilation_pass(
         gm, skip_flex_attention_check=True
     )
 
+    full_inductor_configs = {
+        # Keep large fuse-region boundary buffers near their next consumer.
+        "size_threshold_for_succ_based_strategy": 1,
+    }
+
+    _strip_nested_fuse_region_metadata(gm)
     _migrate_cpu_get_attrs_to_cuda(gm)
     for module in gm.modules():
         if not isinstance(module, torch.fx.GraphModule):
@@ -250,13 +271,13 @@ def full_inductor_compilation_pass(
         for node in module.graph.nodes:
             if node.op in ("placeholder", "output"):
                 continue
-            node.meta.setdefault("custom", {}).setdefault(
-                "compile_with_inductor", {"inductor_configs": {}}
-            )
-    # AOT autograd (via ``standalone_compile``) reorders the gm and breaks
-    # fwd/bwd interleaving, blowing up the baseline schedule. Re-enable
-    # Inductor's reorder pass (disabled globally in ``compile.py``) to fix.
-    with ic.patch(reorder_for_peak_memory=True):
+            custom = node.meta.setdefault("custom", {})
+            compile_annotation = {"inductor_configs": full_inductor_configs}
+            region = custom.get(FUSE_REGION)
+            if isinstance(region, str):
+                compile_annotation[FUSE_REGION] = region
+            custom["compile_with_inductor"] = compile_annotation
+    with ic.patch(full_inductor_configs):
         result = regional_inductor_pass(gm, example_inputs)
 
     # Carry the pre-collapse cudagraph verdict forward via gm.meta. The
