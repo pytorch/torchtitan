@@ -75,17 +75,12 @@ def _shared_expert_colwise_config(enable_ep: bool, enable_sp: bool) -> ShardingC
     to Replicate for the column-sharded matmul; output is Shard(2)
     (feature dim for 3-D activations from MoE).
     """
-    input_layout = (
-        dense_sequence_parallel_placement()
-        if enable_ep and enable_sp
-        else dense_activation_placement(tp=spmd.R)
-    )
     return ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.S(0)),
             "bias": dense_param_placement(tp=spmd.S(0)),
         },
-        in_src_shardings={"input": input_layout},
+        in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
         in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
         out_dst_shardings=dense_activation_placement(tp=spmd.S(2)),
     )

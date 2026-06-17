@@ -114,11 +114,10 @@ def norm_config(*, enable_sp: bool) -> ShardingConfig:
 def pre_lm_head_norm_config(*, enable_sp: bool) -> ShardingConfig:
     """Root decoder norm sharding before ``lm_head`` / chunked CE loss.
 
-    With sequence parallelism, decoder blocks emit sequence-sharded hidden
-    states. ``ChunkedCELoss`` chunks those hidden states and applies
-    ``lm_head`` inside the loss, so this root norm is the last clean module
-    boundary to all-gather the TP sequence shard back to replicated hidden
-    states before chunking starts.
+    Decoder blocks emit sequence-sharded hidden states when sequence
+    parallelism is enabled. The root norm is the last clean module boundary to
+    all-gather the TP sequence shard back to replicated hidden states before
+    either the model forward or ``ChunkedCELoss`` applies ``lm_head``.
     """
     activation = (
         dense_sequence_parallel_placement()

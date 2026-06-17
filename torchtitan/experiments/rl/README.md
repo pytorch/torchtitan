@@ -74,7 +74,7 @@ python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-1.7B --local_dir torch
 
 7. Run simple GRPO RL loop to learn sum digits task. This also serves as an end-to-end smoke test that your environment is set up correctly.
 ```bash
-python -m torchtitan.experiments.rl.train --module rl --config rl_grpo_qwen3_0_6b_varlen
+python -m torchtitan.experiments.rl.train --module alphabet_sort --config rl_grpo_qwen3_0_6b_varlen
 ```
 
 **NOTE:** If you downloaded your HF model to a different path than the one in step 4, specify it in your command with `--hf_assets_path=<path_to_model_checkpoint>`.
@@ -104,7 +104,7 @@ If you want to run true on-policy mode in TorchTitan RL and debug generator/trai
 Now we only support logprob bitwise parity when trainer and generator are under the same parallelism.
 Example:
 ```bash
-python -m torchtitan.experiments.rl.train --module rl --config rl_grpo_qwen3_0_6b_varlen_batch_invariant
+python -m torchtitan.experiments.rl.train --module alphabet_sort --config rl_grpo_qwen3_0_6b_varlen_batch_invariant
 ```
 
 This config sets `DebugConfig(batch_invariant=True, deterministic=True)` and `training.dtype="bfloat16"` (required so the trainer computes in the same precision as the generator, as a limitation because TP only doesn't naturally support mixed precision training).
