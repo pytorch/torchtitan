@@ -130,6 +130,9 @@ class ParallelismConfig:
     tensor_parallel_degree: int = 1
     """Tensor Parallelism degree. 1 means disabled."""
 
+    disable_loss_parallel: bool = False
+    """Whether to apply loss parallel when sequence parallel is enabled"""
+
     enable_async_tensor_parallel: bool = False
     """Whether to apply async tensor parallel (currently only effective when compile is enabled)"""
 

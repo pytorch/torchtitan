@@ -41,7 +41,7 @@ _GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
 def set_deepseek_v3_sharding_config(
     config: "DeepSeekV3Model.Config",
     *,
-    is_inference: bool,
+    tp_gather_logits: bool,
     enable_sp: bool,
     enable_ep: bool,
 ) -> None:
@@ -57,7 +57,7 @@ def set_deepseek_v3_sharding_config(
     """
 
     set_decoder_sharding_config(
-        config, is_inference=is_inference, enable_sp=enable_sp
+        config, tp_gather_logits=tp_gather_logits, enable_sp=enable_sp
     )
     for layer_cfg in config.layers:
         _set_deepseek_v3_layer_sharding(

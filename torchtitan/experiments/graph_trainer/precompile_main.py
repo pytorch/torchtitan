@@ -20,6 +20,7 @@ Usage (aot_fx_trace mode):
         --compile.precompile_artifact_dir /tmp/fx_trace_artifacts
 """
 
+import contextlib
 from typing import Any, cast
 
 import torch
@@ -232,15 +233,31 @@ def _precompile_aot_fx_trace(
             "Set --parallelism.context_parallel_degree 1."
         )
 
+    # Enable loss_parallel when TP is active and loss_parallel is not
+    # disabled. This matches the training path which wraps tracing +
+    # execution inside train_context() → loss_parallel(). Without it,
+    # cross_entropy fails with "mixed torch.Tensor and DTensor" because
+    # the TP-parallelized model outputs Shard'd DTensors but labels
+    # remain plain tensors.
+    loss_parallel_enabled = (
+        parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
+    )
+    loss_parallel_ctx = (
+        torch.distributed.tensor.parallel.loss_parallel()
+        if loss_parallel_enabled
+        else contextlib.nullcontext()
+    )
+
     maybe_register_blockmask_pytree_node()
 
     logger.info("Tracing fwd+loss+bwd via make_fx...")
-    traced_result = minimal_fx_tracer(fwd_bwd_fn, module=model)(
-        dummy_inputs,
-        dummy_labels,
-        dummy_global_valid_tokens,
-        extra_kwargs,
-    )
+    with loss_parallel_ctx:
+        traced_result = minimal_fx_tracer(fwd_bwd_fn, module=model)(
+            dummy_inputs,
+            dummy_labels,
+            dummy_global_valid_tokens,
+            extra_kwargs,
+        )
     logger.info(
         f"Traced graph has {len(list(traced_result.gm.graph.nodes))} nodes, "
         f"{len(traced_result.state_fqns)} state entries"
