@@ -105,7 +105,9 @@ def _get_lora_cls(parent_cls: type) -> type:
     return LoRALinear
 
 
-def _get_frozen_config_cls(config_cls: type) -> type:
+def _get_frozen_config_cls(
+    config_cls: type[Module.Config],
+) -> type[Module.Config]:
     """Get or create a config subclass that freezes direct build parameters."""
     if getattr(config_cls, "_lora_frozen_config", False):
         return config_cls
