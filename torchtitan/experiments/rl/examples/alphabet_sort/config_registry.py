@@ -37,7 +37,7 @@ from torchtitan.experiments.rl.generator_router import (
     StickySessionRoutingStrategy,
 )
 from torchtitan.experiments.rl.losses import GRPOLoss
-from torchtitan.experiments.rl.models.casted_linear import LMHeadCastConverter
+from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.trainer import RLTrainer
@@ -48,7 +48,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
 
 
-def _rl_model_registry(
+def _qwen3_rl_model_registry(
     flavor: str,
     *,
     attn_backend: str,
@@ -68,7 +68,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B (6 GPUs: 4 gen + 2 train)."""
     group_size = 8
     return RLTrainer.Config(
-        model_spec=_rl_model_registry("0.6B", attn_backend="varlen"),
+        model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
         num_groups_per_rollout_batch=5,
@@ -129,7 +129,7 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B with flex attention (4 GPUs: 2 gen + 2 train)."""
     group_size = 8
     return RLTrainer.Config(
-        model_spec=_rl_model_registry("0.6B", attn_backend="flex"),
+        model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="flex"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
         num_groups_per_rollout_batch=5,
@@ -186,7 +186,7 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLTrainer.Config:
     for bitwise-identical numerics between trainer and generator (4 GPUs: 2 gen + 2 train).
     """
     config = rl_grpo_qwen3_0_6b_flex()
-    config.model_spec = _rl_model_registry(
+    config.model_spec = _qwen3_rl_model_registry(
         "0.6B",
         attn_backend="flex",
         converters=[BatchInvariantFlexConverter.Config()],
@@ -212,7 +212,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-1.7B (6 GPUs: 4 gen + 2 train)."""
     group_size = 8
     return RLTrainer.Config(
-        model_spec=_rl_model_registry("1.7B", attn_backend="varlen"),
+        model_spec=_qwen3_rl_model_registry("1.7B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         num_steps=10,
         num_groups_per_rollout_batch=5,
@@ -268,7 +268,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-14B (16 GPUs: 8 gen + 8 train)."""
     group_size = 8
     return RLTrainer.Config(
-        model_spec=_rl_model_registry("14B", attn_backend="varlen"),
+        model_spec=_qwen3_rl_model_registry("14B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-14B",
         num_steps=10,
         num_groups_per_rollout_batch=5,
@@ -527,7 +527,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     group_size = 8
     return RLTrainer.Config(
-        model_spec=_rl_model_registry("0.6B", attn_backend="varlen"),
+        model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=5,
         num_groups_per_rollout_batch=5,
