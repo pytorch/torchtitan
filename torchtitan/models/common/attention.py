@@ -221,7 +221,12 @@ class FlexAttention(Module):
         return_aux: AuxRequest,
         kernel_options: dict,
     ):
-        """Run compiled FlexAttention outside SPMD typechecking, and propagate types."""
+        """Run compiled FlexAttention outside SPMD typechecking.
+
+        Compiled regions are not currently compatible with SPMD typechecking,
+        so propagate types at the boundary instead of typechecking into Flex.
+        TODO(pianpwk): Move flex-typechecking into pytorch/spmd_types.
+        """
         with spmd.no_typecheck():
             out, aux = FlexAttention._compiled_flex_attn(
                 q,
@@ -632,7 +637,7 @@ class QKVLinear(BaseQKVLinear):
         # Use -1 instead of n_heads (or n_kv_heads) to infer the
         # actual local heads from sizes as TP may have sharded them.
 
-        def local_head_split(x):
+        def local_qkv_head_split(x):
             # Drop into local region, we can't propagate S(2) -> qkv head unflatten.
             # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
             with spmd.local():
@@ -643,7 +648,11 @@ class QKVLinear(BaseQKVLinear):
                     )
             return x_
 
-        xq, xk, xv = local_head_split(xq), local_head_split(xk), local_head_split(xv)
+        xq, xk, xv = (
+            local_qkv_head_split(xq),
+            local_qkv_head_split(xk),
+            local_qkv_head_split(xv),
+        )
         return xq, xk, xv
 
 
