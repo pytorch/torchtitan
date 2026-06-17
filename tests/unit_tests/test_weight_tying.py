@@ -81,8 +81,7 @@ class TestLlama3WeightTying(unittest.TestCase):
         config = _make_config(enable_weight_tying=True)
 
         runtime_config = SimpleNamespace(
-            parallelism=ParallelismConfig(pipeline_parallel_degree=2),
-            is_inference=False,
+            parallelism=ParallelismConfig(pipeline_parallel_degree=2)
         )
 
         with self.assertRaises(NotImplementedError):
@@ -93,8 +92,7 @@ class TestLlama3WeightTying(unittest.TestCase):
         config = _make_config(enable_weight_tying=False)
 
         runtime_config = SimpleNamespace(
-            parallelism=ParallelismConfig(pipeline_parallel_degree=2),
-            is_inference=False,
+            parallelism=ParallelismConfig(pipeline_parallel_degree=2)
         )
 
         # Should not raise
