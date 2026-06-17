@@ -82,7 +82,7 @@ class PerHostProvisioner:
 @dataclass
 class HostMeshes:
     trainer: HostMesh
-    generator: HostMesh
+    generators: list[HostMesh]
     gpus_per_node: int
 
 
@@ -103,9 +103,32 @@ def _compute_generator_world_size(p: InferenceParallelismConfig) -> int:
     return p.data_parallel_degree * p.tensor_parallel_degree
 
 
+def _spawn_proc_mesh(
+    host_mesh: HostMesh,
+    role_world_size: int,
+    gpus_per_node: int,
+    *,
+    role: str,
+) -> ProcMesh:
+    """Spawn one role's proc mesh on ``host_mesh``, splitting ``role_world_size``
+    evenly across the mesh's hosts.
+    """
+    nodes = len(host_mesh)
+    assert role_world_size % nodes == 0, (
+        f"{role} world size ({role_world_size}) must be evenly divisible by its "
+        f"host count ({nodes})"
+    )
+    role_gpus_per_node = role_world_size // nodes
+    provisioner = PerHostProvisioner(total_gpus=gpus_per_node)
+    return host_mesh.spawn_procs(
+        per_host={"gpus": role_gpus_per_node},
+        bootstrap=provisioner.allocate(role_gpus_per_node),
+    )
+
+
 def spawn_proc_mesh(
     trainer_world_size: int,
-    generator_world_size: int,
+    per_generator_world_size: int,
     host_meshes: HostMeshes | None = None,
     *,
     num_generators: int = 1,
@@ -114,7 +137,7 @@ def spawn_proc_mesh(
 
     Args:
         trainer_world_size: Number of GPU procs to spawn for the trainer.
-        generator_world_size: Number of GPU procs to spawn for each generator.
+        per_generator_world_size: Number of GPU procs to spawn for each generator.
         host_meshes: Caller-provided trainer/generator host meshes. When
             provided, each role is spawned on its provided host mesh. None means
             both roles are spawned on ``this_host()`` by using non-overlapping
@@ -124,55 +147,35 @@ def spawn_proc_mesh(
     Returns:
         The ``(trainer_mesh, generator_meshes)`` proc meshes.
     """
-    total_generator_gpus = num_generators * generator_world_size
+    total_generator_gpus = num_generators * per_generator_world_size
     total_gpus = trainer_world_size + total_generator_gpus
     logger.info(
-        f"{num_generators} generator(s) * {generator_world_size} GPUs + "
+        f"{num_generators} generator(s) * {per_generator_world_size} GPUs + "
         f"{trainer_world_size} trainer GPUs = {total_gpus} total"
     )
 
     if host_meshes is not None:
-        if num_generators > 1:
-            raise NotImplementedError(
-                "multi-host multi-generator topology is not yet supported"
-            )
-
         trainer_host_mesh = host_meshes.trainer
-        generator_host_mesh = host_meshes.generator
+        generator_host_meshes = host_meshes.generators
         gpus_per_node = host_meshes.gpus_per_node
 
-        trainer_nodes = trainer_host_mesh.sizes["hosts"]
-        generator_nodes = generator_host_mesh.sizes["hosts"]
-        # Validate that world sizes are evenly divisible by node counts
-        assert trainer_world_size % trainer_nodes == 0, (
-            f"trainer_world_size ({trainer_world_size}) must be "
-            f"evenly divisible by trainer_nodes ({trainer_nodes})"
-        )
-        assert generator_world_size % generator_nodes == 0, (
-            f"generator_world_size ({generator_world_size}) must be "
-            f"evenly divisible by generator_nodes ({generator_nodes})"
+        assert len(generator_host_meshes) == num_generators, (
+            f"expected {num_generators} generator host mesh(es), "
+            f"got {len(generator_host_meshes)}"
         )
 
-        # Compute GPUs per node for each role based on the world size and
-        # number of nodes allocated to that role
-        trainer_gpus_per_node = trainer_world_size // trainer_nodes
-        generator_gpus_per_node = generator_world_size // generator_nodes
-
-        # Use PerHostProvisioner to set CUDA_VISIBLE_DEVICES so each role
-        # only sees its own GPUs and doesn't conflict with other
-        # processes on the node
-        trainer_provisioner = PerHostProvisioner(total_gpus=gpus_per_node)
-        generator_provisioner = PerHostProvisioner(total_gpus=gpus_per_node)
-
-        trainer_mesh = trainer_host_mesh.spawn_procs(
-            per_host={"gpus": trainer_gpus_per_node},
-            bootstrap=trainer_provisioner.allocate(trainer_gpus_per_node),
+        trainer_mesh = _spawn_proc_mesh(
+            trainer_host_mesh, trainer_world_size, gpus_per_node, role="trainer"
         )
-        generator_mesh = generator_host_mesh.spawn_procs(
-            per_host={"gpus": generator_gpus_per_node},
-            bootstrap=generator_provisioner.allocate(generator_gpus_per_node),
-        )
-        generator_meshes = [generator_mesh]
+        generator_meshes = [
+            _spawn_proc_mesh(
+                gen_host_mesh,
+                per_generator_world_size,
+                gpus_per_node,
+                role="generator",
+            )
+            for gen_host_mesh in generator_host_meshes
+        ]
     else:
         # Single-node mode: partition GPUs on this_host() via
         # CUDA_VISIBLE_DEVICES
@@ -184,8 +187,8 @@ def spawn_proc_mesh(
         )
         generator_meshes = [
             host_mesh.spawn_procs(
-                per_host={"gpus": generator_world_size},
-                bootstrap=provisioner.allocate(generator_world_size),
+                per_host={"gpus": per_generator_world_size},
+                bootstrap=provisioner.allocate(per_generator_world_size),
             )
             for _ in range(num_generators)
         ]
@@ -207,12 +210,12 @@ async def main():
     rl_trainer: RLTrainer = config.build()
     try:
         trainer_world_size = _compute_trainer_world_size(config.trainer.parallelism)
-        generator_world_size = _compute_generator_world_size(
+        per_generator_world_size = _compute_generator_world_size(
             config.generator.parallelism
         )
         trainer_mesh, generator_meshes = spawn_proc_mesh(
             trainer_world_size,
-            generator_world_size,
+            per_generator_world_size,
             host_meshes=None,
             num_generators=config.num_generators,
         )
