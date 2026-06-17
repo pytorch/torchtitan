@@ -48,6 +48,7 @@ def _lora_adapter_sharding(
 
 
 _lora_class_cache: dict[type, type] = {}
+_frozen_config_class_cache: dict[type, type] = {}
 
 
 def _get_lora_cls(parent_cls: type) -> type:
@@ -104,40 +105,32 @@ def _get_lora_cls(parent_cls: type) -> type:
     return LoRALinear
 
 
-@dataclass(kw_only=True, slots=True)
-class FrozenConfig(Module.Config):
-    """Config wrapper that freezes direct parameters at build time.
+def _get_frozen_config_cls(config_cls: type) -> type:
+    """Get or create a config subclass that freezes direct build parameters."""
+    if getattr(config_cls, "_lora_frozen_config", False):
+        return config_cls
+    if config_cls in _frozen_config_class_cache:
+        return _frozen_config_class_cache[config_cls]
 
-    Child modules are frozen by their own configs so wrapping a composite module
-    does not recursively freeze nested LoRA adapters.
-    """
+    class FrozenConfig(config_cls):  # type: ignore[valid-type, misc]
+        _lora_frozen_config = True
 
-    inner: Module.Config
+        def build(self, **kwargs):
+            instance = config_cls.build(self, **kwargs)
+            for param in instance.parameters(recurse=False):
+                param.requires_grad_(False)
+            return instance
 
-    def __getattribute__(self, name: str):
-        if name == "__class__":
-            inner = object.__getattribute__(self, "inner")
-            return inner.__class__
-        return object.__getattribute__(self, name)
+    FrozenConfig.__name__ = f"Frozen{config_cls.__name__}"
+    FrozenConfig.__qualname__ = f"Frozen{config_cls.__qualname__}"
+    _frozen_config_class_cache[config_cls] = FrozenConfig
+    return FrozenConfig
 
-    def __getattr__(self, name: str):
-        try:
-            inner = object.__getattribute__(self, "inner")
-        except AttributeError:
-            raise AttributeError(name) from None
-        return getattr(inner, name)
 
-    def __setattr__(self, name: str, value) -> None:
-        if name in type(self).__slots__:
-            object.__setattr__(self, name, value)
-        else:
-            setattr(self.inner, name, value)
-
-    def build(self, **kwargs):
-        instance = self.inner.build(**kwargs)
-        for param in instance.parameters(recurse=False):
-            param.requires_grad_(False)
-        return instance
+def _make_frozen_config(cfg: Module.Config) -> Module.Config:
+    """Create a frozen config that still passes checks for the original type."""
+    frozen_cls = _get_frozen_config_cls(type(cfg))
+    return frozen_cls(**{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init})
 
 
 class LoRAConverter(ModelConfigConverter):
@@ -145,8 +138,8 @@ class LoRAConverter(ModelConfigConverter):
 
     Operates on the model config tree: target Linear configs are replaced
     with ``LoRALinear.Config`` (which builds a LoRA subclass with frozen base
-    and trainable adapters). Non-target Linear modules are wrapped with
-    ``FrozenConfig``.
+    and trainable adapters). Non-target modules are replaced with dynamic
+    frozen config subclasses that freeze direct parameters at build time.
 
     When ``target_modules`` is None (default), every ``Linear.Config`` is
     converted.  When specified, only configs whose FQN's last segment matches
@@ -196,18 +189,17 @@ class LoRAConverter(ModelConfigConverter):
         )
 
     def convert(self, model_config: Module.Config) -> Module.Config:
-        """Walk the module config tree once.
+        """Walk the module config tree from leaves to root.
 
         Target Linear modules get their config replaced with
-        ``LoRALinear.Config``. All other module configs are wrapped with
-        ``FrozenConfig`` so LoRA training updates only adapter parameters.
+        ``LoRALinear.Config``. All other module configs become frozen config
+        subclasses so LoRA training updates only adapter parameters.
         """
         converted_root = model_config
         matched = set()
+        configs = list(model_config.traverse(Module.Config, recurse=True))
 
-        for fqn, cfg, parent, attr in model_config.traverse(
-            Module.Config, recurse=True
-        ):
+        for fqn, cfg, parent, attr in reversed(configs):
             assert isinstance(cfg, Module.Config)
             last_segment = fqn.rsplit(".", 1)[-1]
             is_target = isinstance(cfg, Linear.Config) and (
@@ -218,7 +210,7 @@ class LoRAConverter(ModelConfigConverter):
                 new_cfg = self._make_lora_config(cfg)
                 matched.add(last_segment)
             else:
-                new_cfg = FrozenConfig(inner=cfg)
+                new_cfg = _make_frozen_config(cfg)
 
             if parent is None:
                 converted_root = new_cfg

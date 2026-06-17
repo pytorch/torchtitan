@@ -11,6 +11,7 @@ import torch
 
 from torchtitan.components.lora import _get_lora_cls, LoRAConverter
 from torchtitan.components.quantization import Float8LinearConverter
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.llama3 import model_registry
 from torchtitan.models.utils import validate_converter_order
@@ -196,3 +197,33 @@ def test_lora_freezes_direct_params_on_root_module():
         if p.requires_grad and "lora_a" not in n and "lora_b" not in n
     }
     assert non_lora_trainable == set()
+
+
+def test_lora_preserves_frozen_config_type_checks():
+    """Frozen non-LoRA configs still satisfy checks for their original type."""
+
+    class AttentionHolder(Module):
+        @dataclass(kw_only=True, slots=True)
+        class Config(Module.Config):
+            inner_attention: Module.Config
+            proj: Linear.Config
+
+        def __init__(self, config: Config) -> None:
+            super().__init__()
+            self.inner_attention = config.inner_attention.build()
+            self.proj = config.proj.build()
+
+    model_config = AttentionHolder.Config(
+        inner_attention=FlexAttention.Config(),
+        proj=Linear.Config(in_features=4, out_features=4),
+    )
+
+    model_config = LoRAConverter(
+        LoRAConverter.Config(rank=2, alpha=4.0, target_modules=["proj"])
+    ).convert(model_config)
+
+    assert isinstance(model_config.inner_attention, FlexAttention.Config)
+    model = model_config.build()
+    assert not model.proj.weight.requires_grad
+    assert model.proj.lora_a.weight.requires_grad
+    assert model.proj.lora_b.weight.requires_grad
