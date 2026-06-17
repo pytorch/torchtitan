@@ -492,10 +492,9 @@ class ChunkedCELoss(BaseLoss):
         fires per-chunk, and FSDP2 accumulates the sharded gradients correctly.
 
     TP / SP composability:
-        Hidden states are redistributed to ``Replicate()`` on the TP mesh
-        before chunking, so each chunk enters the lm_head as ``Replicate()``
-        input regardless of whether SP is enabled. With SP, this is an
-        all-gather from ``Shard(1)``; without SP, it's a no-op.
+        The root decoder norm emits hidden states that are replicated on the
+        TP axis before chunking, so each chunk enters the lm_head as
+        ``Replicate()`` input regardless of whether SP is enabled.
 
         When loss parallel is applied, each TP rank
         computes partial CE on its ``V/tp`` slice, with an internal

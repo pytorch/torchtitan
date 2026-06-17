@@ -41,6 +41,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         hf_assets_path: str = "./tests/assets/tokenizer"
         dump_folder: str = "./outputs"
         model_spec: ModelSpec = field(default_factory=ModelSpec)
+        is_inference: bool = False
         optimizer: OptimizersContainer.Config = field(
             default_factory=OptimizersContainer.Config
         )
@@ -284,7 +285,6 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         self.train_context = dist_utils.get_train_context(
-            enable_loss_parallel=config.parallelism.tensor_parallel_degree > 1,
             parallel_dims=parallel_dims,
         )
 
