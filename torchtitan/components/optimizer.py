@@ -8,7 +8,7 @@ import re
 from collections import defaultdict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any, Generic, Literal, overload, TypeVar
+from typing import Any, Generic, Literal, Protocol, cast, overload, TypeVar
 
 import torch
 import torch.distributed.tensor
@@ -67,6 +67,12 @@ class ParamGroupConfig:
 
 
 T = TypeVar("T", bound=Optimizer)
+
+
+class _MoELike(Protocol):
+    load_balance_coeff: float | None
+    tokens_per_expert_E: torch.Tensor
+    expert_bias_E: torch.Tensor
 
 
 class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
@@ -393,19 +399,20 @@ def register_moe_load_balancing_hook(
         parallel_dims: Parallel dimensions for distributed communication.
     """
 
-    def _iter_moe_layers(model_parts: list[nn.Module]) -> Iterator[nn.Module]:
+    def _iter_moe_layers(
+        model_parts: list[nn.Module],
+    ) -> Iterator[tuple[nn.Module, _MoELike]]:
         for model_part in model_parts:
             layers = model_part.get_submodule("layers")
             assert isinstance(layers, nn.ModuleDict)
             for transformer_block in layers.values():
                 if getattr(transformer_block, "moe_enabled", False):
-                    yield transformer_block
+                    yield transformer_block, cast(_MoELike, transformer_block.moe)
 
     def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
         return any(
-            # pyrefly: ignore [missing-attribute]
-            transformer_block.moe.load_balance_coeff is not None
-            for transformer_block in _iter_moe_layers(model_parts)
+            moe.load_balance_coeff is not None
+            for _transformer_block, moe in _iter_moe_layers(model_parts)
         )
 
     # for MoE auxiliary-loss-free load balancing
@@ -420,12 +427,10 @@ def register_moe_load_balancing_hook(
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
         tokens_per_expert_E_list = []
-        for transformer_block in _iter_moe_layers(model_parts):
-            # pyrefly: ignore [missing-attribute]
-            if transformer_block.moe.load_balance_coeff is None:
+        for transformer_block, moe in _iter_moe_layers(model_parts):
+            if moe.load_balance_coeff is None:
                 continue
-            # pyrefly: ignore [missing-attribute]
-            tokens_per_expert_E = transformer_block.moe.tokens_per_expert_E
+            tokens_per_expert_E = moe.tokens_per_expert_E
             if _is_recomputation_enabled(transformer_block):
                 # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
                 # This does not affect to expert choice, but affects the experts usage metrics.
@@ -488,7 +493,7 @@ def register_moe_load_balancing_hook(
                 for transformer_block in layers.values():
                     if not transformer_block.moe_enabled:
                         continue
-                    moe = transformer_block.moe
+                    moe = cast(_MoELike, transformer_block.moe)
                     if moe.load_balance_coeff is None:
                         continue
 
@@ -499,16 +504,13 @@ def register_moe_load_balancing_hook(
 
                     # update the expert bias
                     # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
-                    # pyrefly: ignore [missing-attribute]
                     expert_bias_delta_E = moe.load_balance_coeff * torch.sign(
                         tokens_per_expert_E.mean() - tokens_per_expert_E
                     )
                     expert_bias_delta_E = (
                         expert_bias_delta_E - expert_bias_delta_E.mean()
                     )
-                    # pyrefly: ignore [missing-attribute]
                     moe.expert_bias_E.add_(expert_bias_delta_E)
-                    # pyrefly: ignore [missing-attribute]
                     moe.tokens_per_expert_E.zero_()
 
     if _should_register_moe_balancing_hook(model_parts):
