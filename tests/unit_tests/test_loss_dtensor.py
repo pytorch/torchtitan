@@ -84,7 +84,7 @@ class TestCrossEntropyDTensor(DTensorTestBase):
         )
 
     @with_comms
-    def test_legacy_tp_disable_loss_parallel(self):
+    def test_legacy_tp_replicated_logits(self):
         self._run_one(full_dtensor=False, tp_shard_v=False)
 
     @with_comms
@@ -92,7 +92,7 @@ class TestCrossEntropyDTensor(DTensorTestBase):
         self._run_one(full_dtensor=False, tp_shard_v=True)
 
     @with_comms
-    def test_full_dtensor_disable_loss_parallel(self):
+    def test_full_dtensor_replicated_logits(self):
         self._run_one(full_dtensor=True, tp_shard_v=False)
 
 

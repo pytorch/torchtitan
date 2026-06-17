@@ -18,11 +18,15 @@ import torch
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
-from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
+from torchtitan.components.loss import (
+    BaseLoss,
+    ChunkedCELoss,
+    CrossEntropyLoss,
+    IGNORE_INDEX,
+)
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
@@ -434,14 +438,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
                 self.model_parts = [model]
 
+        if isinstance(self.loss_fn, (CrossEntropyLoss, ChunkedCELoss)):
+            self.loss_fn.loss_parallel = parallel_dims.tp_enabled
+
         # Set lm_head reference for ChunkedCELoss after model construction.
         # Non-PP: single model part always has lm_head.
         # PP: only the last stage has lm_head; non-last stages skip this.
         if isinstance(self.loss_fn, ChunkedCELoss):
-            self.loss_fn.loss_parallel = (
-                parallel_dims.tp_enabled
-                and not config.parallelism.disable_loss_parallel
-            )
             assert isinstance(self.model_config, Decoder.Config)
             self.loss_fn.global_vocab_size = self.model_config.vocab_size
             if parallel_dims.pp_enabled:
@@ -526,11 +529,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             base_folder=config.dump_folder,
         )
 
-        loss_parallel_enabled = (
-            parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
-        )
         self.train_context = dist_utils.get_train_context(
-            enable_loss_parallel=loss_parallel_enabled,
             parallel_dims=parallel_dims,
             spmd_typechecking=(
                 config.parallelism.spmd_backend == "spmd_types"
@@ -751,16 +750,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             assert len(model_parts) == 1
             with self.train_context():
                 pred = model_parts[0](inputs, **extra_kwargs)
-                # Under non-full_dtensor, labels stay as plain tensors. See
-                # ``cross_entropy_loss`` for why pred must also be plain.
-                # Remove once non-full_dtensor is no longer supported.
-                if (
-                    isinstance(pred, DTensor)
-                    and not isinstance(self.loss_fn, ChunkedCELoss)
-                    and self.config.parallelism.spmd_backend == "default"
-                    and self.config.parallelism.disable_loss_parallel
-                ):
-                    pred = pred.to_local()
                 loss = self.loss_fn(pred, labels, global_valid_tokens)
                 del pred
                 with spmd.no_typecheck():

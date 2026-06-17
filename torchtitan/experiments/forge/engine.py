@@ -13,7 +13,7 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import LossFunction
+from torchtitan.components.loss import CrossEntropyLoss, LossFunction
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
@@ -256,6 +256,9 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             self.model_parts = [model]
 
+        if isinstance(self.loss_fn, CrossEntropyLoss):
+            self.loss_fn.loss_parallel = parallel_dims.tp_enabled
+
         # build optimizer after applying parallelisms to the model
         self.optimizers = config.optimizer.build(
             model_parts=self.model_parts,
@@ -283,11 +286,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             base_folder=config.dump_folder,
         )
 
-        loss_parallel_enabled = (
-            parallel_dims.tp_enabled and not parallelism_config.disable_loss_parallel
-        )
         self.train_context = dist_utils.get_train_context(
-            enable_loss_parallel=loss_parallel_enabled,
             parallel_dims=parallel_dims,
         )
 
