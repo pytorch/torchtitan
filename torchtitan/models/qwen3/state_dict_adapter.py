@@ -31,6 +31,21 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
         self.fuse_qkv = isinstance(
             model_config.layers[0].attention.qkv_linear, FusedQKVLinear.Config
         )
+        # Fused gate+up FFN (the fused_swiglu override's FusedSwiGLU: one ``w13``
+        # param, no ``w1``). It checkpoints in stock w1/w3 layout via a
+        # state_dict post-hook, so from_hf/to_hf map gate/up <-> w1/w3 as usual;
+        # we only merge w1/w3 -> w13 at the END of from_hf because the override's
+        # load pre-hook does NOT fire under the RL DCP load. Duck-typed (no w1
+        # attr) so core does not import the opt-in override.
+        ff0 = next(
+            (
+                layer.feed_forward
+                for layer in model_config.layers
+                if getattr(layer, "feed_forward", None) is not None
+            ),
+            None,
+        )
+        self.fused_swiglu = ff0 is not None and not hasattr(ff0, "w1")
 
         qkv_map: dict[str, str | None]
         if self.fuse_qkv:
@@ -289,5 +304,20 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             raise ValueError(
                 f"Incomplete Q/K/V projections for layers: {list(pending_qkv.keys())}"
             )
+
+        if self.fused_swiglu:
+            # Merge the stock w1/w3 (gate/up) into the single fused w13 param
+            # (hidden, 2, dim): w13[:, 0]=gate, w13[:, 1]=up. The override's
+            # load pre-hook would normally do this, but it does not fire under
+            # the RL DCP load, so do it here.
+            layer_prefixes = {
+                k.rsplit(".feed_forward.w1.weight", 1)[0]
+                for k in state_dict
+                if k.endswith(".feed_forward.w1.weight")
+            }
+            for lp in layer_prefixes:
+                w1 = state_dict.pop(f"{lp}.feed_forward.w1.weight")
+                w3 = state_dict.pop(f"{lp}.feed_forward.w3.weight")
+                state_dict[f"{lp}.feed_forward.w13"] = torch.stack([w1, w3], dim=1)
 
         return state_dict
