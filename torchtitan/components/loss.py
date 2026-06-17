@@ -580,7 +580,11 @@ class ChunkedCELoss(BaseLoss):
             total_loss = hidden_states.new_zeros((), dtype=torch.float32)
             if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
                 # TODO(pianpwk): would be nice if mutate_type accepted multiple axes.
-                for axis_name, dst in {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}.items():
+                for axis_name, dst in {
+                    "dp": spmd.P,
+                    "cp": spmd.P,
+                    "tp": spmd.I,
+                }.items():
                     total_loss = spmd.mutate_type(
                         total_loss, axis_name, src=spmd.R, dst=dst
                     )
@@ -611,7 +615,9 @@ class ChunkedCELoss(BaseLoss):
                 )
                 if global_valid_tokens is not None:
                     chunk_loss = chunk_loss / global_valid_tokens
-                if get_spmd_backend() == "spmd_types":  # V -> P reinterpret, after exiting local region
+                if (
+                    get_spmd_backend() == "spmd_types"
+                ):  # V -> P reinterpret, after exiting local region
                     spmd.assert_type(chunk_loss, {"dp": spmd.P, "cp": spmd.P})
                 total_loss = total_loss + chunk_loss.detach()
 

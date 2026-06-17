@@ -442,6 +442,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 parallel_dims.tp_enabled
                 and not config.parallelism.disable_loss_parallel
             )
+            assert isinstance(self.model_config, Decoder.Config)
             self.loss_fn.global_vocab_size = self.model_config.vocab_size
             if parallel_dims.pp_enabled:
                 if self.pp_has_last_stage:
