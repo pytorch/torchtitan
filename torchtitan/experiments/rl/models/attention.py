@@ -160,9 +160,14 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
 
         if not attn_metadata.causal:
             raise RuntimeError("Non-causal attention not supported yet.")
+
+        # vLLM assigns sliding_window_size = None to (-1, -1) w/ optional causal flag
+        # but varlen only encode with sliding window. so we need to convert vllm (-1, -1) to (-1, 0)
+        # for proper full causal attention instead of bidirectional
         if self.sliding_window == (-1, -1):
             sliding_window_size = (-1, 0)
         else:
+            # by default vLLM sets attention type = DECODER, which will set (W-1, 0)
             sliding_window_size = self.sliding_window
 
         assert self.alibi_slopes is None, "Alibi slopes not supported yet."
@@ -214,8 +219,7 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             return result
 
         out, lse = result
-        lse = lse.transpose(0, 1)
-        out = self.out_transform(out, lse)
+        out = self.out_transform(out, lse.transpose(0, 1))
         output[:num_actual_tokens].copy_(out)
         return output[:num_actual_tokens]
 

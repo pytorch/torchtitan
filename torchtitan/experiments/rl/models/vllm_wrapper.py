@@ -115,7 +115,6 @@ class VLLMModelWrapper(Module):
         compile_config: CompileConfig,
         checkpoint_config: CheckpointManager.Config,
         vllm_config: VllmConfig,
-        sliding_window: int | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -240,18 +239,23 @@ class VLLMModelWrapper(Module):
         # TP-sharded.
         self._inject_attention_sinks()
 
+    # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:
         """Give each gpt-oss attention's vLLM backend its sink-rescale hook."""
-        from torchtitan.models.gpt_oss.model import apply_attention_sink
+        from torchtitan.models.gpt_oss.model import (
+            apply_attention_sink_rescale,
+            Attention,
+        )
 
         for module in self.model.modules():
-            sinks = getattr(module, "sinks", None)
-            if sinks is None:
+            if not isinstance(module, Attention):
                 continue
-            local_sinks = sinks.to_local() if isinstance(sinks, DTensor) else sinks
+            sinks = module.sinks
+            local_sinks = sinks._local_tensor if isinstance(sinks, DTensor) else sinks
             module.inner_attention.vllm_attn.impl.out_transform = partial(
-                apply_attention_sink, sinks=local_sinks
+                apply_attention_sink_rescale, sinks=local_sinks
             )
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """vLLM required API.
         Convert input token IDs to embeddings."""

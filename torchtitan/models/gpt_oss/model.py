@@ -12,6 +12,7 @@ import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.nn.attention.flex_attention import and_masks, BlockMask
+
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -23,7 +24,6 @@ from torchtitan.models.common.attention import (
     get_document_mask_mod,
     get_sliding_window_mask_mod,
     VarlenAttention,
-    VarlenMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.nn_modules import Linear
@@ -32,7 +32,7 @@ from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
 
-def apply_attention_sink(
+def apply_attention_sink_rescale(
     out: torch.Tensor, lse: torch.Tensor, sinks: torch.Tensor
 ) -> torch.Tensor:
     """Rescale attention output by the learned per-head sink term."""
@@ -124,7 +124,7 @@ class Attention(BaseAttention):
         sinks = self.sinks
         if isinstance(sinks, DTensor):
             sinks = sinks.to_local(grad_placements=sinks.placements)
-        return apply_attention_sink(out, lse, sinks)
+        return apply_attention_sink_rescale(out, lse, sinks)
 
 
 class GptOssTransformerBlock(TransformerBlock):

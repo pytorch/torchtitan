@@ -73,7 +73,7 @@ def _make_gptoss_attn_config(
     n_heads: int = 64,
     n_kv_heads: int = 8,
     head_dim: int = 64,
-    sliding_window_size: int = 128,
+    sliding_window_size: int | None = None,
     fuse_qkv: bool = False,
     rope: RoPE.Config,
 ) -> Attention.Config:
@@ -237,7 +237,6 @@ def _build_gptoss_layers(
             attention_norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
             ffn_norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
             moe=moe_cfg,
-            use_sliding_attention=(layer_id % 2 == 0),
         )
         layers.append(layer_cfg)
     return layers

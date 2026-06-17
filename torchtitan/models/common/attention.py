@@ -4,6 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# Shape suffix legend
+# (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
+#   B = batch, L = sequence length, D = model dimension,
+#   N = num heads (N is used for both query and kv heads in GQA;
+#       the variable name xq/xk/xv disambiguates),
+#   H = head dimension (per-head dim),
+#   T = packed tokens (B*L, used by VarlenAttention)
+
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple
@@ -98,9 +106,9 @@ class VarlenAttention(Module):
 
     def forward(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        q_BLNH: torch.Tensor,
+        k_BLNH: torch.Tensor,
+        v_BLNH: torch.Tensor,
         *,
         attention_masks: VarlenMetadata,
         scale: float | None = None,
@@ -118,19 +126,20 @@ class VarlenAttention(Module):
         max_q = attention_masks.max_q
         max_k = attention_masks.max_k
 
-        batch_size, seq_len, _, head_dim = q.shape
+        B, L, _, H = q_BLNH.shape
+        T = B * L
 
-        # varlen attention expects (bs*seqlen, n_heads, head_dim)
-        xq_packed = q.reshape(batch_size * seq_len, -1, head_dim)
-        xk_packed = k.reshape(batch_size * seq_len, -1, head_dim)
-        xv_packed = v.reshape(batch_size * seq_len, -1, head_dim)
+        # varlen attention expects (T, N, H)
+        q_TNH = q_BLNH.reshape(T, -1, H)
+        k_TNH = k_BLNH.reshape(T, -1, H)
+        v_TNH = v_BLNH.reshape(T, -1, H)
 
         # Some operators can upcast under AMP, but varlen attention currently only
         # supports bf16/fp16 inputs. If this changes, or fp16 training support
         # is added, this may need to be revisited.
-        xq_packed = xq_packed.to(torch.bfloat16)
-        xk_packed = xk_packed.to(torch.bfloat16)
-        xv_packed = xv_packed.to(torch.bfloat16)
+        q_TNH = q_TNH.to(torch.bfloat16)
+        k_TNH = k_TNH.to(torch.bfloat16)
+        v_TNH = v_TNH.to(torch.bfloat16)
 
         varlen_kwargs: dict[str, Any] = {}
 
@@ -152,9 +161,9 @@ class VarlenAttention(Module):
             varlen_kwargs["return_aux"] = VarlenAuxRequest(lse=True)
 
         result = varlen_attn(
-            xq_packed,
-            xk_packed,
-            xv_packed,
+            q_TNH,
+            k_TNH,
+            v_TNH,
             cu_seq_q,
             cu_seq_k,
             max_q,
@@ -164,31 +173,27 @@ class VarlenAttention(Module):
             **varlen_kwargs,
         )
 
-        # varlen_attn returns the packed output (total_tokens, n_heads, head_dim),
-        # plus the LSE when an out_transform epilogue was requested.
+        # varlen_attn returns the packed output (T, N, H), plus the LSE when an
+        # out_transform epilogue was requested.
         if out_transform is None:
             assert isinstance(result, torch.Tensor)
-            out_packed, lse = result, None
-        else:
-            out_packed, lse = result
+            out_BLNH = result.view(B, L, -1, H).to(q_BLNH.dtype)
+            return out_BLNH
 
-        # Un-flatten packed tokens back to (batch, seq, heads, head_dim).
-        out = out_packed.view(batch_size, seq_len, -1, head_dim).to(q.dtype)
-        if out_transform is None:
-            return out
+        out_TNH, lse_NT = result
+        out_BLNH = out_TNH.view(B, L, -1, H).to(q_BLNH.dtype)
 
-        # FA varlen returns the LSE as (n_heads, total_tokens); reorder to
-        # (batch, seq, heads) so out_transform can broadcast per (token, head).
-        assert lse is not None
-        lse = lse.transpose(0, 1).reshape(batch_size, seq_len, -1)
-        return out_transform(out, lse)
+        # FA varlen returns the LSE as (N, T); reorder to (B, L, N) so
+        # out_transform can broadcast per (token, head).
+        lse_BLN = lse_NT.transpose(0, 1).reshape(B, L, -1)
+        return out_transform(out_BLNH, lse_BLN)
 
 
 class FlexAttention(Module):
     """Inner attention using ``flex_attention`` with torch.compile and CP support.
 
     Each backend handles its own layout transpose: ``forward()`` transposes from
-    ``(bs, seq, heads, dim)`` to ``(bs, heads, seq, dim)`` before calling
+    ``(B, L, N, H)`` to ``(B, N, L, H)`` before calling
     ``flex_attention``, and transposes back before returning.
 
     Note:
@@ -229,14 +234,15 @@ class FlexAttention(Module):
 
     def forward(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        q_BLNH: torch.Tensor,
+        k_BLNH: torch.Tensor,
+        v_BLNH: torch.Tensor,
         *,
         attention_masks: BlockMask,
         score_mod: _score_mod_signature | None = None,
         scale: float | None = None,
         enable_gqa: bool = False,
+        # TODO: make this into a config function and during fwd accept kwargs
         out_transform: (
             Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None
         ) = None,
@@ -246,8 +252,10 @@ class FlexAttention(Module):
             attention_masks, BlockMask
         ), f"attention_masks must be instance of BlockMask, got {type(attention_masks)}"
 
-        # Transpose to (bs, heads, seq, dim) for flex_attention
-        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+        # Transpose to (B, N, L, H) for flex_attention
+        q_BNLH = q_BLNH.transpose(1, 2)
+        k_BNLH = k_BLNH.transpose(1, 2)
+        v_BNLH = v_BLNH.transpose(1, 2)
 
         # 1. _compiled_flex_attn has to be a class variable, otherwise there will
         #    be multiple compiled flex_attention instances, which can be slow.
@@ -259,29 +267,29 @@ class FlexAttention(Module):
         # an inductor sub-compile (see distributed/compile.py). A null context on
         # the default inductor / eager paths, so no dead metadata is emitted.
         with maybe_regional_inductor(FlexAttention.inductor_configs):
-            out, aux = FlexAttention._compiled_flex_attn(
-                q,
-                k,
-                v,
+            out_BNLH, aux = FlexAttention._compiled_flex_attn(
+                q_BNLH,
+                k_BNLH,
+                v_BNLH,
                 block_mask=attention_masks,
                 scale=scale,
                 enable_gqa=enable_gqa,
                 return_aux=AuxRequest(lse=out_transform is not None),
                 kernel_options=self.kernel_options,
             )
-        # Transpose back to (bs, seq, heads, dim)
-        out = out.transpose(1, 2)
+        # Transpose back to (B, L, N, H)
+        out_BLNH = out_BNLH.transpose(1, 2)
         if out_transform is None:
-            return out
-        lse = aux.lse.transpose(1, 2)
-        return out_transform(out, lse)
+            return out_BLNH
+        lse_BLN = aux.lse.transpose(1, 2)
+        return out_transform(out_BLNH, lse_BLN)
 
 
 class ScaledDotProductAttention(Module):
     """Inner attention using ``F.scaled_dot_product_attention`` with CP support.
 
     Each backend handles its own layout transpose: ``forward()`` transposes from
-    ``(bs, seq, heads, dim)`` to ``(bs, heads, seq, dim)`` before calling
+    ``(B, L, N, H)`` to ``(B, N, L, H)`` before calling
     ``scaled_dot_product_attention``, and transposes back before returning.
 
     Note:
@@ -308,9 +316,9 @@ class ScaledDotProductAttention(Module):
 
     def forward(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        q_BLNH: torch.Tensor,
+        k_BLNH: torch.Tensor,
+        v_BLNH: torch.Tensor,
         *,
         attention_masks: AttentionMasksType | None = None,
         scale: float | None = None,
@@ -323,14 +331,23 @@ class ScaledDotProductAttention(Module):
                 "ScaledDotProductAttention does not support attention_masks; it "
                 "only supports causal/non-causal attention via is_causal."
             )
-        # Transpose to (bs, heads, seq, dim) for SDPA
-        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+        # Transpose to (B, N, L, H) for SDPA
+        q_BNLH, k_BNLH, v_BNLH = (
+            q_BLNH.transpose(1, 2),
+            k_BLNH.transpose(1, 2),
+            v_BLNH.transpose(1, 2),
+        )
         with sdpa_kernel(self.sdpa_backends, set_priority=True):
-            out = F.scaled_dot_product_attention(
-                q, k, v, scale=scale, is_causal=is_causal, enable_gqa=enable_gqa
+            out_BNLH = F.scaled_dot_product_attention(
+                q_BNLH,
+                k_BNLH,
+                v_BNLH,
+                scale=scale,
+                is_causal=is_causal,
+                enable_gqa=enable_gqa,
             )
-        # Transpose back to (bs, seq, heads, dim)
-        return out.transpose(1, 2)
+        # Transpose back to (B, L, N, H)
+        return out_BNLH.transpose(1, 2)
 
 
 def get_causal_mask_mod() -> _mask_mod_signature:
@@ -793,29 +810,30 @@ class GQAttention(BaseAttention):
 
     def forward(
         self,
-        x: torch.Tensor,
+        x_BLD: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        bs, seqlen, _ = x.shape
-        xq, xk, xv = self.qkv_linear(x)
+        B, L, _ = x_BLD.shape
+        xq_BLNH, xk_BLNH, xv_BLNH = self.qkv_linear(x_BLD)
 
         # Optional QK normalization (before RoPE, per Qwen3)
         if self.q_norm is not None or self.k_norm is not None:
             assert self.q_norm is not None and self.k_norm is not None
-            xq = self.q_norm(xq)
-            xk = self.k_norm(xk)
+            xq_BLNH = self.q_norm(xq_BLNH)
+            xk_BLNH = self.k_norm(xk_BLNH)
 
         # Apply rotary embeddings
-        xq, xk = self.rope(xq, xk, positions)
+        xq_BLNH, xk_BLNH = self.rope(xq_BLNH, xk_BLNH, positions)
 
-        output = self.inner_attention(
-            xq,
-            xk,
-            xv,
+        # inner_attention returns (B, L, N, H)
+        out_BLNH = self.inner_attention(
+            xq_BLNH,
+            xk_BLNH,
+            xv_BLNH,
             attention_masks=attention_masks,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         ).contiguous()
-        output = output.view(bs, seqlen, -1)
-        return self.wo(output)
+        out_BLD = out_BLNH.view(B, L, -1)
+        return self.wo(out_BLD)
