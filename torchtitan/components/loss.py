@@ -38,20 +38,24 @@ def cross_entropy_loss(
     if isinstance(pred, DTensor) and isinstance(labels, DTensor):
         return _cross_entropy_via_local_map(pred, labels, loss_parallel=loss_parallel)
 
-    if loss_parallel and get_spmd_backend() == "spmd_types":
-        if global_vocab_size is None:
-            raise ValueError(
-                "cross_entropy_loss requires global_vocab_size for "
-                "spmd_types loss_parallel on local tensors."
-            )
-        mesh = current_spmd_mesh()
-        assert mesh is not None, "spmd_types loss_parallel requires current_spmd_mesh"
+    if loss_parallel:
+        if isinstance(pred, DTensor):
+            assert pred.placements == (Shard(pred.ndim - 1),)
+            tp_group = pred.device_mesh.get_group("tp")
+            global_vocab_size = pred.shape[-1]
+            pred = pred.to_local()
+        else:
+            tp_group = current_spmd_mesh().get_group("tp")
         return _LossParallelCrossEntropy.apply(
-            pred,
-            labels,
-            mesh.get_group("tp"),
+            pred.flatten(0, 1).float(),
+            labels.flatten(0, 1),
+            tp_group,
             global_vocab_size,
         )
+
+    if isinstance(pred, DTensor):
+        assert pred.placements == (Replicate(),)
+        pred = pred.to_local()
 
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
@@ -319,7 +323,6 @@ class CrossEntropyLoss(BaseLoss):
         self.fn: LossFunction = cross_entropy_loss
         self._maybe_compile(compile_config)
         self.loss_parallel: bool = False
-        self.global_vocab_size: int | None = None
 
     def __call__(
         self,
@@ -327,12 +330,7 @@ class CrossEntropyLoss(BaseLoss):
         labels: torch.Tensor,
         global_valid_tokens: float | None = None,
     ) -> torch.Tensor:
-        loss = self.fn(
-            pred,
-            labels,
-            loss_parallel=self.loss_parallel,
-            global_vocab_size=self.global_vocab_size,
-        )
+        loss = self.fn(pred, labels, loss_parallel=self.loss_parallel)
         if global_valid_tokens is not None:
             loss = loss / global_valid_tokens
         return loss
@@ -598,7 +596,11 @@ class ChunkedCELoss(BaseLoss):
             total_loss = hidden_states.new_zeros((), dtype=torch.float32)
             if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
                 # TODO(pianpwk): would be nice if mutate_type accepted multiple axes.
-                for axis_name, dst in {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I}.items():
+                for axis_name, dst in {
+                    "dp": spmd.P,
+                    "cp": spmd.P,
+                    "tp": spmd.I,
+                }.items():
                     total_loss = spmd.mutate_type(
                         total_loss, axis_name, src=spmd.R, dst=dst
                     )
@@ -629,7 +631,9 @@ class ChunkedCELoss(BaseLoss):
                 )
                 if global_valid_tokens is not None:
                     chunk_loss = chunk_loss / global_valid_tokens
-                if get_spmd_backend() == "spmd_types":  # V -> P reinterpret, after exiting local region
+                if (
+                    get_spmd_backend() == "spmd_types"
+                ):  # V -> P reinterpret, after exiting local region
                     spmd.assert_type(chunk_loss, {"dp": spmd.P, "cp": spmd.P})
                 total_loss = total_loss + chunk_loss.detach()
 
