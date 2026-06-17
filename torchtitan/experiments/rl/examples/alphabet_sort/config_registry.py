@@ -37,19 +37,38 @@ from torchtitan.experiments.rl.generator_router import (
     StickySessionRoutingStrategy,
 )
 from torchtitan.experiments.rl.losses import GRPOLoss
+from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.trainer import RLTrainer
 from torchtitan.models.qwen3 import model_registry
+from torchtitan.protocols.model import ModelConfigConverter
+from torchtitan.protocols.model_spec import ModelSpec
 
 _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
+
+
+def _qwen3_rl_model_registry(
+    flavor: str,
+    *,
+    attn_backend: str,
+    converters: list[ModelConfigConverter.Config] | None = None,
+) -> ModelSpec:
+    """``qwen3.model_registry`` for RL, with the lm_head fp32 cast always on.
+
+    RL logprob / KL math needs the lm_head logits in fp32, so every RL config
+    runs ``LMHeadCastConverter`` on top of whatever converters it passes.
+    """
+    converters = list(converters or [])
+    converters.append(LMHeadCastConverter.Config())
+    return model_registry(flavor, attn_backend=attn_backend, converters=converters)
 
 
 def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B (6 GPUs: 4 gen + 2 train)."""
     group_size = 8
     return RLTrainer.Config(
-        model_spec=model_registry("0.6B", attn_backend="varlen"),
+        model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
         num_groups_per_rollout_batch=5,
@@ -77,6 +96,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -93,6 +113,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -108,7 +129,7 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B with flex attention (4 GPUs: 2 gen + 2 train)."""
     group_size = 8
     return RLTrainer.Config(
-        model_spec=model_registry("0.6B", attn_backend="flex"),
+        model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="flex"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
         num_groups_per_rollout_batch=5,
@@ -131,6 +152,7 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -147,6 +169,7 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -163,7 +186,7 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLTrainer.Config:
     for bitwise-identical numerics between trainer and generator (4 GPUs: 2 gen + 2 train).
     """
     config = rl_grpo_qwen3_0_6b_flex()
-    config.model_spec = model_registry(
+    config.model_spec = _qwen3_rl_model_registry(
         "0.6B",
         attn_backend="flex",
         converters=[BatchInvariantFlexConverter.Config()],
@@ -189,7 +212,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-1.7B (6 GPUs: 4 gen + 2 train)."""
     group_size = 8
     return RLTrainer.Config(
-        model_spec=model_registry("1.7B", attn_backend="varlen"),
+        model_spec=_qwen3_rl_model_registry("1.7B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         num_steps=10,
         num_groups_per_rollout_batch=5,
@@ -212,6 +235,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -228,6 +252,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -243,7 +268,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-14B (16 GPUs: 8 gen + 8 train)."""
     group_size = 8
     return RLTrainer.Config(
-        model_spec=model_registry("14B", attn_backend="varlen"),
+        model_spec=_qwen3_rl_model_registry("14B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-14B",
         num_steps=10,
         num_groups_per_rollout_batch=5,
@@ -266,6 +291,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=8,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -282,6 +308,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
                 tensor_parallel_degree=8,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -326,6 +353,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
+                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(
@@ -345,6 +373,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
@@ -393,6 +422,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 expert_parallel_degree=4,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=False,
@@ -410,6 +440,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
@@ -456,6 +487,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=4,
+                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(
@@ -474,6 +506,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
@@ -494,7 +527,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     group_size = 8
     return RLTrainer.Config(
-        model_spec=model_registry("0.6B", attn_backend="varlen"),
+        model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=5,
         num_groups_per_rollout_batch=5,
@@ -520,6 +553,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -537,6 +571,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
