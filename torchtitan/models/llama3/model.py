@@ -84,7 +84,7 @@ class Llama3Model(Decoder):
 
             set_llama3_sharding_config(
                 self,
-                is_inference=config.is_inference,
+                tp_gather_logits=parallelism.disable_loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
             )
 

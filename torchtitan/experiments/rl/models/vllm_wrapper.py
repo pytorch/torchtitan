@@ -190,7 +190,6 @@ class VLLMModelWrapper(Module):
         @dataclass(kw_only=True, slots=True)
         class _InferenceConfig:
             parallelism: ParallelismConfig
-            is_inference: bool = True
 
         self.config.update_from_config(config=_InferenceConfig(parallelism=parallelism))
 
@@ -317,9 +316,10 @@ class VLLMModelWrapper(Module):
 
         logits = self.model.lm_head(hidden_states)
 
-        # Full DTensor path returns logits as DTensor; vLLM expects full plain tensors.
+        # Full DTensor path returns logits as DTensor; vLLM expects plain tensors.
+        # disable_loss_parallel=True already makes lm_head output Replicate
         if isinstance(logits, DTensor):
-            logits = logits.full_tensor()
+            logits = logits.to_local()
 
         return logits
 
