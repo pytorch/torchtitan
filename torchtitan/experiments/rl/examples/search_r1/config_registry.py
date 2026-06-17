@@ -10,7 +10,7 @@ These set the full Search-R1 recipe entirely from the example's config — the c
 defaults are unchanged, so every other config keeps vanilla GRPO. ``ConfigManager``
 discovers these directly from the example module::
 
-    --module torchtitan.experiments.rl.examples.search_r1 \\
+    --module search_r1 \\
         --config rl_grpo_qwen3_1_7b_search_r1
 """
 
@@ -71,6 +71,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=1,
+                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -91,6 +92,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             # TODO(#3668): re-enable cudagraph once the large-batch capture bug is
             # fixed. Full cudagraph capture at large batch corrupts generation on this
