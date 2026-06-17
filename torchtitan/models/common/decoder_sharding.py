@@ -264,7 +264,9 @@ def set_dense_ffn_sharding(
     feed_forward_cfg.w2.sharding_config = rowwise_config(output_sp=enable_sp)
 
 
-def set_decoder_sharding_config(config, *, is_inference: bool, enable_sp: bool) -> None:
+def set_decoder_sharding_config(
+    config, *, tp_gather_logits: bool, enable_sp: bool
+) -> None:
     """Set sharding on root-level configs only: ``tok_embeddings``, ``norm``,
     and ``output``.
 
@@ -275,15 +277,14 @@ def set_decoder_sharding_config(config, *, is_inference: bool, enable_sp: bool) 
     the embedding, norm, and output layers.
     ``enable_sp=False`` -> activations stay ``Replicate``; root norm is left
     unsharded (equivalent to the legacy ``NoParallel`` plan).
-    ``is_inference=True`` -> ``lm_head`` returns full logits instead of
-    vocab-sharded logits for loss parallel.
+    ``tp_gather_logits=True`` -> ``lm_head`` returns full logits.
     """
     activation_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
         else dense_activation_placement(tp=spmd.I)
     )
-    lm_head_out_tp = spmd.I if is_inference else spmd.S(-1)
+    loss_tp = spmd.I if tp_gather_logits else spmd.S(-1)
 
     embed_out_src = dense_activation_placement(tp=spmd.P)
     embed_input = dense_activation_placement(tp=spmd.R)
@@ -302,5 +303,5 @@ def set_decoder_sharding_config(config, *, is_inference: bool, enable_sp: bool) 
         in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
         in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
         out_src_shardings=dense_activation_placement(tp=spmd.S(-1)),
-        out_dst_shardings=dense_activation_placement(tp=lm_head_out_tp),
+        out_dst_shardings=dense_activation_placement(tp=loss_tp),
     )

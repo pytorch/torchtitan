@@ -41,7 +41,6 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         hf_assets_path: str = "./tests/assets/tokenizer"
         dump_folder: str = "./outputs"
         model_spec: ModelSpec = field(default_factory=ModelSpec)
-        is_inference: bool = False
         optimizer: OptimizersContainer.Config = field(
             default_factory=OptimizersContainer.Config
         )
@@ -126,6 +125,12 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.parallel_dims = parallel_dims = ParallelDims.from_config(
             config.parallelism, world_size
         )
+        if parallel_dims.tp_enabled and config.parallelism.disable_loss_parallel:
+            raise ValueError(
+                "Tensor-parallel training without loss parallel is deprecated. "
+                "Remove --parallelism.disable_loss_parallel; TP training now "
+                "uses loss parallel by default."
+            )
 
         if parallel_dims.dp_enabled:
             batch_mesh = parallel_dims.get_mesh("batch")
