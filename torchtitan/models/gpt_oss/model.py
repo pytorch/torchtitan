@@ -192,7 +192,7 @@ class GptOssModel(Decoder):
 
             set_gpt_oss_sharding_config(
                 self,
-                loss_parallel=parallelism.tensor_parallel_degree > 1,
+                is_inference=config.is_inference,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
