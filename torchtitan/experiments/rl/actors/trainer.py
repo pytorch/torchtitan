@@ -81,7 +81,7 @@ class PartialLogprobDrift:
 @sl.log_trace_span("verify_logprob_identity")
 def verify_logprob_identity(
     generator_logprobs: torch.Tensor,
-    policy_logprobs: torch.Tensor,
+    trainer_logprobs: torch.Tensor,
     loss_mask: torch.Tensor,
     *,
     num_global_valid_tokens: int,
@@ -90,7 +90,7 @@ def verify_logprob_identity(
 
     Args:
         generator_logprobs: [B, L] generator logprobs from TrainingBatch.
-        policy_logprobs: [B, L] trainer-computed logprobs.
+        trainer_logprobs: [B, L] trainer-computed logprobs.
         loss_mask: [B, L] bool mask; True for response tokens.
         num_global_valid_tokens: Total response tokens across all DP ranks.
 
@@ -98,7 +98,7 @@ def verify_logprob_identity(
         PartialLogprobDrift.
     """
     ref_flat = generator_logprobs[loss_mask].float()
-    policy_flat = policy_logprobs[loss_mask].float()
+    policy_flat = trainer_logprobs[loss_mask].float()
 
     if ref_flat.numel() == 0:
         zero = torch.zeros((), dtype=torch.float32, device=generator_logprobs.device)
@@ -426,11 +426,11 @@ class PolicyTrainer(Actor, Configurable):
             logits = model(
                 token_ids, attention_masks=attention_masks, positions=positions
             )
-        policy_logprobs = compute_logprobs(logits, labels)
+        trainer_logprobs = compute_logprobs(logits, labels)
 
         with sl.log_trace_span("loss_fn"):
             loss, loss_metrics = self.loss_fn(
-                policy_logprobs=policy_logprobs,
+                trainer_logprobs=trainer_logprobs,
                 generator_logprobs=generator_logprobs,
                 loss_mask=loss_mask,
                 advantages=advantages,
@@ -443,7 +443,7 @@ class PolicyTrainer(Actor, Configurable):
         # Metrics for bitwise verification of policy logprobs.
         verification: PartialLogprobDrift = verify_logprob_identity(
             generator_logprobs=generator_logprobs,
-            policy_logprobs=policy_logprobs,
+            trainer_logprobs=trainer_logprobs,
             loss_mask=loss_mask,
             num_global_valid_tokens=num_global_valid_tokens,
         )
