@@ -7,6 +7,7 @@
 import spmd_types as spmd
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.utils import get_spmd_backend
 
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
@@ -114,11 +115,10 @@ def norm_config(*, enable_sp: bool) -> ShardingConfig:
 def pre_lm_head_norm_config(*, enable_sp: bool) -> ShardingConfig:
     """Root decoder norm sharding before ``lm_head`` / chunked CE loss.
 
-    With sequence parallelism, decoder blocks emit sequence-sharded hidden
-    states. ``ChunkedCELoss`` chunks those hidden states and applies
-    ``lm_head`` inside the loss, so this root norm is the last clean module
-    boundary to all-gather the TP sequence shard back to replicated hidden
-    states before chunking starts.
+    Decoder blocks emit sequence-sharded hidden states when sequence
+    parallelism is enabled. The root norm is the last clean module boundary to
+    all-gather the TP sequence shard back to replicated hidden states before
+    either the model forward or ``ChunkedCELoss`` applies ``lm_head``.
     """
     activation = (
         dense_sequence_parallel_placement()
@@ -142,6 +142,12 @@ def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
     ``FusedQKVLinear`` (single ``wqkv``).
     """
     if isinstance(qkv_linear_cfg, FusedQKVLinear.Config):
+        qkv_output = dense_activation_placement(tp=spmd.S(2))
+        qkv_linear_cfg.sharding_config = ShardingConfig(
+            in_src_shardings={"x": dense_activation_placement(tp=spmd.R)},
+            in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
+            out_src_shardings=(qkv_output, qkv_output, qkv_output),
+        )
         qkv_linear_cfg.wqkv.sharding_config = colwise_config()
     elif isinstance(qkv_linear_cfg, QKVLinear.Config):
         qkv_linear_cfg.wq.sharding_config = colwise_config()
