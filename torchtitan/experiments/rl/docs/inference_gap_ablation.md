@@ -97,6 +97,30 @@ Notes:
   cross-rank arrival-spin, not comm; pure-local removes it to reach 0.949. The
   last ~5% is native-only fusion not ported.
 
+## spmd_types execution as a vLLM runtime (W1, 32B TP=8)
+
+`--model-2d spmd`: same plain-local forward as `localfused` (vLLM paged
+attn/rope/silu, threaded residual + fused add+RMSNorm) but the Partial ->
+Replicate TP all-reduce (after wo/w2 + the vocab-parallel embedding) goes
+through `spmd_types.redistribute(P->R)` with typecheck OFF, instead of vLLM's
+custom all-reduce. spmd_types is otherwise a typechecking tool, not a runtime;
+this measures it AS a runtime.
+
+| path | tok/s | ratio | TP all-reduce |
+|------|-------|-------|---------------|
+| DTensor ceiling (vLLM-AR + vLLM-RMSNorm) | 656.2 | 0.742 | vLLM custom |
+| spmd_types (--model-2d spmd) | 617.3 | 0.698 | spmd.redistribute -> NCCL |
+| pure-local (--model-2d localfused) | 785.7 | 0.889 | vLLM custom |
+| native | 883.9 | 1.000 | -- |
+
+Finding: spmd_types execution (0.698x) is SLOWER than pure-local (0.889x) and
+even slightly below the DTensor ceiling, despite being plain-local (no DTensor
+dispatch). The entire deficit is the collective: `spmd.redistribute` routes to
+`dist.all_reduce` (NCCL), while pure-local uses vLLM's custom one-shot AR. Since
+the AR is the dominant decode cost (see W1/W2 ladders), the NCCL backend drags
+spmd_types below the vLLM-AR paths. To use spmd_types as a runtime at
+plain-tensor speed, its redistribute must route through vLLM's custom AR.
+
 ## Cross-workload summary (vs native eager)
 
 | stage | W1 (bs8/in1024/gen128) | W2 (bs32/in4096/gen1024) |
