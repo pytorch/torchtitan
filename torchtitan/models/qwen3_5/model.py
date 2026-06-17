@@ -547,6 +547,7 @@ class Qwen35Model(Decoder):
             self,
             *,
             config,
+            tp_gather_logits: bool = False,
             **kwargs,
         ) -> None:
             Decoder.Config.update_from_config(self, config=config, **kwargs)
@@ -572,7 +573,7 @@ class Qwen35Model(Decoder):
 
             set_qwen35_sharding_config(
                 self,
-                loss_parallel=not parallelism.disable_loss_parallel,
+                tp_gather_logits=tp_gather_logits,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
