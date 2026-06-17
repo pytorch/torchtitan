@@ -335,12 +335,17 @@ def _enable_fused_qkv_gateup(config) -> None:
     from torchtitan.models.common.attention import FusedQKVLinear, QKVLinear
     from torchtitan.models.common.nn_modules import Linear
 
+    # Temporary isolation knobs (default both on): set TT_FUSE_QKV=0 or
+    # TT_FUSE_GATEUP=0 to disable one half while debugging.
+    do_qkv = os.environ.get("TT_FUSE_QKV", "1") == "1"
+    do_gateup = os.environ.get("TT_FUSE_GATEUP", "1") == "1"
+
     model_cfg = config.model_spec.model
     new_layers = []
     for layer in model_cfg.layers:
         attn = getattr(layer, "attention", None)
         qkv = getattr(attn, "qkv_linear", None) if attn is not None else None
-        if isinstance(qkv, QKVLinear.Config):
+        if do_qkv and isinstance(qkv, QKVLinear.Config):
             phd = attn.head_dim or (attn.dim // attn.n_heads)
             n_kv = attn.n_kv_heads or attn.n_heads
             fused = FusedQKVLinear.Config(
@@ -359,9 +364,10 @@ def _enable_fused_qkv_gateup(config) -> None:
     config.model_spec.model = dataclasses.replace(model_cfg, layers=new_layers)
 
     # Fuse gate+up via the registered @override (FeedForward.Config -> FusedSwiGLU).
-    apply_overrides(
-        OverrideConfig(imports=["torchtitan.overrides.fused_swiglu"]), config
-    )
+    if do_gateup:
+        apply_overrides(
+            OverrideConfig(imports=["torchtitan.overrides.fused_swiglu"]), config
+        )
 
 
 def _resolve_sampling(gen_config, args: argparse.Namespace):
