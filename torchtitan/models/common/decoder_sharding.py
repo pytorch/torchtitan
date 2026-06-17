@@ -220,16 +220,35 @@ def set_dense_ffn_sharding(
     attn_x_layout: SpmdLayout,
     enable_sp: bool,
 ) -> None:
-    """Standard dense FFN (``w1``/``w2``/``w3``) TP sharding.
+    """Dense FFN TP sharding, for both the standard ``FeedForward``
+    (``w1``/``w2``/``w3``) and a fused gate+up FFN (single ``w13`` parameter, as
+    produced by the ``fused_swiglu`` override).
 
     Shared by llama3, qwen3, and deepseek_v3. ``attn_x_layout`` should match
     the layout that the layer's attention block emits so the FFN's input wrap is
     a no-op redistribute when placements already agree.
+
+    The fused branch is duck-typed (no ``w1`` attribute) rather than
+    ``isinstance``-checked so core does not import the opt-in override. It must
+    re-derive the same sharding the override sets, because the inference build's
+    ``update_from_config`` re-runs this pass after the override has already
+    replaced the FFN config.
     """
     feed_forward_cfg.sharding_config = ShardingConfig(
         in_src_shardings={"x": attn_x_layout},
         in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
     )
+    if not hasattr(feed_forward_cfg, "w1"):
+        # Fused gate+up FFN: one ``w13`` (hidden_dim, 2, dim) parameter sharded
+        # on the hidden axis (dim 0, matching gate/up slices per rank); the down
+        # projection ``w2`` keeps the standard rowwise sharding.
+        feed_forward_cfg.sharding_config = ShardingConfig(
+            state_shardings={"w13": dense_param_placement(tp=spmd.S(0))},
+            in_src_shardings={"x": attn_x_layout},
+            in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
+        )
+        feed_forward_cfg.w2.sharding_config = rowwise_config(output_sp=enable_sp)
+        return
     feed_forward_cfg.w1.sharding_config = colwise_config()
     feed_forward_cfg.w3.sharding_config = colwise_config()
     feed_forward_cfg.w2.sharding_config = rowwise_config(output_sp=enable_sp)
