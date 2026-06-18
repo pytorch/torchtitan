@@ -38,7 +38,7 @@ from ..flex_shard.utils import (
     _record_function_if_eager,
     _record_view_out_if_eager,
 )
-from ._copy import (
+from ._pack_utils import (
     foreach_copy_,
     pack_tensors_into_flat_buffer,
     pack_tensors_into_flat_buffer_with_scratch,
