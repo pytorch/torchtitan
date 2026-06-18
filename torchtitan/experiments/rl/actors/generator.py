@@ -13,6 +13,7 @@ import logging
 import math
 import os
 from dataclasses import dataclass, field
+from typing import Literal
 
 import torch
 import torch.distributed as dist
@@ -44,6 +45,7 @@ from torchtitan.tools.logging import init_logger
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
+from vllm.config.compilation import CompilationMode
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -108,6 +110,15 @@ def _prepare_generation_request_metrics(
     ]
 
 
+# vLLM's chunked-prefill chunk size (max_num_batched_tokens). "FULL" also graphs
+# prefill, whose per-step token count is bounded by this, so its capture sizes
+# must reach it (else prefill falls back to eager). The generator does not
+# override max_num_batched_tokens, so this is vLLM's default.
+# TODO: this value still needs discussion -- ideally read the engine's actual
+# max_num_batched_tokens rather than hardcoding the default.
+_VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
+
+
 @dataclass(kw_only=True, slots=True)
 class VLLMCudagraphConfig:
     """CUDA graph capture settings for the vLLM inference engine.
@@ -116,15 +127,29 @@ class VLLMCudagraphConfig:
     ``RLTrainer`` level, shared by both trainer and generator.  Only CUDA
     graph capture, which is vLLM-specific, is controlled here.
 
-    vLLM captures full graphs for decode batches only (``FULL_DECODE_ONLY``);
-    prefill / mixed batches run eager. Full graphs for mixed batches (plain
-    ``FULL``) corrupt generation at large batch with the varlen/FA3 backend
-    (see #3668), and the piecewise modes need vLLM's whole-model compile, which
-    conflicts with our per-layer compile.
+    ``mode`` selects which vLLM cudagraph mode to capture; see that field and
+    ``get_vllm_compilation_config`` for the per-mode trade-offs. The default,
+    ``FULL_DECODE_ONLY``, is the only mode that is both cheap (no inductor
+    compile) and correct with our varlen/FA3 attention backend.
     """
 
     enable: bool = True
-    """Whether to enable CUDA graph capture (vLLM ``FULL_DECODE_ONLY`` mode)."""
+    """Whether to enable CUDA graph capture."""
+
+    mode: Literal["FULL_DECODE_ONLY", "FULL"] = "FULL_DECODE_ONLY"
+    """Which vLLM cudagraph mode to capture (when ``enable``):
+
+    - ``"FULL_DECODE_ONLY"`` (default): graph pure-decode batches; prefill / mixed
+      batches run eager. Cheap (no inductor compile) and the only mode that is
+      correct with our varlen/FA3 attention backend (#3668).
+    - ``"FULL"``: graph the whole forward, prefill included. Corrupts generation
+      with our varlen backend (#3668); kept for experiments / repro only.
+
+    FULL_AND_PIECEWISE (graph prefill piecewise around attention) is not offered:
+    the only correct path is vLLM's slow whole-model inductor compile, and the
+    cheap path (breakable cudagraph) corrupts because our varlen attention op
+    lacks an eager break-point. See #3709.
+    """
 
     # TODO: Validate CUDA graph capture with MoE / Expert Parallelism.
     # MoE routing produces dynamic shapes that may conflict with full
@@ -138,24 +163,33 @@ class VLLMCudagraphConfig:
     def get_vllm_compilation_config(
         self, *, max_num_seqs: int
     ) -> CompilationConfig | None:
-        """Build a vLLM ``CompilationConfig`` (``FULL_DECODE_ONLY``), or return
-        ``None`` when CUDA graphs are disabled.
+        """Build a vLLM ``CompilationConfig`` for ``mode``, or return ``None``
+        when CUDA graphs are disabled.
 
-        Capture sizes are powers of 2 from 1 up to ``max_num_seqs``, plus
-        ``max_num_seqs`` itself if it isn't a power of 2.
+        Capture sizes are powers of 2 up to the cap, plus ``max_num_seqs`` itself
+        so the decode batch is captured exactly. The cap is ``max_num_seqs`` for
+        ``FULL_DECODE_ONLY`` (decode batch == num_seqs); ``FULL`` also graphs
+        prefill, so it extends to the prefill chunk size.
+
+        ``mode=CompilationMode.NONE`` captures cudagraphs without vLLM's
+        whole-model inductor compile, which we never use (#3709).
         """
         if not self.enable:
             return None
         if max_num_seqs <= 0:
             raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}")
         cap = max_num_seqs
+        if self.mode == "FULL":
+            cap = max(cap, _VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS)
         sizes = [1 << i for i in range(int(math.log2(cap)) + 1)]
-        if cap not in sizes:
-            sizes.append(cap)
+        if max_num_seqs not in sizes:
+            sizes.append(max_num_seqs)
+        sizes = sorted(sizes)
+
         return CompilationConfig(
-            cudagraph_mode="FULL_DECODE_ONLY",
-            mode=0,
-            cudagraph_capture_sizes=sorted(sizes),
+            cudagraph_mode=self.mode,
+            mode=CompilationMode.NONE,
+            cudagraph_capture_sizes=sizes,
         )
 
 
