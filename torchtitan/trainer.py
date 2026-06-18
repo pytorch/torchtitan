@@ -124,6 +124,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "(--parallelism.pipeline_parallel_degree 1)."
                 )
 
+            if (
+                self.parallelism.spmd_backend == "spmd_types"
+                and self.debug.spmd_typechecking
+                and isinstance(self.activation_checkpoint, SelectiveAC.Config)
+                and self.model_spec is not None
+                and any(self.model_spec.model.traverse(FlexAttention.Config))
+            ):
+                # TODO(pianpwk): Enable SAC with FlexAttention under SPMD typechecking.
+                raise ValueError(
+                    "Selective activation checkpointing (SAC) is not supported "
+                    "with FlexAttention while SPMD typechecking is enabled. "
+                    "Use full activation checkpointing, disable activation "
+                    "checkpointing, or switch to a non-Flex attention backend."
+                )
+
             if isinstance(self.activation_checkpoint, MemoryBudgetAC.Config) and not (
                 self.compile.enable and "model" in self.compile.components
             ):
@@ -423,6 +438,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # Non-PP: single model part always has lm_head.
         # PP: only the last stage has lm_head; non-last stages skip this.
         if isinstance(self.loss_fn, ChunkedCELoss):
+            self.loss_fn.loss_parallel = (
+                parallel_dims.tp_enabled
+                and not config.parallelism.disable_loss_parallel
+            )
             if parallel_dims.pp_enabled:
                 if self.pp_has_last_stage:
                     lm_head = self.model_parts[-1].lm_head

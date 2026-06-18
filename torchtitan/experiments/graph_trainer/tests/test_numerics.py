@@ -164,7 +164,7 @@ def _run_llama3_loss_compare(test_options_extra: str = "") -> bool:
         test_options += f" {test_options_extra}"
     return run_loss_compare(
         baseline_module="llama3",
-        baseline_config="llama3_debugmodel_ce_loss",
+        baseline_config="llama3_debugmodel",
         test_module="graph_trainer.llama3",
         test_config="graph_trainer_llama3_debugmodel",
         baseline_options=LLAMA3_PARALLELISM,
@@ -185,8 +185,8 @@ def _run_deepseek_v3_loss_compare(test_options_extra: str = "") -> bool:
     if test_options_extra:
         test_options += f" {test_options_extra}"
     return run_loss_compare(
-        baseline_module="graph_trainer.deepseek_v3",
-        baseline_config="deepseek_v3_debugmodel_ce_loss",
+        baseline_module="deepseek_v3",
+        baseline_config="deepseek_v3_debugmodel",
         test_module="graph_trainer.deepseek_v3",
         test_config="graph_trainer_deepseek_v3_debugmodel",
         baseline_options=DSV3_PARALLELISM,
@@ -206,8 +206,8 @@ def _run_qwen3_loss_compare(test_options_extra: str = "") -> bool:
     if test_options_extra:
         test_options += f" {test_options_extra}"
     return run_loss_compare(
-        baseline_module="graph_trainer.qwen3",
-        baseline_config="qwen3_debugmodel_ce_loss",
+        baseline_module="qwen3",
+        baseline_config="qwen3_debugmodel",
         test_module="graph_trainer.qwen3",
         test_config="graph_trainer_qwen3_debugmodel",
         baseline_options=QWEN3_PARALLELISM,
@@ -228,8 +228,8 @@ def _run_qwen3_moe_loss_compare(test_options_extra: str = "") -> bool:
     if test_options_extra:
         test_options += f" {test_options_extra}"
     return run_loss_compare(
-        baseline_module="graph_trainer.qwen3",
-        baseline_config="qwen3_moe_debug_ce_loss",
+        baseline_module="qwen3",
+        baseline_config="qwen3_moe_debug",
         test_module="graph_trainer.qwen3",
         test_config="graph_trainer_qwen3_debugmodel_moe",
         baseline_options=QWEN3_MOE_PARALLELISM,
@@ -255,7 +255,7 @@ def _run_autoparallel_llama3_loss_compare() -> bool:
         baseline_module="graph_trainer.llama3",
         baseline_config="graph_trainer_llama3_debugmodel_sdpa_eager",
         test_module="graph_trainer.llama3",
-        test_config="graph_trainer_llama3_debugmodel_sdpa",
+        test_config="graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss",
         baseline_options=AUTOPARALLEL_LLAMA3_PARALLELISM,
         test_options=(
             f"{AUTOPARALLEL_LLAMA3_PARALLELISM}"
@@ -277,8 +277,8 @@ AUTOPARALLEL_DSV3_PARALLELISM = (
 def _run_autoparallel_deepseek_v3_loss_compare() -> bool:
     """Run loss_compare for eager DeepSeek V3 vs graph_trainer AutoParallel."""
     return run_loss_compare_close(
-        baseline_module="graph_trainer.deepseek_v3",
-        baseline_config="deepseek_v3_debugmodel_ce_loss",
+        baseline_module="deepseek_v3",
+        baseline_config="deepseek_v3_debugmodel",
         test_module="graph_trainer.deepseek_v3",
         test_config="graph_trainer_deepseek_v3_debugmodel",
         baseline_options=AUTOPARALLEL_DSV3_PARALLELISM,

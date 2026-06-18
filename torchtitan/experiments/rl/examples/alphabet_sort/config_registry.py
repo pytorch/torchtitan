@@ -4,15 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""
-Config entry points for the RL/unified experiment.
+"""Config entry points for the alphabet-sort example.
 
-Each function returns a complete ``RLTrainer.Config`` and is discoverable by
-``ConfigManager`` via ``--module rl --config <function_name>``.
+Each function returns a complete ``RLTrainer.Config``, discoverable by
+``ConfigManager`` via
+``--module alphabet_sort --config rl_grpo_qwen3_*``.
 """
 
 import dataclasses
-from dataclasses import dataclass
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -29,59 +28,48 @@ from torchtitan.experiments.rl.actors.generator import (
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
+from torchtitan.experiments.rl.batch_invariance import BatchInvariantFlexConverter
 from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
 from torchtitan.experiments.rl.generator_router import (
     GeneratorRouter,
-    RoundRobinRoutingStrategy,
+    LeastLoadedRoutingStrategy,
+    StickySessionRoutingStrategy,
 )
 from torchtitan.experiments.rl.losses import GRPOLoss
+from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
+from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.trainer import RLTrainer
-from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.protocols.model import ModelConfigConverter
+from torchtitan.protocols.model_spec import ModelSpec
 
 _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
 
 
-class BatchInvariantFlexConverter(ModelConfigConverter):
-    """Pin flex attention kernel options for batch-invariant mode.
+def _qwen3_rl_model_registry(
+    flavor: str,
+    *,
+    attn_backend: str,
+    converters: list[ModelConfigConverter.Config] | None = None,
+) -> ModelSpec:
+    """``qwen3.model_registry`` for RL, with the lm_head fp32 cast always on.
 
-    Sets fixed BLOCK_M/BLOCK_N=16 and BACKEND=TRITON on all
-    FlexAttention layers.
-
-    BACKEND=TRITON is to avoid flex_decode kernel.
+    RL logprob / KL math needs the lm_head logits in fp32, so every RL config
+    runs ``LMHeadCastConverter`` on top of whatever converters it passes.
     """
-
-    # the triton BLOCK_N tile size needs to be pinned for stable numerics and
-    # needs to match vLLM's for identical results, today vLLM default is 16
-    # TODO: run some experiments to determine impact of small vs large tile sizes
-    _BLOCK_M = 16
-    _BLOCK_N = 16
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ModelConfigConverter.Config):
-        pass
-
-    def __init__(self, config: Config):
-        pass
-
-    def convert(self, model_config) -> None:
-        for layer_cfg in model_config.layers:
-            inner = layer_cfg.attention.inner_attention
-            if isinstance(inner, FlexAttention.Config):
-                inner.kernel_options["BACKEND"] = "TRITON"
-                inner.kernel_options["BLOCK_M"] = self._BLOCK_M
-                inner.kernel_options["BLOCK_N"] = self._BLOCK_N
+    converters = list(converters or [])
+    converters.append(LMHeadCastConverter.Config())
+    return model_registry(flavor, attn_backend=attn_backend, converters=converters)
 
 
 def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B (6 GPUs: 4 gen + 2 train)."""
     group_size = 8
     return RLTrainer.Config(
-        model_spec=model_registry("0.6B", attn_backend="varlen"),
+        model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
         num_groups_per_rollout_batch=5,
@@ -91,7 +79,9 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
         group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         generator_router=GeneratorRouter.Config(
-            strategy=RoundRobinRoutingStrategy.Config()
+            strategy=StickySessionRoutingStrategy.Config(
+                fallback_strategy=LeastLoadedRoutingStrategy.Config()
+            )
         ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
@@ -119,12 +109,9 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
                 tensor_parallel_degree=4,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -140,7 +127,7 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B with flex attention (4 GPUs: 2 gen + 2 train)."""
     group_size = 8
     return RLTrainer.Config(
-        model_spec=model_registry("0.6B", attn_backend="flex"),
+        model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="flex"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
         num_groups_per_rollout_batch=5,
@@ -175,12 +162,9 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
                 tensor_parallel_degree=2,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -197,7 +181,7 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLTrainer.Config:
     for bitwise-identical numerics between trainer and generator (4 GPUs: 2 gen + 2 train).
     """
     config = rl_grpo_qwen3_0_6b_flex()
-    config.model_spec = model_registry(
+    config.model_spec = _qwen3_rl_model_registry(
         "0.6B",
         attn_backend="flex",
         converters=[BatchInvariantFlexConverter.Config()],
@@ -223,7 +207,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-1.7B (6 GPUs: 4 gen + 2 train)."""
     group_size = 8
     return RLTrainer.Config(
-        model_spec=model_registry("1.7B", attn_backend="varlen"),
+        model_spec=_qwen3_rl_model_registry("1.7B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         num_steps=10,
         num_groups_per_rollout_batch=5,
@@ -258,12 +242,9 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
                 tensor_parallel_degree=4,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -279,7 +260,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-14B (16 GPUs: 8 gen + 8 train)."""
     group_size = 8
     return RLTrainer.Config(
-        model_spec=model_registry("14B", attn_backend="varlen"),
+        model_spec=_qwen3_rl_model_registry("14B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-14B",
         num_steps=10,
         num_groups_per_rollout_batch=5,
@@ -314,12 +295,9 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
                 tensor_parallel_degree=8,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -334,7 +312,9 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
 def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
     """Debug MoE config with EP+TP on generator (8 GPUs: 4 gen + 4 train).
 
-    Generator uses TP=4 for dense layers and EP=4 for MoE experts.
+    Trainer uses data_parallel_shard_degree=2 as FSDP degree and TP=2.
+    Generator uses data_parallel_degree=2 (vLLM pure DP), with TP=2.
+    MoE layers use EP=4.
     """
     group_size = 8
     return RLTrainer.Config(
@@ -361,8 +341,8 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
             ),
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=4,
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
                 disable_loss_parallel=True,
                 expert_parallel_degree=4,
@@ -379,12 +359,9 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
             # path issues an unpinned D2H copy of split sizes that the
             # piecewise/full graph capture rejects.
             cudagraph=VLLMCudagraphConfig(enable=False),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=4,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=2,
+                tensor_parallel_degree=2,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
@@ -400,7 +377,16 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
 def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
     """Batch-invariant MoE EP config for bitwise parity testing (8 GPUs).
 
-    Trainer: TP=4, EP=4 (4 GPUs). Generator: TP=4, EP=4 (4 GPUs).
+    Trainer uses data_parallel_shard_degree=2 as FSDP degree and TP=2.
+    Generator uses data_parallel_degree=2 (vLLM pure DP), with TP=2.
+    MoE layers use EP=4.
+
+    Parity: trainer FSDP2 TP2 EP4 matches generator DP2 TP2 EP4 bitwise
+    (verified ``bit_wise/logprob_diff/max == 0``). Plain FSDP works ONLY because the FSDP all-gather runs in bf16
+    (``training.mixed_precision_param == "bfloat16"``, the default): it gathers
+    the full bf16 params before the forward, so the dense forward is numerically
+    identical to the generator's replicated bf16 dense DP.
+
     """
     group_size = 8
     return RLTrainer.Config(
@@ -429,8 +415,9 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
             ),
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=4,
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=2,
+                data_parallel_replicate_degree=1,
                 expert_parallel_degree=4,
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
@@ -446,12 +433,9 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             cudagraph=VLLMCudagraphConfig(enable=False),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=4,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=2,
+                tensor_parallel_degree=2,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
@@ -468,8 +452,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
 def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
     """GRPO training config for Qwen3-30B-A3B MoE (8 GPUs: 4 gen + 4 train).
 
-    Generator uses TP=4 for dense layers and EP=4 for MoE experts.
-    Trainer uses TP=4 for all layers.
+    Trainer and generator uses TP=2 for dense layers and EP=4 for MoE experts.
 
     Note: Qwen3-30B-A3B has 4 KV heads, so TP degree cannot exceed 4.
     """
@@ -496,8 +479,9 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
             ),
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=4,
+                data_parallel_shard_degree=2,
+                data_parallel_replicate_degree=1,
+                tensor_parallel_degree=2,
                 disable_loss_parallel=True,
                 expert_parallel_degree=4,
             ),
@@ -512,12 +496,9 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             cudagraph=VLLMCudagraphConfig(enable=False),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=4,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=2,
+                tensor_parallel_degree=2,
                 expert_parallel_degree=4,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
@@ -538,7 +519,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     group_size = 8
     return RLTrainer.Config(
-        model_spec=model_registry("0.6B", attn_backend="varlen"),
+        model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=5,
         num_groups_per_rollout_batch=5,
@@ -577,12 +558,9 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
                 tensor_parallel_degree=2,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(

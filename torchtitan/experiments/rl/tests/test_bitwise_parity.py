@@ -59,12 +59,14 @@ from torchtitan.distributed.utils import (
     set_batch_invariance,
 )
 from torchtitan.experiments.rl.actors.trainer import compute_logprobs
-from torchtitan.experiments.rl.config_registry import (
+from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
+    rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
 from torchtitan.experiments.rl.models.vllm_registry import (
-    registry_to_vllm,
+    register_to_vllm,
+    TORCHTITAN_CONFIG_FORMAT,
     VLLM_MODEL_NAME,
 )
 from torchtitan.experiments.rl.trainer import RLTrainer
@@ -146,18 +148,21 @@ def build_trainer_model(
     with torch.no_grad():
         model.init_weights(buffer_device=None)
 
-    # Load HF checkpoint
-    if model_spec.state_dict_adapter is not None:
-        sd_adapter = model_spec.state_dict_adapter(model_spec.model, hf_assets_path)
-        storage_reader = sd_adapter.get_hf_storage_reader(hf_assets_path)
-        hf_state_dict = sd_adapter.to_hf(model.state_dict())
-        dcp.load(hf_state_dict, storage_reader=storage_reader)
-        tt_state_dict = sd_adapter.from_hf(hf_state_dict)
-        set_model_state_dict(
-            model=model,
-            model_state_dict=tt_state_dict,
-            options=StateDictOptions(strict=True),
-        )
+    # Load HF checkpoint if available
+    if model_spec.state_dict_adapter is not None and hf_assets_path:
+        index_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
+        single_path = os.path.join(hf_assets_path, "model.safetensors")
+        if os.path.exists(index_path) or os.path.exists(single_path):
+            sd_adapter = model_spec.state_dict_adapter(model_spec.model, hf_assets_path)
+            storage_reader = sd_adapter.get_hf_storage_reader(hf_assets_path)
+            hf_state_dict = sd_adapter.to_hf(model.state_dict())
+            dcp.load(hf_state_dict, storage_reader=storage_reader)
+            tt_state_dict = sd_adapter.from_hf(hf_state_dict)
+            set_model_state_dict(
+                model=model,
+                model_state_dict=tt_state_dict,
+                options=StateDictOptions(strict=False),
+            )
 
     model.eval()
     return model, device
@@ -189,6 +194,9 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     inner_attn = config.model_spec.model.layers[0].attention.inner_attention
     use_flex = isinstance(inner_attn, FlexAttention.Config)
 
+    # Mirror the production VLLMGenerator so the test exercises the same
+    # batch-invariant path (v2 runner is required for the logprob-kernel patch).
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     if use_flex:
         os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
         backend_enum = AttentionBackendEnum.FLEX_ATTENTION
@@ -196,15 +204,32 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
         if gen_config.debug.batch_invariant:
             set_batch_invariance(True)
+            # batch_invariant_ops covers mm/addmm/_log_softmax/mean but not bmm
+            # (the MoE router gate lowers to bmm in the vLLM inference graph), and
+            # the v2 logprob Triton kernel bypasses the aten overrides. Apply the
+            # same generator-side patches the production VLLMGenerator does.
+            from torchtitan.experiments.rl.batch_invariance import (
+                force_logprobs_fn_for_batch_invariance,
+                patch_bmm_for_batch_invariance,
+            )
+
+            patch_bmm_for_batch_invariance()
+            force_logprobs_fn_for_batch_invariance()
         backend_enum = AttentionBackendEnum.CUSTOM
 
     _set_generator_determinism(gen_config.debug)
 
+    enable_ep = gen_config.parallelism.expert_parallel_degree > 1
     engine_kwargs = dict(
         model=config.hf_assets_path,
         trust_remote_code=True,
+        # Build the model config from torchtitan's ModelSpec via the custom
+        # parser registered by register_to_vllm, instead of reading config.json.
+        config_format=TORCHTITAN_CONFIG_FORMAT,
         dtype=gen_config.model_dtype,
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
+        data_parallel_size=gen_config.parallelism.data_parallel_degree,
+        enable_expert_parallel=enable_ep,
         distributed_executor_backend="external_launcher",
         gpu_memory_utilization=gen_config.gpu_memory_limit,
         enforce_eager=not gen_config.cudagraph.enable,
@@ -516,6 +541,8 @@ class BitwiseParityTestBase(unittest.TestCase):
 
     config_fn = staticmethod(rl_grpo_qwen3_0_6b_varlen_batch_invariant)
     attn_backend: str = "varlen"
+    min_world_size: int = 1
+    hf_assets_env_var: str = "HF_ASSETS_PATH"
 
     # Shared across all tests in the class (built once in setUpClass)
     model: torch.nn.Module
@@ -524,8 +551,18 @@ class BitwiseParityTestBase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        world_size = (
+            dist.get_world_size()
+            if dist.is_initialized()
+            else int(os.environ.get("WORLD_SIZE", "1"))
+        )
+        if world_size < cls.min_world_size:
+            raise unittest.SkipTest(
+                f"requires at least {cls.min_world_size} GPUs, got {world_size}"
+            )
+
         config = cls.config_fn()
-        hf_path = os.environ.get("HF_ASSETS_PATH")
+        hf_path = os.environ.get(cls.hf_assets_env_var)
         if hf_path:
             config.hf_assets_path = hf_path
 
@@ -546,7 +583,7 @@ class BitwiseParityTestBase(unittest.TestCase):
         if not dist.is_initialized():
             dist_utils.init_distributed(CommConfig())
 
-        registry_to_vllm(
+        register_to_vllm(
             config.model_spec,
             parallelism=config.generator.parallelism,
             compile_config=config.compile,
@@ -630,7 +667,10 @@ class BitwiseParityTestBase(unittest.TestCase):
 
         if dist.get_rank() == 0:
             for i in range(mid):
-                partial_lp = lps_partial[i] if mid > 1 else lps_partial
+                # ``prompt_ids[:mid]`` is a list of sequences, so
+                # ``compute_trainer_prefill_logprobs`` always returns a list
+                # (even for mid==1) -> index per-sequence.
+                partial_lp = lps_partial[i]
                 self._assert_logprobs_equal(
                     f"seq {i}: prefill(bsz={mid}) vs prefill(bsz={n})",
                     partial_lp,
@@ -703,6 +743,28 @@ class TestBitwiseParityFlex(BitwiseParityTestBase):
     __test__ = True
     config_fn = staticmethod(rl_grpo_qwen3_0_6b_flex_batch_invariant)
     attn_backend = "flex"
+
+
+class TestBitwiseParityMoEEP(BitwiseParityTestBase):
+    """Test bitwise parity between trainer and vLLM generator with MoE EP.
+
+    On 4 GPUs: trainer uses dp_shard=2, TP=2, EP=4; the generator maps
+    dp_shard=2 to vLLM data parallelism with TP=2, EP=4.
+
+    Uses the bundled debug MoE assets by default. Override with
+    MOE_HF_ASSETS_PATH if needed.
+    """
+
+    __test__ = True
+
+    BATCH_SIZE = 3
+    PROMPT_LENGTH = 100
+    MAX_GEN_TOKENS = 30
+
+    config_fn = staticmethod(rl_grpo_qwen3_moe_debug_varlen_batch_invariant)
+    attn_backend = "varlen"
+    min_world_size = 4
+    hf_assets_env_var = "MOE_HF_ASSETS_PATH"
 
 
 if __name__ == "__main__":
