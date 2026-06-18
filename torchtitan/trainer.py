@@ -24,7 +24,6 @@ from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhausted
 from torchtitan.components.loss import (
     BaseLoss,
     ChunkedCELoss,
-    CrossEntropyLoss,
     IGNORE_INDEX,
 )
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -437,9 +436,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 model.train()
 
                 self.model_parts = [model]
-
-        if isinstance(self.loss_fn, (CrossEntropyLoss, ChunkedCELoss)):
-            self.loss_fn.loss_parallel = parallel_dims.tp_enabled
 
         # Set lm_head reference for ChunkedCELoss after model construction.
         # Non-PP: single model part always has lm_head.

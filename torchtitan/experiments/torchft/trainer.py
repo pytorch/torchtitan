@@ -16,7 +16,7 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.dataloader import DataloaderExhaustedError
-from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
+from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
@@ -242,9 +242,6 @@ class FaultTolerantTrainer(Trainer):
             model.train()
 
             self.model_parts = [model]
-
-        if isinstance(self.loss_fn, CrossEntropyLoss):
-            self.loss_fn.loss_parallel = parallel_dims.tp_enabled
 
         # FT addition: set all reduce hook
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
