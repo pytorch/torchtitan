@@ -74,6 +74,195 @@ class SegmentReduceResult:
     owned_segments: tuple[PlannedSegmentReduceDescriptor, ...]
     owned_views: tuple[torch.Tensor, ...]
     plan: SegmentReducePlan
+    scratch: SegmentReduceScratchLease | None = None
+
+    def release_scratch(self, stream: torch.Stream | None = None) -> None:
+        """Return reusable scratch to its pool after queued stream work finishes."""
+        if self.scratch is not None:
+            self.scratch.release(stream)
+
+
+@dataclass
+class _SegmentReduceScratchSlot:
+    send: torch.Tensor
+    output: torch.Tensor
+    in_use: bool = False
+    ready_event: torch.Event | None = None
+
+
+@dataclass
+class SegmentReduceScratchLease:
+    """Borrowed packed send/output buffers from a scratch pool."""
+
+    _pool: SegmentReduceScratchPool
+    _slot: _SegmentReduceScratchSlot
+    send: torch.Tensor
+    output: torch.Tensor
+    _released: bool = False
+
+    def release(self, stream: torch.Stream | None = None) -> None:
+        """Mark this lease reusable after queued work on ``stream`` is complete."""
+        if self._released:
+            return
+        self._released = True
+        self._pool._release(self._slot, stream)
+
+
+class SegmentReduceScratchPool:
+    """Bounded reusable scratch for packed reduce-scatter segment reductions.
+
+    Phase 2a deliberately stops at bounding temporary send/receive buffers with
+    explicit stream lifetime. Defer direct owner-layout and optimizer aliasing
+    until the current Triton packed RS path is accepted and profiler/memory
+    evidence shows temporary memory is the limiting issue.
+    """
+
+    def __init__(self, max_slots: int = 1) -> None:
+        if max_slots <= 0:
+            raise ValueError(f"max_slots must be positive, but got {max_slots}.")
+        self.max_slots = max_slots
+        self._slots: list[_SegmentReduceScratchSlot] = []
+
+    def acquire(
+        self,
+        *,
+        send_numel: int,
+        output_numel: int,
+        dtype: torch.dtype,
+        device: torch.device | str,
+    ) -> SegmentReduceScratchLease:
+        """Acquire reusable buffers sized for one segment reduce call."""
+        if send_numel < 0 or output_numel < 0:
+            raise ValueError(
+                f"Scratch sizes must be non-negative, got send={send_numel} "
+                f"output={output_numel}."
+            )
+        device = torch.device(device)
+        slot = self._find_ready_slot(send_numel, output_numel, dtype, device)
+        if slot is None and len(self._slots) < self.max_slots:
+            slot = self._make_slot(send_numel, output_numel, dtype, device)
+            self._slots.append(slot)
+        if slot is None:
+            slot = self._wait_for_released_slot(send_numel, output_numel, dtype, device)
+
+        slot.in_use = True
+        slot.ready_event = None
+        return SegmentReduceScratchLease(
+            self,
+            slot,
+            slot.send.narrow(0, 0, send_numel),
+            slot.output.narrow(0, 0, output_numel),
+        )
+
+    def _find_ready_slot(
+        self,
+        send_numel: int,
+        output_numel: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> _SegmentReduceScratchSlot | None:
+        fallback: _SegmentReduceScratchSlot | None = None
+        for slot in self._slots:
+            if slot.in_use or not self._is_ready(slot):
+                continue
+            if self._slot_can_satisfy(slot, send_numel, output_numel, dtype, device):
+                return slot
+            fallback = fallback or slot
+        if fallback is None:
+            return None
+        self._resize_slot(fallback, send_numel, output_numel, dtype, device)
+        return fallback
+
+    def _wait_for_released_slot(
+        self,
+        send_numel: int,
+        output_numel: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> _SegmentReduceScratchSlot:
+        for slot in self._slots:
+            if not slot.in_use:
+                if slot.ready_event is not None:
+                    slot.ready_event.synchronize()
+                    slot.ready_event = None
+                self._resize_slot(slot, send_numel, output_numel, dtype, device)
+                return slot
+        raise RuntimeError(
+            "No released segment reduce scratch slot is available. "
+            "Call SegmentReduceResult.release_scratch() before launching more "
+            "than max_slots in-flight segment reductions."
+        )
+
+    @staticmethod
+    def _make_slot(
+        send_numel: int,
+        output_numel: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> _SegmentReduceScratchSlot:
+        return _SegmentReduceScratchSlot(
+            send=torch.empty(send_numel, dtype=dtype, device=device),
+            output=torch.empty(output_numel, dtype=dtype, device=device),
+        )
+
+    @staticmethod
+    def _slot_can_satisfy(
+        slot: _SegmentReduceScratchSlot,
+        send_numel: int,
+        output_numel: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> bool:
+        return (
+            slot.send.dtype == dtype
+            and slot.output.dtype == dtype
+            and slot.send.device == device
+            and slot.output.device == device
+            and slot.send.numel() >= send_numel
+            and slot.output.numel() >= output_numel
+        )
+
+    @staticmethod
+    def _resize_slot(
+        slot: _SegmentReduceScratchSlot,
+        send_numel: int,
+        output_numel: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        if slot.send.dtype != dtype or slot.send.device != device:
+            slot.send = torch.empty(send_numel, dtype=dtype, device=device)
+        elif slot.send.numel() < send_numel:
+            slot.send = torch.empty(send_numel, dtype=dtype, device=device)
+
+        if slot.output.dtype != dtype or slot.output.device != device:
+            slot.output = torch.empty(output_numel, dtype=dtype, device=device)
+        elif slot.output.numel() < output_numel:
+            slot.output = torch.empty(output_numel, dtype=dtype, device=device)
+
+    @staticmethod
+    def _is_ready(slot: _SegmentReduceScratchSlot) -> bool:
+        if slot.ready_event is None:
+            return True
+        if slot.ready_event.query():
+            slot.ready_event = None
+            return True
+        return False
+
+    def _release(
+        self,
+        slot: _SegmentReduceScratchSlot,
+        stream: torch.Stream | None,
+    ) -> None:
+        slot.in_use = False
+        if slot.send.device.type != "cuda":
+            slot.ready_event = None
+            return
+        if stream is None:
+            stream = torch.cuda.current_stream(slot.send.device)
+        event = torch.cuda.Event()
+        event.record(stream)
+        slot.ready_event = event
 
 
 def segment_descriptors_from_offsets(
@@ -179,10 +368,17 @@ def build_segment_reduce_plan(
 def pack_segment_reduce_scatter_input(
     flat_input: torch.Tensor,
     plan: SegmentReducePlan,
+    *,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Pack flat input into equal-size owner chunks for reduce-scatter."""
     _validate_flat_input(flat_input, plan)
-    send = flat_input.new_zeros(plan.send_numel)
+    if out is None:
+        send = flat_input.new_empty(plan.send_numel)
+    else:
+        _validate_pack_output(out, flat_input, plan)
+        send = out.narrow(0, 0, plan.send_numel)
+    send.zero_()
     if plan.send_numel == 0:
         return send
 
@@ -233,6 +429,7 @@ def segment_reduce_to_owner(
     *,
     group: Any | None = None,
     op: dist.ReduceOp.RedOpType = dist.ReduceOp.SUM,
+    scratch_pool: SegmentReduceScratchPool | None = None,
 ) -> SegmentReduceResult:
     """Reduce flat segments to owner ranks via packed ``reduce_scatter_tensor``.
 
@@ -247,6 +444,7 @@ def segment_reduce_to_owner(
         plan,
         group=group,
         op=op,
+        scratch_pool=scratch_pool,
     )
 
 
@@ -256,6 +454,7 @@ def segment_reduce_to_owner_with_plan(
     *,
     group: Any | None = None,
     op: dist.ReduceOp.RedOpType = dist.ReduceOp.SUM,
+    scratch_pool: SegmentReduceScratchPool | None = None,
 ) -> SegmentReduceResult:
     """Run packed reduce-scatter using a precomputed segment reduce plan."""
     rank = dist.get_rank(group)
@@ -265,15 +464,35 @@ def segment_reduce_to_owner_with_plan(
             f"Plan world_size={plan.world_size} does not match process group "
             f"world_size={world_size}."
         )
-    send = pack_segment_reduce_scatter_input(flat_input, plan)
-    output = flat_input.new_empty(plan.chunk_numel)
-    if plan.chunk_numel > 0:
-        dist.reduce_scatter_tensor(
-            output=output,
-            input=send,
-            op=op,
-            group=group,
-        )
+    scratch: SegmentReduceScratchLease | None = None
+    try:
+        if scratch_pool is None:
+            send = pack_segment_reduce_scatter_input(flat_input, plan)
+            output = flat_input.new_empty(plan.chunk_numel)
+        else:
+            scratch = scratch_pool.acquire(
+                send_numel=plan.send_numel,
+                output_numel=plan.chunk_numel,
+                dtype=flat_input.dtype,
+                device=flat_input.device,
+            )
+            send = pack_segment_reduce_scatter_input(
+                flat_input,
+                plan,
+                out=scratch.send,
+            )
+            output = scratch.output
+        if plan.chunk_numel > 0:
+            dist.reduce_scatter_tensor(
+                output=output,
+                input=send,
+                op=op,
+                group=group,
+            )
+    except Exception:
+        if scratch is not None:
+            scratch.release()
+        raise
 
     owned_segments = tuple(
         segment for segment in plan.segments if segment.dst_rank == rank
@@ -284,6 +503,7 @@ def segment_reduce_to_owner_with_plan(
         owned_segments=owned_segments,
         owned_views=views,
         plan=plan,
+        scratch=scratch,
     )
 
 
@@ -333,6 +553,30 @@ def _validate_flat_input(
             )
 
 
+def _validate_pack_output(
+    out: torch.Tensor,
+    flat_input: torch.Tensor,
+    plan: SegmentReducePlan,
+) -> None:
+    if out.dim() != 1:
+        raise ValueError(f"Expected a flat output tensor, but got dim={out.dim()}.")
+    if out.dtype != flat_input.dtype:
+        raise ValueError(
+            f"Pack output dtype {out.dtype} must match input dtype "
+            f"{flat_input.dtype}."
+        )
+    if out.device != flat_input.device:
+        raise ValueError(
+            f"Pack output device {out.device} must match input device "
+            f"{flat_input.device}."
+        )
+    if out.numel() < plan.send_numel:
+        raise ValueError(
+            f"Pack output has {out.numel()} elements but plan needs "
+            f"{plan.send_numel}."
+        )
+
+
 def _foreach_copy_(
     dst_tensors: list[torch.Tensor],
     src_tensors: list[torch.Tensor],
@@ -357,6 +601,8 @@ __all__ = [
     "SegmentReduceDescriptor",
     "SegmentReducePlan",
     "SegmentReduceResult",
+    "SegmentReduceScratchLease",
+    "SegmentReduceScratchPool",
     "build_segment_reduce_plan",
     "owned_segment_views",
     "pack_segment_reduce_scatter_input",

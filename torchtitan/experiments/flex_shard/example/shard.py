@@ -22,8 +22,17 @@ from ..flex_shard.placement_contract import (
     PlacementReduceGradResult,
     PlacementUnshardResult,
 )
-from ..flex_shard.utils import _record_comm_if_eager, _record_function_if_eager
-from ._copy import copy_tensor_to_dtype, pack_tensors_into_flat_buffer
+from ..flex_shard.utils import (
+    _record_comm_if_eager,
+    _record_copy_in_if_eager,
+    _record_copy_out_if_eager,
+    _record_function_if_eager,
+)
+from ._copy import (
+    copy_tensor_to_dtype,
+    pack_tensors_into_flat_buffer,
+    pack_tensors_into_flat_buffer_with_scratch,
+)
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -204,12 +213,16 @@ class Shard(Placement):
         dtype = infos[0].unsharded_dtype
         device = tensors[0].device
 
-        with _record_function_if_eager("FlexShard::all_gather_copy_in", debug_fqn):
+        with _record_copy_in_if_eager():
+            copy_in_scratch: list[torch.Tensor] = []
             send_buf = None
             if not torch.compiler.is_compiling():
                 send_buf = self._try_get_contiguous_flat_bucket_view(tensors)
             if send_buf is None:
-                send_buf = pack_tensors_into_flat_buffer(tensors, dtype)
+                send_buf, copy_in_scratch = pack_tensors_into_flat_buffer_with_scratch(
+                    tensors,
+                    dtype,
+                )
             else:
                 send_buf = copy_tensor_to_dtype(send_buf, dtype)
 
@@ -245,7 +258,7 @@ class Shard(Placement):
 
         return PlacementPreparedUnshard(
             placement=self,
-            buffers=[send_buf, *gathered],
+            buffers=[send_buf, *gathered, *copy_in_scratch],
             placement_state=Shard._UnshardState(
                 infos=infos,
                 world_size=ws,
@@ -276,7 +289,7 @@ class Shard(Placement):
                     group=prepared.placement_state.pg,
                 )
             else:
-                gathered = prepared.buffers[1:]
+                gathered = prepared.buffers[1 : 1 + prepared.placement_state.world_size]
                 dist.all_gather(gathered, send_buf, group=prepared.placement_state.pg)
 
     @override
@@ -300,12 +313,9 @@ class Shard(Placement):
                 for r in range(prepared.placement_state.world_size)
             ]
         else:
-            gathered = prepared.buffers[1:]
+            gathered = prepared.buffers[1 : 1 + prepared.placement_state.world_size]
         device = prepared.buffers[0].device
-        with _record_function_if_eager(
-            "FlexShard::all_gather_copy_out",
-            prepared.placement_state.debug_fqn,
-        ):
+        with _record_copy_out_if_eager():
             if (
                 prepared.placement_state.uniform_per_rank_size is not None
                 and self._can_split_uniform_dim0_unshard(
