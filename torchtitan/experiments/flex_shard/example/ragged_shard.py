@@ -30,7 +30,7 @@ from ..flex_shard.utils import (
     _record_copy_out_if_eager,
     _record_function_if_eager,
 )
-from ._copy import (
+from ._pack_utils import (
     copy_tensor_to_dtype,
     foreach_copy_,
     pack_tensors_into_flat_buffer,
