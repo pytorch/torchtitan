@@ -36,9 +36,7 @@ def set_llama3_sharding_config(
 
     ``enable_sp`` controls SequenceParallel (decoupled from TP).
     """
-    set_decoder_sharding_config(
-        config, enable_sp=enable_sp
-    )
+    set_decoder_sharding_config(config, enable_sp=enable_sp)
     for layer_cfg in config.layers:
         _set_llama3_layer_sharding(layer_cfg, enable_sp=enable_sp)
 
