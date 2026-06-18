@@ -141,12 +141,6 @@ def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
     ``FusedQKVLinear`` (single ``wqkv``).
     """
     if isinstance(qkv_linear_cfg, FusedQKVLinear.Config):
-        qkv_output = dense_activation_placement(tp=spmd.S(2))
-        qkv_linear_cfg.sharding_config = ShardingConfig(
-            in_src_shardings={"x": dense_activation_placement(tp=spmd.R)},
-            in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
-            out_src_shardings=(qkv_output, qkv_output, qkv_output),
-        )
         qkv_linear_cfg.wqkv.sharding_config = colwise_config()
     elif isinstance(qkv_linear_cfg, QKVLinear.Config):
         qkv_linear_cfg.wq.sharding_config = colwise_config()
@@ -162,8 +156,8 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     """Standard GQA attention (``qkv_linear``/``wo``) TP sharding.
 
     Shared by llama3 and qwen3 -- both have a GQA block whose
-    ``forward(x, ...)`` takes ``x`` (per-SP layout, gathered to Replicate
-    internally) and uses the attention layer's local RoPE cache.
+    ``forward(x_BLD, ...)`` takes ``x_BLD`` (per-SP layout, gathered to
+    Replicate internally) and uses the attention layer's local RoPE cache.
 
     Callers that have additional attention sub-state (e.g. ``qk_norm``,
     ``sinks``) set those after calling this helper.
@@ -179,10 +173,10 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     )
     attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={
-            "x": attn_x_layout,
+            "x_BLD": attn_x_layout,
         },
         in_dst_shardings={
-            "x": dense_activation_placement(tp=spmd.R),
+            "x_BLD": dense_activation_placement(tp=spmd.R),
         },
     )
     if attention_cfg.rope is not None:
@@ -227,14 +221,14 @@ def set_gqa_inner_attention_local_map(
     )
     inner_attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={
-            "q": q_placements,
-            "k": kv_src_placements,
-            "v": kv_src_placements,
+            "q_BLNH": q_placements,
+            "k_BLNH": kv_src_placements,
+            "v_BLNH": kv_src_placements,
         },
         in_dst_shardings={
-            "q": q_placements,
-            "k": kv_dst_placements,
-            "v": kv_dst_placements,
+            "q_BLNH": q_placements,
+            "k_BLNH": kv_dst_placements,
+            "v_BLNH": kv_dst_placements,
         },
         out_src_shardings=out_src,
         local_map=LocalMapConfig(
