@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 def set_llama3_sharding_config(
     config: "Llama3Model.Config",
     *,
-    tp_gather_logits: bool,
     enable_sp: bool,
 ) -> None:
     """Fill ``sharding_config`` on all Llama3 sub-configs.
@@ -36,10 +35,9 @@ def set_llama3_sharding_config(
     placements under FSDP-only) are skipped at parallelize time.
 
     ``enable_sp`` controls SequenceParallel (decoupled from TP).
-    ``tp_gather_logits`` controls whether TP gathers output logits.
     """
     set_decoder_sharding_config(
-        config, tp_gather_logits=tp_gather_logits, enable_sp=enable_sp
+        config, enable_sp=enable_sp
     )
     for layer_cfg in config.layers:
         _set_llama3_layer_sharding(layer_cfg, enable_sp=enable_sp)
