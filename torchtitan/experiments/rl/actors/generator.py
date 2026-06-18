@@ -20,19 +20,15 @@ import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
 from monarch.rdma import is_rdma_available
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config import (
-    CompileConfig,
-    Configurable,
-    DebugConfig,
-    ParallelismConfig,
-)
+from torchtitan.config import CompileConfig, Configurable, DebugConfig
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
     patch_bmm_for_batch_invariance,
 )
 from torchtitan.experiments.rl.models.vllm_registry import (
-    registry_to_vllm,
+    InferenceParallelismConfig,
+    register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
 )
 from torchtitan.experiments.rl.observability import metrics as m
@@ -228,7 +224,9 @@ class VLLMGenerator(Actor, Configurable):
         """Generator actor configuration.
         TODO: Expose a EngineConfig field to passing config to vLLM Engine"""
 
-        parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
+        parallelism: InferenceParallelismConfig = field(
+            default_factory=InferenceParallelismConfig
+        )
         """Parallelism configuration for the vLLM engine."""
 
         sampling: SamplingConfig = field(default_factory=SamplingConfig)
@@ -269,30 +267,16 @@ class VLLMGenerator(Actor, Configurable):
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only."""
 
         def __post_init__(self):
-            # VLLMGenerator supports TP plus MoE EP. vLLM handles its own
-            # process groups, and the wrapper applies the model parallelisms.
+            # The generator runs vLLM full expert parallelism: vLLM forms the EP
+            # group from all DP*TP ranks, so expert_parallel_degree must equal
+            # data_parallel_degree * tensor_parallel_degree (or 1 to disable EP).
             p = self.parallelism
-            if p.data_parallel_replicate_degree != 1:
+            full_ep = p.data_parallel_degree * p.tensor_parallel_degree
+            if p.expert_parallel_degree not in (1, full_ep):
                 raise ValueError(
-                    f"Generator does not support data parallel replication, "
-                    f"got dp_replicate={p.data_parallel_replicate_degree}"
-                )
-            if p.pipeline_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support pipeline parallelism, "
-                    f"got pp={p.pipeline_parallel_degree}"
-                )
-            if p.context_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support context parallelism, "
-                    f"got cp={p.context_parallel_degree}"
-                )
-            if p.enable_sequence_parallel:
-                raise ValueError(
-                    "Generator does not support sequence parallelism: "
-                    "spmd_types erasure mode requires sequence length to be "
-                    "evenly divisible by TP, which doesn't hold for inference "
-                    "(uneven batches). Set enable_sequence_parallel=False."
+                    f"expert_parallel_degree ({p.expert_parallel_degree}) must be 1 "
+                    f"(no expert parallelism) or equal data_parallel_degree * "
+                    f"tensor_parallel_degree ({full_ep}) in the generator."
                 )
 
             if (
@@ -342,7 +326,7 @@ class VLLMGenerator(Actor, Configurable):
         self._max_num_seqs = max_num_seqs
 
         # Register TorchTitan model + parser with vLLM
-        registry_to_vllm(
+        register_to_vllm(
             model_spec,
             parallelism=config.parallelism,
             compile_config=compile_config,
@@ -382,11 +366,12 @@ class VLLMGenerator(Actor, Configurable):
             model=model_path,
             trust_remote_code=True,
             # Use the torchtitan custom config parser (registered by
-            # registry_to_vllm above). It builds PretrainedConfig from
+            # register_to_vllm above). It builds PretrainedConfig from
             # ModelSpec instead of reading config.json from disk.
             config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
+            data_parallel_size=config.parallelism.data_parallel_degree,
             # NOTE: Monarch launches the generator workers and sets the torch
             # elastic distributed env; with external_launcher, vLLM uses that
             # world to build its process groups. vLLM does not take an
@@ -659,7 +644,8 @@ class VLLMGenerator(Actor, Configurable):
                 lambda: self._close_request is not None
                 or self._model_state_dict_pull_request is not None
                 or self._queued_generation_requests
-                or self._engine.has_unfinished_requests()
+                # rank-0-only decision: use the local (no DP all-reduce) check;
+                or self._engine.output_processor.has_unfinished_requests()
             )
 
             if self._close_request is not None:

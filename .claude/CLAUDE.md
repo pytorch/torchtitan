@@ -93,6 +93,17 @@ this for the comments and docstrings you are adding or rewriting.
   ``DataParallelMeshDims``, etc.): match the upstream spelling at the call
   site, then assign into a locally named ``mesh_axis_names`` if the value
   flows through our code.
+- **Shape-suffix tensor names.** In model code, name tensors with shape
+  suffixes (Noam Shazeer convention:
+  https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd),
+  e.g. `x_BLD`, `q_BLNH`, `out_TNH`. Capital-letter suffixes denote *logical*
+  tensor dimensions, not a physical sharding layout -- a name like
+  `routed_input_RD` keeps the same suffix whether or not `R` is a local shard
+  under EP/SP. Letters are scoped per module, not global: give each module that
+  uses them a legend in a top-of-file comment, and don't assume a letter means
+  the same thing across files (e.g. `N` is num heads in `attention.py` but
+  routed tokens in `moe.py`). Apply this to newly written or rewritten model
+  tensor code; don't churn unrelated code just to add suffixes.
 
 ### Code Placement
 - Put code in the **most general applicable location**:
