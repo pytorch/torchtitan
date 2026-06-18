@@ -53,12 +53,20 @@ def compute_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     dataloader convention.  No internal shift is needed.
     Output shape matches input: ``[batch, seq_len]``.
     """
-    from torch.distributed.tensor import DTensor
+    from torch.distributed.tensor import DTensor, Replicate, Shard
 
     if isinstance(logits, DTensor):
         # TODO: pass `grad_placements=[Replicate(), ...]` to make the autograd
         # contract explicit (see .claude/rules/distributed.md).
-        logits = logits.to_local()
+        # Gather vocab-sharded TP logits before computing per-token logprobs.
+        placements = tuple(
+            Replicate()
+            if isinstance(p, Shard) and p.dim in (-1, logits.ndim - 1)
+            else p
+            for p in logits.placements
+        )
+        logits = logits.redistribute(placements=placements).to_local()
+
     B, S, V = logits.shape
     return -F.cross_entropy(
         logits.float().reshape(B * S, V),
@@ -313,7 +321,7 @@ class PolicyTrainer(Actor, Configurable):
         # Fill sharding configs on the config BEFORE build via the
         # model-agnostic `update_from_config` hook (RL's trainer bypasses
         # `torchtitan.Trainer's` call, so we invoke it directly).
-        model_spec.model.update_from_config(config=config, tp_gather_logits=True)
+        model_spec.model.update_from_config(config=config)
 
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
