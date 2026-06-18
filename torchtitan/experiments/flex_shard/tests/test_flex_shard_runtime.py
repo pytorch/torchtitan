@@ -9,6 +9,10 @@ import torch.nn as nn
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard import is_flex_shard_param
+from torchtitan.experiments.flex_shard.flex_shard.bucket_runtime import (
+    _accumulate_sharded_grads,
+    ParamOwnerRef,
+)
 from torchtitan.experiments.flex_shard.flex_shard.unsharded_param_getters import (
     UnshardedParamSlot,
 )
@@ -63,6 +67,26 @@ class TestUnshardedParamSlot(TestCase):
 
 
 class TestFlexShardEagerRuntime(TestCase):
+    def test_accumulate_sharded_grads_matches_param_layout_for_fused_optimizer(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required for fused AdamW.")
+        module = nn.Module().cuda()
+        module.weight = nn.Parameter(torch.randn(4, 3, 2, device="cuda"))
+        base = torch.randn(4, 9, 2, device="cuda")
+        strided_grad = base.as_strided((4, 3, 2), (18, 2, 1))
+
+        stored_grads = _accumulate_sharded_grads(
+            [ParamOwnerRef(module, "weight")],
+            [strided_grad],
+        )
+
+        self.assertIs(module.weight.grad, stored_grads[0])
+        self.assertEqual(module.weight.grad.dtype, module.weight.dtype)
+        self.assertEqual(module.weight.grad.stride(), module.weight.stride())
+
+        optim = torch.optim.AdamW(module.parameters(), lr=1e-3, fused=True)
+        optim.step()
+
     def test_eager_forward_backward_on_cuda_mesh(self):
         with single_rank_cuda_mesh() as mesh:
             args, model = flex_shard_transformer_model(mesh)
