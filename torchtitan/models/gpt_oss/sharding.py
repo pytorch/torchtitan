@@ -50,9 +50,7 @@ def set_gpt_oss_sharding_config(
     EP is enabled.
     """
 
-    set_decoder_sharding_config(
-        config, enable_sp=enable_sp
-    )
+    set_decoder_sharding_config(config, enable_sp=enable_sp)
     for layer_cfg in config.layers:
         _set_gpt_oss_layer_sharding(layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep)
 
