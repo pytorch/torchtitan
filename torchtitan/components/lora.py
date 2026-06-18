@@ -109,14 +109,15 @@ def _get_frozen_config_cls(
     config_cls: type[Module.Config],
 ) -> type[Module.Config]:
     """Get or create a config subclass that freezes direct build parameters."""
-    if getattr(config_cls, "_lora_frozen_config", False):
+    if any(
+        issubclass(config_cls, frozen_cls)
+        for frozen_cls in _frozen_config_class_cache.values()
+    ):
         return config_cls
     if config_cls in _frozen_config_class_cache:
         return _frozen_config_class_cache[config_cls]
 
     class FrozenConfig(config_cls):  # type: ignore[valid-type, misc]
-        _lora_frozen_config = True
-
         def build(self, **kwargs):
             instance = config_cls.build(self, **kwargs)
             for param in instance.parameters(recurse=False):
