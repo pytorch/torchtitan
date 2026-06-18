@@ -34,7 +34,12 @@ from ..flex_shard.placement_contract import (
     PlacementPreparedUnshard,
     PlacementUnshardResult,
 )
-from ..flex_shard.utils import _record_comm_if_eager, _record_function_if_eager
+from ..flex_shard.utils import (
+    _record_comm_if_eager,
+    _record_copy_in_if_eager,
+    _record_copy_out_if_eager,
+    _record_function_if_eager,
+)
 from .ragged_shard import GroupedRaggedShard
 
 if TYPE_CHECKING:
@@ -282,7 +287,7 @@ class Fp8BlockwiseGroupedRaggedShard(GroupedRaggedShard):
         rank_offset = bucket_layout.rank_offsets[rank]
         rank_numel = bucket_layout.rank_numels[rank]
 
-        with _record_function_if_eager("FlexShard::all_gather_copy_in", debug_fqn):
+        with _record_copy_in_if_eager():
             local_fp8 = torch.zeros(rank_numel, dtype=self.fp8_dtype, device=device)
             local_scale = torch.zeros(
                 rank_numel // tile_numel, dtype=torch.float32, device=device
@@ -369,9 +374,7 @@ class Fp8BlockwiseGroupedRaggedShard(GroupedRaggedShard):
         bs = self.block_size
         tile_numel = bs * bs
         full_params: list[torch.Tensor] = []
-        with _record_function_if_eager(
-            "FlexShard::all_gather_copy_out", prepared.placement_state.debug_fqn
-        ):
+        with _record_copy_out_if_eager():
             for info in prepared.placement_state.infos:
                 param_offset = self._param_layout(info).param_offset
                 out_dim, in_dim = info.global_shape
@@ -529,7 +532,7 @@ class Fp8TwoOrientationGroupedRaggedShard(GroupedRaggedShard):
         rank_offset = bucket_layout.rank_offsets[rank]
         rank_numel = bucket_layout.rank_numels[rank]
 
-        with _record_function_if_eager("FlexShard::all_gather_copy_in", debug_fqn):
+        with _record_copy_in_if_eager():
             local_fwd = torch.zeros(rank_numel, dtype=self.fp8_dtype, device=device)
             local_bwd = torch.zeros(rank_numel, dtype=self.fp8_dtype, device=device)
             local_scale_fwd = torch.zeros(
@@ -664,9 +667,7 @@ class Fp8TwoOrientationGroupedRaggedShard(GroupedRaggedShard):
         gathered_scale_bwd = prepared.buffers[7]
         bs = self.block_size
         full_params: list[torch.Tensor] = []
-        with _record_function_if_eager(
-            "FlexShard::all_gather_copy_out", state.debug_fqn
-        ):
+        with _record_copy_out_if_eager():
             for info in state.infos:
                 param_offset = self._param_layout(info).param_offset
                 out_dim, in_dim = info.global_shape

@@ -409,6 +409,10 @@ class BucketCommContext:
         if not grads:
             return
         with torch.no_grad():
+            # Keep placement-owned packed send scratch bounded. A deferred
+            # reduce input can be very large, so do not prepare another one
+            # before launching the previous deferred request.
+            self.flush_pending_reduce_grad_launches(max_to_flush=None)
             prepared = prepare_reduce_grad(
                 grads,
                 infos,
@@ -961,16 +965,39 @@ class _BucketUnshard(torch.autograd.Function):
         return (None, *([None] * ctx.num_inputs))
 
 
+def _match_param_grad_layout(
+    grad: torch.Tensor,
+    param: nn.Parameter,
+) -> torch.Tensor:
+    """Return a grad tensor suitable for assignment to ``param.grad``."""
+    if grad.dtype != param.dtype or grad.device != param.device:
+        grad = grad.to(device=param.device, dtype=param.dtype)
+    if grad.layout != param.layout:
+        raise RuntimeError(
+            "FlexShard reduced gradient layout does not match the local "
+            f"parameter layout: grad={grad.layout}, param={param.layout}"
+        )
+    if grad.layout == torch.strided and grad.stride() != param.stride():
+        aligned = torch.empty_strided(
+            tuple(param.shape),
+            tuple(param.stride()),
+            dtype=param.dtype,
+            device=param.device,
+        )
+        aligned.copy_(grad)
+        grad = aligned
+    return grad
+
+
 def _accumulate_sharded_grads(
     param_owners: list[ParamOwnerRef],
     sharded_grads: list[torch.Tensor],
 ) -> list[torch.Tensor]:
-    """Cast sharded grads to local param dtype and accumulate into .grad."""
+    """Cast sharded grads to local param dtype/layout and accumulate into .grad."""
     stored_grads: list[torch.Tensor] = []
     for param_owner, grad in zip(param_owners, sharded_grads, strict=True):
         param = param_owner.module._parameters[param_owner.param_name]
-        if grad.dtype != param.dtype:
-            grad = grad.to(param.dtype)
+        grad = _match_param_grad_layout(grad, param)
         stored_grads.append(grad)
         if param.grad is None:
             param.grad = grad

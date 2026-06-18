@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import torch
 
 
@@ -96,6 +98,21 @@ def pack_tensors_into_flat_buffer(
     return out
 
 
+def pack_tensors_into_flat_buffer_with_scratch(
+    tensors: list[torch.Tensor],
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    """Pack tensors into one flat buffer and return async scratch to retain."""
+    if not tensors:
+        raise AssertionError("Expected at least one tensor to pack.")
+
+    triton_result = _try_pack_tensors_into_flat_buffer_triton(tensors, dtype)
+    if triton_result is not None:
+        return triton_result
+
+    return pack_tensors_into_flat_buffer(tensors, dtype), []
+
+
 def copy_tensors_into_flat_buffer(
     tensors: list[torch.Tensor],
     out: torch.Tensor,
@@ -116,3 +133,50 @@ def copy_tensors_into_flat_buffer(
             f"Packed tensor numel {offset} does not match output numel {out.numel()}."
         )
     foreach_copy_(copy_dsts, copy_srcs)
+
+
+def _try_pack_tensors_into_flat_buffer_triton(
+    tensors: list[torch.Tensor],
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, list[torch.Tensor]] | None:
+    """Try the optional Triton copy-in path, falling back on any issue."""
+    if torch.compiler.is_compiling():
+        return None
+    try:
+        from ._triton_copy import pack_tensors_into_flat_buffer_triton
+    except Exception:
+        return None
+
+    try:
+        return pack_tensors_into_flat_buffer_triton(tensors, dtype)
+    except Exception:
+        return None
+
+
+def try_pack_segments_into_flat_buffer_triton(
+    inputs: list[torch.Tensor],
+    tensor_indices: Sequence[int],
+    src_offsets: Sequence[int],
+    numels: Sequence[int],
+    dst_offsets: Sequence[int],
+    out: torch.Tensor,
+) -> list[torch.Tensor] | None:
+    """Try the optional Triton descriptor pack path, falling back on any issue."""
+    if torch.compiler.is_compiling():
+        return None
+    try:
+        from ._triton_copy import pack_segments_into_flat_buffer_triton
+    except Exception:
+        return None
+
+    try:
+        return pack_segments_into_flat_buffer_triton(
+            inputs,
+            tensor_indices,
+            src_offsets,
+            numels,
+            dst_offsets,
+            out,
+        )
+    except Exception:
+        return None

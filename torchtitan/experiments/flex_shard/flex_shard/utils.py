@@ -54,6 +54,27 @@ def _record_function_if_eager(
     return torch.profiler.record_function(_with_fqn(label, fqn))
 
 
+def _record_copy_in_if_eager() -> AbstractContextManager[Any]:
+    """Record unshard copy-in even when physical unshard profiling is suppressed."""
+    if torch.compiler.is_compiling():
+        return nullcontext()
+    return torch.profiler.record_function("FlexShard::copy_in")
+
+
+def _record_copy_out_if_eager() -> AbstractContextManager[Any]:
+    """Record unshard copy-out even when physical unshard profiling is suppressed."""
+    if torch.compiler.is_compiling():
+        return nullcontext()
+    return torch.profiler.record_function("FlexShard::copy_out")
+
+
+def _record_view_out_if_eager() -> AbstractContextManager[Any]:
+    """Record unshard view-out even when physical unshard profiling is suppressed."""
+    if torch.compiler.is_compiling():
+        return nullcontext()
+    return torch.profiler.record_function("FlexShard::view_out")
+
+
 def _record_comm_if_eager(
     label: str,
     fqn: str | None,

@@ -47,7 +47,11 @@ from torchtitan.experiments.flex_shard import (
     LocalStorageLayout,
     Placement,
 )
-from torchtitan.experiments.flex_shard.example.owned import Owned
+from torchtitan.experiments.flex_shard.example.owned import (
+    GroupedOwned,
+    GroupedOwnedSegmentSpec,
+    Owned,
+)
 from torchtitan.experiments.flex_shard.example.shard import per_param_placements, Shard
 from torchtitan.experiments.flex_shard.flex_shard.bucket_runtime import (
     BucketCommContext,
@@ -536,6 +540,173 @@ class TestBucketPlacementValidation(TestCase):
 
         copied = byte_storage.view(torch.float32).view(local_shape)
         self.assertEqual(copied, local_payload.contiguous())
+
+    def test_grouped_owned_expert_block_unshard_is_view_out(self):
+        """GroupedOwned can preserve packed expert tensors for grouped-mm."""
+
+        class TinyExperts(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.w1 = nn.Parameter(torch.arange(24, dtype=torch.float32).view(4, 2, 3))
+                self.w2 = nn.Parameter(
+                    (torch.arange(24, dtype=torch.float32) + 100).view(4, 3, 2)
+                )
+                self.w3 = nn.Parameter(
+                    (torch.arange(24, dtype=torch.float32) + 200).view(4, 2, 3)
+                )
+
+        with single_rank_cpu_mesh() as mesh:
+            model = TinyExperts()
+            named_params = list(model.named_parameters())
+            original_params = {
+                fqn: param.detach().clone() for fqn, param in named_params
+            }
+            ordered_params = sorted(
+                named_params,
+                key=lambda item: {"w1": 0, "w3": 1, "w2": 2}[item[0]],
+            )
+            segments_by_fqn: dict[str, list[GroupedOwnedSegmentSpec]] = {
+                fqn: [] for fqn, _ in named_params
+            }
+            num_experts = model.w1.shape[0]
+            for expert_idx in range(num_experts):
+                for param_order, (fqn, param) in enumerate(ordered_params):
+                    expert_numel = param[0].numel()
+                    segments_by_fqn[fqn].append(
+                        GroupedOwnedSegmentSpec(
+                            name=f"{fqn}#expert{expert_idx}",
+                            fqn=fqn,
+                            param_offset=expert_idx * expert_numel,
+                            numel=expert_numel,
+                            owner_rank=0,
+                            storage_order=expert_idx * len(ordered_params)
+                            + param_order,
+                        )
+                    )
+            placement = GroupedOwned(segments_by_fqn)
+
+            def placement_fn(
+                named_params: list[tuple[str, nn.Parameter]],
+                _mesh,
+            ) -> dict[str, tuple[Placement, ...]]:
+                return {fqn: (placement,) for fqn, _ in named_params}
+
+            bucket_spec = BucketSpec(
+                ["*"],
+                placement_fn=placement_fn,
+                mesh=mesh,
+                reshard_after_forward=False,
+            )
+            bucket_storage = ShardedBucketStorage.from_bucket(
+                model,
+                named_params,
+                {fqn: (placement,) for fqn, _ in named_params},
+                mesh,
+                torch.device("cpu"),
+                bucket_spec,
+            )
+            infos = [bucket_storage.param_infos[fqn] for fqn, _ in named_params]
+            local_shards = [bucket_storage.get_local_view(fqn) for fqn, _ in named_params]
+
+            prepared = placement.prepare_unshard_bucket(local_shards, infos, mesh, None)
+            send_buf = prepared.buffers[0]
+            expected_send = torch.cat(
+                [
+                    param.detach()[expert_idx].reshape(-1)
+                    for expert_idx in range(num_experts)
+                    for _, param in ordered_params
+                ]
+            )
+            self.assertEqual(send_buf, expected_send)
+
+            placement.run_prepared_unshard(prepared)
+            result = placement.finish_prepared_unshard(prepared).full_params
+            gathered_bucket = prepared.buffers[1]
+
+            for full_param, (fqn, original_param) in zip(
+                result,
+                named_params,
+                strict=True,
+            ):
+                self.assertEqual(full_param, original_params[fqn])
+                self.assertEqual(
+                    full_param.untyped_storage().data_ptr(),
+                    gathered_bucket.untyped_storage().data_ptr(),
+                )
+                self.assertFalse(full_param.is_contiguous())
+                self.assertEqual(
+                    full_param.stride()[0],
+                    len(ordered_params) * original_param[0].numel(),
+                )
+
+    def test_grouped_owned_reduce_grad_reuses_packed_send_buffer(self):
+        """GroupedOwned packs reduce-grad with reusable fp32 scratch."""
+        with single_rank_cpu_mesh() as mesh:
+            placement = GroupedOwned(
+                {
+                    "a": [GroupedOwnedSegmentSpec("a#0", "a", 0, 4, 0)],
+                    "b": [GroupedOwnedSegmentSpec("b#0", "b", 0, 3, 0)],
+                }
+            )
+            params = {
+                "a": nn.Parameter(torch.empty(2, 2)),
+                "b": nn.Parameter(torch.empty(3)),
+            }
+            infos = [
+                ParamInfo(
+                    fqn=fqn,
+                    global_shape=param.shape,
+                    global_stride=tuple(param.stride()),
+                    dtype=torch.float32,
+                    reduce_dtype=torch.float32,
+                    requires_grad=True,
+                    placements=(placement,),
+                    local_shape=param.shape,
+                    local_numel=param.numel(),
+                    global_numel=param.numel(),
+                )
+                for fqn, param in params.items()
+            ]
+            grads = [
+                torch.arange(4, dtype=torch.bfloat16).view(2, 2),
+                torch.arange(3, dtype=torch.bfloat16).add(10),
+            ]
+
+            first = placement.prepare_reduce_grad(grads, infos, mesh, None)
+            self.assertEqual(first.buffers[0].dtype, torch.float32)
+            self.assertEqual(
+                first.buffers[0],
+                torch.tensor([0, 1, 2, 3, 10, 11, 12], dtype=torch.float32),
+            )
+            first_result = placement.reduce_prepared_grad(first)
+            self.assertEqual(first_result.sharded_grads[0], grads[0].float())
+            self.assertEqual(first_result.sharded_grads[1], grads[1].float())
+
+            first_ptr = first.buffers[0].data_ptr()
+            other_placement = GroupedOwned(placement.segments_by_fqn)
+            other_infos = [
+                ParamInfo(
+                    fqn=info.fqn,
+                    global_shape=info.global_shape,
+                    global_stride=info.global_stride,
+                    dtype=info.dtype,
+                    reduce_dtype=info.reduce_dtype,
+                    requires_grad=info.requires_grad,
+                    placements=(other_placement,),
+                    local_shape=info.local_shape,
+                    local_numel=info.local_numel,
+                    global_numel=info.global_numel,
+                )
+                for info in infos
+            ]
+            second = other_placement.prepare_reduce_grad(
+                grads,
+                other_infos,
+                mesh,
+                None,
+            )
+            self.assertEqual(second.buffers[0].data_ptr(), first_ptr)
+            other_placement.reduce_prepared_grad(second)
 
     def test_rejects_shard_dim_out_of_range(self):
         """Placement layout validation happens during bucket storage planning."""
