@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from types import ModuleType
 from typing import Any
@@ -39,6 +40,20 @@ logger = logging.getLogger(__name__)
 
 
 _EAGER_COMM_CONTEXTS_ATTR = "_flex_shard_eager_comm_contexts"
+
+
+def _max_pending_reduce_grads_from_env() -> int:
+    raw = os.environ.get("FLEX_SHARD_MAX_PENDING_REDUCE_GRADS")
+    if raw is None:
+        return 1
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "Ignoring invalid FLEX_SHARD_MAX_PENDING_REDUCE_GRADS=%r; using 1.",
+            raw,
+        )
+        return 1
 
 
 @dataclass
@@ -125,6 +140,7 @@ class BucketCommContext:
     device_handle: ModuleType
     unshard_stream: torch.Stream
     reduce_grad_stream: torch.Stream
+    reduce_grad_release_stream: torch.Stream
     buckets: list[BucketRuntime] = field(default_factory=list)
     pending_unshards: dict[PendingUnshardKey, PendingUnshard] = field(
         default_factory=dict
@@ -133,6 +149,9 @@ class BucketCommContext:
         default_factory=list
     )
     reduce_grad_states: list[PendingReduceGrad] = field(default_factory=list)
+    max_pending_reduce_grads: int = field(
+        default_factory=_max_pending_reduce_grads_from_env
+    )
     reduce_grad_callback_queued: bool = False
     raf_saved_unshard_cache: dict[int, list[torch.Tensor]] = field(default_factory=dict)
     raf_saved_unshard_cache_callback_queued: bool = False
@@ -282,6 +301,7 @@ class BucketCommContext:
             device_handle=device_handle,
             unshard_stream=device_handle.Stream(priority=-1),
             reduce_grad_stream=device_handle.Stream(priority=-1),
+            reduce_grad_release_stream=device_handle.Stream(priority=-1),
         )
         contexts[device] = context
         return context
@@ -295,13 +315,8 @@ class BucketCommContext:
         def _wait_for_reduce_grad() -> None:
             try:
                 self.flush_pending_reduce_grad_launches(max_to_flush=None)
-                for pending in self.reduce_grad_states:
-                    pending.result.wait()
-                    pending.result.release_buffers(
-                        release_sharded_grads=True,
-                    )
+                self.wait_and_clear_reduce_grad_states(debug_fqn=None)
             finally:
-                self.reduce_grad_states.clear()
                 self.pending_reduce_grad_launches.clear()
                 self.reduce_grad_callback_queued = False
 
@@ -327,7 +342,7 @@ class BucketCommContext:
         self,
         debug_fqn: str | None,
     ) -> None:
-        """Wait for prior reduce-grad states and release their buffers."""
+        """Host-retire prior reduce-grad states and release their buffers."""
         if not self.reduce_grad_states:
             return
         with _record_function_if_eager(
@@ -335,18 +350,39 @@ class BucketCommContext:
             debug_fqn,
         ):
             for pending in self.reduce_grad_states:
-                pending.result.wait()
-                pending.result.release_buffers(
-                    release_sharded_grads=True,
-                )
+                self.synchronize_and_release_reduce_grad_state(pending)
             self.reduce_grad_states.clear()
+
+    def synchronize_and_release_reduce_grad_state(
+        self,
+        pending: PendingReduceGrad,
+    ) -> None:
+        pending.result.synchronize()
+        with self.device_handle.stream(self.reduce_grad_release_stream):
+            pending.result.release_buffers(
+                release_sharded_grads=True,
+            )
+
+    def drain_reduce_grad_states_if_needed(
+        self,
+        debug_fqn: str | None,
+    ) -> None:
+        if self.max_pending_reduce_grads <= 0:
+            return
+        while len(self.reduce_grad_states) >= self.max_pending_reduce_grads:
+            pending = self.reduce_grad_states.pop(0)
+            with _record_function_if_eager(
+                "FlexShard::post_backward_reduce_grad_retire",
+                debug_fqn,
+            ):
+                self.synchronize_and_release_reduce_grad_state(pending)
 
     def _launch_pending_reduce_grad(
         self,
         pending: PendingReduceGradLaunch,
     ) -> None:
         bucket = pending.bucket
-        self.wait_and_clear_reduce_grad_states(bucket.debug_fqn)
+        self.drain_reduce_grad_states_if_needed(bucket.debug_fqn)
         result = launch_reduce_grad(
             pending.prepared,
             self.reduce_grad_stream,
@@ -757,7 +793,7 @@ class BucketRuntime:
         if not grads:
             return
         with torch.no_grad():
-            self.context.wait_and_clear_reduce_grad_states(self.debug_fqn)
+            self.context.drain_reduce_grad_states_if_needed(self.debug_fqn)
             result = begin_reduce_grad(
                 grads,
                 infos,

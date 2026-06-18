@@ -48,6 +48,10 @@ class ReduceGradHandle:
         """Wait until the reduce-grad result is usable on the current stream."""
         raise NotImplementedError
 
+    def synchronize(self) -> None:
+        """Block the host until the reduce-grad result is complete."""
+        raise NotImplementedError
+
     def release_buffers(self, release_sharded_grads: bool) -> None:
         """Release temporary buffers owned by the reduce-grad operation."""
         raise NotImplementedError
@@ -252,6 +256,9 @@ class SyncReduceGradResult(ReduceGradHandle):
     def wait(self) -> None:
         return
 
+    def synchronize(self) -> None:
+        return
+
     def release_buffers(self, release_sharded_grads: bool) -> None:
         if release_sharded_grads:
             self.sharded_grads.clear()
@@ -286,6 +293,10 @@ class AsyncReduceGradResult(ReduceGradHandle):
             return
         if self.event is not None:
             self.device_handle.current_stream(device).wait_event(self.event)
+
+    def synchronize(self) -> None:
+        if self.event is not None:
+            self.event.synchronize()
 
     def release_buffers(self, release_sharded_grads: bool) -> None:
         """Release pending reduce-grad buffers after its completion wait."""
