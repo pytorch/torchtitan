@@ -175,7 +175,6 @@ def _precompile_aot_fx_trace(
     tokenizer,
 ):
     """aot_fx_trace mode precompilation: make_fx tracing + Inductor."""
-    from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
     from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
     from torchtitan.experiments.graph_trainer.precompile import (
         compute_config_fingerprint,
@@ -184,9 +183,6 @@ def _precompile_aot_fx_trace(
     from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
     loss_fn = config.loss.build(compile_config=compile_config)
-    if isinstance(loss_fn, (CrossEntropyLoss, ChunkedCELoss)):
-        loss_fn.loss_parallel = parallel_dims.tp_enabled
-
     fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
 
     seq_len = config.training.seq_len
