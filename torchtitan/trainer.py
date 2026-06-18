@@ -21,11 +21,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.loss import (
-    BaseLoss,
-    ChunkedCELoss,
-    IGNORE_INDEX,
-)
+from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
