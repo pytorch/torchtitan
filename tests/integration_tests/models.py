@@ -84,14 +84,14 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.context_parallel_degree 2",
                 ],
                 [
-                    "--module qwen3 --config qwen3_debugmodel_fused_qkv",
+                    "--module qwen3 --config qwen3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.context_parallel_degree 2",
                 ],
             ],
-            "Qwen3 FSDP+TP+CP (SP disabled -> fused QKV)",
-            "qwen3_fsdp+tp+cp_no_sp_fused_qkv",
+            "Qwen3 FSDP+TP+CP (SP disabled)",
+            "qwen3_fsdp+tp+cp_no_sp",
             ngpu=8,
         ),
         OverrideDefinitions(

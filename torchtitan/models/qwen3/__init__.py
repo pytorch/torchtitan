@@ -225,44 +225,6 @@ def _debugmodel(attn_backend: str) -> Qwen3Model.Config:
     )
 
 
-def _debugmodel_fused_qkv(attn_backend: str) -> Qwen3Model.Config:
-    dim = 256
-    head_dim = 128
-    n_layers = 8
-    vocab_size = 2048
-    return Qwen3Model.Config(
-        vocab_size=vocab_size,
-        dim=dim,
-        norm=_qwen3_norm(dim),
-        enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size,
-            embedding_dim=dim,
-            param_init=_EMBEDDING_SKIP_INIT,
-        ),
-        lm_head=Linear.Config(
-            in_features=dim,
-            out_features=vocab_size,
-            param_init=_output_linear_init(dim),
-        ),
-        layers=_build_qwen3_layers(
-            n_layers=n_layers,
-            dim=dim,
-            n_heads=16,
-            n_kv_heads=8,
-            head_dim=head_dim,
-            hidden_dim=3072,
-            fuse_qkv=True,
-            attn_backend=attn_backend,
-            rope=CosSinRoPE.Config(
-                dim=head_dim,
-                max_seq_len=4096,
-                theta=1000000.0,
-            ),
-        ),
-    )
-
-
 def _0_6b(attn_backend: str) -> Qwen3Model.Config:
     dim = 1024
     head_dim = 128
@@ -610,7 +572,6 @@ def _235b_a22b(
 
 qwen3_configs = {
     "debugmodel": _debugmodel,
-    "debugmodel_fused_qkv": _debugmodel_fused_qkv,
     "0.6B": _0_6b,
     "1.7B": _1_7b,
     "4B": _4b,
