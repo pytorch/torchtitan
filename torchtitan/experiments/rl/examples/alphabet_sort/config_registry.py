@@ -480,8 +480,8 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
             ),
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                data_parallel_replicate_degree=2,
+                data_parallel_shard_degree=2,
+                data_parallel_replicate_degree=1,
                 tensor_parallel_degree=2,
                 disable_loss_parallel=True,
                 expert_parallel_degree=4,
