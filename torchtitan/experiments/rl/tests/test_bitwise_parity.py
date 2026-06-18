@@ -129,7 +129,6 @@ def build_trainer_model(
     # generator runs fully TP-parallelized, breaking trainer-vs-vLLM parity.
     model_spec.model.update_from_config(
         config=trainer_config,
-        tp_gather_logits=True,
     )
 
     with torch.device("meta"):

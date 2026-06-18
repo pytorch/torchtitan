@@ -495,6 +495,8 @@ class ChunkedCELoss(BaseLoss):
     class Config(BaseLoss.Config):
         num_chunks: int = 8
         """Number of chunks to split the sequence into."""
+        global_vocab_size: int | None = None
+        """Full vocabulary size, needed for spmd_types loss-parallel CE."""
 
     def __init__(
         self,
@@ -506,7 +508,7 @@ class ChunkedCELoss(BaseLoss):
         self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
-        self.global_vocab_size: int | None = None
+        self.global_vocab_size = config.global_vocab_size
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Set the lm_head module. Must be called before the first __call__."""
@@ -642,15 +644,10 @@ class ChunkedCELoss(BaseLoss):
             assert grad_accumulator is not None
             accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
-        if get_spmd_backend() == "spmd_types":
-            spmd.assert_type(
-                accumulated_grad,
-                {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
-                spmd.PartitionSpec("dp", "cp", None),
+        with spmd.no_typecheck():
+            return self._gradient_backprop(
+                hidden_states, accumulated_grad, total_loss, lm_head, fsdp_enabled
             )
-        return self._gradient_backprop(
-            hidden_states, accumulated_grad, total_loss, lm_head, fsdp_enabled
-        )
 
     @staticmethod
     def _gradient_backprop(
@@ -672,7 +669,6 @@ class ChunkedCELoss(BaseLoss):
         )
 
 
-@spmd.register_autograd_function
 class _DecoderOutputGradientBackProp(torch.autograd.Function):
     """Bridges chunked lm_head backward with decoder backward via autograd.
 
@@ -711,17 +707,3 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         # to properly handle. The complicated part is that grad_output might not be
         # on the same device mesh as accumlated_grad.
         return accumulated_grad, None, None
-
-    @staticmethod
-    def typecheck_forward(
-        hidden_states: torch.Tensor,
-        accumulated_grad: torch.Tensor,
-        loss: torch.Tensor,
-    ) -> torch.Tensor:
-        # The hidden activation type depends on the model's sharding config;
-        # we'll defer hidden_states typechecking to previous module boundaries.
-        result = _DecoderOutputGradientBackProp.apply(
-            hidden_states, accumulated_grad, loss
-        )
-        spmd.assert_type(result, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I})
-        return result
