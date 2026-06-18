@@ -17,7 +17,7 @@ from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
-from torchtitan.distributed.spmd_types import current_spmd_mesh
+from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.tools.logging import logger
 
@@ -31,31 +31,28 @@ def cross_entropy_loss(
     pred: torch.Tensor,
     labels: torch.Tensor,
     *,
-    loss_parallel: bool = True,
     global_vocab_size: int | None = None,
 ) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
     if isinstance(pred, DTensor) and isinstance(labels, DTensor):
-        return _cross_entropy_via_local_map(pred, labels, loss_parallel=loss_parallel)
+        return _cross_entropy_via_local_map(pred, labels)
 
-    if loss_parallel:
-        if isinstance(pred, DTensor):
-            assert pred.placements == (Shard(pred.ndim - 1),)
-            tp_group = pred.device_mesh.get_group("tp")
-            global_vocab_size = pred.shape[-1]
-            pred = pred.to_local()
-        else:
-            tp_group = current_spmd_mesh().get_group("tp")
+    if isinstance(pred, DTensor):
+        assert get_spmd_backend() == "default"
+        if pred.placements == (Shard(pred.ndim - 1),):
+            return _LossParallelCrossEntropy.apply(
+                pred.to_local().flatten(0, 1).float(),
+                labels.flatten(0, 1),
+                pred.device_mesh.get_group("tp"),
+                pred.shape[-1],
+            )
+    elif get_spmd_backend() == "spmd_types" and spmd_mesh_size("tp") > 1:
         return _LossParallelCrossEntropy.apply(
             pred.flatten(0, 1).float(),
             labels.flatten(0, 1),
-            tp_group,
+            current_spmd_mesh().get_group("tp"),
             global_vocab_size,
         )
-
-    if isinstance(pred, DTensor):
-        assert pred.placements == (Replicate(),)
-        pred = pred.to_local()
 
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
@@ -203,8 +200,6 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
 def _cross_entropy_via_local_map(
     pred: DTensor,
     labels: DTensor,
-    *,
-    loss_parallel: bool,
 ) -> torch.Tensor:
     mesh = pred.device_mesh
     # Labels don't have a vocab dim.
@@ -250,12 +245,6 @@ def _cross_entropy_via_local_map(
                 reduction="sum",
                 ignore_index=IGNORE_INDEX,
             )
-        if not loss_parallel:
-            raise ValueError(
-                "cross_entropy_loss received vocab-sharded logits with "
-                "loss_parallel=False."
-            )
-
         return _LossParallelCrossEntropy.apply(
             flat_pred,
             flat_labels,
@@ -322,7 +311,6 @@ class CrossEntropyLoss(BaseLoss):
     def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
         self.fn: LossFunction = cross_entropy_loss
         self._maybe_compile(compile_config)
-        self.loss_parallel: bool = False
 
     def __call__(
         self,
@@ -330,7 +318,7 @@ class CrossEntropyLoss(BaseLoss):
         labels: torch.Tensor,
         global_valid_tokens: float | None = None,
     ) -> torch.Tensor:
-        loss = self.fn(pred, labels, loss_parallel=self.loss_parallel)
+        loss = self.fn(pred, labels)
         if global_valid_tokens is not None:
             loss = loss / global_valid_tokens
         return loss
@@ -518,7 +506,6 @@ class ChunkedCELoss(BaseLoss):
         self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
-        self.loss_parallel: bool = False
         self.global_vocab_size: int | None = None
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
@@ -626,7 +613,6 @@ class ChunkedCELoss(BaseLoss):
                 chunk_loss = self.fn(
                     logits,
                     label_chunk,
-                    loss_parallel=self.loss_parallel,
                     global_vocab_size=self.global_vocab_size,
                 )
                 if global_valid_tokens is not None:
