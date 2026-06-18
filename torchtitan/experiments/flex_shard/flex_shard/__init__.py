@@ -12,12 +12,26 @@ from .placement_contract import (
     LocalStorageLayout,
     Placement,
 )
+from .segment_reduce import (
+    CoalescedSegmentReduceDescriptor,
+    PlannedSegmentReduceDescriptor,
+    SegmentReduceDescriptor,
+    SegmentReducePlan,
+    SegmentReduceResult,
+    build_segment_reduce_plan,
+    owned_segment_views,
+    pack_segment_reduce_scatter_input,
+    segment_descriptors_from_offsets,
+    segment_reduce_to_owner,
+    segment_reduce_to_owner_with_plan,
+)
 from .sharded_param import get_global_shape, get_placements, is_flex_shard_param
 
 __all__ = [
     "BucketParamStorageLayout",
     "BucketSpec",
     "BucketStorageLayout",
+    "CoalescedSegmentReduceDescriptor",
     "flex_shard",
     "get_global_shape",
     "get_placements",
@@ -27,4 +41,14 @@ __all__ = [
     "OffloadPolicy",
     "Placement",
     "PlacementFn",
+    "PlannedSegmentReduceDescriptor",
+    "SegmentReduceDescriptor",
+    "SegmentReducePlan",
+    "SegmentReduceResult",
+    "build_segment_reduce_plan",
+    "owned_segment_views",
+    "pack_segment_reduce_scatter_input",
+    "segment_descriptors_from_offsets",
+    "segment_reduce_to_owner",
+    "segment_reduce_to_owner_with_plan",
 ]
