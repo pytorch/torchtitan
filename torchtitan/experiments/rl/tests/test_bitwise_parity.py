@@ -44,6 +44,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
+from torch.distributed.tensor import distribute_tensor, DTensor
 from torch.nn.attention.flex_attention import and_masks
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig
@@ -60,6 +61,7 @@ from torchtitan.distributed.utils import (
 )
 from torchtitan.experiments.rl.actors.trainer import compute_logprobs
 from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
+    rl_grpo_gpt_oss_debug_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
@@ -259,6 +261,37 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     return LLMEngine.from_engine_args(EngineArgs(**engine_kwargs))
 
 
+def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
+    """Copy the trainer model's weights into the vLLM model in-process."""
+
+    wrapper = engine.model_executor.driver_worker.get_model()
+    vllm_model = wrapper.model
+    trainer_sd = trainer_model.state_dict()
+
+    missing = []
+    for name, vparam in vllm_model.state_dict().items():
+        tparam = trainer_sd.get(name)
+        if tparam is None:
+            missing.append(name)
+            continue
+        full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
+        with torch.inference_mode():
+            if isinstance(vparam, DTensor):
+                vparam.copy_(
+                    distribute_tensor(full, vparam.device_mesh, vparam.placements)
+                )
+            else:
+                vparam.copy_(full)
+
+    if dist.get_rank() == 0 and missing:
+        logger.warning("vLLM params not present in trainer state_dict: %s", missing)
+
+    # Sinks were injected during build with uninitialized values (no HF load);
+    # re-inject now that the real sink weights are in place.
+    if hasattr(wrapper, "_inject_attention_sinks"):
+        wrapper._inject_attention_sinks()
+
+
 # ---------------------------------------------------------------------------
 # Logprob helpers
 # ---------------------------------------------------------------------------
@@ -311,9 +344,12 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
     packed_ids = torch.cat(parts).unsqueeze(0)
     positions = torch.cat(pos_parts).unsqueeze(0)
 
-    mask_mod = and_masks(get_causal_mask_mod(), get_document_mask_mod(positions))
+    mask_mods = [get_causal_mask_mod(), get_document_mask_mod(positions)]
+
+    if inner_attn.mask_mod is not None:
+        mask_mods.append(inner_attn.mask_mod.build().get_mask_mod())
     attention_masks = create_attention_mask(
-        mask_mod,
+        and_masks(*mask_mods),
         1,
         None,
         positions.shape[1],
@@ -545,6 +581,9 @@ class BitwiseParityTestBase(unittest.TestCase):
     attn_backend: str = "varlen"
     min_world_size: int = 1
     hf_assets_env_var: str = "HF_ASSETS_PATH"
+    # When True, vLLM skips its own checkpoint load and the trainer model's
+    # weights (including attention sinks) are copied into the engine in-process.
+    sync_weights_from_trainer: bool = False
 
     # Shared across all tests in the class (built once in setUpClass)
     model: torch.nn.Module
@@ -585,15 +624,20 @@ class BitwiseParityTestBase(unittest.TestCase):
         if not dist.is_initialized():
             dist_utils.init_distributed(CommConfig())
 
+        if cls.sync_weights_from_trainer:
+            generator_checkpoint = CheckpointManager.Config(enable=False)
+        else:
+            generator_checkpoint = CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                initial_load_path=config.hf_assets_path,
+            )
+
         register_to_vllm(
             config.model_spec,
             parallelism=config.generator.parallelism,
             compile_config=config.compile,
-            checkpoint_config=CheckpointManager.Config(
-                enable=True,
-                initial_load_in_hf=True,
-                initial_load_path=config.hf_assets_path,
-            ),
+            checkpoint_config=generator_checkpoint,
         )
 
         # Test runs trainer and generator in the same process, so limit
@@ -602,6 +646,8 @@ class BitwiseParityTestBase(unittest.TestCase):
 
         cls.model, cls.device = build_trainer_model(config)
         cls.engine = build_inference_engine(config)
+        if cls.sync_weights_from_trainer:
+            _sync_trainer_weights_to_vllm(cls.model, cls.engine)
 
         tokenizer = cls.engine.get_tokenizer()
         cls.prompt_ids = _make_prompt_tokens(
@@ -767,6 +813,15 @@ class TestBitwiseParityMoEEP(BitwiseParityTestBase):
     attn_backend = "varlen"
     min_world_size = 4
     hf_assets_env_var = "MOE_HF_ASSETS_PATH"
+
+
+class TestBitwiseParityGptOssVarlen(BitwiseParityTestBase):
+    """Bitwise parity for GPT-OSS varlen attention."""
+
+    __test__ = True
+    config_fn = staticmethod(rl_grpo_gpt_oss_debug_varlen_batch_invariant)
+    attn_backend = "varlen"
+    sync_weights_from_trainer = True
 
 
 if __name__ == "__main__":

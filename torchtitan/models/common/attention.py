@@ -14,7 +14,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import ClassVar, NamedTuple
+from typing import Any, ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -33,7 +33,7 @@ from torch.nn.attention.flex_attention import (
     create_block_mask,
     flex_attention,
 )
-from torch.nn.attention.varlen import varlen_attn
+from torch.nn.attention.varlen import AuxRequest as VarlenAuxRequest, varlen_attn
 
 from torchtitan.distributed.compile import maybe_regional_inductor
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
@@ -112,8 +112,11 @@ class VarlenAttention(Module):
         *,
         attention_masks: VarlenMetadata,
         scale: float | None = None,
+        out_transform: (
+            Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None
+        ) = None,
         **kwargs,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert isinstance(
             attention_masks, VarlenMetadata
         ), f"attention_masks must be instance of VarlenMetadata but got {type(attention_masks)}"
@@ -138,7 +141,7 @@ class VarlenAttention(Module):
         k_TNH = k_TNH.to(torch.bfloat16)
         v_TNH = v_TNH.to(torch.bfloat16)
 
-        varlen_kwargs = dict()
+        varlen_kwargs: dict[str, Any] = {}
 
         # TODO(pytorch/pytorch#179760): FA2's auto num_splits heuristic
         # produces NaN intermittently with paged KV (block_table). Force
@@ -154,7 +157,10 @@ class VarlenAttention(Module):
         if kwargs.get("enable_gqa", False):
             varlen_kwargs["enable_gqa"] = True
 
-        out_TNH = varlen_attn(
+        if out_transform is not None:
+            varlen_kwargs["return_aux"] = VarlenAuxRequest(lse=True)
+
+        result = varlen_attn(
             q_TNH,
             k_TNH,
             v_TNH,
@@ -164,13 +170,23 @@ class VarlenAttention(Module):
             max_k,
             scale=scale,
             window_size=self.window_size,
-            **varlen_kwargs,  # pyrefly: ignore [bad-argument-type]
+            **varlen_kwargs,
         )
-        assert isinstance(out_TNH, torch.Tensor)
-        # Reshape back to the format expected by GQAttention.forward()
-        out_BLNH = out_TNH.view(B, L, -1, H)
 
-        return out_BLNH.to(q_BLNH.dtype)
+        # varlen_attn returns the packed output (T, N, H), plus the LSE when an
+        # out_transform epilogue was requested.
+        if out_transform is None:
+            assert isinstance(result, torch.Tensor)
+            out_BLNH = result.view(B, L, -1, H).to(q_BLNH.dtype)
+            return out_BLNH
+
+        out_TNH, lse_NT = result
+        out_BLNH = out_TNH.view(B, L, -1, H).to(q_BLNH.dtype)
+
+        # FA varlen returns the LSE as (N, T); reorder to (B, L, N) so
+        # out_transform can broadcast per (token, head).
+        lse_BLN = lse_NT.transpose(0, 1).reshape(B, L, -1)
+        return out_transform(out_BLNH, lse_BLN)
 
 
 class FlexAttention(Module):
@@ -225,10 +241,13 @@ class FlexAttention(Module):
         attention_masks: BlockMask,
         score_mod: _score_mod_signature | None = None,
         scale: float | None = None,
-        return_lse: bool = False,
         enable_gqa: bool = False,
+        # TODO: make this into a config function and during fwd accept kwargs
+        out_transform: (
+            Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None
+        ) = None,
         **kwargs,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert isinstance(
             attention_masks, BlockMask
         ), f"attention_masks must be instance of BlockMask, got {type(attention_masks)}"
@@ -255,13 +274,15 @@ class FlexAttention(Module):
                 block_mask=attention_masks,
                 scale=scale,
                 enable_gqa=enable_gqa,
-                return_aux=AuxRequest(lse=return_lse),
+                return_aux=AuxRequest(lse=out_transform is not None),
                 kernel_options=self.kernel_options,
             )
         # Transpose back to (B, L, N, H)
-        if return_lse:
-            return out_BNLH.transpose(1, 2), aux.lse.transpose(1, 2)
-        return out_BNLH.transpose(1, 2)
+        out_BLNH = out_BNLH.transpose(1, 2)
+        if out_transform is None:
+            return out_BLNH
+        lse_BLN = aux.lse.transpose(1, 2)
+        return out_transform(out_BLNH, lse_BLN)
 
 
 class ScaledDotProductAttention(Module):
