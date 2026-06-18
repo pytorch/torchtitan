@@ -463,8 +463,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # Non-PP: single model part always has lm_head.
         # PP: only the last stage has lm_head; non-last stages skip this.
         if isinstance(self.loss_fn, ChunkedCELoss):
-            assert isinstance(self.model_config, Decoder.Config)
-            self.loss_fn.global_vocab_size = self.model_config.vocab_size
             if parallel_dims.pp_enabled:
                 if self.pp_has_last_stage:
                     lm_head = self.model_parts[-1].lm_head
