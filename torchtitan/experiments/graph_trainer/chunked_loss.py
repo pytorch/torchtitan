@@ -7,62 +7,172 @@
 from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
+import torch.nn.functional as F
+from torch.distributed.tensor import DTensor, Partial, Replicate
+from torch.distributed.tensor.experimental import local_map
 
-from torchtitan.components.loss import ChunkedCELoss
+from torchtitan.components.loss import ChunkedCELoss, GradAccumulator
+
+
+def _redistribute_grad_like_param(
+    local_grad: torch.Tensor, param: torch.Tensor
+) -> torch.Tensor:
+    """Redistribute an accumulated local grad to ``param``'s DTensor layout.
+
+    Data-parallel axes start as ``Partial`` so redistribution performs the
+    needed reduction; TP sharding is preserved because it is already local.
+    """
+    if not isinstance(param, DTensor):
+        return local_grad
+    mesh = param.device_mesh
+    mesh_axis_names = mesh.mesh_dim_names
+    src_placements = [
+        pl
+        if (mesh_axis_names is not None and mesh_axis_names[i] == "tp")
+        else Partial()
+        for i, pl in enumerate(param.placements)
+    ]
+    return DTensor.from_local(local_grad, mesh, src_placements).redistribute(
+        placements=param.placements
+    )
 
 
 class ChunkedCELossWithParamGrads(ChunkedCELoss):
-    """ChunkedCELoss variant that exposes sharded lm_head param grads as
-    explicit autograd outputs of the returned loss tensor, so outer
-    ``torch.autograd.grad(loss, [hidden_states, *lm_head.parameters()])``
-    returns real grads instead of relying on ``param.grad`` side effects.
+    """ChunkedCELoss variant for graph_trainer.
 
-    Designed for graph_trainer, where the chunk loop's per-chunk
-    ``param.grad`` side-effect writes don't survive the captured graph and
-    replay therefore produces all-zero param grads. Compatible with both
-    outer ``loss.backward()`` and ``torch.autograd.grad`` consumers.
+    The parent implementation can override only FSDP2 gradient sync. Graph
+    trainer uses simple_fsdp, so this training path materializes lm_head once,
+    accumulates local per-chunk parameter grads, then redistributes them once
+    as explicit autograd outputs for graph capture.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(ChunkedCELoss.Config):
         pass
 
-    @staticmethod
-    def _gradient_backprop(
-        hidden_states: torch.Tensor,
-        accumulated_grad: torch.Tensor,
-        total_loss: torch.Tensor,
-        lm_head: nn.Module,
-        fsdp_enabled: bool,
+    def __call__(
+        self,
+        pred: torch.Tensor,
+        labels: torch.Tensor,
+        global_valid_tokens: float | None = None,
     ) -> torch.Tensor:
-        return _ChunkedLossWithParamGrads.apply(
+        hidden_states = pred
+        num_chunks = self.num_chunks
+        lm_head = self.lm_head
+        assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
+
+        # SP: redistribute the TP axis of hidden states to Replicate before
+        # chunking so lm_head receives Replicate input on TP (mirrors base).
+        if isinstance(hidden_states, DTensor):
+            mesh = hidden_states.device_mesh
+            mesh_axis_names = mesh.mesh_dim_names
+            if mesh_axis_names is not None and "tp" in mesh_axis_names:
+                tp_axis = mesh_axis_names.index("tp")
+                placements = list(hidden_states.placements)
+                if not isinstance(placements[tp_axis], Replicate):
+                    placements[tp_axis] = Replicate()
+                    hidden_states = hidden_states.redistribute(mesh, tuple(placements))
+
+        requires_grad = hidden_states.requires_grad
+
+        # Chunk on the *local* view (see base ChunkedCELoss for the rationale).
+        def _chunk_local(t: torch.Tensor) -> tuple[torch.Tensor, ...]:
+            return tuple(c.contiguous() for c in torch.chunk(t, num_chunks, dim=1))
+
+        def _chunk(t: torch.Tensor) -> tuple[torch.Tensor, ...]:
+            if not isinstance(t, DTensor):
+                return _chunk_local(t)
+            p = t.placements
+            wrapped = local_map(
+                _chunk_local,
+                out_placements=(p,) * num_chunks,
+                in_placements=(p,),
+                device_mesh=t.device_mesh,
+            )
+            return wrapped(t)
+
+        h_chunks = [
+            c.detach().requires_grad_(requires_grad) for c in _chunk(hidden_states)
+        ]
+        label_chunks = list(_chunk(labels))
+
+        # Accessing lm_head.weight fires the simple_fsdp all-gather once.
+        raw_weight = lm_head._parameters["weight"]
+        raw_bias = lm_head._parameters.get("bias")
+        weight = lm_head.weight
+        bias = lm_head.bias if raw_bias is not None else None
+
+        if not requires_grad:
+            total_loss = hidden_states.new_zeros((), dtype=torch.float32)
+            for h_chunk, label_chunk in zip(h_chunks, label_chunks):
+                logits = F.linear(h_chunk, weight, bias)
+                chunk_loss = self.fn(logits, label_chunk)
+                if global_valid_tokens is not None:
+                    chunk_loss = chunk_loss / global_valid_tokens
+                total_loss = total_loss + chunk_loss.detach()
+            return total_loss
+
+        # Detached leaves keep lm_head collectives out of the chunk loop.
+        w_leaf = weight.detach().requires_grad_(True)
+        b_leaf = bias.detach().requires_grad_(True) if bias is not None else None
+
+        grad_accumulator = GradAccumulator(
+            hidden_states, num_chunks=num_chunks, dtype=torch.float32
+        )
+        total_loss = hidden_states.new_zeros((), dtype=torch.float32)
+
+        # Accumulate local fp32 lm_head grads across chunks, then redistribute
+        # once to the raw parameter layout. This matches eager's chunk summation
+        # order and avoids per-chunk data-parallel reductions.
+        def _to_local(t: torch.Tensor) -> torch.Tensor:
+            return t.to_local() if isinstance(t, DTensor) else t
+
+        w_grad_buf = torch.zeros_like(_to_local(w_leaf), dtype=torch.float32)
+        b_grad_buf = (
+            torch.zeros_like(_to_local(b_leaf), dtype=torch.float32)
+            if b_leaf is not None
+            else None
+        )
+
+        for h_chunk, label_chunk in zip(h_chunks, label_chunks):
+            logits = F.linear(h_chunk, w_leaf, b_leaf)
+            chunk_loss = self.fn(logits, label_chunk)
+            if global_valid_tokens is not None:
+                chunk_loss = chunk_loss / global_valid_tokens
+            total_loss = total_loss + chunk_loss.detach()
+            inputs = [h_chunk, w_leaf] + ([b_leaf] if b_leaf is not None else [])
+            grads = torch.autograd.grad(chunk_loss, inputs)
+            grad_accumulator.add(grads[0])
+            w_grad_buf += _to_local(grads[1]).float()
+            if b_leaf is not None:
+                b_grad_buf += _to_local(grads[2]).float()
+
+        accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
+
+        params: list[torch.Tensor] = [raw_weight]
+        param_grads: list[torch.Tensor] = [
+            _redistribute_grad_like_param(w_grad_buf, raw_weight)
+        ]
+        if bias is not None:
+            params.append(raw_bias)
+            param_grads.append(_redistribute_grad_like_param(b_grad_buf, raw_bias))
+
+        return _ChunkedParamGradBridge.apply(
             hidden_states,
             accumulated_grad,
             total_loss,
-            lm_head,
-            fsdp_enabled,
-            *lm_head.parameters(),
+            len(params),
+            *params,
+            *param_grads,
         )
 
 
-class _ChunkedLossWithParamGrads(torch.autograd.Function):
-    """Like ``_DecoderOutputGradientBackProp`` but also plumbs sharded grads
-    for the lm_head parameters out as explicit autograd outputs, so outer
-    ``torch.autograd.grad(loss, [hidden_states, *lm_head.parameters()])``
-    returns correct grads instead of relying on ``param.grad`` side effects.
-
-    Forward is invoked *after* the chunked ``chunk_loss.backward()`` loop has
-    populated each lm_head param's sharded ``.grad`` (via FSDP's last-chunk
-    reduce-scatter). Forward captures those grads, clears ``.grad``, and
-    disables grad sync — so that outer ``loss.backward()`` consumers, whose
-    AccumulateGrad would otherwise (a) double-add onto ``.grad`` and (b)
-    re-fire FSDP's reduce-scatter on already-sharded data, get clean
-    behavior. Backward queues a callback to restore grad sync after the
-    engine drains the rest of the backward graph.
-
-    Outer ``torch.autograd.grad`` consumers bypass AccumulateGrad entirely
-    and just receive the saved sharded grads directly.
+class _ChunkedParamGradBridge(torch.autograd.Function):
+    """Returns a detached loss whose backward emits the precomputed grads:
+    ``accumulated_h_grad`` for ``hidden_states`` (propagating through the decoder)
+    and the precomputed sharded param grads for the lm_head params -- so both
+    ``loss.backward()`` and ``torch.autograd.grad(loss, [hidden, *lm_head.params])``
+    consumers get correct grads without relying on ``.grad`` side effects.
     """
 
     @staticmethod
@@ -72,53 +182,27 @@ class _ChunkedLossWithParamGrads(torch.autograd.Function):
         hidden_states: torch.Tensor,
         accumulated_h_grad: torch.Tensor,
         total_loss: torch.Tensor,
-        lm_head: nn.Module,
-        fsdp_enabled: bool,
-        *lm_params: torch.Tensor,
+        num_params: int,
+        *params_and_grads: torch.Tensor,
     ) -> torch.Tensor:
-        # The chunk loop above already populated each lm_head param's
-        # ``.grad`` with the correctly sharded value via the FSDP last-chunk
-        # post-accumulate-grad hook (reduce-scatter). Capture those grads
-        # into saved_tensors so backward ca route them as autograd outputs
-        # for the lm_head param inputs of this Function. Additionally, we need
-        # following changes:
-        # 1. We need to clear ``.grad`` so a subsequent outer ``loss.backward()`` doesn't
-        # double-add when AccumulateGrad fires on those params with our returned grads.
-        # 2. We need to disable FSDP grad sync on lm_head: outer .backward() would
-        # otherwise re-fire the post-accumulate-grad hook on already-sharded
-        # data. The restore is queued in backward() below.
-        sharded_param_grads = [p.grad.detach() for p in lm_params]
-        for p in lm_params:
-            p.grad = None
-        if fsdp_enabled:
-            lm_head.set_requires_gradient_sync(False, recurse=False)
-        ctx.save_for_backward(accumulated_h_grad, *sharded_param_grads)
-        ctx.lm_head = lm_head
-        ctx.fsdp_enabled = fsdp_enabled
+        param_grads = params_and_grads[num_params:]
+        ctx.save_for_backward(accumulated_h_grad, *param_grads)
+        ctx.num_params = num_params
         return total_loss.detach().clone()
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):  # pyrefly: ignore[bad-override]
         saved = ctx.saved_tensors
-        accumulated_h_grad = saved[0]
+        h_grad = saved[0]
         param_grads = saved[1:]
-        if ctx.fsdp_enabled:
-            # Restore FSDP grad sync that forward() disabled. Use
-            # queue_callback to defer the restore until the engine drains
-            # the rest of the backward graph — including each lm_head
-            # param's AccumulateGrad firing on the grads we return below.
-            # If we restored here (synchronously, before returning), the
-            # first AccumulateGrad would see sync=True and try to
-            # reduce-scatter our already-sharded grad → wrong result.
-            lm_head = ctx.lm_head
-            torch.autograd.Variable._execution_engine.queue_callback(
-                lambda: lm_head.set_requires_gradient_sync(True, recurse=False)
-            )
+        # Grad for each forward input, in order:
+        # (hidden_states, accumulated_h_grad, total_loss, num_params,
+        #  *params, *param_grads)
         return (
-            accumulated_h_grad,
-            None,
+            h_grad,
             None,
             None,
             None,
             *param_grads,
+            *([None] * ctx.num_params),
         )
