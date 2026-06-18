@@ -26,6 +26,7 @@ from typing import Any, cast
 import torch
 import torch.distributed as dist
 
+from torchtitan.components.loss import ChunkedLoss
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
@@ -164,6 +165,22 @@ def _common_setup(config):
     )
 
 
+def _prepare_loss_for_precompile(model, loss_fn, parallel_dims, parallelism) -> None:
+    """Match Trainer's post-parallelization loss setup for precompile tracing."""
+    if not isinstance(loss_fn, ChunkedLoss):
+        return
+
+    lm_head = getattr(model, "lm_head", None)
+    if lm_head is None:
+        raise ValueError("Model must have lm_head for ChunkedLoss precompile")
+
+    loss_fn.loss_parallel = (
+        parallel_dims.tp_enabled and not parallelism.disable_loss_parallel
+    )
+    loss_fn.set_lm_head(lm_head)
+    model._skip_lm_head = True
+
+
 def _precompile_aot_fx_trace(
     config,
     model,
@@ -183,6 +200,7 @@ def _precompile_aot_fx_trace(
     from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
     loss_fn = config.loss.build(compile_config=compile_config)
+    _prepare_loss_for_precompile(model, loss_fn, parallel_dims, config.parallelism)
 
     fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
 

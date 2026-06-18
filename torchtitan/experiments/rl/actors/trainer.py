@@ -14,6 +14,7 @@ import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
+from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import (
     BaseLoss,
@@ -372,7 +373,27 @@ class PolicyTrainer(Actor, Configurable):
             if not values_by_key:
                 continue
             keys = list(values_by_key)
-            stacked = torch.stack([values_by_key[key].detach() for key in keys])
+            # A metric can arrive as a DTensor: ChunkedLoss returns the loss as a
+            # DTensor and the trainer injects ``loss.detach()`` as ``loss/mean``.
+            # The loss mesh reduced below is batch/cp, orthogonal to TP, so mirror
+            # core's ``_dist_reduce`` and take the local per-rank value: the loss
+            # is Replicate on the TP axis (loss parallel is disabled) and Partial
+            # on batch/cp, so ``to_local`` yields exactly the per-rank share this
+            # all-reduce expects, matching the plain-tensor (non-chunked) path.
+            # ``full_tensor`` could instead add a spurious all-reduce.
+            local_values: list[torch.Tensor] = []
+            for key in keys:
+                value = values_by_key[key].detach()
+                if isinstance(value, DTensor):
+                    assert all(
+                        p.is_replicate() or p.is_partial() for p in value.placements
+                    ), (
+                        f"metric '{key}' is a DTensor with unsupported placements "
+                        f"{value.placements}; only Replicate/Partial are supported."
+                    )
+                    value = value.to_local()
+                local_values.append(value)
+            stacked = torch.stack(local_values)
             if loss_mesh is not None:
                 stacked = funcol.all_reduce(stacked, reduceOp=op.name, group=loss_mesh)
             for key, value in zip(keys, stacked.cpu().tolist(), strict=True):

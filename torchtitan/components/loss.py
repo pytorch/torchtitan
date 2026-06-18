@@ -298,7 +298,7 @@ class BaseLoss(ABC, Configurable):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor | None = None,
+        global_valid_tokens: float | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         loss = self.fn(pred, labels, **self._fn_kwargs())
         # Normalization is owned by the loss: leaf losses (CrossEntropyLoss,
@@ -410,7 +410,7 @@ class GRPOLoss(BaseLoss):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor | None = None,
+        global_valid_tokens: float | None = None,
         *,
         generator_logprobs: torch.Tensor,
         advantages: torch.Tensor,
@@ -457,7 +457,12 @@ class GRPOLoss(BaseLoss):
         )
         token_pg_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
 
-        loss_denominator = max(global_valid_tokens, 1)
+        # global_valid_tokens is the per-step denominator (always provided by the
+        # trainer); the None default exists only for the uniform BaseLoss
+        # signature, so fall back to 1 (no normalization) to mirror BaseLoss.
+        loss_denominator = (
+            max(global_valid_tokens, 1) if global_valid_tokens is not None else 1
+        )
         loss = (token_pg_loss * loss_mask).sum() / loss_denominator
 
         with torch.no_grad():
@@ -722,7 +727,7 @@ class ChunkedLoss(BaseLoss):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor | None = None,
+        global_valid_tokens: float | None = None,
         **loss_inputs: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute the chunked loss by running the inner ``loss_fn`` per chunk.
