@@ -452,8 +452,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
 def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
     """GRPO training config for Qwen3-30B-A3B MoE (8 GPUs: 4 gen + 4 train).
 
-    Generator uses TP=4 for dense layers and EP=4 for MoE experts.
-    Trainer uses TP=4 for all layers.
+    Trainer and generator uses TP=2 for dense layers and EP=4 for MoE experts.
 
     Note: Qwen3-30B-A3B has 4 KV heads, so TP degree cannot exceed 4.
     """
@@ -480,8 +479,8 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
             ),
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                data_parallel_replicate_degree=2,
+                data_parallel_shard_degree=2,
+                data_parallel_replicate_degree=1,
                 tensor_parallel_degree=2,
                 disable_loss_parallel=True,
                 expert_parallel_degree=4,
