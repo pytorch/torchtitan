@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import torch
 import torch._dynamo
 import torch.distributed as dist
-from torch.distributed._tensor import DTensor, Replicate
+from torch.distributed.tensor import DTensor, Replicate, Shard
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
@@ -306,10 +306,16 @@ class VLLMModelWrapper(Module):
 
         logits = self.model.lm_head(hidden_states)
 
-        # Full DTensor path returns logits as DTensor; vLLM expects plain tensors.
-        # disable_loss_parallel=True already makes lm_head output Replicate
+        # Full DTensor path returns vocab-sharded logits as DTensor; vLLM
+        # expects full plain tensors.
         if isinstance(logits, DTensor):
-            logits = logits.to_local()
+            placements = tuple(
+                Replicate()
+                if isinstance(p, Shard) and p.dim in (-1, logits.ndim - 1)
+                else p
+                for p in logits.placements
+            )
+            logits = logits.redistribute(placements=placements).to_local()
 
         return logits
 
