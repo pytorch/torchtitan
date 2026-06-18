@@ -83,6 +83,35 @@ python -m torchtitan.experiments.rl.train --module alphabet_sort --config rl_grp
 
 We use a unified model definition from torchtitan for the trainer and generator, ensuring bitwise-identical models to address a class of subtle correctness bugs in RL for LLMs.
 
+## Multi-node on SLURM
+
+For configurations whose total GPU footprint exceeds a single node (e.g.
+`rl_grpo_qwen3_14b`: trainer TP=8 + generator TP=8 = 16 GPUs), run the
+controller from a login node and let Monarch's `SlurmJob` submit the worker
+allocation:
+
+```bash
+RL_LAUNCHER=slurm \
+RL_SLURM_PARTITION=<partition> \
+RL_SLURM_GPUS_PER_NODE=8 \
+RL_SLURM_TIME=02:00:00 \
+RL_SLURM_QOS=<qos>          # optional, passed as #SBATCH --qos=...
+RL_SLURM_ACCOUNT=<account>  # optional, passed as #SBATCH --account=...
+python -m torchtitan.experiments.rl.train \
+    --module rl --config rl_grpo_qwen3_14b
+```
+
+`train.py` constructs `SlurmJob(meshes={"trainer": N, "generator": M}, ...)`,
+which submits a single sbatch covering both meshes, waits for the
+allocation to start, and returns the `HostMesh` objects ready to spawn the
+trainer/generator proc meshes onto. Trainer and generator land on disjoint
+nodes; both world sizes must be divisible by `RL_SLURM_GPUS_PER_NODE`.
+
+For single-node runs on SLURM, omit `RL_LAUNCHER` and use a standard
+allocation (`salloc` or `sbatch --wrap "python -m ..."`); the in-process
+`this_host()` path partitions GPUs between trainer and generator without
+needing a launcher.
+
 ## Reproducibility
 
 We provide two independent tools for debugging and reproducibility. They address different sources of non-determinism and can be used separately or together.
