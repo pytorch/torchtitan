@@ -9,6 +9,7 @@ import pickle
 import tempfile
 import unittest
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -183,6 +184,25 @@ class TestConfigFingerprint(unittest.TestCase):
         fp_ab = compute_config_fingerprint(_make_stub_model(), cfg_ab, dims)
         fp_ba = compute_config_fingerprint(_make_stub_model(), cfg_ba, dims)
         self.assertNotEqual(fp_ab, fp_ba)
+
+
+class TestPrecompileLossSetup(unittest.TestCase):
+    def test_chunked_loss_setup_matches_trainer_boundary(self):
+        from torchtitan.experiments.graph_trainer.chunked_loss import (
+            ChunkedCELossWithParamGrads,
+        )
+        from torchtitan.experiments.graph_trainer.precompile_main import (
+            _prepare_loss_for_precompile,
+        )
+
+        lm_head = torch.nn.Linear(2, 3)
+        model = SimpleNamespace(lm_head=lm_head, _skip_lm_head=False)
+        loss_fn = ChunkedCELossWithParamGrads.Config().build()
+
+        _prepare_loss_for_precompile(model, loss_fn)
+
+        self.assertIs(loss_fn.lm_head, lm_head)
+        self.assertTrue(model._skip_lm_head)
 
 
 class TestPrecompiledFxTraceArtifact(unittest.TestCase):
