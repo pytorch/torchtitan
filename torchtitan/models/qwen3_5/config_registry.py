@@ -37,7 +37,7 @@ def _dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
 
 def qwen35_debugmodel() -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedCELoss.Config(global_vocab_size=248320),
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
@@ -65,7 +65,7 @@ def qwen35_debugmodel() -> Trainer.Config:
 
 def qwen35_debugmodel_moe() -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedCELoss.Config(global_vocab_size=248320),
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
@@ -94,7 +94,7 @@ def qwen35_debugmodel_moe() -> Trainer.Config:
 
 def qwen35_0_8b() -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedCELoss.Config(global_vocab_size=248320),
         hf_assets_path="./assets/hf/Qwen3.5-0.8B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_registry("0.8B"),
@@ -119,7 +119,7 @@ def qwen35_0_8b() -> Trainer.Config:
 
 def qwen35_2b() -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedCELoss.Config(global_vocab_size=248320),
         hf_assets_path="./assets/hf/Qwen3.5-2B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_registry("2B"),
@@ -144,7 +144,7 @@ def qwen35_2b() -> Trainer.Config:
 
 def qwen35_4b() -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedCELoss.Config(global_vocab_size=248320),
         hf_assets_path="./assets/hf/Qwen3.5-4B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_registry("4B"),
@@ -168,7 +168,7 @@ def qwen35_4b() -> Trainer.Config:
 
 def qwen35_9b() -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedCELoss.Config(global_vocab_size=248320),
         hf_assets_path="./assets/hf/Qwen3.5-9B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_registry("9B"),
@@ -194,7 +194,7 @@ def qwen35_9b() -> Trainer.Config:
 
 def qwen35_27b() -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedCELoss.Config(global_vocab_size=248320),
         hf_assets_path="./assets/hf/Qwen3.5-27B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_registry("27B"),
@@ -220,7 +220,7 @@ def qwen35_27b() -> Trainer.Config:
 
 def qwen35_35b_a3b() -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedCELoss.Config(global_vocab_size=248320),
         hf_assets_path="./assets/hf/Qwen3.5-35B-A3B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_registry("35B-A3B", moe_comm_backend="standard"),
@@ -247,7 +247,7 @@ def qwen35_35b_a3b() -> Trainer.Config:
 
 def qwen35_122b_a10b() -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedCELoss.Config(global_vocab_size=248320),
         hf_assets_path="./assets/hf/Qwen3.5-122B-A10B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_registry("122B-A10B", moe_comm_backend="standard"),
@@ -274,7 +274,7 @@ def qwen35_122b_a10b() -> Trainer.Config:
 
 def qwen35_397b_a17b() -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedCELoss.Config(global_vocab_size=248320),
         hf_assets_path="./assets/hf/Qwen3.5-397B-A17B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_registry("397B-A17B", moe_comm_backend="standard"),

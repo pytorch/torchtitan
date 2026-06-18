@@ -67,7 +67,6 @@ class Llama3Model(Decoder):
             self,
             *,
             config,
-            tp_gather_logits: bool = False,
             **kwargs,
         ) -> None:
             Decoder.Config.update_from_config(self, config=config, **kwargs)
@@ -85,7 +84,6 @@ class Llama3Model(Decoder):
 
             set_llama3_sharding_config(
                 self,
-                tp_gather_logits=tp_gather_logits,
                 enable_sp=parallelism.enable_sequence_parallel,
             )
 
