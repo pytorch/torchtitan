@@ -63,7 +63,11 @@ _original_node_ref = _codegen._node_ref
 
 # TODO: Followup with core vLLM fix
 # https://github.com/pytorch/torchtitan/issues/3067
-def _patched_node_ref(arg):
+# Accept *args: the FAP piecewise codegen callsite passes additional positional
+# args in newer vLLM; only the first arg is the value to render. Forward all of
+# them to the original so the wrapper matches whatever arity vLLM uses.
+def _patched_node_ref(*args):
+    arg = args[0]
     try:
         from torch.distributed.tensor.placement_types import Partial, Placement
 
@@ -76,7 +80,7 @@ def _patched_node_ref(arg):
             return f"{cls.__module__}.{repr(arg)}"
     except ImportError:
         pass
-    return _original_node_ref(arg)
+    return _original_node_ref(*args)
 
 
 _codegen._node_ref = _patched_node_ref

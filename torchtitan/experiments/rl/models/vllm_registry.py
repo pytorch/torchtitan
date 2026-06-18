@@ -158,8 +158,13 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     }
 
     if ffn is not None:
-        # Unused: only v1/metrics/perf.py reads it (off by default). SwiGLU hidden == w1.out_features.
-        hf["intermediate_size"] = ffn.w1.out_features
+        # Unused: only v1/metrics/perf.py reads it (off by default). The FFN
+        # hidden dim is `hidden_dim` on a fused gate+up config (FusedSwiGLU) and
+        # `w1.out_features` on the stock FeedForward (separate gate/up linears).
+        hidden_dim = getattr(ffn, "hidden_dim", None)
+        if hidden_dim is None:
+            hidden_dim = ffn.w1.out_features
+        hf["intermediate_size"] = hidden_dim
 
     if moe is not None:
         # Presence required: >0 toggles MoE/EP branches.

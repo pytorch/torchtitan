@@ -688,17 +688,20 @@ class FusedQKVLinear(BaseQKVLinear):
         # Use -1 for n_kv_heads so TP sharding is handled automatically.
         qkv = self.wqkv(x)
         qkv = qkv.view(bs, seqlen, -1, self.r_dim, self.head_dim)
-        # torch.split returns contiguous views for size-1 splits (xk, xv).
-        # xq (size heads_per_kv) is non-contiguous; reshape triggers a copy.
         xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
-        xq = xq.reshape(bs, seqlen, -1, self.head_dim)
-        xk = xk.reshape(bs, seqlen, -1, self.head_dim)
-        xv = xv.reshape(bs, seqlen, -1, self.head_dim)
+        # Splitting along the R dim leaves xk/xv as strided views into the fused
+        # buffer (consecutive KV groups are R*head_dim apart, not head_dim).
+        # PyTorch ops respect strides, but downstream consumers that read raw
+        # memory (e.g. vLLM attention/KV-cache kernels) assume contiguous
+        # head-major layout, so materialize all three contiguously here.
+        xq = xq.reshape(bs, seqlen, -1, self.head_dim).contiguous()
+        xk = xk.reshape(bs, seqlen, -1, self.head_dim).contiguous()
+        xv = xv.reshape(bs, seqlen, -1, self.head_dim).contiguous()
         return xq, xk, xv
 
     @staticmethod
     def _split_qkv_on_save(module, state_dict, prefix, local_metadata) -> None:
-        """Split fused ``wqkv`` into stock ``wq.weight``/``wk.weight``/``wv.weight``."""
+        """Split fused ``wqkv`` into stock ``wq``/``wk``/``wv`` (weight and bias)."""
         hd, hpk, r = module.head_dim, module.heads_per_kv, module.r_dim
 
         for param, ndim in (("weight", 4), ("bias", 3)):
@@ -721,7 +724,7 @@ class FusedQKVLinear(BaseQKVLinear):
 
     @staticmethod
     def _merge_qkv_on_load(module, state_dict, prefix, *args) -> None:
-        """Merge stock ``wq.weight``/``wk.weight``/``wv.weight`` back into ``wqkv``."""
+        """Merge stock ``wq``/``wk``/``wv`` back into fused ``wqkv`` (weight and bias)."""
         hd, hpk = module.head_dim, module.heads_per_kv
 
         for param, ndim in (("weight", 4), ("bias", 3)):
