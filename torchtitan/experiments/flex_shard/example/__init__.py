@@ -14,7 +14,13 @@ from .fp8_ragged_shard import (
     make_fp8_two_orientation_grouped_ragged_placement_fn,
     promote_to_square_block,
 )
-from .owned import Owned, param_boundary_placements
+from .owned import (
+    GroupedOwned,
+    GroupedOwnedSegmentSpec,
+    make_grouped_owned_placement_fn,
+    Owned,
+    param_boundary_placements,
+)
 from .ragged_shard import (
     GroupedRaggedShard,
     make_grouped_ragged_placement_fn,
@@ -30,9 +36,12 @@ __all__ = [
     "blockwise_transpose",
     "Fp8BlockwiseGroupedRaggedShard",
     "Fp8TwoOrientationGroupedRaggedShard",
+    "GroupedOwned",
+    "GroupedOwnedSegmentSpec",
     "GroupedRaggedShard",
     "make_fp8_blockwise_grouped_ragged_placement_fn",
     "make_fp8_two_orientation_grouped_ragged_placement_fn",
+    "make_grouped_owned_placement_fn",
     "make_grouped_ragged_placement_fn",
     "make_ragged_placement_fn",
     "Owned",

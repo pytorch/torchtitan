@@ -15,6 +15,7 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard import (
     SegmentReduceDescriptor,
+    SegmentReduceScratchPool,
     build_segment_reduce_plan,
     owned_segment_views,
     pack_segment_reduce_scatter_input,
@@ -94,6 +95,25 @@ class TestSegmentReduceToOwner(TestCase):
         expected[1, 7:12] = flat_input[9:14]
         self.assertEqual(send.view(3, 12), expected)
 
+    def test_packs_into_reusable_output_buffer(self):
+        descriptors = (
+            SegmentReduceDescriptor(0, 4, 1),
+            SegmentReduceDescriptor(4, 3, 1),
+            SegmentReduceDescriptor(7, 2, 0),
+        )
+        plan = build_segment_reduce_plan(descriptors, world_size=3)
+        flat_input = torch.arange(9, dtype=torch.float32)
+        reusable = torch.full((plan.send_numel + 5,), -1.0)
+
+        send = pack_segment_reduce_scatter_input(flat_input, plan, out=reusable)
+
+        self.assertEqual(send.data_ptr(), reusable.data_ptr())
+        expected = torch.zeros(3, 7)
+        expected[1, :7] = flat_input[:7]
+        expected[0, :2] = flat_input[7:9]
+        self.assertEqual(send.view(3, 7), expected)
+        self.assertEqual(reusable[plan.send_numel :].tolist(), [-1.0] * 5)
+
     def test_owned_views_alias_output_buffer_in_descriptor_order(self):
         descriptors = (
             SegmentReduceDescriptor(0, 4, 1),
@@ -133,6 +153,59 @@ class TestSegmentReduceToOwner(TestCase):
 
         self.assertEqual(result.output, flat_input)
         self.assertEqual([view.tolist() for view in result.owned_views], [[0, 1, 2, 3], [4, 5, 6]])
+
+    def test_scratch_pool_reuses_released_reduce_scatter_buffers(self):
+        descriptors = (
+            SegmentReduceDescriptor(0, 4, 0, "a"),
+            SegmentReduceDescriptor(4, 3, 0, "b"),
+        )
+        flat_input = torch.arange(7, dtype=torch.float32)
+        scratch_pool = SegmentReduceScratchPool(max_slots=1)
+
+        with single_rank_cpu_mesh() as mesh:
+            first = segment_reduce_to_owner(
+                flat_input,
+                descriptors,
+                group=mesh.get_group(),
+                op=dist.ReduceOp.SUM,
+                scratch_pool=scratch_pool,
+            )
+            self.assertIsNotNone(first.scratch)
+            first_output_ptr = first.output.data_ptr()
+            first_send_ptr = first.scratch.send.data_ptr()
+            first.release_scratch()
+
+            second = segment_reduce_to_owner(
+                flat_input + 1,
+                descriptors,
+                group=mesh.get_group(),
+                op=dist.ReduceOp.SUM,
+                scratch_pool=scratch_pool,
+            )
+            self.assertIsNotNone(second.scratch)
+            self.assertEqual(second.output.data_ptr(), first_output_ptr)
+            self.assertEqual(second.scratch.send.data_ptr(), first_send_ptr)
+            self.assertEqual(second.output, flat_input + 1)
+            second.release_scratch()
+
+    def test_scratch_pool_requires_release_when_bounded(self):
+        scratch_pool = SegmentReduceScratchPool(max_slots=1)
+        lease = scratch_pool.acquire(
+            send_numel=4,
+            output_numel=2,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "release_scratch"):
+            scratch_pool.acquire(
+                send_numel=4,
+                output_numel=2,
+                dtype=torch.float32,
+                device=torch.device("cpu"),
+            )
+
+        lease.release()
 
     def test_rejects_invalid_metadata(self):
         with self.assertRaisesRegex(ValueError, "non-decreasing"):
