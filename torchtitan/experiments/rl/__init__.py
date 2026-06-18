@@ -9,10 +9,10 @@ Unified approach for running TorchTitan models with vLLM inference.
 
 To register TorchTitan models with vLLM:
     from torchtitan.components.checkpoint import CheckpointManager
-    from torchtitan.experiments.rl.models.vllm_registry import registry_to_vllm
+    from torchtitan.experiments.rl.models.vllm_registry import register_to_vllm
 
     # Standalone inference (loads HF weights):
-    registry_to_vllm(
+    register_to_vllm(
         model_spec,
         parallelism=parallelism_config,
         compile_config=compile_config,
@@ -24,7 +24,7 @@ To register TorchTitan models with vLLM:
     )
 
     # RL loop (skip HF loading, weights from TorchStore):
-    registry_to_vllm(
+    register_to_vllm(
         model_spec,
         parallelism=parallelism_config,
         compile_config=compile_config,
@@ -32,11 +32,11 @@ To register TorchTitan models with vLLM:
     )
 """
 
-from torchtitan.experiments.rl.models.vllm_registry import registry_to_vllm
+from torchtitan.experiments.rl.models.vllm_registry import register_to_vllm
 from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
 
 
 __all__ = [
     "VLLMModelWrapper",
-    "registry_to_vllm",  # Export register function for manual use
+    "register_to_vllm",  # Export register function for manual use
 ]
