@@ -34,7 +34,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.examples.alphabet_sort import config_registry
 from torchtitan.experiments.rl.models.vllm_registry import (
-    registry_to_vllm,
+    register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
 )
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
@@ -86,7 +86,7 @@ def generate() -> None:
     is_rank0 = os.environ.get("RANK", "0") == "0"
 
     # Register TorchTitan model with vLLM before engine creation
-    registry_to_vllm(
+    register_to_vllm(
         config.model_spec,
         parallelism=gen_config.parallelism,
         compile_config=config.compile,
@@ -130,6 +130,7 @@ def generate() -> None:
         dtype=gen_config.model_dtype,
         # Parallelism configuration
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
+        data_parallel_size=gen_config.parallelism.data_parallel_degree,
         enable_expert_parallel=enable_ep,
         # Use external_launcher only when launched via torchrun (multi-GPU);
         # for single-GPU, let vLLM pick the default executor.

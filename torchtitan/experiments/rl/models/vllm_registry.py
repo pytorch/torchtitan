@@ -13,11 +13,11 @@ subclasses — vLLM's ``hf_config`` only carries HF-shaped fields.
 
 Usage:
     from torchtitan.experiments.rl.models.vllm_registry import (
-        registry_to_vllm,
+        register_to_vllm,
         TORCHTITAN_CONFIG_FORMAT,
     )
 
-    registry_to_vllm(
+    register_to_vllm(
         model_spec,
         parallelism=parallelism_config,
         compile_config=compile_config,
@@ -27,6 +27,7 @@ Usage:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from torchtitan.components.checkpoint import CheckpointManager
@@ -40,6 +41,55 @@ VLLM_MODEL_NAME = "TorchTitanCausalLM"
 # Identifier passed to ``EngineArgs(config_format=...)`` to select the
 # torchtitan ConfigParser registered below.
 TORCHTITAN_CONFIG_FORMAT = "torchtitan"
+
+
+@dataclass(kw_only=True, slots=True)
+class InferenceParallelismConfig:
+    """Parallelism for vLLM inference — a focused subset of the training
+    :class:`~torchtitan.config.ParallelismConfig`.
+
+    Not specific to RL: any vLLM-based inference path (the RL generator or
+    standalone inference) uses it. Inference replicates parameters across pure
+    data-parallel groups (the vLLM wrapper skips FSDP/DDP), so
+    ``data_parallel_degree`` is vLLM's pure DP size, not the trainer's
+    ``data_parallel_shard_degree`` (FSDP). The vLLM wrapper translates this to
+    the training ``ParallelismConfig`` via :meth:`to_training`
+    before building ``ParallelDims``; other utils (e.g. world-size calc) call it
+    too.
+    """
+
+    data_parallel_degree: int = 1
+    """vLLM pure data-parallel degree; parameters are replicated across these
+    groups. 1 means disabled."""
+
+    tensor_parallel_degree: int = 1
+    """Tensor parallelism degree. 1 means disabled."""
+
+    expert_parallel_degree: int = 1
+    """Expert parallelism degree for MoE layers. 1 means disabled."""
+
+    def to_training(self) -> ParallelismConfig:
+        """Translate to the training ``ParallelismConfig`` for utils that need
+        the full shape (``ParallelDims``, ``parallelize_fn``, world-size calc).
+
+        Pins the inference-only invariants: no DP replication, no CP/PP, no
+        sequence parallel, and loss parallel disabled.
+        """
+        return ParallelismConfig(
+            # Carry the vLLM DP factor on dp_shard (not dp_replicate) so the
+            # translated config passes ParallelDims' checks for MoE:
+            # EP to divide the dp_shard * cp * tp region (efsdp = dp_shard*cp*tp
+            # // ep).
+            # TODO: In core torchtitan, allow dp_replicate being converted
+            # to EP degree in the future
+            data_parallel_shard_degree=self.data_parallel_degree,
+            tensor_parallel_degree=self.tensor_parallel_degree,
+            expert_parallel_degree=self.expert_parallel_degree,
+            data_parallel_replicate_degree=1,
+            context_parallel_degree=1,
+            pipeline_parallel_degree=1,
+            enable_sequence_parallel=False,
+        )
 
 
 def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
@@ -125,10 +175,10 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     return hf
 
 
-def registry_to_vllm(
+def register_to_vllm(
     model_spec: ModelSpec,
     *,
-    parallelism: ParallelismConfig,
+    parallelism: InferenceParallelismConfig,
     compile_config: CompileConfig,
     checkpoint_config: CheckpointManager.Config,
 ) -> None:
@@ -153,10 +203,11 @@ def registry_to_vllm(
 
     Args:
         model_spec: TorchTitan ModelSpec containing model config and components.
-        parallelism: Authoritative parallelism configuration. The wrapper
-            uses this directly to build ``ParallelDims``; the caller is
-            responsible for translating the relevant fields (TP, EP) to
-            ``EngineArgs`` so vLLM's own world layout matches.
+        parallelism: Inference parallelism configuration. The wrapper
+            translates it to a full ``ParallelismConfig`` to build
+            ``ParallelDims``; the caller is responsible for translating the
+            relevant fields (TP, EP) to ``EngineArgs`` so vLLM's own world
+            layout matches.
         compile_config: torch.compile config applied per-layer by the
             wrapper's parallelize step.
         checkpoint_config: CheckpointManager config controlling initial
