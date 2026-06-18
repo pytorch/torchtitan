@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
@@ -38,6 +39,13 @@ def graph_trainer_llama3_debugmodel_sdpa() -> GraphTrainer.Config:
     base.model_spec = model_registry("debugmodel", attn_backend="sdpa")
     config = to_graph_trainer_config(base, model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
+
+
+def graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss() -> GraphTrainer.Config:
+    """SDPA debug model with standard cross-entropy loss."""
+    config = graph_trainer_llama3_debugmodel_sdpa()
+    config.loss = CrossEntropyLoss.Config()
     return config
 
 
