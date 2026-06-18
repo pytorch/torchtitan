@@ -22,6 +22,7 @@ Usage:
 import copy
 from types import ModuleType, SimpleNamespace
 from typing import cast
+from unittest import mock
 
 import torch
 import torch.distributed as dist
@@ -72,6 +73,28 @@ from torchtitan.experiments.flex_shard.tests.common import (
 
 
 device_type = torch.device(get_devtype())
+
+
+def _owned_param_info(
+    fqn: str,
+    global_shape: torch.Size,
+    placement: Owned,
+    *,
+    rank: int = 0,
+    world_size: int = 1,
+    dtype: torch.dtype = torch.float32,
+) -> ParamInfo:
+    return ParamInfo(
+        fqn=fqn,
+        global_shape=global_shape,
+        global_stride=tuple(torch.empty(global_shape).stride()),
+        dtype=dtype,
+        requires_grad=True,
+        placements=(placement,),
+        local_shape=placement.compute_local_shape(global_shape, rank, world_size),
+        local_numel=placement.compute_local_numel(global_shape, rank, world_size),
+        global_numel=torch.empty(global_shape).numel(),
+    )
 
 
 class _IncompletePlacement(Placement):
@@ -130,20 +153,36 @@ class _PaddedShard(Shard):
 
 class TestBucketCommScheduling(TestCase):
     @staticmethod
-    def _context_with_reshard_flags(flags: list[bool]) -> BucketCommContext:
+    def _context_with_reshard_flags(
+        flags: list[bool],
+        unit_keys: list[object] | None = None,
+    ) -> BucketCommContext:
         context = BucketCommContext(
             device_handle=ModuleType("dummy_device_handle"),
             unshard_stream=cast(torch.Stream, object()),
             reduce_grad_stream=cast(torch.Stream, object()),
         )
+        if unit_keys is None:
+            unit_keys = [object() for _ in flags]
+        pending_keys = [object() for _ in flags]
         context.buckets = [
             cast(
                 BucketRuntime,
                 SimpleNamespace(
                     bucket_storage=SimpleNamespace(_reshard_after_forward=flag),
+                    recompute_prefetch_unit_key=lambda key=unit_key: key,
+                    pending_unshard_key=lambda *, recompute, key=pending_key: (
+                        key,
+                        recompute,
+                    ),
                 ),
             )
-            for flag in flags
+            for flag, unit_key, pending_key in zip(
+                flags,
+                unit_keys,
+                pending_keys,
+                strict=True,
+            )
         ]
         return context
 
@@ -174,7 +213,7 @@ class TestBucketCommScheduling(TestCase):
             )
         )
 
-    def test_reduce_grad_defer_depends_on_previous_bucket_not_current_bucket(self):
+    def test_reduce_grad_defer_skips_non_reshard_bucket(self):
         context = self._context_with_reshard_flags([True, False, True])
 
         self.assertTrue(
@@ -182,10 +221,49 @@ class TestBucketCommScheduling(TestCase):
                 context.buckets[1],
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             context.should_defer_reduce_grad_for_backward_prefetch(
                 context.buckets[2],
             )
+        )
+
+    def test_recompute_prefetch_order_reverses_units_preserving_unit_order(self):
+        context = self._context_with_reshard_flags(
+            [True, True, True, True, True, True, False, False],
+            unit_keys=[
+                "tok",
+                "layer0",
+                "layer1",
+                "layer1",
+                "layer2",
+                "layer2",
+                "norm",
+                "head",
+            ],
+        )
+
+        self.assertEqual(
+            context.recompute_prefetch_buckets(),
+            [
+                context.buckets[4],
+                context.buckets[5],
+                context.buckets[2],
+                context.buckets[3],
+                context.buckets[1],
+                context.buckets[0],
+            ],
+        )
+        self.assertIs(
+            context.next_backward_unshard_bucket(context.buckets[7]),
+            context.buckets[4],
+        )
+        self.assertIs(
+            context.next_backward_unshard_bucket(context.buckets[4]),
+            context.buckets[5],
+        )
+        self.assertIs(
+            context.next_backward_unshard_bucket(context.buckets[5]),
+            context.buckets[2],
         )
 
 
@@ -502,6 +580,73 @@ class TestBucketPlacementValidation(TestCase):
             result = placement.reduce_prepared_grad(prepared).sharded_grads[0]
 
             self.assertEqual(result, grad)
+
+    def test_owned_unshard_uses_one_broadcast_for_multi_param_bucket(self):
+        """Owned unshard fuses a multi-param bucket into one broadcast."""
+        with single_rank_cpu_mesh() as mesh:
+            placement = Owned(0)
+            infos = [
+                _owned_param_info("a", torch.Size([2, 2]), placement),
+                _owned_param_info("b", torch.Size([3]), placement),
+            ]
+            tensors = [
+                torch.arange(4, dtype=torch.float32).view(2, 2),
+                torch.arange(3, dtype=torch.float32),
+            ]
+
+            prepared = placement.prepare_unshard_bucket(tensors, infos, mesh, None)
+            with mock.patch.object(
+                dist, "broadcast", wraps=dist.broadcast
+            ) as broadcast:
+                placement.run_prepared_unshard(prepared)
+            result = placement.finish_prepared_unshard(prepared).full_params
+
+            self.assertEqual(broadcast.call_count, 1)
+            self.assertEqual(result[0], tensors[0])
+            self.assertEqual(result[1], tensors[1])
+
+    def test_owned_unshard_aliases_contiguous_owner_bucket(self):
+        """Owned unshard avoids pack copy when owner tensors are contiguous."""
+        with single_rank_cpu_mesh() as mesh:
+            placement = Owned(0)
+            infos = [
+                _owned_param_info("a", torch.Size([2, 2]), placement),
+                _owned_param_info("b", torch.Size([3]), placement),
+            ]
+            flat_storage = torch.arange(7, dtype=torch.float32)
+            tensors = [
+                flat_storage.narrow(0, 0, 4).view(2, 2),
+                flat_storage.narrow(0, 4, 3),
+            ]
+
+            prepared = placement.prepare_unshard_bucket(tensors, infos, mesh, None)
+
+            self.assertEqual(
+                prepared.buffers[0].untyped_storage().data_ptr(),
+                flat_storage.untyped_storage().data_ptr(),
+            )
+            self.assertEqual(prepared.buffers[0], flat_storage)
+
+    def test_owned_reduce_grad_uses_one_reduce_for_multi_param_bucket(self):
+        """Owned reduce-grad fuses a multi-param bucket into one reduce."""
+        with single_rank_cpu_mesh() as mesh:
+            placement = Owned(0)
+            infos = [
+                _owned_param_info("a", torch.Size([2, 2]), placement),
+                _owned_param_info("b", torch.Size([3]), placement),
+            ]
+            grads = [
+                torch.ones(2, 2),
+                torch.arange(3, dtype=torch.float32),
+            ]
+
+            prepared = placement.prepare_reduce_grad(grads, infos, mesh, None)
+            with mock.patch.object(dist, "reduce", wraps=dist.reduce) as reduce:
+                result = placement.reduce_prepared_grad(prepared).sharded_grads
+
+            self.assertEqual(reduce.call_count, 1)
+            self.assertEqual(result[0], grads[0])
+            self.assertEqual(result[1], grads[1])
 
     def test_rejects_mixed_dtypes(self):
         """Parameters in one bucket must share the same storage dtype."""
@@ -863,6 +1008,75 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
 
         self.assertEqual(result, expected)
 
+    def test_owned_unshard_broadcasts_multi_param_bucket_from_owner(self):
+        mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
+        placement = Owned(0)
+        infos = [
+            _owned_param_info(
+                "a",
+                torch.Size([2, 2]),
+                placement,
+                rank=self.rank,
+                world_size=self.world_size,
+            ),
+            _owned_param_info(
+                "b",
+                torch.Size([3]),
+                placement,
+                rank=self.rank,
+                world_size=self.world_size,
+            ),
+        ]
+        expected = [
+            torch.arange(4, dtype=torch.float32).view(2, 2),
+            torch.arange(3, dtype=torch.float32),
+        ]
+        local = [
+            tensor.clone() if self.rank == 0 else torch.empty(0)
+            for tensor in expected
+        ]
+
+        prepared = placement.prepare_unshard_bucket(local, infos, mesh, None)
+        placement.run_prepared_unshard(prepared)
+        result = placement.finish_prepared_unshard(prepared).full_params
+
+        self.assertEqual(result[0], expected[0])
+        self.assertEqual(result[1], expected[1])
+
+    def test_owned_reduce_grad_multi_param_bucket_to_owner(self):
+        mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
+        placement = Owned(0)
+        infos = [
+            _owned_param_info(
+                "a",
+                torch.Size([2, 2]),
+                placement,
+                rank=self.rank,
+                world_size=self.world_size,
+            ),
+            _owned_param_info(
+                "b",
+                torch.Size([3]),
+                placement,
+                rank=self.rank,
+                world_size=self.world_size,
+            ),
+        ]
+        grads = [
+            torch.full((2, 2), float(self.rank + 1)),
+            torch.full((3,), float(10 + self.rank)),
+        ]
+
+        prepared = placement.prepare_reduce_grad(grads, infos, mesh, None)
+        result = placement.reduce_prepared_grad(prepared).sharded_grads
+
+        if self.rank == 0:
+            self.assertEqual(result[0], torch.full((2, 2), 1.5))
+            self.assertEqual(result[1], torch.full((3,), 10.5))
+        else:
+            self.assertEqual(result[0].numel(), 0)
+            self.assertEqual(result[1].numel(), 0)
+
 
 # ---------------------------------------------------------------------------
 # Distributed per-bucket ShardedBucketStorage tests (torchrun only)
@@ -966,6 +1180,7 @@ class TestDistributedBuckets(FSDPTest):
 # ---------------------------------------------------------------------------
 # Per-bucket mesh: experts on a 1-D efsdp axis, dense on a 1-D dp axis
 # ---------------------------------------------------------------------------
+
 
 def _multi_mesh_moe_args() -> ModelArgs:
     # weight_tying=False: flex_shard rejects shared params (output<->tok_emb).
