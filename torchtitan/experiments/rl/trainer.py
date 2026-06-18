@@ -25,7 +25,7 @@ import torchstore as ts
 from monarch.actor import ProcMesh
 from monarch.spmd import setup_torch_elastic_env_async
 
-from torchtitan.config import CompileConfig, Configurable
+from torchtitan.config import CompileConfig, Configurable, OverrideConfig
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import Batcher
@@ -70,6 +70,13 @@ class RLTrainer(Configurable):
         model_spec: ModelSpec | None = None
         """Model specification shared by trainer and generator.
         Set programmatically via config_registry (not from CLI)."""
+
+        override: OverrideConfig = field(default_factory=OverrideConfig)
+        """Config overrides (e.g. ``torchtitan.overrides.fused_swiglu``) applied
+        to the shared ``model_spec`` inside *both* the trainer and generator
+        actors, after each actor's ``update_from_config`` and before ``build()``
+        -- mirroring core ``Trainer``'s order. Applying to both keeps trainer and
+        generator FFN numerics consistent (so batch-invariant parity holds)."""
 
         hf_assets_path: str = "./tests/assets/tokenizer"
         """Path to HF assets folder (model weights, tokenizer, config files)."""
@@ -344,6 +351,7 @@ class RLTrainer(Configurable):
                 generator_dtype=config.generator.model_dtype,
                 compile_config=config.compile,
                 output_dir=config.dump_folder,
+                override=config.override,
             )
 
             generators = []
@@ -363,6 +371,7 @@ class RLTrainer(Configurable):
                         config.num_validation_samples,
                     ),
                     output_dir=config.dump_folder,
+                    override=config.override,
                 )
                 generators.append(generator)
             self.generator_router = config.generator_router.build(generators=generators)

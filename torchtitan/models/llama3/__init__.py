@@ -73,7 +73,7 @@ def _build_llama3_layers(
     hidden_dim: int,
     rope: RoPE.Config,
     n_kv_heads: int | None = None,
-    fuse_qkv: bool = False,
+    fuse_qkv: bool = True,
     attn_backend: str,
 ) -> list[TransformerBlock.Config]:
     """Build a list of per-layer TransformerBlock configs with depth-scaled inits."""
@@ -122,6 +122,7 @@ def _debugmodel(attn_backend: str) -> Llama3Model.Config:
             in_features=dim, out_features=2048, param_init=_output_linear_init(dim)
         ),
         layers=_build_llama3_layers(
+            fuse_qkv=True,
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
@@ -190,6 +191,7 @@ def _1b(attn_backend: str) -> Llama3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         layers=_build_llama3_layers(
+            fuse_qkv=True,
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
@@ -230,6 +232,7 @@ def _3b(attn_backend: str) -> Llama3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         layers=_build_llama3_layers(
+            fuse_qkv=True,
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
@@ -267,6 +270,7 @@ def _8b(attn_backend: str) -> Llama3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         layers=_build_llama3_layers(
+            fuse_qkv=True,
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
@@ -304,6 +308,7 @@ def _70b(attn_backend: str) -> Llama3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         layers=_build_llama3_layers(
+            fuse_qkv=True,
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
@@ -341,6 +346,7 @@ def _405b(attn_backend: str) -> Llama3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         layers=_build_llama3_layers(
+            fuse_qkv=True,
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,

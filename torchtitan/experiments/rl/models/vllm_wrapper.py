@@ -21,7 +21,13 @@ import torch.distributed as dist
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import (
+    apply_overrides,
+    CompileConfig,
+    OverrideConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
@@ -120,6 +126,7 @@ class VLLMModelWrapper(Module):
         checkpoint_config: CheckpointManager.Config,
         vllm_config: VllmConfig,
         prefix: str = "",
+        override: OverrideConfig | None = None,
     ):
         super().__init__()
 
@@ -192,6 +199,12 @@ class VLLMModelWrapper(Module):
         self.config.update_from_config(
             config=_InferenceConfig(parallelism=training_parallelism)
         )
+
+        # Apply config overrides after update_from_config (which sets the
+        # sharding configs the override factories read) and before build --
+        # mirroring core Trainer's order. See torchtitan/trainer.py.
+        if override is not None and override.imports:
+            apply_overrides(override, self.config)
 
         # Build model on meta device to avoid allocating full model on every GPU
         with torch.device("meta"):
