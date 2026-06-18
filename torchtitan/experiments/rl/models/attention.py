@@ -283,9 +283,9 @@ class VLLMAttentionWrapper(Module):
 
     def forward(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        q_BLNH: torch.Tensor,
+        k_BLNH: torch.Tensor,
+        v_BLNH: torch.Tensor,
         *,
         attention_masks: AttentionMasksType | None = None,
         **kwargs,
@@ -293,12 +293,12 @@ class VLLMAttentionWrapper(Module):
         """Run vLLM paged attention on local (non-DTensor) tensors.
 
         Args:
-            q: ``(batch, seq_len, num_heads, head_dim)``
-            k: ``(batch, seq_len, num_kv_heads, head_dim)``
-            v: ``(batch, seq_len, num_kv_heads, head_dim)``
+            q_BLNH: ``(batch, seq_len, num_heads, head_dim)``
+            k_BLNH: ``(batch, seq_len, num_kv_heads, head_dim)``
+            v_BLNH: ``(batch, seq_len, num_kv_heads, head_dim)``
 
         Returns:
-            ``(batch, seq_len, num_heads * head_dim)`` — ready for
+            ``(batch, seq_len, num_heads * head_dim)`` -- ready for
             ``output.view(bs, seqlen, -1)`` in GQAttention.forward
         """
         if attention_masks is not None:
@@ -307,22 +307,22 @@ class VLLMAttentionWrapper(Module):
                 "manages causal masking and the KV-cache internally."
             )
 
-        batch_size, seq_len, _, head_dim = q.shape
+        batch_size, seq_len, _, head_dim = q_BLNH.shape
 
-        # vllm attention expects (bs*seqlen, n_heads, head_dim)
+        # vllm attention expects (bs*seqlen, n_heads, head_dim) == (T, N, H)
         # (bs, seq, heads, dim) is contiguous, so reshape is zero-copy
-        q = q.reshape(batch_size * seq_len, -1, head_dim)
-        k = k.reshape(batch_size * seq_len, -1, head_dim)
-        v = v.reshape(batch_size * seq_len, -1, head_dim)
+        q_TNH = q_BLNH.reshape(batch_size * seq_len, -1, head_dim)
+        k_TNH = k_BLNH.reshape(batch_size * seq_len, -1, head_dim)
+        v_TNH = v_BLNH.reshape(batch_size * seq_len, -1, head_dim)
 
-        output_flat = self.vllm_attn(q, k, v)
+        out_TD = self.vllm_attn(q_TNH, k_TNH, v_TNH)
 
         # vLLM's flash attention backend may pad the token count (e.g.
         # round up to an even number), which introduces a new symbolic
         # shape under torch.compile.  Narrow to trim this padding.
-        output_flat = output_flat.narrow(0, 0, batch_size * seq_len)
+        out_TD = out_TD.narrow(0, 0, batch_size * seq_len)
 
-        # Reshape back to the format expected by GQAttention.forward()
-        output = output_flat.view(batch_size, seq_len, -1, head_dim)
+        # Reshape back to the (B, L, N, H) format expected by GQAttention.forward()
+        out_BLNH = out_TD.view(batch_size, seq_len, -1, head_dim)
 
-        return output
+        return out_BLNH
