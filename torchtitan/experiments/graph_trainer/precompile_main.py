@@ -233,6 +233,8 @@ def _precompile_aot_fx_trace(
         )
 
     loss_parallel_ctx = (
+        # TODO(bobrenjc93): Migrate graph trainer to the manual loss-parallel
+        # custom autograd function and remove this DTensor context manager.
         torch.distributed.tensor.parallel.loss_parallel()
         if parallel_dims.tp_enabled
         else contextlib.nullcontext()

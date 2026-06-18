@@ -25,7 +25,7 @@ from . import model_registry
 
 def llama3_debugmodel() -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedCELoss.Config(global_vocab_size=2048),
         hf_assets_path="./tests/assets/tokenizer",
         model_spec=model_registry("debugmodel"),
         optimizer=default_adamw(lr=8e-4),
@@ -113,7 +113,7 @@ def llama3_debugmodel_ce_loss() -> Trainer.Config:
 
 def llama3_8b() -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedCELoss.Config(global_vocab_size=128256),
         hf_assets_path="./assets/hf/Llama-3.1-8B",
         profiler=Profiler.Config(
             enable_profiling=True,
@@ -143,7 +143,7 @@ def llama3_8b() -> Trainer.Config:
 
 def llama3_70b() -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedCELoss.Config(global_vocab_size=128256),
         hf_assets_path="./assets/hf/Llama-3.1-70B",
         profiler=Profiler.Config(
             enable_profiling=True,
@@ -177,7 +177,7 @@ def llama3_70b() -> Trainer.Config:
 def llama3_405b() -> Trainer.Config:
     compile_config = CompileConfig(enable=True)
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedCELoss.Config(global_vocab_size=128256),
         hf_assets_path="./assets/hf/Llama-3.1-405B",
         profiler=Profiler.Config(
             enable_profiling=True,
@@ -233,7 +233,7 @@ def sft_debugmodel() -> Trainer.Config:
     model_spec = model_registry("debugmodel", attn_backend="flex")
 
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedCELoss.Config(global_vocab_size=2048),
         hf_assets_path="./tests/assets/tokenizer",
         model_spec=model_spec,
         optimizer=default_adamw(lr=8e-4),
