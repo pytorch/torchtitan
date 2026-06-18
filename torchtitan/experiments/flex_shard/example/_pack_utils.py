@@ -143,7 +143,7 @@ def _try_pack_tensors_into_flat_buffer_triton(
     if torch.compiler.is_compiling():
         return None
     try:
-        from ._triton_copy import pack_tensors_into_flat_buffer_triton
+        from ._pack_kernels import pack_tensors_into_flat_buffer_triton
     except Exception:
         return None
 
@@ -165,7 +165,7 @@ def try_pack_segments_into_flat_buffer_triton(
     if torch.compiler.is_compiling():
         return None
     try:
-        from ._triton_copy import pack_segments_into_flat_buffer_triton
+        from ._pack_kernels import pack_segments_into_flat_buffer_triton
     except Exception:
         return None
 
