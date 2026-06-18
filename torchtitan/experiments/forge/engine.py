@@ -13,7 +13,7 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import LossFunction
+from torchtitan.components.loss import BaseLoss, ChunkedCELoss, LossFunction
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
@@ -58,6 +58,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         compile: CompileConfig = field(default_factory=CompileConfig)
         comm: CommConfig = field(default_factory=CommConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
+        loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
 
         def __post_init__(self):
             if isinstance(self.activation_checkpoint, MemoryBudgetAC.Config) and not (
@@ -175,9 +176,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             init_device = device_type
             buffer_device = None
 
-        self.loss_fn = self.train_spec.loss.build(
-            config.compile, parallel_dims=parallel_dims
-        )
+        self.loss_fn = config.loss.build(compile_config=config.compile)
 
         # verify batch sizes
         global_batch_size = config.training.global_batch_size
@@ -256,6 +255,25 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             self.model_parts = [model]
 
+        # Set lm_head reference for ChunkedCELoss after model construction.
+        # Non-PP: single model part always has lm_head.
+        # PP: only the last stage has lm_head; non-last stages skip this.
+        if isinstance(self.loss_fn, ChunkedCELoss):
+            if parallel_dims.pp_enabled:
+                if self.pp_has_last_stage:
+                    lm_head = self.model_parts[-1].lm_head
+                    assert (
+                        lm_head is not None
+                    ), "Last PP stage must have lm_head for ChunkedCELoss"
+                    self.loss_fn.set_lm_head(lm_head)
+                    self.model_parts[-1]._skip_lm_head = True
+            else:
+                assert len(self.model_parts) == 1
+                lm_head = self.model_parts[0].lm_head
+                assert lm_head is not None, "Model must have lm_head for ChunkedCELoss"
+                self.loss_fn.set_lm_head(lm_head)
+                self.model_parts[0]._skip_lm_head = True
+
         # build optimizer after applying parallelisms to the model
         self.optimizers = config.optimizer.build(
             model_parts=self.model_parts,
@@ -284,7 +302,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         loss_parallel_enabled = (
-            parallel_dims.tp_enabled and not parallelism_config.disable_loss_parallel
+            parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
         )
         self.train_context = dist_utils.get_train_context(
             enable_loss_parallel=loss_parallel_enabled,
