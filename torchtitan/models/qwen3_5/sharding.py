@@ -95,7 +95,6 @@ _GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
 def set_qwen35_sharding_config(
     config: "Qwen35Model.Config",
     *,
-    loss_parallel: bool,
     enable_ep: bool,
 ) -> None:
     """Fill ``sharding_config`` on all Qwen3.5 sub-configs.
@@ -106,7 +105,7 @@ def set_qwen35_sharding_config(
     """
     # SP on norm, lm_head, and layers. Each full-attention layer owns its rope;
     # its cache buffer is sharded Replicate in _set_full_attention_sharding.
-    set_decoder_sharding_config(config, loss_parallel=loss_parallel, enable_sp=True)
+    set_decoder_sharding_config(config, enable_sp=True)
     # Override tok_embeddings: output Replicate (not Shard(1)) for vision scatter
     config.tok_embeddings.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},

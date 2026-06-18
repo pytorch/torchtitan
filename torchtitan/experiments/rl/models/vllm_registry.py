@@ -89,7 +89,6 @@ class InferenceParallelismConfig:
             context_parallel_degree=1,
             pipeline_parallel_degree=1,
             enable_sequence_parallel=False,
-            disable_loss_parallel=True,
         )
 
 

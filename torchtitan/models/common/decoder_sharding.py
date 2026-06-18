@@ -258,9 +258,7 @@ def set_dense_ffn_sharding(
     feed_forward_cfg.w2.sharding_config = rowwise_config(output_sp=enable_sp)
 
 
-def set_decoder_sharding_config(
-    config, *, loss_parallel: bool, enable_sp: bool
-) -> None:
+def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:
     """Set sharding on root-level configs only: ``tok_embeddings``, ``norm``,
     and ``output``.
 
@@ -277,8 +275,6 @@ def set_decoder_sharding_config(
         if enable_sp
         else dense_activation_placement(tp=spmd.I)
     )
-    loss_tp = spmd.S(-1) if loss_parallel else spmd.I
-
     embed_out_src = dense_activation_placement(tp=spmd.P)
     embed_input = dense_activation_placement(tp=spmd.R)
     config.tok_embeddings.sharding_config = ShardingConfig(
@@ -296,5 +292,5 @@ def set_decoder_sharding_config(
         in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
         in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
         out_src_shardings=dense_activation_placement(tp=spmd.S(-1)),
-        out_dst_shardings=dense_activation_placement(tp=loss_tp),
+        out_dst_shardings=dense_activation_placement(tp=spmd.S(-1)),
     )
