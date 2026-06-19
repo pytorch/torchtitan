@@ -24,6 +24,7 @@ from torchtitan.experiments.rl.actors.generator import (
     _prepare_generation_request_metrics,
     GenerationFuture,
     SamplingConfig,
+    VLLMCudagraphConfig,
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
@@ -242,3 +243,52 @@ def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
                 config.generator, reset_prefix_cache_on_weight_sync=False
             ),
         )
+
+
+# --- CUDA graph config (VLLMCudagraphConfig.get_vllm_compilation_config) ---
+
+
+def test_cudagraph_disabled_returns_none():
+    assert (
+        VLLMCudagraphConfig(enable=False).get_vllm_compilation_config(max_num_seqs=256)
+        is None
+    )
+
+
+def test_cudagraph_default_mode_is_full_decode_only():
+    # Default mode; decode-only graphs avoid the mixed-batch corruption (#3668),
+    # with no inductor compile (CompilationMode.NONE == 0).
+    cfg = VLLMCudagraphConfig(enable=True).get_vllm_compilation_config(max_num_seqs=256)
+    assert cfg.cudagraph_mode.name == "FULL_DECODE_ONLY"
+    assert int(cfg.mode) == 0
+
+
+def test_cudagraph_full_mode_no_compile():
+    # FULL captures the whole forward (incl. attention) with no inductor compile.
+    cfg = VLLMCudagraphConfig(enable=True, mode="FULL").get_vllm_compilation_config(
+        max_num_seqs=256
+    )
+    assert cfg.cudagraph_mode.name == "FULL"
+    assert int(cfg.mode) == 0
+
+
+def test_cudagraph_decode_only_capture_sizes_cover_max_num_seqs():
+    # FULL_DECODE_ONLY only graphs decode, so capture up to max_num_seqs (plus
+    # max_num_seqs itself when not a power of 2).
+    cfg = VLLMCudagraphConfig(enable=True).get_vllm_compilation_config(max_num_seqs=500)
+    assert cfg.cudagraph_capture_sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256, 500]
+
+
+def test_cudagraph_full_mode_extends_capture_sizes_to_chunk():
+    # FULL also graphs prefill, so sizes extend to the chunked-prefill chunk
+    # (max_num_batched_tokens, 2048) on top of max_num_seqs.
+    cfg = VLLMCudagraphConfig(enable=True, mode="FULL").get_vllm_compilation_config(
+        max_num_seqs=500
+    )
+    assert cfg.cudagraph_capture_sizes[-1] == 2048
+    assert 500 in cfg.cudagraph_capture_sizes  # decode batch captured exactly
+
+
+def test_cudagraph_rejects_nonpositive_max_num_seqs():
+    with pytest.raises(ValueError, match="max_num_seqs must be positive"):
+        VLLMCudagraphConfig(enable=True).get_vllm_compilation_config(max_num_seqs=0)
