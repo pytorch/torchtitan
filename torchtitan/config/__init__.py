@@ -22,7 +22,15 @@ from .configs import (
 )
 from .configurable import Configurable
 from .function import Function
-from .manager import ConfigManager
+
+
+def __getattr__(name: str):
+    if name == "ConfigManager":
+        from .manager import ConfigManager
+
+        return ConfigManager
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "ConfigManager",

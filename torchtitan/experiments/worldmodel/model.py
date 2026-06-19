@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from collections import OrderedDict
 from collections.abc import Callable
 from copy import copy
@@ -15,40 +13,30 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard
 from torch.distributed.tensor import DTensor
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
-from torchtitan.config import (
+from torchtitan.config.configs import (
     ActivationCheckpointConfig,
     CompileConfig,
-    Configurable,
     ParallelismConfig,
-    TORCH_DTYPE_MAP,
     TrainingConfig,
 )
-from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.activation_checkpoint import _apply_ac_to_transformer_block
-from torchtitan.distributed.fsdp import enable_fsdp_symm_mem, get_fsdp_reshard_after_forward_policy
-from torchtitan.models.common import (
-    Embedding,
-    FlexAttention,
-    GELU,
-    Identity,
-    LayerNorm,
-    Linear,
-    RMSNorm,
-    ScaledDotProductAttention,
-    SiLU,
-    create_attention_mask,
-)
-from torchtitan.protocols import BaseModel
+from torchtitan.config.configurable import Configurable
+from torchtitan.models.common.attention import FlexAttention, ScaledDotProductAttention, create_attention_mask
+from torchtitan.models.common.nn_modules import Embedding, GELU, Identity, LayerNorm, Linear, RMSNorm, SiLU
+from torchtitan.protocols.model import BaseModel
 from torchtitan.tools.logging import logger
 
 
 PLAN_SIZE = 15 * 33 * 2
 PLAN_HEAD_INIT_STD = 1e-3
 PLAN_HEAD_INIT_LOG_SIGMA_SCALE = 5.0
+TORCH_DTYPE_MAP = {
+    "float16": torch.float16,
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+}
 TensorOrMask = torch.Tensor | BlockMask
 
 
@@ -68,8 +56,8 @@ class TransformerConfig:
     attention_mask: str
     norm: str
     attention_impl: str
-    block_size: int = field(init=False)
-    attention_mask_mini_block_size: int | None = field(init=False)
+    block_size: int = field(init=False, default=0)
+    attention_mask_mini_block_size: int | None = field(init=False, default=None)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -555,7 +543,7 @@ def residual_ffn(config: TransformerConfig, linears: FFNLinearsConfig) -> Residu
 
 
 class PlanHead(nn.Module):
-    def __init__(self, config: WorldModel.Config, linears: PlanHeadLinearsConfig):
+    def __init__(self, config: "WorldModel.Config", linears: PlanHeadLinearsConfig):
         super().__init__()
         self.mlps = nn.ModuleList(residual_ffn(config.plan_head, linears.blocks[i]) for i in range(config.plan_head.n_layer))
         self.head = linears.head.build()
@@ -578,7 +566,7 @@ class PlanHead(nn.Module):
 
 
 class DiTBlock(nn.Module):
-    def __init__(self, config: WorldModel.Config, linears: DiTBlockLinearsConfig):
+    def __init__(self, config: "WorldModel.Config", linears: DiTBlockLinearsConfig):
         super().__init__()
         self.norm1 = make_norm(config.transformer.norm, config.transformer.n_embd, elementwise_affine=False)
         self.attn = SelfAttention(config.transformer, linears.attn)
@@ -604,7 +592,7 @@ class DiTBlock(nn.Module):
 
 
 class FinalLayer(nn.Module):
-    def __init__(self, config: WorldModel.Config, linears: FinalLayerLinearsConfig):
+    def __init__(self, config: "WorldModel.Config", linears: FinalLayerLinearsConfig):
         super().__init__()
         self.norm_final = make_norm(config.transformer.norm, config.transformer.n_embd, elementwise_affine=False)
         self.linear = linears.linear.build()
@@ -708,7 +696,7 @@ class WorldModel(BaseModel):
             )
             self.plan_head_linears = plan_head_linears_config(self.plan_head, current_plan) if self.plan_head.n_layer >= 0 else None
 
-        def build(self, **kwargs: Any) -> WorldModel:
+        def build(self, **kwargs: Any) -> "WorldModel":
             if kwargs:
                 raise ValueError("WorldModel.Config.build does not accept kwargs")
             if self._owner is None:
@@ -812,6 +800,9 @@ class WorldModel(BaseModel):
     def scale_latents(self, latents: torch.Tensor) -> torch.Tensor:
         return (latents - self.config.compressor_mean) / self.config.compressor_std
 
+    def unscale_latents(self, latents: torch.Tensor) -> torch.Tensor:
+        return latents * self.config.compressor_std + self.config.compressor_mean
+
     def unpatchify(self, x: torch.Tensor) -> torch.Tensor:
         return einops.rearrange(
             x,
@@ -857,7 +848,7 @@ class WorldModel(BaseModel):
 def parallelize_worldmodel(
     model: WorldModel,
     *,
-    parallel_dims: ParallelDims,
+    parallel_dims: Any,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
@@ -893,6 +884,8 @@ def parallelize_worldmodel(
 
 
 def _apply_activation_checkpointing(model: WorldModel, ac_config: ActivationCheckpointConfig) -> None:
+    from torchtitan.distributed.activation_checkpoint import _apply_ac_to_transformer_block
+
     for layer_id, block in model.blocks.named_children():
         model.blocks.register_module(
             layer_id,
@@ -941,6 +934,9 @@ def _apply_fsdp(
     reshard_after_forward_policy: str,
     enable_symm_mem: bool,
 ) -> None:
+    from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard
+    from torchtitan.distributed.fsdp import enable_fsdp_symm_mem, get_fsdp_reshard_after_forward_policy
+
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
         reduce_dtype=reduce_dtype,

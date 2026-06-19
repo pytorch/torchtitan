@@ -19,7 +19,7 @@ from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 from xx.common.compressor_helpers import COMPRESSOR_STATS
-from xx.datasets.helpers import BASE_DIR_GT, DEFAULT_BIG_TRAIN_LIST
+from xx.datasets.helpers import BASE_DIR_GT_10M, DEFAULT_BIG_TRAIN_LIST
 
 from .dataset import WorldModelDataLoader
 from .loss import WorldModelLoss
@@ -69,9 +69,10 @@ def model_registry(
 def worldmodel() -> WorldModelTrainer.Config:
     local_batch_size = 16
     validation_freq = 512
+    steps = validation_freq * 50
     validation_steps = 8
     compile_config = CompileConfig(enable=True, components=["model", "loss"])
-    optimizer = default_adamw(lr=4e-4, weight_decay=1e-2)
+    optimizer = default_adamw(lr=2e-4, weight_decay=1e-2)
     optimizer.implementation = "fused_opt_states_bf16"
     local_world_size, world_size, num_nodes = _world_sizes()
     checkpoint_base_folder = _reporterv2_checkpoint_base_folder()
@@ -96,7 +97,7 @@ def worldmodel() -> WorldModelTrainer.Config:
         optimizer=optimizer,
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2 * validation_freq,
-            total_steps=validation_freq * 100,
+            total_steps=steps,
             decay_ratio=0.1,
             decay_type="cosine",
             min_lr_factor=0.0,
@@ -105,7 +106,7 @@ def worldmodel() -> WorldModelTrainer.Config:
             local_batch_size=local_batch_size,
             global_batch_size=local_batch_size * world_size * 2,
             seq_len=1,
-            steps=validation_freq * 100,
+            steps=steps,
             max_norm=1.0,
             dtype="float32",
             mixed_precision_param="bfloat16",
@@ -135,6 +136,13 @@ def worldmodel() -> WorldModelTrainer.Config:
             keep_latest_k=0,
             enable_first_step_checkpoint=True,
             last_save_model_only=False,
+            checkpoint_id_format="",
+            exclude_from_loading=[
+                "optimizer",
+                "lr_scheduler",
+                "dataloader",
+                "train_state",
+            ],
         ),
         validator=WorldModelValidator.Config(
             enable=True,
@@ -148,103 +156,8 @@ def worldmodel() -> WorldModelTrainer.Config:
         ),
         pose_dropout=0.1,
         noise_scheduler_steps=10,
-        no_noise_conditioning_frames_prob=0.5,
-        fake_timesteps_prob=0.5,
-        debug=DebugConfig(seed=0),
-    )
-
-
-def worldmodel_debug() -> WorldModelTrainer.Config:
-    local_batch_size = 2
-    model = _model_config(
-        input_size=(3, 4, 4),
-        patch_size=(1, 2, 2),
-        hidden=64,
-        heads=4,
-        layers=2,
-        plan_layers=1,
-        mlp_multiple_of=16,
-        attention_impl="SDPA",
-        attention_mask="NONE",
-        norm="LayerNorm",
-    )
-    return WorldModelTrainer.Config(
-        hf_assets_path=".",
-        loss=WorldModelLoss.Config(plan_loss_weight=0.1),
-        tokenizer=WorldModelTokenizer.Config(),
-        model_spec=model_registry("debug"),
-        dataloader=_dataloader_config(
-            split="train",
-            feature_dir="mock",
-            latent_size=(4, 4),
-            context_size_frames=2,
-            future_size_frames=1,
-            max_future_frames=3,
-            inference_conditioning_frames=2,
-            shuffle_size=8,
-            num_writers=1,
-            num_readers=1,
-            mock_data=True,
-            mock_segment_batch_size=local_batch_size,
-        ),
-        optimizer=default_adamw(lr=1e-3, weight_decay=1e-2),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=1,
-            total_steps=2,
-            decay_ratio=0.5,
-            decay_type="cosine",
-        ),
-        training=TrainingConfig(
-            local_batch_size=local_batch_size,
-            global_batch_size=local_batch_size * 2,
-            seq_len=model.num_patches,
-            steps=2,
-            max_norm=1.0,
-            dtype="float32",
-            mixed_precision_param="bfloat16",
-            mixed_precision_reduce="float32",
-        ),
-        parallelism=ParallelismConfig(
-            data_parallel_replicate_degree=1,
-            data_parallel_shard_degree=1,
-            tensor_parallel_degree=1,
-            context_parallel_degree=1,
-            pipeline_parallel_degree=1,
-            expert_parallel_degree=1,
-            enable_sequence_parallel=False,
-        ),
-        activation_checkpoint=ActivationCheckpointConfig(mode="full"),
-        compile=CompileConfig(enable=False, components=["model", "loss"]),
-        metrics=MetricsProcessor.Config(log_freq=1),
-        checkpoint=CheckpointManager.Config(enable=False, last_save_model_only=False),
-        validator=WorldModelValidator.Config(
-            enable=True,
-            freq=1,
-            steps=1,
-            dataloader=_dataloader_config(
-                split="val",
-                feature_dir="mock",
-                latent_size=(4, 4),
-                context_size_frames=2,
-                future_size_frames=1,
-                max_future_frames=3,
-                inference_conditioning_frames=2,
-                shuffle_size=4,
-                num_writers=1,
-                num_readers=1,
-                fill_once=True,
-                mock_data=True,
-                mock_segment_batch_size=local_batch_size,
-            ),
-            pose_dropout=0.0,
-            noise_scheduler_steps=4,
-            no_noise_conditioning_frames_prob=0.0,
-            fake_timesteps_prob=0.0,
-        ),
-        pose_dropout=0.1,
-        noise_scheduler_steps=4,
-        no_noise_conditioning_frames_prob=0.5,
-        fake_timesteps_prob=0.5,
+        no_noise_conditioning_frames_prob=0.,
+        fake_timesteps_prob=0.,
         debug=DebugConfig(seed=0),
     )
 
@@ -252,18 +165,6 @@ def worldmodel_debug() -> WorldModelTrainer.Config:
 def _worldmodel_configs() -> dict[str, Callable[[], WorldModel.Config]]:
     return {
         "base": _model_config,
-        "debug": lambda: _model_config(
-            input_size=(3, 4, 4),
-            patch_size=(1, 2, 2),
-            hidden=64,
-            heads=4,
-            layers=2,
-            plan_layers=1,
-            mlp_multiple_of=16,
-            attention_impl="SDPA",
-            attention_mask="NONE",
-            norm="LayerNorm",
-        ),
     }
 
 
@@ -274,7 +175,7 @@ def _model_config(
     hidden: int = 2304,
     heads: int = 36,
     layers: int = 56,
-    plan_layers: int = 4,
+    plan_layers: int = -1,
     mlp_multiple_of: int = 256,
     attention_impl: str = "FLEX",
     attention_mask: str = "NONE",
@@ -335,7 +236,7 @@ def _dataloader_config(
     num_writers: int = 2,
     num_readers: int = 4,
     fill_once: bool = False,
-    base_dir: str = BASE_DIR_GT,
+    base_dir: str = BASE_DIR_GT_10M,
     feature_dir: str | None = FEATURE_DIR,
     compressor_model: str = COMPRESSOR_MODEL,
     in_channels: int = LATENT_CHANNELS,
@@ -344,7 +245,7 @@ def _dataloader_config(
     context_size_frames: int = 10,
     future_size_frames: int = 5,
     max_future_frames: int = 50,
-    inference_conditioning_frames: int = 14,
+    inference_conditioning_frames: int = 0,
     fps: int = 5,
     train_skip: int = 40,
     val_skip: int = 800,

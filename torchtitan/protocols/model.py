@@ -7,7 +7,7 @@
 from abc import abstractmethod
 from dataclasses import dataclass
 
-from torchtitan.config import Configurable
+from torchtitan.config.configurable import Configurable
 
 from .module import Module
 
@@ -65,10 +65,7 @@ class BaseModel(Module):
                 failures.append((fqn, type(mod).__name__))
         if failures:
             details = ", ".join(f"'{fqn}' ({cls})" for fqn, cls in failures)
-            raise RuntimeError(
-                f"The following modules do not satisfy the Module protocol: "
-                f"{details}"
-            )
+            raise RuntimeError(f"The following modules do not satisfy the Module protocol: {details}")
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):

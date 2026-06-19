@@ -42,8 +42,7 @@ def compute_worldmodel_losses(
     *,
     plan_loss_weight: float,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    batch_size = next(iter(outputs.values())).shape[0]
-    loss = torch.zeros((batch_size,), device=next(iter(outputs.values())).device)
+    loss: torch.Tensor | None = None
     terms: dict[str, torch.Tensor] = {}
 
     if "sample" in outputs:
@@ -52,7 +51,7 @@ def compute_worldmodel_losses(
         mask = targets["mask"].to(device=pred.device).flatten(1).float()
         mse = F.mse_loss(pred.float(), target.float(), reduction="none").flatten(1)
         diffusion_loss = (mse * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
-        loss = loss + diffusion_loss
+        loss = diffusion_loss
         terms["diffusion_loss"] = diffusion_loss.detach()
 
     if "plan" in outputs and "plan" in targets:
@@ -62,11 +61,12 @@ def compute_worldmodel_losses(
         plan_loss = plan_loss_values.flatten(1).mean(dim=1)
         flat_mask = plan_mask.flatten(1).float()
         plan_mse = (plan_err.square().flatten(1) * flat_mask).sum(dim=1) / flat_mask.sum(dim=1).clamp_min(1.0)
-        loss = loss + (plan_loss_weight if "sample" in outputs else 1.0) * plan_loss
+        weighted_plan_loss = (plan_loss_weight if "sample" in outputs else 1.0) * plan_loss
+        loss = weighted_plan_loss if loss is None else loss + weighted_plan_loss
         terms["plan_loss"] = plan_loss.detach()
         terms["plan_mse"] = plan_mse.detach()
 
-    if not terms:
+    if loss is None:
         raise RuntimeError("worldmodel produced no trainable outputs")
     terms["loss"] = loss.detach()
     return loss, terms

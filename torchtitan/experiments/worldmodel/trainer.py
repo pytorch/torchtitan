@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager
@@ -13,11 +14,13 @@ import torch.nn as nn
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
+from torchtitan.components.unique_counter import StringUniqueCounter
 from torchtitan.components.validate import BaseValidator
 from torchtitan.config import ParallelismConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.observability import structured_logger as sl
 from torchtitan.trainer import Trainer
+from xx.common.helpers import parse_info
 from xx.training.diffusion.schedulers import RFScheduler
 
 from .dataset import WorldModelDataLoader
@@ -35,6 +38,18 @@ def _batch_size(inputs: dict[str, torch.Tensor]) -> int:
 
 def _tensor_dict_to_device(data: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
     return {key: value.to(device) if isinstance(value, torch.Tensor) else value for key, value in data.items()}
+
+
+def _segment_names_from_info(info: torch.Tensor) -> list[str]:
+    names: list[str] = []
+    for item in info.cpu().numpy():
+        try:
+            name = parse_info(item).get("name")
+        except ValueError:
+            continue
+        if name is not None:
+            names.append(str(name))
+    return names
 
 
 def _prepare_worldmodel_batch(
@@ -145,6 +160,8 @@ class WorldModelValidator(BaseValidator):
         self.metrics_processor = metrics_processor
         self.seq_len = seq_len
         self.local_batch_size = local_batch_size
+        training_id = os.getenv("REPORTERV2_TRAINING_ID") or "local"
+        self.unique_segment_counter = StringUniqueCounter(f"unique_ids:{training_id}:worldmodel:validation")
 
     @torch.no_grad()
     def validate(self, model_parts: list[nn.Module], step: int) -> None:
@@ -173,6 +190,8 @@ class WorldModelValidator(BaseValidator):
                 batch_size = _batch_size(input_dict)
                 samples += batch_size
                 self.metrics_processor.ntokens_since_last_log += batch_size * self.seq_len
+                if "info" in input_dict:
+                    self.unique_segment_counter.update(_segment_names_from_info(input_dict["info"]))
                 model_inputs, targets = _prepare_worldmodel_batch(
                     model=model,
                     tokenizer=self.tokenizer,
@@ -211,6 +230,11 @@ class WorldModelValidator(BaseValidator):
 
         loss = global_mean(term_sums["loss"])
         extra_metrics = {f"validation_metrics/worldmodel/{name}": global_mean(value) for name, value in term_sums.items() if name != "loss"}
+        extra_metrics["validation_metrics/dataset/unique_segments_seen"] = (
+            self.unique_segment_counter.global_count(batch_mesh.get_group())
+            if batch_mesh is not None
+            else self.unique_segment_counter.local_count()
+        )
         self.metrics_processor.log_validation(loss=loss, step=step, extra_metrics=extra_metrics)
 
 
@@ -237,6 +261,8 @@ class WorldModelTrainer(Trainer):
         self.discrete_timesteps = self.train_noise_scheduler.timesteps[:-1]
         self.tokenizer = cast(WorldModelTokenizer, self.tokenizer)
         self.loss_fn = cast(WorldModelLoss, self.loss_fn)
+        training_id = os.getenv("REPORTERV2_TRAINING_ID") or "local"
+        self.unique_segment_counter = StringUniqueCounter(f"unique_ids:{training_id}:worldmodel:train")
 
     def batch_generator(
         self,
@@ -298,11 +324,14 @@ class WorldModelTrainer(Trainer):
         batch_mesh = parallel_dims.get_optional_mesh("batch")
 
         microbatches = []
+        step_segment_names: set[str] = set()
         local_samples = torch.tensor(0, dtype=torch.int64)
         for _ in range(self.gradient_accumulation_steps):
             with sl.log_trace_span("fetching_batch"):
                 input_dict, targets = next(data_iterator)
             local_samples += _batch_size(input_dict)
+            if "info" in input_dict:
+                step_segment_names.update(_segment_names_from_info(input_dict["info"]))
             microbatches.append((input_dict, targets))
         sl.log_trace_scalar({"local_samples": int(local_samples)})
 
@@ -336,6 +365,8 @@ class WorldModelTrainer(Trainer):
             self.optimizers.step()
             self.lr_schedulers.step()
 
+        self.unique_segment_counter.update(step_segment_names)
+
         if not self.metrics_processor.should_log(self.step):
             return
 
@@ -358,6 +389,11 @@ class WorldModelTrainer(Trainer):
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
             **{f"worldmodel/{name}": value for name, value in metric_values.items()},
+            "dataset/unique_segments_seen": (
+                self.unique_segment_counter.global_count(batch_mesh.get_group())
+                if batch_mesh is not None
+                else self.unique_segment_counter.local_count()
+            ),
         }
         stats = self.dataloader.stats() if hasattr(self.dataloader, "stats") else None
         if stats is not None:
@@ -379,6 +415,22 @@ class WorldModelTrainer(Trainer):
     def close(self) -> None:
         self.dataloader.close()
         super().close()
+
+    def state_dict(self) -> dict[str, Any]:
+        state = super().state_dict()
+        state["unique_segment_counter"] = self.unique_segment_counter.state_dict()
+        validator_unique_segment_counter = getattr(getattr(self, "validator", None), "unique_segment_counter", None)
+        if validator_unique_segment_counter is not None:
+            state["validation_unique_segment_counter"] = validator_unique_segment_counter.state_dict()
+        return state
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        super().load_state_dict(state_dict)
+        if "unique_segment_counter" in state_dict:
+            self.unique_segment_counter.load_state_dict(state_dict["unique_segment_counter"])
+        validator_unique_segment_counter = getattr(getattr(self, "validator", None), "unique_segment_counter", None)
+        if validator_unique_segment_counter is not None and "validation_unique_segment_counter" in state_dict:
+            validator_unique_segment_counter.load_state_dict(state_dict["validation_unique_segment_counter"])
 
 
 def _floating_model_dtype(model: torch.nn.Module) -> torch.dtype:
