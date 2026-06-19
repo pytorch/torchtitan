@@ -5,7 +5,7 @@ import torch
 
 from xx.training.diffusion.schedulers import RFScheduler
 
-from .model import WorldModel
+from torchtitan.experiments.worldmodel.model import WorldModel
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +68,7 @@ class WorldModelForInference(WorldModel):
         batch_size: int = 1,
         dtype: torch.dtype = torch.bfloat16,
         steps: int = 1,
-        num_conditioning_frames: int = 0,
+        num_conditioning_frames: int = 14,
     ) -> dict[str, dict[str, torch.Size] | dict[str, torch.dtype]]:
         inputs = self.example_inputs(self.config, batch_size=batch_size, dtype=dtype, device=self.pos_embed.device)
         outputs = self.generate(
@@ -98,7 +98,7 @@ class WorldModelForInference(WorldModel):
         fidxs: torch.Tensor,
         *,
         steps: int = 15,
-        num_conditioning_frames: int = 0,
+        num_conditioning_frames: int = 14,
         dtype: torch.dtype = torch.bfloat16,
         inference_schedule: str = "linear",
         cfg: float = 0.0,
@@ -229,3 +229,34 @@ class WorldModelForInference(WorldModel):
         if num_conditioning_frames:
             timesteps[:, :num_conditioning_frames] = RFScheduler.no_noise_timestep_value
         return full_latents, timesteps
+
+
+def main() -> None:
+    from torchtitan.experiments.worldmodel.config_registry import model_registry
+
+    torch.manual_seed(0)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    config = model_registry("debugmodel").model
+    model = WorldModelForInference(config).to(device=device, dtype=torch.bfloat16).eval()
+    inputs = WorldModelForInference.example_inputs(
+        config,
+        batch_size=2,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    outputs = model.generate(
+        **inputs,
+        dtype=torch.bfloat16,
+        steps=10,
+    )
+    print(
+        {
+            "device": str(device),
+            "inputs": {key: (tuple(value.shape), str(value.dtype)) for key, value in inputs.items()},
+            "outputs": {key: (tuple(value.shape), str(value.dtype)) for key, value in outputs.items()},
+        }
+    )
+
+
+if __name__ == "__main__":
+    main()

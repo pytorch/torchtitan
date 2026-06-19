@@ -19,7 +19,7 @@ from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 from xx.common.compressor_helpers import COMPRESSOR_STATS
-from xx.datasets.helpers import BASE_DIR_GT_10M, DEFAULT_BIG_TRAIN_LIST
+from xx.datasets.helpers import BASE_DIR_GT_10M, DEFAULT_10M_TRAIN_LIST
 
 from .dataset import WorldModelDataLoader
 from .loss import WorldModelLoss
@@ -69,7 +69,7 @@ def model_registry(
 def worldmodel() -> WorldModelTrainer.Config:
     local_batch_size = 16
     validation_freq = 512
-    steps = validation_freq * 50
+    steps = validation_freq * 30
     validation_steps = 8
     compile_config = CompileConfig(enable=True, components=["model", "loss"])
     optimizer = default_adamw(lr=2e-4, weight_decay=1e-2)
@@ -165,7 +165,21 @@ def worldmodel() -> WorldModelTrainer.Config:
 def _worldmodel_configs() -> dict[str, Callable[[], WorldModel.Config]]:
     return {
         "base": _model_config,
+        "debugmodel": _debug_model_config,
     }
+
+
+def _debug_model_config() -> WorldModel.Config:
+    return _model_config(
+        input_size=(15, 4, 4),
+        patch_size=(1, 2, 2),
+        hidden=64,
+        heads=4,
+        layers=1,
+        plan_layers=1,
+        mlp_multiple_of=16,
+        attention_impl="FLEX",
+    )
 
 
 def _model_config(
@@ -229,7 +243,7 @@ def _model_config(
 def _dataloader_config(
     *,
     split: str,
-    dataset: str = DEFAULT_BIG_TRAIN_LIST,
+    dataset: str = DEFAULT_10M_TRAIN_LIST,
     dataset_path: str | None = None,
     shuffle_size: int = 50_000,
     min_mixing: float = 0.5,
@@ -304,3 +318,27 @@ def _world_sizes() -> tuple[int, int, int]:
 def _reporterv2_checkpoint_base_folder() -> str:
     host = os.getenv("REPORTERV2_HOST")
     return f"{host.rstrip('/')}/checkpoint" if host else ""
+
+
+def main() -> None:
+    spec = model_registry("debugmodel")
+    model = spec.model.build()
+    config = model.config
+    nparams = sum(param.numel() for param in model.parameters())
+    head_dim = config.transformer.n_embd // config.transformer.n_head
+    print(
+        {
+            "flavor": spec.flavor,
+            "input_size": config.input_size,
+            "num_patches": config.num_patches,
+            "hidden": config.transformer.n_embd,
+            "heads": config.transformer.n_head,
+            "head_dim": head_dim,
+            "layers": config.transformer.n_layer,
+            "parameters": nparams,
+        }
+    )
+
+
+if __name__ == "__main__":
+    main()

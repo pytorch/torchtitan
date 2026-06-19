@@ -6,7 +6,6 @@ import gc
 import io
 import os
 import posixpath
-import re
 from typing import Any
 
 import fsspec
@@ -14,13 +13,13 @@ import torch
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint._fsspec_filesystem import FsspecReader
 from torch.package import PackageExporter
+from torchtitan.models.common.nn_modules import Linear
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.logging import init_logger, logger
 
-from .config_registry import worldmodel
-from .inference import WorldModelForInference
-from .model import WorldModel
-from torchtitan.models.common.nn_modules import Linear
+from torchtitan.experiments.worldmodel.config_registry import model_registry
+from torchtitan.experiments.worldmodel.inference import WorldModelForInference
+from torchtitan.experiments.worldmodel.model import WorldModel
 
 
 os.environ.setdefault("NCCL_P2P_DISABLE", "1")
@@ -29,7 +28,6 @@ REPORTERV2_HOST = os.getenv("REPORTERV2_HOST", "mkv://data-gen.comma.life:3080/r
 STRUCTURED_LOG_DIR = os.getenv("TORCHTITAN_STRUCTURED_LOG_DIR", "./outputs/worldmodel_package_for_inference")
 PACKAGE_NAME = "model.torchpackage"
 INFERENCE_STEPS = 1
-STEP_RE = re.compile(r"^(?:step-)?(\d+)$")
 
 TORCH_EXPORT_INTERN_MODULES = [
     "torchtitan.config.**",
@@ -57,22 +55,14 @@ TORCH_EXPORT_DENY_MODULES = ["openpilot.**"]
 TORCH_EXPORT_MOCK_MODULES = ["**"]
 
 
-def checkpoint_step(checkpoint_id: str) -> int:
-    name = posixpath.basename(checkpoint_id.rstrip("/"))
-    match = STEP_RE.fullmatch(name)
-    if match is None:
-        raise ValueError(f"checkpoint id must end in '<step>' or 'step-<step>', got {checkpoint_id}")
-    return int(match.group(1))
-
-
 def resolve_checkpoint_path(checkpoint_id: str) -> str:
     if "://" in checkpoint_id or os.path.exists(checkpoint_id):
         return checkpoint_id
 
     parts = checkpoint_id.strip("/").split("/")
     if len(parts) == 2:
-        run_id, _ = parts
-        return posixpath.join(REPORTERV2_HOST.rstrip("/"), "checkpoint", run_id, f"step-{checkpoint_step(checkpoint_id)}")
+        run_id, step = parts
+        return posixpath.join(REPORTERV2_HOST.rstrip("/"), "checkpoint", run_id, step)
     return checkpoint_id
 
 
@@ -190,26 +180,12 @@ def write_bytes(path: str, data: bytes) -> None:
         handle.write(data)
 
 
-def export_package(
+def build_package(
     *,
-    checkpoint_path: str,
-    output_path: str | None,
-) -> None:
-    step = checkpoint_step(checkpoint_path)
-    checkpoint_path = resolve_checkpoint_path(checkpoint_path)
-    output_path = default_output_path(checkpoint_path) if output_path is None else output_path
-    sl.set_step(step)
-    logger.info("Packaging worldmodel checkpoint step=%s", step)
-    logger.info("DCP checkpoint path: %s", checkpoint_path)
-    logger.info("Torch package output path: %s", output_path)
-
-    with sl.log_trace_span("worldmodel_package_load_config"):
-        config = worldmodel()
-        model_config = copy_model_config(config.model_spec.model)
-        conditioning_frames = config.dataloader.inference_conditioning_frames
-
-    with sl.log_trace_span("worldmodel_package_load_dcp"):
-        state_dict = load_dcp_model_state_dict(checkpoint_path, model_config)
+    model_config: WorldModel.Config,
+    state_dict: dict[str, torch.Tensor],
+    step: int,
+) -> bytes:
     sl.log_trace_scalar(
         {
             "worldmodel_package.bf16_state_dict_bytes": state_dict_nbytes(state_dict),
@@ -225,7 +201,6 @@ def export_package(
         model_io = io_model.get_model_io(
             dtype=torch.bfloat16,
             steps=INFERENCE_STEPS,
-            num_conditioning_frames=conditioning_frames,
         )
         del io_model
         model = build_meta_model(model_config)
@@ -237,8 +212,35 @@ def export_package(
             model_io=model_io,
             step=step,
         )
+    sl.log_trace_scalar({"worldmodel_package.package_bytes": len(package)})
+    return package
+
+
+def export_package(
+    *,
+    checkpoint_path: str,
+    output_path: str | None,
+    flavor: str,
+) -> None:
+    step = int(posixpath.basename(checkpoint_path.rstrip("/")))
+    checkpoint_path = resolve_checkpoint_path(checkpoint_path)
+    output_path = default_output_path(checkpoint_path) if output_path is None else output_path
+    sl.set_step(step)
+    logger.info("Packaging worldmodel checkpoint step=%s", step)
+    logger.info("DCP checkpoint path: %s", checkpoint_path)
+    logger.info("Torch package output path: %s", output_path)
+
+    with sl.log_trace_span("worldmodel_package_load_config"):
+        model_config = copy_model_config(model_registry(flavor).model)
+
+    with sl.log_trace_span("worldmodel_package_load_dcp"):
+        state_dict = load_dcp_model_state_dict(checkpoint_path, model_config)
+    package = build_package(
+        model_config=model_config,
+        state_dict=state_dict,
+        step=step,
+    )
     package_bytes = len(package)
-    sl.log_trace_scalar({"worldmodel_package.package_bytes": package_bytes})
 
     with sl.log_trace_span("worldmodel_package_write"):
         write_bytes(output_path, package)
@@ -251,6 +253,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Package worldmodel DCP checkpoints for inference.")
     parser.add_argument("checkpoint_path")
     parser.add_argument("output_path", nargs="?", default=None)
+    parser.add_argument("--flavor", default="base")
     return parser
 
 
@@ -262,6 +265,7 @@ def main() -> None:
         export_package(
             checkpoint_path=args.checkpoint_path,
             output_path=args.output_path,
+            flavor=args.flavor,
         )
 
 

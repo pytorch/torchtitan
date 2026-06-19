@@ -457,3 +457,81 @@ def _validate_worldmodel_config(config: WorldModelTrainer.Config) -> None:
         raise ValueError("worldmodel supports FSDP/HSDP only")
     model_config._sync_derived_fields()
     config.training.seq_len = model_config.num_patches
+
+
+def _set_single_process_env() -> None:
+    os.environ.setdefault("LOCAL_RANK", "0")
+    os.environ.setdefault("RANK", "0")
+    os.environ.setdefault("WORLD_SIZE", "1")
+    os.environ.setdefault("MASTER_ADDR", "localhost")
+    os.environ.setdefault("MASTER_PORT", "29500")
+
+
+def _stock_trainer_mock_config() -> WorldModelTrainer.Config:
+    from torchtitan.components.optimizer import default_adamw
+
+    from .config_registry import _dataloader_config, model_registry, worldmodel
+
+    config = worldmodel()
+    model_spec = model_registry("debugmodel")
+
+    config.dump_folder = "./outputs/worldmodel_trainer_mock"
+    config.model_spec = model_spec
+    config.dataloader = _dataloader_config(
+        split="train",
+        shuffle_size=8,
+        min_mixing=0.25,
+        num_writers=1,
+        num_readers=1,
+        latent_size=model_spec.model.input_size[1:],
+        mock_data=True,
+        mock_segment_batch_size=2,
+    )
+    config.optimizer = default_adamw(lr=1e-3)
+    config.lr_scheduler.warmup_steps = 0
+    config.lr_scheduler.total_steps = 1
+    config.training.local_batch_size = 2
+    config.training.global_batch_size = 2
+    config.training.steps = 1
+    config.training.dtype = "float32"
+    config.training.mixed_precision_param = "float32"
+    config.checkpoint.enable = False
+    config.activation_checkpoint.mode = "none"
+    config.compile.enable = False
+    config.metrics.log_freq = 1
+    config.metrics.enable_reporterv2 = False
+    config.validator.enable = False
+    config.pose_dropout = 0.0
+    config.noise_scheduler_steps = 2
+    config.no_noise_conditioning_frames_prob = 0.0
+    config.fake_timesteps_prob = 0.0
+    config.debug.seed = 0
+    return config
+
+
+def main() -> None:
+    from torchtitan.observability import structured_logger as sl
+    from torchtitan.tools.logging import init_logger
+
+    init_logger()
+    _set_single_process_env()
+    config = _stock_trainer_mock_config()
+    sl.init_structured_logger(
+        source="worldmodel_trainer_mock",
+        output_dir=config.dump_folder,
+        enable=config.debug.enable_structured_logging,
+    )
+    trainer: WorldModelTrainer | None = None
+    try:
+        trainer = config.build()
+        trainer.train()
+        print({"step": trainer.step, "ntokens_seen": trainer.ntokens_seen})
+    finally:
+        if trainer is not None:
+            trainer.close()
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+
+
+if __name__ == "__main__":
+    main()

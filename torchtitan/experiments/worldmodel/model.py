@@ -1,3 +1,4 @@
+import argparse
 from collections import OrderedDict
 from collections.abc import Callable
 from copy import copy
@@ -1006,3 +1007,44 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim: int, pos: np.ndarray) -> np.nda
     omega /= embed_dim / 2.0
     out = np.einsum("m,d->md", pos.reshape(-1), 1.0 / 10000**omega)
     return np.concatenate([np.sin(out), np.cos(out)], axis=1)
+
+
+def main() -> None:
+    from torchtitan.components.checkpoint import CheckpointManager
+    from torchtitan.tools.logging import init_logger
+
+    from torchtitan.experiments.worldmodel.config_registry import model_registry
+
+    parser = argparse.ArgumentParser(description="Create a tiny worldmodel checkpoint.")
+    parser.add_argument("--output-dir", default="./outputs/worldmodel_debug_checkpoint")
+    parser.add_argument("--flavor", default="debugmodel")
+    args = parser.parse_args()
+
+    init_logger()
+    model = model_registry(args.flavor).model.build().eval()
+    checkpointer = CheckpointManager.Config(
+        enable=True,
+        folder="checkpoint",
+        interval=1,
+        async_mode="disabled",
+        keep_latest_k=0,
+        last_save_model_only=True,
+        checkpoint_id_format="",
+    ).build(
+        dataloader=None,
+        model_parts=[model],
+        optimizers=None,
+        lr_schedulers=None,
+        states={},
+        sd_adapter=None,
+        base_folder=args.output_dir,
+    )
+    try:
+        checkpointer.save(curr_step=0, last_step=True)
+    finally:
+        checkpointer.close()
+    print({"checkpoint_path": f"{args.output_dir}/checkpoint/0", "flavor": args.flavor})
+
+
+if __name__ == "__main__":
+    main()
