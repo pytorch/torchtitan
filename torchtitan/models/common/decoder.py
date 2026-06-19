@@ -277,13 +277,13 @@ class Decoder(BaseModel):
         positions: torch.Tensor,
         attn_config: BaseAttention.Config,
     ) -> AttentionMasksType:
+        assert isinstance(attn_config.inner_attention, FlexAttention.Config)
         mask_mods = [
             get_causal_mask_mod(),
             get_efficient_causal_mask_mod_for_packed_document(positions),
         ]
         B = positions.shape[0]
         seq_len = positions.shape[1]
-        assert isinstance(attn_config.inner_attention, FlexAttention.Config)
         return create_attention_mask(
             and_masks(*mask_mods),
             B,

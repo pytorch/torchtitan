@@ -17,6 +17,7 @@ from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -28,12 +29,20 @@ LossFunction: TypeAlias = Callable[..., torch.Tensor]
 def cross_entropy_loss(
     pred: torch.Tensor,
     labels: torch.Tensor,
-    *,
-    loss_parallel: bool = True,
 ) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
     if isinstance(pred, DTensor) and isinstance(labels, DTensor):
-        return _cross_entropy_via_local_map(pred, labels, loss_parallel=loss_parallel)
+        return _cross_entropy_via_local_map(pred, labels)
+
+    if isinstance(pred, DTensor):
+        assert get_spmd_backend() == "default"
+        if pred.placements == (Shard(pred.ndim - 1),):
+            return _LossParallelCrossEntropy.apply(
+                pred.to_local().flatten(0, 1).float(),
+                labels.flatten(0, 1),
+                pred.device_mesh.get_group("tp"),
+                pred.shape[-1],
+            )
 
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
@@ -181,8 +190,6 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
 def _cross_entropy_via_local_map(
     pred: DTensor,
     labels: DTensor,
-    *,
-    loss_parallel: bool,
 ) -> torch.Tensor:
     mesh = pred.device_mesh
     # Labels don't have a vocab dim.
@@ -228,12 +235,6 @@ def _cross_entropy_via_local_map(
                 reduction="sum",
                 ignore_index=IGNORE_INDEX,
             )
-        if not loss_parallel:
-            raise ValueError(
-                "cross_entropy_loss received vocab-sharded logits with "
-                "loss_parallel=False."
-            )
-
         return _LossParallelCrossEntropy.apply(
             flat_pred,
             flat_labels,
@@ -300,6 +301,17 @@ class CrossEntropyLoss(BaseLoss):
     def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
         self.fn: LossFunction = cross_entropy_loss
         self._maybe_compile(compile_config)
+
+    def __call__(
+        self,
+        pred: torch.Tensor,
+        labels: torch.Tensor,
+        global_valid_tokens: float | None = None,
+    ) -> torch.Tensor:
+        loss = self.fn(pred, labels)
+        if global_valid_tokens is not None:
+            loss = loss / global_valid_tokens
+        return loss
 
 
 class MSELoss(BaseLoss):
@@ -484,7 +496,6 @@ class ChunkedCELoss(BaseLoss):
         self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
-        self.loss_parallel: bool = False
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Set the lm_head module. Must be called before the first __call__."""
@@ -581,7 +592,6 @@ class ChunkedCELoss(BaseLoss):
                 chunk_loss = self.fn(
                     logits,
                     label_chunk,
-                    loss_parallel=self.loss_parallel,
                 )
                 if global_valid_tokens is not None:
                     chunk_loss = chunk_loss / global_valid_tokens
