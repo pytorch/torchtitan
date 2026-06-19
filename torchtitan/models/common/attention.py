@@ -14,7 +14,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import ClassVar, NamedTuple
+from typing import Any, ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -33,7 +33,7 @@ from torch.nn.attention.flex_attention import (
     create_block_mask,
     flex_attention,
 )
-from torch.nn.attention.varlen import varlen_attn
+from torch.nn.attention.varlen import AuxRequest as VarlenAuxRequest, varlen_attn
 
 import spmd_types as spmd
 
@@ -114,8 +114,11 @@ class VarlenAttention(Module):
         *,
         attention_masks: VarlenMetadata,
         scale: float | None = None,
+        out_transform: (
+            Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None
+        ) = None,
         **kwargs,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert isinstance(
             attention_masks, VarlenMetadata
         ), f"attention_masks must be instance of VarlenMetadata but got {type(attention_masks)}"
@@ -140,7 +143,7 @@ class VarlenAttention(Module):
         k_TNH = k_TNH.to(torch.bfloat16)
         v_TNH = v_TNH.to(torch.bfloat16)
 
-        varlen_kwargs = dict()
+        varlen_kwargs: dict[str, Any] = {}
 
         # TODO(pytorch/pytorch#179760): FA2's auto num_splits heuristic
         # produces NaN intermittently with paged KV (block_table). Force
@@ -156,7 +159,10 @@ class VarlenAttention(Module):
         if kwargs.get("enable_gqa", False):
             varlen_kwargs["enable_gqa"] = True
 
-        out_TNH = varlen_attn(
+        if out_transform is not None:
+            varlen_kwargs["return_aux"] = VarlenAuxRequest(lse=True)
+
+        result = varlen_attn(
             q_TNH,
             k_TNH,
             v_TNH,
@@ -166,13 +172,23 @@ class VarlenAttention(Module):
             max_k,
             scale=scale,
             window_size=self.window_size,
-            **varlen_kwargs,  # pyrefly: ignore [bad-argument-type]
+            **varlen_kwargs,
         )
-        assert isinstance(out_TNH, torch.Tensor)
-        # Reshape back to the format expected by GQAttention.forward()
-        out_BLNH = out_TNH.view(B, L, -1, H)
 
-        return out_BLNH.to(q_BLNH.dtype)
+        # varlen_attn returns the packed output (T, N, H), plus the LSE when an
+        # out_transform epilogue was requested.
+        if out_transform is None:
+            assert isinstance(result, torch.Tensor)
+            out_BLNH = result.view(B, L, -1, H).to(q_BLNH.dtype)
+            return out_BLNH
+
+        out_TNH, lse_NT = result
+        out_BLNH = out_TNH.view(B, L, -1, H).to(q_BLNH.dtype)
+
+        # FA varlen returns the LSE as (N, T); reorder to (B, L, N) so
+        # out_transform can broadcast per (token, head).
+        lse_BLN = lse_NT.transpose(0, 1).reshape(B, L, -1)
+        return out_transform(out_BLNH, lse_BLN)
 
 
 class FlexAttention(Module):
@@ -262,10 +278,13 @@ class FlexAttention(Module):
         attention_masks: BlockMask,
         score_mod: _score_mod_signature | None = None,
         scale: float | None = None,
-        return_lse: bool = False,
         enable_gqa: bool = False,
+        # TODO: make this into a config function and during fwd accept kwargs
+        out_transform: (
+            Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None
+        ) = None,
         **kwargs,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert isinstance(
             attention_masks, BlockMask
         ), f"attention_masks must be instance of BlockMask, got {type(attention_masks)}"
@@ -292,13 +311,15 @@ class FlexAttention(Module):
                 block_mask=attention_masks,
                 scale=scale,
                 enable_gqa=enable_gqa,
-                return_aux=AuxRequest(lse=return_lse),
+                return_aux=AuxRequest(lse=out_transform is not None),
                 kernel_options=self.kernel_options,
             )
         # Transpose back to (B, L, N, H)
-        if return_lse:
-            return out_BNLH.transpose(1, 2), aux.lse.transpose(1, 2)
-        return out_BNLH.transpose(1, 2)
+        out_BLNH = out_BNLH.transpose(1, 2)
+        if out_transform is None:
+            return out_BLNH
+        lse_BLN = aux.lse.transpose(1, 2)
+        return out_transform(out_BLNH, lse_BLN)
 
 
 class ScaledDotProductAttention(Module):
@@ -684,6 +705,10 @@ class FusedQKVLinear(BaseQKVLinear):
     Reduces kernel launch overhead compared to three separate projections.
 
     Compatible with ColwiseParallel on the ``wqkv`` linear layer.
+
+    Checkpoints in the stock ``QKVLinear`` layout (``wq.weight`` / ``wk.weight`` /
+    ``wv.weight``) via state_dict hooks, so checkpoints interoperate with the
+    non-fused module and the HF adapter.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -702,6 +727,8 @@ class FusedQKVLinear(BaseQKVLinear):
         self.wqkv = config.wqkv.build()
         self.heads_per_kv = config.n_heads // config.n_kv_heads
         self.r_dim = self.heads_per_kv + 2
+        self.register_state_dict_post_hook(self._split_qkv_on_save)
+        self.register_load_state_dict_pre_hook(self._merge_qkv_on_load)
 
     def forward(
         self, x: torch.Tensor
@@ -723,6 +750,68 @@ class FusedQKVLinear(BaseQKVLinear):
         xk = xk.reshape(bs, seqlen, -1, self.head_dim)
         xv = xv.reshape(bs, seqlen, -1, self.head_dim)
         return xq, xk, xv
+
+    @staticmethod
+    def _split_qkv_on_save(module, state_dict, prefix, local_metadata) -> None:
+        """Split fused ``wqkv`` into stock ``wq.weight``/``wk.weight``/``wv.weight``."""
+        hd, hpk, r = module.head_dim, module.heads_per_kv, module.r_dim
+
+        wqkv_w = state_dict.pop(f"{prefix}wqkv.weight")
+        n_kv, in_f = wqkv_w.shape[0] // (r * hd), wqkv_w.shape[1]
+        w = wqkv_w.reshape(n_kv, r, hd, in_f)
+        state_dict[f"{prefix}wq.weight"] = w[:, :hpk].reshape(-1, in_f).contiguous()
+        state_dict[f"{prefix}wk.weight"] = w[:, hpk].reshape(-1, in_f).contiguous()
+        state_dict[f"{prefix}wv.weight"] = w[:, hpk + 1].reshape(-1, in_f).contiguous()
+
+        b_key = f"{prefix}wqkv.bias"
+        if b_key in state_dict:
+            b = state_dict.pop(b_key).reshape(n_kv, r, hd)
+            state_dict[f"{prefix}wq.bias"] = b[:, :hpk].reshape(-1).contiguous()
+            state_dict[f"{prefix}wk.bias"] = b[:, hpk].reshape(-1).contiguous()
+            state_dict[f"{prefix}wv.bias"] = b[:, hpk + 1].reshape(-1).contiguous()
+
+    @staticmethod
+    def _merge_qkv_on_load(module, state_dict, prefix, *args) -> None:
+        """Merge stock ``wq.weight``/``wk.weight``/``wv.weight`` back into ``wqkv``."""
+        hd, hpk = module.head_dim, module.heads_per_kv
+        wq_key, wk_key, wv_key = (
+            f"{prefix}wq.weight",
+            f"{prefix}wk.weight",
+            f"{prefix}wv.weight",
+        )
+
+        if wq_key in state_dict and wk_key in state_dict and wv_key in state_dict:
+            wq, wk, wv = (
+                state_dict.pop(wq_key),
+                state_dict.pop(wk_key),
+                state_dict.pop(wv_key),
+            )
+            n_kv, in_f = wk.shape[0] // hd, wq.shape[1]
+            q = wq.reshape(n_kv, hpk, hd, in_f)
+            k = wk.reshape(n_kv, 1, hd, in_f)
+            v = wv.reshape(n_kv, 1, hd, in_f)
+            state_dict[f"{prefix}wqkv.weight"] = torch.cat([q, k, v], dim=1).reshape(
+                -1, in_f
+            )
+
+        bq_key, bk_key, bv_key = (
+            f"{prefix}wq.bias",
+            f"{prefix}wk.bias",
+            f"{prefix}wv.bias",
+        )
+        if bq_key in state_dict and bk_key in state_dict and bv_key in state_dict:
+            bq, bk, bv = (
+                state_dict.pop(bq_key),
+                state_dict.pop(bk_key),
+                state_dict.pop(bv_key),
+            )
+            n_kv = bk.shape[0] // hd
+            q_b = bq.reshape(n_kv, hpk, hd)
+            k_b = bk.reshape(n_kv, 1, hd)
+            v_b = bv.reshape(n_kv, 1, hd)
+            state_dict[f"{prefix}wqkv.bias"] = torch.cat(
+                [q_b, k_b, v_b], dim=1
+            ).reshape(-1)
 
 
 class GQAttention(BaseAttention):
