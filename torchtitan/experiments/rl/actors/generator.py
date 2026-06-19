@@ -862,14 +862,14 @@ class VLLMGenerator(Actor, Configurable):
 
             # The engine-aggregate snapshot rides out with this completion (no controller poll):
             # KV-cache util, queue depth, preemptions, and prefix-hit, as of the latest engine step.
-            snapshot_keys = (
+            vllm_engine_snapshot_keys = (
                 "kv_cache_usage",
                 "num_running",
                 "num_waiting",
                 "num_preempted_reqs",
                 "prefix_cache_hit_rate",
             )
-            for key in snapshot_keys:
+            for key in vllm_engine_snapshot_keys:
                 if key in _LATEST_ENGINE_STATS:
                     for metric_type in (m.Mean, m.Max):
                         metrics.append(

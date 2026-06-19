@@ -82,7 +82,7 @@ class Rollouter(Configurable):
         """The env to build per sample; `make_env_group` calls `build(env_input=sample)`."""
 
         token_env: TokenEnv.Config = field(default_factory=TokenEnv.Config)
-        """`TokenEnv` limits (e.g. `max_rollout_tokens`) passed to `make_env_group`."""
+        """`TokenEnv` limits (e.g. `rollout_max_context_len`) passed to `make_env_group`."""
 
         advantage: Configurable.Config = field(
             default_factory=AdvantageEstimator.Config

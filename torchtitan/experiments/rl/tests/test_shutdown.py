@@ -11,9 +11,9 @@ import pytest
 
 from torchtitan.experiments.rl import train
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
-from torchtitan.experiments.rl.batcher import Batcher
 from torchtitan.experiments.rl.generator_router import GeneratorRouter
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
+from torchtitan.experiments.rl.trainer import AsyncControlConfig
 
 
 class _FakeRLTrainer:
@@ -92,7 +92,7 @@ def _make_stub_rl_trainer():
     from torchtitan.experiments.rl.observability import metrics as m
 
     class _StubConfig:
-        batcher = Batcher.Config()
+        async_control = AsyncControlConfig()
         metrics = m.MetricsProcessor.Config()
         dump_folder = "/tmp/test_rl"
         rollout_recorder = RolloutSampleRecorder.Config()

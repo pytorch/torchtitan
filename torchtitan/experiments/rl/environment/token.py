@@ -86,7 +86,7 @@ class TokenEnv(Configurable):
     class Config(Configurable.Config):
         """Limits enforced by the wrapper"""
 
-        max_rollout_tokens: int | None = None
+        rollout_max_context_len: int | None = None
         """Hard cap on prompt length for the next turn. If the number of tokens meets/exceeds
         it, the turn is terminal; `None` disables the check."""
 
@@ -297,5 +297,5 @@ class TokenEnv(Configurable):
         await self._message_env.close()
 
     def _is_prompt_too_long(self, *, prompt_len: int) -> bool:
-        cap = self._config.max_rollout_tokens
+        cap = self._config.rollout_max_context_len
         return cap is not None and prompt_len >= cap

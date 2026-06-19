@@ -29,7 +29,7 @@ from torchtitan.experiments.rl.actors.generator import (
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
+from torchtitan.experiments.rl.batcher import BatchConfig, EpisodeBatcher
 from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
 from torchtitan.experiments.rl.generator_router import (
     GeneratorRouter,
@@ -39,7 +39,11 @@ from torchtitan.experiments.rl.generator_router import (
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
-from torchtitan.experiments.rl.trainer import RLTrainer
+from torchtitan.experiments.rl.trainer import (
+    AsyncControlConfig,
+    RLTrainer,
+    ValidationConfig,
+)
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.protocols.model import ModelConfigConverter
@@ -84,12 +88,19 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
     return RLTrainer.Config(
         model_spec=model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
-        num_steps=10,
-        num_rollout_workers=16,
-        num_validation_samples=20,
+        async_control=AsyncControlConfig(
+            num_training_steps=10,
+            num_rollout_workers=16,
+            num_rollout_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            episode_batcher=EpisodeBatcher.Config(
+                # seq_len >= model max_seq_len (4096) so a full-length episode packs without being dropped.
+                batch=BatchConfig(local_batch_size=2, seq_len=4096),
+            ),
+        ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         generator_router=GeneratorRouter.Config(
             strategy=StickySessionRoutingStrategy.Config(
@@ -97,9 +108,6 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
             )
         ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -145,17 +153,21 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
     return RLTrainer.Config(
         model_spec=model_registry("0.6B", attn_backend="flex"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
-        num_steps=10,
-        num_rollout_workers=16,
-        num_validation_samples=20,
+        async_control=AsyncControlConfig(
+            num_training_steps=10,
+            num_rollout_workers=16,
+            num_rollout_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            episode_batcher=EpisodeBatcher.Config(
+                # seq_len >= model max_seq_len (4096) so a full-length episode packs without being dropped.
+                batch=BatchConfig(local_batch_size=2, seq_len=4096),
+            ),
+        ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -206,8 +218,8 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLTrainer.Config:
         converters=[BatchInvariantFlexConverter.Config()],
     )
     block_size = config.model_spec.model.layers[0].attention.inner_attention.block_size
-    config.batcher = dataclasses.replace(
-        config.batcher, per_sample_pad_multiple=block_size
+    config.async_control.episode_batcher = dataclasses.replace(
+        config.async_control.episode_batcher, per_sample_pad_multiple=block_size
     )
     config.trainer = dataclasses.replace(
         config.trainer,
@@ -228,17 +240,20 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
     return RLTrainer.Config(
         model_spec=model_registry("1.7B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
-        num_steps=10,
-        num_rollout_workers=16,
-        num_validation_samples=20,
+        async_control=AsyncControlConfig(
+            num_training_steps=10,
+            num_rollout_workers=16,
+            num_rollout_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            episode_batcher=EpisodeBatcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -284,17 +299,20 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
     return RLTrainer.Config(
         model_spec=model_registry("14B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-14B",
-        num_steps=10,
-        num_rollout_workers=16,
-        num_validation_samples=20,
+        async_control=AsyncControlConfig(
+            num_training_steps=10,
+            num_rollout_workers=16,
+            num_rollout_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            episode_batcher=EpisodeBatcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -343,19 +361,22 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
     return RLTrainer.Config(
         model_spec=model_registry("debugmodel_moe", attn_backend="varlen"),
         hf_assets_path="tests/assets/tokenizer",
-        num_steps=5,
-        num_rollout_workers=5,
-        num_validation_samples=20,
+        async_control=AsyncControlConfig(
+            num_training_steps=5,
+            num_rollout_workers=5,
+            num_rollout_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            episode_batcher=EpisodeBatcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
         # MoE EP all-to-all path issues unpinned D2H copies that block
         # torch.compile and CUDA graph capture; disable both.
         compile=CompileConfig(enable=False),
         rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=8e-4),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -411,19 +432,22 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
             "debugmodel_moe", attn_backend="varlen", moe_comm_backend="standard"
         ),
         hf_assets_path="tests/assets/tokenizer",
-        num_steps=10,
-        num_rollout_workers=5,
-        num_validation_samples=20,
+        async_control=AsyncControlConfig(
+            num_training_steps=10,
+            num_rollout_workers=5,
+            num_rollout_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            episode_batcher=EpisodeBatcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
         # MoE EP all-to-all path issues unpinned D2H copies that block
         # torch.compile and CUDA graph capture; disable both.
         compile=CompileConfig(enable=False),
         rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=8e-4),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -480,17 +504,20 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
     return RLTrainer.Config(
         model_spec=model_registry("30B-A3B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-30B-A3B",
-        num_steps=10,
-        num_rollout_workers=5,
-        num_validation_samples=20,
+        async_control=AsyncControlConfig(
+            num_training_steps=10,
+            num_rollout_workers=5,
+            num_rollout_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            episode_batcher=EpisodeBatcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
         compile=CompileConfig(enable=False),
         rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -543,17 +570,21 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
     return RLTrainer.Config(
         model_spec=model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
-        num_steps=10,
-        num_rollout_workers=16,
-        num_validation_samples=20,
+        async_control=AsyncControlConfig(
+            num_training_steps=10,
+            num_rollout_workers=16,
+            num_rollout_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            episode_batcher=EpisodeBatcher.Config(
+                # seq_len >= model max_seq_len (4096) so a full-length episode packs without being dropped.
+                batch=BatchConfig(local_batch_size=2, seq_len=4096),
+            ),
+        ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(

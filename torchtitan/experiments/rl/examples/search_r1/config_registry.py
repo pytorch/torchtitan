@@ -28,13 +28,17 @@ from torchtitan.experiments.rl.actors.generator import (
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
+from torchtitan.experiments.rl.batcher import BatchConfig, EpisodeBatcher
 from torchtitan.experiments.rl.examples.search_r1.rollouter import SearchR1Rollouter
 from torchtitan.experiments.rl.losses import DAPOLoss
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
-from torchtitan.experiments.rl.trainer import RLTrainer
+from torchtitan.experiments.rl.trainer import (
+    AsyncControlConfig,
+    RLTrainer,
+    ValidationConfig,
+)
 from torchtitan.models.qwen3 import model_registry
 
 
@@ -48,20 +52,22 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
     return RLTrainer.Config(
         model_spec=model_registry("1.7B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
-        num_steps=500,
-        num_rollout_workers=32,
-        group_size=8,
-        num_validation_samples=500,
-        validation_freq=5,
+        async_control=AsyncControlConfig(
+            num_training_steps=500,
+            num_rollout_workers=32,
+            num_rollout_groups_per_train_step=8,
+            group_size=8,
+            validation=ValidationConfig(num_samples=500, every_n_steps=5),
+            episode_batcher=EpisodeBatcher.Config(
+                batch=BatchConfig(local_batch_size=1, seq_len=4096),
+            ),
+        ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=SearchR1Rollouter.Config(
             advantage=AdvantageEstimator.Config(should_std_normalize=True),
         ),
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=1, global_batch_size=48, seq_len=4096),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),
             lr_scheduler=LRSchedulersContainer.Config(
