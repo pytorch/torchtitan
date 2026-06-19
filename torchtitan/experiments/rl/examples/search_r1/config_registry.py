@@ -28,7 +28,7 @@ from torchtitan.experiments.rl.actors.generator import (
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.controller.batcher import BatchConfig, EpisodeBatcher
+from torchtitan.experiments.rl.batcher import BatchConfig, EpisodeBatcher
 from torchtitan.experiments.rl.examples.search_r1.rollouter import SearchR1Rollouter
 from torchtitan.experiments.rl.losses import DAPOLoss
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor

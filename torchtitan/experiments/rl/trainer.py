@@ -103,13 +103,10 @@ from monarch.spmd import setup_torch_elastic_env_async
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
+from torchtitan.experiments.rl.batcher import EpisodeBatcher, PackedTrainingBatch
 from torchtitan.experiments.rl.controller.async_rollout_buffer import (
     AsyncRolloutBuffer,
     RolloutGroupWork,
-)
-from torchtitan.experiments.rl.controller.batcher import (
-    EpisodeBatcher,
-    PackedTrainingBatch,
 )
 from torchtitan.experiments.rl.controller.episode_builder import EpisodeBuilder
 from torchtitan.experiments.rl.generator_router import GeneratorRouter, RoutingContext

@@ -176,12 +176,7 @@ class PolicyTrainer(Actor, Configurable):
         self.config = config
         self.compile_config = compile_config
         self.loss_fn = config.loss.build()
-        # Compile the loss with inductor (per-token GRPO surrogate is pure pointwise:
-        # ratio/clamp/min/masked-sum → fuses well). With disable_loss_parallel the loss sees gathered
-        # (non-sharded) tensors, so it dodges the inductor+DTensor subclass-codegen bug that blocks
-        # inductor on the TP-sharded MODEL (which stays on compile_config.backend, e.g. aot_eager).
-        if compile_config.enable:
-            self.loss_fn = torch.compile(self.loss_fn, backend="inductor")
+        # TODO: add support to compile the loss.
 
         # Only cast if generator dtype differs from training dtype, otherwise
         # staging buffers would be allocated for a no-op cast.
