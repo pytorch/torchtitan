@@ -109,11 +109,6 @@ def _get_frozen_config_cls(
     config_cls: type[Module.Config],
 ) -> type[Module.Config]:
     """Get or create a config subclass that freezes direct build parameters."""
-    if any(
-        issubclass(config_cls, frozen_cls)
-        for frozen_cls in _frozen_config_class_cache.values()
-    ):
-        return config_cls
     if config_cls in _frozen_config_class_cache:
         return _frozen_config_class_cache[config_cls]
 
