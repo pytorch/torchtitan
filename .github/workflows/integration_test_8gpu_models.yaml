@@ -76,6 +76,13 @@ jobs:
         fi
 
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
+        # Helion is a PyPI-only pure-Python JIT package; install it after the
+        # nightly torch wheel and only on CUDA where the override integration runs.
+        if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
+          python -m pip install helion==1.1.0
+          python -c "import helion"
+          python -m pytest tests/unit_tests/test_helion_rope.py -v
+        fi
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
