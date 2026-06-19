@@ -20,8 +20,15 @@ from torchtitan.models.common import (
     RoPE,
     TransformerBlock,
 )
-from torchtitan.models.common.attention import FusedQKVLinear, QKVLinear
-from torchtitan.models.common.config_utils import make_token_dispatcher_config
+from torchtitan.models.common.attention import (
+    FusedQKVLinear,
+    QKVLinear,
+    VarlenAttention,
+)
+from torchtitan.models.common.config_utils import (
+    get_attention_config,
+    make_token_dispatcher_config,
+)
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.utils import validate_converter_order
@@ -62,10 +69,11 @@ def _make_gptoss_attn_config(
     *,
     dim: int,
     layer_id: int,
+    attn_backend: str = "varlen",
     n_heads: int = 64,
     n_kv_heads: int = 8,
     head_dim: int = 64,
-    sliding_window_size: int = 128,
+    sliding_window_size: int | None = None,
     fuse_qkv: bool = False,
     rope: RoPE.Config,
 ) -> Attention.Config:
@@ -75,6 +83,16 @@ def _make_gptoss_attn_config(
     All linear params use depth-scaled init (including wq/wkv/wo).
     Sinks also use depth-scaled init.
     """
+
+    inner_attention = get_attention_config(attn_backend)
+
+    if sliding_window_size is not None and isinstance(
+        inner_attention, VarlenAttention.Config
+    ):
+        inner_attention = dataclasses.replace(
+            inner_attention, window_size=(sliding_window_size - 1, 0)
+        )
+
     sinks_init = {
         "sinks": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id))
     }
@@ -121,6 +139,7 @@ def _make_gptoss_attn_config(
             param_init=_depth_init(layer_id),
         ),
         sliding_window_size=sliding_window_size,
+        inner_attention=inner_attention,
         param_init=sinks_init,
         rope=dataclasses.replace(rope),
     )
@@ -166,6 +185,7 @@ def _build_gptoss_layers(
     num_experts: int,
     top_k: int,
     load_balance_coeff: float,
+    attn_backend: str = "varlen",
     fuse_qkv: bool = False,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
@@ -181,6 +201,8 @@ def _build_gptoss_layers(
         attn_cfg = _make_gptoss_attn_config(
             dim=dim,
             layer_id=layer_id,
+            attn_backend=attn_backend,
+            sliding_window_size=128 if layer_id % 2 == 0 else None,
             fuse_qkv=fuse_qkv,
             rope=rope,
         )
@@ -215,7 +237,6 @@ def _build_gptoss_layers(
             attention_norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
             ffn_norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
             moe=moe_cfg,
-            use_sliding_attention=(layer_id % 2 == 0),
         )
         layers.append(layer_cfg)
     return layers
@@ -223,6 +244,7 @@ def _build_gptoss_layers(
 
 def _debugmodel(
     moe_comm_backend: str,
+    attn_backend: str = "varlen",
 ) -> GptOssModel.Config:
     dim = 256
     hidden_dim = 2880
@@ -246,6 +268,7 @@ def _debugmodel(
             num_experts=8,
             top_k=4,
             load_balance_coeff=1e-3,
+            attn_backend=attn_backend,
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
                 dim=64,
@@ -263,6 +286,7 @@ def _debugmodel(
 
 def _20b(
     moe_comm_backend: str,
+    attn_backend: str = "varlen",
 ) -> GptOssModel.Config:
     dim = 2880
     hidden_dim = 2880
@@ -286,6 +310,7 @@ def _20b(
             num_experts=32,
             top_k=4,
             load_balance_coeff=1e-3,
+            attn_backend=attn_backend,
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
                 dim=64,
@@ -303,6 +328,7 @@ def _20b(
 
 def _120b(
     moe_comm_backend: str,
+    attn_backend: str = "varlen",
 ) -> GptOssModel.Config:
     dim = 2880
     hidden_dim = 2880
@@ -326,6 +352,7 @@ def _120b(
             num_experts=128,
             top_k=4,
             load_balance_coeff=1e-3,
+            attn_backend=attn_backend,
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
                 dim=64,
@@ -351,10 +378,12 @@ gptoss_configs = {
 def model_registry(
     flavor: str,
     moe_comm_backend: str = "standard",
+    attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     config = gptoss_configs[flavor](
         moe_comm_backend=moe_comm_backend,
+        attn_backend=attn_backend,
     )
     if converters is not None:
         validate_converter_order(converters)
