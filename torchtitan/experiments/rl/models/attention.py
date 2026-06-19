@@ -318,6 +318,10 @@ class VLLMAttentionWrapper(Module):
     ) -> torch.Tensor:
         """Run vLLM paged attention on local (non-DTensor) tensors.
 
+        Positional arg names match the q_BLNH/k_BLNH/v_BLNH convention the GQA
+        attention sharding (``set_gqa_inner_attention_local_map``) keys its
+        ``in_dst_shardings`` by, so the local_map machinery aligns inputs.
+
         Args:
             q_BLNH: ``(batch, seq_len, num_heads, head_dim)``
             k_BLNH: ``(batch, seq_len, num_kv_heads, head_dim)``
