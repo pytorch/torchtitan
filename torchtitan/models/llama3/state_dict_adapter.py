@@ -8,11 +8,8 @@ import logging
 import re
 from typing import Any
 
-import torch
-
 logger = logging.getLogger()
 
-from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 from .model import Llama3Model
@@ -28,42 +25,22 @@ class Llama3StateDictAdapter(StateDictAdapter):
 
         self.model_config = model_config
         self.hf_assets_path = hf_assets_path
-        self.fuse_qkv = isinstance(
-            model_config.layers[0].attention.qkv_linear, FusedQKVLinear.Config
-        )
 
-        if self.fuse_qkv:
-            self.from_hf_map = {
-                "model.embed_tokens.weight": "tok_embeddings.weight",
-                "model.layers.{}.self_attn.q_proj.weight": None,
-                "model.layers.{}.self_attn.k_proj.weight": None,
-                "model.layers.{}.self_attn.v_proj.weight": None,
-                "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
-                "model.layers.{}.self_attn.rotary_emb.inv_freq": None,
-                "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
-                "model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
-                "model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
-                "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
-                "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
-                "model.norm.weight": "norm.weight",
-                "lm_head.weight": "lm_head.weight",
-            }
-        else:
-            self.from_hf_map = {
-                "model.embed_tokens.weight": "tok_embeddings.weight",
-                "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.qkv_linear.wq.weight",
-                "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.qkv_linear.wk.weight",
-                "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.qkv_linear.wv.weight",
-                "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
-                "model.layers.{}.self_attn.rotary_emb.inv_freq": None,
-                "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
-                "model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
-                "model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
-                "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
-                "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
-                "model.norm.weight": "norm.weight",
-                "lm_head.weight": "lm_head.weight",
-            }
+        self.from_hf_map = {
+            "model.embed_tokens.weight": "tok_embeddings.weight",
+            "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.qkv_linear.wq.weight",
+            "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.qkv_linear.wk.weight",
+            "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.qkv_linear.wv.weight",
+            "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
+            "model.layers.{}.self_attn.rotary_emb.inv_freq": None,
+            "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
+            "model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
+            "model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
+            "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
+            "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
+            "model.norm.weight": "norm.weight",
+            "lm_head.weight": "lm_head.weight",
+        }
 
     # HuggingFace permutation function (exact copy from their conversion script)
     def _permute(self, w, n_heads_arg, dim1=None, dim2=None):
@@ -99,10 +76,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
         head_dim = attn.head_dim or dim // n_heads
         hf_state_dict = {}
 
-        if self.fuse_qkv:
-            to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
-        else:
-            to_hf_map = {v: k for k, v in self.from_hf_map.items()}
+        to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
 
         for key, value in state_dict.items():
             if "layers" in key:
@@ -110,40 +84,16 @@ class Llama3StateDictAdapter(StateDictAdapter):
                 # pyrefly: ignore [missing-attribute]
                 layer_num = re.search(r"\d+", key).group(0)
 
-                if (
-                    self.fuse_qkv
-                    and abstract_key == "layers.{}.attention.qkv_linear.wqkv.weight"
-                ):
-                    # Split fused weight into separate Q, K, V for HF format
-                    wq, wk, wv = self.fused_to_separate_qkv(
-                        value, n_heads, n_kv_heads, head_dim
-                    )
-                    # Apply HF permutation
-                    wq = self._permute(wq, n_heads)
-                    key_value_dim = head_dim * n_kv_heads
-                    wk = self._permute(wk, n_kv_heads, key_value_dim, dim)
-                    hf_state_dict[
-                        f"model.layers.{layer_num}.self_attn.q_proj.weight"
-                    ] = wq
-                    hf_state_dict[
-                        f"model.layers.{layer_num}.self_attn.k_proj.weight"
-                    ] = wk
-                    hf_state_dict[
-                        f"model.layers.{layer_num}.self_attn.v_proj.weight"
-                    ] = wv
-                    continue
-
                 new_key = to_hf_map.get(abstract_key)
                 if new_key is None:
                     continue
 
-                if not self.fuse_qkv:
-                    # Apply HF permutation for unfused Q/K weights
-                    if abstract_key == "layers.{}.attention.qkv_linear.wq.weight":
-                        value = self._permute(value, n_heads)
-                    if abstract_key == "layers.{}.attention.qkv_linear.wk.weight":
-                        key_value_dim = head_dim * n_kv_heads
-                        value = self._permute(value, n_kv_heads, key_value_dim, dim)
+                # Apply HF permutation for Q/K weights
+                if abstract_key == "layers.{}.attention.qkv_linear.wq.weight":
+                    value = self._permute(value, n_heads)
+                if abstract_key == "layers.{}.attention.qkv_linear.wk.weight":
+                    key_value_dim = head_dim * n_kv_heads
+                    value = self._permute(value, n_kv_heads, key_value_dim, dim)
 
                 new_key = new_key.format(layer_num)
             else:
@@ -175,9 +125,6 @@ class Llama3StateDictAdapter(StateDictAdapter):
         head_dim = attn.head_dim or dim // n_heads
         state_dict = {}
 
-        # Collect Q/K/V per layer, then fuse (only used when fuse_qkv=True)
-        pending_qkv: dict[str, dict[str, torch.Tensor]] = {}
-
         for key, value in hf_state_dict.items():
             if "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
@@ -191,44 +138,15 @@ class Llama3StateDictAdapter(StateDictAdapter):
                     key_value_dim = head_dim * n_kv_heads
                     value = self._reverse_permute(value, n_kv_heads, key_value_dim, dim)
 
-                if self.fuse_qkv and abstract_key in (
-                    "model.layers.{}.self_attn.q_proj.weight",
-                    "model.layers.{}.self_attn.k_proj.weight",
-                    "model.layers.{}.self_attn.v_proj.weight",
-                ):
-                    # Collect Q/K/V; fuse once all three are available
-                    if layer_num not in pending_qkv:
-                        pending_qkv[layer_num] = {}
-                    proj = abstract_key.split(".")[-2]  # q_proj, k_proj, v_proj
-                    pending_qkv[layer_num][proj] = value
-                    if len(pending_qkv[layer_num]) == 3:
-                        fused = self.separate_to_fused_qkv(
-                            pending_qkv[layer_num]["q_proj"],
-                            pending_qkv[layer_num]["k_proj"],
-                            pending_qkv[layer_num]["v_proj"],
-                            n_heads,
-                            n_kv_heads,
-                            head_dim,
-                        )
-                        state_dict[
-                            f"layers.{layer_num}.attention.qkv_linear.wqkv.weight"
-                        ] = fused
-                        del pending_qkv[layer_num]
-                    continue
-
                 new_key = self.from_hf_map[abstract_key]
                 if new_key is None:
                     continue
                 new_key = new_key.format(layer_num)
             else:
                 new_key = self.from_hf_map[key]
+                if new_key is None:
+                    continue
 
-            # pyrefly: ignore [unsupported-operation]
             state_dict[new_key] = value
-
-        if self.fuse_qkv and pending_qkv:
-            raise ValueError(
-                f"Incomplete Q/K/V projections for layers: {list(pending_qkv.keys())}"
-            )
 
         return state_dict
