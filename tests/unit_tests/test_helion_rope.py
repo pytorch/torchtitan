@@ -6,25 +6,20 @@
 
 import unittest
 from dataclasses import dataclass, field
+from unittest.mock import patch
 
 import torch
+import torchtitan.overrides.helion_rope as helion_rope_module
 from torchtitan.config import apply_overrides, Configurable, OverrideConfig
 from torchtitan.config.override import _REGISTRY
 from torchtitan.models.common.rope import ComplexRoPE, CosSinRoPE
 
-# Importing the override module registers the "helion_rope" override and is safe
-# even when helion is not installed (the kernel import is optional).
+# Importing the override module registers the "helion_rope" override. The import
+# is safe without helion, but explicitly applying the override requires helion.
 from torchtitan.overrides.helion_rope import helion_rope, HelionRoPE
 
-try:
-    import helion  # noqa: F401
-
-    _HAS_HELION = True
-except ImportError:
-    _HAS_HELION = False
-
-_HAS_CUDA = torch.cuda.is_available()
-_HELION_GPU = _HAS_HELION and _HAS_CUDA
+_HELION_INSTALLED = helion_rope_module._HELION_IMPORT_ERROR is None
+_HELION_GPU = _HELION_INSTALLED and torch.cuda.is_available()
 
 # The override registers at import time. Capture it now so the registry-dependent
 # tests below stay robust if a sibling test (e.g. test_override.py) calls
@@ -72,7 +67,7 @@ class _SubclassRoPEHolder(Configurable):
 
 
 class TestHelionRoPEOverride(unittest.TestCase):
-    """Registration, factory, and PyTorch-fallback parity (no GPU/helion needed)."""
+    """Registration, factory, and PyTorch-fallback parity."""
 
     def setUp(self):
         # Restore the override if a previously run test cleared the registry.
@@ -86,18 +81,29 @@ class TestHelionRoPEOverride(unittest.TestCase):
 
     def test_factory_preserves_fields(self):
         cfg = CosSinRoPE.Config(dim=64, max_seq_len=128, theta=5000.0, scaling="yarn")
-        replacement = helion_rope(cfg)
+        with patch.object(helion_rope_module, "_HELION_IMPORT_ERROR", None):
+            replacement = helion_rope(cfg)
         self.assertIsInstance(replacement, HelionRoPE.Config)
         self.assertEqual(replacement.dim, 64)
         self.assertEqual(replacement.max_seq_len, 128)
         self.assertEqual(replacement.theta, 5000.0)
         self.assertEqual(replacement.scaling, "yarn")
 
+    def test_override_requires_helion_install(self):
+        root = _RoPEHolder.Config()
+        import_error = ImportError("No module named 'helion'")
+        with patch.object(helion_rope_module, "_HELION_IMPORT_ERROR", import_error):
+            with self.assertRaisesRegex(ImportError, "helion.*not installed"):
+                apply_overrides(
+                    OverrideConfig(imports=["torchtitan.overrides.helion_rope"]), root
+                )
+
     def test_override_claims_only_cossin(self):
         root = _RoPEHolder.Config()
-        replacements = apply_overrides(
-            OverrideConfig(imports=["torchtitan.overrides.helion_rope"]), root
-        )
+        with patch.object(helion_rope_module, "_HELION_IMPORT_ERROR", None):
+            replacements = apply_overrides(
+                OverrideConfig(imports=["torchtitan.overrides.helion_rope"]), root
+            )
         self.assertEqual(len(replacements), 1)
         # cos/sin node is swapped; complex node (Llama 3 / DeepSeek) is untouched.
         self.assertIsInstance(root.cos_rope, HelionRoPE.Config)
@@ -112,6 +118,7 @@ class TestHelionRoPEOverride(unittest.TestCase):
         self.assertIs(type(root.rope), _ContractSubclassRoPE.Config)
         self.assertEqual(root.rope.extra, 7)
 
+    @unittest.skipUnless(_HELION_INSTALLED, "requires helion")
     def test_cpu_falls_back_to_cossin(self):
         """On CPU the module falls back to CosSinRoPE, bit-for-bit identical."""
         torch.manual_seed(0)
@@ -128,6 +135,19 @@ class TestHelionRoPEOverride(unittest.TestCase):
         out_q, out_k = helion_module(xq, xk, positions)
         torch.testing.assert_close(out_q, ref_q, rtol=0, atol=0)
         torch.testing.assert_close(out_k, ref_k, rtol=0, atol=0)
+
+    @unittest.skipIf(_HELION_INSTALLED, "requires helion to be missing")
+    def test_forward_errors_without_helion(self):
+        torch.manual_seed(0)
+        dim, seqlen = 64, 16
+        helion_module = HelionRoPE.Config(dim=dim, max_seq_len=seqlen).build()
+
+        xq = torch.randn(2, seqlen, 4, dim, dtype=torch.bfloat16)
+        xk = torch.randn(2, seqlen, 1, dim, dtype=torch.bfloat16)
+        positions = torch.arange(seqlen).unsqueeze(0).expand(2, -1)
+
+        with self.assertRaisesRegex(ImportError, "helion.*not installed"):
+            helion_module(xq, xk, positions)
 
 
 @unittest.skipUnless(_HELION_GPU, "requires helion + CUDA")

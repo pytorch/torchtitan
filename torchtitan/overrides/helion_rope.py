@@ -18,13 +18,13 @@ Scope and fallbacks (the kernel is opt-in and never changes default behavior):
 * **Plain cos/sin only.** Targets exactly ``CosSinRoPE.Config``; the complex
   RoPE used by Llama 3 / DeepSeek V3 and subclasses with different cache
   contracts (e.g. Qwen3.5 ``MRoPE``) are untouched.
-* ``helion`` is an optional dependency. If it is not installed, or
-  the inputs are unsupported (any tensor on CPU or split across devices, a cache
-  that isn't a 2D ``(max_seq, 2 * head_dim)`` table, non-integer or oddly shaped
-  position ids, non-contiguous tensors), the module transparently falls back to
-  the PyTorch ``CosSinRoPE`` path. Position ids are bounds-checked exactly as the
-  PyTorch path does, so out-of-range ids fail cleanly rather than as an illegal
-  kernel access.
+* ``helion`` is an optional dependency, but explicitly selecting this override
+  requires it to be installed. Unsupported tensor inputs (any tensor on CPU or
+  split across devices, a cache that isn't a 2D ``(max_seq, 2 * head_dim)``
+  table, non-integer or oddly shaped position ids, non-contiguous tensors) fall
+  back to the PyTorch ``CosSinRoPE`` path. Position ids are bounds-checked
+  exactly as the PyTorch path does, so out-of-range ids fail cleanly rather than
+  as an illegal kernel access.
 * **CUDA only.** For now, the configs are tuned for NVIDIA H100, although this
   supports configs tuned for AMD, etc. Helion is a hardware agnostic DSL.
 
@@ -35,6 +35,7 @@ rotate-half convention), so it is interoperable with stock checkpoints.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cache
 from typing import Any, TYPE_CHECKING
 
 import torch
@@ -46,25 +47,25 @@ from torchtitan.tools.logging import logger, warn_once
 
 if TYPE_CHECKING:
     # The type checker always sees helion as importable (resolved to Any via
-    # ``replace-imports-with-any`` in pyproject.toml); the runtime guard below is
-    # what makes it a genuine optional dependency.
+    # ``replace-imports-with-any`` in pyproject.toml); the runtime import-error
+    # sentinel below is what makes it a genuine optional dependency.
     import helion
     import helion.language as hl
 
-    _HAS_HELION = True
+    _HELION_IMPORT_ERROR: ImportError | None = None
 else:
     try:
         import helion
         import helion.language as hl
 
-        _HAS_HELION = True
-    except ImportError:
-        _HAS_HELION = False
+        _HELION_IMPORT_ERROR = None
+    except ImportError as e:
+        _HELION_IMPORT_ERROR = e
 
 __all__ = ["HelionRoPE"]
 
 
-if _HAS_HELION:
+if _HELION_IMPORT_ERROR is None:
     # A reasonable default config so a raw (unbound) kernel call is deterministic
     # rather than triggering autotune; production calls override it per shape via
     # ``_run_tuned`` below.
@@ -209,27 +210,86 @@ if _HAS_HELION:
 
         return grad_xq, grad_xk
 
+    @cache
+    def _config(
+        block_sizes: tuple[int, ...],
+        num_warps: int,
+        num_stages: int | None = None,
+        *,
+        l2_groupings: tuple[int, ...] | None = None,
+        load_eviction_policies: tuple[str, ...] | None = None,
+        pid_type: str | None = None,
+    ) -> helion.Config:
+        config_kwargs: dict[str, Any] = {
+            "block_sizes": list(block_sizes),
+            "num_warps": num_warps,
+            "load_eviction_policies": list(load_eviction_policies)
+            if load_eviction_policies is not None
+            else ["", "", "first", "first"],
+        }
+        if num_stages is not None:
+            config_kwargs["num_stages"] = num_stages
+        if l2_groupings is not None:
+            config_kwargs["l2_groupings"] = list(l2_groupings)
+        if pid_type is not None:
+            config_kwargs["pid_type"] = pid_type
+        return helion.Config(**config_kwargs)
+
     def _fwd_config(query: torch.Tensor) -> helion.Config:
         # Pick a forward config by token count (batch * seq_len), the dominant
-        # work size for this bandwidth-bound kernel. The final bucket is a
-        # catch-all so every supported shape has a deterministic config.
+        # work size for this bandwidth-bound kernel. These buckets are tuned on
+        # Qwen3 TP=8 local training shapes and still cover all supported shapes.
         num_tokens = query.shape[0] * query.shape[1]
-        if num_tokens <= 1024:  # decode / short prefill
-            return helion.Config(block_sizes=[1, 8, 8, 1], num_warps=4)
-        if num_tokens <= 2048:  # small prefill
-            return helion.Config(block_sizes=[1, 16, 8, 1], num_warps=8)
-        # large prefill / batch
-        return helion.Config(block_sizes=[1, 16, 4, 1], num_warps=2, num_stages=2)
+        seq_len = query.shape[1]
+        if seq_len >= 1024:
+            return _config(
+                (1, 4, 4, 1),
+                num_warps=2,
+                num_stages=1,
+                l2_groupings=(64,),
+                pid_type="flat",
+            )
+        if num_tokens <= 512:
+            return _config((1, 16, 4, 1), num_warps=2)
+        if num_tokens <= 1024:
+            return _config((1, 4, 4, 1), num_warps=4)
+        if num_tokens <= 2048:
+            return _config((1, 4, 8, 1), num_warps=8)
+        if num_tokens <= 4096:
+            return _config((1, 16, 2, 1), num_warps=8, num_stages=2)
+        if num_tokens <= 8192:
+            return _config((1, 16, 4, 1), num_warps=2, num_stages=2)
+        if num_tokens <= 16384:
+            return _config((1, 4, 4, 1), num_warps=2, num_stages=2)
+        return _config(
+            (1, 8, 4, 1),
+            num_warps=2,
+            num_stages=2,
+            load_eviction_policies=("", "", "last", "last"),
+        )
 
     def _bwd_config(grad_query: torch.Tensor) -> helion.Config:
-        # Backward uses the same token-count bucketing as forward, with a
-        # pipelined catch-all config for larger batches.
+        # Backward gets its own token-count buckets because the transposed
+        # rotation changes which tile shapes are best.
         num_tokens = grad_query.shape[0] * grad_query.shape[1]
+        if num_tokens <= 512:
+            return _config((1, 16, 4, 1), num_warps=2)
         if num_tokens <= 1024:
-            return helion.Config(block_sizes=[1, 8, 8, 1], num_warps=4)
+            return _config((1, 4, 8, 1), num_warps=2)
+        if num_tokens <= 2048:
+            return _config((1, 8, 2, 1), num_warps=8)
+        if num_tokens <= 4096:
+            return _config((1, 8, 4, 1), num_warps=2)
         if num_tokens <= 8192:
-            return helion.Config(block_sizes=[1, 16, 8, 1], num_warps=8)
-        return helion.Config(block_sizes=[1, 16, 4, 1], num_warps=2, num_stages=2)
+            return _config((1, 4, 4, 1), num_warps=2)
+        if num_tokens <= 16384:
+            return _config((1, 8, 4, 1), num_warps=2, num_stages=2)
+        return _config(
+            (1, 4, 4, 1),
+            num_warps=2,
+            num_stages=2,
+            load_eviction_policies=("", "last", "", ""),
+        )
 
     # Cache of bound kernels keyed by (kernel, shapes, dtypes, device). Re-binding
     # a config on every call costs ~20us of CPU dispatch; training/inference use a
@@ -399,7 +459,7 @@ def _eligible(
     )
 
 
-if _HAS_HELION:
+if _HELION_IMPORT_ERROR is None:
 
     def _apply_helion_rope(
         query: torch.Tensor,
@@ -444,13 +504,10 @@ else:
         rope_cache: torch.Tensor,
         positions: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        warn_once(
-            logger,
+        raise ImportError(
             "HelionRoPE override is active but `helion` is not installed; "
-            "falling back to the PyTorch cos/sin RoPE. Install helion to use "
-            "the fused kernel.",
+            "install helion to use torchtitan.overrides.helion_rope."
         )
-        return None
 
 
 class HelionRoPE(CosSinRoPE):
@@ -458,8 +515,8 @@ class HelionRoPE(CosSinRoPE):
 
     A drop-in for :class:`CosSinRoPE`: it reuses the same cache and rotate-half
     math, so it stays checkpoint-compatible, and transparently falls back to the
-    PyTorch implementation whenever the fused kernel cannot be used (see the
-    module docstring). Registered as an override on ``CosSinRoPE.Config``.
+    PyTorch implementation for unsupported tensor inputs (see the module
+    docstring). Registered as an override on ``CosSinRoPE.Config``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -485,4 +542,9 @@ class HelionRoPE(CosSinRoPE):
     description="Fused Helion cos/sin rotary embedding (CUDA).",
 )
 def helion_rope(cfg: CosSinRoPE.Config) -> HelionRoPE.Config:
+    if _HELION_IMPORT_ERROR is not None:
+        raise ImportError(
+            "HelionRoPE override was requested but `helion` is not installed; "
+            "install helion to use torchtitan.overrides.helion_rope."
+        ) from _HELION_IMPORT_ERROR
     return derive(cfg, HelionRoPE.Config)
