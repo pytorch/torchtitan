@@ -92,11 +92,9 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
             ),
-            # TODO(#3668): re-enable cudagraph once the large-batch capture bug is
-            # fixed. Full cudagraph capture at large batch corrupts generation on this
-            # vLLM build (random tokens + NaN logprobs), so we run eager for now.
-            # https://github.com/pytorch/torchtitan/issues/3668
-            cudagraph=VLLMCudagraphConfig(enable=False),
+            # cudagraph on: decode-only graphs (FULL_DECODE_ONLY) are safe at this
+            # config's large batch; plain full graphs corrupted here before. See #3668.
+            cudagraph=VLLMCudagraphConfig(enable=True),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 temperature=1.0,

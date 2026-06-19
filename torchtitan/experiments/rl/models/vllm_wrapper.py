@@ -13,6 +13,7 @@ TorchTitan models for vLLM.
 
 import dataclasses
 from dataclasses import dataclass
+from functools import partial
 
 import torch
 import torch._dynamo
@@ -134,21 +135,26 @@ class VLLMModelWrapper(Module):
             if attn_config.head_dim is not None
             else model_config.dim // n_heads
         )
-        vllm_backend = VLLMAttentionWrapper.Config(
-            hidden_size=model_config.dim,
-            num_heads=n_heads,
-            num_kv_heads=n_kv_heads,
-            head_dim=head_dim,
-        )
-        new_layers = [
-            dataclasses.replace(
-                layer_cfg,
-                attention=dataclasses.replace(
-                    layer_cfg.attention, inner_attention=vllm_backend
+        new_layers = []
+        for layer_cfg in model_config.layers:
+            inner = layer_cfg.attention.inner_attention
+            vllm_backend = VLLMAttentionWrapper.Config(
+                hidden_size=model_config.dim,
+                num_heads=n_heads,
+                num_kv_heads=n_kv_heads,
+                head_dim=head_dim,
+                sliding_window_size=getattr(
+                    layer_cfg.attention, "sliding_window_size", None
                 ),
             )
-            for layer_cfg in model_config.layers
-        ]
+            new_layers.append(
+                dataclasses.replace(
+                    layer_cfg,
+                    attention=dataclasses.replace(
+                        layer_cfg.attention, inner_attention=vllm_backend
+                    ),
+                )
+            )
         self.config = dataclasses.replace(model_config, layers=new_layers)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
@@ -192,9 +198,13 @@ class VLLMModelWrapper(Module):
         # specializes on tensor type, so each switch triggers a
         # recompile.  Because of this, the default recompile_limit (8) is
         # too low; exceeding it fails under
-        # fullgraph=True so set to 10 for now
+        # fullgraph=True so set to 10 for now and bump to 12 for sliding window
+        has_sliding_window = any(
+            getattr(layer_cfg.attention, "sliding_window_size", None) is not None
+            for layer_cfg in model_config.layers
+        )
         if compile_config.enable:
-            torch._dynamo.config.recompile_limit = 10
+            torch._dynamo.config.recompile_limit = 12 if has_sliding_window else 10
 
         self.model = self.parallelize_fn(
             model=self.model,
@@ -223,6 +233,28 @@ class VLLMModelWrapper(Module):
         with torch.no_grad():
             self.model.init_weights(buffer_device=None)
         self._maybe_initial_load_weights()
+
+        # Give each gpt-oss attention's vLLM backend its sink rescale.
+        # Need to do it here after parallelize + weight load so sinks are
+        # TP-sharded.
+        self._inject_attention_sinks()
+
+    # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
+    def _inject_attention_sinks(self) -> None:
+        """Give each gpt-oss attention's vLLM backend its sink-rescale hook."""
+        from torchtitan.models.gpt_oss.model import (
+            apply_attention_sink_rescale,
+            Attention,
+        )
+
+        for module in self.model.modules():
+            if not isinstance(module, Attention):
+                continue
+            sinks = module.sinks
+            local_sinks = sinks._local_tensor if isinstance(sinks, DTensor) else sinks
+            module.inner_attention.vllm_attn.impl.out_transform = partial(
+                apply_attention_sink_rescale, sinks=local_sinks
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """vLLM required API.
