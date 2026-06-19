@@ -1,5 +1,6 @@
 torchdata >= 0.8.0
 datasets >= 3.6.0, < 4.8.0
+zstandard  # decompress the Dolmino .jsonl.zst shards when streaming from the Hub
 tensorboard
 wandb
 tyro >= 1.0.5

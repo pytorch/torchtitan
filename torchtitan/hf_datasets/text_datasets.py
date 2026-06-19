@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
@@ -34,6 +35,26 @@ def _process_c4_text(sample: dict[str, Any]) -> str:
     return sample["text"]
 
 
+def _load_dolmino_dataset(dataset_path: str):
+    """Load the Dolma3 Dolmino mix (allenai/dolma3_dolmino_mix-100B-1025).
+
+    Reads a local directory of parquet shards when ``dataset_path`` is a
+    directory (offline use); otherwise streams the full mix (the ``default``
+    config) from the Hugging Face Hub. The Hub shards are .jsonl.zst, so the
+    Hub path needs the ``zstandard`` package (see requirements.txt).
+    """
+    if os.path.isdir(dataset_path):
+        return load_dataset(
+            "parquet", data_dir=dataset_path, split="train", streaming=True
+        )
+    return load_dataset(dataset_path, split="train", streaming=True)
+
+
+def _process_dolmino_text(sample: dict[str, Any]) -> str:
+    """Process a Dolmino sample: the document text lives in the 'text' column."""
+    return sample["text"]
+
+
 # Add your dataset here - more information at docs/datasets.md
 DATASETS = {
     "c4": DatasetConfig(
@@ -50,6 +71,13 @@ DATASETS = {
         path="allenai/c4",
         loader=partial(_load_c4_dataset, split="validation"),
         sample_processor=_process_c4_text,
+    ),
+    # OLMo-3's stage-2 annealing mix (fully open data). Streams from the Hub by
+    # default; pass --dataloader.dataset_path to read a local parquet copy.
+    "dolmino": DatasetConfig(
+        path="allenai/dolma3_dolmino_mix-100B-1025",
+        loader=_load_dolmino_dataset,
+        sample_processor=_process_dolmino_text,
     ),
 }
 

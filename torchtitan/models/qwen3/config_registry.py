@@ -221,6 +221,51 @@ def qwen3_30b_a3b() -> Trainer.Config:
     )
 
 
+def olmo3_7b_a1b() -> Trainer.Config:
+    """OLMo-3 style ~6.9B-total / ~1.1B-active MoE on the Dolma3 Dolmino mix.
+
+    Trains an OLMo-3-style MoE (see ``_olmo3_moe_7b_a1b``) on the fully open
+    ``allenai/dolma3_dolmino_mix-100B-1025`` data with the OLMo-3 tokenizer,
+    using torchtitan's shared Qwen3 MoE components. Pure FSDP/ZeRO-3, bf16,
+    local batch 6 x seq 4096. Enable ``--compile.enable``, and set
+    ``--parallelism.expert_parallel_degree > 1`` at scale so the large expert
+    weights are sharded across ranks instead of all-gathered every step.
+
+    Stage the OLMo-3 tokenizer once with
+    ``scripts/download_hf_assets.py --repo_id allenai/OLMo-3-1025-7B
+    --assets tokenizer --local_dir ./assets/hf`` (it lands at the default
+    ``hf_assets_path`` below).
+    """
+    return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
+        hf_assets_path="./assets/hf/OLMo-3-1025-7B",
+        model_spec=model_registry("olmo3-7B-A1B"),
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="dolmino"),
+        optimizer=default_adamw(lr=3e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=200,
+            decay_type="cosine",
+            min_lr_factor=0.1,
+        ),
+        training=TrainingConfig(
+            local_batch_size=6,
+            seq_len=4096,
+            steps=1000,
+        ),
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=-1,
+            tensor_parallel_degree=1,
+            expert_parallel_degree=1,
+            context_parallel_degree=1,
+            pipeline_parallel_degree=1,
+        ),
+        checkpoint=CheckpointManager.Config(
+            interval=500,
+            last_save_model_only=False,
+        ),
+    )
+
+
 def qwen3_32b() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),

@@ -140,11 +140,28 @@ def _build_qwen3_moe_layers(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     rope: RoPE.Config,
+    shared_expert_hidden_dim: int | None = None,
+    use_qk_norm: bool = True,
 ) -> list[TransformerBlock.Config]:
-    """Build per-layer configs for MoE Qwen3 models with depth-scaled inits."""
+    """Build per-layer configs for MoE Qwen3 models with depth-scaled inits.
+
+    ``shared_expert_hidden_dim`` adds an always-on shared expert (a dense
+    SwiGLU FFN of that intermediate size) alongside the routed experts, as in
+    DeepSeek-V3 / OLMo-3 style MoE; stock Qwen3-MoE has no shared expert so it
+    defaults to None. ``use_qk_norm`` toggles per-head QK RMSNorm (Qwen3 uses
+    it; OLMo-3 style softmax attention does not).
+    """
     inner_attention = get_attention_config(attn_backend)
     layers = []
     for layer_id in range(n_layers):
+        shared_experts = None
+        if shared_expert_hidden_dim is not None:
+            shared_experts = make_ffn_config(
+                dim=dim,
+                hidden_dim=shared_expert_hidden_dim,
+                w1_param_init=_LINEAR_INIT,
+                w2w3_param_init=_depth_init(layer_id),
+            )
         layers.append(
             Qwen3TransformerBlock.Config(
                 attention_norm=_qwen3_norm(dim),
@@ -158,7 +175,7 @@ def _build_qwen3_moe_layers(
                     wo_param_init=_depth_init(layer_id),
                     inner_attention=inner_attention,
                     rope=rope,
-                    qk_norm=_qwen3_norm(head_dim),
+                    qk_norm=_qwen3_norm(head_dim) if use_qk_norm else None,
                 ),
                 moe=make_moe_config(
                     num_experts=num_experts,
@@ -179,6 +196,7 @@ def _build_qwen3_moe_layers(
                         comm_backend=moe_comm_backend,
                         non_blocking_capacity_factor=non_blocking_capacity_factor,
                     ),
+                    shared_experts=shared_experts,
                 ),
             )
         )
@@ -596,6 +614,64 @@ def _235b_a22b(
     )
 
 
+def _olmo3_moe_7b_a1b(
+    attn_backend: str,
+    moe_comm_backend: str = "standard",
+) -> Qwen3Model.Config:
+    """OLMo-3 style fine-grained MoE: ~6.9B total / ~1.1B active params.
+
+    A sparse MoE counterpart to AllenAI's open OLMo-3 1025 family, trained on
+    the OLMo-3 tokenizer + Dolma3 Dolmino data. dim 1536, 40 layers, plain MHA
+    (24 query heads == 24 kv heads, head_dim 64), an MoE block in every layer
+    with 128 routed experts (per-expert hidden 256), top-8 routing, plus one
+    always-on shared expert (hidden 1024). Shares the OLMo-3 family conventions
+    cross-checked against allenai/Olmo-3-1025-7B: vocab 100278, RMSNorm eps
+    1e-6, RoPE theta 500000, no attention bias, untied embeddings.
+
+    Built from torchtitan's shared Qwen3 MoE components, so it uses pre-norm and
+    omits two features of the released *dense* Olmo3ForCausalLM that don't affect
+    this training stage: OLMo-2/3 reordered post-norm + whole-projection QK-norm,
+    and the sliding/full attention interleave (sliding_window 4096 == seq_len
+    here, so attention is full either way).
+    """
+    dim = 1536
+    head_dim = 64
+    n_layers = 40
+    vocab_size = 100278
+    return Qwen3Model.Config(
+        vocab_size=vocab_size,
+        dim=dim,
+        norm=_qwen3_norm(dim),
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+        ),
+        lm_head=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
+        ),
+        layers=_build_qwen3_moe_layers(
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=24,
+            n_kv_heads=24,
+            head_dim=head_dim,
+            moe_hidden_dim=256,
+            num_experts=128,
+            top_k=8,
+            shared_expert_hidden_dim=1024,
+            use_qk_norm=False,
+            attn_backend=attn_backend,
+            rope=CosSinRoPE.Config(
+                dim=head_dim,
+                max_seq_len=4096,
+                theta=500000.0,
+            ),
+            moe_comm_backend=moe_comm_backend,
+        ),
+    )
+
+
 qwen3_configs = {
     "debugmodel": _debugmodel,
     "debugmodel_fused_qkv": _debugmodel_fused_qkv,
@@ -608,6 +684,7 @@ qwen3_configs = {
     "debugmodel_moe": _debugmodel_moe,
     "30B-A3B": _30b_a3b,
     "235B-A22B": _235b_a22b,
+    "olmo3-7B-A1B": _olmo3_moe_7b_a1b,
 }
 
 
