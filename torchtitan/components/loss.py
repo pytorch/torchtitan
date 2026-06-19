@@ -50,7 +50,7 @@ def cross_entropy_loss(
         return _LossParallelCrossEntropy.apply(
             pred.flatten(0, 1).float(),
             labels.flatten(0, 1),
-            current_spmd_mesh().get_group("tp"),
+            current_spmd_mesh().get_group("tp"),  # pyrefly: ignore[missing-attribute]
             global_vocab_size,
         )
 
