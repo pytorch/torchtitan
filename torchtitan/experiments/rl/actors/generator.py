@@ -67,13 +67,11 @@ class _EngineStatsCapture(StatLoggerBase):
 
     def __init__(self, vllm_config, engine_index: int = 0):
         del vllm_config, engine_index
-        self._prefix_cache = (
-            CachingMetrics()
-        )  # cumulative hit-rate over a recent-request window
+        # cumulative hit-rate over a recent-request window
+        self._prefix_cache = CachingMetrics()
         self._total_generation_tokens = 0.0
-        self._num_preempted_reqs = (
-            0.0  # latest iteration's preemptions (KV-pressure signal)
-        )
+        # latest iteration's preemptions (KV-pressure signal)
+        self._num_preempted_reqs = 0.0
 
     def record(
         self, scheduler_stats, iteration_stats, mm_cache_stats=None, engine_idx: int = 0
@@ -404,8 +402,8 @@ class VLLMGenerator(Actor, Configurable):
         # max_num_seqs controls vLLM's maximum batch dimension: it sets
         # the upper bound for concurrent sequences, determines KV-cache
         # block allocation (and therefore GPU memory usage), and bounds
-        # the CUDA graph capture sizes.  Always computed by the caller
-        # (RLTrainer) as num_rollout_workers * group_size.
+        # the CUDA graph capture sizes. Set by the caller (RLTrainer); see its
+        # setup_async TODO to derive it from run-ahead depth + KV capacity.
         self._max_num_seqs = max_num_seqs
 
         # Register TorchTitan model + parser with vLLM

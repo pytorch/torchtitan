@@ -21,19 +21,19 @@ _data_input_loop                                      _rollout_loop[N] (rollout 
 | sample = rollouter.get_training_sample()         |  | group = rollouter.run_group_rollouts(work.sample)|
 | work = RolloutGroupWork(group_id, sample)        |  | buffer.record_rollout_group_result(group)       |
 | buffer.add_rollout_group_work(work)              |  +-----------------------+--------------------------+
-+-----------------------+--------------------------+                          ^ |
-                        |                                                     | |
-                        | adds work entry                                     | | updates same entry
-                        v                                                     | v
++-------------------+--+---------------------------+                          ^ |
+                    |  ^                                                      | |
+    adds work entry |  | maybe returns batch                                  | | updates same entry
+                    v  |                                                      | v
 AsyncRolloutBuffer
-+-----------------------+-----------------------------------------------------+-+--------------------------+
++-------------------+--+------------------------------------------------------+-+------------------------+
 | capacity = ceil(max_offpolicy_steps * num_rollout_groups_per_train_step)                               |
 |                                                                                                        |
-| caller                  buffer call                                      RolloutGroupWork Status        |
-| _data_input_loop        add_rollout_group_work(RolloutGroupWork)         WAITING                        |
-| _rollout_loop[N]        claim_next_rollout_group()                       WAITING -> GENERATING          |
-| _rollout_loop[N]        record_rollout_group_result(RolloutGroup)        GENERATING -> GENERATED        |
-| _episode_batcher_loop   RolloutGroup = take_generated_rollout_group()    GENERATED -> removed           |
+| caller                  buffer call                                      RolloutGroupWork Status       |
+| _data_input_loop        add_rollout_group_work(RolloutGroupWork)         WAITING                       |
+| _rollout_loop[N]        claim_next_rollout_group()                       WAITING -> GENERATING         |
+| _rollout_loop[N]        record_rollout_group_result(RolloutGroup)        GENERATING -> GENERATED       |
+| _episode_batcher_loop   RolloutGroup = take_generated_rollout_group()    GENERATED -> removed          |
 +--------------------------------------------------------------------------------+----------------------+
                                                                                  |
                                                                                  | group = buffer.take_generated_rollout_group()
@@ -637,11 +637,8 @@ class RLTrainer(Configurable):
                 output_dir=config.dump_folder,
             )
 
-            # The generator runs vLLM's own cudagraph/inductor path; its per-layer torch.compile must
-            # stay aot_eager (inductor here crashes the engine). So the generator is pinned to
-            # aot_eager and `config.compile.backend` controls ONLY the trainer (which wants inductor).
-            # TODO: verify trainer model compile=True works in RL (it shares the model path with the generator).
-            generator_compile = replace(config.compile, backend="aot_eager")
+            # TODO: enable torch.compile for trainer + generator. Generator inductor crashed the vLLM
+            # engine (it shares the model path with vLLM's own inductor/cudagraph); find a working config.
             generators = []
             for idx, generator_mesh in enumerate(generator_meshes):
                 actor_name = (
@@ -653,7 +650,7 @@ class RLTrainer(Configurable):
                     config.generator,
                     model_spec=config.model_spec,
                     model_path=config.hf_assets_path,
-                    compile_config=generator_compile,
+                    compile_config=config.compile,
                     # TODO(async-rl): derive max_num_seqs from the run-ahead depth + the generator's profiled
                     # KV concurrency, and keep the cudagraph capture-size cap separate from this request cap.
                     # 512 for now (cudagraph capture must not be unbounded on this path).
@@ -807,13 +804,12 @@ class RLTrainer(Configurable):
         rollout_tasks = [
             asyncio.create_task(
                 self._rollout_loop(
-                    worker_id=worker_id,
                     buffer=self._rollout_buffer,
                     generate_fn=generate_fn,
                 ),
-                name=f"rollout_{worker_id}",
+                name=f"rollout_worker_{rollout_worker_id}",
             )
-            for worker_id in range(self._num_rollout_workers)
+            for rollout_worker_id in range(self._num_rollout_workers)
         ]
         episode_batcher_task = asyncio.create_task(
             self._episode_batcher_loop(
@@ -898,7 +894,7 @@ class RLTrainer(Configurable):
             group_index += 1
 
     async def _rollout_loop(
-        self, *, worker_id: int, buffer: AsyncRolloutBuffer, generate_fn: GenerateFn
+        self, *, buffer: AsyncRolloutBuffer, generate_fn: GenerateFn
     ) -> None:
         """Generate + score one group at a time; a failed group becomes an empty group + a failure metric.
 
