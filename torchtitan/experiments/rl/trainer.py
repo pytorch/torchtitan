@@ -5,28 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Backpressure:
-_data_input_loop
-  waits_for: AsyncRolloutBuffer slot
-  unblocked_by: _episode_batcher_loop -> buffer.take_generated_rollout_group()
+TLDR:
+_data_input_loop -> _rollout_loop -> _episode_batcher_loop -> packed_training_batch_queue -> _trainer_loop
+           v               v                    v                         ^
+           |               |                    |                         |
+           |               ^                    ^                         |
+           +----------------------AsyncRolloutBuffer----------------------+
 
-_rollout_loop[N]
-  waits_for: claimable RolloutGroupWork
-  unblocked_by: _data_input_loop -> buffer.add_rollout_group_work()
 
-_episode_batcher_loop
-  waits_for: takeable RolloutGroup
-  unblocked_by: _rollout_loop[N] -> buffer.record_rollout_group_result()
-
-_episode_batcher_loop
-  waits_for: packed_training_batch_queue slot
-  unblocked_by: _trainer_loop -> packed_training_batch_queue.get()
-
-_trainer_loop
-  waits_for: PackedTrainingBatch
-  unblocked_by: _episode_batcher_loop -> packed_training_batch_queue.put()
-
-Diagram:
+Detailed diagram:
 
 _data_input_loop                                      _rollout_loop[N] (rollout workers)
 +--------------------------------------------------+  +--------------------------------------------------+
@@ -71,6 +58,27 @@ _trainer_loop
 +--------------------------------------------------------------------------------+
 | train packed batch -> optim step -> push weights -> pull weights               |
 +--------------------------------------------------------------------------------+
+
+Backpressure:
+_data_input_loop
+  waits_for: AsyncRolloutBuffer slot
+  unblocked_by: _episode_batcher_loop -> buffer.take_generated_rollout_group()
+
+_rollout_loop[N]
+  waits_for: claimable RolloutGroupWork
+  unblocked_by: _data_input_loop -> buffer.add_rollout_group_work()
+
+_episode_batcher_loop
+  waits_for: takeable RolloutGroup
+  unblocked_by: _rollout_loop[N] -> buffer.record_rollout_group_result()
+
+_episode_batcher_loop
+  waits_for: packed_training_batch_queue slot
+  unblocked_by: _trainer_loop -> packed_training_batch_queue.get()
+
+_trainer_loop
+  waits_for: PackedTrainingBatch
+  unblocked_by: _episode_batcher_loop -> packed_training_batch_queue.put()
 """
 
 import asyncio
