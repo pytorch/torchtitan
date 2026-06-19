@@ -83,8 +83,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
             episode_batcher=EpisodeBatcher.Config(
-                # seq_len >= model max_seq_len (4096) so a full-length episode packs without being dropped.
-                batch=BatchConfig(local_batch_size=2, seq_len=4096),
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
             ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
@@ -144,8 +143,7 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
             episode_batcher=EpisodeBatcher.Config(
-                # seq_len >= model max_seq_len (4096) so a full-length episode packs without being dropped.
-                batch=BatchConfig(local_batch_size=2, seq_len=4096),
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
             ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
@@ -724,8 +722,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
             episode_batcher=EpisodeBatcher.Config(
-                # seq_len >= model max_seq_len (4096) so a full-length episode packs without being dropped.
-                batch=BatchConfig(local_batch_size=2, seq_len=4096),
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
             ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
