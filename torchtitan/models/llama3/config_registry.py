@@ -24,11 +24,10 @@ from . import model_registry
 
 
 def llama3_debugmodel() -> Trainer.Config:
-    model_spec = model_registry("debugmodel")
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
-        model_spec=model_spec,
+        model_spec=model_registry("debugmodel"),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -113,7 +112,6 @@ def llama3_debugmodel_ce_loss() -> Trainer.Config:
 
 
 def llama3_8b() -> Trainer.Config:
-    model_spec = model_registry("8B")
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Llama-3.1-8B",
@@ -124,7 +122,7 @@ def llama3_8b() -> Trainer.Config:
         metrics=MetricsProcessor.Config(
             enable_tensorboard=True,
         ),
-        model_spec=model_spec,
+        model_spec=model_registry("8B"),
         optimizer=default_adamw(lr=3e-4),
         training=TrainingConfig(
             local_batch_size=1,
@@ -144,7 +142,6 @@ def llama3_8b() -> Trainer.Config:
 
 
 def llama3_70b() -> Trainer.Config:
-    model_spec = model_registry("70B")
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Llama-3.1-70B",
@@ -155,7 +152,7 @@ def llama3_70b() -> Trainer.Config:
         metrics=MetricsProcessor.Config(
             enable_tensorboard=True,
         ),
-        model_spec=model_spec,
+        model_spec=model_registry("70B"),
         optimizer=default_adamw(lr=1.5e-4),
         training=TrainingConfig(
             local_batch_size=8,
@@ -179,17 +176,6 @@ def llama3_70b() -> Trainer.Config:
 
 def llama3_405b() -> Trainer.Config:
     compile_config = CompileConfig(enable=True)
-    model_spec = model_registry(
-        "405B",
-        converters=[
-            Float8LinearConverter.Config(
-                filter_fqns=["output"],
-                model_compile_enabled=(
-                    compile_config.enable and "model" in compile_config.components
-                ),
-            ),
-        ],
-    )
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Llama-3.1-405B",
@@ -200,7 +186,17 @@ def llama3_405b() -> Trainer.Config:
         metrics=MetricsProcessor.Config(
             enable_tensorboard=True,
         ),
-        model_spec=model_spec,
+        model_spec=model_registry(
+            "405B",
+            converters=[
+                Float8LinearConverter.Config(
+                    filter_fqns=["output"],
+                    model_compile_enabled=(
+                        compile_config.enable and "model" in compile_config.components
+                    ),
+                ),
+            ],
+        ),
         optimizer=default_adamw(lr=8e-5),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
