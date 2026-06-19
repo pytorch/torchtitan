@@ -19,11 +19,12 @@ from . import model_registry
 
 
 def gpt_oss_debugmodel() -> Trainer.Config:
+    model_spec = model_registry("debugmodel")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(global_vocab_size=2048),
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel"),
+        model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4_test",
         ),
@@ -55,10 +56,11 @@ def gpt_oss_debugmodel() -> Trainer.Config:
 
 
 def gpt_oss_20b() -> Trainer.Config:
+    model_spec = model_registry("20b")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(global_vocab_size=201088),
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/gpt-oss-20b",
-        model_spec=model_registry("20b"),
+        model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -81,10 +83,11 @@ def gpt_oss_20b() -> Trainer.Config:
 
 
 def gpt_oss_120b() -> Trainer.Config:
+    model_spec = model_registry("120b")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(global_vocab_size=201088),
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/gpt-oss-120b",
-        model_spec=model_registry("120b"),
+        model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(

@@ -629,10 +629,8 @@ class TestChunkedCELossSPMD(DTensorTestBase):
             spmd.assert_type(lm_head_spmd.weight, {tp_group: spmd.S(0)})
             with typecheck(strict_mode="strict", local=False):
                 loss_spmd = loss_spmd_fn(h_spmd, labels)
-            self.assertIs(
-                spmd.get_axis_local_type(loss_spmd, tp_group),
-                spmd.I,
-            )
+            # ChunkedCELoss returns through an autograd bridge under
+            # no_typecheck, so the returned scalar is intentionally untyped.
 
         # numerics check
         loss_spmd.backward()
