@@ -198,13 +198,10 @@ class TestPrecompileLossSetup(unittest.TestCase):
         lm_head = torch.nn.Linear(2, 3)
         model = SimpleNamespace(lm_head=lm_head, _skip_lm_head=False)
         loss_fn = ChunkedLossWithParamGrads.Config().build()
-        parallel_dims = SimpleNamespace(tp_enabled=True)
-        parallelism = SimpleNamespace(disable_loss_parallel=False)
 
-        _prepare_loss_for_precompile(model, loss_fn, parallel_dims, parallelism)
+        _prepare_loss_for_precompile(model, loss_fn)
 
         self.assertIs(loss_fn.lm_head, lm_head)
-        self.assertTrue(loss_fn.loss_parallel)
         self.assertTrue(model._skip_lm_head)
 
 

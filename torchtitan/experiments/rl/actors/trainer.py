@@ -377,8 +377,10 @@ class PolicyTrainer(Actor, Configurable):
             # DTensor and the trainer injects ``loss.detach()`` as ``loss/mean``.
             # The loss mesh reduced below is batch/cp, orthogonal to TP, so mirror
             # core's ``_dist_reduce`` and take the local per-rank value: the loss
-            # is Replicate on the TP axis (loss parallel is disabled) and Partial
-            # on batch/cp, so ``to_local`` yields exactly the per-rank share this
+            # is Replicate on the TP axis (GRPO computes per-token logprobs with
+            # the loss-parallel cross-entropy, all-reducing across the TP axis, so
+            # every TP rank gets the same logprob and loss) and Partial on
+            # batch/cp, so ``to_local`` yields exactly the per-rank share this
             # all-reduce expects, matching the plain-tensor (non-chunked) path.
             # ``full_tensor`` could instead add a spurious all-reduce.
             local_values: list[torch.Tensor] = []

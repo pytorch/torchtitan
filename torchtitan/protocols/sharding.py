@@ -98,7 +98,7 @@ class ShardingConfig:
             DTensor. When ``local_map`` is set this also tells ``local_map``
             what to wrap the local output back to. Accepts a single
             ``SpmdLayout`` (single-output case) or a tuple (multi-
-            output case, e.g. attention with ``return_lse=True``). ``None``
+            output case). ``None``
             means "infer from the output" (it's already a DTensor at the
             right placement, or there's no local_map to drive).
             e.g. ``{TP: Partial()}`` for the MoE wrapper.

@@ -7,7 +7,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -17,6 +17,7 @@ from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -28,12 +29,21 @@ LossFunction: TypeAlias = Callable[..., torch.Tensor]
 def cross_entropy_loss(
     pred: torch.Tensor,
     labels: torch.Tensor,
-    *,
-    loss_parallel: bool = True,
 ) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
     if isinstance(pred, DTensor) and isinstance(labels, DTensor):
-        return _cross_entropy_via_local_map(pred, labels, loss_parallel=loss_parallel)
+        return _cross_entropy_via_local_map(pred, labels)
+
+    if isinstance(pred, DTensor):
+        assert get_spmd_backend() == "default"
+        if pred.placements == (Shard(pred.ndim - 1),):
+            return _LossParallelCrossEntropy.apply(
+                pred.to_local().flatten(0, 1).float(),
+                labels.flatten(0, 1),
+                pred.device_mesh.get_group("tp"),
+                pred.shape[-1],
+                "sum",
+            )
 
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
@@ -66,6 +76,7 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         labels: torch.Tensor,
         tp_group: dist.ProcessGroup,
         global_vocab_size: int,
+        reduction: str = "sum",
     ) -> torch.Tensor:
         """
         SPMD type: logits S(-1)@TP, labels I@TP → loss I@TP.
@@ -78,6 +89,7 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
             labels,
             tp_group,
             global_vocab_size,
+            reduction,
         )
         output_type = dict(spmd.get_local_type(logits))
         output_type[tp_group] = spmd.I
@@ -92,8 +104,14 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         labels: torch.Tensor,
         tp_group: dist.ProcessGroup,
         global_vocab_size: int,
+        reduction: str = "sum",
     ) -> torch.Tensor:
-        """Compute exact CE loss from local vocab shards via TP all-reduces."""
+        """Compute exact CE from local vocab shards via TP all-reduces.
+
+        ``reduction="sum"`` returns the scalar summed loss (SFT/CE).
+        ``reduction="none"`` returns the per-token NLL ``[N]``, which GRPO
+        negates to get per-token logprobs without all-gathering the vocab.
+        """
         logits_shape = logits.shape
         logits_2d = logits.flatten(0, -2).float()
         labels_1d = labels.flatten()
@@ -139,10 +157,9 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         local_result[out_of_range.unsqueeze(-1)] = 0
         dist.all_reduce(local_result, op=dist.ReduceOp.SUM, group=tp_group)
 
-        # Compute summed NLL loss, dropping ignored labels.
+        # Per-token NLL, dropping ignored labels (logprob 0 for ignored).
         result = -local_result.squeeze(-1)
         result = torch.where(labels_1d != IGNORE_INDEX, result, 0)
-        loss = result.sum()
 
         # Save local-shard log probabilities for the fused CE backward.
         ctx.save_for_backward(log_probs, labels_1d)
@@ -150,13 +167,16 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         ctx.logits_dtype = logits.dtype
         ctx.vocab_start = vocab_start
         ctx.local_vocab_size = local_vocab_size
-        return loss
+        ctx.reduction = reduction
+        if reduction == "none":
+            return result
+        return result.sum()
 
     @staticmethod
     def backward(  # pyrefly: ignore[bad-override]
         ctx,
         grad_output: torch.Tensor,
-    ) -> tuple[torch.Tensor, None, None, None]:
+    ) -> tuple[torch.Tensor, None, None, None, None]:
         log_probs, labels_1d = ctx.saved_tensors
         safe_labels = torch.where(labels_1d != IGNORE_INDEX, labels_1d, 0)
         out_of_range = (safe_labels < ctx.vocab_start) | (
@@ -170,19 +190,22 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         grad_update = out_of_range.to(grad_input.dtype) - 1.0
         grad_input[row_idx, local_labels] = grad_update
 
+        # reduction="none" gives a per-token ``[N]`` upstream grad; reshape to
+        # ``[N, 1]`` to broadcast over the local vocab. "sum" gives the scalar
+        # loss grad, which broadcasts as-is.
+        if ctx.reduction == "none":
+            grad_output = grad_output.reshape(-1, 1)
         grad_output = torch.where(
             (labels_1d != IGNORE_INDEX).unsqueeze(-1), grad_output, 0
         )
         grad_logits = (grad_input + torch.exp(log_probs)) * grad_output
         grad_logits = grad_logits.reshape(ctx.logits_shape).to(ctx.logits_dtype)
-        return grad_logits, None, None, None
+        return grad_logits, None, None, None, None
 
 
 def _cross_entropy_via_local_map(
     pred: DTensor,
     labels: DTensor,
-    *,
-    loss_parallel: bool,
 ) -> torch.Tensor:
     mesh = pred.device_mesh
     # Labels don't have a vocab dim.
@@ -228,17 +251,12 @@ def _cross_entropy_via_local_map(
                 reduction="sum",
                 ignore_index=IGNORE_INDEX,
             )
-        if not loss_parallel:
-            raise ValueError(
-                "cross_entropy_loss received vocab-sharded logits with "
-                "loss_parallel=False."
-            )
-
         return _LossParallelCrossEntropy.apply(
             flat_pred,
             flat_labels,
             mesh.get_group("tp"),
             pred.shape[-1],
+            "sum",
         )
 
     return _local_cross_entropy(pred, labels)
@@ -260,10 +278,8 @@ class BaseLoss(ABC, Configurable):
     to branch on the return type; ``metrics`` is an empty dict for losses that
     don't emit any (e.g. ``CrossEntropyLoss``, ``MSELoss``).
     Subclasses must implement ``__init__``. Leaf losses set ``self.fn`` and
-    reuse the default ``__call__`` (optionally overriding ``_fn_kwargs`` to
-    forward static options like ``loss_parallel`` to ``self.fn``); composite
-    losses (e.g. ``ChunkedLoss``) may override ``__call__`` and delegate to an
-    inner loss instead.
+    reuse the default ``__call__``; composite losses (e.g. ``ChunkedLoss``) may
+    override ``__call__`` and delegate to an inner loss instead.
     """
 
     fn: LossFunction
@@ -285,22 +301,13 @@ class BaseLoss(ABC, Configurable):
             logger.info("Compiling the loss function with torch.compile")
             self.fn = torch.compile(self.fn, backend=compile_config.backend)
 
-    def _fn_kwargs(self) -> dict[str, Any]:
-        """Extra keyword arguments forwarded to ``self.fn`` on each call.
-
-        Empty by default. Leaf losses whose ``fn`` takes static configuration
-        (e.g. ``CrossEntropyLoss``'s ``loss_parallel``) override this to thread
-        the option through without changing the uniform ``__call__`` signature.
-        """
-        return {}
-
     def __call__(
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
         global_valid_tokens: float | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        loss = self.fn(pred, labels, **self._fn_kwargs())
+        loss = self.fn(pred, labels)
         # Normalization is owned by the loss: leaf losses (CrossEntropyLoss,
         # MSELoss) inherit this division, and ChunkedLoss delegates to its
         # inner loss so each chunk is normalized the same way.
@@ -320,15 +327,7 @@ class CrossEntropyLoss(BaseLoss):
 
     def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
         self.fn: LossFunction = cross_entropy_loss
-        # Threaded into ``cross_entropy_loss``: selects the loss-parallel path
-        # when TP vocab-sharded logits reach the loss. Set by the trainer from
-        # ``disable_loss_parallel`` -- directly for a standalone
-        # ``CrossEntropyLoss``, or via ``ChunkedLoss`` when this is its inner loss.
-        self.loss_parallel: bool = True
         self._maybe_compile(compile_config)
-
-    def _fn_kwargs(self) -> dict[str, Any]:
-        return {"loss_parallel": self.loss_parallel}
 
 
 class MSELoss(BaseLoss):
@@ -486,15 +485,37 @@ class GRPOLoss(BaseLoss):
 def logits_to_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """``[B, S, V]`` logits -> ``[B, S]`` logprob of each label token.
 
-    Localizes DTensor logits first: this path runs only for RL losses, which
-    disable loss parallel, so the vocab is replicated (not sharded) and
-    ``to_local`` yields the full vocab. (SFT/CE never takes this path — it uses
-    the fused, loss-parallel-aware cross-entropy instead.) Ignored positions
-    (``IGNORE_INDEX``) get logprob 0 and gradient 0.
+    The lm_head vocab-shards its output (``Shard(-1)`` on the TP axis). When the
+    logits are a vocab-parallel DTensor, this computes the per-token logprob
+    (negative per-token cross-entropy) directly on the local shards via the same
+    loss-parallel cross-entropy as SFT (``_LossParallelCrossEntropy`` with
+    ``reduction="none"``), all-reducing the softmax across the TP axis. Reducing
+    on the shards -- rather than all-gathering the full vocab -- avoids an extra
+    all-gather and, crucially, has a backward that composes inside
+    ``ChunkedLoss``'s ``spmd.local()`` region. (The plain DTensor
+    ``redistribute``/``to_local`` gather does not: its backward silently drops
+    the scatter under ``spmd.local()``, corrupting the chunked GRPO gradient.)
+    Ignored positions (``IGNORE_INDEX``) get logprob 0 and gradient 0.
     """
     if isinstance(logits, DTensor):
-        # RL disables loss parallel, so logits are Replicate on the TP axis here.
-        logits = logits.to_local()
+        vocab_dim = logits.ndim - 1
+        if any(isinstance(p, Shard) and p.dim == vocab_dim for p in logits.placements):
+            # Vocab-parallel: per-token CE on the local shards with explicit TP
+            # all-reduces (no all-gather) -- the spmd-composable path SFT uses.
+            assert get_spmd_backend() == "default"
+            local_logits = logits.to_local()
+            batch_size, seq_len = local_logits.shape[0], local_logits.shape[1]
+            nll = _LossParallelCrossEntropy.apply(
+                local_logits.flatten(0, 1).float(),
+                labels.flatten(0, 1),
+                logits.device_mesh.get_group("tp"),
+                logits.shape[-1],
+                "none",
+            )
+            return -nll.reshape(batch_size, seq_len)
+        # No vocab sharding (e.g. replicated logits): recover the local view and
+        # fall through to the dense per-token cross-entropy below.
+        logits = logits.to_local(grad_placements=logits.placements)
     batch_size, seq_len, vocab_size = logits.shape
     nll = torch.nn.functional.cross_entropy(
         logits.float().reshape(batch_size * seq_len, vocab_size),
@@ -704,20 +725,6 @@ class ChunkedLoss(BaseLoss):
         self.num_chunks = config.num_chunks
         self.loss_fn: BaseLoss = config.loss_fn.build(compile_config=compile_config)
         self.lm_head: nn.Module | None = None
-        self._loss_parallel: bool = False
-
-    @property
-    def loss_parallel(self) -> bool:
-        return self._loss_parallel
-
-    @loss_parallel.setter
-    def loss_parallel(self, value: bool) -> None:
-        self._loss_parallel = value
-        # Propagate to the inner leaf so its ``cross_entropy_loss`` takes the TP
-        # loss-parallel path. Only ``CrossEntropyLoss`` consumes the flag; RL
-        # losses (e.g. ``GRPOLoss``) disable loss parallel and ignore it.
-        if isinstance(self.loss_fn, CrossEntropyLoss):
-            self.loss_fn.loss_parallel = value
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Set the lm_head module. Must be called before the first __call__."""

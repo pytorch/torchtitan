@@ -29,11 +29,8 @@ from torchtitan.components.loss import (
     _LossParallelCrossEntropy,
     ChunkedLoss,
     cross_entropy_loss,
-    CrossEntropyLoss,
     GradAccumulator,
-    GRPOLoss,
     IGNORE_INDEX,
-    MSELoss,
 )
 
 
@@ -379,6 +376,7 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                             local_labels,
                             tp_group,
                             vocab_size,
+                            "sum",
                         )
                     self.assertIs(
                         spmd.get_axis_local_type(local_loss, tp_group), spmd.I
@@ -525,86 +523,6 @@ class TestChunkedLoss(unittest.TestCase):
                 places=5,
                 msg=f"Loss with {2**i} chunks should match loss with 1 chunk",
             )
-
-
-class TestLossParallelThreading(unittest.TestCase):
-    """Tests for threading ``loss_parallel`` through the refactored loss design.
-
-    Covers the ``_fn_kwargs`` seam on ``BaseLoss``, the settable ``loss_parallel``
-    on ``CrossEntropyLoss``, and the propagating ``loss_parallel`` property on
-    ``ChunkedLoss``. All run on plain CPU tensors -- ``cross_entropy_loss``
-    ignores ``loss_parallel`` for non-DTensor inputs, so these exercise the
-    Python wiring rather than the distributed code path.
-    """
-
-    @staticmethod
-    def _ce() -> CrossEntropyLoss:
-        return CrossEntropyLoss(CrossEntropyLoss.Config())
-
-    def test_standalone_ce_defaults_loss_parallel_true(self):
-        # Matches main: a standalone CrossEntropyLoss defaults to True so the
-        # SFT path is unchanged by the refactor.
-        self.assertTrue(self._ce().loss_parallel)
-
-    def test_ce_fn_kwargs_reflects_flag(self):
-        ce = self._ce()
-        self.assertEqual(ce._fn_kwargs(), {"loss_parallel": True})
-        ce.loss_parallel = False
-        self.assertEqual(ce._fn_kwargs(), {"loss_parallel": False})
-
-    def test_mse_fn_kwargs_empty_and_call_unaffected(self):
-        # Non-CE leaf losses keep the empty default so ``self.fn`` is called with
-        # no extra kwargs (``mse_loss`` has no ``loss_parallel`` parameter). This
-        # also guards against the ``_fn_kwargs`` seam breaking a non-CE leaf.
-        mse = MSELoss(MSELoss.Config())
-        self.assertEqual(mse._fn_kwargs(), {})
-        pred = torch.randn(2, 4, 8)
-        labels = torch.randn(2, 4, 8)
-        loss, metrics = mse(pred, labels)
-        self.assertEqual(metrics, {})
-        self.assertTrue(torch.isfinite(loss))
-
-    def test_chunked_defaults_loss_parallel_false(self):
-        chunked = ChunkedLoss(ChunkedLoss.Config())
-        self.assertFalse(chunked.loss_parallel)
-
-    def test_chunked_setter_propagates_to_inner_ce(self):
-        chunked = ChunkedLoss(ChunkedLoss.Config())
-        self.assertIsInstance(chunked.loss_fn, CrossEntropyLoss)
-        chunked.loss_parallel = True
-        self.assertTrue(chunked.loss_parallel)
-        self.assertTrue(chunked.loss_fn.loss_parallel)
-        chunked.loss_parallel = False
-        self.assertFalse(chunked.loss_parallel)
-        self.assertFalse(chunked.loss_fn.loss_parallel)
-
-    def test_chunked_setter_skips_non_ce_inner(self):
-        # GRPOLoss disables loss parallel and does not consume the flag, so the
-        # setter must not attach ``loss_parallel`` to a non-CrossEntropyLoss inner.
-        chunked = ChunkedLoss(ChunkedLoss.Config(loss_fn=GRPOLoss.Config()))
-        self.assertIsInstance(chunked.loss_fn, GRPOLoss)
-        chunked.loss_parallel = True  # must not raise
-        self.assertTrue(chunked.loss_parallel)
-        self.assertFalse(hasattr(chunked.loss_fn, "loss_parallel"))
-
-    def test_fn_kwargs_reaches_self_fn(self):
-        # White-box: prove ``_fn_kwargs()`` forwards ``loss_parallel`` into
-        # ``self.fn`` on each ``__call__``.
-        ce = self._ce()
-        captured = {}
-
-        def spy(pred, labels, *, loss_parallel=True):
-            captured["loss_parallel"] = loss_parallel
-            return cross_entropy_loss(pred, labels, loss_parallel=loss_parallel)
-
-        ce.fn = spy
-        pred = torch.randn(2, 4, 8)
-        labels = torch.randint(0, 8, (2, 4))
-        ce(pred, labels)
-        self.assertTrue(captured["loss_parallel"])
-        ce.loss_parallel = False
-        ce(pred, labels)
-        self.assertFalse(captured["loss_parallel"])
 
 
 if __name__ == "__main__":
