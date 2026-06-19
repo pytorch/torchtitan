@@ -27,6 +27,12 @@ from torchtitan.models.flux.utils import (
     preprocess_data,
 )
 from torchtitan.trainer import Trainer
+from torchtitan.models.flux import exif_safe_patch as _exif_safe_patch
+
+# Apply PIL safety patches early so that EXIF errors in CC12M images are
+# caught at the PIL level and do not propagate to the HuggingFace dataset
+# iterator, avoiding training crashes and unnecessary iterator restarts.
+_exif_safe_patch.apply()
 
 
 class FluxTrainer(Trainer):
