@@ -642,6 +642,9 @@ class BaseAttention(Module):
     class Config(Module.Config):
         n_heads: int
         inner_attention: Module.Config
+        out_transform: Callable[..., torch.Tensor] | None = None
+        """Optional attention-output epilogue applied after the inner attention;
+        ``None`` means no epilogue."""
 
         def __post_init__(self):
             assert self.n_heads > 0, "n_heads must be > 0"

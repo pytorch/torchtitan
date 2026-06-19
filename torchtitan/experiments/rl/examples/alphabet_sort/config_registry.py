@@ -396,9 +396,6 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             model_dtype="bfloat16",
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=1,
-                # Must match the trainer's TP for bitwise parity: a different TP
-                # degree changes reduction order / sharding in the parallel
-                # matmuls and attention, which batch-invariant ops do not undo.
                 tensor_parallel_degree=2,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
@@ -410,6 +407,91 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             debug=batch_invariant_config,
         ),
     )
+
+
+def rl_grpo_gpt_oss_debug_flex() -> Controller.Config:
+    """Small GPT-OSS debug config with flex attention (random init)."""
+    group_size = 8
+    return Controller.Config(
+        model_spec=gpt_oss_model_registry("debugmodel", attn_backend="flex"),
+        hf_assets_path="tests/assets/tokenizer",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=3,
+            num_groups_per_train_step=5,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+            training_sample_builder=TrainingSampleBuilder.Config(
+                drop_zero_std_reward_groups=False,
+            ),
+        ),
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        rollouter=AlphabetSortRollouter.Config(),
+        # Debug tokenizer (vocab 2048, matches debugmodel); the gpt_oss renderer
+        # needs gpt-oss special tokens absent here, so use the qwen3 renderer
+        # like the other debug configs.
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=2e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
+                tensor_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=50,
+            ),
+        ),
+    )
+
+
+def rl_grpo_gpt_oss_debug_flex_batch_invariant() -> Controller.Config:
+    """GPT-OSS debug config with flex attention, deterministic + batch-invariant."""
+    batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
+    config = rl_grpo_gpt_oss_debug_flex()
+    config.model_spec = gpt_oss_model_registry(
+        "debugmodel",
+        attn_backend="flex",
+        converters=[BatchInvariantFlexConverter.Config()],
+    )
+    block_size = config.model_spec.model.layers[0].attention.inner_attention.block_size
+    config.async_loop.batcher = dataclasses.replace(
+        config.async_loop.batcher, per_sample_pad_multiple=block_size
+    )
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        debug=batch_invariant_config,
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism, enable_sequence_parallel=False
+        ),
+    )
+    config.generator = dataclasses.replace(
+        config.generator,
+        debug=batch_invariant_config,
+        # Default FULL_DECODE_ONLY cudagraph capture is validated for the
+        # varlen/FA3 backend; run flex eager to avoid capture-path issues.
+        cudagraph=VLLMCudagraphConfig(enable=False),
+    )
+    return config
 
 
 def rl_grpo_qwen3_1_7b() -> Controller.Config:
