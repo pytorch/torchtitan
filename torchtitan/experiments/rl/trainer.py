@@ -4,17 +4,73 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Runs the async RL dataflow. Four coroutines; the trainer is the clock.
+"""
+Backpressure:
+_data_input_loop
+  waits_for: AsyncRolloutBuffer slot
+  unblocked_by: _episode_batcher_loop -> buffer.take_generated_rollout_group()
 
-    data input loop -> AsyncRolloutBuffer <-> rollout loops
-    AsyncRolloutBuffer -> episode batcher loop -> packed_training_batch_queue -> trainer loop
+_rollout_loop[N]
+  waits_for: claimable RolloutGroupWork
+  unblocked_by: _data_input_loop -> buffer.add_rollout_group_work()
 
-    backpressure flows upstream: trainer slow -> queue full -> batcher waits -> buffer full -> input waits
+_episode_batcher_loop
+  waits_for: takeable RolloutGroup
+  unblocked_by: _rollout_loop[N] -> buffer.record_rollout_group_result()
 
-    data input: read training samples, admit them as rollout-group work (backpressured)
-    rollout (N): claim a waiting group, generate + score it, record the generated group
-    episode batcher: build episodes, drop stale ones at flush, pack rollout-count training batches
-    trainer: run fwd/bwd, optimizer step, and inline generator weight sync (push then pull)
+_episode_batcher_loop
+  waits_for: packed_training_batch_queue slot
+  unblocked_by: _trainer_loop -> packed_training_batch_queue.get()
+
+_trainer_loop
+  waits_for: PackedTrainingBatch
+  unblocked_by: _episode_batcher_loop -> packed_training_batch_queue.put()
+
+Diagram:
+
+_data_input_loop                                      _rollout_loop[N] (rollout workers)
++--------------------------------------------------+  +--------------------------------------------------+
+| buffer.wait_for_rollout_group_slot()             |  | work = buffer.claim_next_rollout_group()        |
+| sample = rollouter.get_training_sample()         |  | group = rollouter.run_group_rollouts(work.sample)|
+| work = RolloutGroupWork(group_id, sample)        |  | buffer.record_rollout_group_result(group)       |
+| buffer.add_rollout_group_work(work)              |  +-----------------------+--------------------------+
++-----------------------+--------------------------+                          ^ |
+                        |                                                     | |
+                        | adds work entry                                     | | updates same entry
+                        v                                                     | v
+AsyncRolloutBuffer
++-----------------------+-----------------------------------------------------+-+--------------------------+
+| capacity = ceil(max_offpolicy_steps * num_rollout_groups_per_train_step)                               |
+|                                                                                                        |
+| caller                  buffer call                                      RolloutGroupWork Status        |
+| _data_input_loop        add_rollout_group_work(RolloutGroupWork)         WAITING                        |
+| _rollout_loop[N]        claim_next_rollout_group()                       WAITING -> GENERATING          |
+| _rollout_loop[N]        record_rollout_group_result(RolloutGroup)        GENERATING -> GENERATED        |
+| _episode_batcher_loop   RolloutGroup = take_generated_rollout_group()    GENERATED -> removed           |
++--------------------------------------------------------------------------------+----------------------+
+                                                                                 |
+                                                                                 | group = buffer.take_generated_rollout_group()
+                                                                                 v
+_episode_batcher_loop
++--------------------------------------------------------------------------------+
+| output = episode_builder.build_episodes(rollout_group=group)                   |
+| maybe_training_batches = episode_batcher.add_episode_group(output)             |
+| packed_training_batch_queue.put(PackedTrainingBatch)                           |
++-----------------------+------------------------------+-------------------------+
+                        |                              |
+                        | add output                   | put batch
+                        v                              v
+EpisodeBatcher                                     packed_training_batch_queue
++----------------------------------------------+   +----------------------------------------------+
+| accumulated built episode groups             |   | size 1; holds PackedTrainingBatch | None     |
+| stale-filter at flush; pack if target met    |   +---------------------+------------------------+
++----------------------------------------------+                         |
+                                                                         | packed = packed_training_batch_queue.get()
+                                                                         v
+_trainer_loop
++--------------------------------------------------------------------------------+
+| train packed batch -> optim step -> push weights -> pull weights               |
++--------------------------------------------------------------------------------+
 """
 
 import asyncio
@@ -39,12 +95,15 @@ from monarch.spmd import setup_torch_elastic_env_async
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.async_rollout_buffer import (
+from torchtitan.experiments.rl.controller.async_rollout_buffer import (
     AsyncRolloutBuffer,
     RolloutGroupWork,
 )
-from torchtitan.experiments.rl.batcher import EpisodeBatcher, PackedTrainingBatch
-from torchtitan.experiments.rl.episode_builder import EpisodeBuilder
+from torchtitan.experiments.rl.controller.batcher import (
+    EpisodeBatcher,
+    PackedTrainingBatch,
+)
+from torchtitan.experiments.rl.controller.episode_builder import EpisodeBuilder
 from torchtitan.experiments.rl.generator_router import GeneratorRouter, RoutingContext
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.observability import metrics as m
@@ -76,7 +135,7 @@ def _rollout_turn_metrics(groups: list[RolloutGroup]) -> list[m.Metric]:
 
 
 def combine_microbatch_metrics(
-    microbatch_metrics: list[dict[str, float]]
+    microbatch_metrics: list[dict[str, float]],
 ) -> dict[str, float]:
     """Combine per-microbatch loss metrics over the grad-accumulation: mean/frac keys are pre-normalized
     by num_global_valid_tokens so summing them reconstructs the global value; max keys take the max.
@@ -151,12 +210,12 @@ def _perf_ratio_metrics(
     ratios = {
         "perf/trainer_idle_ratio": wait_s / step_s if step_s else 0.0,
         "perf/weight_sync_overhead_ratio": sync_s / step_s if step_s else 0.0,
-        "perf/goodput_tokens_per_second": num_global_valid_tokens / step_s
-        if step_s
-        else 0.0,
-        "perf/active_tokens_per_second": num_global_valid_tokens / train_s
-        if train_s
-        else 0.0,
+        "perf/goodput_tokens_per_second": (
+            num_global_valid_tokens / step_s if step_s else 0.0
+        ),
+        "perf/active_tokens_per_second": (
+            num_global_valid_tokens / train_s if train_s else 0.0
+        ),
     }
     return [m.Metric(key, m.NoReduce(value)) for key, value in ratios.items()]
 
@@ -898,11 +957,11 @@ class RLTrainer(Configurable):
                     rollout_group=rollout_group
                 )
             with sl.log_trace_span("episode_batcher_pack"):
-                ready_training_batches = await asyncio.to_thread(
+                maybe_training_batches = await asyncio.to_thread(
                     episode_batcher.add_episode_group,
                     episode_builder_output=episode_builder_output,
                 )
-            for packed_training_batch in ready_training_batches:
+            for packed_training_batch in maybe_training_batches:
                 await packed_training_batch_queue.put(packed_training_batch)
         if (remaining := episode_batcher.flush_remaining()) is not None:
             await packed_training_batch_queue.put(remaining)

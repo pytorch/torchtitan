@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 import torch
 
 from torchtitan.config import Configurable
-from torchtitan.experiments.rl.episode_builder import EpisodeBuilderOutput
+from torchtitan.experiments.rl.controller.episode_builder import EpisodeBuilderOutput
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import Episode, TrainingBatch
 
