@@ -33,7 +33,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module rl",
+                    "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen",
                     "--async-control.num-training-steps 5",
                     "--trainer.parallelism.tensor_parallel_degree 2",
@@ -57,7 +57,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module rl",
+                    "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen",
                     "--async-control.num-training-steps 5",
                     "--trainer.parallelism.tensor_parallel_degree 2",
@@ -78,14 +78,16 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module rl",
+                    "--module alphabet_sort",
                     "--config rl_grpo_qwen3_moe_debug_varlen",
                     "--async-control.num-training-steps 5",
                     "--hf_assets_path tests/assets/tokenizer",
                     "--trainer.parallelism.tensor_parallel_degree 4",
                     "--trainer.parallelism.expert_parallel_degree 4",
+                    "--trainer.parallelism.data_parallel_shard_degree 1",
                     "--generator.parallelism.tensor_parallel_degree 4",
                     "--generator.parallelism.expert_parallel_degree 4",
+                    "--generator.parallelism.data_parallel_degree 1",
                     "--async-control.group-size 2",
                     "--async-control.episode-batcher.batch.seq-len 1024",
                     "--renderer.enable-thinking False",
@@ -111,7 +113,7 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module rl",
+                    "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen_batch_invariant",
                     "--async-control.num-training-steps 5",
                     "--async-control.group-size 2",
@@ -128,7 +130,7 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module rl",
+                    "--module alphabet_sort",
                     "--config rl_grpo_qwen3_moe_debug_varlen_batch_invariant",
                     "--async-control.num-training-steps 5",
                     "--hf_assets_path tests/assets/tokenizer",

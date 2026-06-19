@@ -515,7 +515,7 @@ def _build_autoparallel_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.llama3",
-                    "--config graph_trainer_llama3_debugmodel_sdpa",
+                    "--config graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss",
                     "--compile.mode aot_fx_trace",
                     "--compile.enable_autoparallel",
                     "--parallelism.data_parallel_shard_degree 2",
@@ -544,7 +544,6 @@ def _build_autoparallel_h100_tests() -> list[OverrideDefinitions]:
                     "--compile.enable_autoparallel",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
-                    "--parallelism.disable_loss_parallel",
                 ],
             ],
             "autoparallel deepseek_v3 EFSDP+EP",

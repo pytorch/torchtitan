@@ -200,7 +200,7 @@ class EpisodeBatcher(Configurable):
             }
         )
 
-    # --- batch formation (count-triggered) + packing (the packing helpers are unchanged from the old Batcher) ---
+    # --- batch formation (count-triggered) + packing ---
 
     def _pack_one_training_batch(self, version: int) -> PackedTrainingBatch:
         """Take groups (oldest first) until `target` rollouts are reached, pack them, carry the remainder."""
@@ -356,8 +356,9 @@ class EpisodeBatcher(Configurable):
         packed["seq_lens"] = seq_lens
         return packed
 
-    # TODO: accept a collate_fn on Batcher.Config (like the pre-trainer's dataloader) and wire a
-    # non-pretraining collate only when a caller actually needs one.
+    # TODO: accept a collate_fn on EpisodeBatcher.Config (like the pre-trainer's
+    # dataloader) and wire a non-pretraining collate only when a caller actually
+    # needs one.
     @staticmethod
     def collate(rows: list[dict]) -> TrainingBatch:
         """Concatenate packed rows into a single ``[B, L]`` TrainingBatch."""

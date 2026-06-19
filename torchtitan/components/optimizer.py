@@ -8,7 +8,7 @@ import re
 from collections import defaultdict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any, Generic, Literal, overload, TypeVar
+from typing import Any, cast, Generic, Literal, overload, Protocol, TypeVar
 
 import torch
 import torch.distributed.tensor
@@ -67,6 +67,12 @@ class ParamGroupConfig:
 
 
 T = TypeVar("T", bound=Optimizer)
+
+
+class _MoELike(Protocol):
+    load_balance_coeff: float | None
+    tokens_per_expert_E: torch.Tensor  # noqa: N815
+    expert_bias_E: torch.Tensor  # noqa: N815
 
 
 class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
@@ -393,16 +399,30 @@ def register_moe_load_balancing_hook(
         parallel_dims: Parallel dimensions for distributed communication.
     """
 
-    def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
+    def _iter_moe_layers(
+        model_parts: list[nn.Module],
+    ) -> Iterator[tuple[nn.Module, _MoELike]]:
         for model_part in model_parts:
             layers = model_part.get_submodule("layers")
             assert isinstance(layers, nn.ModuleDict)
             for transformer_block in layers.values():
-                if transformer_block.moe_enabled:
-                    # Assumption: load_balance_coeff is set universally on all moe blocks.
-                    # pyrefly: ignore [missing-attribute]
-                    return bool(transformer_block.moe.load_balance_coeff)
-        return False
+                if getattr(transformer_block, "moe_enabled", False):
+                    yield transformer_block, cast(_MoELike, transformer_block.moe)
+
+    def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
+        moe_layers = list(_iter_moe_layers(model_parts))
+        if not moe_layers:
+            return False
+
+        load_balance_enabled = moe_layers[0][1].load_balance_coeff is not None
+        for _transformer_block, moe in moe_layers[1:]:
+            if (moe.load_balance_coeff is not None) != load_balance_enabled:
+                raise ValueError(
+                    "MoE load_balance_coeff must be configured consistently "
+                    "across all MoE layers. Either set it for every MoE layer "
+                    "or leave it unset for all MoE layers."
+                )
+        return load_balance_enabled
 
     # for MoE auxiliary-loss-free load balancing
     def _is_recomputation_enabled(module):
@@ -416,24 +436,18 @@ def register_moe_load_balancing_hook(
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
         tokens_per_expert_E_list = []
-        for model_part in model_parts:
-            layers = model_part.get_submodule("layers")
-            assert isinstance(layers, nn.ModuleDict)
-            for transformer_block in layers.values():
-                if not transformer_block.moe_enabled:
-                    continue
-                # pyrefly: ignore [missing-attribute]
-                if transformer_block.moe.load_balance_coeff is None:
-                    return
-                # pyrefly: ignore [missing-attribute]
-                tokens_per_expert_E = transformer_block.moe.tokens_per_expert_E
-                if _is_recomputation_enabled(transformer_block):
-                    # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
-                    # This does not affect to expert choice, but affects the experts usage metrics.
-                    # We divide by 2 to correct for this double-counting due to recomputation
-                    # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
-                    tokens_per_expert_E = tokens_per_expert_E // 2
-                tokens_per_expert_E_list.append(tokens_per_expert_E)
+        for transformer_block, moe in _iter_moe_layers(model_parts):
+            tokens_per_expert_E = moe.tokens_per_expert_E
+            if _is_recomputation_enabled(transformer_block):
+                # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
+                # This does not affect to expert choice, but affects the experts usage metrics.
+                # We divide by 2 to correct for this double-counting due to recomputation
+                # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
+                tokens_per_expert_E = tokens_per_expert_E // 2
+            tokens_per_expert_E_list.append(tokens_per_expert_E)
+
+        if not tokens_per_expert_E_list:
+            return
 
         tokens_per_expert_E_by_layer = torch.vstack(tokens_per_expert_E_list)
 
@@ -486,7 +500,9 @@ def register_moe_load_balancing_hook(
                 for transformer_block in layers.values():
                     if not transformer_block.moe_enabled:
                         continue
-                    moe = transformer_block.moe
+                    moe = cast(_MoELike, transformer_block.moe)
+                    load_balance_coeff = moe.load_balance_coeff
+                    assert load_balance_coeff is not None
 
                     tokens_per_expert_E = tokens_per_expert_E_by_layer[
                         moe_layer_idx
@@ -495,16 +511,13 @@ def register_moe_load_balancing_hook(
 
                     # update the expert bias
                     # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
-                    # pyrefly: ignore [missing-attribute]
-                    expert_bias_delta_E = moe.load_balance_coeff * torch.sign(
+                    expert_bias_delta_E = load_balance_coeff * torch.sign(
                         tokens_per_expert_E.mean() - tokens_per_expert_E
                     )
                     expert_bias_delta_E = (
                         expert_bias_delta_E - expert_bias_delta_E.mean()
                     )
-                    # pyrefly: ignore [missing-attribute]
                     moe.expert_bias_E.add_(expert_bias_delta_E)
-                    # pyrefly: ignore [missing-attribute]
                     moe.tokens_per_expert_E.zero_()
 
     if _should_register_moe_balancing_hook(model_parts):

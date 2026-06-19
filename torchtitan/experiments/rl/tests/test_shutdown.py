@@ -52,7 +52,7 @@ class _FakeTrainerConfig:
     debug = _FakeDebug()
     # main() reads config.trainer.parallelism to size the trainer mesh; the
     # value is irrelevant here because stub_mesh_provisioning stubs
-    # _compute_world_size, so a placeholder is enough to resolve the access.
+    # _compute_trainer_world_size, so a placeholder is enough to resolve the access.
     parallelism = None
 
 
@@ -120,11 +120,13 @@ def _make_stub_rl_trainer():
 def stub_mesh_provisioning(monkeypatch):
     """Stub the Monarch mesh provisioning ``main()`` runs before ``setup_async``.
 
-    ``spawn_proc_mesh`` spawns real GPU proc meshes and ``_compute_world_size``
-    reads parallelism degrees; neither matters to shutdown behavior, so stub
-    both and let the test intercept at the ``_FakeRLTrainer`` boundary.
+    ``spawn_proc_mesh`` spawns real GPU proc meshes and the
+    ``_compute_*_world_size`` helpers read parallelism degrees; neither matters
+    to shutdown behavior, so stub both and let the test intercept at the
+    ``_FakeRLTrainer`` boundary.
     """
-    monkeypatch.setattr(train, "_compute_world_size", lambda p: 1)
+    monkeypatch.setattr(train, "_compute_trainer_world_size", lambda p: 1)
+    monkeypatch.setattr(train, "_compute_generator_world_size", lambda p: 1)
 
     def _spawn_proc_mesh(*args, num_generators=1, **kwargs):
         return "trainer_mesh", [

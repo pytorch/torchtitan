@@ -13,16 +13,18 @@ TorchTitan models for vLLM.
 
 import dataclasses
 from dataclasses import dataclass
+from functools import partial
 
 import torch
 import torch._dynamo
 import torch.distributed as dist
-from torch.distributed._tensor import DTensor, Replicate
+from torch.distributed.tensor import DTensor, Replicate, Shard
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
+from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 from vllm.compilation import codegen as _codegen
@@ -109,7 +111,7 @@ class VLLMModelWrapper(Module):
         self,
         *,
         model_spec: ModelSpec,
-        parallelism: ParallelismConfig,
+        parallelism: InferenceParallelismConfig,
         compile_config: CompileConfig,
         checkpoint_config: CheckpointManager.Config,
         vllm_config: VllmConfig,
@@ -118,23 +120,6 @@ class VLLMModelWrapper(Module):
         super().__init__()
 
         assert vllm_config is not None, "vllm_config is required"
-
-        # PP and CP are not supported on this inference path. User-facing
-        # validation lives in Generator.Config.__post_init__; these are
-        # internal invariants — by the time we get here, parallelism has
-        # already been validated.
-        assert parallelism.data_parallel_shard_degree == 1, (
-            "vLLM wrapper requires data_parallel_shard_degree=1, "
-            f"got {parallelism.data_parallel_shard_degree}"
-        )
-        assert parallelism.pipeline_parallel_degree == 1, (
-            "vLLM wrapper requires pipeline_parallel_degree=1, "
-            f"got {parallelism.pipeline_parallel_degree}"
-        )
-        assert parallelism.context_parallel_degree == 1, (
-            "vLLM wrapper requires context_parallel_degree=1, "
-            f"got {parallelism.context_parallel_degree}"
-        )
 
         # Store components from model_spec
         self.state_dict_adapter = model_spec.state_dict_adapter
@@ -150,34 +135,43 @@ class VLLMModelWrapper(Module):
             if attn_config.head_dim is not None
             else model_config.dim // n_heads
         )
-        vllm_backend = VLLMAttentionWrapper.Config(
-            hidden_size=model_config.dim,
-            num_heads=n_heads,
-            num_kv_heads=n_kv_heads,
-            head_dim=head_dim,
-        )
-        new_layers = [
-            dataclasses.replace(
-                layer_cfg,
-                attention=dataclasses.replace(
-                    layer_cfg.attention, inner_attention=vllm_backend
+        new_layers = []
+        for layer_cfg in model_config.layers:
+            inner = layer_cfg.attention.inner_attention
+            vllm_backend = VLLMAttentionWrapper.Config(
+                hidden_size=model_config.dim,
+                num_heads=n_heads,
+                num_kv_heads=n_kv_heads,
+                head_dim=head_dim,
+                sliding_window_size=getattr(
+                    layer_cfg.attention, "sliding_window_size", None
                 ),
             )
-            for layer_cfg in model_config.layers
-        ]
+            new_layers.append(
+                dataclasses.replace(
+                    layer_cfg,
+                    attention=dataclasses.replace(
+                        layer_cfg.attention, inner_attention=vllm_backend
+                    ),
+                )
+            )
         self.config = dataclasses.replace(model_config, layers=new_layers)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
-        # Build ParallelDims from the TorchTitan ParallelismConfig so TP/EP
-        # sharding sees the same mesh shape as vLLM. In the generator,
-        # data_parallel_shard_degree means vLLM pure DP, not TorchTitan FSDP.
+        # Translate the inference parallelism into torchtitan's full
+        # ParallelismConfig that ParallelDims / parallelize_fn consume.
+        training_parallelism = parallelism.to_training()
+
+        # Build ParallelDims from the translated ParallelismConfig so TP/EP
+        # sharding sees the same mesh shape as vLLM. data_parallel_shard_degree
+        # carries vLLM's pure DP here (skip_dp=True below), not TorchTitan FSDP.
         self.parallel_dims = ParallelDims(
-            dp_replicate=parallelism.data_parallel_replicate_degree,
-            dp_shard=parallelism.data_parallel_shard_degree,
-            cp=parallelism.context_parallel_degree,
-            tp=parallelism.tensor_parallel_degree,
-            pp=parallelism.pipeline_parallel_degree,
-            ep=parallelism.expert_parallel_degree,
+            dp_replicate=training_parallelism.data_parallel_replicate_degree,
+            dp_shard=training_parallelism.data_parallel_shard_degree,
+            cp=training_parallelism.context_parallel_degree,
+            tp=training_parallelism.tensor_parallel_degree,
+            pp=training_parallelism.pipeline_parallel_degree,
+            ep=training_parallelism.expert_parallel_degree,
             world_size=dist.get_world_size(),
         )
 
@@ -191,7 +185,9 @@ class VLLMModelWrapper(Module):
         class _InferenceConfig:
             parallelism: ParallelismConfig
 
-        self.config.update_from_config(config=_InferenceConfig(parallelism=parallelism))
+        self.config.update_from_config(
+            config=_InferenceConfig(parallelism=training_parallelism)
+        )
 
         # Build model on meta device to avoid allocating full model on every GPU
         with torch.device("meta"):
@@ -202,15 +198,19 @@ class VLLMModelWrapper(Module):
         # specializes on tensor type, so each switch triggers a
         # recompile.  Because of this, the default recompile_limit (8) is
         # too low; exceeding it fails under
-        # fullgraph=True so set to 10 for now
+        # fullgraph=True so set to 10 for now and bump to 12 for sliding window
+        has_sliding_window = any(
+            getattr(layer_cfg.attention, "sliding_window_size", None) is not None
+            for layer_cfg in model_config.layers
+        )
         if compile_config.enable:
-            torch._dynamo.config.recompile_limit = 10
+            torch._dynamo.config.recompile_limit = 12 if has_sliding_window else 10
 
         self.model = self.parallelize_fn(
             model=self.model,
             parallel_dims=self.parallel_dims,
             training=TrainingConfig(),
-            parallelism=parallelism,
+            parallelism=training_parallelism,
             compile_config=compile_config,
             ac_config=None,
             dump_folder="",
@@ -233,6 +233,28 @@ class VLLMModelWrapper(Module):
         with torch.no_grad():
             self.model.init_weights(buffer_device=None)
         self._maybe_initial_load_weights()
+
+        # Give each gpt-oss attention's vLLM backend its sink rescale.
+        # Need to do it here after parallelize + weight load so sinks are
+        # TP-sharded.
+        self._inject_attention_sinks()
+
+    # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
+    def _inject_attention_sinks(self) -> None:
+        """Give each gpt-oss attention's vLLM backend its sink-rescale hook."""
+        from torchtitan.models.gpt_oss.model import (
+            apply_attention_sink_rescale,
+            Attention,
+        )
+
+        for module in self.model.modules():
+            if not isinstance(module, Attention):
+                continue
+            sinks = module.sinks
+            local_sinks = sinks._local_tensor if isinstance(sinks, DTensor) else sinks
+            module.inner_attention.vllm_attn.impl.out_transform = partial(
+                apply_attention_sink_rescale, sinks=local_sinks
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """vLLM required API.
@@ -316,10 +338,16 @@ class VLLMModelWrapper(Module):
 
         logits = self.model.lm_head(hidden_states)
 
-        # Full DTensor path returns logits as DTensor; vLLM expects plain tensors.
-        # disable_loss_parallel=True already makes lm_head output Replicate
+        # Full DTensor path returns vocab-sharded logits as DTensor; vLLM
+        # expects full plain tensors.
         if isinstance(logits, DTensor):
-            logits = logits.to_local()
+            placements = tuple(
+                Replicate()
+                if isinstance(p, Shard) and p.dim in (-1, logits.ndim - 1)
+                else p
+                for p in logits.placements
+            )
+            logits = logits.redistribute(placements=placements).to_local()
 
         return logits
 

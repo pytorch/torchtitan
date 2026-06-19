@@ -32,9 +32,9 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.distributed.utils import set_batch_invariance
-from torchtitan.experiments.rl import config_registry
+from torchtitan.experiments.rl.examples.alphabet_sort import config_registry
 from torchtitan.experiments.rl.models.vllm_registry import (
-    registry_to_vllm,
+    register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
 )
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
@@ -86,7 +86,7 @@ def generate() -> None:
     is_rank0 = os.environ.get("RANK", "0") == "0"
 
     # Register TorchTitan model with vLLM before engine creation
-    registry_to_vllm(
+    register_to_vllm(
         config.model_spec,
         parallelism=gen_config.parallelism,
         compile_config=config.compile,
@@ -107,11 +107,11 @@ def generate() -> None:
     if gen_config.debug.batch_invariant:
         # batch_invariant_ops doesn't cover bmm; the MoE router gate is a bmm in
         # the vLLM inference graph, so override it generator-side (not in core).
-        from torchtitan.experiments.rl.actors.generator import (
-            _patch_bmm_for_batch_invariance,
+        from torchtitan.experiments.rl.batch_invariance import (
+            patch_bmm_for_batch_invariance,
         )
 
-        _patch_bmm_for_batch_invariance()
+        patch_bmm_for_batch_invariance()
     enable_ep = gen_config.parallelism.expert_parallel_degree > 1
 
     logger.debug("Initializing vLLM LLMEngine with TorchTitan model")
@@ -130,6 +130,7 @@ def generate() -> None:
         dtype=gen_config.model_dtype,
         # Parallelism configuration
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
+        data_parallel_size=gen_config.parallelism.data_parallel_degree,
         enable_expert_parallel=enable_ep,
         # Use external_launcher only when launched via torchrun (multi-GPU);
         # for single-GPU, let vLLM pick the default executor.

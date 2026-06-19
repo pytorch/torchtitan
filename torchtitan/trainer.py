@@ -18,7 +18,6 @@ import torch
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
-from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
@@ -122,6 +121,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "SPMD typechecking is not supported with pipeline parallelism. "
                     "Validate the same config without PP "
                     "(--parallelism.pipeline_parallel_degree 1)."
+                )
+
+            if (
+                self.parallelism.spmd_backend == "spmd_types"
+                and self.debug.spmd_typechecking
+                and isinstance(self.activation_checkpoint, SelectiveAC.Config)
+                and self.model_spec is not None
+                and any(self.model_spec.model.traverse(FlexAttention.Config))
+            ):
+                # TODO(pianpwk): Enable SAC with FlexAttention under SPMD typechecking.
+                raise ValueError(
+                    "Selective activation checkpointing (SAC) is not supported "
+                    "with FlexAttention while SPMD typechecking is enabled. "
+                    "Use full activation checkpointing, disable activation "
+                    "checkpointing, or switch to a non-Flex attention backend."
                 )
 
             if isinstance(self.activation_checkpoint, MemoryBudgetAC.Config) and not (
@@ -505,11 +519,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             base_folder=config.dump_folder,
         )
 
-        loss_parallel_enabled = (
-            parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
-        )
         self.train_context = dist_utils.get_train_context(
-            enable_loss_parallel=loss_parallel_enabled,
             parallel_dims=parallel_dims,
             spmd_typechecking=(
                 config.parallelism.spmd_backend == "spmd_types"
@@ -730,15 +740,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             assert len(model_parts) == 1
             with self.train_context():
                 pred = model_parts[0](inputs, **extra_kwargs)
-                # Under non-full_dtensor, labels stay as plain tensors. See
-                # ``cross_entropy_loss`` for why pred must also be plain.
-                # Remove once non-full_dtensor is no longer supported.
-                if (
-                    isinstance(pred, DTensor)
-                    and self.config.parallelism.spmd_backend != "full_dtensor"
-                    and self.config.parallelism.disable_loss_parallel
-                ):
-                    pred = pred.to_local()
                 loss = self.loss_fn(pred, labels, global_valid_tokens)
                 del pred
                 with spmd.no_typecheck():

@@ -19,13 +19,15 @@ from types import SimpleNamespace
 import pytest
 from vllm.sampling_params import RequestOutputKind
 
-from torchtitan.config import DebugConfig, ParallelismConfig
+from torchtitan.config import DebugConfig
 from torchtitan.experiments.rl.actors.generator import (
     _prepare_generation_request_metrics,
     GenerationFuture,
     SamplingConfig,
+    VLLMCudagraphConfig,
     VLLMGenerator,
 )
+from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability import metrics as m
 
 
@@ -204,14 +206,14 @@ def test_decode_metrics_absent_for_single_generated_token():
 
 # --- config guards (weight-sync invariants) ---
 
-# Parallelism the generator accepts (TP-only); the weight-sync guards run after these checks.
-_TP_ONLY = ParallelismConfig(enable_sequence_parallel=False, disable_loss_parallel=True)
+# A valid inference parallelism; the weight-sync guards run after it is accepted.
+_PARALLELISM = InferenceParallelismConfig()
 
 
 def test_batch_invariant_requires_prefix_cache_reset():
     with pytest.raises(ValueError, match="reset_prefix_cache_on_weight_sync"):
         VLLMGenerator.Config(
-            parallelism=_TP_ONLY,
+            parallelism=_PARALLELISM,
             debug=DebugConfig(batch_invariant=True),
             reset_prefix_cache_on_weight_sync=False,
         )
@@ -220,7 +222,7 @@ def test_batch_invariant_requires_prefix_cache_reset():
 def test_reset_running_requests_requires_prefix_cache_reset():
     with pytest.raises(ValueError, match="reset_prefix_cache_on_weight_sync"):
         VLLMGenerator.Config(
-            parallelism=_TP_ONLY,
+            parallelism=_PARALLELISM,
             reset_running_requests_on_weight_sync=True,
             reset_prefix_cache_on_weight_sync=False,
         )
@@ -230,7 +232,9 @@ def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
     # Strict drain (hot_swap=False) needs the prefix cache reset so post-pull requests don't reuse old-weight KV.
     import dataclasses
 
-    from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b_varlen
+    from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
+        rl_grpo_qwen3_0_6b_varlen,
+    )
 
     config = rl_grpo_qwen3_0_6b_varlen()
     # hot_swap defaults True; the guard fires only in drain mode (hot_swap=False) with reset also off.
@@ -244,3 +248,52 @@ def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
                 config.generator, reset_prefix_cache_on_weight_sync=False
             ),
         )
+
+
+# --- CUDA graph config (VLLMCudagraphConfig.get_vllm_compilation_config) ---
+
+
+def test_cudagraph_disabled_returns_none():
+    assert (
+        VLLMCudagraphConfig(enable=False).get_vllm_compilation_config(max_num_seqs=256)
+        is None
+    )
+
+
+def test_cudagraph_default_mode_is_full_decode_only():
+    # Default mode; decode-only graphs avoid the mixed-batch corruption (#3668),
+    # with no inductor compile (CompilationMode.NONE == 0).
+    cfg = VLLMCudagraphConfig(enable=True).get_vllm_compilation_config(max_num_seqs=256)
+    assert cfg.cudagraph_mode.name == "FULL_DECODE_ONLY"
+    assert int(cfg.mode) == 0
+
+
+def test_cudagraph_full_mode_no_compile():
+    # FULL captures the whole forward (incl. attention) with no inductor compile.
+    cfg = VLLMCudagraphConfig(enable=True, mode="FULL").get_vllm_compilation_config(
+        max_num_seqs=256
+    )
+    assert cfg.cudagraph_mode.name == "FULL"
+    assert int(cfg.mode) == 0
+
+
+def test_cudagraph_decode_only_capture_sizes_cover_max_num_seqs():
+    # FULL_DECODE_ONLY only graphs decode, so capture up to max_num_seqs (plus
+    # max_num_seqs itself when not a power of 2).
+    cfg = VLLMCudagraphConfig(enable=True).get_vllm_compilation_config(max_num_seqs=500)
+    assert cfg.cudagraph_capture_sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256, 500]
+
+
+def test_cudagraph_full_mode_extends_capture_sizes_to_chunk():
+    # FULL also graphs prefill, so sizes extend to the chunked-prefill chunk
+    # (max_num_batched_tokens, 2048) on top of max_num_seqs.
+    cfg = VLLMCudagraphConfig(enable=True, mode="FULL").get_vllm_compilation_config(
+        max_num_seqs=500
+    )
+    assert cfg.cudagraph_capture_sizes[-1] == 2048
+    assert 500 in cfg.cudagraph_capture_sizes  # decode batch captured exactly
+
+
+def test_cudagraph_rejects_nonpositive_max_num_seqs():
+    with pytest.raises(ValueError, match="max_num_seqs must be positive"):
+        VLLMCudagraphConfig(enable=True).get_vllm_compilation_config(max_num_seqs=0)

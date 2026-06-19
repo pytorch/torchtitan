@@ -10,7 +10,7 @@ These set the full Search-R1 recipe entirely from the example's config — the c
 defaults are unchanged, so every other config keeps vanilla GRPO. ``ConfigManager``
 discovers these directly from the example module::
 
-    --module torchtitan.experiments.rl.examples.search_r1 \\
+    --module search_r1 \\
         --config rl_grpo_qwen3_1_7b_search_r1
 """
 
@@ -31,6 +31,7 @@ from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import BatchConfig, EpisodeBatcher
 from torchtitan.experiments.rl.examples.search_r1.rollouter import SearchR1Rollouter
 from torchtitan.experiments.rl.losses import DAPOLoss
+from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
@@ -77,7 +78,6 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=1,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -93,18 +93,13 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
                 tensor_parallel_degree=4,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
-            # TODO(#3668): re-enable cudagraph once the large-batch capture bug is
-            # fixed. Full cudagraph capture at large batch corrupts generation on this
-            # vLLM build (random tokens + NaN logprobs), so we run eager for now.
-            # https://github.com/pytorch/torchtitan/issues/3668
-            cudagraph=VLLMCudagraphConfig(enable=False),
+            # cudagraph on: decode-only graphs (FULL_DECODE_ONLY) are safe at this
+            # config's large batch; plain full graphs corrupted here before. See #3668.
+            cudagraph=VLLMCudagraphConfig(enable=True),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 temperature=1.0,
