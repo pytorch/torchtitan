@@ -28,12 +28,11 @@ def enable_fused_grouped_experts(config: Trainer.Config) -> None:
 
 
 def deepseek_v3_debugmodel() -> Trainer.Config:
-    model_spec = model_registry("debugmodel")
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_spec,
+        model_spec=model_registry("debugmodel"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -88,11 +87,10 @@ def deepseek_v3_debugmodel_minimal_async_ep() -> Trainer.Config:
 
 
 def deepseek_v3_16b() -> Trainer.Config:
-    model_spec = model_registry("16B", attn_backend="flex")
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
-        model_spec=model_spec,
+        model_spec=model_registry("16B", attn_backend="flex"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
@@ -153,23 +151,22 @@ def deepseek_v3_671b() -> Trainer.Config:
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
-    model_spec = model_registry(
-        "671B",
-        attn_backend="flex",
-        converters=[
-            Float8LinearConverter.Config(
-                filter_fqns=["output", "router.gate"],
-                model_compile_enabled=model_compile_enabled,
-            ),
-            Float8GroupedExpertsConverter.Config(
-                model_compile_enabled=model_compile_enabled
-            ),
-        ],
-    )
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
-        model_spec=model_spec,
+        model_spec=model_registry(
+            "671B",
+            attn_backend="flex",
+            converters=[
+                Float8LinearConverter.Config(
+                    filter_fqns=["output", "router.gate"],
+                    model_compile_enabled=model_compile_enabled,
+                ),
+                Float8GroupedExpertsConverter.Config(
+                    model_compile_enabled=model_compile_enabled
+                ),
+            ],
+        ),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
