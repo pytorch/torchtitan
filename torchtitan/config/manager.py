@@ -31,7 +31,9 @@ class ConfigManager:
     def __init__(self):
         self.register_tyro_rules(custom_registry)
 
-    def parse_args(self, args: list[str] = sys.argv[1:]):
+    def parse_args(self, args: list[str] | None = None):
+        if args is None:
+            args = sys.argv[1:]
         loaded_config, args = self._load_config(args)
         config_cls = type(loaded_config)
 
