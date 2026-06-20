@@ -202,17 +202,10 @@ def apply_fsdp(
             )
         # As an optimization, do not reshard_after_forward the last layers
         # by default since FSDP would prefetch them immediately.
-        if model.norm is not None:
+        if model.norm is not None and model.lm_head is not None:
             # pyrefly: ignore [no-matching-overload]
             fully_shard(
-                model.norm,
-                **fsdp_config,
-                reshard_after_forward=reshard_after_forward_policy == "always",
-            )
-        if model.lm_head is not None:
-            # pyrefly: ignore [no-matching-overload]
-            fully_shard(
-                model.lm_head,
+                [model.norm, model.lm_head],
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward_policy == "always",
             )
@@ -330,16 +323,11 @@ def apply_fsdp(
         if next_transformer_block is not None:
             # pyrefly: ignore [missing-attribute]
             transformer_block.set_modules_to_forward_prefetch([next_transformer_block])
-        elif model.norm is not None:
+        elif model.norm is not None and model.lm_head is not None:
             # pyrefly: ignore [missing-attribute]
-            transformer_block.set_modules_to_forward_prefetch([model.norm])
-        elif model.lm_head is not None:
-            # pyrefly: ignore [missing-attribute]
-            transformer_block.set_modules_to_forward_prefetch([model.lm_head])
-
-    if model.norm is not None and model.lm_head is not None:
-        # pyrefly: ignore [missing-attribute]
-        model.norm.set_modules_to_forward_prefetch([model.lm_head])
+            transformer_block.set_modules_to_forward_prefetch(
+                [model.norm, model.lm_head]
+            )
 
     # backward
     # pyrefly: ignore [not-callable]
