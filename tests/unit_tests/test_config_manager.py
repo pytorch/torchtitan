@@ -4,11 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import sys
 import unittest
+from unittest import mock
 
 import pytest
 from torchtitan.config import ConfigManager
-from torchtitan.trainer import Trainer
 
 
 class TestConfigManager(unittest.TestCase):
@@ -30,6 +31,14 @@ class TestConfigManager(unittest.TestCase):
         )
         assert config.model_spec.name == "llama3"
         assert config.model_spec.flavor == "debugmodel"
+
+    def test_parse_args_uses_current_sys_argv(self):
+        """parse_args() without args reads sys.argv at call time."""
+        config_manager = ConfigManager()
+        argv = ["train.py", "--module", "nonexistent", "--config", "foo"]
+        with mock.patch.object(sys, "argv", argv):
+            with pytest.raises(ImportError, match="Cannot import module 'nonexistent'"):
+                config_manager.parse_args()
 
     def test_model_without_config_errors(self):
         """--module alone raises ValueError."""
@@ -148,6 +157,8 @@ class TestConfigManager(unittest.TestCase):
     def test_extend_trainer_config_directly(self):
         """Test that _merge_configs works to extend config types."""
         from dataclasses import dataclass
+
+        from torchtitan.trainer import Trainer
 
         @dataclass
         class CustomCheckpoint:
