@@ -365,6 +365,7 @@ class GradAccumulator:
         self.num_chunks = num_chunks
         self.seq_dim = seq_dim
         self._next_idx = 0
+        self._seq_offset = 0
         self._device_mesh: DeviceMesh | None = None
         # Captured from the first added chunk; see __init__ docstring.
         self._placements: tuple[Placement, ...] | None = None
@@ -411,13 +412,14 @@ class GradAccumulator:
             chunk_grad = chunk_grad.to(self._buffer.dtype)
 
         chunk_seq_len = chunk_grad.shape[self.seq_dim]
-        start = self._next_idx * chunk_seq_len
+        start = self._seq_offset
         end = start + chunk_seq_len
 
         slices = [slice(None)] * self._buffer.ndim
         slices[self.seq_dim] = slice(start, end)
         self._buffer[tuple(slices)] = chunk_grad
 
+        self._seq_offset = end
         self._next_idx += 1
 
     def result(self) -> torch.Tensor:

@@ -183,6 +183,26 @@ class TestGradAccumulator(unittest.TestCase):
         result = acc.result()
         torch.testing.assert_close(result, reference)
 
+    def test_accumulate_matches_cat_with_uneven_chunks(self):
+        """Verify GradAccumulator uses cumulative offsets for uneven chunks."""
+        B, L, D = 2, 10, 3
+        num_chunks = 4
+        reference = torch.arange(B * L * D, dtype=torch.float32).reshape(B, L, D)
+        chunks = torch.chunk(reference, num_chunks, dim=1)
+        self.assertNotEqual(len({chunk.shape[1] for chunk in chunks}), 1)
+
+        acc = GradAccumulator(
+            reference,
+            num_chunks=num_chunks,
+            seq_dim=1,
+            dtype=reference.dtype,
+        )
+        for chunk in chunks:
+            acc.add(chunk)
+
+        result = acc.result()
+        torch.testing.assert_close(result, torch.cat(chunks, dim=1))
+
     def test_accumulate_with_dtype_conversion(self):
         """Verify fp32 accumulation from bf16 chunks."""
         torch.manual_seed(42)
@@ -430,11 +450,8 @@ class TestChunkedCELoss(unittest.TestCase):
         chunked_loss.lm_head = model.output
         return model, chunked_loss
 
-    def test_numerical_equivalence(self):
-        """ChunkedCELoss must produce the same loss and gradients as the standard path."""
+    def _assert_numerical_equivalence(self, B, L, D, V, num_chunks):
         torch.manual_seed(42)
-        B, L, D, V = 2, 8, 32, 64
-        num_chunks = 4
 
         model_std, _ = self._make_model_and_loss(D, V, num_chunks)
         model_chunked, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
@@ -491,6 +508,14 @@ class TestChunkedCELoss(unittest.TestCase):
             rtol=1e-5,
             msg="Chunked and standard lm_head gradients should match",
         )
+
+    def test_numerical_equivalence(self):
+        """ChunkedCELoss must produce the same loss and gradients as the standard path."""
+        self._assert_numerical_equivalence(B=2, L=8, D=32, V=64, num_chunks=4)
+
+    def test_numerical_equivalence_with_uneven_chunks(self):
+        """ChunkedCELoss must preserve gradients when sequence chunks are uneven."""
+        self._assert_numerical_equivalence(B=2, L=10, D=32, V=64, num_chunks=4)
 
     def test_different_chunk_counts(self):
         """Loss should be the same regardless of num_chunks."""
