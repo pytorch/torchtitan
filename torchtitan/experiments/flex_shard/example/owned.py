@@ -27,10 +27,6 @@ from ..flex_shard.placement_contract import (
     PlacementReduceGradResult,
     PlacementUnshardResult,
 )
-from ..flex_shard.segment_reduce import (
-    SegmentReduceScratchLease,
-    SegmentReduceScratchPool,
-)
 from ..flex_shard.utils import (
     _record_comm_if_eager,
     _record_copy_in_if_eager,
@@ -51,6 +47,162 @@ if TYPE_CHECKING:
     from ..flex_shard.bucket_storage import ParamInfo, PlacementFn
 
 
+@dataclass
+class _ReduceScratchSlot:
+    send: torch.Tensor
+    in_use: bool = False
+    ready_event: torch.Event | None = None
+
+
+@dataclass
+class _ReduceScratchLease:
+    _pool: _ReduceScratchPool
+    _slot: _ReduceScratchSlot
+    send: torch.Tensor
+    _released: bool = False
+
+    def release(self, stream: torch.Stream | None = None) -> None:
+        """Mark this lease reusable after queued work on ``stream`` is complete."""
+        if self._released:
+            return
+        self._released = True
+        self._pool._release(self._slot, stream)
+
+
+class _ReduceScratchPool:
+    """Bounded reusable scratch for GroupedOwned packed reduce-scatter sends.
+
+    Phase 2a deliberately stops at bounding temporary send buffers with explicit
+    stream lifetime. Defer direct owner-layout and optimizer aliasing until the
+    current Triton packed RS path is accepted and profiler/memory evidence shows
+    temporary memory is the limiting issue.
+    """
+
+    def __init__(self, max_slots: int = 1) -> None:
+        if max_slots <= 0:
+            raise ValueError(f"max_slots must be positive, but got {max_slots}.")
+        self.max_slots = max_slots
+        self._slots: list[_ReduceScratchSlot] = []
+
+    def acquire(
+        self,
+        *,
+        send_numel: int,
+        dtype: torch.dtype,
+        device: torch.device | str,
+    ) -> _ReduceScratchLease:
+        """Acquire a reusable send buffer sized for one reduce-scatter call."""
+        if send_numel < 0:
+            raise ValueError(f"Scratch size must be non-negative, got {send_numel}.")
+        device = torch.device(device)
+        slot = self._find_ready_slot(send_numel, dtype, device)
+        if slot is None and len(self._slots) < self.max_slots:
+            slot = self._make_slot(send_numel, dtype, device)
+            self._slots.append(slot)
+        if slot is None:
+            slot = self._wait_for_released_slot(send_numel, dtype, device)
+
+        slot.in_use = True
+        slot.ready_event = None
+        return _ReduceScratchLease(self, slot, slot.send.narrow(0, 0, send_numel))
+
+    def _find_ready_slot(
+        self,
+        send_numel: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> _ReduceScratchSlot | None:
+        fallback: _ReduceScratchSlot | None = None
+        for slot in self._slots:
+            if slot.in_use or not self._is_ready(slot):
+                continue
+            if self._slot_can_satisfy(slot, send_numel, dtype, device):
+                return slot
+            fallback = fallback or slot
+        if fallback is None:
+            return None
+        self._resize_slot(fallback, send_numel, dtype, device)
+        return fallback
+
+    def _wait_for_released_slot(
+        self,
+        send_numel: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> _ReduceScratchSlot:
+        for slot in self._slots:
+            if not slot.in_use:
+                if slot.ready_event is not None:
+                    slot.ready_event.synchronize()
+                    slot.ready_event = None
+                self._resize_slot(slot, send_numel, dtype, device)
+                return slot
+        raise RuntimeError(
+            "No released GroupedOwned reduce scratch slot is available. "
+            "Call _ReduceScratchLease.release() before launching more than "
+            "max_slots in-flight reduce-scatter operations."
+        )
+
+    @staticmethod
+    def _make_slot(
+        send_numel: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> _ReduceScratchSlot:
+        return _ReduceScratchSlot(
+            send=torch.empty(send_numel, dtype=dtype, device=device),
+        )
+
+    @staticmethod
+    def _slot_can_satisfy(
+        slot: _ReduceScratchSlot,
+        send_numel: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> bool:
+        return (
+            slot.send.dtype == dtype
+            and slot.send.device == device
+            and slot.send.numel() >= send_numel
+        )
+
+    @staticmethod
+    def _resize_slot(
+        slot: _ReduceScratchSlot,
+        send_numel: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        if slot.send.dtype != dtype or slot.send.device != device:
+            slot.send = torch.empty(send_numel, dtype=dtype, device=device)
+        elif slot.send.numel() < send_numel:
+            slot.send = torch.empty(send_numel, dtype=dtype, device=device)
+
+    @staticmethod
+    def _is_ready(slot: _ReduceScratchSlot) -> bool:
+        if slot.ready_event is None:
+            return True
+        if slot.ready_event.query():
+            slot.ready_event = None
+            return True
+        return False
+
+    def _release(
+        self,
+        slot: _ReduceScratchSlot,
+        stream: torch.Stream | None,
+    ) -> None:
+        slot.in_use = False
+        if slot.send.device.type != "cuda":
+            slot.ready_event = None
+            return
+        if stream is None:
+            stream = torch.cuda.current_stream(slot.send.device)
+        event = torch.cuda.Event()
+        event.record(stream)
+        slot.ready_event = event
+
+
 def _grouped_owned_reduce_scratch_slots() -> int:
     raw = os.environ.get("FLEX_SHARD_GROUPED_OWNED_SCRATCH_SLOTS")
     if raw is not None:
@@ -68,11 +220,11 @@ def _grouped_owned_reduce_scratch_slots() -> int:
         return 1
 
 
-_GROUPED_OWNED_REDUCE_SCRATCH_POOL: SegmentReduceScratchPool | None = None
+_GROUPED_OWNED_REDUCE_SCRATCH_POOL: _ReduceScratchPool | None = None
 _GROUPED_OWNED_REDUCE_SCRATCH_POOL_SLOTS: int | None = None
 
 
-def _grouped_owned_reduce_scratch_pool() -> SegmentReduceScratchPool:
+def _grouped_owned_reduce_scratch_pool() -> _ReduceScratchPool:
     global _GROUPED_OWNED_REDUCE_SCRATCH_POOL
     global _GROUPED_OWNED_REDUCE_SCRATCH_POOL_SLOTS
 
@@ -81,7 +233,7 @@ def _grouped_owned_reduce_scratch_pool() -> SegmentReduceScratchPool:
         _GROUPED_OWNED_REDUCE_SCRATCH_POOL is None
         or _GROUPED_OWNED_REDUCE_SCRATCH_POOL_SLOTS != slots
     ):
-        _GROUPED_OWNED_REDUCE_SCRATCH_POOL = SegmentReduceScratchPool(max_slots=slots)
+        _GROUPED_OWNED_REDUCE_SCRATCH_POOL = _ReduceScratchPool(max_slots=slots)
         _GROUPED_OWNED_REDUCE_SCRATCH_POOL_SLOTS = slots
     return _GROUPED_OWNED_REDUCE_SCRATCH_POOL
 
@@ -494,7 +646,7 @@ class GroupedOwned(Placement):
         world_size: int
         pg: Any
         debug_fqn: str | None
-        scratch_lease: SegmentReduceScratchLease | None
+        scratch_lease: _ReduceScratchLease | None
 
     def __init__(
         self,
@@ -940,12 +1092,11 @@ class GroupedOwned(Placement):
         send_numel: int,
         dtype: torch.dtype,
         device: torch.device,
-    ) -> tuple[torch.Tensor, SegmentReduceScratchLease | None]:
+    ) -> tuple[torch.Tensor, _ReduceScratchLease | None]:
         if torch.compiler.is_compiling():
             return torch.empty(send_numel, dtype=dtype, device=device), None
         lease = _grouped_owned_reduce_scratch_pool().acquire(
             send_numel=send_numel,
-            output_numel=0,
             dtype=dtype,
             device=device,
         )
