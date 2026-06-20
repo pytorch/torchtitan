@@ -162,29 +162,43 @@ class VarlenAttention(Module):
         if out_transform is not None:
             varlen_kwargs["return_aux"] = VarlenAuxRequest(lse=True)
 
-        result = varlen_attn(
-            q_TNH,
-            k_TNH,
-            v_TNH,
-            cu_seq_q,
-            cu_seq_k,
-            max_q,
-            max_k,
-            scale=scale,
-            window_size=self.window_size,
-            **varlen_kwargs,
-        )
+        # FA3 varlen attention takes rank-local metadata tensors.
+        # TODO(pianpwk): Move this op contract into pytorch/spmd_types.
+        with spmd.no_typecheck():
+            result = varlen_attn(
+                q_TNH,
+                k_TNH,
+                v_TNH,
+                cu_seq_q,
+                cu_seq_k,
+                max_q,
+                max_k,
+                scale=scale,
+                window_size=self.window_size,
+                **varlen_kwargs,
+            )
 
         # varlen_attn returns the packed output (T, N, H), plus the LSE when an
         # out_transform epilogue was requested.
         if out_transform is None:
             assert isinstance(result, torch.Tensor)
+            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+                spmd.assert_type(
+                    result, spmd.V, spmd.PartitionSpec(("dp", "cp"), "tp", None)
+                )
             out_BLNH = result.view(B, L, -1, H).to(q_BLNH.dtype)
             return out_BLNH
 
         out_TNH, lse_NT = result
-        out_BLNH = out_TNH.view(B, L, -1, H).to(q_BLNH.dtype)
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            spmd.assert_type(
+                out_TNH, spmd.V, spmd.PartitionSpec(("dp", "cp"), "tp", None)
+            )
+            spmd.assert_type(
+                lse_NT, spmd.V, spmd.PartitionSpec("tp", ("dp", "cp"))
+            )
 
+        out_BLNH = out_TNH.view(B, L, -1, H).to(q_BLNH.dtype)
         # FA varlen returns the LSE as (N, T); reorder to (B, L, N) so
         # out_transform can broadcast per (token, head).
         lse_BLN = lse_NT.transpose(0, 1).reshape(B, L, -1)
@@ -263,7 +277,7 @@ class FlexAttention(Module):
                 return_aux=return_aux,
                 kernel_options=kernel_options,
             )
-        if get_spmd_backend() == "spmd_types":
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
             spmd.assert_type(out, spmd.V, spmd.PartitionSpec("dp", "tp", "cp", None))
             if return_aux.lse:
                 spmd.assert_type(aux.lse, spmd.V, spmd.PartitionSpec("dp", "tp", "cp"))
