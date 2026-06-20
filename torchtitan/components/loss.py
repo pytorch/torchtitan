@@ -306,11 +306,13 @@ class CrossEntropyLoss(BaseLoss):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseLoss.Config):
-        pass
+        global_vocab_size: int | None = None
+        """Full vocabulary size, needed for spmd_types loss-parallel CE."""
 
     def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
         self.fn: LossFunction = cross_entropy_loss
         self._maybe_compile(compile_config)
+        self.global_vocab_size = config.global_vocab_size
 
     def __call__(
         self,
@@ -318,7 +320,7 @@ class CrossEntropyLoss(BaseLoss):
         labels: torch.Tensor,
         global_valid_tokens: float | None = None,
     ) -> torch.Tensor:
-        loss = self.fn(pred, labels)
+        loss = self.fn(pred, labels, global_vocab_size=self.global_vocab_size)
         if global_valid_tokens is not None:
             loss = loss / global_valid_tokens
         return loss
