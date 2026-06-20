@@ -372,31 +372,15 @@ def _reshape_for_broadcast(
             for i, d in enumerate(query_shape)
         ]
         return rope_cache.view(*shape)
-    elif positions.size(0) == bsz:
+    else:
         assert positions.shape == (bsz, seqlen)
-        # Local-shape expansion; the typechecker does not know this is S(0).
-        with spmd.no_typecheck():
-            rope_cache_expanded = rope_cache[None, :, None, :].expand(bsz, -1, -1, -1)
-        if get_spmd_backend() == "spmd_types":
-            spmd.assert_type(
-                rope_cache_expanded, {"dp": spmd.S(0), "cp": spmd.R, "tp": spmd.R}
-            )
+        rope_cache_expanded = rope_cache[None, :, None, :].expand(bsz, -1, -1, -1)
         rope_cache = torch.gather(
             rope_cache_expanded,
             dim=1,
             index=positions.view(bsz, seqlen, 1, 1).expand(bsz, seqlen, 1, cache_width),
         )
         return rope_cache
-    else:
-        assert positions.size(0) == 1
-        assert positions.shape == (1, seqlen)
-        rope_cache = rope_cache[positions.squeeze(0)]
-        assert rope_cache.shape == (seqlen, cache_width)
-        shape = [
-            d if i == 1 else cache_width if i == ndim - 1 else 1
-            for i, d in enumerate(query_shape)
-        ]
-        return rope_cache.view(*shape)
 
 
 def _maybe_wrap_positions(
