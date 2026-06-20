@@ -122,7 +122,8 @@ def rollout_to_episodes(rollout: Rollout) -> list[Episode]:
 
 
 def prepare_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metric]:
-    """Build rollout-derived metrics (lengths, truncation, reward breakdown).
+    """Build rollout-derived metrics: lengths, truncation, reward breakdown, and each turn's
+    per-generation metrics (the latter keep their own generator-side keys, unprefixed).
 
     Args:
         prefix: Metric namespace (e.g. `"rollout"` or `"validation"`).
@@ -173,5 +174,14 @@ def prepare_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
     out.extend(
         m.Metric(f"{prefix}_reward/component/{name}", m.Mean.from_list(values))
         for name, values in sorted(values_by_name.items())
+    )
+
+    # Per-generation turn metrics (latencies, output tokens) measured by the generator.
+    # They carry their own keys (e.g. "generator/..."), so they ride through unprefixed.
+    out.extend(
+        metric
+        for rollout in rollouts
+        for rollout_turn in rollout.turns
+        for metric in rollout_turn.metrics
     )
     return out

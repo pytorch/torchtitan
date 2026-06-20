@@ -51,7 +51,7 @@ class _BufferedGroup:
     Used to evict to-be-born-stale groups."""
 
 
-class AsyncRolloutBuffer(Configurable):
+class RolloutWorkBuffer(Configurable):
     """Queues rollout-group work and returns generated groups in feed order.
 
     Two count-based controls:
