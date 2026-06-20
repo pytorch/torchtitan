@@ -368,15 +368,6 @@ def _reshape_for_broadcast(
             for i, d in enumerate(query_shape)
         ]
         return rope_cache.view(*shape)
-    elif positions.size(0) == 1:
-        assert positions.shape == (1, seqlen)
-        rope_cache = rope_cache[positions.squeeze(0)]
-        assert rope_cache.shape == (seqlen, cache_width)
-        shape = [
-            d if i == 1 else cache_width if i == ndim - 1 else 1
-            for i, d in enumerate(query_shape)
-        ]
-        return rope_cache.view(*shape)
     else:
         assert positions.shape == (bsz, seqlen)
         rope_cache_expanded = rope_cache[None, :, None, :].expand(bsz, -1, -1, -1)
