@@ -6,7 +6,7 @@
 
 """WSD-S / Chinchilla scaling policy, ported from OLMo-core.
 
-Faithful port of ``WSDSChinchillaRunConfigurator`` (see PLAN.md References).
+Faithful port of ``WSDSChinchillaRunConfigurator`` (see DESIGN.md References).
 ``N`` denotes ladder (non-embedding) parameters throughout; every token budget
 is converted to steps by the planner.
 """
@@ -60,7 +60,7 @@ class WSDSChinchillaPolicy:
 
     def peak_lr(self, N: int) -> float:
         # The /2 is OLMo-core's empirical halving (near optimal for the stepped
-        # WSD-S schedule); kept verbatim, see PLAN.md References.
+        # WSD-S schedule); kept verbatim, see DESIGN.md References.
         return _LR_CONST * (N / _PARAM_ANCHOR) ** (-1 / 3) / 2.0 * self.lr_multiplier
 
     def beta2(self, actual_token_batch: int) -> float:
