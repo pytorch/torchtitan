@@ -183,25 +183,26 @@ class TestGradAccumulator(unittest.TestCase):
         result = acc.result()
         torch.testing.assert_close(result, reference)
 
-    def test_accumulate_matches_cat_with_uneven_chunks(self):
-        """Verify GradAccumulator uses cumulative offsets for uneven chunks."""
+    def test_uneven_sequence_length_raises(self):
+        """Verify GradAccumulator rejects uneven sequence chunks."""
         B, L, D = 2, 10, 3
         num_chunks = 4
         reference = torch.arange(B * L * D, dtype=torch.float32).reshape(B, L, D)
-        chunks = torch.chunk(reference, num_chunks, dim=1)
-        self.assertNotEqual(len({chunk.shape[1] for chunk in chunks}), 1)
 
-        acc = GradAccumulator(
-            reference,
-            num_chunks=num_chunks,
-            seq_dim=1,
-            dtype=reference.dtype,
-        )
-        for chunk in chunks:
-            acc.add(chunk)
+        with self.assertRaisesRegex(ValueError, "evenly divisible"):
+            GradAccumulator(
+                reference,
+                num_chunks=num_chunks,
+                seq_dim=1,
+                dtype=reference.dtype,
+            )
 
-        result = acc.result()
-        torch.testing.assert_close(result, torch.cat(chunks, dim=1))
+    def test_unexpected_chunk_size_raises(self):
+        """Verify GradAccumulator rejects chunks with the wrong sequence length."""
+        acc = GradAccumulator(torch.randn(2, 8, 16), num_chunks=4, dtype=torch.float32)
+
+        with self.assertRaisesRegex(ValueError, "expected chunk sequence length"):
+            acc.add(torch.randn(2, 3, 16))
 
     def test_accumulate_with_dtype_conversion(self):
         """Verify fp32 accumulation from bf16 chunks."""
@@ -513,9 +514,18 @@ class TestChunkedCELoss(unittest.TestCase):
         """ChunkedCELoss must produce the same loss and gradients as the standard path."""
         self._assert_numerical_equivalence(B=2, L=8, D=32, V=64, num_chunks=4)
 
-    def test_numerical_equivalence_with_uneven_chunks(self):
-        """ChunkedCELoss must preserve gradients when sequence chunks are uneven."""
-        self._assert_numerical_equivalence(B=2, L=10, D=32, V=64, num_chunks=4)
+    def test_uneven_sequence_chunks_raise(self):
+        """ChunkedCELoss should raise if num_chunks does not divide the sequence."""
+        B, D, V = 2, 32, 64
+
+        for seq_len, num_chunks in ((10, 4), (2, 4)):
+            with self.subTest(seq_len=seq_len, num_chunks=num_chunks):
+                _, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
+                hidden_states = torch.randn(B, seq_len, D, requires_grad=True)
+                labels = torch.randint(0, V, (B, seq_len))
+
+                with self.assertRaisesRegex(ValueError, "evenly divisible"):
+                    chunked_loss(hidden_states, labels)
 
     def test_different_chunk_counts(self):
         """Loss should be the same regardless of num_chunks."""

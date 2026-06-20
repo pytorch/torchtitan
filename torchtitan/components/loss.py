@@ -365,7 +365,6 @@ class GradAccumulator:
         self.num_chunks = num_chunks
         self.seq_dim = seq_dim
         self._next_idx = 0
-        self._seq_offset = 0
         self._device_mesh: DeviceMesh | None = None
         # Captured from the first added chunk; see __init__ docstring.
         self._placements: tuple[Placement, ...] | None = None
@@ -376,6 +375,17 @@ class GradAccumulator:
         else:
             local = reference
 
+        if num_chunks <= 0:
+            raise ValueError(f"num_chunks must be positive, got {num_chunks}")
+
+        seq_len = local.shape[seq_dim]
+        if seq_len % num_chunks != 0:
+            raise ValueError(
+                "GradAccumulator requires the sequence length to be evenly "
+                f"divisible by num_chunks, got sequence length {seq_len} "
+                f"and num_chunks {num_chunks}."
+            )
+        self._chunk_seq_len = seq_len // num_chunks
         self._buffer = torch.zeros_like(local, dtype=dtype)
 
     def add(self, chunk_grad: torch.Tensor) -> None:
@@ -412,14 +422,19 @@ class GradAccumulator:
             chunk_grad = chunk_grad.to(self._buffer.dtype)
 
         chunk_seq_len = chunk_grad.shape[self.seq_dim]
-        start = self._seq_offset
+        if chunk_seq_len != self._chunk_seq_len:
+            raise ValueError(
+                "GradAccumulator expected chunk sequence length "
+                f"{self._chunk_seq_len}, got {chunk_seq_len}."
+            )
+
+        start = self._next_idx * chunk_seq_len
         end = start + chunk_seq_len
 
         slices = [slice(None)] * self._buffer.ndim
         slices[self.seq_dim] = slice(start, end)
         self._buffer[tuple(slices)] = chunk_grad
 
-        self._seq_offset = end
         self._next_idx += 1
 
     def result(self) -> torch.Tensor:
@@ -531,6 +546,23 @@ class ChunkedCELoss(BaseLoss):
 
         # Check if it's training model or validation mode
         requires_grad = hidden_states.requires_grad
+
+        if num_chunks <= 0:
+            raise ValueError(
+                f"ChunkedCELoss num_chunks must be positive, got {num_chunks}"
+            )
+
+        local_seq_len = (
+            hidden_states.to_local().shape[1]
+            if isinstance(hidden_states, DTensor)
+            else hidden_states.shape[1]
+        )
+        if local_seq_len % num_chunks != 0:
+            raise ValueError(
+                "ChunkedCELoss requires the local sequence length to be evenly "
+                f"divisible by num_chunks, got local sequence length {local_seq_len} "
+                f"and num_chunks {num_chunks}."
+            )
 
         # Chunking always operates on the *local* view: when ``t`` is a
         # Shard(1) DTensor, chunking the global view would distribute whole
