@@ -228,15 +228,20 @@ def model_registry(rung: str, attn_backend: str = "flex") -> ModelSpec:
 
 
 @functools.lru_cache(maxsize=None)
-def count_ladder_params(rung: str) -> int:
-    """Non-embedding params (built on meta, untied so lm_head is counted).
+def count_total_params(rung: str) -> int:
+    """Total params (including embeddings), built on meta.
 
     Backend-independent: attention backends add no parameters, so the count is
-    built with a fixed backend regardless of the rung's configured one.
+    built with a fixed backend regardless of the rung's configured one. Used for
+    memory estimation (the optimizer state covers every parameter).
     """
-    shape = RUNGS[rung]
-    config = _build_rung_config(shape, "flex")
+    config = _build_rung_config(RUNGS[rung], "flex")
     with torch.device("meta"):
         model = config.build()
-    nparams = sum(p.numel() for p in model.parameters())
-    return nparams - shape.vocab_size * shape.dim
+    return sum(p.numel() for p in model.parameters())
+
+
+def count_ladder_params(rung: str) -> int:
+    """Non-embedding params (untied, so lm_head is counted) = OLMo's N."""
+    shape = RUNGS[rung]
+    return count_total_params(rung) - shape.vocab_size * shape.dim

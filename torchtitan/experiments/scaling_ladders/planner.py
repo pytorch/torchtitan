@@ -31,7 +31,7 @@ from torchtitan.trainer import Trainer
 
 from .checkpoint import LadderCheckpointManager
 from .lr_scheduler import WSDSScheduler
-from .model import count_ladder_params, model_registry, RUNGS
+from .model import count_ladder_params, count_total_params, model_registry, RUNGS
 from .policy import WSDSChinchillaPolicy
 from .validate import LadderValidator
 
@@ -52,6 +52,70 @@ class ComputeSpec:
     local_batch_size: int = 1
 
 
+# Per-parameter memory under bf16 mixed precision with AdamW: bf16 param (2) +
+# grad (2) + fp32 master/exp_avg/exp_avg_sq (12). FSDP shards this by dp_shard.
+_BYTES_PER_PARAM = 18
+# Shard only enough that the model+optimizer+grad state takes at most this
+# fraction of the memory budget, leaving the rest for activations. Below this,
+# leftover ranks become data-parallel REPLICAS (DDP) rather than FSDP shards --
+# cheap all-reduce instead of per-layer all-gather, which is the right choice
+# whenever the model comfortably fits on one GPU.
+_MODEL_MEM_FRAC = 0.30
+
+
+def _divisors_ascending(n: int) -> list[int]:
+    return [d for d in range(1, n + 1) if n % d == 0]
+
+
+def _largest_divisor_leq(n: int, cap: int) -> int:
+    """Largest divisor of ``n`` that is <= ``cap`` (>= 1)."""
+    cap = max(1, min(cap, n))
+    return next(d for d in range(cap, 0, -1) if n % d == 0)
+
+
+def auto_compute_spec(
+    rung: str,
+    policy: WSDSChinchillaPolicy,
+    *,
+    gpus: int = 8,
+    gpu_mem_gib: float = 183.0,
+    mem_frac: float = 0.85,
+) -> ComputeSpec:
+    """Derive a ComputeSpec from the rung's memory footprint -- no hardcoding.
+
+    Picks the *least* sharding (``dp_shard``) whose model+optimizer state fits in
+    ``_MODEL_MEM_FRAC`` of the budget, makes the leftover ranks data-parallel
+    replicas (DDP for small rungs, which fit on one GPU), and aims for a single
+    gradient-accumulation step (``local_batch_size = global_seqs / dp_degree``).
+    The activation footprint is hard to predict analytically, so the launch-time
+    OOM probe (see the runner) trims ``local_batch_size`` if this is optimistic.
+    """
+    model_gib = count_total_params(rung) * _BYTES_PER_PARAM / 2**30
+    budget = gpu_mem_gib * mem_frac
+    dp_shard = next(
+        (
+            s
+            for s in _divisors_ascending(gpus)
+            if model_gib / s <= budget * _MODEL_MEM_FRAC
+        ),
+        gpus,
+    )
+    dp_replicate = gpus // dp_shard
+    dp_degree = dp_replicate * dp_shard
+    target_seqs = round(
+        policy.target_token_batch(count_ladder_params(rung)) / policy.seq_len
+    )
+    local_batch_size = max(1, round(target_seqs / dp_degree))
+    return ComputeSpec(
+        world_size=gpus,
+        parallelism=ParallelismConfig(
+            data_parallel_replicate_degree=dp_replicate,
+            data_parallel_shard_degree=dp_shard,
+        ),
+        local_batch_size=local_batch_size,
+    )
+
+
 @dataclass(kw_only=True)
 class ResolvedPlan:
     """All derived quantities for one run; serializes to the plan/JSON dict."""
@@ -63,6 +127,7 @@ class ResolvedPlan:
     target_token_batch: int
     global_batch_size: int
     actual_token_batch: int
+    local_batch_size: int
     grad_accum_steps: int
     steps: int
     warmup_steps: int
@@ -104,11 +169,16 @@ def resolve(
 
     seq_len = policy.seq_len
     target_token_batch = policy.target_token_batch(N)
-    # global_batch_size is in SEQUENCES, rounded to a valid grad-accum multiple.
-    unit = compute.local_batch_size * dp_degree
-    global_batch_size = max(1, round(target_token_batch / seq_len / unit)) * unit
+    # The policy sets the global batch (in sequences), independent of lbs:
+    # seqs_per_dp is the sequences each data-parallel rank sees per optimizer step.
+    seqs_per_dp = max(1, round(target_token_batch / seq_len / dp_degree))
+    global_batch_size = seqs_per_dp * dp_degree
     actual_token_batch = global_batch_size * seq_len
-    grad_accum_steps = global_batch_size // unit
+    # local_batch_size is a pure memory/throughput knob: it must divide seqs_per_dp
+    # so gradient accumulation is integral. Snap a requested lbs down to the largest
+    # such divisor, so the OOM probe can shrink it without moving the schedule.
+    local_batch_size = _largest_divisor_leq(seqs_per_dp, compute.local_batch_size)
+    grad_accum_steps = seqs_per_dp // local_batch_size
     batch_diff = abs(actual_token_batch - target_token_batch) / target_token_batch
     if batch_diff > _BATCH_TOLERANCE:
         logger.warning(
@@ -163,6 +233,7 @@ def resolve(
         target_token_batch=target_token_batch,
         global_batch_size=global_batch_size,
         actual_token_batch=actual_token_batch,
+        local_batch_size=local_batch_size,
         grad_accum_steps=grad_accum_steps,
         steps=steps,
         warmup_steps=warmup_steps,
@@ -236,7 +307,7 @@ def to_trainer_config(
             period_lr_multipliers=plan.period_lr_multipliers,
         ),
         training=TrainingConfig(
-            local_batch_size=compute.local_batch_size,
+            local_batch_size=plan.local_batch_size,
             global_batch_size=plan.global_batch_size,
             seq_len=plan.seq_len,
             steps=plan.steps,

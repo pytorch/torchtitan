@@ -496,3 +496,115 @@ def test_compare_variants_pairs_matched_points():
     assert result["variant_lower_count"] == 4
     assert result["variant_wins_everywhere"] is True
     assert result["mean_delta"] == pytest.approx(-0.05)
+
+
+def test_auto_compute_spec_picks_ddp_for_small_fsdp_for_large():
+    """auto_compute_spec: DDP when the model fits on one GPU, FSDP only when not."""
+    from torchtitan.experiments.scaling_ladders.planner import auto_compute_spec
+
+    policy = WSDSChinchillaPolicy()
+    for rung in ("60M", "100M", "370M", "1B"):
+        cs = auto_compute_spec(rung, policy, gpus=8)
+        assert cs.world_size == 8
+        assert cs.parallelism.data_parallel_shard_degree == 1  # DDP (replicas)
+        assert cs.parallelism.data_parallel_replicate_degree == 8
+        assert cs.local_batch_size >= 1
+
+    # 8B does not fit on one GPU -> must shard; 3B shards less than 8B.
+    big = auto_compute_spec("8B", policy, gpus=8)
+    assert big.parallelism.data_parallel_shard_degree > 1
+    mid = auto_compute_spec("3B", policy, gpus=8)
+    assert (
+        mid.parallelism.data_parallel_shard_degree
+        <= big.parallelism.data_parallel_shard_degree
+    )
+    # dp_degree is always the full node, regardless of the shard/replicate split.
+    for cs in (big, mid):
+        dp = (
+            cs.parallelism.data_parallel_replicate_degree
+            * cs.parallelism.data_parallel_shard_degree
+        )
+        assert dp == 8
+
+
+def test_auto_compute_spec_fits_memory_budget():
+    """The chosen shard degree keeps model+optimizer state within the budget frac."""
+    from torchtitan.experiments.scaling_ladders.model import count_total_params
+    from torchtitan.experiments.scaling_ladders.planner import (
+        _BYTES_PER_PARAM,
+        _MODEL_MEM_FRAC,
+        auto_compute_spec,
+    )
+
+    policy = WSDSChinchillaPolicy()
+    budget = 183.0 * 0.85
+    for rung in ("60M", "760M", "3B", "8B"):
+        cs = auto_compute_spec(rung, policy, gpus=8)
+        sharded_model_gib = (
+            count_total_params(rung)
+            * _BYTES_PER_PARAM
+            / 2**30
+            / cs.parallelism.data_parallel_shard_degree
+        )
+        assert sharded_model_gib <= budget * _MODEL_MEM_FRAC + 1e-6
+
+
+class _ProbePlan:
+    # seqs_per_dp = local_batch_size * grad_accum_steps = 16.
+    local_batch_size = 8
+    grad_accum_steps = 2
+
+
+class _ProbeLadder:
+    def __init__(self, run_dir):
+        self._dir = run_dir
+
+    def _resolve(self, rung, overrides):
+        return _ProbePlan()
+
+    def compute_for(self, rung):
+        return ComputeSpec(world_size=8)
+
+    def run_dir(self, rung, **overrides):
+        return self._dir
+
+
+def _lbs_from_flags(flags):
+    return int(flags[flags.index("--local-batch-size") + 1])
+
+
+def test_run_rung_with_backoff_shrinks_on_oom(monkeypatch, tmp_path):
+    """OOM at the planned lbs retries at the next-smaller divisor, then succeeds."""
+    from torchtitan.experiments.scaling_ladders import ladder as ladder_mod
+
+    calls = []
+
+    def fake_spawn(rung, overrides, ws, flags=(), *, check=True, log_path=None):
+        lbs = _lbs_from_flags(flags)
+        calls.append(lbs)
+        with open(log_path, "w") as handle:
+            handle.write("CUDA out of memory" if lbs == 8 else "done")
+        return 1 if lbs == 8 else 0
+
+    monkeypatch.setattr(ladder_mod, "_spawn_run", fake_spawn)
+    ladder_mod.run_rung_with_backoff(_ProbeLadder(str(tmp_path)), "1B", {})
+    # 8 OOMs; largest divisor of 16 strictly below 8 is 4, which succeeds.
+    assert calls == [8, 4]
+
+
+def test_run_rung_with_backoff_raises_on_non_oom(monkeypatch, tmp_path):
+    """A non-OOM failure is not retried -- it surfaces immediately."""
+    from torchtitan.experiments.scaling_ladders import ladder as ladder_mod
+
+    calls = []
+
+    def fake_spawn(rung, overrides, ws, flags=(), *, check=True, log_path=None):
+        calls.append(_lbs_from_flags(flags))
+        with open(log_path, "w") as handle:
+            handle.write("ValueError: something unrelated broke")
+        return 1
+
+    monkeypatch.setattr(ladder_mod, "_spawn_run", fake_spawn)
+    with pytest.raises(RuntimeError, match="failed"):
+        ladder_mod.run_rung_with_backoff(_ProbeLadder(str(tmp_path)), "1B", {})
+    assert calls == [8]  # no retry on a non-OOM error

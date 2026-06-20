@@ -22,7 +22,15 @@ from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
 
 from .metrics import _find_event_dir, _read_scalars, _TRAIN_LOSS_TAG, read_run_metrics
-from .planner import ComputeSpec, resolve, ResolvedPlan, to_plan_dict, to_trainer_config
+from .model import RUNGS
+from .planner import (
+    auto_compute_spec,
+    ComputeSpec,
+    resolve,
+    ResolvedPlan,
+    to_plan_dict,
+    to_trainer_config,
+)
 from .policy import WSDSChinchillaPolicy
 
 # Override keys that re-run the policy. Anything else (e.g. seed) is handled
@@ -95,10 +103,19 @@ class Llama3Ladder:
     def plan(self, rung: str, **overrides) -> dict:
         return to_plan_dict(self._resolve(rung, overrides))
 
-    def trainer_config(self, rung: str, **overrides) -> Trainer.Config:
+    def trainer_config(
+        self, rung: str, *, local_batch_size: int | None = None, **overrides
+    ) -> Trainer.Config:
+        # local_batch_size is a memory/throughput override (the OOM probe); it does
+        # not change the schedule (resolve snaps it to a divisor of the per-rank
+        # batch), so plan/status/metrics stay consistent with the run.
+        policy, seed = self._split_overrides(overrides)
+        compute = self.compute_for(rung)
+        if local_batch_size is not None:
+            compute = replace(compute, local_batch_size=local_batch_size)
         return to_trainer_config(
-            self._resolve(rung, overrides),
-            compute=self.compute_for(rung),
+            resolve(rung, policy, compute, seed=seed),
+            compute=compute,
             dataset=self.dataset,
             val_dataset=self.val_dataset,
             hf_assets_path=self.hf_assets_path,
@@ -110,7 +127,9 @@ class Llama3Ladder:
             compile_enabled=self.compile,
         )
 
-    def run(self, rung: str, **overrides) -> None:
+    def run(
+        self, rung: str, *, local_batch_size: int | None = None, **overrides
+    ) -> None:
         """Per-rank run body. Asserts NGPU matches the rung's compute spec."""
         compute = self.compute_for(rung)
         world_size = int(os.environ.get("WORLD_SIZE", compute.world_size))
@@ -119,7 +138,9 @@ class Llama3Ladder:
                 f"Launched with world_size {world_size} but rung {rung} "
                 f"compute_spec.world_size is {compute.world_size}."
             )
-        trainer = self.trainer_config(rung, **overrides).build()
+        trainer = self.trainer_config(
+            rung, local_batch_size=local_batch_size, **overrides
+        ).build()
         try:
             trainer.train()
         finally:
@@ -212,8 +233,14 @@ def _checkpoint_steps_present(checkpoint_folder: str) -> list[int]:
 
 
 def _spawn_run(
-    rung: str, overrides: dict, world_size: int, extra_flags: list[str] = ()
-) -> None:
+    rung: str,
+    overrides: dict,
+    world_size: int,
+    extra_flags: list[str] = (),
+    *,
+    check: bool = True,
+    log_path: str | None = None,
+) -> int:
     import subprocess
 
     cmd = [
@@ -228,40 +255,85 @@ def _spawn_run(
         cmd += [f"--{key.replace('_', '-')}", str(value)]
     cmd += list(extra_flags)
     logger.info("Launching: %s", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    if log_path is None:
+        return subprocess.run(cmd, check=check).returncode
+    with open(log_path, "w") as handle:
+        proc = subprocess.run(cmd, stdout=handle, stderr=subprocess.STDOUT)
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
+    return proc.returncode
 
 
-# Per-rung local batch size tuned for 8-way data parallelism: large enough that
-# gradient accumulation is ~1 for the small rungs (so the B200 matmuls are not
-# overhead-bound) while staying well within memory for the large rungs. This is
-# a throughput-only choice; the global batch, token budget, and loss curve are
-# unchanged (they are fixed by the policy and invariant to the chunking).
-_DEFAULT_LOCAL_BATCH_SIZE = {
-    "60M": 7,
-    "100M": 9,
-    "190M": 15,
-    "370M": 23,
-    "760M": 18,
-    "1B": 22,
-    "3B": 12,
-    "8B": 8,
-}
+_OOM_MARKERS = ("out of memory", "outofmemoryerror")
+
+
+def run_rung_with_backoff(
+    ladder, rung: str, overrides: dict, *, compile: bool = True, max_retries: int = 4
+) -> None:
+    """Spawn a rung run; on OOM, shrink local_batch_size and retry (the probe).
+
+    local_batch_size only changes gradient accumulation, not the schedule, so the
+    retry is schedule-invariant. Steps down through divisors of the per-rank batch.
+    """
+    from .planner import _largest_divisor_leq
+
+    plan = ladder._resolve(rung, overrides)
+    seqs_per_dp = plan.local_batch_size * plan.grad_accum_steps
+    lbs = plan.local_batch_size
+    world_size = ladder.compute_for(rung).world_size
+    run_dir = ladder.run_dir(rung, **overrides)
+    os.makedirs(run_dir, exist_ok=True)
+
+    for _ in range(max_retries + 1):
+        flags = (["--compile"] if compile else []) + ["--local-batch-size", str(lbs)]
+        log_path = os.path.join(run_dir, f"launch_lbs{lbs}.log")
+        rc = _spawn_run(
+            rung, overrides, world_size, flags, check=False, log_path=log_path
+        )
+        if rc == 0:
+            return
+        tail = _tail(log_path)
+        if lbs > 1 and any(m in tail.lower() for m in _OOM_MARKERS):
+            lbs = _largest_divisor_leq(seqs_per_dp, lbs - 1)
+            logger.warning(
+                "OOM on %s; retrying at local_batch_size=%d (grad_accum=%d)",
+                rung,
+                lbs,
+                seqs_per_dp // lbs,
+            )
+            continue
+        raise RuntimeError(f"Run {rung} failed (rc={rc}); see {log_path}")
+    raise RuntimeError(
+        f"Run {rung} OOM even at local_batch_size=1; needs more sharding or GPUs."
+    )
+
+
+def _tail(path: str, nbytes: int = 4000) -> str:
+    try:
+        with open(path) as handle:
+            return handle.read()[-nbytes:]
+    except OSError:
+        return ""
 
 
 def default_ladder(
     base_dump_folder: str = "./outputs/scaling_ladders", world_size: int = 8
 ) -> Llama3Ladder:
-    """The showcase Llama3 ladder: 8-way FSDP, C4, Llama3 tokenizer assets."""
+    """The showcase Llama3 ladder: C4, Llama3 tokenizer assets.
+
+    Per-rung parallelism and local batch size are derived from each rung's memory
+    footprint by ``auto_compute_spec`` (no hardcoded table): small rungs that fit
+    on one GPU run as DDP replicas, larger rungs shard (FSDP) only as much as
+    needed. The launch-time OOM probe trims an over-optimistic local batch size.
+    """
+    policy = WSDSChinchillaPolicy()
     compute_specs = {
-        rung: ComputeSpec(
-            world_size=world_size,
-            parallelism=ParallelismConfig(),
-            local_batch_size=lbs,
-        )
-        for rung, lbs in _DEFAULT_LOCAL_BATCH_SIZE.items()
+        rung: auto_compute_spec(rung, policy, gpus=world_size)
+        for rung in RUNGS
+        if rung != "debug"
     }
     return Llama3Ladder(
-        policy=WSDSChinchillaPolicy(),
+        policy=policy,
         compute_specs=compute_specs,
         default_compute=ComputeSpec(
             world_size=world_size, parallelism=ParallelismConfig(), local_batch_size=1

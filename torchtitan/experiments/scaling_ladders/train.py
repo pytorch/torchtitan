@@ -30,6 +30,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--compile", action="store_true", help="Enable torch.compile (model + loss)."
     )
+    parser.add_argument(
+        "--local-batch-size",
+        type=int,
+        help="Override the per-device microbatch (memory knob; set by the OOM probe). "
+        "Does not change the schedule -- it is snapped to a divisor of the per-rank batch.",
+    )
     return parser.parse_args()
 
 
@@ -45,7 +51,7 @@ def main() -> None:
     }
     overrides = {k: v for k, v in candidates.items() if v is not None}
     ladder = replace(LADDER, compile=True) if args.compile else LADDER
-    ladder.run(args.rung, **overrides)
+    ladder.run(args.rung, local_batch_size=args.local_batch_size, **overrides)
 
 
 if __name__ == "__main__":

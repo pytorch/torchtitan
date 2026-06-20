@@ -24,7 +24,7 @@ import numpy as np
 from scipy.optimize import curve_fit
 
 from . import LADDER
-from .ladder import _spawn_run
+from .ladder import run_rung_with_backoff
 
 
 def _chinchilla(compute, asymptote, scale, exponent):
@@ -92,13 +92,16 @@ def matched_points(ladder, rung: str, metric: str, overrides: dict) -> list[dict
 def run_rungs(
     ladder, rungs: list[str], overrides: dict, *, compile: bool = True
 ) -> None:
-    """Run each rung once (sequentially, skipping complete runs)."""
-    extra_flags = ["--compile"] if compile else []
+    """Run each rung once (sequentially, skipping complete runs).
+
+    Each launch goes through the OOM probe, which trims local_batch_size on
+    out-of-memory without moving the schedule.
+    """
     for rung in rungs:
         plan = ladder._resolve(rung, overrides)
         if plan.steps in ladder.status(rung, **overrides)["checkpoint_steps_present"]:
             continue  # final checkpoint exists -> already complete
-        _spawn_run(rung, overrides, ladder.compute_for(rung).world_size, extra_flags)
+        run_rung_with_backoff(ladder, rung, overrides, compile=compile)
 
 
 def extrapolate(
