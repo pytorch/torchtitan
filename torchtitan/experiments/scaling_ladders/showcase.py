@@ -146,6 +146,114 @@ def extrapolate(
     }
 
 
+def compare_variants(
+    baseline,
+    variant,
+    rungs: list[str],
+    *,
+    at_xCs: tuple[float, ...] = (0.5, 1.0),
+    metric: str = "val_loss",
+    overrides: dict | None = None,
+) -> dict:
+    """Compare a code-variant ladder against the baseline at matched (rung, xC).
+
+    ``baseline`` and ``variant`` are ladders that differ only in
+    ``base_dump_folder`` (and the variant's code edit); metrics are read from
+    disk, so the baseline runs are reused as-is with no retraining. A negative
+    ``delta`` means the variant has the lower (better) loss at that point.
+    """
+    overrides = overrides or {"chinchilla_multiple": 1.0}
+    points = []
+    for rung in rungs:
+        base = {
+            p["chinchilla_multiple"]: p
+            for p in matched_points(baseline, rung, metric, overrides)
+        }
+        var = {
+            p["chinchilla_multiple"]: p
+            for p in matched_points(variant, rung, metric, overrides)
+        }
+        for xc in at_xCs:
+            if xc in base and xc in var:
+                points.append(
+                    {
+                        "rung": rung,
+                        "chinchilla_multiple": xc,
+                        "compute": base[xc]["compute"],
+                        "baseline_loss": base[xc]["loss"],
+                        "variant_loss": var[xc]["loss"],
+                        "delta": var[xc]["loss"] - base[xc]["loss"],
+                    }
+                )
+    deltas = [p["delta"] for p in points]
+    return {
+        "metric": metric,
+        "points": points,
+        "variant_lower_count": sum(d < 0 for d in deltas),
+        "total": len(points),
+        "mean_delta": (sum(deltas) / len(deltas)) if deltas else None,
+        "variant_wins_everywhere": bool(deltas) and all(d < 0 for d in deltas),
+    }
+
+
+def plot_loss_vs_compute(results: dict, path: str) -> str:
+    """Overlay one or more ``{label: extrapolate-result}`` loss-vs-compute curves.
+
+    Each value is a dict returned by ``extrapolate`` (fit + fit_points, and
+    optionally validations, which are drawn as stars). Saves a PNG and returns
+    the path; matplotlib is imported lazily.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+    palette = plt.cm.tab10(np.linspace(0, 1, 10))
+    all_compute = [p["compute"] for r in results.values() for p in r["fit_points"]]
+    xs = np.logspace(
+        np.log10(min(all_compute) * 0.85), np.log10(max(all_compute) * 1.15), 300
+    )
+    for color, (label, result) in zip(palette, results.items()):
+        fit = result["fit"]
+        ax.plot(
+            xs,
+            [predict_loss(fit, c) for c in xs],
+            "-",
+            color=color,
+            lw=2,
+            label=f"{label}  (alpha={fit['alpha']:.3f}, rmse={fit['rmse']:.3f})",
+        )
+        ax.scatter(
+            [p["compute"] for p in result["fit_points"]],
+            [p["loss"] for p in result["fit_points"]],
+            color=color,
+            s=70,
+            edgecolor="k",
+            linewidth=0.5,
+            zorder=3,
+        )
+        for v in result.get("validations", []):
+            ax.scatter(
+                v["compute"],
+                v["actual_loss"],
+                marker="*",
+                s=320,
+                color=color,
+                edgecolor="k",
+                zorder=5,
+            )
+    ax.set_xscale("log")
+    ax.set_xlabel("training compute  C = 6 N D  (FLOPs)")
+    ax.set_ylabel("C4 validation loss")
+    ax.set_title("Llama3 scaling ladder: loss-vs-compute")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(path, dpi=140)
+    return path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Loss-vs-compute extrapolation showcase."

@@ -456,3 +456,43 @@ def test_extrapolate_predicts_held_out():
     assert len(result["validations"]) == 2  # 760M at 0.5xC and 1xC
     for validation in result["validations"]:
         assert validation["relative_error"] < 1e-3
+
+
+def test_compare_variants_pairs_matched_points():
+    """compare_variants pairs baseline vs variant at matched (rung, xC)."""
+    from torchtitan.experiments.scaling_ladders import showcase
+
+    params = {"60M": 61e6, "100M": 99e6}
+
+    class _FakePlan:
+        def __init__(self, N):
+            self.ladder_params = int(N)
+            self.steps = 100
+
+    def _make(loss_offset):
+        class _Ladder:
+            def _resolve(self, rung, overrides):
+                return _FakePlan(params[rung])
+
+            def metrics(self, rung, **overrides):
+                N = int(params[rung])
+                recs = []
+                for xc in (0.5, 1.0):
+                    recs.append(
+                        {
+                            "phase": "post-decay",
+                            "chinchilla_multiple": xc,
+                            "tokens": int(20 * N * xc),
+                            "val_loss": 3.0 - xc * 0.1 + loss_offset,
+                        }
+                    )
+                return {"checkpoints": recs}
+
+        return _Ladder()
+
+    # variant is uniformly 0.05 lower -> wins everywhere, negative mean delta.
+    result = showcase.compare_variants(_make(0.0), _make(-0.05), ["60M", "100M"])
+    assert result["total"] == 4  # 2 rungs x 2 xC
+    assert result["variant_lower_count"] == 4
+    assert result["variant_wins_everywhere"] is True
+    assert result["mean_delta"] == pytest.approx(-0.05)
