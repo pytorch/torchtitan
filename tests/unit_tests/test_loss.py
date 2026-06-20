@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from unittest import mock
 
 import spmd_types as spmd
 import torch
@@ -421,6 +422,146 @@ class _FakeDecoder(nn.Module):
         return self.output(tokens)
 
 
+class _FakeFSDPParamGroup:
+    __slots__ = (
+        "all_reduce_grads",
+        "post_forward_mesh_info",
+        "reduce_grads",
+        "reshard_after_backward",
+    )
+
+    def __init__(
+        self,
+        post_forward_mesh_info,
+        reshard_after_backward,
+        reduce_grads,
+        all_reduce_grads,
+    ):
+        self.post_forward_mesh_info = post_forward_mesh_info
+        self.reshard_after_backward = reshard_after_backward
+        self.reduce_grads = reduce_grads
+        self.all_reduce_grads = all_reduce_grads
+
+
+class _FakeFSDPState:
+    __slots__ = ("_auto_reshard_after_forward", "_fsdp_param_groups")
+
+    def __init__(self, auto_reshard_after_forward, fsdp_param_groups):
+        self._auto_reshard_after_forward = auto_reshard_after_forward
+        self._fsdp_param_groups = fsdp_param_groups
+
+
+class _FakeFSDPModule(nn.Module):
+    def __init__(
+        self,
+        post_forward_mesh_info,
+        reshard_after_backward,
+        reduce_grads,
+        all_reduce_grads,
+    ):
+        super().__init__()
+        self._state = _FakeFSDPState(
+            auto_reshard_after_forward=True,
+            fsdp_param_groups=[
+                _FakeFSDPParamGroup(
+                    post_forward_mesh_info,
+                    reshard_after_backward,
+                    reduce_grads,
+                    all_reduce_grads,
+                )
+            ],
+        )
+        self.reshard_calls = 0
+
+    def _get_fsdp_state(self):
+        return self._state
+
+    def _iter_fsdp_modules(self, recurse):
+        return self.modules() if recurse else (self,)
+
+    def set_reshard_after_forward(self, reshard_after_forward, recurse=True):
+        for module in self._iter_fsdp_modules(recurse):
+            if isinstance(module, _FakeFSDPModule):
+                state = module._get_fsdp_state()
+                state._auto_reshard_after_forward = False
+                for fsdp_param_group in state._fsdp_param_groups:
+                    fsdp_param_group.post_forward_mesh_info = (
+                        "reshard" if reshard_after_forward else None
+                    )
+
+    def set_reshard_after_backward(self, reshard_after_backward, *, recurse=True):
+        for module in self._iter_fsdp_modules(recurse):
+            if isinstance(module, _FakeFSDPModule):
+                state = module._get_fsdp_state()
+                for fsdp_param_group in state._fsdp_param_groups:
+                    fsdp_param_group.reshard_after_backward = reshard_after_backward
+
+    def set_requires_gradient_sync(self, requires_gradient_sync, *, recurse=True):
+        for module in self._iter_fsdp_modules(recurse):
+            if isinstance(module, _FakeFSDPModule):
+                state = module._get_fsdp_state()
+                for fsdp_param_group in state._fsdp_param_groups:
+                    fsdp_param_group.reduce_grads = requires_gradient_sync
+                    fsdp_param_group.all_reduce_grads = requires_gradient_sync
+
+    def reshard(self):
+        self.reshard_calls += 1
+
+
+class _FailingFakeFSDPLmHead(_FakeFSDPModule):
+    def __init__(self):
+        super().__init__(
+            post_forward_mesh_info="root-forward",
+            reshard_after_backward=True,
+            reduce_grads=True,
+            all_reduce_grads=False,
+        )
+        self.child = _FakeFSDPModule(
+            post_forward_mesh_info="child-forward",
+            reshard_after_backward=False,
+            reduce_grads=True,
+            all_reduce_grads=True,
+        )
+        self.saw_disabled_state = False
+
+    def forward(self, h_chunk):
+        root_param_group = self._state._fsdp_param_groups[0]
+        child_param_group = self.child._state._fsdp_param_groups[0]
+        self.saw_disabled_state = (
+            root_param_group.post_forward_mesh_info is None
+            and root_param_group.reshard_after_backward is False
+            and root_param_group.reduce_grads is False
+            and root_param_group.all_reduce_grads is False
+            and child_param_group.post_forward_mesh_info is None
+            and child_param_group.reshard_after_backward is False
+            and child_param_group.reduce_grads is True
+            and child_param_group.all_reduce_grads is True
+        )
+        raise RuntimeError("forced lm_head failure")
+
+
+def _snapshot_fake_fsdp(module):
+    result = []
+    for fsdp_module in module.modules():
+        if isinstance(fsdp_module, _FakeFSDPModule):
+            state = fsdp_module._get_fsdp_state()
+            result.append(
+                (
+                    state._auto_reshard_after_forward,
+                    [
+                        (
+                            fsdp_param_group.post_forward_mesh_info,
+                            fsdp_param_group.reshard_after_backward,
+                            fsdp_param_group.reduce_grads,
+                            fsdp_param_group.all_reduce_grads,
+                        )
+                        for fsdp_param_group in state._fsdp_param_groups
+                    ],
+                )
+            )
+    return result
+
+
 class TestChunkedCELoss(unittest.TestCase):
     def _make_model_and_loss(self, dim=32, vocab_size=64, num_chunks=4):
         """Create a fake Decoder and ChunkedCELoss for testing."""
@@ -429,6 +570,27 @@ class TestChunkedCELoss(unittest.TestCase):
         # Bypass isinstance(model, Decoder) check for unit testing
         chunked_loss.lm_head = model.output
         return model, chunked_loss
+
+    def test_fsdp_flags_are_restored_if_chunk_loop_raises(self):
+        """FSDP runtime flags must be restored when chunked loss fails."""
+        chunked_loss = ChunkedCELoss(ChunkedCELoss.Config(num_chunks=2))
+        lm_head = _FailingFakeFSDPLmHead()
+        chunked_loss.lm_head = lm_head
+        initial_state = _snapshot_fake_fsdp(lm_head)
+
+        hidden_states = torch.randn(2, 8, 32, requires_grad=True)
+        labels = torch.randint(0, 64, (2, 8))
+        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
+
+        with mock.patch(
+            "torch.distributed._composable.fsdp.FSDPModule", _FakeFSDPModule
+        ):
+            with self.assertRaisesRegex(RuntimeError, "forced lm_head failure"):
+                chunked_loss(hidden_states, labels, global_valid_tokens)
+
+        self.assertTrue(lm_head.saw_disabled_state)
+        self.assertEqual(_snapshot_fake_fsdp(lm_head), initial_state)
+        self.assertEqual(lm_head.reshard_calls, 1)
 
     def test_numerical_equivalence(self):
         """ChunkedCELoss must produce the same loss and gradients as the standard path."""

@@ -6,8 +6,9 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import cast, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -444,6 +445,66 @@ class GradAccumulator:
         return self._buffer
 
 
+@contextmanager
+def _temporary_lm_head_fsdp_no_sync(lm_head):
+    """Temporarily keep FSDP lm_head unsharded across chunked loss chunks.
+
+    FSDP exposes setters but not getters for these runtime flags, so restore
+    the exact param-group fields mutated by the setters below.
+    """
+    from torch.distributed._composable.fsdp import FSDPModule
+
+    assert isinstance(lm_head, FSDPModule)
+    fsdp_modules = [
+        m for m in cast(nn.Module, lm_head).modules() if isinstance(m, FSDPModule)
+    ]
+    fsdp_states = []
+    for module in fsdp_modules:
+        state = module._get_fsdp_state()
+        fsdp_states.append(
+            (
+                state,
+                state._auto_reshard_after_forward,
+                [
+                    (
+                        fsdp_param_group.post_forward_mesh_info,
+                        fsdp_param_group.reshard_after_backward,
+                    )
+                    for fsdp_param_group in state._fsdp_param_groups
+                ],
+            )
+        )
+
+    lm_head_state = lm_head._get_fsdp_state()
+    grad_sync_states = [
+        (fsdp_param_group.reduce_grads, fsdp_param_group.all_reduce_grads)
+        for fsdp_param_group in lm_head_state._fsdp_param_groups
+    ]
+
+    try:
+        lm_head.set_reshard_after_forward(False)
+        lm_head.set_reshard_after_backward(False)
+        lm_head.set_requires_gradient_sync(False, recurse=False)
+        yield
+    finally:
+        for state, auto_reshard_after_forward, param_group_states in fsdp_states:
+            state._auto_reshard_after_forward = auto_reshard_after_forward
+            for fsdp_param_group, (
+                post_forward_mesh_info,
+                reshard_after_backward,
+            ) in zip(state._fsdp_param_groups, param_group_states):
+                fsdp_param_group.post_forward_mesh_info = post_forward_mesh_info
+                fsdp_param_group.reshard_after_backward = reshard_after_backward
+
+        for fsdp_param_group, (reduce_grads, all_reduce_grads) in zip(
+            lm_head_state._fsdp_param_groups, grad_sync_states
+        ):
+            fsdp_param_group.reduce_grads = reduce_grads
+            fsdp_param_group.all_reduce_grads = all_reduce_grads
+
+        lm_head.reshard()
+
+
 class ChunkedCELoss(BaseLoss):
     """Chunked cross-entropy loss that splits the sequence dimension to reduce peak memory.
 
@@ -571,44 +632,35 @@ class ChunkedCELoss(BaseLoss):
 
             total_loss = hidden_states.new_zeros((), dtype=torch.float32)
 
-            # Disable FSDP reshard on lm_head to keep weight unsharded across
-            # all chunks, avoiding repeated all-gathers. Coalesce per-chunk
-            # grad sync into a single reduce-scatter at the last chunk by
-            # disabling gradient sync for chunks 0..N-2.
-            if fsdp_enabled:
-                lm_head.set_reshard_after_forward(False)
-                lm_head.set_reshard_after_backward(False)
-                lm_head.set_requires_gradient_sync(False, recurse=False)
+            fsdp_context = (
+                _temporary_lm_head_fsdp_no_sync(lm_head)
+                if fsdp_enabled
+                else nullcontext()
+            )
+            with fsdp_context:
+                last_idx = len(h_chunks) - 1
+                for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
+                    if fsdp_enabled and i == last_idx:
+                        lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
+                            True, recurse=False
+                        )
 
-            last_idx = len(h_chunks) - 1
-            for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
-                if fsdp_enabled and i == last_idx:
-                    lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
-                        True, recurse=False
+                    logits = lm_head(h_chunk)
+
+                    chunk_loss = self.fn(
+                        logits,
+                        label_chunk,
                     )
+                    if global_valid_tokens is not None:
+                        chunk_loss = chunk_loss / global_valid_tokens
+                    total_loss = total_loss + chunk_loss.detach()
 
-                logits = lm_head(h_chunk)
-
-                chunk_loss = self.fn(
-                    logits,
-                    label_chunk,
-                )
-                if global_valid_tokens is not None:
-                    chunk_loss = chunk_loss / global_valid_tokens
-                total_loss = total_loss + chunk_loss.detach()
-
-                if requires_grad:
-                    chunk_loss.backward()
-                    assert h_chunk.grad is not None
-                    assert grad_accumulator is not None
-                    grad_accumulator.add(h_chunk.grad)
-                    h_chunk.grad = None
-
-            if fsdp_enabled:
-                lm_head.set_reshard_after_forward(True)
-                lm_head.set_reshard_after_backward(True)
-                lm_head.set_requires_gradient_sync(True, recurse=False)
-                lm_head.reshard()
+                    if requires_grad:
+                        chunk_loss.backward()
+                        assert h_chunk.grad is not None
+                        assert grad_accumulator is not None
+                        grad_accumulator.add(h_chunk.grad)
+                        h_chunk.grad = None
             if not requires_grad:
                 return total_loss
 
