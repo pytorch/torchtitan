@@ -49,15 +49,14 @@ def _is_pp_only(variant: tuple[str, ...], ngpu: int) -> bool:
     )
 
 
-def _enable_spmd_backend(
-    t: OverrideDefinitions, backend: str, *, test_name_suffix: str = ""
-) -> OverrideDefinitions:
+def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
     """Inject ``--parallelism.spmd_backend`` into every variant.
 
     All features.py tests run under SPMD backends except PP-only variants
     (see ``_is_pp_only``) and CP + compile variants (upstream symint
     limitation); legacy non-full_dtensor coverage lives in models.py.
     """
+    test_name = t.test_name if backend == "full_dtensor" else f"{t.test_name}_{backend}"
     new_args = []
     for variant in t.override_args:
         prefix: list[str] = []
@@ -65,19 +64,16 @@ def _enable_spmd_backend(
         has_compile = any("compile.enable" in arg for arg in variant)
         if not _is_pp_only(variant, t.ngpu) and not (has_cp and has_compile):
             prefix.append(f"--parallelism.spmd_backend {backend}")
-        if test_name_suffix:
+        if test_name != t.test_name:
             variant = tuple(
-                arg.replace(
-                    f"{t.test_name}/",
-                    f"{t.test_name}{test_name_suffix}/",
-                )
+                arg.replace(f"{t.test_name}/", f"{test_name}/")
                 for arg in variant
             )
         new_args.append(tuple(prefix) + tuple(variant))
     return dataclasses.replace(
         t,
         override_args=tuple(new_args),
-        test_name=f"{t.test_name}{test_name_suffix}",
+        test_name=test_name,
     )
 
 
@@ -622,8 +618,5 @@ def build_features_test_list() -> list[OverrideDefinitions]:
 
     return [
         *[_enable_spmd_backend(t, "full_dtensor") for t in integration_tests_flavors],
-        *[
-            _enable_spmd_backend(t, "spmd_types", test_name_suffix="_spmd_types")
-            for t in integration_tests_flavors
-        ],
+        *[_enable_spmd_backend(t, "spmd_types") for t in integration_tests_flavors],
     ]
