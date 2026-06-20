@@ -134,6 +134,35 @@ The falsifiable claim -- "predicted loss within tolerance" -- holds.
 
 ![Loss-vs-compute extrapolation: fit on 60M-370M predicts held-out 760M](assets/extrapolation.png)
 
+## Code-variant result: QK-norm (Flavor-Q)
+
+A first demonstration of the ladder as a fitness function for an agent that edits
+code: a worktree-isolated architecture change is trained on the small rungs and
+judged by its loss-vs-compute curve against the *reused* baseline (no baseline
+retraining). The first variant adds per-head RMSNorm on Q and K (qwen3-style
+QK-norm) -- a ~2-line change to the attention config.
+
+`compare_variants` reports the C4 val-loss delta at each matched `(rung, xC)`
+(negative = QK-norm better):
+
+| rung | 0.5xC | 1xC |
+|---|---:|---:|
+| 60M  | -0.021 | -0.023 |
+| 100M | -0.028 | -- |
+| 190M | -0.025 | -0.019 |
+| 370M | -0.021 | -0.017 |
+
+QK-norm is lower at every measured point (mean **-0.022** nats); the improvement
+is uniform across rungs and horizons, so the ladder's verdict is **keep**. The
+fitted curves: baseline `alpha=0.108`, QK-norm `alpha=0.140` (slightly steeper),
+so the gap is roughly stable-to-widening with compute.
+
+Caveats: single-seed (the baseline is seed 0, so this is one comparison, not a
+noise band); the 100M @ 1xC validation point did not flush on that run; and there
+is no large-rung (760M+) transfer confirmation yet.
+
+![QK-norm vs baseline loss-vs-compute](assets/qknorm_vs_baseline.png)
+
 ## Reproducing
 
 ```bash
@@ -152,11 +181,9 @@ C4 streams from the HF hub, so training needs network egress configured.
 
 ## Status and next steps
 
-- **Done:** the ladder infrastructure, CPU unit tests, and the baseline
-  loss-vs-compute extrapolation above.
-- **In progress:** a Flavor-Q "agent edits code, ladder judges it" loop -- a
-  worktree-isolated architecture change (QK-norm) trained on the small rungs and
-  compared against the *reused* baseline curve via `compare_variants` /
-  `plot_loss_vs_compute`.
-- **Out of v1 scope:** the weight-decay hillclimb, multi-seed noise bands, the
-  1B/3B verification, and downstream task evals (see `DESIGN.md`).
+- **Done:** the ladder infrastructure, CPU unit tests, the baseline
+  loss-vs-compute extrapolation, and the QK-norm code-variant comparison above.
+- **Next:** multi-seed noise bands and a larger-rung (760M+) transfer check for
+  promising variants; the weight-decay hillclimb; downstream task evals.
+- **Out of v1 scope:** Slurm/Beaker launcher, `SkipStepAdamW`, and changes to
+  core `torchtitan.models.llama3` (see `DESIGN.md`).

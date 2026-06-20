@@ -267,11 +267,12 @@ checkpointing disabled (DCP cannot build a multi-rank save plan from a single
   predict a held-out larger rung, and verify by running it. The baseline run (fit
   60M-370M, held-out 760M) is reported in [`README.md`](README.md): the prediction
   holds to ~1%.
-- **Code-variant comparison (Flavor-Q, in progress).** `compare_variants` and
+- **Code-variant comparison (Flavor-Q, executed).** `compare_variants` and
   `plot_loss_vs_compute` support an "agent edits code, the ladder judges it" loop:
   a worktree-isolated architecture change is trained on the small rungs and its
   loss-vs-compute curve compared against the *reused* baseline (no retraining of
-  the baseline). First variant: QK-norm.
+  the baseline). The first variant (QK-norm) lowered the curve at every measured
+  point; the result and figure are in [`README.md`](README.md).
 - **Weight-decay hillclimb (designed, not run).** Sweep `weight_decay` on the
   small rungs to matched `xC`, select the argmin, and check transfer up-ladder via
   `sweep`/`compare`. Methodology: always compare at matched `xC`; use multiple
