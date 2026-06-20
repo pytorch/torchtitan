@@ -17,6 +17,7 @@ from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
+from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.tools.logging import logger
 
@@ -29,6 +30,8 @@ LossFunction: TypeAlias = Callable[..., torch.Tensor]
 def cross_entropy_loss(
     pred: torch.Tensor,
     labels: torch.Tensor,
+    *,
+    global_vocab_size: int | None = None,
 ) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
     if isinstance(pred, DTensor) and isinstance(labels, DTensor):
@@ -43,6 +46,13 @@ def cross_entropy_loss(
                 pred.device_mesh.get_group("tp"),
                 pred.shape[-1],
             )
+    elif get_spmd_backend() == "spmd_types" and spmd_mesh_size("tp") > 1:
+        return _LossParallelCrossEntropy.apply(
+            pred.flatten(0, 1).float(),
+            labels.flatten(0, 1),
+            current_spmd_mesh().get_group("tp"),  # pyrefly: ignore[missing-attribute]
+            global_vocab_size,
+        )
 
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
@@ -296,11 +306,13 @@ class CrossEntropyLoss(BaseLoss):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseLoss.Config):
-        pass
+        global_vocab_size: int | None = None
+        """Full vocabulary size, needed for spmd_types loss-parallel CE."""
 
     def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
         self.fn: LossFunction = cross_entropy_loss
         self._maybe_compile(compile_config)
+        self.global_vocab_size = config.global_vocab_size
 
     def __call__(
         self,
@@ -308,7 +320,7 @@ class CrossEntropyLoss(BaseLoss):
         labels: torch.Tensor,
         global_valid_tokens: float | None = None,
     ) -> torch.Tensor:
-        loss = self.fn(pred, labels)
+        loss = self.fn(pred, labels, global_vocab_size=self.global_vocab_size)
         if global_valid_tokens is not None:
             loss = loss / global_valid_tokens
         return loss
@@ -485,6 +497,8 @@ class ChunkedCELoss(BaseLoss):
     class Config(BaseLoss.Config):
         num_chunks: int = 8
         """Number of chunks to split the sequence into."""
+        global_vocab_size: int | None = None
+        """Full vocabulary size, needed for spmd_types loss-parallel CE."""
 
     def __init__(
         self,
@@ -496,6 +510,7 @@ class ChunkedCELoss(BaseLoss):
         self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
+        self.global_vocab_size = config.global_vocab_size
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Set the lm_head module. Must be called before the first __call__."""
@@ -570,6 +585,16 @@ class ChunkedCELoss(BaseLoss):
                 )
 
             total_loss = hidden_states.new_zeros((), dtype=torch.float32)
+            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+                # TODO(pianpwk): would be nice if mutate_type accepted multiple axes.
+                for axis_name, dst in {
+                    "dp": spmd.P,
+                    "cp": spmd.P,
+                    "tp": spmd.I,
+                }.items():
+                    total_loss = spmd.mutate_type(
+                        total_loss, axis_name, src=spmd.R, dst=dst
+                    )
 
             # Disable FSDP reshard on lm_head to keep weight unsharded across
             # all chunks, avoiding repeated all-gathers. Coalesce per-chunk
@@ -592,17 +617,23 @@ class ChunkedCELoss(BaseLoss):
                 chunk_loss = self.fn(
                     logits,
                     label_chunk,
+                    global_vocab_size=self.global_vocab_size,
                 )
                 if global_valid_tokens is not None:
                     chunk_loss = chunk_loss / global_valid_tokens
+                if (
+                    get_spmd_backend() == "spmd_types"
+                ):  # V -> P reinterpret, after exiting local region
+                    spmd.assert_type(chunk_loss, {"dp": spmd.P, "cp": spmd.P})
                 total_loss = total_loss + chunk_loss.detach()
 
                 if requires_grad:
-                    chunk_loss.backward()
-                    assert h_chunk.grad is not None
-                    assert grad_accumulator is not None
-                    grad_accumulator.add(h_chunk.grad)
-                    h_chunk.grad = None
+                    with spmd.no_typecheck():
+                        chunk_loss.backward()
+                        assert h_chunk.grad is not None
+                        assert grad_accumulator is not None
+                        grad_accumulator.add(h_chunk.grad)
+                        h_chunk.grad = None
 
             if fsdp_enabled:
                 lm_head.set_reshard_after_forward(True)
@@ -615,9 +646,10 @@ class ChunkedCELoss(BaseLoss):
             assert grad_accumulator is not None
             accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
-        return self._gradient_backprop(
-            hidden_states, accumulated_grad, total_loss, lm_head, fsdp_enabled
-        )
+        with spmd.no_typecheck():
+            return self._gradient_backprop(
+                hidden_states, accumulated_grad, total_loss, lm_head, fsdp_enabled
+            )
 
     @staticmethod
     def _gradient_backprop(
