@@ -81,16 +81,6 @@ def _enable_spmd_backend(
     )
 
 
-def _enable_full_dtensor(t: OverrideDefinitions) -> OverrideDefinitions:
-    """Inject ``--parallelism.spmd_backend full_dtensor`` into every variant."""
-    return _enable_spmd_backend(t, "full_dtensor")
-
-
-def _enable_spmd_types(t: OverrideDefinitions) -> OverrideDefinitions:
-    """Add a no-typechecking spmd_types variant for each feature test."""
-    return _enable_spmd_backend(t, "spmd_types", test_name_suffix="_spmd_types")
-
-
 # Use RUNNER_TEMP if defined (GitHub Actions variable), else fallback to old path
 runner_temp = os.getenv("RUNNER_TEMP")
 if runner_temp:
@@ -631,6 +621,9 @@ def build_features_test_list() -> list[OverrideDefinitions]:
     ]
 
     return [
-        *[_enable_full_dtensor(t) for t in integration_tests_flavors],
-        *[_enable_spmd_types(t) for t in integration_tests_flavors],
+        *[_enable_spmd_backend(t, "full_dtensor") for t in integration_tests_flavors],
+        *[
+            _enable_spmd_backend(t, "spmd_types", test_name_suffix="_spmd_types")
+            for t in integration_tests_flavors
+        ],
     ]
