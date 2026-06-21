@@ -15,6 +15,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import distribute_module, DTensor, Replicate
 from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed.tensor.placement_types import Placement
+from torch.utils._pytree import tree_map
 
 from torchtitan.config import CompileConfig, ParallelismConfig
 from torchtitan.tools.logging import logger
@@ -74,12 +75,19 @@ class NoParallel(ParallelStyle):
         output_layout: Placement,
         use_local_output: bool,
         mod: nn.Module,
-        outputs: DTensor,
+        outputs: Any,
         device_mesh: DeviceMesh,
-    ) -> torch.Tensor | DTensor:
-        if outputs.placements != (output_layout,):
-            outputs = outputs.redistribute(placements=(output_layout,), async_op=True)
-        return outputs.to_local() if use_local_output else outputs
+    ) -> Any:
+        # tree_map over outputs handles modules that return more than one value
+        # (e.g. the router gate); non-DTensor outputs pass through unchanged.
+        def _prepare(output: Any) -> Any:
+            if not isinstance(output, DTensor):
+                return output
+            if output.placements != (output_layout,):
+                output = output.redistribute(placements=(output_layout,), async_op=True)
+            return output.to_local() if use_local_output else output
+
+        return tree_map(_prepare, outputs)
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(
