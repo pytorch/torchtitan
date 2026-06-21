@@ -70,21 +70,32 @@ Everything is under `torchtitan/experiments/scaling_ladders/`:
   `Trainer.Config` and a plan dict. The same step-rounded period table drives
   *both* the scheduler's decay boundaries and the checkpoint steps, so the
   pre-decay checkpoint lands exactly where decay begins.
-- `ladder.py` -- `Llama3Ladder`, the source of truth and the agent-facing API:
-  `plan / trainer_config / run / status / metrics / sweep / compare`. Run
-  identity is `(rung, overrides, seed)`, hashed into a unique `run_dir`.
+- `ladder.py` -- `Llama3Ladder`, the source of truth for rungs/policy/compute and
+  the read-side API: `plan / trainer_config / status / metrics / sweep / compare`.
+  It does not launch anything. Run identity is `(rung, overrides, seed)`, hashed
+  into a unique `run_dir`.
+- `launcher.py` -- the **one** launcher. `run_jobs` bin-packs rung jobs onto a
+  node's GPUs (sequential = `run_rung`, N=1), each its own torchrun group; it
+  resolves the schedule once (`build_spec`), writes the plan + all build knobs to
+  `run_dir/launch_spec.json`, and spawns `torchrun ... train --config-file PATH`.
+  OOM -> shrink `local_batch_size`; transient C4 flake -> retry; complete -> skip.
 - `config_registry.py` / `train.py` / `cli.py` -- nullary default recipes for the
-  standard `run_train.sh` path, a torchrun entry point for API-driven runs, and a
-  thin CLI.
+  native `run_train.sh` path; a ~15-line torchrun worker (`--config-file` ->
+  `run_from_spec`); and a thin CLI over the ladder + launcher.
 - `metrics.py` -- reads TensorBoard scalars back into structured per-checkpoint
-  records (reusing the `scripts/loss_compare.py` approach).
-- `showcase.py` -- the experiment drivers: loss-vs-compute fit + extrapolation,
-  and `compare_variants` / `plot_loss_vs_compute` for code-variant A/Bs.
+  records and steady-state throughput (reusing the `scripts/loss_compare.py`
+  approach).
+- `showcase.py` / `run_perf_campaign.py` -- experiment drivers: loss-vs-compute
+  fit + extrapolation, `compare_variants` for code-variant A/Bs, and
+  `compare_perf` + a `--variant` campaign driver for iso-quality throughput A/Bs.
 
-A nuance worth calling out: throughput on these small models is grad-accumulation
-overhead bound at `local_batch_size=1`, so the per-rung `lbs` defaults are tuned
-for ~1 grad-accum step under 8-way data parallelism. This is purely a throughput
-choice -- the global batch, token budget, and loss curve are unchanged.
+A nuance worth calling out: a worker run never rebuilds config from CLI flags --
+the launcher resolves the schedule once and hands the worker one JSON spec, so a
+new knob (attention backend, fp8, reduce dtype) is one spec key rather than a flag
+threaded through five files, and the launched run cannot disagree with the plan.
+Per-rung parallelism and `local_batch_size` are derived from each rung's memory
+footprint (`auto_compute_spec`, with the launcher's OOM backoff as a safety net),
+which is throughput-only -- the global batch, token budget, and loss are unchanged.
 
 ## The Llama3 ladder family
 
@@ -163,6 +174,39 @@ is no large-rung (760M+) transfer confirmation yet.
 
 ![QK-norm vs baseline loss-vs-compute](assets/qknorm_vs_baseline.png)
 
+## Performance experiments (iso-quality throughput)
+
+The same ladder doubles as a fitness function for *performance* knobs: train a
+baseline and a variant arm, then check the variant is faster **without** moving
+the loss curve. `run_perf_campaign.py --variant V` drives this (short
+`--max-steps` runs suffice, since steady-state throughput is reached in ~10
+steps); `compare_perf` reports per-rung `throughput(tps)` speedup with a loss
+guardrail. Results on an 8x B200 node (`throughput(tps)` is per device):
+
+- **`flex_flash` attention -- ADOPTED.** Swapping `attn_backend` from the default
+  Triton `flex` to the FlexAttention FLASH kernel is faster at every rung at
+  numerically-identical loss (<=1e-4), and the speedup grows with model size:
+
+  | rung (gpus) | 60M (1) | 100M (1) | 190M (2) | 370M (2) | 760M (4) |
+  |---|---:|---:|---:|---:|---:|
+  | flex_flash / flex | 1.02x | 1.12x | 1.07x | 1.10x | **1.15x** |
+
+  (Requires flash_attn 2.8.4's CUTE kernels; the stock 2.8.3 is incompatible on
+  this Blackwell + source-built-torch environment.)
+
+- **bf16 gradient all-reduce -- modest win.** `reduce_dtype="bfloat16"` halves the
+  gradient-comm bytes; iso-quality. It helps only multi-GPU rungs (1.00x on 1-GPU,
+  which do no all-reduce), and only ~1.03-1.05x at 760M because the all-reduce is
+  largely overlapped with the backward pass.
+
+- **fp8 (rowwise) -- REJECTED for this ladder.** A net loss in every config at
+  760M (fp8-everywhere ~0.93x; fp8 on the MLP GEMMs only 0.915x): the GEMMs at
+  dim <=1536 are below the fp8 crossover on B200's fast bf16, and fp8 on `lm_head`
+  OOMs (it breaks `ChunkedCELoss`'s logit fusion). The `fp8_converter` wiring
+  remains for larger models, where the GEMMs are large enough to benefit.
+
+The "fast config" is therefore `flex_flash` (+ bf16-reduce on multi-GPU rungs).
+
 ## Reproducing
 
 ```bash
@@ -172,9 +216,11 @@ python -m torchtitan.experiments.scaling_ladders.cli dry-run-all
 # Default-recipe single rung via the standard launcher:
 NGPU=8 MODULE=scaling_ladders CONFIG=llama3_ladder_100m ./run_train.sh
 
-# The extrapolation experiment (trains the rungs, then fits + predicts):
-python -m torchtitan.experiments.scaling_ladders.showcase \
-    --fit-rungs 60M,100M,190M,370M --held-out-rungs 760M --chinchilla-multiple 1.0
+# A performance campaign (baseline vs variant, then analyze + plot):
+python -m torchtitan.experiments.scaling_ladders.run_perf_campaign \
+    --variant flex_flash --phase run
+python -m torchtitan.experiments.scaling_ladders.run_perf_campaign \
+    --variant flex_flash --phase analyze
 ```
 
 C4 streams from the HF hub, so training needs network egress configured.
@@ -182,7 +228,9 @@ C4 streams from the HF hub, so training needs network egress configured.
 ## Status and next steps
 
 - **Done:** the ladder infrastructure, CPU unit tests, the baseline
-  loss-vs-compute extrapolation, and the QK-norm code-variant comparison above.
+  loss-vs-compute extrapolation, the QK-norm code-variant comparison, and the
+  performance experiments above (`flex_flash` adopted; fp8 rejected at this scale).
+  Launching is a single config-file-driven scheduler (no per-knob argv plumbing).
 - **Next:** multi-seed noise bands and a larger-rung (760M+) transfer check for
   promising variants; the weight-decay hillclimb; downstream task evals.
 - **Out of v1 scope:** Slurm/Beaker launcher, `SkipStepAdamW`, and changes to

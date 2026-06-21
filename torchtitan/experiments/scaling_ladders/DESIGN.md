@@ -5,37 +5,49 @@ high-level overview, the OLMo-core <-> TorchTitan bridge table, the rung family,
 and the baseline extrapolation result, see [`README.md`](README.md). The policy
 math and WSD-S curve are a faithful port of OLMo-core (see **References**).
 
-## Architecture: Python-API-first
+## Architecture: resolve once, carry one spec
 
-`Llama3Ladder` is the single source of truth for rungs, policy, and compute
-spec. The config registry, the CLI, and the agent-facing API are all thin
-adapters over it, so the dry-run plan, the launched run, and the read-back
-metrics can never disagree.
+`Llama3Ladder` is the single source of truth for rungs, policy, compute spec, and
+build knobs (attention backend, gradient-reduce dtype, fp8, compile). The
+read/plan side runs in-process; the run side goes through **one** launcher that
+resolves the schedule once and hands the worker a config file. The dry-run plan,
+the launched run, and the read-back metrics therefore cannot disagree -- not
+because every layer re-derives the same thing, but because the resolved plan is
+computed once and carried.
 
 ```text
                        +------------------+
-                       |   Llama3Ladder   |   single source of truth
-                       |  rungs + policy  |
-                       |  + compute spec  |
+                       |   Llama3Ladder   |   config + resolution (no GPU)
+                       | rungs + policy + |   _resolve / trainer_config / run_dir
+                       | compute + knobs  |
                        +--------+---------+
-        plan/trainer_config     | run / status / metrics / sweep / compare
-        +-----------------------+------------------------+
-        |                       |                        |
-config_registry.py        train.py                    cli.py
-(nullary default recipes  (torchrun entry point:      (thin wrapper: spawns
- for run_train.sh)         per-rank ladder.run)         torchrun, JSON output)
+   plan/status/metrics/compare  |  build_spec
+        (in-process, on meta)   |
+        +-----------------------+---------------------------+
+        |                       |                           |
+config_registry.py        launcher.run_jobs             cli.py / run_perf_campaign
+(nullary recipes for      (resolve once -> spec.json    (thin adapters: build Jobs,
+ run_train.sh, native)     -> torchrun --config-file     emit JSON / drive campaigns)
+                            -> train.run_from_spec)
 ```
 
 - **Read/plan side is in-process, no distributed.** `plan`, `status`, `metrics`,
   and `compare` only build models on `meta` (for param counts) and read files.
-- **Run side is a `torchrun` subprocess.** `run` / `sweep --execute` spawns
-  `torchrun --nproc_per_node=<ws> -m ...scaling_ladders.train --rung 100M
-  --weight-decay 0.05`; `train.py` rebuilds the ladder per rank and calls
-  `ladder.run(rung, **overrides)` -> `config.build()` -> `trainer.train()`.
-- **Overrides go through the planner, not tyro.** `lr_multiplier`,
-  `weight_decay`, etc. change derived LR/steps, so `train.py` parses them from
-  argv and threads them into `ladder.run` so the policy re-runs cleanly.
-- **Default recipe** is reachable the standard way:
+- **Run side is one launcher.** `launcher.run_jobs(ladder, jobs, total_gpus=N)`
+  bin-packs jobs onto the node (sequential is just `run_rung`, i.e. one job at
+  `total_gpus = its width`); each job is its own `torchrun` group with a private
+  rendezvous and masked `CUDA_VISIBLE_DEVICES`. The launcher resolves the
+  schedule **once** (`build_spec`), writes the plan plus every build knob to
+  `{run_dir}/launch_spec.json`, and spawns `torchrun ... train --config-file
+  PATH`. The worker (`train.py` -> `run_from_spec`) loads that spec and builds the
+  `Trainer.Config` directly -- config never round-trips through argv, so a new
+  knob is one spec key, not a flag threaded through five files.
+- **Resilience lives in the one launcher.** OOM -> shrink `local_batch_size`
+  (schedule-invariant) and retry; a transient streaming failure (e.g. an HF C4
+  shard fetch) -> retry at the same batch; an already-complete run (final
+  checkpoint present) -> skip. All callers (cli `run`/`sweep --execute`,
+  `showcase.run_rungs`, `run_perf_campaign`) inherit this from the single path.
+- **Default recipe** is reachable the native way, with no launcher or plumbing:
   `MODULE=scaling_ladders CONFIG=llama3_ladder_100m ./run_train.sh`, where the
   config function is `return LADDER.trainer_config("100M")`.
 
@@ -67,22 +79,28 @@ The bridge is a set of thin adapters over these TorchTitan facts:
 
 ```text
 torchtitan/experiments/scaling_ladders/
-  README.md             # overview + baseline findings (+ assets/extrapolation.png)
+  README.md             # overview + baseline + perf findings (+ assets/*.png)
   DESIGN.md             # this document
   __init__.py           # exports Llama3Ladder, the default LADDER, model_registry
-  ladder.py             # Llama3Ladder: plan/run/status/metrics/sweep/compare
-  policy.py             # WSD-S / Chinchilla policy (formulas + periods)
+  ladder.py             # Llama3Ladder: config + resolution; plan/status/metrics/sweep/compare
+  policy.py             # WSD-S / Chinchilla policy (OVERRIDABLE_FIELDS + formulas + periods)
   planner.py            # policy + compute spec -> Trainer.Config and plan dict
-  model.py              # experiment-local Llama3 rungs + model_registry
+  model.py              # experiment-local Llama3 rungs + model_registry + fp8_converter
   lr_scheduler.py       # WSDSScheduler(LRSchedulersContainer)
   checkpoint.py         # LadderCheckpointManager(CheckpointManager), explicit steps
   validate.py           # LadderValidator(Validator), fires at fixed steps
-  metrics.py            # TensorBoard read-back -> per-checkpoint records
-  config_registry.py    # nullary default recipes + debug config
-  train.py              # torchrun entry point for API-driven / swept runs
-  cli.py                # thin CLI over Llama3Ladder
-  showcase.py           # extrapolation fit + variant comparison + plotting
+  metrics.py            # TensorBoard read-back -> per-checkpoint records + throughput
+  config_registry.py    # nullary default recipes + debug config (native run_train.sh)
+  launcher.py           # ONE scheduler: build_spec / run_jobs / run_rung / run_from_spec
+  train.py              # torchrun worker entry: --config-file -> run_from_spec
+  cli.py                # thin CLI over Llama3Ladder + launcher
+  showcase.py           # loss-vs-compute fit + variant/perf comparison + plotting
+  run_perf_campaign.py  # iso-quality throughput campaign driver (--variant flex_flash|fp8|...)
 ```
+
+`launcher.py` holds all launch concerns (one scheduler, one cmd builder, the
+OOM/transient backoff, the spec serialization); `ladder.py` no longer spawns
+anything. `train.py` is ~15 lines.
 
 Constructing the module-level `LADDER` stays cheap: rungs are built on `meta`
 lazily (on first `plan`/`trainer_config`), not at import time.
@@ -141,9 +159,12 @@ hidden dim, ladder_params)` in [`README.md`](README.md). Key choices:
 - `ladder_params = total_params - vocab_size * dim` (OLMo's
   `num_non_embedding_params`), built on `meta`; the planner audits it and warns if
   it drifts >5% from the nominal label (all rungs are within ~2%).
-- Per-rung `local_batch_size` defaults are tuned so gradient accumulation is ~1
-  under 8-way data parallelism (the small models are otherwise overhead-bound).
-  This is throughput-only -- the global batch, token budget, and loss are unchanged.
+- Per-rung parallelism and `local_batch_size` are derived from each rung's memory
+  footprint by `planner.auto_compute_spec` (no hardcoded table): a rung that fits
+  on one GPU runs as DDP replicas (cheap all-reduce), larger rungs shard (FSDP)
+  only as much as needed; `local_batch_size` aims for ~1 gradient-accumulation
+  step, and the launcher's OOM backoff trims it if that is optimistic. All of this
+  is throughput-only -- the global batch, token budget, and loss are unchanged.
 
 ## Planner (`planner.py`)
 
@@ -165,8 +186,10 @@ Both `plan()` (dict) and `trainer_config()` (`Trainer.Config`) call `resolve()`:
    the two-group AdamW optimizer; `WSDSScheduler.Config`;
    `LadderCheckpointManager.Config` (explicit steps, `keep_latest_k=0`);
    `LadderValidator.Config` (`fixed_steps` = post-decay steps);
-   `ChunkedCELoss`; TensorBoard on; `CompileConfig(enable=...)`; dataset +
-   `hf_assets_path`; `dump_folder` (the run's unique dir); `seed`.
+   `ChunkedCELoss`; TensorBoard on; `CompileConfig(enable=...)`;
+   `mixed_precision_reduce` (gradient all-reduce dtype) and optional fp8
+   converters; dataset + `hf_assets_path`; `dump_folder` (the run's unique dir);
+   `seed`.
 
 ## WSD-S scheduler (`lr_scheduler.py`)
 
@@ -213,43 +236,53 @@ the full curve against an inline copy of OLMo's `get_lr`.
 
 ## Agent-facing API and CLI
 
-`Llama3Ladder` methods (all accept the policy overrides `lr_multiplier`,
-`weight_decay`, `chinchilla_multiple`, `tokens_per_param`, `decay_fraction`, and
-`seed`):
+`Llama3Ladder` (config + resolution; methods accept the policy overrides in
+`policy.OVERRIDABLE_FIELDS` -- `lr_multiplier`, `weight_decay`,
+`chinchilla_multiple`, `tokens_per_param`, `decay_fraction` -- plus `seed`):
 
 ```text
 plan(rung, **overrides)            -> dict   # params, batch, steps, lr, beta2, ckpt_steps, ...
 trainer_config(rung, **overrides)  -> Trainer.Config
-run(rung, **overrides)             -> None   # config.build() -> train() -> close()
-run_dir(rung, **overrides)         -> str    # unique dump folder for this (rung, overrides, seed)
+run_dir(rung, **overrides)         -> str    # unique dump folder for (rung, overrides, seed)
 status(rung, **overrides)          -> dict   # ckpt/metric steps present, pct complete
 metrics(rung, **overrides)         -> dict   # per-checkpoint structured records
-sweep(rungs, grid, *, execute=False) -> list # emit (default) or run (rung, overrides) specs
+sweep(rungs, grid)                 -> list   # expand to (rung, overrides) specs (pure)
 compare(runs, metric, at_xC)       -> dict   # rank a sweep's runs at matched xC
 ```
 
+The ladder does not launch anything; that is `launcher.py`:
+
+```text
+launcher.run_jobs(ladder, jobs, total_gpus=N) -> list[result]  # the one scheduler
+launcher.run_rung(ladder, rung, overrides)    -> result        # sequential (N=1)
+launcher.build_spec(ladder, job)              -> dict          # resolve once -> spec
+launcher.Job(rung, gpus, overrides=, fp8=, attn_backend=, reduce_dtype=, base_dump_folder=)
+```
+
 Run identity is `(rung, overrides, seed)`; `run_dir` encodes it into a unique
-folder (e.g. `.../100M/wd0.05_seed1/`, `.../60M/cm1.0_seed0/`) so concurrent
-sweep points never collide and `status`/`metrics` resolve the same folder.
+folder (e.g. `.../100M/wd0.05_seed1/`, `.../60M/cm1.0_seed0/`) so concurrent jobs
+never collide and `status`/`metrics`/the persisted `launch_spec.json` resolve the
+same folder. Per-job build knobs (`fp8`, `attn_backend`, `reduce_dtype`,
+`base_dump_folder`) let one `run_jobs` call mix A/B arms on the node.
 
 `cli.py` read commands emit JSON; all accept the override flags:
 
 ```text
 dry-run --size 100M / dry-run-all
-run --size 100M [overrides]            # spawns torchrun ...train (blocks)
+run --size 100M [overrides]            # launcher.run_rung (blocks)
 launch-command --size 100M             # prints the run_train.sh command
 status / status-all, metrics / metrics-all
 sweep --sizes 60M,100M --grid weight_decay=0.05,0.1,0.2 [--execute]
 compare --runs <sweep-output.json> --metric val_loss --at 1xC   # NxC or N
 ```
 
-`train.py` also takes `--compile` (enables `torch.compile` for model + loss).
+`train.py` takes only `--config-file PATH`; all build options live in the spec.
 
 The hillclimbing loop an agent drives: `sweep` the `(rung, override, seed)`
-specs -> spawn `torchrun ...train` -> poll `status` to completion -> `metrics`
-parse the objective at matched `xC` -> `compare` argmin -> escalate the winner to
-the next rung. The unique `run_dir`, `status`, and JSON contract make this loop
-possible without screen-scraping or run collisions.
+specs -> `launcher.run_jobs` -> poll `status` to completion -> `metrics` parse
+the objective at matched `xC` -> `compare` argmin -> escalate the winner up the
+ladder. The unique `run_dir`, `status`, and JSON contract make this loop possible
+without screen-scraping or run collisions.
 
 ## Config registry (`config_registry.py`)
 
@@ -260,7 +293,7 @@ checkpointing disabled (DCP cannot build a multi-rank save plan from a single
 `fake_backend` process), for fake-backend and smoke tests. Real-rung recipes use
 `c4` and a Llama3 tokenizer/assets dir with TensorBoard on.
 
-## Experiments (`showcase.py`) and status
+## Experiments and status (`showcase.py`, `run_perf_campaign.py`)
 
 - **Loss-vs-compute extrapolation (executed).** Fit `L(C) = E + A*(C/c_ref)^-alpha`
   on the small rungs' post-decay points (each `cm=1` run yields 0.5xC and 1xC),
@@ -277,6 +310,31 @@ checkpointing disabled (DCP cannot build a multi-rank save plan from a single
   small rungs to matched `xC`, select the argmin, and check transfer up-ladder via
   `sweep`/`compare`. Methodology: always compare at matched `xC`; use multiple
   seeds and a noise threshold; record the resolved plan per run.
+
+### Performance experiments (`run_perf_campaign.py`)
+
+The same harness doubles as an iso-quality throughput A/B: the ladder is the
+fitness function, a perf knob is the variable. `run_perf_campaign --variant V`
+trains a baseline and a variant arm (per-rung GPU widths, both arms identical so
+each rung's pair shares a data-parallel degree), then `showcase.compare_perf`
+reads steady-state `throughput(tps)` from TensorBoard and checks the loss curves
+coincide. `metrics.read_run_throughput` and `showcase.plot_perf` support it.
+Findings on this B200 node (see [`README.md`](README.md) for plots):
+
+- **`flex_flash` attention -- adopted (~1.02-1.15x, grows with size, iso-quality).**
+  Switching `attn_backend` from the default Triton `flex` to the FlexAttention
+  FLASH kernel is faster at every rung at numerically-identical loss. (Needs
+  flash_attn 2.8.4's CUTE kernels; the stock 2.8.3 is incompatible.)
+- **bf16 gradient all-reduce -- modest win (~1.03-1.05x on multi-GPU rungs).**
+  `reduce_dtype="bfloat16"` halves the gradient-comm bytes; helps only where there
+  is an all-reduce (1.00x on 1-GPU rungs). Modest because the all-reduce is mostly
+  overlapped with the backward pass.
+- **fp8 (rowwise) -- rejected for this ladder (<=760M).** A net loss in every
+  config: fp8-everywhere ~0.93x, fp8 on the MLP GEMMs only 0.915x at 760M; the
+  GEMMs at dim <=1536 are below the fp8 crossover on B200's fast bf16, and fp8 on
+  `lm_head` OOMs (it breaks `ChunkedCELoss`'s logit fusion). `fp8_converter` and
+  the wiring remain for larger models. torchao's `auto_filter_small_kn` is
+  incompatible with the config-conversion path (it requires real `nn.Linear`).
 
 ## Tests
 
