@@ -176,15 +176,8 @@ def rl_grpo_qwen3_32b_search_r1() -> RLTrainer.Config:
             mixed_precision_param="bfloat16",
             mixed_precision_reduce="float32",
         ),
-        # Full activation checkpointing (vs the SelectiveAC default). The 32B
-        # forward (64 layers, seq_len 4096) plus the fp32 master + AdamW shards
-        # leaves no headroom for compute_logprobs, which upcasts the full
-        # [B*S, vocab=151936] logits to fp32 (~2.5 GB) and cross_entropy then
-        # allocates another ~2.5 GB log_softmax. Under SelectiveAC one trainer
-        # rank OOM'd there at step 1, bailed out of forward_backward, and never
-        # issued its loss/backward collectives -> the other ranks blocked on the
-        # next collective -> NCCL watchdog timeout (the "step-1 hang"). FullAC
-        # frees the recomputable layer activations, giving compute_logprobs room.
+        # Full activation checkpointing: SelectiveAC OOMs at 32B/FSDP=8,
+        # FullAC fits.
         ac_config=FullAC.Config(),
         # FSDP across all 8 GPUs on one host (dp_shard=8, TP=1) shards the fp32
         # master + AdamW 8-way so 32B fits one 80GB host; intra-host shard group
