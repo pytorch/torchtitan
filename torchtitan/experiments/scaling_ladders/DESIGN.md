@@ -192,7 +192,8 @@ Both `plan()` (dict) and `trainer_config()` (`Trainer.Config`) call `resolve()`:
    `LadderValidator.Config` (`fixed_steps` = post-decay steps);
    `ChunkedCELoss`; TensorBoard on; `CompileConfig(enable=...)`;
    `mixed_precision_reduce` (gradient all-reduce dtype) and optional fp8
-   converters; dataset + `hf_assets_path`; `dump_folder` (the run's unique dir);
+   converters (built from the spec's `fp8_recipe`); dataset + `hf_assets_path`;
+   `dump_folder` (the run's unique dir);
    `seed`.
 
 ## WSD-S scheduler (`lr_scheduler.py`)
@@ -260,14 +261,21 @@ The ladder does not launch anything; that is `launcher.py`:
 launcher.run_jobs(ladder, jobs, total_gpus=N) -> list[result]  # the one scheduler
 launcher.run_rung(ladder, rung, overrides)    -> result        # sequential (N=1)
 launcher.build_spec(ladder, job)              -> dict          # resolve once -> spec
-launcher.Job(rung, gpus, overrides=, fp8=, attn_backend=, reduce_dtype=, base_dump_folder=)
+launcher.Job(rung, gpus, overrides=, fp8=, fp8_recipe=, attn_backend=, reduce_dtype=, base_dump_folder=)
 ```
 
 Run identity is `(rung, overrides, seed)`; `run_dir` encodes it into a unique
 folder (e.g. `.../100M/wd0.05_seed1/`, `.../60M/cm1.0_seed0/`) so concurrent jobs
 never collide and `status`/`metrics`/the persisted `launch_spec.json` resolve the
-same folder. Per-job build knobs (`fp8`, `attn_backend`, `reduce_dtype`,
-`base_dump_folder`) let one `run_jobs` call mix A/B arms on the node.
+same folder. Per-job build knobs (`fp8`, `fp8_recipe`, `attn_backend`,
+`reduce_dtype`, `base_dump_folder`) let one `run_jobs` call mix A/B arms on the
+node. `fp8_recipe` (default `"rowwise"`, also `"tensorwise"` /
+`"rowwise_with_gw_hp"`) threads through with no flag plumbing: `build_spec` writes
+`spec["fp8_recipe"]` and `run_from_spec` passes it to
+`model.fp8_converter(recipe_name=...)`, which constructs the
+`Float8LinearConverter.Config`. torchao's `Float8LinearConfig.from_recipe_name`
+accepts all three; the converter's `recipe_name` Literal is only a type hint, not
+enforced at runtime, so `"tensorwise"` flows through cleanly.
 
 `cli.py` read commands emit JSON; all accept the override flags:
 
@@ -333,12 +341,44 @@ Findings on this B200 node (see [`README.md`](README.md) for plots):
   `reduce_dtype="bfloat16"` halves the gradient-comm bytes; helps only where there
   is an all-reduce (1.00x on 1-GPU rungs). Modest because the all-reduce is mostly
   overlapped with the backward pass.
-- **fp8 (rowwise) -- rejected for this ladder (<=760M).** A net loss in every
-  config: fp8-everywhere ~0.93x, fp8 on the MLP GEMMs only 0.915x at 760M; the
-  GEMMs at dim <=1536 are below the fp8 crossover on B200's fast bf16, and fp8 on
-  `lm_head` OOMs (it breaks `ChunkedCELoss`'s logit fusion). `fp8_converter` and
-  the wiring remain for larger models. torchao's `auto_filter_small_kn` is
-  incompatible with the config-conversion path (it requires real `nn.Linear`).
+- **fp8 (rowwise) -- no win at small rungs (<=760M), and flat even at 8B.** At
+  the small rungs it is a net loss in every config: fp8-everywhere ~0.93x, fp8 on
+  the MLP GEMMs only 0.915x at 760M; the GEMMs at dim <=1536 are below the fp8
+  crossover on B200's fast bf16, and fp8 on `lm_head` OOMs (it breaks
+  `ChunkedCELoss`'s logit fusion, so `lm_head` stays bf16). torchao's
+  `auto_filter_small_kn` is incompatible with the config-conversion path (it
+  requires real `nn.Linear`). At 8B (full node, 8-GPU FSDP, `chinchilla_multiple=1`,
+  flex attention, `compile=True`, 30 profiled steps) rowwise is still essentially
+  flat -- 13390 vs the 12699 tps/dev bf16 baseline, 1.05x -- the original "suspect"
+  result. The rank0 trace shows fp8 *does* engage (cutlass `float_e4m3`
+  `SM100_MMA_F8F6F4` GEMM plus `triton_red_fused__scaled_mm__...amax...` quant
+  kernels are present, not a silent no-op), but the GEMM+quant kernel time is
+  unchanged: bf16 73.6k ms -> rowwise 73.3k ms. The killer is rowwise's per-row
+  amax + power-of-2 scale (exp2/floor/log2/reciprocal) quantization at 7.1k ms,
+  which is about equal to the fp8 GEMM FLOP savings, so the two cancel to net zero.
+- **fp8 (tensorwise) -- the real 8B lever (1.247x, iso-quality).** Switching the
+  recipe from `rowwise` to `tensorwise` (one amax per tensor instead of per row)
+  drops the quant work to 0.55k ms (13x less), so the ~2x fp8 GEMM finally
+  surfaces: GEMM+quant kernel time falls bf16 73.6k -> tensorwise 50.4k ms (-31%),
+  total GPU kernel time 149k -> 115k ms (-23%), giving 15831 tps/dev, **1.247x**
+  (+24.7%) over bf16 at 8B. About 45% of the step is precision-invariant (comm
+  ~30% with the fp32 gradient reduce, attention ~12%), which caps the ceiling and
+  explains why the +24.7% lands below the GEMM's nominal 2x. The recipe is selected
+  by the per-job `fp8_recipe` knob (default `"rowwise"`; see below).
+  - **Quality validated by the ladder (iso-quality).** Phase B ran a tensorwise-fp8
+    quality ladder at 60M/100M/190M/370M (`chinchilla_multiple=1`) configured to
+    match the on-disk bf16 baseline exactly (`compile=False`, `world_size=8`,
+    `seed=0`, C4) so fp8 is the only variable. Per-rung validation-loss delta
+    (fp8 minus bf16): 60M +0.0000, 100M -0.0015, 190M +0.0033, 370M +0.0037 --
+    all within +-0.004 nats with no growth trend across 6x of N. Fitting
+    `L(N) = E + A*N^(-alpha)` on validation loss: bf16 (60M-760M, 5 pts)
+    `alpha=0.309, E=2.034` -> 8B prediction 2.4545; fp8 (60M-370M, 4 pts)
+    `alpha=0.311, E=2.051` -> 8B prediction 2.4642, an 8B extrapolated val-loss
+    delta of +0.0096 nats (negligible; iso-quality). Plot at
+    `outputs/scaling_ladders_fp8_tw_ladder/fp8_vs_bf16_quality.png`. So the net
+    finding is that scale (8B, dim=4096) plus the right recipe (tensorwise) is what
+    turns fp8 into a real, iso-quality win; the wiring already in place for larger
+    models is now load-bearing, not speculative.
 
 ## Tests
 

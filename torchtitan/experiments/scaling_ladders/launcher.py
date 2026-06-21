@@ -64,10 +64,11 @@ _TRANSIENT_MARKERS = (
 class Job:
     """One rung run on a fixed GPU count.
 
-    ``fp8`` / ``attn_backend`` / ``reduce_dtype`` / ``base_dump_folder`` make the
-    job self-describing so a single scheduler call can mix arms on the node;
-    unset fields fall back to the launcher ladder's. ``overrides`` are policy
-    overrides (see policy.OVERRIDABLE_FIELDS) plus optional ``seed``.
+    ``fp8`` / ``fp8_recipe`` / ``attn_backend`` / ``reduce_dtype`` /
+    ``base_dump_folder`` make the job self-describing so a single scheduler call
+    can mix arms on the node; unset fields fall back to the launcher ladder's.
+    ``overrides`` are policy overrides (see policy.OVERRIDABLE_FIELDS) plus an
+    optional ``seed``.
     """
 
     rung: str
@@ -75,6 +76,7 @@ class Job:
     overrides: dict = field(default_factory=dict)
     fp8: bool = False
     fp8_filter: tuple = ("lm_head", "attention")
+    fp8_recipe: str = "rowwise"
     attn_backend: str | None = None
     reduce_dtype: str | None = None
     base_dump_folder: str | None = None
@@ -143,6 +145,7 @@ def build_spec(
         "reduce_dtype": job.reduce_dtype or ladder.reduce_dtype,
         "fp8": job.fp8,
         "fp8_filter": list(job.fp8_filter),
+        "fp8_recipe": job.fp8_recipe,
         "max_steps": max_steps,
         "profile": profile,
     }
@@ -172,7 +175,13 @@ def run_from_spec(spec_path: str) -> None:
             f"{compute.world_size}."
         )
     converters = (
-        [fp8_converter(spec["fp8_filter"], model_compile_enabled=spec["compile"])]
+        [
+            fp8_converter(
+                spec["fp8_filter"],
+                model_compile_enabled=spec["compile"],
+                recipe_name=spec.get("fp8_recipe", "rowwise"),
+            )
+        ]
         if spec["fp8"]
         else None
     )

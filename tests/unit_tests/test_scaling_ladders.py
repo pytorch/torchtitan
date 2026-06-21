@@ -855,3 +855,17 @@ def test_build_spec_matches_direct_config():
     assert from_spec.training.local_batch_size == direct.training.local_batch_size
     assert from_spec.lr_scheduler.period_lengths == direct.lr_scheduler.period_lengths
     assert json.loads(json.dumps(spec)) == spec  # spec is JSON-serializable
+
+
+def test_build_spec_propagates_fp8_recipe():
+    """build_spec carries Job.fp8_recipe into the spec; default is rowwise."""
+    from torchtitan.experiments.scaling_ladders import launcher as L
+
+    tensorwise = L.build_spec(
+        LADDER, L.Job("60M", 8, fp8=True, fp8_recipe="tensorwise")
+    )
+    assert tensorwise["fp8"] is True
+    assert tensorwise["fp8_recipe"] == "tensorwise"
+    # An fp8 job with no recipe falls back to the rowwise default.
+    default = L.build_spec(LADDER, L.Job("60M", 8, fp8=True))
+    assert default["fp8_recipe"] == "rowwise"

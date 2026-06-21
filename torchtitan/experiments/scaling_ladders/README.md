@@ -199,13 +199,30 @@ guardrail. Results on an 8x B200 node (`throughput(tps)` is per device):
   which do no all-reduce), and only ~1.03-1.05x at 760M because the all-reduce is
   largely overlapped with the backward pass.
 
-- **fp8 (rowwise) -- REJECTED for this ladder.** A net loss in every config at
-  760M (fp8-everywhere ~0.93x; fp8 on the MLP GEMMs only 0.915x): the GEMMs at
-  dim <=1536 are below the fp8 crossover on B200's fast bf16, and fp8 on `lm_head`
-  OOMs (it breaks `ChunkedCELoss`'s logit fusion). The `fp8_converter` wiring
-  remains for larger models, where the GEMMs are large enough to benefit.
+- **fp8 -- recipe- and scale-dependent; tensorwise wins at 8B.** At the small
+  rungs (<=760M) fp8 is a net loss in every config (fp8-everywhere ~0.93x; MLP
+  GEMMs only 0.915x): the GEMMs at dim <=1536 are below the fp8 crossover on
+  B200's fast bf16, and fp8 on `lm_head` OOMs (it breaks `ChunkedCELoss`'s logit
+  fusion, so `lm_head` stays bf16). At 8B (dim=4096), however, the GEMMs are large
+  enough that the right recipe is a real win. On a full 8-GPU FSDP node the per-
+  device throughput is: bf16 `12699` tps (baseline), fp8 rowwise `13390` tps
+  (1.05x, marginal), fp8 tensorwise `15831` tps (**1.247x**). The rowwise result
+  is flat because its per-row amax + power-of-2 scale quantization costs about as
+  much as the fp8 GEMM FLOP savings, so the two cancel; tensorwise uses one amax
+  per tensor (~13x cheaper quant), so the ~2x fp8 GEMM finally surfaces. About 45%
+  of the step (fp32-reduce comm + attention) is precision-invariant and caps the
+  ceiling. The recipe is selectable via the `fp8_recipe` knob (`rowwise` default |
+  `tensorwise` | `rowwise_with_gw_hp`), threaded through the launch spec.
 
-The "fast config" is therefore `flex_flash` (+ bf16-reduce on multi-GPU rungs).
+  A tensorwise-fp8 *quality* ladder (60M/100M/190M/370M, `chinchilla_multiple=1`,
+  matched to the bf16 baseline) confirms it is iso-quality: per-rung val-loss
+  delta (fp8 minus bf16) is `+0.0000 / -0.0015 / +0.0033 / +0.0037`, all
+  within +-0.004 nats with no trend across 6x of N. Scaling-law fits
+  `L(N) = E + A * N^(-alpha)` give bf16 `alpha=0.309` and fp8 `alpha=0.311`, an 8B
+  extrapolated val-loss delta of **+0.0096 nats** -- negligible.
+
+The "fast config" is therefore `flex_flash` (+ bf16-reduce on multi-GPU rungs),
+plus `fp8_recipe=tensorwise` at 8B.
 
 ## Reproducing
 
@@ -229,7 +246,8 @@ C4 streams from the HF hub, so training needs network egress configured.
 
 - **Done:** the ladder infrastructure, CPU unit tests, the baseline
   loss-vs-compute extrapolation, the QK-norm code-variant comparison, and the
-  performance experiments above (`flex_flash` adopted; fp8 rejected at this scale).
+  performance experiments above (`flex_flash` adopted; tensorwise fp8 a 1.247x
+  iso-quality win at 8B, fp8 still rejected at the small rungs).
   Launching is a single config-file-driven scheduler (no per-knob argv plumbing).
 - **Next:** multi-seed noise bands and a larger-rung (760M+) transfer check for
   promising variants; the weight-decay hillclimb; downstream task evals.

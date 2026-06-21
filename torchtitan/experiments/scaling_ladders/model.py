@@ -242,18 +242,25 @@ def model_registry(
 
 
 def fp8_converter(
-    filter_fqns=("lm_head", "attention"), *, model_compile_enabled: bool
+    filter_fqns=("lm_head", "attention"),
+    *,
+    model_compile_enabled: bool,
+    recipe_name: str = "rowwise",
 ) -> ModelConfigConverter.Config:
-    """Rowwise Float8 converter for the MLP GEMMs (skips ``filter_fqns``).
+    """Float8 converter for the MLP GEMMs (skips ``filter_fqns``).
 
     Default skips lm_head (its fp8 breaks ChunkedCELoss's logit fusion -> OOM) and
     the small attention projections (too small to beat fp8's quant overhead).
+    ``recipe_name`` selects the torchao scaling recipe: ``rowwise`` (per-row amax,
+    numerically safest) or ``tensorwise`` (one amax per tensor, far less quant
+    overhead). At 8B the rowwise per-row amax/scale work cancels the fp8 GEMM win,
+    so ``tensorwise`` is the lever for a real throughput gain (see DESIGN.md).
     Single place to construct fp8 so both the worker and in-process callers agree.
     """
     from torchtitan.components.quantization.float8 import Float8LinearConverter
 
     return Float8LinearConverter.Config(
-        recipe_name="rowwise",
+        recipe_name=recipe_name,
         filter_fqns=list(filter_fqns),
         model_compile_enabled=model_compile_enabled,
     )
