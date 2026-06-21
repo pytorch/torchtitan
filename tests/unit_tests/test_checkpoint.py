@@ -9,6 +9,7 @@ import shutil
 import tempfile
 import time
 import unittest
+import uuid
 from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest import mock
@@ -17,6 +18,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
+from torchtitan.components import fs
 from torchtitan.components.checkpoint import CheckpointManager, MODEL, ModelWrapper
 
 
@@ -361,6 +363,55 @@ class TestCheckpointManager(unittest.TestCase):
         )
         self.assertEqual(manager._find_load_step(), 5)
         manager.close()
+
+    def test_dcp_save_load_memory_fs_checkpoint(self):
+        root = f"memory://torchtitan-checkpoint-test/{uuid.uuid4()}"
+        cfg = CheckpointManager.Config(
+            enable=True,
+            async_mode="disabled",
+            folder=root,
+            interval=1,
+            keep_latest_k=0,
+            last_save_model_only=False,
+            export_dtype="float32",
+            exclude_from_loading=[],
+            initial_load_path=None,
+            initial_load_model_only=False,
+        )
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=cfg,
+            sd_adapter=None,
+            base_folder="",
+        )
+
+        try:
+            checkpoint_id = manager._create_checkpoint_id(1)
+            expected = torch.tensor([3.0])
+            manager.dcp_save(
+                {"trainer": expected},
+                checkpoint_id=checkpoint_id,
+                async_mode=manager.async_mode,
+            )
+
+            actual = {"trainer": torch.zeros_like(expected)}
+            manager.dcp_load(
+                actual,
+                checkpoint_id=checkpoint_id,
+                from_hf=False,
+                from_quantized=False,
+            )
+
+            torch.testing.assert_close(actual["trainer"], expected)
+            self.assertTrue(manager._checkpoint_exists(checkpoint_id, from_hf=False))
+            self.assertEqual(manager._find_load_step(), 1)
+        finally:
+            manager.close()
+            fs.rm(root, recursive=True)
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torchtitan.components.checkpoint.dcp.save")
