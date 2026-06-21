@@ -374,8 +374,9 @@ Findings on this B200 node (see [`README.md`](README.md) for plots):
     `L(N) = E + A*N^(-alpha)` on validation loss: bf16 (60M-760M, 5 pts)
     `alpha=0.309, E=2.034` -> 8B prediction 2.4545; fp8 (60M-370M, 4 pts)
     `alpha=0.311, E=2.051` -> 8B prediction 2.4642, an 8B extrapolated val-loss
-    delta of +0.0096 nats (negligible; iso-quality). Plot at
-    `outputs/scaling_ladders_fp8_tw_ladder/fp8_vs_bf16_quality.png`. So the net
+    delta of +0.0096 nats (negligible; iso-quality). Plots:
+    `assets/fp8_8b_throughput.png` (throughput + GEMM/quant mechanism) and
+    `assets/fp8_quality_ladder.png` (the loss-vs-N fits). So the net
     finding is that scale (8B, dim=4096) plus the right recipe (tensorwise) is what
     turns fp8 into a real, iso-quality win; the wiring already in place for larger
     models is now load-bearing, not speculative.

@@ -194,10 +194,14 @@ guardrail. Results on an 8x B200 node (`throughput(tps)` is per device):
   (Requires flash_attn 2.8.4's CUTE kernels; the stock 2.8.3 is incompatible on
   this Blackwell + source-built-torch environment.)
 
+  ![flex_flash vs flex throughput per rung; iso-quality, speedup grows with model size](assets/flex_flash_throughput.png)
+
 - **bf16 gradient all-reduce -- modest win.** `reduce_dtype="bfloat16"` halves the
   gradient-comm bytes; iso-quality. It helps only multi-GPU rungs (1.00x on 1-GPU,
   which do no all-reduce), and only ~1.03-1.05x at 760M because the all-reduce is
   largely overlapped with the backward pass.
+
+  ![bf16 vs fp32 gradient all-reduce throughput per rung; iso-quality, modest gain](assets/bf16reduce_throughput.png)
 
 - **fp8 -- recipe- and scale-dependent; tensorwise wins at 8B.** At the small
   rungs (<=760M) fp8 is a net loss in every config (fp8-everywhere ~0.93x; MLP
@@ -214,12 +218,16 @@ guardrail. Results on an 8x B200 node (`throughput(tps)` is per device):
   ceiling. The recipe is selectable via the `fp8_recipe` knob (`rowwise` default |
   `tensorwise` | `rowwise_with_gw_hp`), threaded through the launch spec.
 
+  ![8B throughput (bf16 vs fp8 rowwise vs tensorwise) and the GEMM+quant kernel-time breakdown: rowwise quant cancels the GEMM win, tensorwise quant is ~13x cheaper](assets/fp8_8b_throughput.png)
+
   A tensorwise-fp8 *quality* ladder (60M/100M/190M/370M, `chinchilla_multiple=1`,
   matched to the bf16 baseline) confirms it is iso-quality: per-rung val-loss
   delta (fp8 minus bf16) is `+0.0000 / -0.0015 / +0.0033 / +0.0037`, all
   within +-0.004 nats with no trend across 6x of N. Scaling-law fits
   `L(N) = E + A * N^(-alpha)` give bf16 `alpha=0.309` and fp8 `alpha=0.311`, an 8B
   extrapolated val-loss delta of **+0.0096 nats** -- negligible.
+
+  ![fp8 tensorwise quality ladder vs bf16 baseline; scaling-law fits coincide and the 8B extrapolations are within 0.01 nats (iso-quality)](assets/fp8_quality_ladder.png)
 
 The "fast config" is therefore `flex_flash` (+ bf16-reduce on multi-GPU rungs),
 plus `fp8_recipe=tensorwise` at 8B.
