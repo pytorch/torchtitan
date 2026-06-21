@@ -14,6 +14,7 @@ recipe path, the plan/compare JSON contracts, and run-dir identity.
 
 import itertools
 import math
+from dataclasses import replace
 
 import pytest
 
@@ -498,6 +499,62 @@ def test_compare_variants_pairs_matched_points():
     assert result["mean_delta"] == pytest.approx(-0.05)
 
 
+def test_compare_perf_verdict(monkeypatch):
+    """compare_perf keeps a faster iso-quality variant, rejects a quality regression."""
+    from torchtitan.experiments.scaling_ladders import metrics as metrics_mod, showcase
+
+    params = {"60M": 61e6, "100M": 99e6}
+
+    class _Plan:
+        def __init__(self, N):
+            self.ladder_params = int(N)
+            self.steps = 100
+
+    def _make(loss_offset, root):
+        class _Ladder:
+            def _resolve(self, rung, overrides):
+                return _Plan(params[rung])
+
+            def metrics(self, rung, **overrides):
+                N = int(params[rung])
+                recs = [
+                    {
+                        "phase": "post-decay",
+                        "chinchilla_multiple": xc,
+                        "tokens": int(20 * N * xc),
+                        "val_loss": 3.0 + loss_offset,
+                    }
+                    for xc in (0.5, 1.0)
+                ]
+                return {"checkpoints": recs}
+
+            def run_dir(self, rung, **overrides):
+                return f"/tmp/{root}/{rung}"
+
+        return _Ladder()
+
+    # Variant runs (root contains "var") are 1.3x faster; baseline is 1.0x.
+    monkeypatch.setattr(
+        metrics_mod,
+        "read_run_throughput",
+        lambda run_dir, **kw: 1300.0 if "var" in run_dir else 1000.0,
+    )
+    base = _make(0.0, "base")
+
+    keep = showcase.compare_perf(
+        base, _make(0.0, "var"), ["60M", "100M"], quality_eps=0.02
+    )
+    assert keep["mean_speedup"] == pytest.approx(1.3)
+    assert keep["iso_quality"] is True and keep["verdict"] == "keep"
+
+    # Faster but +0.05 worse loss -> exceeds eps -> reject.
+    reject = showcase.compare_perf(
+        base, _make(0.05, "var2"), ["60M", "100M"], quality_eps=0.02
+    )
+    assert reject["mean_speedup"] == pytest.approx(1.3)
+    assert reject["iso_quality"] is False and reject["verdict"] == "reject"
+
+
 def test_auto_compute_spec_picks_ddp_for_small_fsdp_for_large():
     """auto_compute_spec: DDP when the model fits on one GPU, FSDP only when not."""
     from torchtitan.experiments.scaling_ladders.planner import auto_compute_spec
@@ -608,3 +665,193 @@ def test_run_rung_with_backoff_raises_on_non_oom(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match="failed"):
         ladder_mod.run_rung_with_backoff(_ProbeLadder(str(tmp_path)), "1B", {})
     assert calls == [8]  # no retry on a non-OOM error
+
+
+# ----------------------------------------------------------------------------
+# fp8 rowwise wiring
+# ----------------------------------------------------------------------------
+def test_fp8_converter_swaps_linears_skipping_lm_head():
+    """The rowwise Float8 converter swaps every transformer Linear but not lm_head."""
+    from torchtitan.components.quantization.float8 import (
+        Float8Linear,
+        Float8LinearConverter,
+    )
+    from torchtitan.experiments.scaling_ladders.model import model_registry
+
+    if Float8Linear is None:
+        pytest.skip("torchao not installed")
+
+    # emulate=True + compile off makes the converter constructible without SM89+.
+    converter = Float8LinearConverter.Config(
+        recipe_name="rowwise",
+        filter_fqns=["lm_head"],
+        emulate=True,
+        model_compile_enabled=False,
+    )
+    spec = model_registry("60M", converters=[converter])
+    fp8_fqns = [fqn for fqn, _, _, _ in spec.model.traverse(Float8Linear.Config)]
+    # 60M has 5 layers x 6 linears (wq, wkv, wo, w1, w2, w3) = 30 swapped.
+    assert len(fp8_fqns) == 30
+    assert not any("lm_head" in fqn for fqn in fp8_fqns)
+
+
+# ----------------------------------------------------------------------------
+# Concurrent multi-GPU launcher
+# ----------------------------------------------------------------------------
+class _FakePopen:
+    """Stand-in for subprocess.Popen that enforces the GPU-budget invariant.
+
+    Asserts on construction that its assigned GPUs are disjoint from all other
+    live jobs and that the node is never oversubscribed; completes after two
+    poll() calls so several jobs are concurrently live during the test.
+    """
+
+    in_use: set = set()
+    launches: list = []
+
+    def __init__(self, cmd, *, stdout=None, stderr=None, env=None):
+        self.cmd = cmd
+        self.devs = [int(x) for x in env["CUDA_VISIBLE_DEVICES"].split(",") if x != ""]
+        assert not (set(self.devs) & _FakePopen.in_use), "GPU double-allocated"
+        assert len(_FakePopen.in_use) + len(self.devs) <= 8, "node oversubscribed"
+        _FakePopen.in_use.update(self.devs)
+        _FakePopen.launches.append({"cmd": cmd, "devs": list(self.devs)})
+        self._stdout = stdout
+        self._polls = 0
+
+    def poll(self):
+        self._polls += 1
+        if self._polls >= 2:
+            _FakePopen.in_use.difference_update(self.devs)
+            return 0
+        return None
+
+
+def _cmd_lbs(cmd):
+    return int(cmd[cmd.index("--local-batch-size") + 1])
+
+
+def test_concurrent_packing_respects_gpu_budget(monkeypatch, tmp_path):
+    """Jobs whose GPU demand exceeds the node run in waves, never oversubscribed."""
+    from torchtitan.experiments.scaling_ladders import concurrent as conc
+    from torchtitan.experiments.scaling_ladders.ladder import default_ladder
+
+    _FakePopen.in_use, _FakePopen.launches = set(), []
+    monkeypatch.setattr(conc.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(conc, "_checkpoint_steps_present", lambda d: [])
+
+    ladder = replace(default_ladder(), base_dump_folder=str(tmp_path))
+    jobs = [
+        conc.Job("60M", 1),
+        conc.Job("100M", 1),
+        conc.Job("190M", 1),
+        conc.Job("370M", 2),
+        conc.Job("760M", 4),
+    ]  # total demand 9 > 8 -> must wave
+    results = conc.run_jobs_concurrent(ladder, jobs, total_gpus=8, poll_secs=0)
+    assert len(results) == 5
+    assert all(r["status"] == "done" for r in results)
+    assert len(_FakePopen.launches) == 5  # each launched exactly once
+    # The 760M (widest) launches first under largest-first packing.
+    assert len(_FakePopen.launches[0]["devs"]) == 4
+
+
+def test_concurrent_oom_requeues_smaller_lbs(monkeypatch, tmp_path):
+    """An OOM relaunches the same job at a smaller local_batch_size, same width."""
+    from torchtitan.experiments.scaling_ladders import concurrent as conc
+    from torchtitan.experiments.scaling_ladders.ladder import default_ladder
+
+    _FakePopen.in_use, _FakePopen.launches = set(), []
+
+    class _OOMOncePopen(_FakePopen):
+        launched: int = 0
+
+        def __init__(self, cmd, *, stdout=None, stderr=None, env=None):
+            super().__init__(cmd, stdout=stdout, stderr=stderr, env=env)
+            self._oom = _OOMOncePopen.launched == 0  # only the first attempt OOMs
+            _OOMOncePopen.launched += 1
+            if self._oom and stdout is not None:
+                stdout.write("torch.OutOfMemoryError: CUDA out of memory")
+                stdout.flush()
+
+        def poll(self):
+            self._polls += 1
+            if self._polls >= 2:
+                _FakePopen.in_use.difference_update(self.devs)
+                return 1 if self._oom else 0
+            return None
+
+    monkeypatch.setattr(conc.subprocess, "Popen", _OOMOncePopen)
+    monkeypatch.setattr(conc, "_checkpoint_steps_present", lambda d: [])
+
+    ladder = replace(default_ladder(), base_dump_folder=str(tmp_path))
+    results = conc.run_jobs_concurrent(
+        ladder, [conc.Job("370M", 2)], total_gpus=8, poll_secs=0
+    )
+    assert results[0]["status"] == "done"
+    lbs_seq = [_cmd_lbs(l["cmd"]) for l in _FakePopen.launches]
+    assert len(lbs_seq) == 2 and lbs_seq[1] < lbs_seq[0]  # shrank then succeeded
+
+
+def test_concurrent_retries_transient_failure(monkeypatch, tmp_path):
+    """A transient (e.g. C4 fetch) failure is retried at the same lbs, then succeeds."""
+    from torchtitan.experiments.scaling_ladders import concurrent as conc
+    from torchtitan.experiments.scaling_ladders.ladder import default_ladder
+
+    _FakePopen.in_use, _FakePopen.launches = set(), []
+
+    class _FlakeOncePopen(_FakePopen):
+        launched: int = 0
+
+        def __init__(self, cmd, *, stdout=None, stderr=None, env=None):
+            super().__init__(cmd, stdout=stdout, stderr=stderr, env=env)
+            self._flake = _FlakeOncePopen.launched == 0
+            _FlakeOncePopen.launched += 1
+            if self._flake and stdout is not None:
+                stdout.write("FileNotFoundError: gzip://c4-train.00000 ...")
+                stdout.flush()
+
+        def poll(self):
+            self._polls += 1
+            if self._polls >= 2:
+                _FakePopen.in_use.difference_update(self.devs)
+                return 1 if self._flake else 0
+            return None
+
+    monkeypatch.setattr(conc.subprocess, "Popen", _FlakeOncePopen)
+    monkeypatch.setattr(conc, "_checkpoint_steps_present", lambda d: [])
+
+    ladder = replace(default_ladder(), base_dump_folder=str(tmp_path))
+    results = conc.run_jobs_concurrent(
+        ladder, [conc.Job("370M", 2)], total_gpus=8, poll_secs=0
+    )
+    assert results[0]["status"] == "done"
+    lbs_seq = [_cmd_lbs(launch["cmd"]) for launch in _FakePopen.launches]
+    # Retried once at the SAME lbs (transient retry does not shrink the batch).
+    assert len(lbs_seq) == 2 and lbs_seq[0] == lbs_seq[1]
+
+
+def test_concurrent_mixes_bf16_and_fp8_arms(monkeypatch, tmp_path):
+    """A single call packs bf16 and fp8 jobs, each with its own flags/output root."""
+    from torchtitan.experiments.scaling_ladders import concurrent as conc
+    from torchtitan.experiments.scaling_ladders.ladder import default_ladder
+
+    _FakePopen.in_use, _FakePopen.launches = set(), []
+    monkeypatch.setattr(conc.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(conc, "_checkpoint_steps_present", lambda d: [])
+
+    ladder = replace(default_ladder(), base_dump_folder=str(tmp_path), compile=True)
+    jobs = [
+        conc.Job("60M", 1, base_dump_folder=str(tmp_path / "bf16")),
+        conc.Job("60M", 1, fp8=True, base_dump_folder=str(tmp_path / "fp8")),
+    ]
+    results = conc.run_jobs_concurrent(ladder, jobs, total_gpus=8, poll_secs=0)
+    assert all(r["status"] == "done" for r in results)
+    by_arm = {
+        ("fp8" if "--fp8" in l["cmd"] else "bf16"): l["cmd"]
+        for l in _FakePopen.launches
+    }
+    assert set(by_arm) == {"bf16", "fp8"}
+    assert str(tmp_path / "bf16") in by_arm["bf16"]
+    assert str(tmp_path / "fp8") in by_arm["fp8"]
+    assert "--compile" in by_arm["fp8"]  # fp8 needs compile

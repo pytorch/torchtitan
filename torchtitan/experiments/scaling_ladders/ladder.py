@@ -15,7 +15,7 @@ subprocess whose per-rank body is ``config.build() -> train() -> close()``.
 
 import itertools
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from torchtitan.config.configs import ParallelismConfig
 from torchtitan.tools.logging import logger
@@ -68,6 +68,9 @@ class Llama3Ladder:
     log_freq: int = 10
     attn_backend: str = "flex"
     compile: bool = False
+    # Model-config converters (e.g. Float8LinearConverter.Config) applied at build
+    # time; loss-affecting (fp8 quantization) but checkpoint- and schedule-neutral.
+    converters: list = field(default_factory=list)
 
     def rungs(self) -> list[str]:
         return list(self.compute_specs)
@@ -125,12 +128,24 @@ class Llama3Ladder:
             log_freq=self.log_freq,
             attn_backend=self.attn_backend,
             compile_enabled=self.compile,
+            converters=self.converters or None,
         )
 
     def run(
-        self, rung: str, *, local_batch_size: int | None = None, **overrides
+        self,
+        rung: str,
+        *,
+        local_batch_size: int | None = None,
+        max_steps: int | None = None,
+        profile: bool = False,
+        **overrides,
     ) -> None:
-        """Per-rank run body. Asserts NGPU matches the rung's compute spec."""
+        """Per-rank run body. Asserts NGPU matches the rung's compute spec.
+
+        ``max_steps`` truncates training for smoke tests only; it does not write
+        the final checkpoint, so the run stays marked incomplete. ``profile``
+        turns on the Kineto profiler (chrome trace under dump_folder/profiling).
+        """
         compute = self.compute_for(rung)
         world_size = int(os.environ.get("WORLD_SIZE", compute.world_size))
         if world_size != compute.world_size:
@@ -138,9 +153,15 @@ class Llama3Ladder:
                 f"Launched with world_size {world_size} but rung {rung} "
                 f"compute_spec.world_size is {compute.world_size}."
             )
-        trainer = self.trainer_config(
-            rung, local_batch_size=local_batch_size, **overrides
-        ).build()
+        cfg = self.trainer_config(rung, local_batch_size=local_batch_size, **overrides)
+        if max_steps is not None:
+            cfg.training.steps = min(cfg.training.steps, max_steps)
+        if profile:
+            cfg.profiler.enable_profiling = True
+            cfg.profiler.profile_freq = 10
+            cfg.profiler.profiler_warmup = 3
+            cfg.profiler.profiler_active = 2
+        trainer = cfg.build()
         try:
             trainer.train()
         finally:

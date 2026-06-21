@@ -31,6 +31,8 @@ from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.llama3.model import Llama3Model, Llama3TransformerBlock
 from torchtitan.models.llama3.parallelize import parallelize_llama
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
+from torchtitan.models.utils import validate_converter_order
+from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 # Per-layer init dicts reproduced from llama3 (module-private there). Kept local
@@ -213,9 +215,21 @@ def _build_rung_config(shape: RungShape, attn_backend: str) -> Llama3Model.Confi
     )
 
 
-def model_registry(rung: str, attn_backend: str = "flex") -> ModelSpec:
-    """Build the ``ModelSpec`` for a ladder rung, mirroring llama3's registry."""
+def model_registry(
+    rung: str,
+    attn_backend: str = "flex",
+    converters: list[ModelConfigConverter.Config] | None = None,
+) -> ModelSpec:
+    """Build the ``ModelSpec`` for a ladder rung, mirroring llama3's registry.
+
+    ``converters`` (e.g. ``Float8LinearConverter.Config``) mutate the model config
+    tree in place before build -- same passthrough as ``llama3.model_registry``.
+    """
     config = _build_rung_config(RUNGS[rung], attn_backend)
+    if converters is not None:
+        validate_converter_order(converters)
+        for converter in converters:
+            converter.build().convert(config)
     return ModelSpec(
         name="scaling_ladders/llama3",
         flavor=rung,

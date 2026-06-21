@@ -199,19 +199,10 @@ def compare_variants(
     }
 
 
-def plot_loss_vs_compute(results: dict, path: str) -> str:
-    """Overlay one or more ``{label: extrapolate-result}`` loss-vs-compute curves.
-
-    Each value is a dict returned by ``extrapolate`` (fit + fit_points, and
-    optionally validations, which are drawn as stars). Saves a PNG and returns
-    the path; matplotlib is imported lazily.
-    """
-    import matplotlib
-
-    matplotlib.use("Agg")
+def _draw_curves(ax, results: dict) -> None:
+    """Draw one or more loss-vs-compute curves (fit line + points + val stars)."""
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(9, 6))
     palette = plt.cm.tab10(np.linspace(0, 1, 10))
     all_compute = [p["compute"] for r in results.values() for p in r["fit_points"]]
     xs = np.logspace(
@@ -249,9 +240,116 @@ def plot_loss_vs_compute(results: dict, path: str) -> str:
     ax.set_xscale("log")
     ax.set_xlabel("training compute  C = 6 N D  (FLOPs)")
     ax.set_ylabel("C4 validation loss")
-    ax.set_title("Llama3 scaling ladder: loss-vs-compute")
     ax.grid(True, which="both", alpha=0.3)
     ax.legend(fontsize=9)
+
+
+def plot_loss_vs_compute(results: dict, path: str) -> str:
+    """Overlay one or more ``{label: extrapolate-result}`` loss-vs-compute curves.
+
+    Each value is a dict returned by ``extrapolate``. Saves a PNG and returns the
+    path; matplotlib is imported lazily.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+    _draw_curves(ax, results)
+    ax.set_title("Llama3 scaling ladder: loss-vs-compute")
+    fig.tight_layout()
+    fig.savefig(path, dpi=140)
+    return path
+
+
+def compare_perf(
+    baseline,
+    variant,
+    rungs: list[str],
+    *,
+    at_xCs: tuple[float, ...] = (0.5, 1.0),
+    metric: str = "val_loss",
+    overrides: dict | None = None,
+    quality_eps: float = 0.02,
+) -> dict:
+    """Performance comparison: throughput speedup at iso-quality.
+
+    Reuses ``compare_variants`` for the loss-curve delta and reads per-rung
+    steady-state throughput from TensorBoard. The verdict is "keep" only if the
+    variant is faster on average AND its loss never regresses past ``quality_eps``
+    (nats) at any matched point -- i.e. the speedup did not cost quality.
+    """
+    from .metrics import read_run_throughput
+
+    overrides = overrides or {"chinchilla_multiple": 1.0}
+    quality = compare_variants(
+        baseline, variant, rungs, at_xCs=at_xCs, metric=metric, overrides=overrides
+    )
+    perf = []
+    for rung in rungs:
+        base_tps = read_run_throughput(baseline.run_dir(rung, **overrides))
+        var_tps = read_run_throughput(variant.run_dir(rung, **overrides))
+        if base_tps and var_tps:
+            perf.append(
+                {
+                    "rung": rung,
+                    "baseline_tps": base_tps,
+                    "variant_tps": var_tps,
+                    "speedup": var_tps / base_tps,
+                }
+            )
+    speedups = [p["speedup"] for p in perf]
+    # delta = variant - baseline; positive means the variant is worse.
+    worst_regression = max((p["delta"] for p in quality["points"]), default=None)
+    mean_speedup = sum(speedups) / len(speedups) if speedups else None
+    iso_quality = worst_regression is not None and worst_regression <= quality_eps
+    verdict = (
+        "keep" if (mean_speedup and mean_speedup > 1.0 and iso_quality) else "reject"
+    )
+    return {
+        "quality": quality,
+        "perf": perf,
+        "mean_speedup": mean_speedup,
+        "worst_quality_regression": worst_regression,
+        "quality_eps": quality_eps,
+        "iso_quality": iso_quality,
+        "verdict": verdict,
+    }
+
+
+def plot_perf(results: dict, perf: list[dict], path: str) -> str:
+    """Two-panel perf figure: loss-vs-compute guardrail + per-rung throughput.
+
+    ``results`` is ``{label: extrapolate-result}`` (left panel, quality);
+    ``perf`` is the ``compare_perf`` per-rung list (right panel, throughput).
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, (ax_quality, ax_speed) = plt.subplots(1, 2, figsize=(15, 6))
+    _draw_curves(ax_quality, results)
+    ax_quality.set_title("Quality guardrail: loss-vs-compute (curves should coincide)")
+
+    rungs = [p["rung"] for p in perf]
+    x = np.arange(len(rungs))
+    ax_speed.bar(x - 0.2, [p["baseline_tps"] for p in perf], 0.4, label="baseline")
+    ax_speed.bar(x + 0.2, [p["variant_tps"] for p in perf], 0.4, label="variant")
+    for i, p in enumerate(perf):
+        ax_speed.annotate(
+            f"{p['speedup']:.2f}x",
+            (i, max(p["baseline_tps"], p["variant_tps"])),
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+    ax_speed.set_xticks(x)
+    ax_speed.set_xticklabels(rungs)
+    ax_speed.set_ylabel("throughput (tokens/s)")
+    ax_speed.set_title("Throughput per rung (higher is better)")
+    ax_speed.legend(fontsize=9)
     fig.tight_layout()
     fig.savefig(path, dpi=140)
     return path

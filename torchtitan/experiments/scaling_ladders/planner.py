@@ -269,6 +269,7 @@ def to_trainer_config(
     log_freq: int,
     attn_backend: str,
     compile_enabled: bool = False,
+    converters: list | None = None,
 ) -> Trainer.Config:
     optimizer = OptimizersContainer.Config(
         param_groups=[
@@ -295,7 +296,9 @@ def to_trainer_config(
         ]
     )
     return Trainer.Config(
-        model_spec=model_registry(plan.rung, attn_backend=attn_backend),
+        model_spec=model_registry(
+            plan.rung, attn_backend=attn_backend, converters=converters
+        ),
         loss=ChunkedCELoss.Config(),
         hf_assets_path=hf_assets_path,
         dump_folder=dump_folder,

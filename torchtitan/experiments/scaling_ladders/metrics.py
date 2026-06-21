@@ -18,12 +18,14 @@ arbitrary rounded checkpoint steps rarely coincide with them.
 """
 
 import os
+import statistics
 
 from .planner import ResolvedPlan
 
 _TRAIN_LOSS_TAG = "loss_metrics/global_avg_loss"
 _GRAD_NORM_TAG = "grad_norm"
 _VAL_LOSS_TAG = "validation_metrics/loss"
+_THROUGHPUT_TAG = "throughput(tps)"
 
 
 def _find_event_dir(run_dir: str, save_tb_folder: str) -> str | None:
@@ -86,3 +88,18 @@ def read_run_metrics(
         "ladder_params": plan.ladder_params,
         "checkpoints": checkpoints,
     }
+
+
+def read_run_throughput(run_dir: str, *, save_tb_folder: str = "tb") -> float | None:
+    """Median steady-state throughput (tokens/sec) for a run, from TensorBoard.
+
+    The first logged step includes torch.compile + startup warmup, so it is
+    dropped; the median over the remaining logged steps is robust to stragglers.
+    Returns None if no throughput scalars are present.
+    """
+    event_dir = _find_event_dir(run_dir, save_tb_folder)
+    if event_dir is None:
+        return None
+    scalars = _read_scalars(event_dir, _THROUGHPUT_TAG)
+    steady = [v for step, v in scalars.items() if step > 1]
+    return statistics.median(steady) if steady else None
