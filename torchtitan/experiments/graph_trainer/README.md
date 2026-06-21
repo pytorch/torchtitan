@@ -108,8 +108,7 @@ MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel_ep 
   --compile.mode aot_fx_trace \
   --compile.enable_autoparallel \
   --parallelism.data_parallel_shard_degree 4 \
-  --parallelism.expert_parallel_degree 2 \
-  --parallelism.disable_loss_parallel
+  --parallelism.expert_parallel_degree 2
 ```
 
 AutoParallel is only responsible for producing the placed model. After that,
@@ -169,8 +168,7 @@ python -m torchtitan.experiments.graph_trainer.precompile_main \
     --compile.precompile_artifact_dir /tmp/dsv3_precompile_artifacts \
     --parallelism.data_parallel_shard_degree 4 \
     --parallelism.tensor_parallel_degree 2 \
-    --parallelism.expert_parallel_degree 4 \
-    --parallelism.expert_tensor_parallel_degree 1
+    --parallelism.expert_parallel_degree 4
 
 # Step 2: load and train with torchrun (uses all GPUs)
 NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel \
@@ -178,8 +176,7 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmo
     --compile.precompile_artifact_dir /tmp/dsv3_precompile_artifacts \
     --parallelism.data_parallel_shard_degree 4 \
     --parallelism.tensor_parallel_degree 2 \
-    --parallelism.expert_parallel_degree 4 \
-    --parallelism.expert_tensor_parallel_degree 1
+    --parallelism.expert_parallel_degree 4
 ```
 
 <details>

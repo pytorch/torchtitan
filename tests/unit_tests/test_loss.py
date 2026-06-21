@@ -6,12 +6,27 @@
 
 import unittest
 
+import spmd_types as spmd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
+from spmd_types._checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import DTensor, Partial, Replicate
+from torch.distributed.tensor import (
+    distribute_tensor,
+    DTensor,
+    Partial,
+    Replicate,
+    Shard,
+)
+from torch.distributed.tensor.parallel import loss_parallel
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 from torchtitan.components.loss import (
+    _LossParallelCrossEntropy,
     ChunkedCELoss,
     cross_entropy_loss,
     GradAccumulator,
@@ -260,6 +275,135 @@ class TestGradAccumulatorDTensor(unittest.TestCase):
             acc.add(self._make_chunk((B, L // num_chunks, D), Replicate()))
 
 
+class TestLossParallelCrossEntropy(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 4
+
+    @with_comms
+    def test_loss_parallel_cross_entropy_parity(self):
+        """
+        Tests loss-parallel cross-entropy loss bitwise parity, with torch.distributed.tensor.parallel.loss_parallel().
+        Tests even/uneven vocab sharding, TP, DP+TP, and IGNORE_INDEX labels.
+
+        Runs _LossParallelCrossEntropy under typing checking: logits S(2)@TP, labels I@TP -> I@TP.
+        """
+        B, L = 4, 32
+        mesh_configs = (
+            ((4,), ("tp",), (Shard(2),), (Replicate(),)),
+            ((2, 2), ("dp", "tp"), (Shard(0), Shard(2)), (Shard(0), Replicate())),
+        )
+        cases = ((32000, 109, False), (32003, 211, False), (32000, 307, True))
+
+        for mesh_shape, axis_names, logits_placements, label_placements in mesh_configs:
+            mesh = init_device_mesh(
+                self.device_type, mesh_shape, mesh_dim_names=axis_names
+            )
+            tp_group = mesh.get_group("tp")
+            for vocab_size, seed, ignore in cases:
+                with self.subTest(
+                    mesh_shape=mesh_shape, vocab_size=vocab_size, ignore=ignore
+                ):
+                    # Build global test data once, then let DTensor derive the
+                    # exact local shards for TP-only and DP+TP placements.
+                    generator = torch.Generator(device=self.device_type).manual_seed(
+                        seed
+                    )
+                    global_logits = torch.randn(
+                        B,
+                        L,
+                        vocab_size,
+                        device=self.device_type,
+                        generator=generator,
+                    )
+                    global_labels = torch.randint(
+                        0,
+                        vocab_size,
+                        (B, L),
+                        device=self.device_type,
+                        dtype=torch.long,
+                        generator=generator,
+                    )
+                    if ignore:
+                        mask = torch.rand(
+                            B,
+                            L,
+                            device=self.device_type,
+                            generator=generator,
+                        )
+                        global_labels[mask < 0.3] = IGNORE_INDEX
+                    # distribute as DTensor; loss_parallel wrapper takes DTensors.
+                    logits_dtensor = distribute_tensor(
+                        global_logits,
+                        mesh,
+                        logits_placements,
+                    ).detach()
+                    logits_dtensor.requires_grad_(True)
+                    labels_dtensor = distribute_tensor(
+                        global_labels,
+                        mesh,
+                        label_placements,
+                    )
+
+                    # pytorch loss_parallel() as ground truth. F.cross_entropy
+                    # expects the class dimension at dim 1.
+                    with loss_parallel():
+                        wrapper_loss = F.cross_entropy(
+                            logits_dtensor.float().transpose(1, 2),
+                            labels_dtensor,
+                            reduction="sum",
+                            ignore_index=IGNORE_INDEX,
+                        )
+
+                    # typecheck S(2)@TP, I@TP -> I@TP
+                    logits_type = {tp_group: spmd.S(2)}
+                    labels_type = {tp_group: spmd.I}
+                    if "dp" in axis_names:
+                        dp_group = mesh.get_group("dp")
+                        logits_type[dp_group] = spmd.S(0)
+                        labels_type[dp_group] = spmd.S(0)
+
+                    # run custom autograd
+                    local_logits = (
+                        logits_dtensor.to_local().detach().requires_grad_(True)
+                    )
+                    local_labels = labels_dtensor.to_local()
+                    spmd.assert_type(local_logits, logits_type)
+                    spmd.assert_type(local_labels, labels_type)
+                    with typecheck(strict_mode="strict"):
+                        local_loss = _LossParallelCrossEntropy.apply(
+                            local_logits,
+                            local_labels,
+                            tp_group,
+                            vocab_size,
+                        )
+                    self.assertIs(
+                        spmd.get_axis_local_type(local_loss, tp_group), spmd.I
+                    )
+
+                    # Loss and local-shard gradients must be bitwise-equivalent
+                    # to torch.distributed.tensor.parallel.loss_parallel().
+                    self.assertTrue(torch.equal(local_loss, wrapper_loss.to_local()))
+
+                    # compare grad_logits; easier to wrap DTensor -> full_tensor for check.
+                    with loss_parallel():
+                        wrapper_loss.backward()
+                    local_loss.backward()
+                    local_grad_dtensor = DTensor.from_local(
+                        local_logits.grad,
+                        mesh,
+                        logits_placements,
+                        shape=torch.Size((B, L, vocab_size)),
+                        stride=(L * vocab_size, vocab_size, 1),
+                    )
+                    self.assertTrue(
+                        torch.equal(
+                            local_grad_dtensor.full_tensor(),
+                            logits_dtensor.grad.full_tensor(),
+                        )
+                    )
+
+
 class _FakeDecoder(nn.Module):
     """Minimal Decoder-like model for testing ChunkedCELoss."""
 
@@ -302,7 +446,7 @@ class TestChunkedCELoss(unittest.TestCase):
         labels = torch.randint(0, V, (B, L))
         labels[0, 1] = IGNORE_INDEX
         labels[1, 3] = IGNORE_INDEX
-        global_valid_tokens = (labels != IGNORE_INDEX).sum().float()
+        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
 
         # Standard path: lm_head + ce_loss + backward
         hidden_std = hidden_states.detach().requires_grad_(True)
@@ -353,7 +497,7 @@ class TestChunkedCELoss(unittest.TestCase):
         torch.manual_seed(42)
         B, L, D, V = 2, 8, 32, 64
         labels = torch.randint(0, V, (B, L))
-        global_valid_tokens = (labels != IGNORE_INDEX).sum().float()
+        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
         hidden_states = torch.randn(B, L, D)
 
         losses = []

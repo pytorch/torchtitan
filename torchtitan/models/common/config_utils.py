@@ -10,6 +10,7 @@ These helpers construct fully-specified sub-configs with all dimensional
 fields set at config creation time.
 """
 
+import dataclasses
 from collections.abc import Callable
 from typing import Literal
 
@@ -18,29 +19,36 @@ from torchtitan.models.common.attention import (
     FusedQKVLinear,
     GQAttention,
     QKVLinear,
-    ScaledDotProductAttention,
     VarlenAttention,
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
+from torchtitan.models.common.rope import RoPE
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
+    MinimalAsyncEPTokenDispatcher,
 )
 from torchtitan.protocols.module import Module
 
 
 def get_attention_config(
     backend: str,
-) -> tuple[Module.Config, str]:
-    """Map backend string to (inner_attention config, mask_type)."""
-    if backend == "sdpa":
-        return ScaledDotProductAttention.Config(), "causal"
-    elif backend == "flex":
-        return FlexAttention.Config(), "block_causal"
+) -> Module.Config:
+    """Map backend string to an inner_attention config.
+
+    Language models always use block_causal masking (the dataloaders always
+    emit per-document positions), so every backend here is a masked attention
+    backend. ``ScaledDotProductAttention`` only supports a boolean ``is_causal``
+    flag and cannot consume per-document positions, so it is not a valid
+    language-model backend (it remains available for Flux, which builds it
+    directly).
+    """
+    if backend == "flex":
+        return FlexAttention.Config()
     elif backend == "flex_flash":
         from torchtitan.tools.utils import has_cuda_capability
 
@@ -48,14 +56,16 @@ def get_attention_config(
             raise ValueError(
                 "Flash backend of FlexAttention is only supported on Hopper or Blackwell"
             )
-        return (
-            FlexAttention.Config(
-                block_size=(256, 128), kernel_options={"BACKEND": "FLASH"}
-            ),
-            "block_causal",
+        return FlexAttention.Config(
+            block_size=(256, 128), kernel_options={"BACKEND": "FLASH"}
         )
     elif backend == "varlen":
-        return VarlenAttention.Config(), "block_causal"
+        return VarlenAttention.Config()
+    elif backend == "sdpa":
+        raise ValueError(
+            "sdpa is no longer supported for language models; positions are "
+            "always available so use flex, flex_flash, or varlen."
+        )
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
@@ -67,17 +77,16 @@ def make_gqa_config(
     wqkv_param_init: dict[str, Callable],
     wo_param_init: dict[str, Callable],
     inner_attention: Module.Config,
+    rope: RoPE.Config,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
     fuse_qkv: bool = False,
-    use_rope: bool = True,
-    mask_type: str = "causal",
-    rope_backend: str = "complex",
     qk_norm: RMSNorm.Config | None = None,
 ) -> GQAttention.Config:
     """Build a fully-specified GQAttention.Config."""
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
+    rope = dataclasses.replace(rope)
 
     if fuse_qkv:
         qkv = FusedQKVLinear.Config(
@@ -117,10 +126,8 @@ def make_gqa_config(
             param_init=wo_param_init,
         ),
         qk_norm=qk_norm,
-        use_rope=use_rope,
         inner_attention=inner_attention,
-        mask_type=mask_type,
-        rope_backend=rope_backend,
+        rope=rope,
     )
 
 
@@ -198,7 +205,6 @@ def make_token_dispatcher_config(
     *,
     num_experts: int,
     top_k: int,
-    score_before_experts: bool = True,
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> LocalTokenDispatcher.Config:
@@ -209,6 +215,7 @@ def make_token_dispatcher_config(
       dispatch when EP=1, i.e. ep_mesh is None at runtime)
     - "deepep": Uses DeepEP custom kernels for H100/NVLink Switch
     - "hybridep": Uses HybridEP with TMA optimization for GB200/NVLink72
+    - "minimal_async_ep": Uses MinimalAsyncEP for constrained DP>=EP
 
     DeepEP/HybridEP requires installation:
     https://github.com/deepseek-ai/DeepEP
@@ -221,25 +228,27 @@ def make_token_dispatcher_config(
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
-            score_before_experts=score_before_experts,
         )
     elif comm_backend == "hybridep":
         return HybridEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
-            score_before_experts=score_before_experts,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
+        )
+    elif comm_backend == "minimal_async_ep":
+        return MinimalAsyncEPTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
         )
     elif comm_backend == "standard":
         return AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
-            score_before_experts=score_before_experts,
         )
     else:
         raise ValueError(
             f"Unknown comm_backend: '{comm_backend}'. "
-            "Must be one of 'standard', 'deepep', 'hybridep'."
+            "Must be one of 'standard', 'deepep', 'hybridep', 'minimal_async_ep'."
         )
 
 
@@ -250,7 +259,6 @@ def make_experts_config(
     num_experts: int,
     top_k: int,
     param_init: dict[str, Callable],
-    score_before_experts: bool = True,
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> GroupedExperts.Config:
@@ -263,7 +271,6 @@ def make_experts_config(
         token_dispatcher=make_token_dispatcher_config(
             num_experts=num_experts,
             top_k=top_k,
-            score_before_experts=score_before_experts,
             comm_backend=comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         ),

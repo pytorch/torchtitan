@@ -10,11 +10,10 @@ from typing import Any
 
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
-
 from torch.distributed.tensor import DTensor
 
+from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.utils import MoEStateDictAdapter
-
 from .model import DeepSeekV3Model
 
 
@@ -44,9 +43,9 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
             # MoE Module
-            "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.experts.w1",
-            "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.experts.w3",
-            "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.experts.w2",
+            "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.experts.w1_EFD",
+            "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.experts.w3_EFD",
+            "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.experts.w2_EDF",
             "model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
             "model.layers.{}.mlp.shared_experts.gate_proj.weight": "layers.{}.moe.shared_experts.w1.weight",
             "model.layers.{}.mlp.shared_experts.up_proj.weight": "layers.{}.moe.shared_experts.w3.weight",
@@ -100,6 +99,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         1. Convert between the HF shape and the torchtitan shape.
         2. Split the GroupedExperts' weight into separate expert's weight.
         """
+
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
         hf_state_dict = {}
@@ -131,7 +131,9 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 else:
                     # keep this path for offline conversion
                     moe_layer = next(
-                        l for l in self.model_config.layers if l.moe is not None
+                        l
+                        for l in self.model_config.layers  # pyrefly: ignore [missing-attribute]
+                        if l.moe is not None
                     )
                     split_values = self._split_experts_weights(
                         value,
@@ -162,6 +164,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         2. Convert between the HF shape and the torchtitan shape.
         3. Concat separate expert's weight into GroupedExperts' weight.
         """
+        self._validate_hf_rope_config(ComplexRoPE.Config)
 
         state_dict = {}
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
@@ -196,7 +199,9 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                         titan_abstract_key,
                         layer_num,
                         next(
-                            l for l in self.model_config.layers if l.moe is not None
+                            l
+                            for l in self.model_config.layers  # pyrefly: ignore [missing-attribute]
+                            if l.moe is not None
                         ).moe.num_experts,
                     )
 

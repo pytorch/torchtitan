@@ -33,7 +33,33 @@ from torchtitan.experiments.graph_trainer.registry import (
     POST_INIT_HOOKS,
     PRE_TRAIN_STEP_HOOKS,
 )
+from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
+
+
+def _maybe_apply_numa_binding(gpu_index: int, device_type: str) -> None:
+    """Pin this process to the NUMA node of its GPU for local memory bandwidth.
+
+    On multi-NUMA machines (e.g. GB200 NVLink-C2C), pinned-memory allocations
+    that land on the GPU's local NUMA node get ~350 GB/s D2H bandwidth vs
+    ~120 GB/s cross-NUMA. Must run before any pinned memory is allocated.
+    """
+    if device_type != "cuda":
+        return
+    from torch.numa.binding import (
+        _maybe_apply_numa_binding_to_current_process,
+        AffinityMode,
+        NumaOptions,
+    )
+
+    _maybe_apply_numa_binding_to_current_process(
+        gpu_index=gpu_index,
+        numa_options=NumaOptions(
+            affinity_mode=AffinityMode.NODE,
+            should_fall_back_if_binding_fails=True,
+        ),
+    )
+    logger.info("NUMA binding applied for GPU %d", gpu_index)
 
 
 def make_fwd_bwd_step(model, loss_fn):
@@ -44,8 +70,8 @@ def make_fwd_bwd_step(model, loss_fn):
     to thread its parameters/buffers as static graph inputs.
     """
 
-    def fwd_bwd_step(inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs):
-        pred = model(inputs, **extra_inputs, **extra_kwargs)
+    def fwd_bwd_step(inputs, labels, global_valid_tokens, extra_kwargs):
+        pred = model(inputs, **extra_kwargs)
         # The loss function is not a submodule of the model, so
         # annotate_module_fqns won't tag it. Annotate it here so that
         # downstream passes (bucketing, SAC, kernel annotations) can
@@ -74,6 +100,8 @@ class GraphTrainer(Trainer):
     def __init__(self, config):
         super().__init__(config)
 
+        _maybe_apply_numa_binding(self.device.index, self.device.type)
+
         if self.config.compile.mode == "aot_fx_trace" and self.parallel_dims.pp_enabled:
             raise ValueError(
                 "aot_fx_trace compile mode does not support Pipeline Parallel"
@@ -81,6 +109,16 @@ class GraphTrainer(Trainer):
 
         # Lazy state for aot_fx_trace mode
         self._traced_step: TracedResult | None = None
+
+        if self.config.compile.memory_policy == "sac_and_offload":
+            from torch._functorch._activation_offloading.offload_ops import (
+                pinned_memory_pool,
+            )
+
+            self._pinned_pool_ctx = pinned_memory_pool()
+            self._pinned_pool_ctx.__enter__()
+        else:
+            self._pinned_pool_ctx = None
 
         # Run post-init hook for the active pass pipeline
         POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
@@ -90,7 +128,7 @@ class GraphTrainer(Trainer):
         *,
         input_dict: dict[str, torch.Tensor],
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor,
+        global_valid_tokens: float,
     ) -> torch.Tensor:
         if self.config.compile.mode != "aot_fx_trace":
             return super().forward_backward_step(
@@ -102,9 +140,7 @@ class GraphTrainer(Trainer):
         assert len(self.model_parts) == 1
         model = self.model_parts[0]
 
-        inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
-            input_dict, labels
-        )
+        inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
         # remove_duplicate=False to preserve duplicate parameter entries
         # from weight tying (e.g. shared embedding/output weights).
         params = [
@@ -118,7 +154,6 @@ class GraphTrainer(Trainer):
             labels,
             global_valid_tokens,
             params,
-            extra_inputs,
             extra_kwargs,
         )
 
@@ -155,9 +190,8 @@ class GraphTrainer(Trainer):
         model: nn.Module,
         inputs: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor,
+        global_valid_tokens: float,
         params: list[torch.Tensor],
-        extra_inputs: dict[str, torch.Tensor],
         extra_kwargs: dict[str, Any],
     ) -> torch.Tensor:
         maybe_register_blockmask_pytree_node()
@@ -171,7 +205,6 @@ class GraphTrainer(Trainer):
                         inputs,
                         labels,
                         global_valid_tokens,
-                        extra_inputs,
                         extra_kwargs,
                     )
 
@@ -193,7 +226,6 @@ class GraphTrainer(Trainer):
                 inputs,
                 labels,
                 global_valid_tokens,
-                extra_inputs,
                 extra_kwargs,
             )
         loss = outputs[0]
@@ -216,6 +248,10 @@ class GraphTrainer(Trainer):
         super().train_step(data_iterator)
 
     def close(self) -> None:
+        if self._pinned_pool_ctx is not None:
+            self._pinned_pool_ctx.__exit__(None, None, None)
+            self._pinned_pool_ctx = None
+
         super().close()
 
         # See Note [explicit cudagraph teardown] in cudagraph.py

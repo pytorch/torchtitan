@@ -27,16 +27,22 @@ permissions:
   contents: read
 
 jobs:
-  # Step 1: Dynamically compute the matrix based on conditions
+  # CUDA: run the suite on an H100 runner via linux_job_v3.
   set-matrix:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8')
+    # Skip scheduled runs on forks, where they would only fail and email the fork owner
+    if: >-
+      (github.repository_owner == 'pytorch' || github.event_name != 'schedule') &&
+      (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8'))
     uses: ./.github/workflows/set-matrix.yaml
     with:
       runner-cuda: mt-l-bx86iamx-176-1800-h100-8
+      gpu-arch: cuda
 
-  # Step 2: Use the dynamic matrix in the build-test job
   build-test:
     needs: set-matrix
+    # Skip cleanly when the matrix is empty (e.g. CUDA on a label-triggered,
+    # ROCm-only run); an empty matrix would otherwise error at evaluation.
+    if: ${{ needs.set-matrix.outputs.matrix != '' && fromJSON(needs.set-matrix.outputs.matrix).include[0] != null }}
     uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
     strategy:
       fail-fast: false
@@ -51,43 +57,43 @@ jobs:
       upload-artifact: outputs
       timeout: 45
       script: |
-        set -eux
+        TORCH_VERSION="${{ matrix.torch-version }}" \
+        INDEX_URL="${{ matrix.index-url }}" \
+        GPU_ARCH_TYPE="${{ matrix.gpu-arch-type }}" \
+        bash .github/scripts/run_8xgpu_integration_tests.sh
 
-        # The generic Linux job chooses to use base env, not the one setup by the image
-        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
-        conda activate "${CONDA_ENV}"
+  # ROCm: run the same suite on a ROCm runner via linux_job_v2. v2 is required
+  # because linux_job_v3 does not authenticate ROCm runners to the private ECR
+  # (the pull fails with "no basic auth credentials"); the bare image name lets
+  # v2 resolve and authenticate against ECR.
+  set-matrix-rocm:
+    # Skip scheduled runs on forks, where they would only fail and email the fork owner
+    if: >-
+      (github.repository_owner == 'pytorch' || github.event_name != 'schedule') &&
+      (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8'))
+    uses: ./.github/workflows/set-matrix.yaml
+    with:
+      gpu-arch: rocm
 
-        # Log CUDA driver version for debugging.
-        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
-        echo "CUDA driver version: ${DRIVER_VERSION}"
-
-        pip config --user set global.progress_bar off
-
-        TORCH_SPEC="torch"
-        if [ -n "${{ matrix.torch-version }}" ]; then
-          TORCH_SPEC="torch==${{ matrix.torch-version }}"
-        fi
-
-        # Pre-install torch's pure-python deps from the in-cluster pypi-cache for speed.
-        python -m pip install filelock typing-extensions "setuptools<82" sympy networkx jinja2 fsspec numpy
-        # Clear PIP_EXTRA_INDEX_URL so the default cpu index can't supply a +cpu torch.
-        PIP_EXTRA_INDEX_URL= python -m pip install --force-reinstall --pre "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
-
-        if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
-          export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
-          echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
-        fi
-
-        USE_CPP=0 PIP_EXTRA_INDEX_URL= python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
-
-        mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
-
-        # Install DeepEP for HybridEP integration test
-        bash /install_deepep.sh
-
-        # Enable CPP stacktraces for debugging symmetric memory initialization errors.
-        # Disable Nvlink Sharp. The CI machine seems to be unstable state to support
-        # NLVS according to several CI runs.
-        # DeepEP needs CUDA_HOME specified to JIT kernels.
-        CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests --test_suite h100 $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
-        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
+  build-test-rocm:
+    needs: set-matrix-rocm
+    # Skip cleanly when the matrix is empty (e.g. ROCm on an ordinary
+    # synchronize push); an empty matrix would otherwise error at evaluation.
+    if: ${{ needs.set-matrix-rocm.outputs.matrix != '' && fromJSON(needs.set-matrix-rocm.outputs.matrix).include[0] != null }}
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix-rocm.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: ${{ matrix.docker-image }}
+      repository: pytorch/torchtitan
+      upload-artifact: outputs
+      timeout: 45
+      script: |
+        TORCH_VERSION="${{ matrix.torch-version }}" \
+        INDEX_URL="${{ matrix.index-url }}" \
+        GPU_ARCH_TYPE="${{ matrix.gpu-arch-type }}" \
+        bash .github/scripts/run_8xgpu_integration_tests.sh

@@ -18,13 +18,9 @@ import torch
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor.placement_types import Replicate, Shard
 
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    ParallelismConfig,
-    TORCH_DTYPE_MAP,
-    TrainingConfig,
-)
+from torchtitan.config import ParallelismConfig, TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.autoparallel_api import (
     AutoParallelGraph,
@@ -45,7 +41,7 @@ def parallelize_autoparallel_llama(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: GraphTrainerCompileConfig,
-    ac_config: ActivationCheckpointConfig,
+    ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
     """Apply AutoParallelGraph SPMD sharding to Llama3.
@@ -120,14 +116,6 @@ def parallelize_autoparallel_llama(
         possible_input_shardings[name] for name in dense_mesh.mesh_dim_names
     )
 
-    loss_parallel_enabled = (
-        parallel_dims.tp_enabled and not parallelism.disable_loss_parallel
-    )
-    if not loss_parallel_enabled:
-        raise ValueError(
-            "AutoParallel Llama3 graph_trainer currently requires loss parallel "
-            "so the model-only graph can return vocab-sharded DTensor logits."
-        )
     output_sharding = tuple(
         Shard(2) if name == "tp" else Shard(0) for name in dense_mesh.mesh_dim_names
     )
@@ -148,10 +136,14 @@ def parallelize_autoparallel_llama(
         t1 = time.time()
         logger.info(f"AutoParallelGraph took {t1 - t0:.2f} seconds")
 
-        model_output = AutoParallelModelOutput(
-            output_mesh=parallel_dims.get_mesh("tp"),
-            output_placements=(Shard(2),),
-            sharded_output_axis=2,
+        model_output = (
+            AutoParallelModelOutput(
+                output_mesh=parallel_dims.get_mesh("tp"),
+                output_placements=(Shard(2),),
+                sharded_output_axis=2,
+            )
+            if parallel_dims.tp_enabled
+            else None
         )
         parallel_mod = autop.apply_placement_for_fx_module(
             sharding_placement,

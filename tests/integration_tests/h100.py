@@ -42,13 +42,14 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.full_dtensor",
+                    "--parallelism.spmd_backend full_dtensor",
                     "--parallelism.enable-fsdp-symm-mem",
                 ],
             ],
             "FSDP symmetric memory",
             "fsdp_symm_mem",
             ngpu=2,
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
@@ -92,6 +93,8 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             "DeepSeek V3 FSDP+HybridEP+compile",
             "deepseek_v3_fsdp+hybridep+compile",
             ngpu=4,
+            # deep_ep/NVSHMEM is CUDA-only, so skip on ROCm.
+            skip_rocm_test=True,
         ),
     ]
     return integration_tests_flavors

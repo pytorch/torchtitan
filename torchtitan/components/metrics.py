@@ -13,7 +13,6 @@ from typing import Any
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
@@ -398,7 +397,6 @@ class MetricsProcessor(Configurable):
     num_flops_per_token: int
     has_quantization: bool
     optimizers: OptimizersContainer | None
-    lr_schedulers: LRSchedulersContainer | None
     model_parts: list[torch.nn.Module] | None
 
     def __init__(
@@ -443,7 +441,6 @@ class MetricsProcessor(Configurable):
         # These variables have to be set later as they depend on other components or model.
         self.num_flops_per_token = -1
         self.optimizers = None
-        self.lr_schedulers = None
         self.model_parts = None
 
     def should_log(self, step: int) -> bool:

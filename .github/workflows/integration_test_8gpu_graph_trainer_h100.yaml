@@ -30,7 +30,10 @@ permissions:
 jobs:
   # Step 1: Dynamically compute the matrix based on conditions
   set-matrix:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8')
+    # Skip scheduled runs on forks, where they would only fail and email the fork owner
+    if: >-
+      (github.repository_owner == 'pytorch' || github.event_name != 'schedule') &&
+      (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8'))
     uses: ./.github/workflows/set-matrix.yaml
     with:
       runner-cuda: mt-l-bx86iamx-176-1800-h100-8
@@ -68,7 +71,8 @@ jobs:
         # Pre-install torch's pure-python deps from the in-cluster pypi-cache for speed.
         python -m pip install filelock typing-extensions "setuptools<82" sympy networkx jinja2 fsspec numpy
         # Clear PIP_EXTRA_INDEX_URL so the default cpu index can't supply a +cpu torch.
-        PIP_EXTRA_INDEX_URL= python -m pip install --force-reinstall --pre \
+        python -m pip uninstall -y torch
+        PIP_EXTRA_INDEX_URL= python -m pip install --pre \
           torch --index-url ${{ matrix.index-url }}
         python -m pip install git+https://github.com/meta-pytorch/autoparallel.git
 

@@ -13,6 +13,7 @@ from torchtitan.components.optimizer import (
     default_adamw,
     OptimizersContainer,
     ParamGroupConfig,
+    register_moe_load_balancing_hook,
 )
 
 
@@ -43,6 +44,43 @@ class SimpleModel(nn.Module):
         return self.output(x)
 
 
+class FakeMoE(nn.Module):
+    def __init__(self, load_balance_coeff, tokens):
+        super().__init__()
+        self.load_balance_coeff = load_balance_coeff
+        self.register_buffer("tokens_per_expert_E", torch.tensor(tokens))
+        if load_balance_coeff is not None:
+            self.register_buffer("expert_bias_E", torch.zeros(len(tokens)))
+        else:
+            self.expert_bias_E = None
+
+
+class FakeMoEBlock(nn.Module):
+    def __init__(self, load_balance_coeff, tokens):
+        super().__init__()
+        self.moe_enabled = True
+        self.moe = FakeMoE(load_balance_coeff, tokens)
+
+
+class FakeMoEModel(nn.Module):
+    def __init__(self, load_balance_coeffs=(0.1, 0.2)):
+        super().__init__()
+        self.weight = nn.Parameter(torch.tensor([1.0]))
+        self.layers = nn.ModuleDict(
+            {
+                "0": FakeMoEBlock(load_balance_coeffs[0], [10, 0]),
+                "1": FakeMoEBlock(load_balance_coeffs[1], [0, 10]),
+            }
+        )
+
+
+class FakeParallelDims:
+    spmd_backend = "none"
+
+    def get_optional_mesh(self, name):
+        return None
+
+
 # Default AdamW param group for catch-all
 _DEFAULT_ADAMW = ParamGroupConfig(
     pattern=r".*",
@@ -66,7 +104,7 @@ def _get_default_groups(model, config):
     """Helper: build param groups and return the AdamW optimizer's groups."""
     impl_kwargs = OptimizersContainer._build_impl_kwargs(config)
     param_groups = config.param_groups
-    groups_by_opt = OptimizersContainer._build_param_groups(
+    groups_by_opt, _ = OptimizersContainer._build_param_groups(
         model, param_groups, impl_kwargs
     )
     return groups_by_opt.get("AdamW", [])
@@ -105,6 +143,66 @@ class TestParamGroupConfig(unittest.TestCase):
         self.assertIsInstance(adam, torch.optim.Adam)
         self.assertEqual(adam.param_groups[0]["lr"], 1e-2)
         self.assertEqual(adam.param_groups[0]["betas"], (0.9, 0.95))
+
+    def test_moe_load_balancing_updates_all_enabled_layers(self):
+        model = FakeMoEModel()
+        config = OptimizersContainer.Config(
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"lr": 0.0, "weight_decay": 0.0},
+                ),
+            ],
+        )
+        container = config.build(model_parts=[model])
+        register_moe_load_balancing_hook(
+            container,
+            [model],
+            FakeParallelDims(),
+        )
+
+        container.step()
+
+        torch.testing.assert_close(
+            model.layers["0"].moe.expert_bias_E,
+            torch.tensor([-0.1, 0.1]),
+        )
+        torch.testing.assert_close(
+            model.layers["1"].moe.expert_bias_E,
+            torch.tensor([0.2, -0.2]),
+        )
+        torch.testing.assert_close(
+            model.layers["0"].moe.tokens_per_expert_E,
+            torch.tensor([0, 0]),
+        )
+        torch.testing.assert_close(
+            model.layers["1"].moe.tokens_per_expert_E,
+            torch.tensor([0, 0]),
+        )
+
+    def test_moe_load_balancing_rejects_inconsistent_coeffs(self):
+        model = FakeMoEModel(load_balance_coeffs=(None, 0.2))
+        config = OptimizersContainer.Config(
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"lr": 0.0, "weight_decay": 0.0},
+                ),
+            ],
+        )
+        container = config.build(model_parts=[model])
+        with self.assertRaisesRegex(
+            ValueError, "load_balance_coeff must be configured consistently"
+        ):
+            register_moe_load_balancing_hook(
+                container,
+                [model],
+                FakeParallelDims(),
+            )
 
     def test_single_pattern_weight_decay_zero(self):
         """Pattern matching bias params with weight_decay=0."""
@@ -276,7 +374,7 @@ class TestParamGroupConfig(unittest.TestCase):
             ],
         )
         impl_kwargs = OptimizersContainer._build_impl_kwargs(config)
-        groups_by_opt = OptimizersContainer._build_param_groups(
+        groups_by_opt, _ = OptimizersContainer._build_param_groups(
             model, config.param_groups, impl_kwargs
         )
 
@@ -425,34 +523,8 @@ class TestMixedOptimizers(unittest.TestCase):
         self.assertEqual(adam.param_groups[0]["lr"], 5e-4)
         self.assertEqual(adam.param_groups[0]["betas"], (0.9, 0.95))
 
-    def test_model_part_indices(self):
-        """_model_part_indices correctly maps optimizers to model parts."""
-        model1 = SimpleModel()
-        model2 = SimpleModel()
-        config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
-                    pattern=r"output\.",
-                    optimizer_name="Adam",
-                    optimizer_kwargs={"lr": 5e-4, "betas": (0.9, 0.95), "eps": 1e-8},
-                ),
-                ParamGroupConfig(
-                    pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
-                ),
-            ],
-        )
-        container = config.build(model_parts=[model1, model2])
-        self.assertEqual(len(container.optimizers), 4)
-        self.assertEqual(container._model_part_indices[0], 0)
-        self.assertEqual(container._model_part_indices[1], 0)
-        self.assertEqual(container._model_part_indices[2], 1)
-        self.assertEqual(container._model_part_indices[3], 1)
-
-    def test_param_group_patterns(self):
-        """Param groups have correct pattern for logging."""
+    def test_pattern_not_leaked_to_state_dict(self):
+        """Pattern is logging-only; it must not enter the optimizer or state dict."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
             implementation="for-loop",
@@ -470,9 +542,12 @@ class TestMixedOptimizers(unittest.TestCase):
             ],
         )
         container = config.build(model_parts=[model])
-        adamw = container.optimizers[0]
-        self.assertEqual(adamw.param_groups[0]["pattern"], r"output\.")
-        self.assertEqual(adamw.param_groups[1]["pattern"], ".*")
+        # Pattern is popped before optimizer construction, so it never reaches
+        # the optimizer's param groups or the saved (flat) state dict.
+        for opt in container.optimizers:
+            for group in opt.param_groups:
+                self.assertNotIn("pattern", group)
+        self.assertFalse(any(".pattern" in key for key in container.state_dict()))
 
     def test_mixed_optimizer_state_dict_round_trip(self):
         """State dict save/load works with mixed optimizer types."""
@@ -543,6 +618,30 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
             scheduler.step()
         lr = scheduler.schedulers[0].optimizer.param_groups[0]["lr"]
         self.assertAlmostEqual(lr, 1e-3, places=6)
+
+    def test_get_metrics_reports_lr_per_group(self):
+        """get_metrics reports a learning rate per optimizer param group."""
+        model = SimpleModel()
+        config = OptimizersContainer.Config(
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r"output\.",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"lr": 5e-4, "weight_decay": 0.0},
+                ),
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
+                ),
+            ],
+        )
+        lr_config = LRSchedulersContainer.Config(warmup_steps=10, decay_type="linear")
+        scheduler, _ = self._build_scheduler(config, lr_config, model)
+        metrics = scheduler.get_metrics()
+        # One AdamW optimizer with two param groups -> indexed lr keys.
+        self.assertEqual(set(metrics), {"lr/AdamW/0", "lr/AdamW/1"})
 
     def test_mixed_optimizer_gets_separate_schedulers(self):
         """Mixed optimizers should each get their own scheduler."""

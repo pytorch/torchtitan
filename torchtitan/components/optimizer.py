@@ -4,25 +4,25 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import functools
 import re
 from collections import defaultdict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any, Generic, Literal, overload, TypeVar
+from typing import Any, cast, Generic, Literal, overload, Protocol, TypeVar
 
 import torch
 import torch.distributed.tensor
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
-from torch.distributed.checkpoint.state_dict import (
-    get_optimizer_state_dict,
-    set_optimizer_state_dict,
-    StateDictOptions,
-)
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import Replicate
 from torch.optim import Optimizer
+from torchtitan.components.checkpoint_utils import (
+    canonical_fqn,
+    get_flat_optim_state_dict,
+    init_optim_state,
+    load_flat_optim_state_dict,
+)
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.observability import structured_logger as sl
@@ -69,6 +69,12 @@ class ParamGroupConfig:
 
 
 T = TypeVar("T", bound=Optimizer)
+
+
+class _MoELike(Protocol):
+    load_balance_coeff: float | None
+    tokens_per_expert_E: torch.Tensor  # noqa: N815
+    expert_bias_E: torch.Tensor  # noqa: N815
 
 
 class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
@@ -152,42 +158,51 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         model: nn.Module,
         param_group_configs: list[ParamGroupConfig],
         impl_kwargs: dict[str, Any],
-    ) -> dict[str, list[dict[str, Any]]]:
+    ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]]]:
         """Build PyTorch param groups from model parameters, partitioned by optimizer.
 
         Each parameter is assigned to the first matching ParamGroupConfig pattern.
-        Returns a dict mapping optimizer name to a list of param group dicts.
 
-        Each param group dict includes a ``pattern`` key with the regex pattern
-        string for logging.
+        Returns two dicts keyed by optimizer name and aligned by index: the param
+        group dicts to pass to the optimizer constructor, and the regex pattern of
+        each group. Patterns are returned separately (not stored on the group) so
+        they stay out of the saved optimizer state dict; they are logging-only.
+
+        Each param group dict carries a ``param_names`` list (canonical FQNs
+        aligned with ``params``) so PyTorch records the names on the group; the
+        checkpoint utilities use those names to build FQN-keyed optimizer state.
         """
-        result: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        patterns: dict[str, list[str]] = defaultdict(list)
         claimed: set[str] = set()  # first-match-wins
 
         for pg in param_group_configs:
             pattern = re.compile(pg.pattern)
-            matched = []
+            params: list[nn.Parameter] = []
+            param_names: list[str] = []
             for name, param in model.named_parameters():
                 if param.requires_grad and name not in claimed and pattern.search(name):
-                    matched.append(param)
+                    params.append(param)
+                    param_names.append(canonical_fqn(name))
                     claimed.add(name)
 
-            if not matched:
+            if not params:
                 raise ValueError(
                     f"Optimizer param_groups pattern '{pg.pattern}' "
                     f"matched no parameters"
                 )
 
-            result[pg.optimizer_name].append(
+            groups[pg.optimizer_name].append(
                 {
-                    "params": matched,
-                    "pattern": pg.pattern,
+                    "params": params,
+                    "param_names": param_names,
                     **impl_kwargs,
                     **pg.optimizer_kwargs,
                 }
             )
+            patterns[pg.optimizer_name].append(pg.pattern)
 
-        return result
+        return groups, patterns
 
     def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
         impl_kwargs = self._build_impl_kwargs(config)
@@ -195,17 +210,15 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         all_params = []
         self.optimizers = []
         self.model_parts = model_parts
-        # Maps each optimizer to its model part (for state_dict/load_state_dict)
-        self._model_part_indices: list[int] = []
 
         for part_idx, model in enumerate(self.model_parts):
-            groups_by_opt_name = self._build_param_groups(
+            groups_by_opt_name, patterns_by_opt_name = self._build_param_groups(
                 model, param_group_configs, impl_kwargs
             )
             for opt_name, opt_param_groups in groups_by_opt_name.items():
-                opt_cls = self._resolve_optimizer_cls(opt_name)
-                self.optimizers.append(opt_cls(opt_param_groups))
-                self._model_part_indices.append(part_idx)
+                optimizer = self._resolve_optimizer_cls(opt_name)(opt_param_groups)
+                self.optimizers.append(optimizer)
+                self._log_optimizer(optimizer, part_idx, patterns_by_opt_name[opt_name])
                 for group in opt_param_groups:
                     all_params.extend(group["params"])
 
@@ -214,10 +227,11 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         if config.implementation == "fused_opt_states_bf16":
             self._register_bf16_optimizer_state_hook()
         self._post_init(all_params)
-        self._log_summary()
 
-    def _log_summary(self) -> None:
-        """Log a summary of optimizer assignments."""
+    def _log_optimizer(
+        self, optimizer: Optimizer, part_idx: int, patterns: list[str]
+    ) -> None:
+        """Log one optimizer's param-group assignments (patterns are logging-only)."""
         _KEY_KWARGS = {
             "lr",
             "weight_decay",
@@ -228,17 +242,14 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             "fused",
             "foreach",
         }
-        for i, opt in enumerate(self.optimizers):
-            opt_name = type(opt).__name__
-            part_idx = self._model_part_indices[i]
-            for group in opt.param_groups:
-                num_params = len(group["params"])
-                kwargs = {k: v for k, v in group.items() if k in _KEY_KWARGS}
-                pattern = group["pattern"]
-                logger.info(
-                    f"Optimizer {opt_name} (model_part={part_idx}): "
-                    f"{num_params} params [{pattern}] {kwargs}"
-                )
+        opt_name = type(optimizer).__name__
+        for group, pattern in zip(optimizer.param_groups, patterns):
+            num_params = len(group["params"])
+            kwargs = {k: v for k, v in group.items() if k in _KEY_KWARGS}
+            logger.info(
+                f"Optimizer {opt_name} (model_part={part_idx}): "
+                f"{num_params} params [{pattern}] {kwargs}"
+            )
 
     def _validate_params(self, all_params: list[nn.Parameter]) -> None:
         """Verify every trainable param is assigned to exactly one optimizer."""
@@ -279,24 +290,25 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             optimizer.zero_grad(set_to_none=set_to_none)
 
     def state_dict(self) -> dict[str, Any]:
-        func = functools.partial(
-            get_optimizer_state_dict,
-            options=StateDictOptions(flatten_optimizer_state_dict=True),
-        )
-        result = {}
-        for opt, part_idx in zip(self.optimizers, self._model_part_indices):
-            sd = func(self.model_parts[part_idx], opt)
-            result.update(sd)
+        """Return a flat, FQN-keyed optimizer state dict for all optimizers.
+
+        Side effect: if an optimizer's state has not been created yet (no training
+        step taken), ``init_optim_state`` materializes it with a zero-gradient,
+        zero-lr step before reading. The step leaves parameters unchanged, and the
+        call is a no-op once state exists.
+        """
+        result: dict[str, Any] = {}
+        for optim in self.optimizers:
+            init_optim_state(optim)
+            result.update(get_flat_optim_state_dict(optim))
         return result
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        func = functools.partial(
-            set_optimizer_state_dict,
-            optim_state_dict=state_dict,
-            options=StateDictOptions(flatten_optimizer_state_dict=True),
-        )
-        for opt, part_idx in zip(self.optimizers, self._model_part_indices):
-            func(self.model_parts[part_idx], opt)
+        # init_optim_state must run first: the unflatten step reads each
+        # optimizer's live state to learn which state tensors to expect.
+        for optim in self.optimizers:
+            init_optim_state(optim)
+            load_flat_optim_state_dict(optim, state_dict)
 
     def _post_init(self, all_params: list[nn.Parameter]) -> None:
         # We need to call Optimizer.__init__() to initialize some necessary optimizer
@@ -424,16 +436,30 @@ def register_moe_load_balancing_hook(
         parallel_dims: Parallel dimensions for distributed communication.
     """
 
-    def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
+    def _iter_moe_layers(
+        model_parts: list[nn.Module],
+    ) -> Iterator[tuple[nn.Module, _MoELike]]:
         for model_part in model_parts:
             layers = model_part.get_submodule("layers")
             assert isinstance(layers, nn.ModuleDict)
             for transformer_block in layers.values():
-                if transformer_block.moe_enabled:
-                    # Assumption: load_balance_coeff is set universally on all moe blocks.
-                    # pyrefly: ignore [missing-attribute]
-                    return bool(transformer_block.moe.load_balance_coeff)
-        return False
+                if getattr(transformer_block, "moe_enabled", False):
+                    yield transformer_block, cast(_MoELike, transformer_block.moe)
+
+    def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
+        moe_layers = list(_iter_moe_layers(model_parts))
+        if not moe_layers:
+            return False
+
+        load_balance_enabled = moe_layers[0][1].load_balance_coeff is not None
+        for _transformer_block, moe in moe_layers[1:]:
+            if (moe.load_balance_coeff is not None) != load_balance_enabled:
+                raise ValueError(
+                    "MoE load_balance_coeff must be configured consistently "
+                    "across all MoE layers. Either set it for every MoE layer "
+                    "or leave it unset for all MoE layers."
+                )
+        return load_balance_enabled
 
     # for MoE auxiliary-loss-free load balancing
     def _is_recomputation_enabled(module):
@@ -447,28 +473,22 @@ def register_moe_load_balancing_hook(
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
         tokens_per_expert_E_list = []
-        for model_part in model_parts:
-            layers = model_part.get_submodule("layers")
-            assert isinstance(layers, nn.ModuleDict)
-            for transformer_block in layers.values():
-                if not transformer_block.moe_enabled:
-                    continue
-                # pyrefly: ignore [missing-attribute]
-                if transformer_block.moe.load_balance_coeff is None:
-                    return
-                # pyrefly: ignore [missing-attribute]
-                tokens_per_expert_E = transformer_block.moe.tokens_per_expert_E
-                if _is_recomputation_enabled(transformer_block):
-                    # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
-                    # This does not affect to expert choice, but affects the experts usage metrics.
-                    # We divide by 2 to correct for this double-counting due to recomputation
-                    # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
-                    tokens_per_expert_E = tokens_per_expert_E // 2
-                tokens_per_expert_E_list.append(tokens_per_expert_E)
+        for transformer_block, moe in _iter_moe_layers(model_parts):
+            tokens_per_expert_E = moe.tokens_per_expert_E
+            if _is_recomputation_enabled(transformer_block):
+                # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
+                # This does not affect to expert choice, but affects the experts usage metrics.
+                # We divide by 2 to correct for this double-counting due to recomputation
+                # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
+                tokens_per_expert_E = tokens_per_expert_E // 2
+            tokens_per_expert_E_list.append(tokens_per_expert_E)
+
+        if not tokens_per_expert_E_list:
+            return
 
         tokens_per_expert_E_by_layer = torch.vstack(tokens_per_expert_E_list)
 
-        if parallel_dims.full_dtensor:
+        if parallel_dims.spmd_backend == "full_dtensor":
             # full_dtensor: DTensor mesh includes all axes (DP/CP/TP/EP).
             # redistribute Partial→Replicate covers everything.
             assert isinstance(
@@ -517,7 +537,9 @@ def register_moe_load_balancing_hook(
                 for transformer_block in layers.values():
                     if not transformer_block.moe_enabled:
                         continue
-                    moe = transformer_block.moe
+                    moe = cast(_MoELike, transformer_block.moe)
+                    load_balance_coeff = moe.load_balance_coeff
+                    assert load_balance_coeff is not None
 
                     tokens_per_expert_E = tokens_per_expert_E_by_layer[
                         moe_layer_idx
@@ -526,16 +548,13 @@ def register_moe_load_balancing_hook(
 
                     # update the expert bias
                     # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
-                    # pyrefly: ignore [missing-attribute]
-                    expert_bias_delta_E = moe.load_balance_coeff * torch.sign(
+                    expert_bias_delta_E = load_balance_coeff * torch.sign(
                         tokens_per_expert_E.mean() - tokens_per_expert_E
                     )
                     expert_bias_delta_E = (
                         expert_bias_delta_E - expert_bias_delta_E.mean()
                     )
-                    # pyrefly: ignore [missing-attribute]
                     moe.expert_bias_E.add_(expert_bias_delta_E)
-                    # pyrefly: ignore [missing-attribute]
                     moe.tokens_per_expert_E.zero_()
 
     if _should_register_moe_balancing_hook(model_parts):
