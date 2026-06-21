@@ -26,8 +26,14 @@ from torch._inductor.fx_passes.bucketing import (
     is_all_gather_into_tensor as is_all_gather,
     is_wait_tensor,
 )
+
+try:
+    from torch._inductor.fx_passes.overlap_manual_scheduling import _move_overlap_nodes
+except ImportError:
+    _move_overlap_nodes = None
 from torch._inductor.fx_passes.overlap_manual_scheduling import (
     manual_overlap_bucketing,
+    ManualOverlapPreservingBucketer,
     ManualOverlapScheduler,
 )
 from torch._inductor.fx_passes.overlap_scheduling import (
@@ -62,6 +68,19 @@ def is_wait_tensor_from_fsdp(node: torch.fx.Node) -> bool:
 # Each NCCL PG gets its own CUDA stream, so the extra PG is what enables
 # AG/RS overlap in backward.
 _EXTRA_FSDP_PG_REGISTRY: dict[str, str] = {}
+
+
+def _reorder_overlap_nodes(
+    graph: fx.Graph,
+    overlap_deps: dict[fx.Node, OrderedSet[fx.Node]],
+    bucketed_node_types: dict[fx.Node, str],
+) -> None:
+    if _move_overlap_nodes is None:
+        # TODO(ivankobzarev): Remove this fallback once the PyTorch nightly wheel
+        # includes _move_overlap_nodes.
+        _stable_topological_sort(graph, overlap_deps)
+    else:
+        _move_overlap_nodes(graph, overlap_deps, bucketed_node_types)
 
 
 def _get_or_create_extra_pg(
@@ -107,23 +126,17 @@ def _get_or_create_extra_fsdp_pg(source_pg_name: str) -> str:
     )
 
 
-def overlap_fsdp_ag_rs_pass(
+def reassign_collective_pgs_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
 ) -> torch.fx.GraphModule:
-    """
-    Reassign FSDP all-gathers to extra NCCL process groups.
+    """Reassign collectives to dedicated NCCL process groups.
 
-    Discovers all distinct FSDP PGs by inspecting the graph (e.g. one for
-    FSDP, another for expert-FSDP), creates an extra NCCL PG over the same
-    ranks for each (giving it a separate CUDA stream), and rewrites every
-    all-gather to the corresponding extra PG. This separates all-gathers
-    from reduce-scatters onto different streams, enabling AG/RS overlap in
-    backward. EP communicator isolation is handled by
-    ``isolate_ep_process_group_pass``.
-
-    No-op when the graph has no FSDP all-gathers. Must be applied BEFORE
-    bucketing passes so bucketed all-gathers inherit the new PG name.
+    Each PG runs on its own CUDA stream, so moving a collective to an extra PG
+    (same ranks) lets it overlap with the collectives left on the original PG --
+    e.g. all-gathers overlapping reduce-scatters in backward, or isolating EP
+    collectives. No-op without targeted collectives; run before bucketing so
+    bucketed collectives inherit the new PG.
     """
     source_pg_names: OrderedSet[str] = OrderedSet()
     for node in gm.graph.nodes:
@@ -181,6 +194,40 @@ def transformer_block_bucketing_reordering_pass(
     return gm
 
 
+def get_fsdp_param_module_order(state_fqns: list[str]) -> dict[str, int]:
+    """Return module order matching FSDP2's first-seen parameter order."""
+    order: dict[str, int] = {}
+    for fqn in state_fqns:
+        if "." not in fqn:
+            continue
+        module_fqn = fqn.rsplit(".", 1)[0]
+        order.setdefault(module_fqn, len(order))
+    return order
+
+
+class FSDPParamOrderBucketer(ManualOverlapPreservingBucketer):
+    """Pack FSDP buckets in Eager FSDP2 parameter order."""
+
+    def __init__(
+        self,
+        *args: Any,
+        fsdp_param_module_order: dict[str, int] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.fsdp_param_module_order = fsdp_param_module_order or {}
+
+    def _param_order_key(self, node: fx.Node) -> tuple[int, int]:
+        module_fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
+        param_idx = self.fsdp_param_module_order.get(module_fqn, len(self.node_idx))
+        return (param_idx, self.node_idx[node])
+
+    def _bucket_group(self, coll_nodes: list[fx.Node]) -> None:
+        if self.fsdp_param_module_order:
+            coll_nodes = sorted(coll_nodes, key=self._param_order_key)
+        return super()._bucket_group(coll_nodes)
+
+
 class JointManualOverlapScheduler(ManualOverlapScheduler):
     """Manual overlap scheduler for joint forward+backward graphs.
 
@@ -216,6 +263,7 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
         is_backward_fn: Callable[[fx.Node], bool],
         module_stack_fn: Callable[[fx.Node], list[tuple[str, type[Any]]]],
         bucket_mode: BucketMode | None = None,
+        fsdp_param_module_order: dict[str, int] | None = None,
     ) -> None:
         super().__init__(
             gm,
@@ -225,6 +273,14 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
             bucket_mode=bucket_mode,
         )
         self._is_backward_fn = is_backward_fn
+        effective_bucket_mode = self.bucketer.bucket_mode
+        self.bucketer = FSDPParamOrderBucketer(
+            graph=self.graph,
+            collective_info=self.collective_info,
+            scheduled=OrderedSet(self.graph.nodes),
+            bucket_mode=effective_bucket_mode,
+            fsdp_param_module_order=fsdp_param_module_order,
+        )
 
     def _manual_bucket_collectives(self) -> None:
         """Bucket per module, splitting by direction to keep fwd/bwd buckets disjoint."""
@@ -237,7 +293,9 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
             if bwd_nodes:
                 self.bucketer.manual_bucket_collectives(nodes=bwd_nodes)
 
-        _stable_topological_sort(self.graph, {})
+        if _move_overlap_nodes is None:
+            _stable_topological_sort(self.graph, {})
+
         self.graph.lint()
         self.nodes = list(self.graph.nodes)
         self.in_degree = Counter(user for node in self.nodes for user in node.users)
@@ -252,7 +310,9 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
         self._schedule_rs_prefetch(overlap_deps)
         self._schedule_ag_prefetch(overlap_deps)
 
-        _stable_topological_sort(self.graph, overlap_deps)
+        _reorder_overlap_nodes(
+            self.graph, overlap_deps, self.bucketer.bucketed_node_types
+        )
         self.graph.lint()
 
         if self.insert_overlap_deps:
@@ -386,7 +446,7 @@ def joint_transformer_block_bucketing_reordering_pass(
     module_bucket_plans: list[list[str] | str],
     insert_overlap_deps: bool = False,
     bucket_mode: BucketMode | None = None,
-    enable_fsdp_ag_rs_overlap: bool = False,
+    fsdp_param_module_order: dict[str, int] | None = None,
 ) -> torch.fx.GraphModule:
     """Run joint-graph manual bucketing and reordering.
 
@@ -394,6 +454,9 @@ def joint_transformer_block_bucketing_reordering_pass(
     ``torch._inductor.fx_passes.overlap_manual_scheduling.manual_overlap_bucketing``.
     Buckets forward all-gathers, backward all-gathers, and backward reduce-scatters
     of each module into separate buckets per transformer block and emits prefetching.
+
+    Run ``reassign_collective_pgs_pass`` first to put collectives on dedicated
+    streams; bucketed collectives inherit the new PGs.
 
     Args:
         gm: joint forward+backward graph module.
@@ -405,14 +468,9 @@ def joint_transformer_block_bucketing_reordering_pass(
             ``preserve_node_ordering`` after the topological sort.
         bucket_mode: bucket mode forwarded to the underlying bucketer;
             defaults to ``"custom_ops"`` via the parent class.
-        enable_fsdp_ag_rs_overlap: when ``True``, run ``overlap_fsdp_ag_rs_pass``
-            on ``gm`` before bucketing so that bucketed all-gathers inherit
-            the extra FSDP PG name and run on a separate CUDA stream from
-            reduce-scatters. No-op when the graph contains no FSDP
-            all-gathers.
+        fsdp_param_module_order: module order derived from traced parameter
+            FQNs, used to pack FSDP buckets like Eager FSDP2.
     """
-    if enable_fsdp_ag_rs_overlap:
-        gm = overlap_fsdp_ag_rs_pass(gm, example_inputs)
 
     def _stack_fn(node: torch.fx.Node) -> list[tuple[str, type]]:
         fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
@@ -427,6 +485,7 @@ def joint_transformer_block_bucketing_reordering_pass(
         is_backward_fn=_is_backward_node,
         module_stack_fn=_stack_fn,
         bucket_mode=bucket_mode,
+        fsdp_param_module_order=fsdp_param_module_order,
     ).run()
     overlapped_gm.recompile()
     return overlapped_gm

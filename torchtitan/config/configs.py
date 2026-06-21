@@ -130,17 +130,20 @@ class ParallelismConfig:
     tensor_parallel_degree: int = 1
     """Tensor Parallelism degree. 1 means disabled."""
 
-    disable_loss_parallel: bool = False
-    """Whether to apply loss parallel when sequence parallel is enabled"""
-
     enable_async_tensor_parallel: bool = False
     """Whether to apply async tensor parallel (currently only effective when compile is enabled)"""
 
     enable_sequence_parallel: bool = True
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
 
-    full_dtensor: bool = False
-    """Whether to use full DTensor mode."""
+    spmd_backend: Literal["default", "full_dtensor", "spmd_types"] = "default"
+    """
+    SPMD backend selector.
+
+    - "default": use the existing TorchTitan parallelism paths.
+    - "full_dtensor": use the existing full DTensor path.
+    - "spmd_types": use the spmd_types path.
+    """
 
     pipeline_parallel_degree: int = 1
     """
@@ -214,6 +217,11 @@ class ParallelismConfig:
     """
 
     def __post_init__(self):
+        if self.spmd_backend not in {"default", "full_dtensor", "spmd_types"}:
+            raise ValueError(
+                "parallelism.spmd_backend must be one of "
+                "'default', 'full_dtensor', or 'spmd_types'."
+            )
         if self.context_parallel_load_balancer == "":
             raise ValueError(
                 "context_parallel_load_balancer cannot be an empty string. "
@@ -231,14 +239,6 @@ class ParallelismConfig:
                 "for compute capability 9.0 or newer."
             )
 
-    context_parallel_rotate_method: Literal["allgather", "alltoall"] = "allgather"
-    """
-    The collective to use in context parallel SDPA for kv shards exchange.
-    - 'allgather' means to all-gather all kv shards on ranks after the first sub-SDPA computation,
-    - 'alltoall' means to all-to-all shuffle the kv shards.
-    The default value is 'allgather'.
-    """
-
     expert_parallel_degree: int = 1
     """
     Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
@@ -247,70 +247,6 @@ class ParallelismConfig:
     (efsdp * ep) cover the same ranks, so dp_shard * cp * tp == efsdp * ep.
     EP borrows ranks from FSDP and TP: efsdp = dp_shard * cp * tp / ep.
     pp and dp_replicate are outer dimensions unaffected by this constraint.
-    """
-
-
-@dataclass(kw_only=True, slots=True)
-class ActivationCheckpointConfig:
-    mode: Literal["selective", "full", "memory_budget", "none"] = "selective"
-    """Type of activation checkpointing to use"""
-
-    per_op_sac_force_recompute_mm_shapes_by_fqns: list[str] = field(
-        default_factory=lambda: ["moe.router.gate"]
-    )
-    """
-    When per-op selective ac is used, this list of fully qualified names is used
-    to determine which mm shapes to force recompute, rather than being considered
-    by rest of the sac policy, e.g save every other mm. Only nn.Linear modules are
-    supported today.
-
-    Note: this config applies to mms not limited to those matching the specified
-    fqns, e.g. if "moe.router.gate", corresponding to Linear(in, out), is specified,
-    ANY mm with shape matching (*, in) x (in, out) will be force recomputed.
-    """
-
-    early_stop: bool = False
-    """
-    Whether to stop recomputing early when all activations have already been
-    rematerialized.
-    """
-
-    memory_budget: float = 0.5
-    """
-    When mode is set to "memory_budget", this value determines how much
-    partitioner in the compiler should trade off compute for memory.
-    0.0 corresponds to the activation memory from applying
-    activation checkpointing to the full compiled region, and 1.0 corresponds to
-    the activation memory from the default runtime-optimized strategy. Read here:
-    https://pytorch.org/blog/activation-checkpointing-techniques/
-    """
-
-    visualize_memory_budget_pareto: bool = False
-    """
-    This dumps out a SVG visualization of the expected runtime vs. activation
-    memory tradeoffs for all memory budget values from 0 to 1 in increments of
-    0.05 in {--dump_folder}/memory_budget_pareto folder. See an example here:
-    https://github.com/pytorch/pytorch/pull/126320#discussion_r1625104015
-    """
-
-    preserve_rng_state: bool = True
-    """
-    If deterministic output compared to non-checkpointed passes is required, set
-    to true. Results in stashing and restoring the RNG state during each checkpoint,
-    may be slower. See https://docs.pytorch.org/docs/stable/checkpoint.html
-    for details.
-    """
-
-    determinism_check: str = "default"
-    """
-    A string specifying the determinism function. See
-    https://docs.pytorch.org/docs/stable/checkpoint.html for details.
-    """
-
-    debug: bool = False
-    """
-    Capture ac debug information. Will be slower. See
-    https://docs.pytorch.org/docs/stable/checkpoint.html for details.
     """
 
 
@@ -367,6 +303,9 @@ class CommConfig:
 class DebugConfig:
     seed: int | None = None
     """Choose the base RNG seed used for training"""
+
+    spmd_typechecking: bool = False
+    """Enable global SPMD type checking; only effective under spmd_backend="spmd_types"."""
 
     deterministic: bool = False
     """Use deterministic algorithms wherever possible, may be slower"""

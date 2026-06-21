@@ -164,7 +164,7 @@ def _run_llama3_loss_compare(test_options_extra: str = "") -> bool:
         test_options += f" {test_options_extra}"
     return run_loss_compare(
         baseline_module="llama3",
-        baseline_config="llama3_debugmodel_ce_loss",
+        baseline_config="llama3_debugmodel",
         test_module="graph_trainer.llama3",
         test_config="graph_trainer_llama3_debugmodel",
         baseline_options=LLAMA3_PARALLELISM,
@@ -185,10 +185,10 @@ def _run_deepseek_v3_loss_compare(test_options_extra: str = "") -> bool:
     if test_options_extra:
         test_options += f" {test_options_extra}"
     return run_loss_compare(
-        baseline_module="graph_trainer.deepseek_v3",
-        baseline_config="deepseek_v3_debugmodel_ep_ce_loss",
+        baseline_module="deepseek_v3",
+        baseline_config="deepseek_v3_debugmodel",
         test_module="graph_trainer.deepseek_v3",
-        test_config="graph_trainer_deepseek_v3_debugmodel_ep",
+        test_config="graph_trainer_deepseek_v3_debugmodel",
         baseline_options=DSV3_PARALLELISM,
         test_options=test_options,
     )
@@ -206,8 +206,8 @@ def _run_qwen3_loss_compare(test_options_extra: str = "") -> bool:
     if test_options_extra:
         test_options += f" {test_options_extra}"
     return run_loss_compare(
-        baseline_module="graph_trainer.qwen3",
-        baseline_config="qwen3_debugmodel_ce_loss",
+        baseline_module="qwen3",
+        baseline_config="qwen3_debugmodel",
         test_module="graph_trainer.qwen3",
         test_config="graph_trainer_qwen3_debugmodel",
         baseline_options=QWEN3_PARALLELISM,
@@ -228,10 +228,10 @@ def _run_qwen3_moe_loss_compare(test_options_extra: str = "") -> bool:
     if test_options_extra:
         test_options += f" {test_options_extra}"
     return run_loss_compare(
-        baseline_module="graph_trainer.qwen3",
-        baseline_config="qwen3_moe_debug_ep_ce_loss",
+        baseline_module="qwen3",
+        baseline_config="qwen3_moe_debug",
         test_module="graph_trainer.qwen3",
-        test_config="graph_trainer_qwen3_debugmodel_moe_ep",
+        test_config="graph_trainer_qwen3_debugmodel_moe",
         baseline_options=QWEN3_MOE_PARALLELISM,
         test_options=test_options,
     )
@@ -244,12 +244,18 @@ AUTOPARALLEL_LLAMA3_PARALLELISM = (
 
 
 def _run_autoparallel_llama3_loss_compare() -> bool:
-    """Run loss_compare for eager llama3 vs graph_trainer AutoParallel llama3."""
+    """Run loss_compare for eager SDPA llama3 vs graph_trainer AutoParallel.
+
+    AutoParallel is unsupported on the default FlexAttention backend (dynamo
+    export flattens the BlockMask), so both sides use the test-only SDPA backend.
+    The eager baseline runs the same SDPA model through GraphTrainer with
+    ``mode=None`` (delegates to the core eager path).
+    """
     return run_loss_compare_close(
-        baseline_module="llama3",
-        baseline_config="llama3_debugmodel_ce_loss",
+        baseline_module="graph_trainer.llama3",
+        baseline_config="graph_trainer_llama3_debugmodel_sdpa_eager",
         test_module="graph_trainer.llama3",
-        test_config="graph_trainer_llama3_debugmodel",
+        test_config="graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss",
         baseline_options=AUTOPARALLEL_LLAMA3_PARALLELISM,
         test_options=(
             f"{AUTOPARALLEL_LLAMA3_PARALLELISM}"
@@ -264,17 +270,16 @@ def _run_autoparallel_llama3_loss_compare() -> bool:
 AUTOPARALLEL_DSV3_PARALLELISM = (
     "--parallelism.data_parallel_shard_degree=4"
     " --parallelism.expert_parallel_degree=2"
-    " --parallelism.disable_loss_parallel"
 )
 
 
 def _run_autoparallel_deepseek_v3_loss_compare() -> bool:
     """Run loss_compare for eager DeepSeek V3 vs graph_trainer AutoParallel."""
     return run_loss_compare_close(
-        baseline_module="graph_trainer.deepseek_v3",
-        baseline_config="deepseek_v3_debugmodel_ep_ce_loss",
+        baseline_module="deepseek_v3",
+        baseline_config="deepseek_v3_debugmodel",
         test_module="graph_trainer.deepseek_v3",
-        test_config="graph_trainer_deepseek_v3_debugmodel_ep",
+        test_config="graph_trainer_deepseek_v3_debugmodel",
         baseline_options=AUTOPARALLEL_DSV3_PARALLELISM,
         test_options=(
             f"{AUTOPARALLEL_DSV3_PARALLELISM}"
@@ -366,6 +371,11 @@ class TestGraphTrainerNumerics(unittest.TestCase):
 class TestGraphTrainerAutoParallelNumerics(unittest.TestCase):
     """Test graph_trainer AutoParallel numerics equivalence against eager."""
 
+    # AutoParallel runs on the test-only SDPA backend (Decoder.forward lists
+    # positions before attention_masks so input_fn's (tokens, positions) binds
+    # correctly). It is unsupported on the default FlexAttention backend (dynamo
+    # export flattens the BlockMask to (Fake)Tensors and flex_attention fails on
+    # missing BLOCK_SIZE), so both eager baseline and AutoParallel test use SDPA.
     def test_llama3_aot_fx_trace_autoparallel_vs_eager(self):
         self.assertTrue(_run_autoparallel_llama3_loss_compare())
 

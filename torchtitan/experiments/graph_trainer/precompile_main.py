@@ -26,6 +26,7 @@ from typing import Any, cast
 import torch
 import torch.distributed as dist
 
+from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
@@ -164,6 +165,19 @@ def _common_setup(config):
     )
 
 
+def _prepare_loss_for_precompile(model, loss_fn) -> None:
+    """Match Trainer's post-parallelization loss setup for precompile tracing."""
+    if not isinstance(loss_fn, ChunkedCELoss):
+        return
+
+    lm_head = getattr(model, "lm_head", None)
+    if lm_head is None:
+        raise ValueError("Model must have lm_head for ChunkedCELoss precompile")
+
+    loss_fn.set_lm_head(lm_head)
+    model._skip_lm_head = True
+
+
 def _precompile_aot_fx_trace(
     config,
     model,
@@ -183,6 +197,7 @@ def _precompile_aot_fx_trace(
     from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
     loss_fn = config.loss.build(compile_config=compile_config)
+    _prepare_loss_for_precompile(model, loss_fn)
 
     fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
 
@@ -207,21 +222,15 @@ def _precompile_aot_fx_trace(
         * parallel_dims.cp
     )
     dummy_global_valid_tokens = float(global_batch_size * seq_len)
-    extra_inputs: dict[str, torch.Tensor] = {}
     extra_kwargs: dict[str, Any] = {}
 
     if isinstance(model_config, Decoder.Config) and model_config.layers:
         attn_config = model_config.layers[0].attention
         inner_attention = attn_config.inner_attention
 
-        if attn_config.mask_type == "block_causal":
-            positions = torch.arange(
-                0, dummy_inputs.shape[1], dtype=torch.int32, device=dummy_inputs.device
-            ).expand(dummy_inputs.shape)
-        else:
-            positions = torch.arange(
-                dummy_inputs.shape[1], dtype=torch.int32, device=dummy_inputs.device
-            ).repeat(dummy_inputs.shape[0], 1)
+        positions = torch.arange(
+            0, dummy_inputs.shape[1], dtype=torch.int32, device=dummy_inputs.device
+        ).expand(dummy_inputs.shape)
 
         if isinstance(inner_attention, (FlexAttention.Config, VarlenAttention.Config)):
             extra_kwargs["attention_masks"] = cast(Decoder, model).get_attention_masks(
@@ -239,18 +248,11 @@ def _precompile_aot_fx_trace(
             "Set --parallelism.context_parallel_degree 1."
         )
 
-    # Enable loss_parallel when TP is active and loss_parallel is not
-    # disabled. This matches the training path which wraps tracing +
-    # execution inside train_context() → loss_parallel(). Without it,
-    # cross_entropy fails with "mixed torch.Tensor and DTensor" because
-    # the TP-parallelized model outputs Shard'd DTensors but labels
-    # remain plain tensors.
-    loss_parallel_enabled = (
-        parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
-    )
     loss_parallel_ctx = (
+        # TODO(bobrenjc93): Migrate graph trainer to the manual loss-parallel
+        # custom autograd function and remove this DTensor context manager.
         torch.distributed.tensor.parallel.loss_parallel()
-        if loss_parallel_enabled
+        if parallel_dims.tp_enabled
         else contextlib.nullcontext()
     )
 
@@ -262,7 +264,6 @@ def _precompile_aot_fx_trace(
             dummy_inputs,
             dummy_labels,
             dummy_global_valid_tokens,
-            extra_inputs,
             extra_kwargs,
         )
     logger.info(

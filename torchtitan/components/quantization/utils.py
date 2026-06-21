@@ -42,14 +42,12 @@ def swap_token_dispatcher(config, pad_multiple: int) -> None:
         config.token_dispatcher = TorchAOTokenDispatcher.Config(
             num_experts=config.token_dispatcher.num_experts,
             top_k=config.token_dispatcher.top_k,
-            score_before_experts=config.token_dispatcher.score_before_experts,
             pad_multiple=pad_multiple,
         )
     elif isinstance(config.token_dispatcher, HybridEPTokenDispatcher.Config):
         config.token_dispatcher = HybridEPTokenDispatcher.Config(
             num_experts=config.token_dispatcher.num_experts,
             top_k=config.token_dispatcher.top_k,
-            score_before_experts=config.token_dispatcher.score_before_experts,
             non_blocking_capacity_factor=config.token_dispatcher.non_blocking_capacity_factor,
             pad_multiple=pad_multiple,
         )

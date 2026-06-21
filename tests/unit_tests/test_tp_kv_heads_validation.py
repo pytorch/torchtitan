@@ -9,7 +9,7 @@ Unit tests for TP-degree / n_kv_heads divisibility validation in model configs.
 
 Covers Issue #2574: models with GQA (n_kv_heads < n_heads) would crash deep in
 the forward pass when tensor_parallel_degree > n_kv_heads. The fix adds an
-early ValueError in update_from_config for llama3, llama4, qwen3, and gpt_oss.
+early ValueError in update_from_config for llama3, qwen3, and gpt_oss.
 """
 
 import unittest
@@ -26,11 +26,11 @@ try:
 
     from torchtitan.config import ParallelismConfig
     from torchtitan.models.common import (
+        ComplexRoPE,
         compute_ffn_hidden_dim,
         Embedding,
         Linear,
         RMSNorm,
-        RoPE,
     )
     from torchtitan.models.llama3 import Llama3Model, Llama3TransformerBlock
 
@@ -48,7 +48,6 @@ def _make_trainer_config(tp: int, seq_len: int = 2048):
     training = SimpleNamespace(seq_len=seq_len)
     parallelism = ParallelismConfig(
         tensor_parallel_degree=tp,
-        disable_loss_parallel=True,
     )
     return SimpleNamespace(training=training, parallelism=parallelism)
 
@@ -76,7 +75,12 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
                     wqkv_param_init=_LINEAR_INIT,
                     wo_param_init=_LINEAR_INIT,
                     inner_attention=ScaledDotProductAttention.Config(),
-                    rope_backend="complex",
+                    rope=ComplexRoPE.Config(
+                        dim=_DIM // n_heads,
+                        max_seq_len=4096,
+                        theta=500000,
+                        scaling="llama",
+                    ),
                 ),
                 feed_forward=make_ffn_config(
                     dim=_DIM,
@@ -93,13 +97,6 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
         tok_embeddings=Embedding.Config(num_embeddings=_VOCAB_SIZE, embedding_dim=_DIM),
         norm=RMSNorm.Config(normalized_shape=_DIM),
         lm_head=Linear.Config(in_features=_DIM, out_features=_VOCAB_SIZE),
-        rope=RoPE.Config(
-            dim=_DIM // n_heads,
-            max_seq_len=4096,
-            theta=500000,
-            backend="complex",
-            scaling="llama",
-        ),
         layers=layers,
     )
 

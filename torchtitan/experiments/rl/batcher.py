@@ -182,24 +182,15 @@ class Batcher(Configurable):
                 step_batches.append(self.collate(packed_rows[start:end]))
             microbatches.append(step_batches)
 
-        # TODO: Optimize rollout collection to reduce wasted episodes.
-        # Currently the controller estimates token counts without padded
-        # tokens, which can overshoot because packing adds prompt tokens
-        # and padding. Track packing metrics to monitor waste.
         total_token_slots = len(packed_rows) * self.seq_len
+        non_padded_tokens = sum(sum(row["seq_lens"]) for row in packed_rows)
+        pct_pad_in_batch = (
+            (total_token_slots - non_padded_tokens) / total_token_slots
+            if total_token_slots > 0
+            else 0.0
+        )
         packing_metrics = [
-            m.Metric(
-                "batcher/packing_efficiency",
-                m.NoReduce(
-                    num_global_valid_tokens / total_token_slots
-                    if total_token_slots > 0
-                    else 0.0
-                ),
-            ),
-            m.Metric(
-                "batcher/num_packed_rows",
-                m.NoReduce(float(len(packed_rows))),
-            ),
+            m.Metric("batcher/pct_pad_in_batch", m.NoReduce(pct_pad_in_batch)),
             m.Metric(
                 "batcher/num_rows_wasted",
                 m.NoReduce(float(max(0, num_rows_before_truncate - len(packed_rows)))),
@@ -211,7 +202,7 @@ class Batcher(Configurable):
     def _pack_episodes(self, episodes: list[Episode]) -> Iterator[dict]:
         """Pack all episodes into [1, seq_len] rows.
 
-        Each episode's raw tokens (length N) are split per sample into
+        Each episode's raw tokens (length N) are split into
         ``input_ids = raw[:-1]`` and ``labels = raw[1:]`` (both length
         N-1), matching the pre-training dataloader convention.
 
@@ -228,19 +219,13 @@ class Batcher(Configurable):
         }
 
         def _iterate_samples() -> Iterator[dict]:
-            for ep in episodes:
-                prompt_len = len(ep.prompt_token_ids)
-                response_len = len(ep.token_ids)
-                raw_ids = ep.prompt_token_ids + ep.token_ids
-                gen_lp = [0.0] * prompt_len + ep.token_logprobs
-                loss_mask = [False] * prompt_len + [True] * response_len
-                advantages = [0.0] * prompt_len + [ep.advantage] * response_len
+            for episode in episodes:
                 sample = {
-                    "input_ids": raw_ids[:-1],
-                    "labels": raw_ids[1:],
-                    "generator_logprobs": gen_lp[1:],
-                    "loss_mask": loss_mask[1:],
-                    "advantages": advantages[1:],
+                    "input_ids": episode.token_ids[:-1],
+                    "labels": episode.token_ids[1:],
+                    "generator_logprobs": episode.logprobs[1:],
+                    "loss_mask": episode.loss_mask[1:],
+                    "advantages": episode.advantage[1:],
                 }
                 if self._per_sample_pad_multiple:
                     sample_len = len(sample["input_ids"])

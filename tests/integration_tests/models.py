@@ -60,21 +60,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "deepseek_v3_hsdp+ep",
             ngpu=4,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel_flex_attn_ep",
-                    "--parallelism.data_parallel_shard_degree 4",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                    "--parallelism.expert_parallel_degree 4",
-                    "--activation_checkpoint.mode 'selective'",
-                ],
-            ],
-            "DeepSeek V3 Flex+PP+FSDP+EP+SACOP",
-            "deepseek_v3_flex+pp+fsdp+ep+sacop",
-            ngpu=8,
-        ),
         # Integration Test Cases for Qwen3 dense and MoE model
         OverrideDefinitions(
             [
@@ -82,10 +67,11 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--module qwen3 --config qwen3_debugmodel_moe_param_groups",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 4",
                 ],
             ],
-            "Qwen3 FSDP+TP (param groups)",
-            "qwen3_fsdp+tp_param_groups",
+            "Qwen3 MoE FSDP+TP+EP (param groups)",
+            "qwen3_moe_fsdp+tp+ep_param_groups",
             ngpu=4,
         ),
         OverrideDefinitions(
@@ -95,78 +81,62 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.no-enable-sequence-parallel",
+                    "--parallelism.context_parallel_degree 2",
                 ],
                 [
                     "--module qwen3 --config qwen3_debugmodel_fused_qkv",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
-                ],
-            ],
-            "Qwen3 FSDP+TP (SP disabled + fused QKV)",
-            "qwen3_fsdp+tp_no_sp_fused_qkv",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module qwen3 --config qwen3_debugmodel",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.context_parallel_degree 2",
                 ],
             ],
-            "Qwen3 FSDP+TP+CP",
-            "qwen3_fsdp+tp+cp",
+            "Qwen3 FSDP+TP+CP (SP disabled -> fused QKV)",
+            "qwen3_fsdp+tp+cp_no_sp_fused_qkv",
             ngpu=8,
         ),
-        # Integration Test Cases for Llama 4
-        # TODO: re-enable compile after fixing
-        # https://github.com/pytorch/torchtitan/issues/2771
+        # Integration Test Cases for Qwen3.5
         OverrideDefinitions(
             [
                 [
-                    "--module llama4 --config llama4_debugmodel_ep",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                    "--module qwen3_5 --config qwen35_debugmodel_moe",
                     "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.expert_parallel_degree 4",
-                    # "--compile.enable",
-                ],
-            ],
-            "Llama 4 PP+FSDP+TP+EP+compile",
-            "llama4_pp+fsdp+tp+ep+compile",
-            ngpu=8,
-        ),
-        # Integration Test Cases for Qwen3-VL
-        OverrideDefinitions(
-            [
-                [
-                    "--module qwen3_vl --config qwen3_vl_debugmodel_moe",
-                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
                 ],
             ],
-            "Qwen3-VL MoE FSDP+TP+EP",
-            "qwen3_vl_moe_fsdp+tp+ep",
+            "Qwen3.5 MoE FSDP+TP+EP+PP",
+            "qwen3_5_moe_fsdp+tp+ep+pp",
             ngpu=8,
         ),
         # Integration Test Cases for gpt-oss
-        # TODO: re-enable compile after fixing
-        # https://github.com/pytorch/torchtitan/issues/3409
         OverrideDefinitions(
             [
                 [
-                    "--module gpt_oss --config gpt_oss_debugmodel_ep",
+                    "--module gpt_oss --config gpt_oss_debugmodel",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
-                    # "--compile.enable",
+                    "--compile.enable",
                 ],
             ],
             "Gpt-oss FSDP+TP+EP+compile",
             "gpt_oss_fsdp+tp+ep+compile",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module gpt_oss --config gpt_oss_debugmodel",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                    "--parallelism.expert_parallel_degree 4",
+                    "activation-checkpoint:selective",
+                ],
+            ],
+            "Gpt-oss PP+FSDP+EP+SACOP",
+            "gpt_oss_pp+fsdp+ep+sacop",
             ngpu=8,
         ),
     ]

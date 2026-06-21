@@ -20,7 +20,6 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
-    ActivationCheckpointConfig,
     CommConfig,
     CompileConfig,
     Configurable,
@@ -30,6 +29,10 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed.activation_checkpoint import (
+    ActivationCheckpointingConfig,
+    SelectiveAC,
+)
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingBatch
 from torchtitan.models.common.attention import FlexAttention
@@ -50,12 +53,20 @@ def compute_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     dataloader convention.  No internal shift is needed.
     Output shape matches input: ``[batch, seq_len]``.
     """
-    from torch.distributed.tensor import DTensor
+    from torch.distributed.tensor import DTensor, Replicate, Shard
 
     if isinstance(logits, DTensor):
         # TODO: pass `grad_placements=[Replicate(), ...]` to make the autograd
         # contract explicit (see .claude/rules/distributed.md).
-        logits = logits.to_local()
+        # Gather vocab-sharded TP logits before computing per-token logprobs.
+        placements = tuple(
+            Replicate()
+            if isinstance(p, Shard) and p.dim in (-1, logits.ndim - 1)
+            else p
+            for p in logits.placements
+        )
+        logits = logits.redistribute(placements=placements).to_local()
+
     B, S, V = logits.shape
     return -F.cross_entropy(
         logits.float().reshape(B * S, V),
@@ -78,7 +89,7 @@ class PartialLogprobDrift:
 @sl.log_trace_span("verify_logprob_identity")
 def verify_logprob_identity(
     generator_logprobs: torch.Tensor,
-    policy_logprobs: torch.Tensor,
+    trainer_logprobs: torch.Tensor,
     loss_mask: torch.Tensor,
     *,
     num_global_valid_tokens: int,
@@ -87,7 +98,7 @@ def verify_logprob_identity(
 
     Args:
         generator_logprobs: [B, L] generator logprobs from TrainingBatch.
-        policy_logprobs: [B, L] trainer-computed logprobs.
+        trainer_logprobs: [B, L] trainer-computed logprobs.
         loss_mask: [B, L] bool mask; True for response tokens.
         num_global_valid_tokens: Total response tokens across all DP ranks.
 
@@ -95,7 +106,7 @@ def verify_logprob_identity(
         PartialLogprobDrift.
     """
     ref_flat = generator_logprobs[loss_mask].float()
-    policy_flat = policy_logprobs[loss_mask].float()
+    policy_flat = trainer_logprobs[loss_mask].float()
 
     if ref_flat.numel() == 0:
         zero = torch.zeros((), dtype=torch.float32, device=generator_logprobs.device)
@@ -140,8 +151,8 @@ class PolicyTrainer(Actor, Configurable):
         comm: CommConfig = field(default_factory=CommConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
         loss: Configurable.Config = field(default_factory=Configurable.Config)
-        ac_config: ActivationCheckpointConfig = field(
-            default_factory=lambda: ActivationCheckpointConfig(mode="none")
+        ac_config: ActivationCheckpointingConfig = field(
+            default_factory=SelectiveAC.Config
         )
         checkpoint: CheckpointManager.Config = field(
             default_factory=CheckpointManager.Config
@@ -160,6 +171,8 @@ class PolicyTrainer(Actor, Configurable):
         output_dir: str,
     ):
         init_logger()
+        if not config.dump_folder:
+            config.dump_folder = output_dir
         sl.init_structured_logger(
             source="rl_trainer",
             output_dir=output_dir,
@@ -187,7 +200,10 @@ class PolicyTrainer(Actor, Configurable):
         set_batch_invariance(config.debug.batch_invariant)
 
         with sl.log_trace_span("torch_distributed_init"):
-            world_size = dist_utils.init_distributed(config.comm)
+            world_size = dist_utils.init_distributed(
+                config.comm,
+                base_folder=output_dir,
+            )
 
         self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
 
@@ -264,9 +280,14 @@ class PolicyTrainer(Actor, Configurable):
 
     @endpoint
     async def close(self) -> None:
-        """Destroy the worker's torch.distributed process group."""
-        if torch.distributed.is_initialized():
-            torch.distributed.destroy_process_group()
+        """Close actor-local resources before the process mesh stops.
+
+        The trainer does not own the distributed process group lifecycle here:
+        Monarch created it for the actor mesh, and ``ProcMesh.stop()`` performs
+        the final teardown. Destroying it from this endpoint can race with mesh
+        shutdown and hang at process exit.
+        """
+        logger.debug("PolicyTrainer close requested; ProcMesh.stop owns PG teardown.")
 
     @sl.log_trace_span("build_model")
     def _build_model(
@@ -413,25 +434,24 @@ class PolicyTrainer(Actor, Configurable):
             logits = model(
                 token_ids, attention_masks=attention_masks, positions=positions
             )
-        policy_logprobs = compute_logprobs(logits, labels)
+        trainer_logprobs = compute_logprobs(logits, labels)
 
         with sl.log_trace_span("loss_fn"):
             loss, loss_metrics = self.loss_fn(
-                policy_logprobs=policy_logprobs,
+                trainer_logprobs=trainer_logprobs,
                 generator_logprobs=generator_logprobs,
                 loss_mask=loss_mask,
                 advantages=advantages,
                 num_global_valid_tokens=num_global_valid_tokens,
             )
 
-        self.optimizers.zero_grad()
         with sl.log_trace_span("model_backward"):
             loss.backward()
 
         # Metrics for bitwise verification of policy logprobs.
         verification: PartialLogprobDrift = verify_logprob_identity(
             generator_logprobs=generator_logprobs,
-            policy_logprobs=policy_logprobs,
+            trainer_logprobs=trainer_logprobs,
             loss_mask=loss_mask,
             num_global_valid_tokens=num_global_valid_tokens,
         )
@@ -456,7 +476,7 @@ class PolicyTrainer(Actor, Configurable):
     async def optim_step(self) -> OptimStepOutput:
         """Clip gradients, step optimizer + LR scheduler, return updated state."""
         # TODO: Accept optional optimizer params (e.g. learning rate)
-        # to allow controller-owned schedules (see Tinker API).
+        # to allow controller-owned schedules.
 
         # capture LR before step
         current_lrs = self.lr_schedulers.schedulers[0].get_last_lr()
@@ -473,11 +493,13 @@ class PolicyTrainer(Actor, Configurable):
                 self.config.training.max_norm,
                 foreach=True,
                 pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
+                ep_enabled=self.parallel_dims.ep_enabled,
             )
 
         with sl.log_trace_span("optim"):
             self.optimizers.step()
             self.lr_schedulers.step()
+            self.optimizers.zero_grad()
 
         self.policy_version += 1
 

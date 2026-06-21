@@ -4,11 +4,11 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'torchtitan/experiments/ft/**'
+      - 'torchtitan/experiments/torchft/**'
       - '.github/workflows/unit_test_cpu_torchft.yaml'
   pull_request:
     paths:
-      - 'torchtitan/experiments/ft/**'
+      - 'torchtitan/experiments/torchft/**'
       - '.github/workflows/unit_test_cpu_torchft.yaml'
 
 concurrency:
@@ -38,4 +38,4 @@ jobs:
 
         USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cpu
 
-        pytest torchtitan/experiments/ft/tests/test_ft_checkpoint.py -v
+        pytest torchtitan/experiments/torchft/tests/test_torchft_checkpoint.py -v
