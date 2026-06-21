@@ -244,6 +244,12 @@ declaratively — no field-sniffing inside the factory.
 - a list of FQN globs — `fnmatch` style, where `*` also crosses `.`; a node is
   claimed if any glob matches its FQN.
 
+By default, `target` matches instances of the target config class and its
+subclasses. If a replacement only implements the concrete target contract, pass
+`exact=True` to `@override`; subclass configs are then not claimed, so they are
+not logged as replacements and can still be handled by a subclass-specific
+override.
+
 The FQN is the full path from the `Trainer.Config` root, e.g. a model component
 is `model_spec.model.layers.0.feed_forward` and the optimizer is `optimizer`.
 Globs with `*` (which crosses `.`) keep selectors readable.
@@ -441,17 +447,23 @@ for the full recipe.
 
 ## Worked Examples
 
-- `torchtitan/overrides/fused_swiglu.py` — **the in-repo example.** A fused
-  SwiGLU feed-forward demonstrating custom `__init__` parametrization (one fused
-  `(hidden, 2, dim)` `w13` weight, one GEMM), `param_init`, and a `sharding_config`
-  that composes with both FSDP and TP (see "Fusion under TP" above). Needs no
-  prerequisite. See "Checkpoint Compatibility" for why it is not interoperable
-  with stock checkpoints.
+- `torchtitan/overrides/fused_swiglu.py` — **the parametrization example.** A
+  fused SwiGLU feed-forward demonstrating custom `__init__` parametrization (one
+  fused `(hidden, 2, dim)` `w13` weight, one GEMM), `param_init`, and a
+  `sharding_config` that composes with both FSDP and TP (see "Fusion under TP"
+  above). Needs no prerequisite. See "Checkpoint Compatibility" for why it is not
+  interoperable with stock checkpoints.
+- `torchtitan/overrides/helion_rope.py` — **the custom-kernel example.** Swaps
+  `CosSinRoPE` for a fused Helion kernel (forward + backward) wrapped in a
+  `torch.library.custom_op` (with `register_fake` / `register_autograd`), the
+  recipe from "Custom kernels and `torch.compile`". `helion` is an optional
+  dependency, so the module imports without it and falls back to the PyTorch RoPE
+  when it (or CUDA) is unavailable; it is checkpoint-compatible with stock.
 
 The `TritonRoPE` snippets above are illustrative — no `triton_rope.py` is
-shipped — but RoPE is a fully valid override target: each attention module owns a
-`rope` submodule (`RoPE.Config`), so a custom RoPE is an ordinary component
-override.
+shipped — but RoPE is a fully valid override target (`helion_rope.py` is a real
+one): each attention module owns a `rope` submodule (`RoPE.Config`), so a custom
+RoPE is an ordinary component override.
 
 ## Code map
 
@@ -461,8 +473,8 @@ override.
 | `torchtitan/config/__init__.py` | Re-exports the override API. |
 | `torchtitan/protocols/model_spec.py` | `ModelSpec.traverse` exposes the nested model config to the traversal. |
 | `torchtitan/trainer.py` | Holds the `override` config field; applies overrides after `update_from_config`, before builds. |
-| `torchtitan/overrides/` | In-repo example implementations (`fused_swiglu.py`). |
-| `tests/unit_tests/test_override.py` | Unit tests: registration, provenance, FQN targeting, per-node conflicts, `derive`. |
+| `torchtitan/overrides/` | In-repo example implementations (`fused_swiglu.py`, `helion_rope.py`). |
+| `tests/unit_tests/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, `derive`. |
 
 Overriding a component requires no changes to any model's `config_registry.py`
 or `__init__.py` — that is the point of the design.
@@ -476,6 +488,8 @@ or `__init__.py` — that is the point of the design.
   claims error.
 - **Per-instance targeting.** Via `fqns` (FQN globs) on `@override`; the factory
   is pure construction.
+- **Subclass matching.** Targets match subclasses by default; use `exact=True`
+  when a replacement only supports the concrete target config.
 - **Scope.** Any `Configurable` in the `Trainer.Config` tree.
 - **Config construction.** Use `derive(cfg, NewConfig, **deltas)` so factories
   don't silently drop fields added to the target later.
