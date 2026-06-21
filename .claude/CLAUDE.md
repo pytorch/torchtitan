@@ -7,7 +7,7 @@
 pip install -r requirements.txt -r requirements-dev.txt
 
 # Lint and format (required before any PR)
-pre-commit run --all-files
+prek run --all-files
 
 # Run unit tests
 pytest tests/ -x
@@ -135,7 +135,7 @@ this for the comments and docstrings you are adding or rewriting.
 
 ## PR Expectations
 
-1. **Lint first.** Run `pre-commit run --all-files` and fix all issues before
+1. **Lint first.** Run `prek run --all-files` and fix all issues before
    requesting review. CI linting failures waste everyone's time.
 2. **Show numerical proof.** Include loss comparison for any non-trivial change.
 3. **Explain "why" not just "what"** in the PR description.

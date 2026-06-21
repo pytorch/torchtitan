@@ -35,7 +35,7 @@ Issues = "https://github.com/pytorch/torchtitan/issues"
 
 [project.optional-dependencies]
 dev = [
-    "pre-commit",
+    "prek",
     "pytest",
     "pytest-cov",
     "expecttest", # test_tokenizer

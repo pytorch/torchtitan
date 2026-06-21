@@ -7,7 +7,7 @@ globs: torchtitan/experiments/**
 
 ## Looser Standards, Still Linted
 Code in experiments has more flexibility than core, but must still pass
-`pre-commit run --all-files`. No exceptions for linting.
+`prek run --all-files`. No exceptions for linting.
 
 ## Don't Modify Core for Experiments
 If an experiment needs behavior that core doesn't provide, work around it in the
