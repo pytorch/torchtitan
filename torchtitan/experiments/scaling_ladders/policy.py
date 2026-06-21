@@ -14,6 +14,17 @@ is converted to steps by the planner.
 import math
 from dataclasses import dataclass
 
+# The policy fields overridable per run (the hillclimb knobs). Single source of
+# truth for override validation, the run-dir slug, and the CLI flags -- consumers
+# derive their tables from this instead of re-listing the field names.
+OVERRIDABLE_FIELDS = (
+    "chinchilla_multiple",
+    "decay_fraction",
+    "tokens_per_param",
+    "lr_multiplier",
+    "weight_decay",
+)
+
 # Constants from the over-training scaling fits (SemanticScholar
 # CorpusID:270764838) and OLMo-core. ``_ANCHOR_SEQ_LEN`` is the 2048-token
 # anchor baked into the batch-size fit; it is NOT the ladder seq_len.

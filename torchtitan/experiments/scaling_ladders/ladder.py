@@ -31,19 +31,12 @@ from .planner import (
     to_plan_dict,
     to_trainer_config,
 )
-from .policy import WSDSChinchillaPolicy
+from .policy import OVERRIDABLE_FIELDS, WSDSChinchillaPolicy
 
-# Override keys that re-run the policy. Anything else (e.g. seed) is handled
-# separately; unknown keys raise so a typo never silently no-ops.
-_POLICY_OVERRIDES = frozenset(
-    {
-        "chinchilla_multiple",
-        "decay_fraction",
-        "tokens_per_param",
-        "lr_multiplier",
-        "weight_decay",
-    }
-)
+# Override keys that re-run the policy (canonical list in policy.py). Anything
+# else (e.g. seed) is handled separately; unknown keys raise so a typo never
+# silently no-ops.
+_POLICY_OVERRIDES = frozenset(OVERRIDABLE_FIELDS)
 _SLUG_ABBREV = {
     "weight_decay": "wd",
     "lr_multiplier": "lrm",

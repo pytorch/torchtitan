@@ -17,15 +17,14 @@ import json
 
 from . import LADDER
 from .ladder import _spawn_run
+from .policy import OVERRIDABLE_FIELDS, WSDSChinchillaPolicy
 
+# Casts derived from the policy dataclass (canonical override list) + seed, so the
+# CLI flags never drift from the policy fields.
 _OVERRIDE_FLAGS = {
-    "lr_multiplier": float,
-    "weight_decay": float,
-    "chinchilla_multiple": float,
-    "tokens_per_param": int,
-    "decay_fraction": float,
-    "seed": int,
+    name: type(getattr(WSDSChinchillaPolicy(), name)) for name in OVERRIDABLE_FIELDS
 }
+_OVERRIDE_FLAGS["seed"] = int
 
 
 def _add_override_flags(parser: argparse.ArgumentParser) -> None:
