@@ -68,6 +68,9 @@ class Llama3Ladder:
     log_freq: int = 10
     attn_backend: str = "flex"
     compile: bool = False
+    # Gradient all-reduce precision: "float32" (default) or "bfloat16" (halves
+    # comm bytes on multi-GPU rungs; loss-affecting, so an iso-quality test).
+    reduce_dtype: str = "float32"
     # Model-config converters (e.g. Float8LinearConverter.Config) applied at build
     # time; loss-affecting (fp8 quantization) but checkpoint- and schedule-neutral.
     converters: list = field(default_factory=list)
@@ -129,6 +132,7 @@ class Llama3Ladder:
             attn_backend=self.attn_backend,
             compile_enabled=self.compile,
             converters=self.converters or None,
+            reduce_dtype=self.reduce_dtype,
         )
 
     def run(

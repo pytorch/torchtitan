@@ -61,6 +61,7 @@ class Job:
     fp8: bool = False
     base_dump_folder: str | None = None
     attn_backend: str | None = None
+    reduce_dtype: str | None = None
 
 
 def _build_cmd(
@@ -100,6 +101,8 @@ def _build_cmd(
         cmd.append("--compile")
     if job.attn_backend is not None:
         cmd += ["--attn-backend", job.attn_backend]
+    if job.reduce_dtype is not None:
+        cmd += ["--reduce-dtype", job.reduce_dtype]
     if max_steps is not None:
         cmd += ["--max-steps", str(max_steps)]
     for key, value in job.overrides.items():

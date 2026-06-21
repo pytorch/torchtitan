@@ -65,6 +65,11 @@ def _parse_args() -> argparse.Namespace:
         help="Override the attention backend (flex, flex_flash, varlen).",
     )
     parser.add_argument(
+        "--reduce-dtype",
+        type=str,
+        help="Gradient all-reduce dtype: float32 (default) or bfloat16.",
+    )
+    parser.add_argument(
         "--local-batch-size",
         type=int,
         help="Override the per-device microbatch (memory knob; set by the OOM probe). "
@@ -102,6 +107,8 @@ def main() -> None:
         ladder = replace(ladder, base_dump_folder=args.base_dump_folder)
     if args.attn_backend is not None:
         ladder = replace(ladder, attn_backend=args.attn_backend)
+    if args.reduce_dtype is not None:
+        ladder = replace(ladder, reduce_dtype=args.reduce_dtype)
     if args.compile:
         ladder = replace(ladder, compile=True)
     if args.fp8:

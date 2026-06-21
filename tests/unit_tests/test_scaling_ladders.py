@@ -695,6 +695,13 @@ def test_fp8_converter_swaps_linears_skipping_lm_head():
     assert not any("lm_head" in fqn for fqn in fp8_fqns)
 
 
+def test_reduce_dtype_threads_to_training_config():
+    """The reduce_dtype knob sets the gradient all-reduce precision; default fp32."""
+    assert LADDER.trainer_config("60M").training.mixed_precision_reduce == "float32"
+    bf16 = replace(LADDER, reduce_dtype="bfloat16")
+    assert bf16.trainer_config("60M").training.mixed_precision_reduce == "bfloat16"
+
+
 # ----------------------------------------------------------------------------
 # Concurrent multi-GPU launcher
 # ----------------------------------------------------------------------------

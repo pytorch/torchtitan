@@ -270,6 +270,7 @@ def to_trainer_config(
     attn_backend: str,
     compile_enabled: bool = False,
     converters: list | None = None,
+    reduce_dtype: str = "float32",
 ) -> Trainer.Config:
     optimizer = OptimizersContainer.Config(
         param_groups=[
@@ -314,6 +315,9 @@ def to_trainer_config(
             global_batch_size=plan.global_batch_size,
             seq_len=plan.seq_len,
             steps=plan.steps,
+            # Gradient-reduction precision: "float32" (default) or "bfloat16"
+            # (halves the all-reduce bytes; only matters for multi-GPU rungs).
+            mixed_precision_reduce=reduce_dtype,
         ),
         parallelism=replace(compute.parallelism),
         compile=CompileConfig(enable=compile_enabled),
