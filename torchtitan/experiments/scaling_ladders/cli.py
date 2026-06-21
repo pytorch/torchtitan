@@ -16,7 +16,7 @@ import argparse
 import json
 
 from . import LADDER
-from .ladder import _spawn_run
+from .launcher import run_rung
 from .policy import OVERRIDABLE_FIELDS, WSDSChinchillaPolicy
 
 # Casts derived from the policy dataclass (canonical override list) + seed, so the
@@ -106,13 +106,12 @@ def main() -> None:
             f"NGPU={world_size} MODULE=scaling_ladders CONFIG={config} ./run_train.sh"
         )
     elif cmd == "run":
-        _spawn_run(
-            args.size, _overrides(args), LADDER.compute_for(args.size).world_size
-        )
+        run_rung(LADDER, args.size, _overrides(args))
     elif cmd == "sweep":
-        specs = LADDER.sweep(
-            args.sizes.split(","), _parse_grid(args.grid), execute=args.execute
-        )
+        specs = LADDER.sweep(args.sizes.split(","), _parse_grid(args.grid))
+        if args.execute:
+            for spec in specs:
+                run_rung(LADDER, spec["rung"], spec["overrides"])
         _emit(specs)
     elif cmd == "compare":
         with open(args.runs) as f:

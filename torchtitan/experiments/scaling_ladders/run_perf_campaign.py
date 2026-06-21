@@ -32,7 +32,7 @@ import argparse
 from dataclasses import replace
 
 from . import LADDER
-from .concurrent import Job, run_jobs_concurrent
+from .launcher import Job, run_jobs
 from .planner import auto_compute_spec
 
 FIT_RUNGS = ["60M", "100M", "190M", "370M"]
@@ -108,9 +108,7 @@ def _arm_ladder(base_dump_folder: str):
 
 def run(variant: str, total_gpus: int = 8) -> None:
     ladder = replace(LADDER, compile=True)  # both arms compile (fair, and fp8 needs it)
-    results = run_jobs_concurrent(
-        ladder, _jobs(variant), total_gpus=total_gpus, poll_secs=60
-    )
+    results = run_jobs(ladder, _jobs(variant), total_gpus=total_gpus, poll_secs=60)
     print(f"\n=== {variant} CAMPAIGN RESULTS ===")
     for r in results:
         print(f"{r['job'].rung:>5} {r['run_dir']:>55} -> {r['status']}")

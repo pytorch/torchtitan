@@ -18,9 +18,9 @@ import os
 from dataclasses import dataclass, field, replace
 
 from torchtitan.config.configs import ParallelismConfig
-from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
 
+from .launcher import _checkpoint_steps_present
 from .metrics import _find_event_dir, _read_scalars, _TRAIN_LOSS_TAG, read_run_metrics
 from .model import RUNGS
 from .planner import (
@@ -128,42 +128,6 @@ class Llama3Ladder:
             reduce_dtype=self.reduce_dtype,
         )
 
-    def run(
-        self,
-        rung: str,
-        *,
-        local_batch_size: int | None = None,
-        max_steps: int | None = None,
-        profile: bool = False,
-        **overrides,
-    ) -> None:
-        """Per-rank run body. Asserts NGPU matches the rung's compute spec.
-
-        ``max_steps`` truncates training for smoke tests only; it does not write
-        the final checkpoint, so the run stays marked incomplete. ``profile``
-        turns on the Kineto profiler (chrome trace under dump_folder/profiling).
-        """
-        compute = self.compute_for(rung)
-        world_size = int(os.environ.get("WORLD_SIZE", compute.world_size))
-        if world_size != compute.world_size:
-            raise ValueError(
-                f"Launched with world_size {world_size} but rung {rung} "
-                f"compute_spec.world_size is {compute.world_size}."
-            )
-        cfg = self.trainer_config(rung, local_batch_size=local_batch_size, **overrides)
-        if max_steps is not None:
-            cfg.training.steps = min(cfg.training.steps, max_steps)
-        if profile:
-            cfg.profiler.enable_profiling = True
-            cfg.profiler.profile_freq = 10
-            cfg.profiler.profiler_warmup = 3
-            cfg.profiler.profiler_active = 2
-        trainer = cfg.build()
-        try:
-            trainer.train()
-        finally:
-            trainer.close()
-
     def status(self, rung: str, **overrides) -> dict:
         plan = self._resolve(rung, overrides)
         run_dir = self.run_dir(rung, **overrides)
@@ -187,24 +151,15 @@ class Llama3Ladder:
         plan = self._resolve(rung, overrides)
         return read_run_metrics(self.run_dir(rung, **overrides), plan)
 
-    def sweep(
-        self, rungs: list[str], grid: dict[str, list], *, execute: bool = False
-    ) -> list[dict]:
-        """Expand a grid into ``(rung, overrides)`` run specs; optionally run them."""
+    def sweep(self, rungs: list[str], grid: dict[str, list]) -> list[dict]:
+        """Expand a grid into ``(rung, overrides)`` run specs (pure; launch via
+        ``launcher.run_jobs``)."""
         keys = sorted(grid)
-        specs = [
+        return [
             {"rung": rung, "overrides": dict(zip(keys, combo))}
             for rung in rungs
             for combo in itertools.product(*(grid[k] for k in keys))
         ]
-        if execute:
-            for spec in specs:
-                _spawn_run(
-                    spec["rung"],
-                    spec["overrides"],
-                    self.compute_for(spec["rung"]).world_size,
-                )
-        return specs
 
     def compare(self, runs: list[dict], metric: str, at_xC: float) -> dict:
         """Rank a sweep's runs by ``metric`` at the matched post-decay xC point."""
@@ -235,103 +190,6 @@ class Llama3Ladder:
             "ranked": ranked,
             "argmin": ranked[0] if ranked else None,
         }
-
-
-def _checkpoint_steps_present(checkpoint_folder: str) -> list[int]:
-    import re
-
-    if not os.path.isdir(checkpoint_folder):
-        return []
-    steps = []
-    for name in os.listdir(checkpoint_folder):
-        match = re.fullmatch(r"step-(\d+)", name)
-        if match:
-            steps.append(int(match.group(1)))
-    return sorted(steps)
-
-
-def _spawn_run(
-    rung: str,
-    overrides: dict,
-    world_size: int,
-    extra_flags: list[str] = (),
-    *,
-    check: bool = True,
-    log_path: str | None = None,
-) -> int:
-    import subprocess
-
-    cmd = [
-        "torchrun",
-        f"--nproc_per_node={world_size}",
-        "-m",
-        "torchtitan.experiments.scaling_ladders.train",
-        "--rung",
-        rung,
-    ]
-    for key, value in overrides.items():
-        cmd += [f"--{key.replace('_', '-')}", str(value)]
-    cmd += list(extra_flags)
-    logger.info("Launching: %s", " ".join(cmd))
-    if log_path is None:
-        return subprocess.run(cmd, check=check).returncode
-    with open(log_path, "w") as handle:
-        proc = subprocess.run(cmd, stdout=handle, stderr=subprocess.STDOUT)
-    if check and proc.returncode != 0:
-        raise subprocess.CalledProcessError(proc.returncode, cmd)
-    return proc.returncode
-
-
-_OOM_MARKERS = ("out of memory", "outofmemoryerror")
-
-
-def run_rung_with_backoff(
-    ladder, rung: str, overrides: dict, *, compile: bool = True, max_retries: int = 4
-) -> None:
-    """Spawn a rung run; on OOM, shrink local_batch_size and retry (the probe).
-
-    local_batch_size only changes gradient accumulation, not the schedule, so the
-    retry is schedule-invariant. Steps down through divisors of the per-rank batch.
-    """
-    from .planner import _largest_divisor_leq
-
-    plan = ladder._resolve(rung, overrides)
-    seqs_per_dp = plan.local_batch_size * plan.grad_accum_steps
-    lbs = plan.local_batch_size
-    world_size = ladder.compute_for(rung).world_size
-    run_dir = ladder.run_dir(rung, **overrides)
-    os.makedirs(run_dir, exist_ok=True)
-
-    for _ in range(max_retries + 1):
-        flags = (["--compile"] if compile else []) + ["--local-batch-size", str(lbs)]
-        log_path = os.path.join(run_dir, f"launch_lbs{lbs}.log")
-        rc = _spawn_run(
-            rung, overrides, world_size, flags, check=False, log_path=log_path
-        )
-        if rc == 0:
-            return
-        tail = _tail(log_path)
-        if lbs > 1 and any(m in tail.lower() for m in _OOM_MARKERS):
-            lbs = _largest_divisor_leq(seqs_per_dp, lbs - 1)
-            logger.warning(
-                "OOM on %s; retrying at local_batch_size=%d (grad_accum=%d)",
-                rung,
-                lbs,
-                seqs_per_dp // lbs,
-            )
-            continue
-        raise RuntimeError(f"Run {rung} failed (rc={rc}); see {log_path}")
-    raise RuntimeError(
-        f"Run {rung} OOM even at local_batch_size=1; needs more sharding or GPUs."
-    )
-
-
-def _tail(path: str, nbytes: int = 4000) -> str:
-    try:
-        with open(path) as handle:
-            return handle.read()[-nbytes:]
-    except OSError:
-        return ""
 
 
 def default_ladder(

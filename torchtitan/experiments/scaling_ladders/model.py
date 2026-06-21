@@ -241,6 +241,24 @@ def model_registry(
     )
 
 
+def fp8_converter(
+    filter_fqns=("lm_head", "attention"), *, model_compile_enabled: bool
+) -> ModelConfigConverter.Config:
+    """Rowwise Float8 converter for the MLP GEMMs (skips ``filter_fqns``).
+
+    Default skips lm_head (its fp8 breaks ChunkedCELoss's logit fusion -> OOM) and
+    the small attention projections (too small to beat fp8's quant overhead).
+    Single place to construct fp8 so both the worker and in-process callers agree.
+    """
+    from torchtitan.components.quantization.float8 import Float8LinearConverter
+
+    return Float8LinearConverter.Config(
+        recipe_name="rowwise",
+        filter_fqns=list(filter_fqns),
+        model_compile_enabled=model_compile_enabled,
+    )
+
+
 @functools.lru_cache(maxsize=None)
 def count_total_params(rung: str) -> int:
     """Total params (including embeddings), built on meta.
