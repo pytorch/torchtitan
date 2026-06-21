@@ -251,7 +251,7 @@ def _dataloader_config(
     num_readers: int = 4,
     fill_once: bool = False,
     base_dir: str = BASE_DIR_GT_10M,
-    feature_dir: str | None = FEATURE_DIR,
+    feature_dir: str | None = None,
     compressor_model: str = COMPRESSOR_MODEL,
     in_channels: int = LATENT_CHANNELS,
     latent_size: tuple[int, int] = LATENT_SIZE,
