@@ -78,6 +78,10 @@ class Job:
     attn_backend: str | None = None
     reduce_dtype: str | None = None
     base_dump_folder: str | None = None
+    # Initial local_batch_size (snapped to a divisor of the per-rank batch). Use to
+    # pin a matched microbatch across A/B arms, or to skip the OOM probe's expensive
+    # recompile walk on big rungs. None -> auto (one grad-accum step), then OOM probe.
+    lbs: int | None = None
 
 
 def _tail(path: str, nbytes: int = 4000) -> str:
@@ -242,7 +246,9 @@ def run_jobs(
 
     states = []
     for job in jobs:
-        spec = build_spec(ladder, job, max_steps=max_steps, profile=profile)
+        spec = build_spec(
+            ladder, job, lbs=job.lbs, max_steps=max_steps, profile=profile
+        )
         seqs_per_dp = (
             spec["plan"]["local_batch_size"] * spec["plan"]["grad_accum_steps"]
         )

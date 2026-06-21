@@ -607,6 +607,36 @@ def test_auto_compute_spec_fits_memory_budget():
         assert sharded_model_gib <= budget * _MODEL_MEM_FRAC + 1e-6
 
 
+def test_auto_compute_spec_caps_lbs_to_fit_activations():
+    """lbs is sized so model+activations fit the budget (OOM probe is a backstop)."""
+    from torchtitan.experiments.scaling_ladders.model import (
+        activation_gib_per_seq,
+        count_total_params,
+    )
+    from torchtitan.experiments.scaling_ladders.planner import (
+        _BYTES_PER_PARAM,
+        _MEM_OVERHEAD_GIB,
+        auto_compute_spec,
+    )
+
+    policy = WSDSChinchillaPolicy()
+    budget = 183.0 * 0.85
+    # Big rungs must NOT return an unfittable microbatch (the old failure: 8B -> lbs
+    # ~351 -> OOM-probe recompile storm). The estimated peak must fit the budget.
+    for rung, gpus in (("8B", 8), ("8B", 4), ("3B", 4), ("760M", 4)):
+        cs = auto_compute_spec(rung, policy, gpus=gpus)
+        shard = cs.parallelism.data_parallel_shard_degree
+        resident = count_total_params(rung) * _BYTES_PER_PARAM / 2**30 / shard
+        peak = (
+            resident
+            + cs.local_batch_size * activation_gib_per_seq(rung, policy.seq_len)
+            + _MEM_OVERHEAD_GIB
+        )
+        assert peak <= budget, f"{rung}@{gpus}gpu: est {peak:.0f} > {budget:.0f} GiB"
+    # Small rungs that fit easily are not over-capped (keep a large microbatch).
+    assert auto_compute_spec("60M", policy, gpus=1).local_batch_size >= 20
+
+
 # ----------------------------------------------------------------------------
 # fp8 rowwise wiring
 # ----------------------------------------------------------------------------

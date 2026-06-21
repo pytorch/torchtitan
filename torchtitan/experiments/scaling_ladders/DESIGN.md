@@ -162,9 +162,13 @@ hidden dim, ladder_params)` in [`README.md`](README.md). Key choices:
 - Per-rung parallelism and `local_batch_size` are derived from each rung's memory
   footprint by `planner.auto_compute_spec` (no hardcoded table): a rung that fits
   on one GPU runs as DDP replicas (cheap all-reduce), larger rungs shard (FSDP)
-  only as much as needed; `local_batch_size` aims for ~1 gradient-accumulation
-  step, and the launcher's OOM backoff trims it if that is optimistic. All of this
-  is throughput-only -- the global batch, token budget, and loss are unchanged.
+  only as much as needed; `local_batch_size` is sized to the largest microbatch
+  whose activations (estimated by `model.activation_gib_per_seq`) fit beside the
+  resident model+optimizer state, capped at ~1 gradient-accumulation step -- so the
+  run fits on the first try and the launcher's OOM backoff is only a backstop for
+  residual estimate error (without it, e.g. 8B started at an unfittable lbs and
+  walked the probe down through many expensive recompiles). All of this is
+  throughput-only -- the global batch, token budget, and loss are unchanged.
 
 ## Planner (`planner.py`)
 

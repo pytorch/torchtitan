@@ -31,7 +31,13 @@ from torchtitan.trainer import Trainer
 
 from .checkpoint import LadderCheckpointManager
 from .lr_scheduler import WSDSScheduler
-from .model import count_ladder_params, count_total_params, model_registry, RUNGS
+from .model import (
+    activation_gib_per_seq,
+    count_ladder_params,
+    count_total_params,
+    model_registry,
+    RUNGS,
+)
 from .policy import WSDSChinchillaPolicy
 from .validate import LadderValidator
 
@@ -61,6 +67,8 @@ _BYTES_PER_PARAM = 18
 # cheap all-reduce instead of per-layer all-gather, which is the right choice
 # whenever the model comfortably fits on one GPU.
 _MODEL_MEM_FRAC = 0.30
+# Reserve beyond model+activation for CUDA/NCCL/FSDP buffers and fragmentation.
+_MEM_OVERHEAD_GIB = 2.0
 
 
 def _divisors_ascending(n: int) -> list[int]:
@@ -85,10 +93,12 @@ def auto_compute_spec(
 
     Picks the *least* sharding (``dp_shard``) whose model+optimizer state fits in
     ``_MODEL_MEM_FRAC`` of the budget, makes the leftover ranks data-parallel
-    replicas (DDP for small rungs, which fit on one GPU), and aims for a single
-    gradient-accumulation step (``local_batch_size = global_seqs / dp_degree``).
-    The activation footprint is hard to predict analytically, so the launch-time
-    OOM probe (see the runner) trims ``local_batch_size`` if this is optimistic.
+    replicas (DDP for small rungs, which fit on one GPU), then sizes
+    ``local_batch_size`` to the largest microbatch whose activations fit alongside
+    the (sharded) model+optimizer state -- capped at a single gradient-accumulation
+    step. The activation estimate (see ``model.activation_gib_per_seq``) means the
+    run fits on the first try; the launch-time OOM probe only handles residual error
+    instead of walking down from an unfittable batch.
     """
     model_gib = count_total_params(rung) * _BYTES_PER_PARAM / 2**30
     budget = gpu_mem_gib * mem_frac
@@ -105,7 +115,11 @@ def auto_compute_spec(
     target_seqs = round(
         policy.target_token_batch(count_ladder_params(rung)) / policy.seq_len
     )
-    local_batch_size = max(1, round(target_seqs / dp_degree))
+    # FSDP shards model+optimizer by dp_shard but NOT activations, so the microbatch
+    # is capped by what fits beside the resident model state.
+    act_budget = budget - model_gib / dp_shard - _MEM_OVERHEAD_GIB
+    lbs_fit = max(1, int(act_budget / activation_gib_per_seq(rung, policy.seq_len)))
+    local_batch_size = max(1, min(round(target_seqs / dp_degree), lbs_fit))
     return ComputeSpec(
         world_size=gpus,
         parallelism=ParallelismConfig(

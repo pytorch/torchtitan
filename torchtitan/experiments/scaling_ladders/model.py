@@ -277,3 +277,18 @@ def count_ladder_params(rung: str) -> int:
     """Non-embedding params (untied, so lm_head is counted) = OLMo's N."""
     shape = RUNGS[rung]
     return count_total_params(rung) - shape.vocab_size * shape.dim
+
+
+# Activation bytes per stored element under the DEFAULT SelectiveAC + flex attention.
+# SelectiveAC recomputes the quadratic attention activation, so the residual scales
+# ~linearly as (n_layers * seq_len * dim). This single constant -- calibrated to a
+# measured 760M run (~1.9 GiB/seq at seq_len=4096) -- folds in SwiGLU/GQA and
+# framework storage. It is an ESTIMATE for sizing the microbatch; the launcher's OOM
+# probe is the backstop for residual error (and for non-default AC, which stores more).
+_ACT_BYTES_PER_ELEM = 20
+
+
+def activation_gib_per_seq(rung: str, seq_len: int) -> float:
+    """Estimated activation memory (GiB) per sequence (microbatch=1) for a rung."""
+    shape = RUNGS[rung]
+    return _ACT_BYTES_PER_ELEM * shape.n_layers * seq_len * shape.dim / 2**30
