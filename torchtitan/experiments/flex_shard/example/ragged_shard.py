@@ -24,22 +24,7 @@ from ..flex_shard.placement_contract import (
     PlacementReduceGradResult,
     PlacementUnshardResult,
 )
-from ..flex_shard.reduce_policy import (
-    gradient_reduce_op_from_infos,
-    GradientReduceOp,
-)
-from ..flex_shard.utils import (
-    _record_comm_if_eager,
-    _record_copy_in_if_eager,
-    _record_copy_out_if_eager,
-    _record_function_if_eager,
-)
-from ._pack_utils import (
-    copy_tensor_to_dtype,
-    foreach_copy_,
-    pack_tensors_into_flat_buffer,
-    pack_tensors_into_flat_buffer_with_scratch,
-)
+from ..flex_shard.utils import _record_comm_if_eager, _record_function_if_eager
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -85,7 +70,6 @@ class RaggedShard(Placement):
         world_size: int
         pg: Any
         debug_fqn: str | None
-        gradient_reduce_op: GradientReduceOp
 
     def __init__(
         self,
@@ -244,14 +228,11 @@ class RaggedShard(Placement):
     ) -> PlacementPreparedUnshard:
         """Prepare buffers for ragged all-gather unshard."""
         world_size = mesh.size()
-        dtype = infos[0].unsharded_dtype
+        dtype = tensors[0].dtype
         device = tensors[0].device
 
-        with _record_copy_in_if_eager():
-            send_buf, copy_in_scratch = pack_tensors_into_flat_buffer_with_scratch(
-                tensors,
-                dtype,
-            )
+        with _record_function_if_eager("FlexShard::all_gather_copy_in", debug_fqn):
+            send_buf = torch.cat([tensor.reshape(-1) for tensor in tensors])
             per_rank_param_offsets, per_rank_sizes = self._bucket_layout(
                 infos,
                 world_size,
@@ -263,7 +244,7 @@ class RaggedShard(Placement):
 
         return PlacementPreparedUnshard(
             placement=self,
-            buffers=[send_buf, *gathered, *copy_in_scratch],
+            buffers=[send_buf, *gathered],
             placement_state=RaggedShard._UnshardState(
                 infos=infos,
                 world_size=world_size,
@@ -282,7 +263,7 @@ class RaggedShard(Placement):
                 f"got {type(prepared.placement_state).__name__}"
             )
         send_buf = prepared.buffers[0]
-        gathered = prepared.buffers[1 : 1 + prepared.placement_state.world_size]
+        gathered = prepared.buffers[1:]
         with _record_comm_if_eager(
             "FlexShard::all_gather",
             prepared.placement_state.debug_fqn,
@@ -300,8 +281,11 @@ class RaggedShard(Placement):
                 "Expected RaggedShard._UnshardState, "
                 f"got {type(prepared.placement_state).__name__}"
             )
-        gathered = prepared.buffers[1 : 1 + prepared.placement_state.world_size]
-        with _record_copy_out_if_eager():
+        gathered = prepared.buffers[1:]
+        with _record_function_if_eager(
+            "FlexShard::all_gather_copy_out",
+            prepared.placement_state.debug_fqn,
+        ):
             full_params: list[torch.Tensor] = []
             for info_idx, info in enumerate(prepared.placement_state.infos):
                 per_rank_shards: list[torch.Tensor] = []
@@ -335,7 +319,7 @@ class RaggedShard(Placement):
                 world_size,
             )
             padded_segment_numel = max(per_rank_sizes)
-            dtype = infos[0].grad_reduce_dtype
+            dtype = tensors[0].dtype
             device = tensors[0].device
             send_buf = torch.zeros(
                 world_size * padded_segment_numel,
@@ -343,8 +327,6 @@ class RaggedShard(Placement):
                 device=device,
             )
             send_buf_by_rank = send_buf.view(world_size, padded_segment_numel)
-            copy_dsts: list[torch.Tensor] = []
-            copy_srcs: list[torch.Tensor] = []
             for rank in range(world_size):
                 for info_idx, (tensor, info) in enumerate(
                     zip(tensors, infos, strict=True)
@@ -355,12 +337,7 @@ class RaggedShard(Placement):
                         world_size,
                     ).reshape(-1)
                     offset = per_rank_param_offsets[rank][info_idx]
-                    if shard.numel() > 0:
-                        copy_srcs.append(shard)
-                        copy_dsts.append(
-                            send_buf_by_rank[rank, offset : offset + shard.numel()]
-                        )
-            foreach_copy_(copy_dsts, copy_srcs)
+                    send_buf_by_rank[rank, offset : offset + shard.numel()].copy_(shard)
             layout = RaggedShard._ReduceGradLayout(
                 per_rank_param_offsets=per_rank_param_offsets,
                 per_rank_sizes=per_rank_sizes,
@@ -377,7 +354,6 @@ class RaggedShard(Placement):
                 world_size=world_size,
                 pg=mesh.get_group(),
                 debug_fqn=debug_fqn,
-                gradient_reduce_op=gradient_reduce_op_from_infos(infos),
             ),
         )
 
@@ -400,13 +376,16 @@ class RaggedShard(Placement):
             device=send_buf.device,
         )
         with _record_comm_if_eager(
-            "FlexShard::post_backward_reduce",
+            "FlexShard::reduce_scatter",
             state.debug_fqn,
         ):
+            # TODO: Plumb the reduction/scaling policy from SPMD gradient semantics.
+            # AVG is a convenient default, but delayed grad scaling may need SUM
+            # plus an explicit scale at a different point in the training step.
             dist.reduce_scatter_tensor(
                 output=recv_buf,
                 input=send_buf,
-                op=self.dist_reduce_op(state.gradient_reduce_op),
+                op=dist.ReduceOp.AVG,
                 group=state.pg,
             )
 
@@ -453,7 +432,6 @@ class GroupedRaggedShard(RaggedShard):
         infos: list[ParamInfo]
         pg: Any
         debug_fqn: str | None
-        num_gathered_views: int
 
     @dataclass(frozen=True)
     class _ReduceGradState:
@@ -462,7 +440,6 @@ class GroupedRaggedShard(RaggedShard):
         pg: Any
         debug_fqn: str | None
         padded_segment_numel: int
-        gradient_reduce_op: GradientReduceOp
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, GroupedRaggedShard):
@@ -747,40 +724,30 @@ class GroupedRaggedShard(RaggedShard):
         mesh: DeviceMesh,
         debug_fqn: str | None,
     ) -> PlacementPreparedUnshard:
-        dtype = infos[0].unsharded_dtype
+        dtype = tensors[0].dtype
         device = tensors[0].device
-        with _record_copy_in_if_eager():
-            send_buf = self._make_local_bucket_view(tensors, infos)
-            copy_in_scratch: list[torch.Tensor] = []
-            if send_buf.dtype != dtype:
-                send_buf, copy_in_scratch = pack_tensors_into_flat_buffer_with_scratch(
-                    [send_buf],
-                    dtype,
-                )
-            else:
-                send_buf = copy_tensor_to_dtype(send_buf, dtype)
-            bucket_layout = self._bucket_layout(infos[0])
-            gathered_bucket = torch.empty(
-                bucket_layout.global_numel,
-                dtype=dtype,
-                device=device,
+        send_buf = self._make_local_bucket_view(tensors, infos)
+        bucket_layout = self._bucket_layout(infos[0])
+        gathered_bucket = torch.empty(
+            bucket_layout.global_numel,
+            dtype=dtype,
+            device=device,
+        )
+        gathered_views = [
+            gathered_bucket[offset : offset + numel]
+            for offset, numel in zip(
+                bucket_layout.rank_offsets,
+                bucket_layout.rank_numels,
+                strict=True,
             )
-            gathered_views = [
-                gathered_bucket[offset : offset + numel]
-                for offset, numel in zip(
-                    bucket_layout.rank_offsets,
-                    bucket_layout.rank_numels,
-                    strict=True,
-                )
-            ]
+        ]
         return PlacementPreparedUnshard(
             placement=self,
-            buffers=[send_buf, gathered_bucket, *gathered_views, *copy_in_scratch],
+            buffers=[send_buf, gathered_bucket, *gathered_views],
             placement_state=GroupedRaggedShard._UnshardState(
                 infos=infos,
                 pg=mesh.get_group(),
                 debug_fqn=debug_fqn,
-                num_gathered_views=len(gathered_views),
             ),
         )
 
@@ -792,9 +759,7 @@ class GroupedRaggedShard(RaggedShard):
                 f"got {type(prepared.placement_state).__name__}"
             )
         send_buf = prepared.buffers[0]
-        gathered_views = prepared.buffers[
-            2 : 2 + prepared.placement_state.num_gathered_views
-        ]
+        gathered_views = prepared.buffers[2:]
         with _record_comm_if_eager(
             "FlexShard::all_gather",
             prepared.placement_state.debug_fqn,
@@ -831,7 +796,7 @@ class GroupedRaggedShard(RaggedShard):
         debug_fqn: str | None,
     ) -> PlacementPreparedReduceGrad:
         world_size = mesh.size()
-        dtype = infos[0].grad_reduce_dtype
+        dtype = tensors[0].dtype
         device = tensors[0].device
         bucket_layout = self._bucket_layout(infos[0])
         padded_segment_numel = max(bucket_layout.rank_numels)
@@ -841,18 +806,12 @@ class GroupedRaggedShard(RaggedShard):
                 dtype=dtype,
                 device=device,
             )
-            copy_dsts: list[torch.Tensor] = []
-            copy_srcs: list[torch.Tensor] = []
             for tensor, info in zip(tensors, infos, strict=True):
                 param_layout = self._param_layout(info)
-                copy_srcs.append(tensor.reshape(-1))
-                copy_dsts.append(
-                    global_grad_bucket[
-                        param_layout.param_offset : param_layout.param_offset
-                        + info.global_numel
-                    ]
-                )
-            foreach_copy_(copy_dsts, copy_srcs)
+                global_grad_bucket[
+                    param_layout.param_offset : param_layout.param_offset
+                    + info.global_numel
+                ].copy_(tensor.reshape(-1))
 
             send_buf = torch.zeros(
                 world_size * padded_segment_numel,
@@ -860,8 +819,6 @@ class GroupedRaggedShard(RaggedShard):
                 device=device,
             )
             send_buf_by_rank = send_buf.view(world_size, padded_segment_numel)
-            copy_dsts = []
-            copy_srcs = []
             for rank, (offset, numel) in enumerate(
                 zip(
                     bucket_layout.rank_offsets,
@@ -869,10 +826,9 @@ class GroupedRaggedShard(RaggedShard):
                     strict=True,
                 )
             ):
-                if numel > 0:
-                    copy_srcs.append(global_grad_bucket[offset : offset + numel])
-                    copy_dsts.append(send_buf_by_rank[rank, :numel])
-            foreach_copy_(copy_dsts, copy_srcs)
+                send_buf_by_rank[rank, :numel].copy_(
+                    global_grad_bucket[offset : offset + numel]
+                )
 
         return PlacementPreparedReduceGrad(
             placement=self,
@@ -883,7 +839,6 @@ class GroupedRaggedShard(RaggedShard):
                 pg=mesh.get_group(),
                 debug_fqn=debug_fqn,
                 padded_segment_numel=padded_segment_numel,
-                gradient_reduce_op=gradient_reduce_op_from_infos(infos),
             ),
         )
 
@@ -907,13 +862,13 @@ class GroupedRaggedShard(RaggedShard):
             device=send_buf.device,
         )
         with _record_comm_if_eager(
-            "FlexShard::post_backward_reduce",
+            "FlexShard::reduce_scatter",
             state.debug_fqn,
         ):
             dist.reduce_scatter_tensor(
                 output=recv_buf,
                 input=send_buf,
-                op=self.dist_reduce_op(state.gradient_reduce_op),
+                op=dist.ReduceOp.AVG,
                 group=state.pg,
             )
 
