@@ -29,6 +29,8 @@ from .owned import (
     assign_matrix_owners_per_layer_balanced,
     GroupedOwned,
     GroupedOwnedSegmentSpec,
+    make_grouped_owned_expert_block_placement_fn,
+    make_grouped_owned_expert_block_segments,
     make_grouped_owned_placement_fn,
     make_owned_placement_fn,
     Owned,
@@ -41,7 +43,7 @@ from .ragged_shard import (
     per_param_ragged_placements,
     RaggedShard,
 )
-from .shard import per_param_placements, Shard
+from .shard import make_shard_placement_fn, per_param_placements, Shard
 
 __all__ = [
     "assign_layer_owners_lpt",
@@ -63,11 +65,14 @@ __all__ = [
     "grouped_ragged_shard_muon_buckets",
     "make_fp8_blockwise_grouped_ragged_placement_fn",
     "make_fp8_two_orientation_grouped_ragged_placement_fn",
+    "make_grouped_owned_expert_block_placement_fn",
+    "make_grouped_owned_expert_block_segments",
     "make_grouped_owned_placement_fn",
     "make_grouped_ragged_placement_fn",
     "promote_to_square_block",
     "make_owned_placement_fn",
     "make_ragged_placement_fn",
+    "make_shard_placement_fn",
     "Owned",
     "param_boundary_placements",
     "per_param_placements",
