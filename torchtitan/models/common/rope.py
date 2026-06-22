@@ -9,8 +9,11 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
+import spmd_types as spmd
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
+from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.protocols.module import Module
 
 __all__ = [
@@ -20,6 +23,7 @@ __all__ = [
 ]
 
 
+@spmd.no_typecheck()
 def _maybe_check_max_pos(positions: torch.Tensor, *, max_valid_pos: int) -> None:
     """Async bounds check: verify all position values <= max_valid_pos.
 
@@ -370,7 +374,13 @@ def _reshape_for_broadcast(
         return rope_cache.view(*shape)
     else:
         assert positions.shape == (bsz, seqlen)
-        rope_cache_expanded = rope_cache[None, :, None, :].expand(bsz, -1, -1, -1)
+        # Local-shape expansion; the typechecker does not know this is S(0).
+        with spmd.no_typecheck():
+            rope_cache_expanded = rope_cache[None, :, None, :].expand(bsz, -1, -1, -1)
+        if get_spmd_backend() == "spmd_types":
+            spmd.assert_type(
+                rope_cache_expanded, {"dp": spmd.S(0), "cp": spmd.R, "tp": spmd.R}
+            )
         rope_cache = torch.gather(
             rope_cache_expanded,
             dim=1,
