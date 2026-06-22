@@ -141,13 +141,12 @@ def rl_grpo_qwen3_32b_search_r1() -> RLTrainer.Config:
 
     Same recipe as the 1.7B/8B configs; only the model and GPU split differ.
     Trainer: single-host FSDP across 8 GPUs (``data_parallel_shard_degree=8``,
-    ``tensor_parallel_degree=1``) with mixed precision (bf16 compute, fp32 reduce
-    -- the default) and fp32 master weights. FSDP shards the fp32 master + AdamW
-    states 8-way so 32B fits one 80GB host (~60-70GB/rank), and the shard group
-    is intra-host (NVLink) so no NCCL group spans hosts -> no RoCE needed. Full
-    activation checkpointing frees the forward activations so compute_logprobs'
-    full-vocab fp32 transient fits. Per tianyu-l: trainer uses FSDP + mixed
-    precision + fp32 master.
+    ``tensor_parallel_degree=1``) in pure bf16 (``dtype=bfloat16``, no fp32 master;
+    fp32 gradient reduce). bf16 roughly halves per-rank memory vs an fp32 master, so
+    32B fits one 80GB host, and the shard group is intra-host (NVLink) so no NCCL
+    group spans hosts. Full activation checkpointing frees the forward activations
+    so compute_logprobs' full-vocab fp32 transient fits. Weight sync uses direct
+    GPU-to-GPU RDMA (see the trainer note below for the measured per-step decompose).
 
     Each generator uses TP=8 = 8 GPUs (1 host) with decode-only CUDA graphs
     (FULL_DECODE_ONLY, #3668-safe) + aot_eager torch.compile (the top-level
@@ -165,31 +164,37 @@ def rl_grpo_qwen3_32b_search_r1() -> RLTrainer.Config:
     config.compile = dataclasses.replace(config.compile, enable=False)
     config.trainer = dataclasses.replace(
         config.trainer,
-        # Per tianyu-l: FSDP + mixed precision + fp32 master weights. Set
-        # explicitly (these match the defaults) so the recipe is self-documenting:
-        #   dtype="float32"             -> fp32 master weights
-        #   mixed_precision_param=bf16  -> bf16 compute (FSDP casts for fwd/bwd)
-        #   mixed_precision_reduce=fp32 -> fp32 gradient reduce
+        # Pure bf16 training (no fp32 master): dtype=bfloat16 keeps the master
+        # weights + AdamW states in bf16, roughly halving per-rank memory vs an
+        # fp32 master -- that headroom is what lets FSDP=8 fit (the fp32-master
+        # variant OOM'd in step-2 backward). mixed_precision_reduce=fp32 still
+        # reduces gradients in fp32 for stability.
         training=dataclasses.replace(
             config.trainer.training,
-            dtype="float32",
+            dtype="bfloat16",
             mixed_precision_param="bfloat16",
             mixed_precision_reduce="float32",
         ),
         # Full activation checkpointing: SelectiveAC OOMs at 32B/FSDP=8,
         # FullAC fits.
         ac_config=FullAC.Config(),
-        # FSDP across all 8 GPUs on one host (dp_shard=8, TP=1) shards the fp32
-        # master + AdamW 8-way so 32B fits one 80GB host; intra-host shard group
-        # -> no cross-host NCCL.
+        # FSDP across all 8 GPUs on one host (dp_shard=8, TP=1) shards the master
+        # + AdamW 8-way so 32B fits one 80GB host; intra-host shard group -> the
+        # FSDP collectives never span hosts.
         #
-        # CPU-staged weight sync (direct_rdma=False), NOT GPU-Direct RDMA. With
-        # num_generators>1 the trainer's direct-RDMA push does not fan out safely:
-        # the post-step-1 trainer->generator sync hangs (NCCL watchdog abort) and
-        # the 2-host trainer crashes in monarch_rdma IbvMemoryRegion. CPU-staging
-        # through TorchStore is fanout-safe across all generators. See
-        # generator.py TODO ">1 generator -> trainer should use direct_rdma=False".
-        weight_sync_direct_rdma=False,
+        # FSDP=8 + direct_rdma=True + bf16 IS runnable: validated end-to-end with 3
+        # generators (single-host trainer, so no 2-host monarch_rdma fanout). Direct
+        # GPU-to-GPU RDMA cuts the trainer->generator weight sync from ~133s
+        # (CPU-staged) to ~4s. Measured per-step decompose (FSDP=8, bf16, RDMA, 3
+        # generators; ~38s/step recent vs ~179s CPU-staged):
+        #   generator_pull (weight sync)   ~4s    (CPU-staged was ~133s)
+        #   trainer_push   (weight sync)   ~0s
+        #   rollout (generation+retrieval) ~20s   <- the new bottleneck
+        #   trainer fwd/bwd (6 micro-bw)   ~15s
+        # Needs Monarch RDMA available (conda rdma-core matching Monarch's build,
+        # v60 -> rdmav59 provider; see mast_rl/build_conda.sh). direct_rdma=None
+        # auto-falls-back to CPU-staged where RDMA is unavailable.
+        weight_sync_direct_rdma=True,
         parallelism=dataclasses.replace(
             config.trainer.parallelism,
             data_parallel_shard_degree=8,
@@ -199,8 +204,9 @@ def rl_grpo_qwen3_32b_search_r1() -> RLTrainer.Config:
     config.generator = dataclasses.replace(
         config.generator,
         gpu_memory_limit=0.6,
-        # CPU-staged weight sync (fanout-safe for >1 generator); see trainer note.
-        weight_sync_direct_rdma=False,
+        # Direct GPU-to-GPU RDMA weight sync (must match the trainer); ~4s pull vs
+        # ~133s CPU-staged. See the trainer note for the per-step decompose.
+        weight_sync_direct_rdma=True,
         # Decode-only CUDA graphs (FULL_DECODE_ONLY, #3668-safe): capture
         # pure-decode batches (the bulk of the generation-bound rollout), run
         # prefill eagerly. Works now that VLLMAttentionWrapper's q/k/v args are
@@ -220,17 +226,17 @@ def rl_grpo_qwen3_32b_search_r1() -> RLTrainer.Config:
 def rl_grpo_qwen3_32b_search_r1_fsdp16() -> RLTrainer.Config:
     """GRPO Search-R1 for Qwen3-32B (dense) -- 2-host trainer (FSDP=16) + 3 generators.
 
-    Same recipe as ``rl_grpo_qwen3_32b_search_r1`` but the trainer shards across two
+    Builds on ``rl_grpo_qwen3_32b_search_r1`` but shards the trainer across two
     hosts: ``data_parallel_shard_degree=16``, ``tensor_parallel_degree=1`` = 16 GPUs
     = 2 hosts. The launcher infers this (``infer_nodes(16, 8) = 2``), so the MAST job
-    is 1 controller + 2 trainer + 3 generator = 6 hosts.
+    is 1 controller + 2 trainer + 3 generator = 6 hosts. This variant reverts the
+    base's bf16 + direct-RDMA back to an fp32 master + CPU-staged weight sync (see
+    the trainer override below for why).
 
-    Why 16-way: sharding the fp32 master + AdamW states 16-way (vs 8-way) roughly
-    halves the trainer's per-rank optimizer memory (~36 GB/rank vs ~72 GB at FSDP=8,
-    which is why FSDP=8 sat on the OOM edge). That frees enough room to drop back to
-    the faster SelectiveAC default -- FSDP=16 is the memory lever instead of FullAC's
-    full-forward recompute -- while still fitting compute_logprobs' full-vocab fp32
-    transient.
+    Why fp32 master here (vs the base's bf16): sharding the fp32 master + AdamW
+    states 16-way roughly halves per-rank optimizer memory (~36 GB/rank), giving the
+    accuracy of an fp32 master while still fitting -- and freeing room to drop to the
+    faster SelectiveAC default instead of FullAC's full-forward recompute.
 
     Caveat: the FSDP all-gather/reduce-scatter group now spans 2 hosts. run.sh
     defaults NCCL_NET=Socket (the rlmast conda env lacks the mlx5 RDMA driver), so
@@ -247,8 +253,58 @@ def rl_grpo_qwen3_32b_search_r1_fsdp16() -> RLTrainer.Config:
             data_parallel_shard_degree=16,
             tensor_parallel_degree=1,
         ),
-        # FSDP=16 frees ~half the per-rank master+optimizer memory vs FSDP=8, so the
-        # SelectiveAC default fits -- no need for FullAC's recompute overhead.
+        # FSDP=16 frees ~half the per-rank memory vs FSDP=8, so the SelectiveAC
+        # default fits -- no need for FullAC's recompute overhead.
+        ac_config=SelectiveAC.Config(),
+        # Revert the FSDP=8 base back to this variant's validated 2-host settings:
+        # fp32 master (16-way sharding gives the memory room) + CPU-staged weight
+        # sync. The base's bf16 + direct_rdma=True is the single-host FSDP=8 path;
+        # direct RDMA across a 2-host trainer hits the monarch_rdma fanout
+        # (untested), so fsdp16 stays CPU-staged (validated: 500 steps, val ~0.48).
+        training=dataclasses.replace(config.trainer.training, dtype="float32"),
+        weight_sync_direct_rdma=False,
+    )
+    config.generator = dataclasses.replace(
+        config.generator, weight_sync_direct_rdma=False
+    )
+    return config
+
+
+def rl_grpo_qwen3_32b_search_r1_fsdp16_rdma() -> RLTrainer.Config:
+    """EXPERIMENTAL: FSDP=16 (2-host trainer) + direct-RDMA weight sync.
+
+    Identical to the working single-host ``rl_grpo_qwen3_32b_search_r1`` (pure bf16 +
+    ``direct_rdma=True`` + 3 generators) EXCEPT the trainer shards 16-way across two
+    hosts (``data_parallel_shard_degree=16``). The 2-host trainer is the only
+    difference from the validated FSDP=8 RDMA recipe, so this isolates whether direct
+    RDMA weight sync survives a multi-host trainer mesh -- i.e. whether the
+    documented monarch_rdma 2-host fanout (3 generators reading the trainer's RDMA
+    buffers across two hosts) actually fails, vs the single-host FSDP=8 path that
+    works. Unlike ``rl_grpo_qwen3_32b_search_r1_fsdp16`` (fp32 master + CPU-staged),
+    this keeps the base's bf16 + direct_rdma=True. Needs Monarch RDMA available
+    (conda rdma-core matching Monarch's build; see mast_rl/build_conda.sh).
+    1 controller + 2 trainer + 3 generator = 6 hosts.
+
+    RESULT (2026-06-21): does NOT work. The initial RDMA weight sync completes
+    (trainer push ~105s registration + generator pull ~7.8s), but right after
+    training starts the trainer SIGSEGVs inside Monarch's RDMA layer
+    (``monarch/rdmaxcel-sys/src/rdmaxcel.cpp:556`` ->
+    ``IbvMemoryRegion::drop``) -- a Monarch multi-host direct-RDMA bug, not a config
+    or memory issue (it is NOT the rdma-core version: v60 got the single-host FSDP=8
+    RDMA path to step 71+, and bf16/16-way has ample memory). For a multi-host
+    trainer, use the CPU-staged ``rl_grpo_qwen3_32b_search_r1_fsdp16`` instead;
+    direct RDMA only works with the single-host FSDP=8 trainer for now.
+    """
+    config = rl_grpo_qwen3_32b_search_r1()
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        # 2 hosts x 8 GPUs = 16-way FSDP shard. Keeps the base's bf16 +
+        # direct_rdma=True; SelectiveAC fits at 16-way (vs FullAC at FSDP=8).
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism,
+            data_parallel_shard_degree=16,
+            tensor_parallel_degree=1,
+        ),
         ac_config=SelectiveAC.Config(),
     )
     return config
