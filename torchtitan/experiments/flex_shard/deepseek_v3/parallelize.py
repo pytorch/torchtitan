@@ -34,6 +34,9 @@ from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     MixedPrecisionPolicy,
 )
 from torchtitan.experiments.flex_shard.flex_shard.placement_contract import Placement
+from torchtitan.experiments.flex_shard.grad_norm import (
+    install_flex_shard_grad_norm_clipping,
+)
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 from torchtitan.models.llama4.parallelize import apply_moe_ep_tp
 from torchtitan.tools.logging import logger
@@ -296,3 +299,4 @@ def _apply_flex_shard(
 
     flex_shard(model, buckets=buckets)
     disable_flex_shard_gradient_division(model)
+    install_flex_shard_grad_norm_clipping()
