@@ -20,8 +20,6 @@ from .owned import (
     make_grouped_owned_expert_block_placement_fn,
     make_grouped_owned_expert_block_segments,
     make_grouped_owned_placement_fn,
-    Owned,
-    param_boundary_placements,
 )
 from .ragged_shard import (
     GroupedRaggedShard,
@@ -49,8 +47,6 @@ __all__ = [
     "make_grouped_ragged_placement_fn",
     "make_ragged_placement_fn",
     "make_shard_placement_fn",
-    "Owned",
-    "param_boundary_placements",
     "per_param_ragged_placements",
     "per_param_placements",
     "promote_to_square_block",
