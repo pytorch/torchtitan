@@ -501,7 +501,42 @@ class ChunkedCELoss(BaseLoss):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseLoss.Config):
         num_chunks: int = 8
-        """Number of chunks to split the sequence into."""
+        """Number of chunks to split the local sequence into."""
+
+    @staticmethod
+    def validate_sequence_chunking(
+        *,
+        seq_len: int,
+        seq_shard_degree: int,
+        num_chunks: int,
+    ) -> None:
+        """Validate that chunked CE will split the local sequence evenly."""
+        if seq_len <= 0:
+            raise ValueError(f"ChunkedCELoss seq_len must be positive, got {seq_len}")
+        if seq_shard_degree <= 0:
+            raise ValueError(
+                "ChunkedCELoss seq_shard_degree must be positive, "
+                f"got {seq_shard_degree}"
+            )
+        if num_chunks <= 0:
+            raise ValueError(
+                f"ChunkedCELoss num_chunks must be positive, got {num_chunks}"
+            )
+        if seq_len % seq_shard_degree != 0:
+            raise ValueError(
+                "ChunkedCELoss requires the global sequence length to be evenly "
+                f"divisible by the sequence shard degree, got sequence length "
+                f"{seq_len} and sequence shard degree {seq_shard_degree}."
+            )
+
+        local_seq_len = seq_len // seq_shard_degree
+        if local_seq_len % num_chunks != 0:
+            raise ValueError(
+                "ChunkedCELoss requires the local sequence length to be evenly "
+                f"divisible by num_chunks, got global sequence length {seq_len}, "
+                f"sequence shard degree {seq_shard_degree}, local sequence length "
+                f"{local_seq_len}, and num_chunks {num_chunks}."
+            )
 
     def __init__(
         self,
@@ -509,6 +544,10 @@ class ChunkedCELoss(BaseLoss):
         *,
         compile_config: CompileConfig | None = None,
     ):
+        if config.num_chunks <= 0:
+            raise ValueError(
+                f"ChunkedCELoss num_chunks must be positive, got {config.num_chunks}"
+            )
         self.fn: LossFunction = cross_entropy_loss
         self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
@@ -546,23 +585,6 @@ class ChunkedCELoss(BaseLoss):
 
         # Check if it's training model or validation mode
         requires_grad = hidden_states.requires_grad
-
-        if num_chunks <= 0:
-            raise ValueError(
-                f"ChunkedCELoss num_chunks must be positive, got {num_chunks}"
-            )
-
-        local_seq_len = (
-            hidden_states.to_local().shape[1]
-            if isinstance(hidden_states, DTensor)
-            else hidden_states.shape[1]
-        )
-        if local_seq_len % num_chunks != 0:
-            raise ValueError(
-                "ChunkedCELoss requires the local sequence length to be evenly "
-                f"divisible by num_chunks, got local sequence length {local_seq_len} "
-                f"and num_chunks {num_chunks}."
-            )
 
         # Chunking always operates on the *local* view: when ``t`` is a
         # Shard(1) DTensor, chunking the global view would distribute whole

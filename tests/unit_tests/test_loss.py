@@ -514,18 +514,43 @@ class TestChunkedCELoss(unittest.TestCase):
         """ChunkedCELoss must produce the same loss and gradients as the standard path."""
         self._assert_numerical_equivalence(B=2, L=8, D=32, V=64, num_chunks=4)
 
-    def test_uneven_sequence_chunks_raise(self):
-        """ChunkedCELoss should raise if num_chunks does not divide the sequence."""
-        B, D, V = 2, 32, 64
+    def test_validate_sequence_chunking_rejects_uneven_local_sequence(self):
+        """ChunkedCELoss should reject uneven local sequence chunks at init time."""
+        cases = (
+            (10, 1, 4),
+            (2, 1, 4),
+            (24, 2, 8),
+        )
 
-        for seq_len, num_chunks in ((10, 4), (2, 4)):
-            with self.subTest(seq_len=seq_len, num_chunks=num_chunks):
-                _, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
-                hidden_states = torch.randn(B, seq_len, D, requires_grad=True)
-                labels = torch.randint(0, V, (B, seq_len))
+        for seq_len, seq_shard_degree, num_chunks in cases:
+            with self.subTest(
+                seq_len=seq_len,
+                seq_shard_degree=seq_shard_degree,
+                num_chunks=num_chunks,
+            ):
+                with self.assertRaisesRegex(ValueError, "local sequence length"):
+                    ChunkedCELoss.validate_sequence_chunking(
+                        seq_len=seq_len,
+                        seq_shard_degree=seq_shard_degree,
+                        num_chunks=num_chunks,
+                    )
 
-                with self.assertRaisesRegex(ValueError, "evenly divisible"):
-                    chunked_loss(hidden_states, labels)
+    def test_validate_sequence_chunking_accepts_even_local_sequence(self):
+        """ChunkedCELoss should accept evenly chunked local sequences."""
+        ChunkedCELoss.validate_sequence_chunking(
+            seq_len=24,
+            seq_shard_degree=2,
+            num_chunks=4,
+        )
+
+    def test_validate_sequence_chunking_rejects_uneven_sequence_sharding(self):
+        """ChunkedCELoss should reject uneven sequence-dimension sharding."""
+        with self.assertRaisesRegex(ValueError, "global sequence length"):
+            ChunkedCELoss.validate_sequence_chunking(
+                seq_len=10,
+                seq_shard_degree=3,
+                num_chunks=2,
+            )
 
     def test_different_chunk_counts(self):
         """Loss should be the same regardless of num_chunks."""
