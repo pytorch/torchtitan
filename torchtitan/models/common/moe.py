@@ -11,7 +11,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
@@ -426,40 +425,14 @@ class MoE(Module):
             scores_BLE,
         ) = self.router(x_BLD, self.expert_bias_E)
 
-        # Build routing map with scatter. scatter_ does not support mixed
-        # local Tensor / DTensor arguments, so run the scatter on local tensors
-        # under local_map when router outputs are DTensors.
-        # TODO: Remove this local_map workaround once DTensor sharding
-        # propagation supports scatter with mixed Tensor / DTensor arguments.
-        def _generate_routing_map(
-            scores_BLE: torch.Tensor,
-            topk_expert_ids_BLK: torch.Tensor,
-        ) -> torch.Tensor:
-            return torch.zeros_like(scores_BLE, dtype=torch.bool).scatter_(
-                -1,
-                topk_expert_ids_BLK,
-                True,
-            )
-
-        if isinstance(topk_expert_ids_BLK, DTensor):
-            assert isinstance(
-                scores_BLE, DTensor
-            ), "scores_BLE and topk_expert_ids_BLK should both be DTensors"
-            generate_routing_map = local_map(
-                _generate_routing_map,
-                in_placements=(
-                    scores_BLE.placements,
-                    topk_expert_ids_BLK.placements,
-                ),
-                out_placements=(scores_BLE.placements,),
-                device_mesh=scores_BLE.device_mesh,
-            )
-        else:
-            generate_routing_map = _generate_routing_map
-
-        routing_map_BLE = generate_routing_map(
-            scores_BLE,
-            topk_expert_ids_BLK,  # pyrefly: ignore [bad-argument-count]
+        # Build a one-hot routing map (B, L, E) marking the experts each token
+        # is routed to. Under TP/SP the router outputs are DTensors sharded on
+        # the token dim; scatter_ writes along the (replicated) expert dim, so
+        # DTensor runs it as a local op with no redistribution.
+        routing_map_BLE = torch.zeros_like(scores_BLE, dtype=torch.bool).scatter_(
+            -1,
+            topk_expert_ids_BLK,
+            True,
         )
         num_local_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
 

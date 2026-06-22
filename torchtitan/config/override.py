@@ -22,6 +22,10 @@ Per-instance targeting is first-class: ``@override(..., fqns=[...])`` selects
 Config class. This supports e.g. "fused MoE on these layers only" and A/B-ing a
 kernel across layers.
 
+By default, a target also matches subclasses of that Config class. Override
+authors can pass ``exact=True`` when the replacement is valid only for the
+target's concrete contract.
+
 See ``torchtitan/overrides/README.md`` for the full design document.
 """
 
@@ -65,7 +69,8 @@ class Override:
 
     ``factory`` constructs the replacement config from the matched config.
     ``fqns`` selects which matched nodes the override claims (see
-    :func:`override`).
+    :func:`override`). ``exact`` restricts the match to exactly ``target_cls``
+    rather than subclasses.
     """
 
     name: str
@@ -74,6 +79,7 @@ class Override:
     fqns: list[str] | None
     description: str
     origin_module: str
+    exact: bool = False
 
     def matches(self, fqn: str) -> bool:
         """Whether this override claims the node at ``fqn``.
@@ -96,6 +102,7 @@ def override(
     target: type[Configurable.Config],
     fqns: list[str] | None = None,
     description: str = "",
+    exact: bool = False,
 ) -> Callable:
     """Decorator to register an override factory.
 
@@ -109,6 +116,9 @@ def override(
             bare module FQN, e.g. ``"layers.0.feed_forward"``. (A general
             predicate selector may be added later if needed.)
         description: Human-readable description, surfaced in the override log.
+        exact: If ``True``, claim only configs whose concrete type is exactly
+            ``target``. The default ``False`` preserves subclass matching, useful
+            when a replacement is valid for the full target contract.
 
     The decorated function takes the matched config and returns its replacement.
 
@@ -145,6 +155,7 @@ def override(
             fqns=fqns,
             description=description,
             origin_module=fn.__module__,
+            exact=exact,
         )
         return fn
 
@@ -254,6 +265,8 @@ def _collect_claims(
     claims: list[_Claim] = []
     for ov in active:
         for fqn, cfg, parent, attr in config_root.traverse(ov.target_cls):
+            if ov.exact and type(cfg) is not ov.target_cls:
+                continue
             if ov.matches(fqn):
                 claims.append(_Claim(ov=ov, fqn=fqn, cfg=cfg, parent=parent, attr=attr))
     return claims

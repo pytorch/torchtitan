@@ -172,6 +172,49 @@ class TestOverride(unittest.TestCase):
         for child_cfg in parent_cfg.children:
             self.assertEqual(child_cfg.extra, 2)
 
+    def test_exact_target_skips_subclasses(self):
+        @override("exact_a", target=ComponentA.Config, exact=True)
+        def exact_a(cfg: ComponentA.Config) -> ComponentB.Config:
+            return ComponentB.Config(dim=cfg.dim, extra=10)
+
+        parent_cfg = ParentComponent.Config(
+            child=DerivedComponent.Config(dim=99),
+            children=[
+                ComponentA.Config(dim=32),
+                DerivedComponent.Config(dim=48),
+            ],
+        )
+        replacements = apply_overrides(self._imports(), parent_cfg)
+
+        self.assertEqual(len(replacements), 1)
+        self.assertIs(type(parent_cfg.child), DerivedComponent.Config)
+        self.assertIsInstance(parent_cfg.children[0], ComponentB.Config)
+        self.assertEqual(parent_cfg.children[0].extra, 10)
+        self.assertIs(type(parent_cfg.children[1]), DerivedComponent.Config)
+
+    def test_exact_target_does_not_conflict_with_subclass_override(self):
+        @override("exact_a", target=ComponentA.Config, exact=True)
+        def exact_a(cfg: ComponentA.Config) -> ComponentB.Config:
+            return ComponentB.Config(dim=cfg.dim, extra=10)
+
+        @override("derived", target=DerivedComponent.Config)
+        def derived(cfg: DerivedComponent.Config) -> ComponentB.Config:
+            return ComponentB.Config(dim=cfg.dim, extra=20)
+
+        parent_cfg = ParentComponent.Config(
+            child=DerivedComponent.Config(dim=99),
+            children=[
+                ComponentA.Config(dim=32),
+                DerivedComponent.Config(dim=48),
+            ],
+        )
+        replacements = apply_overrides(self._imports(), parent_cfg)
+
+        self.assertEqual(len(replacements), 3)
+        self.assertEqual(parent_cfg.child.extra, 20)
+        self.assertEqual(parent_cfg.children[0].extra, 10)
+        self.assertEqual(parent_cfg.children[1].extra, 20)
+
     def test_non_configurable_target_raises(self):
         # `target` must be a Configurable.Config subclass; a plain class (e.g.
         # ModelSpec) or non-type is rejected at registration.
