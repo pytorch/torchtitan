@@ -21,8 +21,8 @@ from torchtitan.trainer import Trainer
 from . import model_registry
 
 
-def enable_fused_grouped_experts(config: Trainer.Config) -> None:
-    override = "torchtitan.overrides.fused_grouped_experts"
+def enable_fused_swiglu(config: Trainer.Config) -> None:
+    override = "torchtitan.overrides.fused_swiglu"
     assert override not in config.override.imports
     config.override.imports.append(override)
 
@@ -73,7 +73,7 @@ def deepseek_v3_debugmodel_minimal_async_ep() -> Trainer.Config:
         "debugmodel",
         moe_comm_backend="minimal_async_ep",
     )
-    enable_fused_grouped_experts(config)
+    enable_fused_swiglu(config)
     config.parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,
         data_parallel_shard_degree=1,
@@ -133,7 +133,7 @@ def deepseek_v3_16b_minimal_async_ep() -> Trainer.Config:
         attn_backend="flex",
         moe_comm_backend="minimal_async_ep",
     )
-    enable_fused_grouped_experts(config)
+    enable_fused_swiglu(config)
     config.parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,
         data_parallel_shard_degree=1,
