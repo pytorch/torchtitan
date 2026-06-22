@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, cast
 
-import torch.distributed as dist
-
 if TYPE_CHECKING:
     from .bucket_storage import ParamInfo
 
@@ -38,9 +36,3 @@ def gradient_reduce_op_from_infos(infos: list[ParamInfo]) -> GradientReduceOp:
                 f"uses {info.gradient_reduce_op!r}."
             )
     return validate_gradient_reduce_op(op)
-
-
-def dist_reduce_op(op: GradientReduceOp) -> dist.ReduceOp.RedOpType:
-    if op == "avg":
-        return dist.ReduceOp.AVG
-    return dist.ReduceOp.SUM

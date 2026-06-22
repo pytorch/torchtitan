@@ -23,7 +23,6 @@ from ..flex_shard.placement_contract import (
     PlacementUnshardResult,
 )
 from ..flex_shard.reduce_policy import (
-    dist_reduce_op,
     gradient_reduce_op_from_infos,
     GradientReduceOp,
 )
@@ -475,7 +474,7 @@ class Shard(Placement):
             dist.reduce_scatter_tensor(
                 output=recv_buf,
                 input=send_buf,
-                op=dist_reduce_op(prepared.placement_state.gradient_reduce_op),
+                op=self.dist_reduce_op(prepared.placement_state.gradient_reduce_op),
                 group=prepared.placement_state.pg,
             )
         with _record_function_if_eager(
