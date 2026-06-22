@@ -562,25 +562,19 @@ def _clip_grad_norm_with_ep(
     non_ep_params = []
     ep_grads = []
     non_ep_grads = []
-    flex_shard_params = []
-    flex_shard_grads = []
 
     for p in parameters:
         if p.grad is None:
             continue
-        if _is_flex_shard_param(p):
-            flex_shard_params.append(p)
-            flex_shard_grads.append(p.grad)
+        assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
+        mesh_dim_names = p.device_mesh.mesh_dim_names
+        assert mesh_dim_names is not None
+        if "ep" in mesh_dim_names:
+            ep_params.append(p)
+            ep_grads.append(p.grad)
         else:
-            assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
-            mesh_dim_names = p.device_mesh.mesh_dim_names
-            assert mesh_dim_names is not None
-            if "ep" in mesh_dim_names:
-                ep_params.append(p)
-                ep_grads.append(p.grad)
-            else:
-                non_ep_params.append(p)
-                non_ep_grads.append(p.grad)
+            non_ep_params.append(p)
+            non_ep_grads.append(p.grad)
 
     # Either list can be empty depending on the parallelization strategy:
     # - In torchtitan with separate dense/sparse meshes, both lists are typically non-empty
@@ -601,38 +595,11 @@ def _clip_grad_norm_with_ep(
     if isinstance(non_ep_grads_total_norm, DTensor):
         non_ep_grads_total_norm = non_ep_grads_total_norm.full_tensor()
 
-    flex_shard_grads_total_norm = torch.nn.utils.get_total_norm(
-        flex_shard_grads, norm_type, error_if_nonfinite, foreach
-    )
-    if flex_shard_grads:
-        # The experimental FlexShard training path currently rejects PP, TP,
-        # CP, and HSDP, so every local shard is unique across the default group.
-        if math.isinf(norm_type):
-            dist.all_reduce(
-                flex_shard_grads_total_norm,
-                op=dist.ReduceOp.MAX,
-            )
-        else:
-            flex_shard_grads_total_norm **= norm_type
-            dist.all_reduce(
-                flex_shard_grads_total_norm,
-                op=dist.ReduceOp.SUM,
-            )
-            flex_shard_grads_total_norm **= 1.0 / norm_type
-        ep_grads_total_norm = ep_grads_total_norm.to(
-            flex_shard_grads_total_norm.device
-        )
-        non_ep_grads_total_norm = non_ep_grads_total_norm.to(
-            flex_shard_grads_total_norm.device
-        )
-
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
-        total_norm = torch.maximum(total_norm, flex_shard_grads_total_norm)
     else:
         total_norm = (
             ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
-            + flex_shard_grads_total_norm**norm_type
         )
         total_norm **= 1.0 / norm_type
 
@@ -646,12 +613,5 @@ def _clip_grad_norm_with_ep(
 
     torch.nn.utils.clip_grads_with_norm_(ep_params, max_norm, total_norm, foreach)
     torch.nn.utils.clip_grads_with_norm_(non_ep_params, max_norm, total_norm, foreach)
-    torch.nn.utils.clip_grads_with_norm_(
-        flex_shard_params, max_norm, total_norm, foreach
-    )
 
     return total_norm
-
-
-def _is_flex_shard_param(tensor: torch.Tensor) -> bool:
-    return hasattr(tensor, "_placements") and hasattr(tensor, "_mesh")
