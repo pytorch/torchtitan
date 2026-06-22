@@ -29,9 +29,9 @@ _HIDDEN = 32
 
 def _build_fused() -> FusedSwiGLU:
     fused = FusedSwiGLU.Config(
-        dim=_DIM,
-        hidden_dim=_HIDDEN,
+        w1=Linear.Config(in_features=_DIM, out_features=_HIDDEN),
         w2=Linear.Config(in_features=_HIDDEN, out_features=_DIM),
+        w3=Linear.Config(in_features=_DIM, out_features=_HIDDEN),
     ).build()
     with torch.no_grad():
         fused.w13.copy_(torch.randn(_HIDDEN, 2, _DIM))
@@ -60,26 +60,28 @@ class TestFusedSwiGLUCheckpointInterop(unittest.TestCase):
         self.assertTrue(torch.equal(sd["w1.weight"], fused.w13[:, 0]))
         self.assertTrue(torch.equal(sd["w3.weight"], fused.w13[:, 1]))
 
+    @unittest.skipUnless(torch.cuda.is_available(), "silu_and_mul op is CUDA-only")
     def test_fused_checkpoint_loads_into_stock(self):
         """A fused checkpoint loads into the stock FeedForward, weights + output."""
-        fused = _build_fused()
-        stock = _build_stock()
+        fused = _build_fused().cuda()
+        stock = _build_stock().cuda()
         stock.load_state_dict(fused.state_dict())
         self.assertTrue(torch.equal(stock.w1.weight, fused.w13[:, 0]))
         self.assertTrue(torch.equal(stock.w3.weight, fused.w13[:, 1]))
         self.assertTrue(torch.equal(stock.w2.weight, fused.w2.weight))
-        x = torch.randn(4, _DIM)
+        x = torch.randn(4, _DIM, device="cuda")
         self.assertTrue(torch.allclose(fused(x), stock(x), atol=1e-5, rtol=1e-5))
 
+    @unittest.skipUnless(torch.cuda.is_available(), "silu_and_mul op is CUDA-only")
     def test_stock_checkpoint_loads_into_fused(self):
         """A stock checkpoint loads into FusedSwiGLU, weights + output."""
-        stock = _build_stock()
-        fused = _build_fused()
+        stock = _build_stock().cuda()
+        fused = _build_fused().cuda()
         fused.load_state_dict(stock.state_dict())
         self.assertTrue(torch.equal(fused.w13[:, 0], stock.w1.weight))
         self.assertTrue(torch.equal(fused.w13[:, 1], stock.w3.weight))
         self.assertTrue(torch.equal(fused.w2.weight, stock.w2.weight))
-        x = torch.randn(4, _DIM)
+        x = torch.randn(4, _DIM, device="cuda")
         self.assertTrue(torch.allclose(fused(x), stock(x), atol=1e-5, rtol=1e-5))
 
     def test_fused_roundtrip(self):
