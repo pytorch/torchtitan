@@ -12,7 +12,7 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from torchtitan.config import CompileConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.experiments.flex_shard.deepseek_v3.config_registry import (
-    flex_shard_deepseek_v3_16b_dp8,
+    flex_shard_deepseek_v3_16b,
 )
 from torchtitan.experiments.flex_shard.deepseek_v3.parallelize import (
     _validate_supported_parallelisms,
@@ -39,7 +39,7 @@ class TestFlexShardDeepSeekV3Config(TestCase):
         return SimpleNamespace(**values)
 
     def test_16b_config_preserves_original_compile_ep_ac_knobs(self):
-        config = flex_shard_deepseek_v3_16b_dp8()
+        config = flex_shard_deepseek_v3_16b()
 
         self.assertTrue(config.compile.enable)
         self.assertEqual(config.compile.components, ["loss"])
