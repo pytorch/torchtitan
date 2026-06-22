@@ -160,12 +160,22 @@ class WorldModelValidator(BaseValidator):
         self.metrics_processor = metrics_processor
         self.seq_len = seq_len
         self.local_batch_size = local_batch_size
+        self.dataloader: WorldModelDataLoader | None = None
+        if self.config.steps != 0:
+            self.dataloader = self.config.dataloader.build(
+                dp_world_size=self.dp_world_size,
+                dp_rank=self.dp_rank,
+                tokenizer=self.tokenizer,
+                seq_len=self.seq_len,
+                local_batch_size=self.local_batch_size,
+                validation_steps=self.config.steps,
+            )
         training_id = os.getenv("REPORTERV2_TRAINING_ID") or "local"
         self.unique_segment_counter = StringUniqueCounter(f"unique_ids:{training_id}:worldmodel:validation")
 
     @torch.no_grad()
     def validate(self, model_parts: list[nn.Module], step: int) -> None:
-        if self.config.steps == 0:
+        if self.config.steps == 0 or self.dataloader is None:
             return
         model = cast(WorldModel, model_parts[0])
         model.eval()
@@ -173,18 +183,11 @@ class WorldModelValidator(BaseValidator):
         dtype = _floating_model_dtype(model)
         scheduler = RFScheduler(steps=self.config.noise_scheduler_steps).to(device=device)
         discrete_timesteps = scheduler.timesteps[:-1]
-        dataloader = self.config.dataloader.build(
-            dp_world_size=self.dp_world_size,
-            dp_rank=self.dp_rank,
-            tokenizer=self.tokenizer,
-            seq_len=self.seq_len,
-            local_batch_size=self.local_batch_size,
-            validation_steps=self.config.steps,
-        )
         samples = 0
         term_sums: dict[str, torch.Tensor] = {}
+        data_iterator = iter(self.dataloader)
         try:
-            for num_steps, (input_dict, targets) in enumerate(dataloader):
+            for num_steps, (input_dict, targets) in enumerate(data_iterator):
                 if num_steps >= self.config.steps:
                     break
                 batch_size = _batch_size(input_dict)
@@ -214,7 +217,9 @@ class WorldModelValidator(BaseValidator):
                 for name, term in terms.items():
                     term_sums[name] = term_sums.get(name, torch.zeros((), device=device)) + term.float().sum()
         finally:
-            dataloader.close()
+            close = getattr(data_iterator, "close", None)
+            if callable(close):
+                close()
             model.train()
 
         if samples == 0:
@@ -236,6 +241,10 @@ class WorldModelValidator(BaseValidator):
             else self.unique_segment_counter.local_count()
         )
         self.metrics_processor.log_validation(loss=loss, step=step, extra_metrics=extra_metrics)
+
+    def close(self) -> None:
+        if self.dataloader is not None:
+            self.dataloader.close()
 
 
 class WorldModelTrainer(Trainer):
@@ -414,6 +423,8 @@ class WorldModelTrainer(Trainer):
 
     def close(self) -> None:
         self.dataloader.close()
+        if self.config.validator.enable:
+            self.validator.close()
         super().close()
 
     def state_dict(self) -> dict[str, Any]:

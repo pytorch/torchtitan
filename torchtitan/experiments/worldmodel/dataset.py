@@ -200,6 +200,8 @@ class WorldModelDataLoader(BaseDataLoader):
 
         train_segments, val_segments = train_and_test_targets_from_file(config.dataset_path or config.dataset)
         segments = val_segments if val else train_segments
+        np.random.seed(42)
+        np.random.shuffle(segments)
         if config.limit is not None:
             segments = segments[: config.limit]
         return GenericDataset(

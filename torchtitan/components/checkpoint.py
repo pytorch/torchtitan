@@ -555,6 +555,7 @@ class CheckpointManager(Configurable):
                 state_dict,
                 storage_reader=FsspecReader(checkpoint_id),
                 checkpoint_id=checkpoint_id,
+                planner=dcp.DefaultLoadPlanner(allow_partial_load=True),
             )
 
             # TODO: Since we flatten the model states in state_dict, we need to
