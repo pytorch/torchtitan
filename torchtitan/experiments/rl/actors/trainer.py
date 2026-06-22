@@ -15,6 +15,8 @@ import torch.distributed.distributed_c10d as c10d
 import torch.nn.functional as F
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
+from torch.utils.checkpoint import checkpoint
+
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -44,6 +46,12 @@ from torchtitan.tools.logging import init_logger
 logger = logging.getLogger(__name__)
 
 
+# Row chunk for compute_logprobs' cross-entropy. The fp32 upcast + log_softmax
+# transient scales with rows * vocab and is saved for backward; chunking + recompute
+# bounds it to this many rows * vocab at a time (2048 * 151936 * 4B ~ 1.2GB).
+_LOGPROB_CHUNK_ROWS = 2048
+
+
 @sl.log_trace_span("compute_logprobs")
 def compute_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Compute per-position logprobs from logits and pre-shifted labels.
@@ -52,6 +60,14 @@ def compute_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     (``labels[i] = raw_token_ids[i+1]``), matching the pre-training
     dataloader convention.  No internal shift is needed.
     Output shape matches input: ``[batch, seq_len]``.
+
+    The cross-entropy is computed in row chunks, each recomputed in the backward
+    (activation checkpointing) rather than saving the fp32 upcast + log_softmax
+    for the whole sequence. That transient scales with rows * vocab and is saved
+    for backward; at a long seq_len and a 150K+ vocab (e.g. Qwen3 V=151936,
+    S=24576 -> ~15GB saved + ~15GB its gradient) it OOMs the 32B/FSDP-8 backward.
+    cross_entropy(reduction="none") is independent per row, so chunking + recompute
+    is numerically identical.
     """
     from torch.distributed.tensor import DTensor, Replicate, Shard
 
@@ -60,20 +76,41 @@ def compute_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
         # contract explicit (see .claude/rules/distributed.md).
         # Gather vocab-sharded TP logits before computing per-token logprobs.
         placements = tuple(
-            Replicate()
-            if isinstance(p, Shard) and p.dim in (-1, logits.ndim - 1)
-            else p
+            (
+                Replicate()
+                if isinstance(p, Shard) and p.dim in (-1, logits.ndim - 1)
+                else p
+            )
             for p in logits.placements
         )
         logits = logits.redistribute(placements=placements).to_local()
 
     B, S, V = logits.shape
-    return -F.cross_entropy(
-        logits.float().reshape(B * S, V),
-        labels.reshape(B * S),
-        reduction="none",
-        ignore_index=IGNORE_INDEX,
-    ).reshape(B, S)
+    logits_flat = logits.reshape(B * S, V)
+    labels_flat = labels.reshape(B * S)
+
+    def _row_logprobs(lg: torch.Tensor, lb: torch.Tensor) -> torch.Tensor:
+        return -F.cross_entropy(
+            lg.float(), lb, reduction="none", ignore_index=IGNORE_INDEX
+        )
+
+    rows = B * S
+    if rows <= _LOGPROB_CHUNK_ROWS:
+        logprobs = _row_logprobs(logits_flat, labels_flat)
+    else:
+        logprobs = torch.cat(
+            [
+                checkpoint(
+                    _row_logprobs,
+                    logits_flat[i : i + _LOGPROB_CHUNK_ROWS],
+                    labels_flat[i : i + _LOGPROB_CHUNK_ROWS],
+                    use_reentrant=False,
+                )
+                for i in range(0, rows, _LOGPROB_CHUNK_ROWS)
+            ],
+            dim=0,
+        )
+    return logprobs.reshape(B, S)
 
 
 @dataclass(frozen=True, slots=True)
