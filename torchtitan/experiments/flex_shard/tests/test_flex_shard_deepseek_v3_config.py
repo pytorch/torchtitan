@@ -21,7 +21,10 @@ from torchtitan.experiments.flex_shard.deepseek_v3.placement_policy import (
     DeepSeekV3FlexShardPolicy,
 )
 from torchtitan.experiments.flex_shard.example.owned import GroupedOwned
-from torchtitan.experiments.flex_shard.example.shard import Shard
+from torchtitan.experiments.flex_shard.example.shard import (
+    make_shard_placement_fn,
+    Shard,
+)
 from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     MixedPrecisionPolicy,
 )
@@ -116,7 +119,9 @@ class TestFlexShardDeepSeekV3Config(TestCase):
 
     def test_routed_experts_can_use_shard_baseline(self):
         buckets, _, efsdp_mesh = self._build_buckets(
-            DeepSeekV3FlexShardPolicy(routed_experts="shard")
+            DeepSeekV3FlexShardPolicy(
+                routed_expert_placement_fn=make_shard_placement_fn(0)
+            )
         )
         expert_bucket = self._bucket_with_pattern(
             buckets, "layers.0.*moe.experts.*"
