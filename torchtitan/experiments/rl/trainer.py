@@ -323,6 +323,22 @@ class RLTrainer(Configurable):
             trainer_parallelism.data_parallel_replicate_degree * dp_shard
         )
 
+        # gradient_accumulation_steps = global_batch_size // (local_batch_size *
+        # trainer_dp_degree) (see Batcher.batch). If global_batch_size is set below
+        # that product, integer division rounds it to 0, the microbatch loop runs
+        # zero times, and every step trains on nothing -- silently. Fail loudly
+        # here instead. (global_batch_size == -1 auto-resolves to the product.)
+        gbs = self.batcher.global_batch_size
+        rows_per_step = self.batcher.local_batch_size * self.trainer_dp_degree
+        if gbs != -1 and gbs < rows_per_step:
+            raise ValueError(
+                f"global_batch_size={gbs} < local_batch_size="
+                f"{self.batcher.local_batch_size} * trainer_dp_degree="
+                f"{self.trainer_dp_degree} (={rows_per_step}); "
+                f"gradient_accumulation_steps would be 0 and no optimizer step "
+                f"would run. Set global_batch_size to a multiple of {rows_per_step}."
+            )
+
         # TODO(observability): the mesh_spawn span wraps ~80 LoC of branching
         # provisioner logic. Pull a PerHostProvisioner.spawn_meshes(...) helper and
         # shrink this span to a single call.
@@ -671,7 +687,21 @@ class RLTrainer(Configurable):
             # NOTE: consecutive _collect_rollouts calls have a barrier between them (each is awaited to
             # completion). This behavior will change in async mode.
             num_tokens_target = self.batcher.num_tokens_target(self.trainer_dp_degree)
+            # Guard against a runaway collection loop: if rollouts persistently yield
+            # no trainable tokens (e.g. every sandbox boot fails), this loop would
+            # spin forever booting groups. Cap the rounds and fail loudly instead.
+            max_collection_rounds = max(8, 4 * num_groups)
+            collection_round = 0
             while collected_tokens < num_tokens_target:
+                collection_round += 1
+                if collection_round > max_collection_rounds:
+                    raise RuntimeError(
+                        f"rollout collection made no progress after "
+                        f"{max_collection_rounds} rounds: collected "
+                        f"{collected_tokens}/{num_tokens_target} tokens. Rollouts are "
+                        f"likely all erroring (e.g. sandbox boot); aborting instead of "
+                        f"spinning."
+                    )
                 new_rollout_groups, new_metrics = await self._collect_rollouts(
                     is_validation=False,
                     num_groups=num_groups,

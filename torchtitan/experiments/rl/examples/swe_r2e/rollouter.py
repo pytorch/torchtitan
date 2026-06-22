@@ -193,6 +193,7 @@ class SWER2ERollouter(Rollouter):
         solved = False
         applied = False
         diff_text = ""
+        error_msg = ""
         try:
             async with asyncio.timeout(self._guard_sec):
                 async with boot_agent_sandbox(sample.image) as sb:
@@ -219,9 +220,11 @@ class SWER2ERollouter(Rollouter):
         except (TimeoutError, asyncio.TimeoutError):
             logger.warning("[swe_r2e] %s: wall-clock guard fired", rollout_id)
             status = RolloutStatus.ERROR_TIMEOUT
-        except Exception:
+            error_msg = "wall_clock_timeout"
+        except Exception as e:
             logger.exception("[swe_r2e] %s: rollout failed", rollout_id)
             status = RolloutStatus.ERROR
+            error_msg = f"{type(e).__name__}: {e}"
         finally:
             captured = await adapter.finish_session(rollout_id)
 
@@ -241,6 +244,15 @@ class SWER2ERollouter(Rollouter):
         if not turns:
             # No trainable tokens (agent never produced a usable turn).
             status = RolloutStatus.ERROR
+            if not error_msg:
+                # Distinguish "claude never reached the model" (captured == 0)
+                # from "claude ran but every turn was length-capped" (captured > 0,
+                # all empty) so the dumped trace says why turns is empty.
+                n_cap = len(captured)
+                n_empty = sum(1 for ct in captured if not ct.completion_token_ids)
+                error_msg = (
+                    f"no_trainable_turns: captured={n_cap} empty_completions={n_empty}"
+                )
         else:
             turns[-1].env_rewards = {
                 R2E_REWARD_KEY: float(reward),
@@ -267,6 +279,7 @@ class SWER2ERollouter(Rollouter):
             solved=solved,
             applied=applied,
             diff_text=diff_text,
+            error_msg=error_msg,
         )
         return Rollout(
             group_id=group_id,
@@ -287,6 +300,7 @@ class SWER2ERollouter(Rollouter):
         solved: bool,
         applied: bool,
         diff_text: str,
+        error_msg: str = "",
     ) -> None:
         """Write a human-readable per-rollout training trace when
         ``SWE_ROLLOUT_DUMP_DIR`` is set: the R2E task, grade, and every captured
@@ -312,6 +326,7 @@ class SWER2ERollouter(Rollouter):
                 "instance_id": sample.instance_id,
                 "image": sample.image,
                 "status": status,
+                "error": error_msg,
                 "reward": reward,
                 "solved": solved,
                 "applied": applied,
