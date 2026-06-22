@@ -84,6 +84,24 @@ class TestParallelAwareDataloader(unittest.TestCase):
         self.assertEqual(last_batch_input["input"].tolist(), [96, 97, 98, 99])
         self.assertEqual(last_batch_label.tolist(), [96, 97, 98, 99])
 
+    def test_load_state_dict_missing_rank_warning_includes_rank_id(self):
+        """The missing-rank warning must interpolate the actual rank key."""
+        dataloader = ParallelAwareDataloader(
+            DummyDataset(),
+            dp_rank=0,
+            dp_world_size=1,
+            batch_size=4,
+        )
+        # Non-empty state that lacks this rank's key hits the warning branch.
+        state_dict = {"dp_rank_1": b"", "world_size": 1}
+
+        with self.assertLogs(level="WARNING") as cm:
+            dataloader.load_state_dict(state_dict)
+
+        output = "\n".join(cm.output)
+        self.assertIn(dataloader._rank_id, output)
+        self.assertNotIn("{self._rank_id}", output)
+
     def test_validate_kwargs_rejects_invalid_kwargs(self):
         """Test that passing invalid kwargs raises ValueError."""
         dataset = DummyDataset()
