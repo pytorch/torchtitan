@@ -25,7 +25,6 @@ from ..flex_shard.placement_contract import (
     PlacementUnshardResult,
 )
 from ..flex_shard.reduce_policy import (
-    dist_reduce_op,
     gradient_reduce_op_from_infos,
     GradientReduceOp,
 )
@@ -407,7 +406,7 @@ class RaggedShard(Placement):
             dist.reduce_scatter_tensor(
                 output=recv_buf,
                 input=send_buf,
-                op=dist_reduce_op(state.gradient_reduce_op),
+                op=self.dist_reduce_op(state.gradient_reduce_op),
                 group=state.pg,
             )
 
@@ -914,7 +913,7 @@ class GroupedRaggedShard(RaggedShard):
             dist.reduce_scatter_tensor(
                 output=recv_buf,
                 input=send_buf,
-                op=dist_reduce_op(state.gradient_reduce_op),
+                op=self.dist_reduce_op(state.gradient_reduce_op),
                 group=state.pg,
             )
 

@@ -28,7 +28,6 @@ from ..flex_shard.placement_contract import (
     PlacementUnshardResult,
 )
 from ..flex_shard.reduce_policy import (
-    dist_reduce_op,
     gradient_reduce_op_from_infos,
     GradientReduceOp,
 )
@@ -1564,7 +1563,7 @@ class GroupedOwned(Placement):
                 dist.reduce_scatter_tensor(
                     output=recv,
                     input=send,
-                    op=dist_reduce_op(state.gradient_reduce_op),
+                    op=self.dist_reduce_op(state.gradient_reduce_op),
                     group=state.pg,
                 )
             finally:
