@@ -95,7 +95,7 @@ def _generator():
 # --- completion (token-out) ---
 
 
-def test_process_finished_requests_resolves_future_with_completion():
+def test_dispatch_finished_requests_resolves_future_with_completion():
     async def main():
         generator = _generator()
         future = asyncio.get_running_loop().create_future()
@@ -103,7 +103,7 @@ def test_process_finished_requests_resolves_future_with_completion():
             "r0": GenerationFuture(future=future, metrics_prefix="generator")
         }
 
-        generator._process_finished_requests(
+        generator._dispatch_finished_requests(
             [
                 _request_output(
                     outputs=[_sample(token_ids=(10, 11), finish_reason="length")]
@@ -130,11 +130,11 @@ def test_process_finished_requests_resolves_future_with_completion():
     asyncio.run(main())
 
 
-def test_process_finished_requests_noop_on_followers():
-    # Followers hold no futures, so completion is a no-op (it returns before touching outputs).
+def test_dispatch_finished_requests_noop_on_followers():
+    # Followers hold no futures, so dispatch is a no-op (it returns before building).
     generator = _generator()
     generator._rank = 1
-    generator._process_finished_requests([_request_output(request_id="r0")])
+    generator._dispatch_finished_requests([_request_output(request_id="r0")])
     assert generator._generation_futures == {}
 
 

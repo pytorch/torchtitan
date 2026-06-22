@@ -237,8 +237,8 @@ class VLLMGenerator(Actor, Configurable):
 
         # resolve the future, waking up `generate` so it returns the result to the controller.
         # Note that prompt_1 can be done before prompt_0. The result is per request, not per batch.
-        rank 0   _process_finished_requests -> prompt_1 done? gen_future_1.set_result(Completion)
-        rank 1   _process_finished_requests -> no-op (holds no futures)
+        rank 0   _dispatch_finished_requests -> prompt_1 done? gen_future_1.set_result(Completion)
+        rank 1   _dispatch_finished_requests -> no-op (holds no futures)
 
     A weight sync rides the same loop: `pull_model_state_dict` queues a `LoopDecision(LoopAction.PULL_MODEL_STATE_DICT)` applied
     between step bursts. The engine does NOT drain in-flight requests first ("hotswap"). This behavior can be changed
@@ -691,7 +691,7 @@ class VLLMGenerator(Actor, Configurable):
                         with torch.no_grad():
                             with sl.log_trace_span("vllm_engine_step"):
                                 request_outputs = self._engine.step()
-                        self._process_finished_requests(request_outputs)
+                        self._dispatch_finished_requests(request_outputs)
                         await asyncio.sleep(0)  # let pending generate() calls enqueue
 
         except Exception as exc:
@@ -740,11 +740,31 @@ class VLLMGenerator(Actor, Configurable):
                 requests_per_dp_rank=requests_per_dp_rank,
             )
 
-    def _process_finished_requests(self, request_outputs: list[RequestOutput]) -> None:
-        """RANK 0: resolve each finished request's future with its `Completion` (metrics included)."""
+    def _dispatch_finished_requests(self, request_outputs: list[RequestOutput]) -> None:
+        """RANK 0: build completions for finished requests and resolve their futures.
+
+        Today rank 0 holds every request's output and every future, so it builds
+        and resolves locally. The split into ``_build_completions`` (turn engine
+        outputs into ``Completion``s) and ``_resolve_completions`` (resolve the
+        rank-0 futures) is the seam where DP result fan-in will later route a peer
+        group's completions back to rank 0.
+        """
         if self._rank != 0:
             return  # other ranks hold no futures
 
+        completions = self._build_completions(request_outputs)
+        self._resolve_completions(completions)
+
+    def _build_completions(
+        self, request_outputs: list[RequestOutput]
+    ) -> list[tuple[str, Completion]]:
+        """Turn finished ``RequestOutput``s into ``(request_id, Completion)`` pairs.
+
+        Builds the per-generation timing metrics; the
+        ``inflight_requests_at_completion`` metric is attached later in
+        ``_resolve_completions`` because it depends on the rank-0 future count.
+        """
+        completions: list[tuple[str, Completion]] = []
         for request_output in request_outputs:
             # We enforce n=1 in sampling params -> exactly one CompletionOutput per finished request
             # Here we just sanity check it (a single engine.step may still finish several requests).
@@ -754,10 +774,6 @@ class VLLMGenerator(Actor, Configurable):
                     f"{len(request_output.outputs)} for {request_output.request_id}"
                 )
 
-            # in flight when this one finished (includes itself; counted before the pop)
-            inflight_requests_at_completion = float(len(self._generation_futures))
-            generation_future = self._generation_futures.pop(request_output.request_id)
-
             # get logprobs
             completion_output = request_output.outputs[0]
             token_logprobs = [
@@ -766,30 +782,45 @@ class VLLMGenerator(Actor, Configurable):
             ]
 
             # prepare metrics
-            metrics_prefix = generation_future.metrics_prefix
+            metrics_prefix = self._generation_futures[
+                request_output.request_id
+            ].metrics_prefix
             metrics = _prepare_generation_request_metrics(
                 request_output, prefix=metrics_prefix
             )
 
+            completions.append(
+                (
+                    request_output.request_id,
+                    Completion(
+                        policy_version=self.policy_version,
+                        request_id=request_output.request_id,
+                        token_ids=list(completion_output.token_ids),
+                        token_logprobs=token_logprobs,
+                        finish_reason=completion_output.finish_reason,
+                        metrics=metrics,
+                    ),
+                )
+            )
+        return completions
+
+    def _resolve_completions(self, completions: list[tuple[str, Completion]]) -> None:
+        """RANK 0: attach the in-flight metric and resolve each request's future."""
+        for request_id, completion in completions:
+            # in flight when this one finished (includes itself; counted before the pop)
+            inflight_requests_at_completion = float(len(self._generation_futures))
+            generation_future = self._generation_futures.pop(request_id)
+
+            metrics_prefix = generation_future.metrics_prefix
             for metric_type in [m.Max, m.Mean]:
-                metrics.append(
+                completion.metrics.append(
                     m.Metric(
                         f"{metrics_prefix}/inflight_requests_at_completion",
                         metric_type(inflight_requests_at_completion),
                     )
                 )
 
-            # resolve the future
-            generation_future.future.set_result(
-                Completion(
-                    policy_version=self.policy_version,
-                    request_id=request_output.request_id,
-                    token_ids=list(completion_output.token_ids),
-                    token_logprobs=token_logprobs,
-                    finish_reason=completion_output.finish_reason,
-                    metrics=metrics,
-                )
-            )
+            generation_future.future.set_result(completion)
 
     def _fail_outstanding_futures(self, exc: BaseException) -> None:
         """Fail every unresolved future after an exception or engine teardown."""
