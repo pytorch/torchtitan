@@ -8,6 +8,7 @@ from .flex_shard import (
     BucketParamStorageLayout,
     BucketSpec,
     BucketStorageLayout,
+    disable_flex_shard_gradient_division,
     flex_shard,
     get_global_shape,
     get_placements,
@@ -17,6 +18,7 @@ from .flex_shard import (
     OffloadPolicy,
     Placement,
     PlacementFn,
+    set_flex_shard_gradient_reduce_op,
 )
 
 
@@ -24,6 +26,7 @@ __all__ = [
     "BucketParamStorageLayout",
     "BucketSpec",
     "BucketStorageLayout",
+    "disable_flex_shard_gradient_division",
     "flex_shard",
     "get_global_shape",
     "get_placements",
@@ -33,4 +36,5 @@ __all__ = [
     "OffloadPolicy",
     "Placement",
     "PlacementFn",
+    "set_flex_shard_gradient_reduce_op",
 ]

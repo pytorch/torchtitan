@@ -53,6 +53,16 @@ class _RafSavedTensorContext:
 
     def register(self, tensor: torch.Tensor, handle: Any) -> None:
         self.tensor_handles[id(tensor)] = handle
+        base = getattr(tensor, "_base", None)
+        if base is None or base is tensor:
+            return
+
+        base_handle_fn = getattr(handle, "base_handle_for_raf_saved_tensor", None)
+        if not callable(base_handle_fn):
+            return
+        base_handle = base_handle_fn(tensor, base)
+        if base_handle is not None:
+            self.tensor_handles[id(base)] = base_handle
 
     def pack(self, tensor: torch.Tensor) -> Any:
         handle = self.tensor_handles.get(id(tensor))

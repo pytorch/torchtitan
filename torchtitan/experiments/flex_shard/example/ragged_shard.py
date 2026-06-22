@@ -24,6 +24,11 @@ from ..flex_shard.placement_contract import (
     PlacementReduceGradResult,
     PlacementUnshardResult,
 )
+from ..flex_shard.reduce_policy import (
+    dist_reduce_op,
+    gradient_reduce_op_from_infos,
+    GradientReduceOp,
+)
 from ..flex_shard.utils import (
     _record_comm_if_eager,
     _record_copy_in_if_eager,
@@ -81,6 +86,7 @@ class RaggedShard(Placement):
         world_size: int
         pg: Any
         debug_fqn: str | None
+        gradient_reduce_op: GradientReduceOp
 
     def __init__(
         self,
@@ -372,6 +378,7 @@ class RaggedShard(Placement):
                 world_size=world_size,
                 pg=mesh.get_group(),
                 debug_fqn=debug_fqn,
+                gradient_reduce_op=gradient_reduce_op_from_infos(infos),
             ),
         )
 
@@ -397,13 +404,10 @@ class RaggedShard(Placement):
             "FlexShard::post_backward_reduce",
             state.debug_fqn,
         ):
-            # TODO: Plumb the reduction/scaling policy from SPMD gradient semantics.
-            # AVG is a convenient default, but delayed grad scaling may need SUM
-            # plus an explicit scale at a different point in the training step.
             dist.reduce_scatter_tensor(
                 output=recv_buf,
                 input=send_buf,
-                op=dist.ReduceOp.AVG,
+                op=dist_reduce_op(state.gradient_reduce_op),
                 group=state.pg,
             )
 
@@ -459,6 +463,7 @@ class GroupedRaggedShard(RaggedShard):
         pg: Any
         debug_fqn: str | None
         padded_segment_numel: int
+        gradient_reduce_op: GradientReduceOp
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, GroupedRaggedShard):
@@ -879,6 +884,7 @@ class GroupedRaggedShard(RaggedShard):
                 pg=mesh.get_group(),
                 debug_fqn=debug_fqn,
                 padded_segment_numel=padded_segment_numel,
+                gradient_reduce_op=gradient_reduce_op_from_infos(infos),
             ),
         )
 
@@ -908,7 +914,7 @@ class GroupedRaggedShard(RaggedShard):
             dist.reduce_scatter_tensor(
                 output=recv_buf,
                 input=send_buf,
-                op=dist.ReduceOp.AVG,
+                op=dist_reduce_op(state.gradient_reduce_op),
                 group=state.pg,
             )
 

@@ -229,6 +229,8 @@ def _make_reshard_only_context_fn(
 class _MarkRecomputeTorchDispatchMode(TorchDispatchMode):
     """Context wrapper that marks bucket-specific recomputation during tracing."""
 
+    supports_higher_order_operators = True
+
     @classmethod
     def ignore_compile_internals(cls) -> bool:
         return True
