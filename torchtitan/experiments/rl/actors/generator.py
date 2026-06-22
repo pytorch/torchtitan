@@ -304,9 +304,10 @@ class VLLMGenerator(Actor, Configurable):
         weight_sync_direct_rdma: bool | None = None
         """Weight-sync transport for ``pull_model_state_dict``: ``None`` uses
         ``is_rdma_available()`` (direct GPU-to-GPU RDMA when present); ``True``/``False`` force it
-        on/off. With >1 generator set ``False`` -- direct RDMA is a single-reader path and its
-        transient GPU memory spike OOMs large generators; CPU-staged (via StorageVolumes) is
-        fanout-safe. Must match the trainer's ``weight_sync_direct_rdma``."""
+        on/off. Direct RDMA fans out fine to multiple generators with a single-host trainer
+        (validated: 3 generators, ~4s pull, reward converges); the limitation is a MULTI-HOST
+        trainer, where direct RDMA SIGSEGVs in monarch_rdma (IbvMemoryRegion) -- use ``False``
+        (CPU-staged via StorageVolumes) there. Must match the trainer's ``weight_sync_direct_rdma``."""
 
         def __post_init__(self):
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
@@ -836,9 +837,10 @@ class VLLMGenerator(Actor, Configurable):
         """ALL RANKS: collectively copy the latest weights from TorchStore, optionally drop the
         prefix cache (so no new request reuses an old-weight prefix), and bump the policy version.
         """
-        # Direct RDMA is a single-reader path; with >1 generator (fanout) set
-        # weight_sync_direct_rdma=False to CPU-stage via StorageVolumes. ``None``
-        # falls back to the hardware probe (single-generator default).
+        # Direct RDMA fans out fine to >1 generator with a single-host trainer; for a
+        # MULTI-HOST trainer it SIGSEGVs in monarch_rdma, so set
+        # weight_sync_direct_rdma=False (CPU-stage via StorageVolumes) there. ``None``
+        # falls back to the hardware probe.
         cfg_rdma = self.config.weight_sync_direct_rdma
         direct_rdma = is_rdma_available() if cfg_rdma is None else cfg_rdma
         model_sd = self._get_model().model.state_dict()

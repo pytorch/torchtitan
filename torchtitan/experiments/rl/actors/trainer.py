@@ -164,7 +164,8 @@ class PolicyTrainer(Actor, Configurable):
         """Weight-sync transport for ``push_model_state_dict``: ``None`` uses
         ``is_rdma_available()``; ``True``/``False`` force it on/off. Must match the
         generator's ``weight_sync_direct_rdma`` (CPU-staged on both, or direct-RDMA on
-        both). Set ``False`` with >1 generator (fanout-safe, avoids the GPU memory spike)."""
+        both). Direct RDMA fans out fine to multiple generators with a single-host trainer;
+        set ``False`` for a MULTI-HOST trainer, where direct RDMA SIGSEGVs in monarch_rdma."""
 
     def __init__(
         self,
@@ -562,8 +563,7 @@ class PolicyTrainer(Actor, Configurable):
         # torchstore honors ``transfer_dtype`` only on the direct-RDMA path
         # (state_dict_utils._put_state_dict_direct_rdma); the CPU-staged
         # StorageVolume path ignores it. Under mixed-precision FSDP the master
-        # weights are fp32, so on the CPU-staged path -- which >1 generator
-        # requires (direct-RDMA does not fan out) -- cast to the generator dtype
+        # weights are fp32, so on the CPU-staged path cast to the generator dtype
         # here, else the generator's pull asserts a dtype mismatch (e.g.
         # float32 != bfloat16). For direct-RDMA leave it to transfer_dtype, whose
         # staging buffer avoids an extra full-precision copy.
