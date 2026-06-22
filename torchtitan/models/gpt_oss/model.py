@@ -45,7 +45,9 @@ def apply_attention_sink_rescale(
 class ScaledBiasRowwiseLinear(Linear):
     """
     Rowwise linear whose local bias contribution is scaled by TP degree.
-    TODO(pianpwk): this should work in decomposition in spmd_types.
+    TODO(pianpwk): this should work in decomposition in spmd_types. Today the
+    local SPMD typecheck errors on the TP-axis input:V, weight:V, bias:P case;
+    decomposing to input @ weight -> P, then P + P, should typecheck.
     """
 
     @dataclass(kw_only=True, slots=True)
