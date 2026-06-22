@@ -392,7 +392,7 @@ class PathModel(BaseModel):
 
         def update_from_config(self, *, config, **kwargs) -> None:
             parallelism = config.parallelism
-            if parallelism.full_dtensor:
+            if parallelism.spmd_backend == "full_dtensor":
                 raise ValueError("path v1 does not support full DTensor")
             unsupported = {
                 "tensor parallel": parallelism.tensor_parallel_degree,
@@ -474,7 +474,7 @@ def parallelize_path(
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ) -> PathModel:
-    if parallelism.full_dtensor:
+    if parallelism.spmd_backend == "full_dtensor":
         raise ValueError("path v1 does not support full DTensor")
     if parallel_dims.tp_enabled or parallel_dims.cp_enabled or parallel_dims.pp_enabled or parallel_dims.ep_enabled:
         raise ValueError("path v1 supports data parallelism only")
