@@ -11,6 +11,24 @@ model on inference throughput, one profiler-found optimization at a time. Harnes
 full per-rung numbers live in `torchtitan/experiments/rl/docs/inference_gap_ablation.md`.
 Goal: match vLLM native 100%.
 
+## Scope: close the IMPLEMENTATION gap, not the serving knobs
+
+This skill makes torchtitan's model run as fast as vLLM's NATIVE model at a FIXED
+model, workload, precision, and topology -- i.e. it closes the framework/overhead
+gap (target = native at the *same* config; ratio -> 1.0). It is explicitly NOT
+about the orthogonal levers that change the setup itself:
+- increasing batch size / seq_len / amount of input data
+- changing the model
+- lower precision (fp8 / quantization)
+- speculative decoding
+- disaggregated prefill
+- changing topology / number of GPUs
+
+Those move ABSOLUTE throughput but apply equally to native -- they don't change
+the torchtitan-vs-native ratio this skill chases. Hold them FIXED and IDENTICAL
+between torchtitan and native when measuring; otherwise you're no longer measuring
+the implementation gap.
+
 ## Before any run: confirm with the user (don't assume defaults)
 
 - **Model + parallelism**: which model, TP degree, SP/DP/PP/EP (e.g. Qwen3-32B,
