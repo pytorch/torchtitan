@@ -13,29 +13,17 @@ from .owned import (
     Owned,
     param_boundary_placements,
 )
-from .ragged_shard import (
-    GroupedRaggedShard,
-    make_grouped_ragged_placement_fn,
-    make_ragged_placement_fn,
-    per_param_ragged_placements,
-    RaggedShard,
-)
 from .shard import make_shard_placement_fn, per_param_placements, Shard
 
 __all__ = [
     "GroupedOwned",
     "GroupedOwnedSegmentSpec",
-    "GroupedRaggedShard",
     "make_grouped_owned_expert_block_placement_fn",
     "make_grouped_owned_expert_block_segments",
     "make_grouped_owned_placement_fn",
-    "make_grouped_ragged_placement_fn",
-    "make_ragged_placement_fn",
     "make_shard_placement_fn",
     "Owned",
     "param_boundary_placements",
-    "per_param_ragged_placements",
     "per_param_placements",
-    "RaggedShard",
     "Shard",
 ]
