@@ -14,10 +14,11 @@ import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.components.dataloader import BaseDataLoader
-from torchtitan.components.loss import IGNORE_INDEX, LossFunction
+from torchtitan.components.looping import run_looped_forward
+from torchtitan.components.loss import IGNORE_INDEX, LoopedEntropyLoss, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config import Configurable, ParallelismConfig
+from torchtitan.config import Configurable, LoopingConfig, ParallelismConfig
 from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
@@ -109,6 +110,7 @@ class Validator(BaseValidator):
         metrics_processor: MetricsProcessor,
         seq_len: int,
         local_batch_size: int,
+        looping: LoopingConfig | None = None,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
         pp_has_last_stage: bool | None = None,
@@ -124,6 +126,7 @@ class Validator(BaseValidator):
         self.dp_rank = dp_rank
         self.seq_len = seq_len
         self.local_batch_size = local_batch_size
+        self.looping = looping or LoopingConfig()
         self.validation_context = validation_context
         self.metrics_processor = metrics_processor
         self.pp_schedule = pp_schedule
@@ -298,8 +301,26 @@ class Validator(BaseValidator):
             else:
                 with self.validation_context():
                     assert len(model_parts) == 1
-                    predictions = model_parts[0](inputs, **extra_kwargs)
-                    loss_sum = self.loss_fn(predictions, labels)
+                    if self.looping.enable:
+                        if not isinstance(self.loss_fn, LoopedEntropyLoss):
+                            raise TypeError(
+                                "Looped validation requires LoopedEntropyLoss"
+                            )
+                        logits_by_step, gate_logits_by_step = run_looped_forward(
+                            model_parts[0],
+                            inputs,
+                            extra_kwargs,
+                            steps=self.looping.steps,
+                            use_exit_gate=self.looping.exit_gate,
+                        )
+                        loss_sum = self.loss_fn(
+                            logits_by_step,
+                            gate_logits_by_step,
+                            labels,
+                        )
+                    else:
+                        predictions = model_parts[0](inputs, **extra_kwargs)
+                        loss_sum = self.loss_fn(predictions, labels)
 
             accumulated_losses.append(loss_sum.detach() / global_valid_tokens)
             num_steps += 1

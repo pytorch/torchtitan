@@ -314,6 +314,171 @@ class CrossEntropyLoss(BaseLoss):
         return loss
 
 
+class LoopedEntropyLoss(BaseLoss):
+    """Full-materialized entropy-regularized loss for looped decoder training."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseLoss.Config):
+        beta: float = 0.05
+        """Entropy coefficient."""
+
+        eps: float = 1e-8
+        """Numerical epsilon for log probabilities."""
+
+    def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
+        if config.beta < 0:
+            raise ValueError("LoopedEntropyLoss beta must be non-negative")
+        if config.eps <= 0:
+            raise ValueError("LoopedEntropyLoss eps must be positive")
+        self.fn: LossFunction = cross_entropy_loss
+        self.beta = config.beta
+        self.eps = config.eps
+        self.last_metrics: dict[str, float] = {}
+
+    @staticmethod
+    def compute_exit_probabilities(
+        gate_logits_by_step: torch.Tensor | None,
+        *,
+        steps: int,
+        batch_shape: tuple[int, int],
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Return a [T, B, S] exit-step distribution.
+
+        If no gate logits are provided, all steps receive uniform mass. With
+        gate logits, steps 1..T-1 receive lambda_t * survival_{t-1}, and the
+        final step receives all remaining survival mass.
+        """
+        if gate_logits_by_step is None:
+            return torch.full(
+                (steps, *batch_shape),
+                1.0 / steps,
+                device=device,
+                dtype=torch.float32,
+            )
+
+        if gate_logits_by_step.ndim != 3:
+            raise ValueError(
+                "gate_logits_by_step must have shape [steps, batch, seq], "
+                f"got {tuple(gate_logits_by_step.shape)}"
+            )
+        if gate_logits_by_step.shape[0] != steps:
+            raise ValueError(
+                f"Expected {steps} gate-logit steps, got {gate_logits_by_step.shape[0]}"
+            )
+        if tuple(gate_logits_by_step.shape[1:]) != batch_shape:
+            raise ValueError(
+                "gate logits batch/seq shape must match logits, got "
+                f"{tuple(gate_logits_by_step.shape[1:])} vs {batch_shape}"
+            )
+
+        if steps == 1:
+            return torch.ones(
+                (1, *batch_shape),
+                device=device,
+                dtype=torch.float32,
+            )
+
+        gates = torch.sigmoid(gate_logits_by_step.float())
+        survival = torch.ones(batch_shape, device=device, dtype=torch.float32)
+        probs = []
+        for step_idx in range(steps - 1):
+            exit_prob = gates[step_idx] * survival
+            probs.append(exit_prob)
+            survival = survival * (1.0 - gates[step_idx])
+        probs.append(survival)
+        return torch.stack(probs, dim=0)
+
+    def __call__(
+        self,
+        logits_by_step: torch.Tensor,
+        gate_logits_by_step: torch.Tensor | None,
+        labels: torch.Tensor,
+        global_valid_tokens: float | torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if logits_by_step.ndim != 4:
+            raise ValueError(
+                "logits_by_step must have shape [steps, batch, seq, vocab], "
+                f"got {tuple(logits_by_step.shape)}"
+            )
+
+        steps, batch, seq, vocab = logits_by_step.shape
+        if labels.shape != (batch, seq):
+            raise ValueError(
+                f"labels shape must be {(batch, seq)}, got {tuple(labels.shape)}"
+            )
+
+        expanded_labels = labels.unsqueeze(0).expand(steps, -1, -1)
+        per_step_ce = torch.nn.functional.cross_entropy(
+            logits_by_step.reshape(-1, vocab).float(),
+            expanded_labels.reshape(-1),
+            reduction="none",
+            ignore_index=IGNORE_INDEX,
+        ).view(steps, batch, seq)
+
+        exit_probs = self.compute_exit_probabilities(
+            gate_logits_by_step,
+            steps=steps,
+            batch_shape=(batch, seq),
+            device=logits_by_step.device,
+            dtype=logits_by_step.dtype,
+        )
+
+        valid_mask = labels != IGNORE_INDEX
+        expected_task_loss = (exit_probs * per_step_ce).sum(dim=0)
+        entropy = -(exit_probs * exit_probs.clamp_min(self.eps).log()).sum(dim=0)
+
+        task_loss_sum = expected_task_loss[valid_mask].sum()
+        entropy_sum = entropy[valid_mask].sum()
+        loss = task_loss_sum - self.beta * entropy_sum
+
+        metrics_denominator = valid_mask.sum().clamp_min(1).to(loss.dtype)
+        if global_valid_tokens is not None:
+            loss = loss / global_valid_tokens
+
+        self._record_metrics(
+            task_loss_sum=task_loss_sum,
+            entropy_sum=entropy_sum,
+            exit_probs=exit_probs,
+            valid_mask=valid_mask,
+            denominator=metrics_denominator,
+        )
+        return loss
+
+    @torch.no_grad()
+    def _record_metrics(
+        self,
+        *,
+        task_loss_sum: torch.Tensor,
+        entropy_sum: torch.Tensor,
+        exit_probs: torch.Tensor,
+        valid_mask: torch.Tensor,
+        denominator: torch.Tensor,
+    ) -> None:
+        denom = denominator.clamp_min(1)
+        metrics = {
+            "looped_loss/task_loss": float((task_loss_sum.detach() / denom).item()),
+            "looped_loss/entropy": float((entropy_sum.detach() / denom).item()),
+        }
+
+        if bool(valid_mask.any().item()):
+            steps = exit_probs.shape[0]
+            step_ids = torch.arange(
+                1,
+                steps + 1,
+                device=exit_probs.device,
+                dtype=exit_probs.dtype,
+            ).view(steps, 1, 1)
+            avg_exit_step = (exit_probs * step_ids).sum(dim=0)[valid_mask].mean()
+            metrics["looped_loss/avg_exit_step"] = float(avg_exit_step.item())
+            exit_mass = exit_probs[:, valid_mask].mean(dim=1)
+            for idx, value in enumerate(exit_mass, start=1):
+                metrics[f"looped_loss/exit_mass_step_{idx}"] = float(value.item())
+
+        self.last_metrics = metrics
+
+
 class MSELoss(BaseLoss):
     """MSE loss with sum reduction for Transformer models training (e.g. Flux)."""
 

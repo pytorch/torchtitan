@@ -199,6 +199,18 @@ class TestConfigManager(unittest.TestCase):
         assert config.model_spec.name == "deepseek_v3"
         assert config.model_spec.flavor == "debugmodel"
 
+    def test_ouro_config(self):
+        """Test that --module ouro --config ouro_debugmodel works."""
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
+            ["--module", "ouro", "--config", "ouro_debugmodel"]
+        )
+        assert config.model_spec.name == "ouro"
+        assert config.model_spec.flavor == "debugmodel"
+        assert config.looping.enable
+        assert config.looping.steps == 4
+        assert not config.parallelism.enable_sequence_parallel
+
     def test_fqn_module_with_config_registry(self):
         """--module torchtitan.models.llama3.config_registry works."""
         config_manager = ConfigManager()

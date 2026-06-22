@@ -74,6 +74,7 @@ class Decoder(BaseModel):
         lm_head: Linear.Config
         tok_embeddings: Embedding.Config
         norm: RMSNorm.Config
+        loop_exit_gate: Linear.Config | None = None
         # TODO(fegin): revisit
         # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
         # and fix the typing here
@@ -184,6 +185,17 @@ class Decoder(BaseModel):
 
             maybe_update_minimal_async_ep_config(self, config)
 
+            if (
+                getattr(getattr(config, "looping", None), "enable", False)
+                and getattr(config.looping, "exit_gate", True)
+                and self.loop_exit_gate is None
+            ):
+                self.loop_exit_gate = Linear.Config(
+                    in_features=self.dim,
+                    out_features=1,
+                    bias=True,
+                )
+
             # NOTE: Inference-only callers such as the RL generator skip
             # training.seq_len sync. Generated sequence length is not known
             # ahead of time, so keep the RoPE cache at the model's max_seq_len.
@@ -227,6 +239,11 @@ class Decoder(BaseModel):
 
         self.norm = config.norm.build()
         self.lm_head = config.lm_head.build()
+        self.loop_exit_gate = (
+            config.loop_exit_gate.build()
+            if config.loop_exit_gate is not None
+            else None
+        )
 
         self.enable_weight_tying = config.enable_weight_tying
         if self.enable_weight_tying:
@@ -257,20 +274,49 @@ class Decoder(BaseModel):
         # positions to the right parameter (it would otherwise land in the
         # attention_masks slot and break the maskless SDPA backend).
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
-
-        for layer in self.layers.values():
-            h = layer(h, attention_masks, positions)
-
-        h = self.norm(h) if self.norm is not None else h
+        h = self.prepare_loop_inputs(
+            tokens,
+            positions=positions,
+            attention_masks=attention_masks,
+        )
+        h = self.loop_step(h, positions=positions, attention_masks=attention_masks)
 
         # _skip_lm_head is an attribute rather than a forward kwarg because PP backward
         # calls .requires_grad on all stage inputs, which fails on bool kwargs.
         # TODO: fix PP backward upstream to skip non-tensor inputs
         if self._skip_lm_head:
             return h
-        output = self.lm_head(h) if self.lm_head is not None else h
-        return output
+        return self.project_logits(h)
+
+    def prepare_loop_inputs(self, tokens: torch.Tensor, **kwargs) -> torch.Tensor:
+        """Prepare the initial hidden state for trainer-controlled looping."""
+        return self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
+
+    def loop_step(
+        self,
+        hidden: torch.Tensor,
+        *,
+        positions: torch.Tensor | None = None,
+        attention_masks: AttentionMasksType | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Apply one recurrent decoder step to an existing hidden state."""
+        for layer in self.layers.values():
+            hidden = layer(hidden, attention_masks, positions)
+        return self.norm(hidden) if self.norm is not None else hidden
+
+    def project_logits(self, hidden: torch.Tensor) -> torch.Tensor:
+        if self.lm_head is None:
+            return hidden
+        return self.lm_head(hidden)
+
+    def exit_gate(self, hidden: torch.Tensor) -> torch.Tensor:
+        if self.loop_exit_gate is None:
+            raise RuntimeError(
+                f"{type(self).__name__} has no loop exit gate. "
+                "Enable looping with exit_gate=False or configure loop_exit_gate."
+            )
+        return self.loop_exit_gate(hidden).squeeze(-1)
 
     def _create_flex_attention_mask_for_document(
         self,

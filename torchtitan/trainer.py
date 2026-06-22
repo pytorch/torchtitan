@@ -21,7 +21,13 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
+from torchtitan.components.looping import run_looped_forward
+from torchtitan.components.loss import (
+    BaseLoss,
+    ChunkedCELoss,
+    IGNORE_INDEX,
+    LoopedEntropyLoss,
+)
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
@@ -33,6 +39,7 @@ from torchtitan.config.configs import (
     CommConfig,
     CompileConfig,
     DebugConfig,
+    LoopingConfig,
     ParallelismConfig,
     TrainingConfig,
 )
@@ -92,6 +99,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         training: TrainingConfig = field(default_factory=TrainingConfig)
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
+        looping: LoopingConfig = field(default_factory=LoopingConfig)
         checkpoint: CheckpointManager.Config = field(
             default_factory=CheckpointManager.Config
         )
@@ -110,6 +118,27 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise ValueError(
                     "Batch-invariant mode is not supported in pre-training."
                 )
+
+            if self.looping.enable:
+                unsupported = []
+                if self.parallelism.tensor_parallel_degree != 1:
+                    unsupported.append("tensor_parallel_degree")
+                if self.parallelism.context_parallel_degree != 1:
+                    unsupported.append("context_parallel_degree")
+                if self.parallelism.expert_parallel_degree != 1:
+                    unsupported.append("expert_parallel_degree")
+                if self.parallelism.pipeline_parallel_degree != 1:
+                    unsupported.append("pipeline_parallel_degree")
+                if self.parallelism.enable_sequence_parallel:
+                    unsupported.append("enable_sequence_parallel")
+                if self.parallelism.spmd_backend != "default":
+                    unsupported.append("spmd_backend")
+                if unsupported:
+                    raise ValueError(
+                        "Looped training v1 supports only single-axis DP/DDP/FSDP/HSDP. "
+                        "Disable unsupported parallelism options: "
+                        + ", ".join(unsupported)
+                    )
 
             if (
                 self.parallelism.spmd_backend == "spmd_types"
@@ -210,6 +239,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     # will do this in a separate PR
     model_parts: list[torch.nn.Module]
     loss_fn: BaseLoss
+    loop_loss_fn: LoopedEntropyLoss | None
     optimizers: OptimizersContainer
     lr_schedulers: LRSchedulersContainer
     validator: BaseValidator
@@ -342,6 +372,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.loss_fn = config.loss.build(
             compile_config=config.compile,
         )
+        self.loop_loss_fn = (
+            LoopedEntropyLoss.Config(beta=config.looping.beta).build()
+            if config.looping.enable
+            else None
+        )
+        self._last_loop_metrics: dict[str, float] = {}
 
         # verify batch sizes
         global_batch_size = config.training.global_batch_size
@@ -436,7 +472,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # Set lm_head reference for ChunkedCELoss after model construction.
         # Non-PP: single model part always has lm_head.
         # PP: only the last stage has lm_head; non-last stages skip this.
-        if isinstance(self.loss_fn, ChunkedCELoss):
+        if isinstance(self.loss_fn, ChunkedCELoss) and not config.looping.enable:
             if parallel_dims.pp_enabled:
                 if self.pp_has_last_stage:
                     lm_head = self.model_parts[-1].lm_head
@@ -545,11 +581,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 dp_rank=batch_rank,
                 tokenizer=self.tokenizer,
                 parallel_dims=parallel_dims,
-                loss_fn=self.loss_fn,
+                loss_fn=self.loop_loss_fn if config.looping.enable else self.loss_fn,
                 validation_context=self.train_context,
                 metrics_processor=self.metrics_processor,
                 seq_len=config.training.seq_len,
                 local_batch_size=config.training.local_batch_size,
+                looping=config.looping,
                 pp_schedule=pp_schedule,
                 pp_has_first_stage=pp_has_first_stage,
                 pp_has_last_stage=pp_has_last_stage,
@@ -739,9 +776,27 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             # Non-PP forward / backward
             assert len(model_parts) == 1
             with self.train_context():
-                pred = model_parts[0](inputs, **extra_kwargs)
-                loss = self.loss_fn(pred, labels, global_valid_tokens)
-                del pred
+                if self.config.looping.enable:
+                    assert self.loop_loss_fn is not None
+                    logits_by_step, gate_logits_by_step = run_looped_forward(
+                        model_parts[0],
+                        inputs,
+                        extra_kwargs,
+                        steps=self.config.looping.steps,
+                        use_exit_gate=self.config.looping.exit_gate,
+                    )
+                    loss = self.loop_loss_fn(
+                        logits_by_step,
+                        gate_logits_by_step,
+                        labels,
+                        global_valid_tokens,
+                    )
+                    self._last_loop_metrics = dict(self.loop_loss_fn.last_metrics)
+                    del logits_by_step, gate_logits_by_step
+                else:
+                    pred = model_parts[0](inputs, **extra_kwargs)
+                    loss = self.loss_fn(pred, labels, global_valid_tokens)
+                    del pred
                 with spmd.no_typecheck():
                     # this propagates types through BWD, causing unnecessary conflicts
                     # between torch_function and internals (e.g. AC). FWD is sufficient.
@@ -851,6 +906,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
+            **self._last_loop_metrics,
         }
         self.metrics_processor.log(
             self.step,

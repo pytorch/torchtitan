@@ -754,25 +754,60 @@ class Qwen35Model(Decoder):
         mrope_positions: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
     ):
-        if self.tok_embeddings is not None:
-            x = self._prepare_multimodal_embeds(
-                tokens,
-                pixel_values=pixel_values,
-                pixel_values_videos=pixel_values_videos,
-                grid_thw=grid_thw,
-                grid_thw_videos=grid_thw_videos,
-                special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
-            )
-        else:
-            x = tokens
+        x = self.prepare_loop_inputs(
+            tokens,
+            pixel_values=pixel_values,
+            pixel_values_videos=pixel_values_videos,
+            grid_thw=grid_thw,
+            grid_thw_videos=grid_thw_videos,
+            special_tokens=special_tokens,
+        )
+        x = self.loop_step(
+            x,
+            attention_masks=attention_masks,
+            positions=positions,
+            mrope_positions=mrope_positions,
+        )
 
+        if self._skip_lm_head:
+            return x
+        return self.project_logits(x)
+
+    def prepare_loop_inputs(
+        self,
+        tokens: torch.Tensor,
+        *,
+        pixel_values: torch.Tensor | None = None,
+        pixel_values_videos: torch.Tensor | None = None,
+        grid_thw: torch.Tensor | None = None,
+        grid_thw_videos: torch.Tensor | None = None,
+        special_tokens: dict[str, int] | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        if self.tok_embeddings is None:
+            return tokens
+        return self._prepare_multimodal_embeds(
+            tokens,
+            pixel_values=pixel_values,
+            pixel_values_videos=pixel_values_videos,
+            grid_thw=grid_thw,
+            grid_thw_videos=grid_thw_videos,
+            special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
+        )
+
+    def loop_step(
+        self,
+        hidden: torch.Tensor,
+        *,
+        attention_masks: AttentionMasksType | None = None,
+        positions: torch.Tensor | None = None,
+        mrope_positions: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
         # 3D MRoPE positions for multimodal batches, else 2D text positions.
         rope_positions = mrope_positions if mrope_positions is not None else positions
         assert rope_positions is not None
         for layer in self.layers.values():
-            x = layer(x, attention_masks, rope_positions)
+            hidden = layer(hidden, attention_masks, rope_positions)
 
-        x = self.norm(x) if self.norm is not None else x
-        if self._skip_lm_head:
-            return x
-        return self.lm_head(x) if self.lm_head is not None else x
+        return self.norm(hidden) if self.norm is not None else hidden

@@ -82,6 +82,27 @@ class TrainingConfig:
 
 
 @dataclass(kw_only=True, slots=True)
+class LoopingConfig:
+    enable: bool = False
+    """Enable trainer-controlled recurrent application of the decoder stack."""
+
+    steps: int = 4
+    """Number of recurrent decoder steps to run per forward pass."""
+
+    beta: float = 0.05
+    """Entropy coefficient for the learned exit-step distribution."""
+
+    exit_gate: bool = True
+    """Use a learned per-token exit gate. If False, steps are weighted uniformly."""
+
+    def __post_init__(self):
+        if self.steps < 1:
+            raise ValueError("looping.steps must be >= 1")
+        if self.beta < 0:
+            raise ValueError("looping.beta must be non-negative")
+
+
+@dataclass(kw_only=True, slots=True)
 class ParallelismConfig:
     data_parallel_replicate_degree: int = 1
     """

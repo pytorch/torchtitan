@@ -4,6 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-_supported_models = frozenset(
-    ["deepseek_v3", "flux", "gpt_oss", "llama3", "ouro", "qwen3", "qwen3_5"]
-)
+from . import ouro_1_4b_r4, ouro_2_6b_r4, ouro_debugmodel
+
+__all__ = ["ouro_debugmodel", "ouro_1_4b_r4", "ouro_2_6b_r4"]
