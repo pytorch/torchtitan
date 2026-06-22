@@ -226,6 +226,9 @@ def rl_grpo_qwen3_32b_search_r1_fsdp16_rdma() -> RLTrainer.Config:
     limitation, so this recipe does not train yet -- use the CPU-staged
     ``rl_grpo_qwen3_32b_search_r1_fsdp16`` for multi-host trainers.
     """
+    # TODO: 2-host-trainer RDMA test case -- does NOT work yet. Direct RDMA across a
+    # multi-host trainer hits a Monarch RDMA limitation; fix the multi-host RDMA path
+    # so this trains like the single-host FSDP=8 RDMA recipe.
     config = rl_grpo_qwen3_32b_search_r1()
     config.trainer = dataclasses.replace(
         config.trainer,
