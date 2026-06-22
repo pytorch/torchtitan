@@ -10,14 +10,18 @@ from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecision
 from torch.distributed.tensor import DTensor, distribute_tensor
 
 from torchtitan.config import (
-    ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.activation_checkpoint import _apply_ac_to_transformer_block
+from torchtitan.distributed.activation_checkpoint import (
+    ActivationCheckpointing,
+    ActivationCheckpointingConfig,
+    FullAC,
+    MemoryBudgetAC,
+)
 from torchtitan.distributed.fsdp import enable_fsdp_symm_mem, get_fsdp_reshard_after_forward_policy
 from torchtitan.models.common import Embedding, LayerNorm, Linear, RMSNorm, SiLU
 from torchtitan.models.common.attention import ScaledDotProductAttention
@@ -467,7 +471,7 @@ def parallelize_path(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
+    ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ) -> PathModel:
     if parallelism.full_dtensor:
@@ -476,8 +480,8 @@ def parallelize_path(
         raise ValueError("path v1 supports data parallelism only")
 
     model_compile_enabled = compile_config.enable and "model" in compile_config.components
-    if ac_config.mode != "none":
-        _apply_activation_checkpointing(model, ac_config)
+    if ac_config is not None:
+        _apply_activation_checkpointing(model, ac_config, dump_folder=dump_folder)
 
     if model_compile_enabled:
         _apply_compile(model, compile_config)
@@ -502,14 +506,26 @@ def parallelize_path(
 
 def _apply_activation_checkpointing(
     model: PathModel,
-    ac_config: ActivationCheckpointConfig,
+    ac_config: ActivationCheckpointingConfig,
+    *,
+    dump_folder: str,
 ) -> None:
+    assert ac_config is not None
+    ac_policy: ActivationCheckpointing = ac_config.build(dump_folder=dump_folder)
+
+    if isinstance(ac_policy, MemoryBudgetAC):
+        ac_policy.apply(model)
+        logger.info("Applied memory-budget activation checkpointing to the path model")
+        return
+
     def wrap(module: nn.Module, fqn: str) -> nn.Module:
-        return _apply_ac_to_transformer_block(module, ac_config, base_fqn=fqn)
+        return ac_policy._wrap_block(module, base_fqn=fqn)
+
+    mode = "full" if isinstance(ac_policy, FullAC) else "selective"
 
     model.vision.encoder.apply_activation_checkpointing(
         wrap,
-        ac_config.mode,
+        mode,
         "vision.encoder",
     )
     model.temporal_policy.temporal_summarizer.transformer.apply_activation_checkpointing(
@@ -517,7 +533,7 @@ def _apply_activation_checkpointing(
         "temporal_policy.temporal_summarizer.transformer",
     )
 
-    logger.info(f"Applied {ac_config.mode} activation checkpointing to the path model")
+    logger.info(f"Applied {mode} activation checkpointing to the path model")
 
 
 def _apply_compile(model: PathModel, compile_config: CompileConfig) -> None:
