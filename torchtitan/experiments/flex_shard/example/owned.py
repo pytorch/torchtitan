@@ -1615,6 +1615,96 @@ def param_boundary_placements(
     return {fqn: (Owned(assignments[fqn]),) for fqn, _ in named_params}
 
 
+def _expert_block_order_key(fqn: str, suffix_order: tuple[str, ...]) -> int:
+    for index, suffix in enumerate(suffix_order):
+        if fqn.endswith(suffix):
+            return index
+    raise ValueError(f"Unexpected grouped expert weight FQN: {fqn}")
+
+
+def make_grouped_owned_expert_block_segments(
+    named_params: list[tuple[str, nn.Parameter]],
+    world_size: int,
+    *,
+    suffix_order: tuple[str, ...] = (".w1", ".w3", ".w2"),
+) -> dict[str, list[GroupedOwnedSegmentSpec]]:
+    """Build per-expert GroupedOwned segments for packed 3D expert weights.
+
+    Each input parameter is expected to be a packed expert stack with shape
+    ``(num_experts, ..., ...)``. Experts are assigned to contiguous owner ranges,
+    while ``suffix_order`` controls how each expert's matrices are interleaved in
+    owner storage. The default order keeps DeepSeek V3's ``w1/w3/w2`` block
+    layout suitable for the GroupedOwned view-out path.
+    """
+    if world_size <= 0:
+        raise ValueError(f"world_size must be positive, but got {world_size}.")
+    if not suffix_order:
+        raise ValueError("suffix_order must contain at least one suffix.")
+    if not named_params:
+        return {}
+
+    bad = [
+        (fqn, tuple(param.shape))
+        for fqn, param in named_params
+        if param.dim() != 3 or not fqn.endswith(suffix_order)
+    ]
+    if bad:
+        raise ValueError(f"GroupedOwned expert block expects packed 3D weights: {bad}")
+
+    num_experts = named_params[0][1].shape[0]
+    if any(param.shape[0] != num_experts for _, param in named_params):
+        raise ValueError("GroupedOwned expert block requires matching expert counts.")
+
+    ordered_params = sorted(
+        named_params,
+        key=lambda item: _expert_block_order_key(item[0], suffix_order),
+    )
+    segments_by_fqn: dict[str, list[GroupedOwnedSegmentSpec]] = {
+        fqn: [] for fqn, _ in ordered_params
+    }
+
+    # Fill owner rows in contiguous equal-capacity expert ranges. Since the
+    # all-gather input is padded to the max owner row length, this keeps the
+    # gathered expert slices evenly strided and enables view-out.
+    experts_per_owner = max(1, (num_experts + world_size - 1) // world_size)
+    for expert_idx in range(num_experts):
+        owner = min(expert_idx // experts_per_owner, world_size - 1)
+        for param_order, (fqn, param) in enumerate(ordered_params):
+            expert_numel = math.prod(param.shape[1:])
+            segments_by_fqn[fqn].append(
+                GroupedOwnedSegmentSpec(
+                    name=f"{fqn}#expert{expert_idx}",
+                    fqn=fqn,
+                    param_offset=expert_idx * expert_numel,
+                    numel=expert_numel,
+                    owner_rank=owner,
+                    storage_order=expert_idx * len(ordered_params) + param_order,
+                )
+            )
+    return segments_by_fqn
+
+
+def make_grouped_owned_expert_block_placement_fn(
+    *,
+    suffix_order: tuple[str, ...] = (".w1", ".w3", ".w2"),
+) -> PlacementFn:
+    """Return a placement function for one packed 3D expert-weight bucket."""
+
+    def placement_fn(
+        named_params: list[tuple[str, nn.Parameter]],
+        mesh: DeviceMesh,
+    ) -> dict[str, tuple[Placement, ...]]:
+        segments_by_fqn = make_grouped_owned_expert_block_segments(
+            named_params,
+            mesh.size(),
+            suffix_order=suffix_order,
+        )
+        placement = GroupedOwned(segments_by_fqn)
+        return {fqn: (placement,) for fqn, _ in named_params}
+
+    return placement_fn
+
+
 def make_grouped_owned_placement_fn(
     segments_by_fqn: dict[str, list[GroupedOwnedSegmentSpec]],
 ) -> PlacementFn:
@@ -1641,6 +1731,8 @@ def make_grouped_owned_placement_fn(
 __all__ = [
     "GroupedOwned",
     "GroupedOwnedSegmentSpec",
+    "make_grouped_owned_expert_block_placement_fn",
+    "make_grouped_owned_expert_block_segments",
     "make_grouped_owned_placement_fn",
     "Owned",
     "param_boundary_placements",
