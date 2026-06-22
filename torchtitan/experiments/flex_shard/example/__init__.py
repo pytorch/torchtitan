@@ -10,8 +10,6 @@ from .owned import (
     make_grouped_owned_expert_block_placement_fn,
     make_grouped_owned_expert_block_segments,
     make_grouped_owned_placement_fn,
-    Owned,
-    param_boundary_placements,
 )
 from .shard import make_shard_placement_fn, per_param_placements, Shard
 
@@ -22,8 +20,6 @@ __all__ = [
     "make_grouped_owned_expert_block_segments",
     "make_grouped_owned_placement_fn",
     "make_shard_placement_fn",
-    "Owned",
-    "param_boundary_placements",
     "per_param_placements",
     "Shard",
 ]
