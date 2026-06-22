@@ -375,6 +375,17 @@ class GradAccumulator:
         else:
             local = reference
 
+        if num_chunks <= 0:
+            raise ValueError(f"num_chunks must be positive, got {num_chunks}")
+
+        seq_len = local.shape[seq_dim]
+        if seq_len % num_chunks != 0:
+            raise ValueError(
+                "GradAccumulator requires the sequence length to be evenly "
+                f"divisible by num_chunks, got sequence length {seq_len} "
+                f"and num_chunks {num_chunks}."
+            )
+        self._chunk_seq_len = seq_len // num_chunks
         self._buffer = torch.zeros_like(local, dtype=dtype)
 
     def add(self, chunk_grad: torch.Tensor) -> None:
@@ -411,6 +422,12 @@ class GradAccumulator:
             chunk_grad = chunk_grad.to(self._buffer.dtype)
 
         chunk_seq_len = chunk_grad.shape[self.seq_dim]
+        if chunk_seq_len != self._chunk_seq_len:
+            raise ValueError(
+                "GradAccumulator expected chunk sequence length "
+                f"{self._chunk_seq_len}, got {chunk_seq_len}."
+            )
+
         start = self._next_idx * chunk_seq_len
         end = start + chunk_seq_len
 
@@ -484,7 +501,42 @@ class ChunkedCELoss(BaseLoss):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseLoss.Config):
         num_chunks: int = 8
-        """Number of chunks to split the sequence into."""
+        """Number of chunks to split the local sequence into."""
+
+    @staticmethod
+    def validate_sequence_chunking(
+        *,
+        seq_len: int,
+        seq_shard_degree: int,
+        num_chunks: int,
+    ) -> None:
+        """Validate that chunked CE will split the local sequence evenly."""
+        if seq_len <= 0:
+            raise ValueError(f"ChunkedCELoss seq_len must be positive, got {seq_len}")
+        if seq_shard_degree <= 0:
+            raise ValueError(
+                "ChunkedCELoss seq_shard_degree must be positive, "
+                f"got {seq_shard_degree}"
+            )
+        if num_chunks <= 0:
+            raise ValueError(
+                f"ChunkedCELoss num_chunks must be positive, got {num_chunks}"
+            )
+        if seq_len % seq_shard_degree != 0:
+            raise ValueError(
+                "ChunkedCELoss requires the global sequence length to be evenly "
+                f"divisible by the sequence shard degree, got sequence length "
+                f"{seq_len} and sequence shard degree {seq_shard_degree}."
+            )
+
+        local_seq_len = seq_len // seq_shard_degree
+        if local_seq_len % num_chunks != 0:
+            raise ValueError(
+                "ChunkedCELoss requires the local sequence length to be evenly "
+                f"divisible by num_chunks, got global sequence length {seq_len}, "
+                f"sequence shard degree {seq_shard_degree}, local sequence length "
+                f"{local_seq_len}, and num_chunks {num_chunks}."
+            )
 
     def __init__(
         self,
@@ -492,6 +544,10 @@ class ChunkedCELoss(BaseLoss):
         *,
         compile_config: CompileConfig | None = None,
     ):
+        if config.num_chunks <= 0:
+            raise ValueError(
+                f"ChunkedCELoss num_chunks must be positive, got {config.num_chunks}"
+            )
         self.fn: LossFunction = cross_entropy_loss
         self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks

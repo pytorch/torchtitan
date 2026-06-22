@@ -183,6 +183,27 @@ class TestGradAccumulator(unittest.TestCase):
         result = acc.result()
         torch.testing.assert_close(result, reference)
 
+    def test_uneven_sequence_length_raises(self):
+        """Verify GradAccumulator rejects uneven sequence chunks."""
+        B, L, D = 2, 10, 3
+        num_chunks = 4
+        reference = torch.arange(B * L * D, dtype=torch.float32).reshape(B, L, D)
+
+        with self.assertRaisesRegex(ValueError, "evenly divisible"):
+            GradAccumulator(
+                reference,
+                num_chunks=num_chunks,
+                seq_dim=1,
+                dtype=reference.dtype,
+            )
+
+    def test_unexpected_chunk_size_raises(self):
+        """Verify GradAccumulator rejects chunks with the wrong sequence length."""
+        acc = GradAccumulator(torch.randn(2, 8, 16), num_chunks=4, dtype=torch.float32)
+
+        with self.assertRaisesRegex(ValueError, "expected chunk sequence length"):
+            acc.add(torch.randn(2, 3, 16))
+
     def test_accumulate_with_dtype_conversion(self):
         """Verify fp32 accumulation from bf16 chunks."""
         torch.manual_seed(42)
@@ -430,11 +451,8 @@ class TestChunkedCELoss(unittest.TestCase):
         chunked_loss.lm_head = model.output
         return model, chunked_loss
 
-    def test_numerical_equivalence(self):
-        """ChunkedCELoss must produce the same loss and gradients as the standard path."""
+    def _assert_numerical_equivalence(self, B, L, D, V, num_chunks):
         torch.manual_seed(42)
-        B, L, D, V = 2, 8, 32, 64
-        num_chunks = 4
 
         model_std, _ = self._make_model_and_loss(D, V, num_chunks)
         model_chunked, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
@@ -491,6 +509,48 @@ class TestChunkedCELoss(unittest.TestCase):
             rtol=1e-5,
             msg="Chunked and standard lm_head gradients should match",
         )
+
+    def test_numerical_equivalence(self):
+        """ChunkedCELoss must produce the same loss and gradients as the standard path."""
+        self._assert_numerical_equivalence(B=2, L=8, D=32, V=64, num_chunks=4)
+
+    def test_validate_sequence_chunking_rejects_uneven_local_sequence(self):
+        """ChunkedCELoss should reject uneven local sequence chunks at init time."""
+        cases = (
+            (10, 1, 4),
+            (2, 1, 4),
+            (24, 2, 8),
+        )
+
+        for seq_len, seq_shard_degree, num_chunks in cases:
+            with self.subTest(
+                seq_len=seq_len,
+                seq_shard_degree=seq_shard_degree,
+                num_chunks=num_chunks,
+            ):
+                with self.assertRaisesRegex(ValueError, "local sequence length"):
+                    ChunkedCELoss.validate_sequence_chunking(
+                        seq_len=seq_len,
+                        seq_shard_degree=seq_shard_degree,
+                        num_chunks=num_chunks,
+                    )
+
+    def test_validate_sequence_chunking_accepts_even_local_sequence(self):
+        """ChunkedCELoss should accept evenly chunked local sequences."""
+        ChunkedCELoss.validate_sequence_chunking(
+            seq_len=24,
+            seq_shard_degree=2,
+            num_chunks=4,
+        )
+
+    def test_validate_sequence_chunking_rejects_uneven_sequence_sharding(self):
+        """ChunkedCELoss should reject uneven sequence-dimension sharding."""
+        with self.assertRaisesRegex(ValueError, "global sequence length"):
+            ChunkedCELoss.validate_sequence_chunking(
+                seq_len=10,
+                seq_shard_degree=3,
+                num_chunks=2,
+            )
 
     def test_different_chunk_counts(self):
         """Loss should be the same regardless of num_chunks."""

@@ -157,6 +157,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         f"divisible by sequence parallel degree ({sp_degree})."
                     )
 
+            if isinstance(self.loss, ChunkedCELoss.Config):
+                # ChunkedCELoss sees hidden states after the root decoder norm.
+                # That norm gathers TP sequence-parallel shards before lm_head,
+                # while CP keeps the local sequence dimension sharded.
+                ChunkedCELoss.validate_sequence_chunking(
+                    seq_len=self.training.seq_len,
+                    seq_shard_degree=self.parallelism.context_parallel_degree,
+                    num_chunks=self.loss.num_chunks,
+                )
+
         def to_dict(self) -> dict[str, Any]:
             d = {}
             for f in dataclasses.fields(self):
