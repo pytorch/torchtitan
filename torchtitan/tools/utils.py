@@ -24,9 +24,7 @@ def round_up(value: int, multiple: int) -> int:
 
 
 def has_cuda_capability(major: int, minor: int) -> bool:
-    # ponytail: torch.version.hip is None excludes ROCm — get_device_capability()
-    # returns a tuple on AMD too, so without this NVIDIA-only gates (e.g. FA3,
-    # SM89 fp8) wrongly fire on ROCm. Mirrors has_rocm_capability below.
+    # torch.version.hip is None excludes ROCm (capability is a tuple on AMD too).
     return (
         torch.cuda.is_available()
         and torch.version.hip is None
