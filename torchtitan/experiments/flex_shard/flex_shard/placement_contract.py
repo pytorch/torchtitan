@@ -12,6 +12,9 @@ from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
 import torch
+import torch.distributed as dist
+
+from .reduce_policy import GradientReduceOp
 
 if TYPE_CHECKING:
     import torch.nn as nn
@@ -165,6 +168,13 @@ class Placement(ABC):
         nbytes = info.local_numel * info.dtype.itemsize
         byte_view = byte_storage[info.byte_offset : info.byte_offset + nbytes]
         return byte_view.view(info.dtype).view(info.local_shape)
+
+    @staticmethod
+    def dist_reduce_op(op: GradientReduceOp) -> dist.ReduceOp.RedOpType:
+        """Return the c10d reduce op for FlexShard gradient reduction semantics."""
+        if op == "avg":
+            return dist.ReduceOp.AVG
+        return dist.ReduceOp.SUM
 
     def prepare_unshard_bucket(
         self,
