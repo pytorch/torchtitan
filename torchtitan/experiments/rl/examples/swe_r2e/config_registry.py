@@ -222,3 +222,58 @@ def rl_grpo_qwen3_30b_a3b_swe_r2e() -> RLTrainer.Config:
         ),
     )
     return config
+
+
+def rl_grpo_qwen3_32b_swe_r2e() -> RLTrainer.Config:
+    """Qwen3-32B (dense) SWE-R2E: single-host FSDP-8 trainer + TP-8 generator.
+
+    The scale target. Trainer: FSDP across 8 GPUs (data_parallel_shard_degree=8,
+    TP=1) with bf16 master + bf16 AdamW states (fused_opt_states_bf16) + FullAC.
+    Together with the chunked ``compute_logprobs`` (actors/trainer.py) this fits the
+    long-context (24576) backward on one 80GB host -- the full-vocab fp32 logprob
+    transient is what OOMs an un-chunked backward at this seq_len. Generator is
+    dense TP=8 with decode-only CUDA graphs. ``group_size=4`` samples per prompt
+    mirrors slime's ``n_samples_per_prompt``. ``global_batch_size=8`` is the FSDP-8
+    trainer's one-row-per-rank floor (below it ``gradient_accumulation_steps``
+    rounds to 0 and no optimizer step runs). The ``mast_rl`` launcher recipe of the
+    same name wraps this for the multi-host MAST run (bucket checkpoint path).
+    """
+    config = rl_grpo_qwen3_1_7b_swe_r2e()
+    config.model_spec = model_registry("32B", attn_backend="varlen")
+    _set_max_seq_len(config.model_spec, _SWE_MAX_MODEL_LEN)
+    config.hf_assets_path = f"{_CKPT_DIR}/Qwen3-32B"
+    config.group_size = 4
+    config.num_steps = 4
+    bf16_adam = default_adamw(lr=1e-6)
+    bf16_adam.implementation = "fused_opt_states_bf16"
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        optimizer=bf16_adam,
+        training=dataclasses.replace(config.trainer.training, dtype="bfloat16"),
+        weight_sync_direct_rdma=False,
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism,
+            data_parallel_shard_degree=8,
+            tensor_parallel_degree=1,
+        ),
+    )
+    config.generator = dataclasses.replace(
+        config.generator,
+        weight_sync_direct_rdma=False,
+        # Coding-agent edits can be long; raise the per-turn generation cap. slime
+        # uses 8192 over a 38k context -> ~4096 ratio-matched to our 20480 budget
+        # (the adapter further caps each turn at budget - prompt_len).
+        sampling=dataclasses.replace(config.generator.sampling, max_tokens=4096),
+        parallelism=dataclasses.replace(
+            config.generator.parallelism,
+            tensor_parallel_degree=8,
+        ),
+    )
+    # global_batch_size must be a multiple of local_batch_size * trainer_dp_degree
+    # (1 * FSDP-8 = 8) or gradient_accumulation_steps rounds to 0 -> no optim step.
+    config.batcher = Batcher.Config(
+        batch=BatchConfig(
+            local_batch_size=1, global_batch_size=8, seq_len=_SMOKE_SEQ_LEN
+        ),
+    )
+    return config
