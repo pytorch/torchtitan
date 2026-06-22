@@ -183,8 +183,9 @@ class VarlenAttention(Module):
         if out_transform is None:
             assert isinstance(result, torch.Tensor)
             if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+                # exclude CP from typecheck as varlen + CP is not yet supported.
                 spmd.assert_type(
-                    result, spmd.V, spmd.PartitionSpec(("dp", "cp"), "tp", None)
+                    result, spmd.V, spmd.PartitionSpec("dp", "tp", None)
                 )
             out_BLNH = result.view(B, L, -1, H).to(q_BLNH.dtype)
             return out_BLNH
@@ -192,10 +193,10 @@ class VarlenAttention(Module):
         out_TNH, lse_NT = result
         if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
             spmd.assert_type(
-                out_TNH, spmd.V, spmd.PartitionSpec(("dp", "cp"), "tp", None)
+                out_TNH, spmd.V, spmd.PartitionSpec("dp", "tp", None)
             )
             spmd.assert_type(
-                lse_NT, spmd.V, spmd.PartitionSpec("tp", ("dp", "cp"))
+                lse_NT, spmd.V, spmd.PartitionSpec("tp", "dp")
             )
 
         out_BLNH = out_TNH.view(B, L, -1, H).to(q_BLNH.dtype)
