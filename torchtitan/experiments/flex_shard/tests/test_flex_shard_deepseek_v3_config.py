@@ -6,14 +6,19 @@
 
 from types import SimpleNamespace
 
+import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.config import CompileConfig
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.experiments.flex_shard.deepseek_v3.config_registry import (
     flex_shard_deepseek_v3_16b_dp8,
 )
 from torchtitan.experiments.flex_shard.deepseek_v3.parallelize import (
     _validate_supported_parallelisms,
+)
+from torchtitan.experiments.flex_shard.grad_norm import (
+    install_flex_shard_grad_norm_clipping,
 )
 
 
@@ -77,6 +82,26 @@ class TestFlexShardDeepSeekV3Config(TestCase):
                 training=self._training(),
                 compile_config=CompileConfig(enable=True, components=["model"]),
             )
+
+    def test_flex_shard_grad_norm_adapter_handles_local_shards(self):
+        original_clip_grad_norm = dist_utils.clip_grad_norm_
+        try:
+            install_flex_shard_grad_norm_clipping()
+            param = torch.nn.Parameter(torch.tensor([3.0, 4.0]))
+            param.grad = torch.tensor([3.0, 4.0])
+            param._placements = ("test",)
+            param._mesh = "test"
+
+            total_norm = dist_utils.clip_grad_norm_(
+                [param],
+                max_norm=1.0,
+                ep_enabled=True,
+            )
+
+            self.assertEqual(total_norm, torch.tensor(5.0))
+            self.assertEqual(param.grad, torch.tensor([0.6, 0.8]))
+        finally:
+            dist_utils.clip_grad_norm_ = original_clip_grad_norm
 
 
 if __name__ == "__main__":
