@@ -212,10 +212,10 @@ class GptOssGroupedExperts(Module):
         self.token_dispatcher.wire_meshes(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
-            sparse_mesh=parallel_dims.get_optional_mesh(
-                ["dp_replicate", "efsdp", "ep"],
-                include_singleton_axes=True,
-            ),
+        )
+        self.token_dispatcher.sparse_mesh = parallel_dims.get_optional_mesh(
+            ["dp_replicate", "efsdp", "ep"],
+            include_singleton_axes=True,
         )
 
 
