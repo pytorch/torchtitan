@@ -243,7 +243,7 @@ def rl_grpo_qwen3_32b_swe_r2e() -> RLTrainer.Config:
     _set_max_seq_len(config.model_spec, _SWE_MAX_MODEL_LEN)
     config.hf_assets_path = f"{_CKPT_DIR}/Qwen3-32B"
     config.group_size = 4
-    config.num_steps = 4
+    config.num_steps = 1
     bf16_adam = default_adamw(lr=1e-6)
     bf16_adam.implementation = "fused_opt_states_bf16"
     config.trainer = dataclasses.replace(
@@ -274,6 +274,53 @@ def rl_grpo_qwen3_32b_swe_r2e() -> RLTrainer.Config:
     config.batcher = Batcher.Config(
         batch=BatchConfig(
             local_batch_size=1, global_batch_size=8, seq_len=_SMOKE_SEQ_LEN
+        ),
+    )
+    return config
+
+
+# Qwen3-14B's native context (no RoPE extension needed).
+_QWEN3_14B_MAX_LEN = 40960
+
+
+def rl_grpo_qwen3_14b_swe_r2e() -> RLTrainer.Config:
+    """Qwen3-14B (dense) SWE-R2E: FSDP-8 mixed-precision trainer + TP-4 generator(s).
+
+    14B leaves enough headroom (vs 32B) to keep fp32-master mixed precision AND a
+    larger context. Trainer: FSDP-8 (dp_shard=8, TP=1) with the default
+    TrainingConfig (dtype=float32 master + mixed_precision_param=bfloat16 compute +
+    fp32 reduce) + FullAC; with the chunked compute_logprobs this fits seq_len=40960
+    -- 14B's native context, ~1.7x the 32B run's 24576 and closer to slime's
+    long-context coding rollouts. Generator is dense TP=4 (14B fits 4 GPUs); run
+    ``--num_generators N`` for more parallel rollout. Per-turn gen cap 8192 (slime's
+    MAX_GEN_LEN). global_batch_size=8 is the FSDP-8 one-row-per-rank floor; group_size
+    and num_steps default to the smoke (override on the CLI for a longer run).
+    """
+    config = rl_grpo_qwen3_1_7b_swe_r2e()
+    config.model_spec = model_registry("14B", attn_backend="varlen")
+    _set_max_seq_len(config.model_spec, _QWEN3_14B_MAX_LEN)
+    config.hf_assets_path = f"{_CKPT_DIR}/Qwen3-14B"
+    config.group_size = 8  # slime n_samples_per_prompt
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism,
+            data_parallel_shard_degree=8,
+            tensor_parallel_degree=1,
+        ),
+    )
+    config.generator = dataclasses.replace(
+        config.generator,
+        gpu_memory_limit=0.8,
+        sampling=dataclasses.replace(config.generator.sampling, max_tokens=8192),
+        parallelism=dataclasses.replace(
+            config.generator.parallelism,
+            tensor_parallel_degree=4,
+        ),
+    )
+    config.batcher = Batcher.Config(
+        batch=BatchConfig(
+            local_batch_size=1, global_batch_size=8, seq_len=_QWEN3_14B_MAX_LEN
         ),
     )
     return config
