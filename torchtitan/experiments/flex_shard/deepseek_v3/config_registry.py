@@ -40,8 +40,4 @@ def flex_shard_deepseek_v3_debugmodel_dp8_ep4_ce_loss() -> Trainer.Config:
 def flex_shard_deepseek_v3_16b_dp8() -> Trainer.Config:
     config = deepseek_v3_16b()
     config.model_spec = model_registry("16B", attn_backend="flex")
-    config.parallelism.data_parallel_shard_degree = 8
-    config.parallelism.expert_parallel_degree = 1
-    config.activation_checkpoint.mode = "none"
-    config.compile.enable = False
     return config
