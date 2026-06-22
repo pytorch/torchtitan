@@ -18,5 +18,6 @@ _supported_experiments = frozenset(
         # listed here so `--module <name>` resolves (see ConfigManager).
         "alphabet_sort",
         "search_r1",
+        "swe_r2e",
     ]
 )
