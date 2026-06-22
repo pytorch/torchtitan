@@ -17,6 +17,8 @@ from .fp8_ragged_shard import (
 from .owned import (
     GroupedOwned,
     GroupedOwnedSegmentSpec,
+    make_grouped_owned_expert_block_placement_fn,
+    make_grouped_owned_expert_block_segments,
     make_grouped_owned_placement_fn,
     Owned,
     param_boundary_placements,
@@ -28,7 +30,7 @@ from .ragged_shard import (
     per_param_ragged_placements,
     RaggedShard,
 )
-from .shard import per_param_placements, Shard
+from .shard import make_shard_placement_fn, per_param_placements, Shard
 
 __all__ = [
     "blockwise_dequant_weight",
@@ -41,9 +43,12 @@ __all__ = [
     "GroupedRaggedShard",
     "make_fp8_blockwise_grouped_ragged_placement_fn",
     "make_fp8_two_orientation_grouped_ragged_placement_fn",
+    "make_grouped_owned_expert_block_placement_fn",
+    "make_grouped_owned_expert_block_segments",
     "make_grouped_owned_placement_fn",
     "make_grouped_ragged_placement_fn",
     "make_ragged_placement_fn",
+    "make_shard_placement_fn",
     "Owned",
     "param_boundary_placements",
     "per_param_ragged_placements",

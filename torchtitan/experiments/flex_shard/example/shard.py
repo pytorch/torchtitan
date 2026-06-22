@@ -42,7 +42,7 @@ from ._pack_utils import (
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
-    from ..flex_shard.bucket_storage import ParamInfo
+    from ..flex_shard.bucket_storage import ParamInfo, PlacementFn
 
 
 class Shard(Placement):
@@ -492,15 +492,29 @@ class Shard(Placement):
         return PlacementReduceGradResult(sharded_grads, [recv_buf])
 
 
+def make_shard_placement_fn(dim: int = 0) -> PlacementFn:
+    """Return a placement function assigning ``Shard(dim)`` per parameter."""
+
+    def placement_fn(
+        named_params: list[tuple[str, nn.Parameter]],
+        mesh: DeviceMesh,
+    ) -> dict[str, tuple[Placement, ...]]:
+        del mesh
+        return {fqn: (Shard(dim),) for fqn, _ in named_params}
+
+    return placement_fn
+
+
 def per_param_placements(
     named_params: list[tuple[str, nn.Parameter]],
     mesh: DeviceMesh,
 ) -> dict[str, tuple[Placement, ...]]:
     """Shard(0) per parameter (FSDP2-style)."""
-    return {fqn: (Shard(0),) for fqn, _ in named_params}
+    return make_shard_placement_fn(0)(named_params, mesh)
 
 
 __all__ = [
+    "make_shard_placement_fn",
     "per_param_placements",
     "Shard",
 ]
