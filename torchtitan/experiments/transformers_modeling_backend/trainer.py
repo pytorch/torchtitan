@@ -28,12 +28,16 @@ class SFTTrainer(Trainer):
     @sl.log_trace_span("post_dataloading_process")
     def post_dataloading_process(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         inputs = input_dict["input"]
-        extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
-        extra_kwargs: dict[str, Any] = {}
+        # Everything else becomes a model-forward kwarg, forwarded to all PP
+        # stages (matches the base Trainer contract). positions is read here so
+        # we can build the block-causal mask.
+        extra_kwargs: dict[str, Any] = {
+            k: v for k, v in input_dict.items() if k != "input"
+        }
 
-        positions = extra_inputs.pop("positions", None)
+        positions = extra_kwargs.get("positions", None)
 
         attn_mask_type = getattr(self.model_config, "attn_mask_type", "causal")
 
@@ -48,8 +52,6 @@ class SFTTrainer(Trainer):
             extra_kwargs["attention_masks"] = create_attention_mask(
                 mask_mod, B, None, seq_len, seq_len
             )
-
-        extra_kwargs["positions"] = positions
 
         if self.parallel_dims.cp_enabled:
             from torchtitan.distributed.context_parallel import (
@@ -70,4 +72,4 @@ class SFTTrainer(Trainer):
 
         self.ntokens_seen += labels.numel()
 
-        return inputs, labels, extra_inputs, extra_kwargs
+        return inputs, labels, extra_kwargs

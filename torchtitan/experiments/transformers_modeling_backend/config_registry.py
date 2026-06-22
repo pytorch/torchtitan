@@ -99,7 +99,7 @@ def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
         hf_model="Qwen/Qwen3-0.6B",
         model_spec=model_registry("sft_full"),
         tokenizer=HFBackendTokenizer.Config(),
-        optimizer=OptimizersContainer.Config(lr=2e-5),
+        optimizer=default_adamw(lr=2e-5),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -127,9 +127,7 @@ def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
 
 
@@ -148,7 +146,7 @@ def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
         hf_model="Qwen/Qwen3-4B-Instruct-2507",
         model_spec=model_registry("sft_debugmodel"),
         tokenizer=HFBackendTokenizer.Config(),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -173,7 +171,5 @@ def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
