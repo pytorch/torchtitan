@@ -24,7 +24,6 @@ from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
-from torch.distributed.checkpoint._fsspec_filesystem import FsspecReader, FsspecWriter
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict_saver import (
     AsyncCheckpointerType,
@@ -585,9 +584,6 @@ class CheckpointManager(Configurable):
             # The internal consolidation is disabled here and instead
             # `consolidate_safetensors_files_on_every_rank` is used later to manage
             # the multi-file merging process.
-        else:
-            storage_writer = FsspecWriter(checkpoint_id)
-
         # Execution Dispatch
         checkpoint_save_id = (
             None if to_hf else checkpoint_id
@@ -672,11 +668,7 @@ class CheckpointManager(Configurable):
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
             self.states[MODEL].load_state_dict(state_dict)
         else:
-            dcp.load(
-                state_dict,
-                storage_reader=FsspecReader(checkpoint_id),
-                checkpoint_id=checkpoint_id,
-            )
+            dcp.load(state_dict, checkpoint_id=checkpoint_id)
 
             # TODO: Since we flatten the model states in state_dict, we need to
             # manually call load_state_dict() for the model. Need to fix this.
