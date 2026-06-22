@@ -59,16 +59,16 @@ class LocalTokenDispatcher(Configurable):
     def __init__(self, config: Config):
         self.num_experts = config.num_experts
         self.top_k = config.top_k
+        self.sparse_mesh: DeviceMesh | None = None
 
     def wire_meshes(
         self,
         *,
         ep_mesh: DeviceMesh | None,
         tp_mesh: DeviceMesh | None,
-        sparse_mesh: DeviceMesh | None,
     ) -> None:
         """No-op for the EP=1 dispatcher. Subclasses override."""
-        del ep_mesh, tp_mesh, sparse_mesh
+        del ep_mesh, tp_mesh
 
     @contextmanager
     def sparse_spmd_mesh(self) -> Iterator[None]:
@@ -201,7 +201,6 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher):
     def __init__(self, config: Config):
         super().__init__(config)
         self.ep_mesh: DeviceMesh | None = None
-        self.sparse_mesh: DeviceMesh | None = None
         # Sequence-parallel split coordinates derived from tp_mesh.
         # ``sp_rank`` uses ``DeviceMesh._sym_get_coordinate`` so it is a
         # ``SymInt`` under CooR precompile, keeping the FX graph
@@ -214,11 +213,9 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher):
         *,
         ep_mesh: DeviceMesh | None,
         tp_mesh: DeviceMesh | None,
-        sparse_mesh: DeviceMesh | None,
     ) -> None:
         """Install the EP mesh and SP coordinates used by dispatch / combine."""
         self.ep_mesh = ep_mesh
-        self.sparse_mesh = sparse_mesh
         if tp_mesh is not None:
             self.sp_size = tp_mesh.size()
             self.sp_rank = tp_mesh._sym_get_coordinate(0)
