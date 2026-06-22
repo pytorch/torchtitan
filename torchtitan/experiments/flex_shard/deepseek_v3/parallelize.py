@@ -20,7 +20,11 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
-from torchtitan.experiments.flex_shard import BucketSpec, flex_shard
+from torchtitan.experiments.flex_shard import (
+    BucketSpec,
+    disable_flex_shard_gradient_division,
+    flex_shard,
+)
 from torchtitan.experiments.flex_shard.example.owned import (
     GroupedOwned,
     GroupedOwnedSegmentSpec,
@@ -291,3 +295,4 @@ def _apply_flex_shard(
     )
 
     flex_shard(model, buckets=buckets)
+    disable_flex_shard_gradient_division(model)
