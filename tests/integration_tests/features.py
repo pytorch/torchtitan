@@ -529,6 +529,20 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "override_fused_swiglu",
             ngpu=4,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
+                    "--override.imports torchtitan.overrides.fused_swiglu",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 4",
+                ],
+            ],
+            "Override: fuse grouped experts + FFNs on deepseek_v3 "
+            "(FSDP2 + TP2 dense, EP4 sparse)",
+            "override_fused_grouped_experts",
+            ngpu=4,
+        ),
         # NOTE: below are tests which require config change that cannot be done
         #       via CLI overrides, so remain llama3 specific
         OverrideDefinitions(
