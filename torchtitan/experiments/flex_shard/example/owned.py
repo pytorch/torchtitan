@@ -27,6 +27,11 @@ from ..flex_shard.placement_contract import (
     PlacementReduceGradResult,
     PlacementUnshardResult,
 )
+from ..flex_shard.reduce_policy import (
+    dist_reduce_op,
+    gradient_reduce_op_from_infos,
+    GradientReduceOp,
+)
 from ..flex_shard.utils import (
     _record_comm_if_eager,
     _record_copy_in_if_eager,
@@ -258,6 +263,7 @@ class Owned(Placement):
         world_size: int
         pg: Any
         debug_fqn: str | None
+        gradient_reduce_op: GradientReduceOp
 
     def __init__(self, owner_rank: int):
         self.owner_rank = owner_rank
@@ -537,6 +543,7 @@ class Owned(Placement):
                 world_size=mesh.size(),
                 pg=mesh.get_group(),
                 debug_fqn=debug_fqn,
+                gradient_reduce_op=gradient_reduce_op_from_infos(infos),
             ),
         )
 
@@ -567,7 +574,8 @@ class Owned(Placement):
                 group=prepared.placement_state.pg,
             )
         if prepared.placement_state.rank == self.owner_rank:
-            flat.div_(prepared.placement_state.world_size)
+            if prepared.placement_state.gradient_reduce_op == "avg":
+                flat.div_(prepared.placement_state.world_size)
             sharded_grads = self._views_from_flat(
                 flat,
                 prepared.placement_state.infos,
@@ -647,6 +655,7 @@ class GroupedOwned(Placement):
         pg: Any
         debug_fqn: str | None
         scratch_lease: _ReduceScratchLease | None
+        gradient_reduce_op: GradientReduceOp
 
     def __init__(
         self,
@@ -1528,6 +1537,7 @@ class GroupedOwned(Placement):
                 pg=mesh.get_group(),
                 debug_fqn=debug_fqn,
                 scratch_lease=scratch_lease,
+                gradient_reduce_op=gradient_reduce_op_from_infos(infos),
             ),
         )
 
@@ -1556,7 +1566,7 @@ class GroupedOwned(Placement):
                 dist.reduce_scatter_tensor(
                     output=recv,
                     input=send,
-                    op=dist.ReduceOp.AVG,
+                    op=dist_reduce_op(state.gradient_reduce_op),
                     group=state.pg,
                 )
             finally:

@@ -14,6 +14,7 @@ from torchtitan.experiments.flex_shard.flex_shard.bucket_runtime import (
     ParamOwnerRef,
 )
 from torchtitan.experiments.flex_shard.flex_shard.unsharded_param_getters import (
+    _RafSavedTensorContext,
     UnshardedParamSlot,
 )
 from torchtitan.experiments.flex_shard.tests.common import (
@@ -64,6 +65,65 @@ class TestUnshardedParamSlot(TestCase):
         slot.pop_unsharded_param()
         self.assertIs(slot.get_unsharded_param(), outer)
         slot.pop_unsharded_param()
+
+    def test_raf_saved_tensor_context_packs_view_of_registered_base(self):
+        class _BaseHandle:
+            def __init__(self, tensor: torch.Tensor) -> None:
+                self.tensor = tensor
+
+            def unpack_raf_saved_tensor(self) -> torch.Tensor:
+                return self.tensor
+
+        class _ParamHandle:
+            def __init__(
+                self,
+                param: torch.Tensor,
+                base: torch.Tensor,
+            ) -> None:
+                self.param = param
+                self.base = base
+
+            def unpack_raf_saved_tensor(self) -> torch.Tensor:
+                return self.param
+
+            def base_handle_for_raf_saved_tensor(
+                self,
+                tensor: torch.Tensor,
+                base: torch.Tensor,
+            ) -> _BaseHandle:
+                self.registered_tensor = tensor
+                self.registered_base = base
+                return _BaseHandle(self.base)
+
+        gathered = torch.arange(4 * 4 * 4, dtype=torch.float32)
+        param = gathered.as_strided(
+            (2, 4, 4),
+            (16, 4, 1),
+            storage_offset=0,
+        )
+        saved_transpose = param.transpose(-2, -1)
+        self.assertIs(saved_transpose._base, gathered)
+        self.assertIsNot(saved_transpose._base, param)
+
+        recomputed_gathered = gathered + 1000
+        recomputed_param = recomputed_gathered.as_strided(
+            param.size(),
+            param.stride(),
+            storage_offset=param.storage_offset(),
+        )
+        handle = _ParamHandle(recomputed_param, recomputed_gathered)
+
+        context = _RafSavedTensorContext()
+        context.register(param, handle)
+
+        packed = context.pack(saved_transpose)
+        self.assertIsNot(packed, saved_transpose)
+        unpacked = context.unpack(packed)
+        expected = recomputed_param.transpose(-2, -1)
+        self.assertEqual(unpacked, expected)
+        self.assertEqual(unpacked.stride(), expected.stride())
+        self.assertIs(handle.registered_tensor, param)
+        self.assertIs(handle.registered_base, gathered)
 
 
 class TestFlexShardEagerRuntime(TestCase):

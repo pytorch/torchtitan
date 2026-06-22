@@ -24,6 +24,7 @@ from torch.utils.checkpoint import (
 
 from torchtitan.experiments.flex_shard import (
     BucketSpec,
+    disable_flex_shard_gradient_division,
     flex_shard,
     MixedPrecisionPolicy,
 )
@@ -216,6 +217,58 @@ class TestFlexShardTraining(FSDPTest):
             world_size=self.world_size,
         )
         self.assertEqual(grad, expected_grad)
+
+    @skip_if_lt_x_gpu(2)
+    def test_disable_gradient_division_uses_sum_reduce(self):
+        mesh = init_device_mesh(
+            device_type.type,
+            (self.world_size,),
+            mesh_dim_names=("fsdp",),
+        )
+
+        args, avg_model = make_transformer_model(device=device_type.type)
+        _init_params_deterministically(avg_model)
+        sum_model = copy.deepcopy(avg_model)
+
+        flex_shard(
+            avg_model,
+            buckets=transformer_bucket_specs(
+                args.n_layers,
+                mesh,
+                reshard_after_forward=False,
+            ),
+        )
+        flex_shard(
+            sum_model,
+            buckets=transformer_bucket_specs(
+                args.n_layers,
+                mesh,
+                reshard_after_forward=False,
+            ),
+        )
+        disable_flex_shard_gradient_division(sum_model)
+
+        for bucket_storage in sum_model.sharded_bucket_storages:
+            self.assertEqual(bucket_storage.gradient_reduce_op, "sum")
+            for info in bucket_storage.param_infos.values():
+                self.assertEqual(info.gradient_reduce_op, "sum")
+
+        torch.manual_seed(42 + self.rank + 1)
+        x = transformer_inputs(args, batch_size=2, device=device_type)
+        avg_model(x).sum().backward()
+        sum_model(x).sum().backward()
+
+        for (avg_name, avg_param), (sum_name, sum_param) in zip(
+            avg_model.named_parameters(),
+            sum_model.named_parameters(),
+            strict=True,
+        ):
+            self.assertEqual(avg_name, sum_name)
+            if avg_param.grad is None:
+                self.assertIsNone(sum_param.grad)
+                continue
+            self.assertIsNotNone(sum_param.grad)
+            self.assertEqual(sum_param.grad, avg_param.grad * self.world_size)
 
     @skip_if_lt_x_gpu(2)
     def test_reshard_after_forward_with_activation_checkpointing(self):

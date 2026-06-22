@@ -22,6 +22,11 @@ from ..flex_shard.placement_contract import (
     PlacementReduceGradResult,
     PlacementUnshardResult,
 )
+from ..flex_shard.reduce_policy import (
+    dist_reduce_op,
+    gradient_reduce_op_from_infos,
+    GradientReduceOp,
+)
 from ..flex_shard.utils import (
     _record_comm_if_eager,
     _record_copy_in_if_eager,
@@ -64,6 +69,7 @@ class Shard(Placement):
         world_size: int
         pg: Any
         debug_fqn: str | None
+        gradient_reduce_op: GradientReduceOp
 
     def __init__(self, dim: int = 0):
         self.dim = dim
@@ -441,6 +447,7 @@ class Shard(Placement):
                 world_size=ws,
                 pg=mesh.get_group(),
                 debug_fqn=debug_fqn,
+                gradient_reduce_op=gradient_reduce_op_from_infos(infos),
             ),
         )
 
@@ -465,13 +472,10 @@ class Shard(Placement):
             "FlexShard::post_backward_reduce",
             prepared.placement_state.debug_fqn,
         ):
-            # TODO: Plumb the reduction/scaling policy from SPMD gradient semantics.
-            # AVG is a convenient default, but delayed grad scaling may need SUM
-            # plus an explicit scale at a different point in the training step.
             dist.reduce_scatter_tensor(
                 output=recv_buf,
                 input=send_buf,
-                op=dist.ReduceOp.AVG,
+                op=dist_reduce_op(prepared.placement_state.gradient_reduce_op),
                 group=prepared.placement_state.pg,
             )
         with _record_function_if_eager(

@@ -154,6 +154,7 @@ class BucketCommContext:
     )
     reduce_grad_callback_queued: bool = False
     raf_saved_unshard_cache: dict[int, list[torch.Tensor]] = field(default_factory=dict)
+    raf_saved_unshard_cache_limit: int = 2
     raf_saved_unshard_cache_callback_queued: bool = False
     _forward_bucket_indices: dict[int, int] | None = None
     _recompute_prefetch_buckets: list[BucketRuntime] | None = None
@@ -338,6 +339,18 @@ class BucketCommContext:
             _clear_raf_saved_unshard_cache
         )
 
+    def set_raf_saved_unshard_cache(
+        self,
+        bucket_id: int,
+        full_params: list[torch.Tensor],
+    ) -> None:
+        """Cache RAF recomputes while bounding gathered-buffer lifetime."""
+        self.raf_saved_unshard_cache.pop(bucket_id, None)
+        self.raf_saved_unshard_cache[bucket_id] = full_params
+        while len(self.raf_saved_unshard_cache) > self.raf_saved_unshard_cache_limit:
+            self.raf_saved_unshard_cache.pop(next(iter(self.raf_saved_unshard_cache)))
+        self.queue_raf_saved_unshard_cache_clear()
+
     def wait_and_clear_reduce_grad_states(
         self,
         debug_fqn: str | None,
@@ -461,26 +474,56 @@ class RafSavedUnshardedParam:
     param_index: int
 
     def unpack_raf_saved_tensor(self) -> torch.Tensor:
-        bucket_id = id(self.bucket.bucket_storage)
-        full_params = self.bucket.context.raf_saved_unshard_cache.get(bucket_id)
-        if full_params is None:
-            recompute_state = (
-                self.bucket.bucket_storage._reshard_after_forward_recompute_state
-            )
-            token = None
-            if recompute_state is not None:
-                token = recompute_state.enter_recompute(frozenset({bucket_id}))
-            try:
-                full_params = self.bucket.recompute_unshard_for_saved_tensor()
-            finally:
-                if token is not None and recompute_state is not None:
-                    recompute_state.exit_recompute(token)
-            self.bucket.context.raf_saved_unshard_cache[bucket_id] = full_params
-            self.bucket.context.queue_raf_saved_unshard_cache_clear()
-
+        full_params = _get_raf_saved_full_params(self.bucket)
         full_param = full_params[self.param_index]
         slot = self.bucket.bucket_params[self.param_index].unsharded_param_slot
         return slot.apply_unsharded_param_policy(full_param)
+
+    def base_handle_for_raf_saved_tensor(
+        self,
+        tensor: torch.Tensor,
+        base: torch.Tensor,
+    ) -> RafSavedUnshardedParamBase:
+        _ = tensor, base
+        return RafSavedUnshardedParamBase(self.bucket, self.param_index)
+
+
+@dataclass(frozen=True)
+class RafSavedUnshardedParamBase:
+    """Saved-tensor hook handle for a RAF parameter's root storage base."""
+
+    bucket: BucketRuntime
+    param_index: int
+
+    def unpack_raf_saved_tensor(self) -> torch.Tensor:
+        full_params = _get_raf_saved_full_params(self.bucket)
+        full_param = full_params[self.param_index]
+        base = getattr(full_param, "_base", None)
+        if base is None:
+            raise RuntimeError(
+                "FlexShard RAF expected a recomputed parameter view with a "
+                "storage base, but recomputation returned a standalone tensor."
+            )
+        return base
+
+
+def _get_raf_saved_full_params(bucket: BucketRuntime) -> list[torch.Tensor]:
+    bucket_id = id(bucket.bucket_storage)
+    full_params = bucket.context.raf_saved_unshard_cache.get(bucket_id)
+    if full_params is not None:
+        return full_params
+
+    recompute_state = bucket.bucket_storage._reshard_after_forward_recompute_state
+    token = None
+    if recompute_state is not None:
+        token = recompute_state.enter_recompute(frozenset({bucket_id}))
+    try:
+        full_params = bucket.recompute_unshard_for_saved_tensor()
+    finally:
+        if token is not None and recompute_state is not None:
+            recompute_state.exit_recompute(token)
+    bucket.context.set_raf_saved_unshard_cache(bucket_id, full_params)
+    return full_params
 
 
 @dataclass

@@ -17,6 +17,7 @@ from torch._prims_common import make_contiguous_strides_for
 
 from .sharded_param import set_sharding_info
 from .utils import _get_single_placement, _set_param_on_module
+from .reduce_policy import GradientReduceOp, validate_gradient_reduce_op
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -91,6 +92,10 @@ class BucketSpec:
             behavior when multiple buckets share the same hooked module.
         offload_policy: CPU offload policy for this bucket. TODO: implement
             and test CPU offload before allowing this in flex_shard().
+        gradient_reduce_op: Gradient reduction semantics. ``"avg"`` preserves
+            FlexShard's historical average-gradient behavior. ``"sum"``
+            matches FSDP2's no-gradient-division mode, where the training loop
+            owns global gradient scaling.
         reshard_after_forward: Whether to free this bucket's unsharded
             parameters after forward and recompute them in backward. This
             defaults to True. Buckets that reshard after forward must have
@@ -103,6 +108,7 @@ class BucketSpec:
     mesh: DeviceMesh
     mp_policy: MixedPrecisionPolicy | None = None
     offload_policy: OffloadPolicy | None = None
+    gradient_reduce_op: GradientReduceOp = "avg"
     reshard_after_forward: bool = True
 
 
@@ -137,6 +143,7 @@ class ParamInfo:
     placements: tuple[Placement, ...]
     param_dtype: torch.dtype | None = None
     reduce_dtype: torch.dtype | None = None
+    gradient_reduce_op: GradientReduceOp = "avg"
     local_shape: torch.Size = field(default_factory=lambda: torch.Size([]))
     local_numel: int = 0
     byte_offset: int = 0  # byte offset into the sharded storage
@@ -181,6 +188,7 @@ class ShardedBucketStorage:
         total_bytes: int,
         module: nn.Module,
         reshard_after_forward: bool = True,
+        gradient_reduce_op: GradientReduceOp = "avg",
     ) -> None:
         if byte_storage.dtype != torch.uint8:
             raise ValueError(f"Expected uint8 storage, got {byte_storage.dtype}")
@@ -190,6 +198,9 @@ class ShardedBucketStorage:
         self._total_bytes = total_bytes
         self._module = module
         self._reshard_after_forward = reshard_after_forward
+        self._gradient_reduce_op = validate_gradient_reduce_op(gradient_reduce_op)
+        for info in self._param_infos.values():
+            info.gradient_reduce_op = self._gradient_reduce_op
         self._reshard_after_forward_recompute_state: (
             _ReshardAfterForwardRecomputeState | None
         ) = None
@@ -210,6 +221,7 @@ class ShardedBucketStorage:
             mesh,
             param_placements,
             bucket_spec.mp_policy,
+            bucket_spec.gradient_reduce_op,
         )
 
         if bucket_spec.offload_policy is not None:
@@ -231,6 +243,7 @@ class ShardedBucketStorage:
             total_bytes,
             module,
             reshard_after_forward=bucket_spec.reshard_after_forward,
+            gradient_reduce_op=bucket_spec.gradient_reduce_op,
         )
         bucket_storage.copy_params_from(named_params)
         bucket_storage.install_sharded_params(expected_param_device)
@@ -243,6 +256,7 @@ class ShardedBucketStorage:
         mesh: DeviceMesh,
         param_placements: dict[str, tuple[Placement, ...]],
         mp_policy: MixedPrecisionPolicy | None = None,
+        gradient_reduce_op: GradientReduceOp = "avg",
     ) -> tuple[dict[str, ParamInfo], int]:
         """
         Create ParamInfo for each parameter, computing local layout and byte offsets.
@@ -267,12 +281,14 @@ class ShardedBucketStorage:
                 param_placements,
                 bucket_layout,
                 mp_policy,
+                gradient_reduce_op,
             )
         return cls._create_param_infos_from_local_layouts(
             named_params,
             mesh,
             param_placements,
             mp_policy,
+            gradient_reduce_op,
         )
 
     @classmethod
@@ -282,6 +298,7 @@ class ShardedBucketStorage:
         mesh: DeviceMesh,
         param_placements: dict[str, tuple[Placement, ...]],
         mp_policy: MixedPrecisionPolicy | None,
+        gradient_reduce_op: GradientReduceOp,
     ) -> tuple[dict[str, ParamInfo], int]:
         rank = mesh.get_local_rank()
         world_size = mesh.size()
@@ -312,6 +329,7 @@ class ShardedBucketStorage:
                 byte_offset=byte_offset,
                 storage_nbytes=local_storage_layout.storage_nbytes,
                 mp_policy=mp_policy,
+                gradient_reduce_op=gradient_reduce_op,
             )
 
         return param_infos, current_byte_offset
@@ -361,6 +379,7 @@ class ShardedBucketStorage:
         param_placements: dict[str, tuple[Placement, ...]],
         bucket_layout: BucketStorageLayout,
         mp_policy: MixedPrecisionPolicy | None,
+        gradient_reduce_op: GradientReduceOp,
     ) -> tuple[dict[str, ParamInfo], int]:
         expected_fqns = {fqn for fqn, _ in named_params}
         actual_fqns = set(bucket_layout.param_layouts)
@@ -420,6 +439,7 @@ class ShardedBucketStorage:
                 storage_nbytes=layout.storage_nbytes,
                 bucket_layout=layout.bucket_layout,
                 mp_policy=mp_policy,
+                gradient_reduce_op=gradient_reduce_op,
             )
 
         return param_infos, bucket_layout.total_bytes
@@ -436,6 +456,7 @@ class ShardedBucketStorage:
         storage_nbytes: int,
         bucket_layout: BucketLayout | None = None,
         mp_policy: MixedPrecisionPolicy | None = None,
+        gradient_reduce_op: GradientReduceOp = "avg",
     ) -> ParamInfo:
         return ParamInfo(
             fqn=fqn,
@@ -444,6 +465,7 @@ class ShardedBucketStorage:
             dtype=param.dtype,
             param_dtype=mp_policy.param_dtype if mp_policy is not None else None,
             reduce_dtype=mp_policy.reduce_dtype if mp_policy is not None else None,
+            gradient_reduce_op=validate_gradient_reduce_op(gradient_reduce_op),
             requires_grad=param.requires_grad,
             placements=placements,
             local_shape=local_shape,
@@ -521,6 +543,18 @@ class ShardedBucketStorage:
     def param_infos(self) -> dict[str, ParamInfo]:
         """Metadata for each parameter."""
         return self._param_infos
+
+    @property
+    def gradient_reduce_op(self) -> GradientReduceOp:
+        """Gradient reduction semantics for this bucket."""
+        return self._gradient_reduce_op
+
+    def set_gradient_reduce_op(self, op: str) -> None:
+        """Set gradient reduction semantics for this bucket and its params."""
+        validated_op = validate_gradient_reduce_op(op)
+        self._gradient_reduce_op = validated_op
+        for info in self._param_infos.values():
+            info.gradient_reduce_op = validated_op
 
     @property
     def world_size(self) -> int:
