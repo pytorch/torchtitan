@@ -258,8 +258,11 @@ class PolicyTrainer(Actor, Configurable):
 
         self.generator: Any | None = None
 
-        # Data parallelism: mesh is available after _build_model triggers build_mesh
-        self.dp_enabled = self.parallel_dims.dp_enabled
+        # Data parallelism: mesh is available after _build_model triggers
+        # build_mesh. Underscore-prefixed so the public ``dp_rank`` endpoint name
+        # does not collide with the instance attribute (Monarch dispatches
+        # endpoints via getattr on the instance).
+        self._dp_enabled = self.parallel_dims.dp_enabled
         batch_mesh = self.parallel_dims.get_optional_mesh("batch")
         if batch_mesh is not None:
             self.dp_size = batch_mesh.size()
@@ -357,21 +360,8 @@ class PolicyTrainer(Actor, Configurable):
         sl.set_step(step, relative_step=relative_step)
 
     @endpoint
-    async def verify_dp_rank(self, expected_dp_rank: int) -> int:
-        """Return this rank's actual data-parallel rank; log on mismatch.
-
-        The controller calls this on ``slice(batch=d)`` (passing ``d``) after
-        reshaping the trainer mesh into ("batch", "within_batch"), then raises
-        if any returned dp_rank differs from its batch slice. Returning the
-        actual dp_rank lets the controller report actual-vs-expected.
-        """
-        if self.dp_rank != expected_dp_rank:
-            logger.error(
-                "Trainer mesh rank %d reports dp_rank=%d but expected %d.",
-                current_rank().rank,
-                self.dp_rank,
-                expected_dp_rank,
-            )
+    async def get_dp_rank(self) -> int:
+        """Return this actor's DP rank."""
         return self.dp_rank
 
     def reduce_forward_backward_metrics(

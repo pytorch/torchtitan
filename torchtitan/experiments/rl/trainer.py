@@ -153,6 +153,20 @@ class RLTrainer(Configurable):
                     "Set generator.checkpoint.enable=False."
                 )
 
+            # The controller scatters microbatches by reshaping the trainer mesh
+            # into ("batch", "_") and slicing the "batch" axis. This assumes
+            # "batch" is the outermost mesh axis, which only holds when pipeline
+            # parallelism is off.
+            # TODO: support trainer PP by accounting for the outermost "pp" axis
+            # in the reshape and validating torchstore composability with PP.
+            if self.trainer.parallelism.pipeline_parallel_degree != 1:
+                raise ValueError(
+                    "RL trainer does not support pipeline parallelism yet; the "
+                    "microbatch scatter assumes 'batch' is the outermost mesh "
+                    "axis. Got pipeline_parallel_degree="
+                    f"{self.trainer.parallelism.pipeline_parallel_degree}."
+                )
+
             # RL policy inputs are shaped by BatchConfig, not TrainingConfig.
             if self.trainer.parallelism.enable_sequence_parallel:
                 sp_degree = self.trainer.parallelism.tensor_parallel_degree
@@ -368,25 +382,27 @@ class RLTrainer(Configurable):
                 generators.append(generator)
             self.generator_router = config.generator_router.build(generators=generators)
 
-        # Reshape trainer mesh into ("batch", "within_batch") so controller can
-        # scatter microbatches by the DP dimension.
-        self.trainer = self.trainer.flatten("flat").split(
-            flat=("batch", "within_batch"), batch=self.trainer_dp_degree
+        # Reshape the trainer ProcMesh into ("batch", "_") so the controller can
+        # scatter microbatches across the DP "batch" axis via slice(batch=...).
+        self.trainer = self.trainer.flatten("rank").split(
+            rank=("batch", "_"), batch=self.trainer_dp_degree
         )
-        # Verify the reshape result against the actual dp rank on each trainer actor.
+        # One-time, cheap startup check: confirm that the DP layout assumed by
+        # controller agrees with the real DP layout used in trainer SPMD.
         with sl.log_trace_span("verify_trainer_dp_layout"):
-            verifications = await asyncio.gather(
+            reported_dp_ranks = await asyncio.gather(
                 *[
-                    self.trainer.slice(batch=dp_rank).verify_dp_rank.call(dp_rank)
+                    self.trainer.slice(batch=dp_rank).get_dp_rank.call()
                     for dp_rank in range(self.trainer_dp_degree)
                 ]
             )
-            for dp_rank, value_mesh in enumerate(verifications):
+            for dp_rank, value_mesh in enumerate(reported_dp_ranks):
                 actual = list(value_mesh.values())
                 if any(reported != dp_rank for reported in actual):
                     raise ValueError(
-                        "Trainer mesh reshape is inconsistent with the DeviceMesh "
-                        f"batch axis: expected all to be {dp_rank}, but got {actual}."
+                        "Trainer mesh reshape is inconsistent with the SPMD "
+                        f"DeviceMesh batch axis: actors in batch slice {dp_rank} "
+                        f"reported SPMD dp_ranks {actual}, expected all {dp_rank}."
                     )
 
         # Initialize TorchStore for weight sync between trainer and generator.
@@ -761,8 +777,9 @@ class RLTrainer(Configurable):
             fwd_bwd_metrics: dict[str, float] = {}
             for microbatch in microbatches:
                 with sl.log_trace_span("trainer_forward_backward_call"):
-                    # Scatter microbatches by the DP dimension.
-                    shard_results = await asyncio.gather(
+                    # Scatter this microbatch across the DP "batch" axis, so
+                    # each rank only gets its designated TrainingBatch.
+                    per_dp_rank_results = await asyncio.gather(
                         *[
                             self.trainer.slice(batch=dp_rank).forward_backward.call(
                                 microbatch[dp_rank], num_global_valid_tokens
@@ -770,7 +787,15 @@ class RLTrainer(Configurable):
                             for dp_rank in range(self.trainer_dp_degree)
                         ]
                     )
-                    mb_metrics = self._get_rank_0_value(shard_results[0])
+                    # The trainer mesh was sliced into N sub-meshes above, where
+                    # N = trainer_dp_degree, and each sub-mesh consists of ranks in
+                    # a DP rank. Subsequently, ``per_dp_rank_results`` consists of
+                    # results from those N sub-meshes.
+                    #
+                    # Since the results from all ranks are identical, we only
+                    # use the 1st sub-mesh's rank 0 result here. It is also the
+                    # rank 0 of the whole trainer mesh.
+                    mb_metrics = self._get_rank_0_value(per_dp_rank_results[0])
                     for k, v in mb_metrics.items():
                         if k not in fwd_bwd_metrics:
                             fwd_bwd_metrics[k] = v
