@@ -747,7 +747,13 @@ class FusedQKVLinear(BaseQKVLinear):
         # [B, L, n_kv_heads * R * head_dim] -> [B, L, n_kv_heads, R, head_dim]
         # Use -1 for n_kv_heads so TP sharding is handled automatically.
         qkv = self.wqkv(x)
-        qkv = qkv.view(bs, seqlen, -1, self.r_dim, self.head_dim)
+        with spmd.local():  # TODO(pianpwk): same QKV:S(2) unflatten case handled by even sharding
+            qkv = qkv.view(bs, seqlen, -1, self.r_dim, self.head_dim)
+        if get_spmd_backend() == "spmd_types":
+            spmd.assert_type(
+                qkv, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None, None)
+            )
+
         # torch.split returns contiguous views for size-1 splits (xk, xv).
         # xq (size heads_per_kv) is non-contiguous; reshape triggers a copy.
         xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
