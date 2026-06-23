@@ -1,8 +1,15 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Thin trainer for plan_vit: model(inputs_dict) -> pred dict, PathLoss(pred, targets), backward.
 
 Mirrors PathTrainer's generic core without the path-specific ONNX export / driving validator / reports a
 scaling study doesn't need. loss + dataloader come from the base Trainer.Config (set in config_registry).
 """
+
 from __future__ import annotations
 
 import time

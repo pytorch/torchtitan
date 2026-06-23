@@ -1,11 +1,19 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Plan ViT: raw camera frames -> patches -> transformer -> plan. NO VAE.
 
 A self-contained planning model for the muP + scaling study, built from torchtitan.models.common
 blocks the same way path/model.py is. Scales cleanly by width (n_embd / n_head) for muTransfer.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
+from xx.ml_tools.constants.model import ModelInputs
 
 import torch
 import torch.nn as nn
@@ -26,7 +34,6 @@ from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleList
 from torchtitan.tools.logging import logger
-from xx.ml_tools.constants.model import ModelInputs
 
 
 class PlanViTMLP(Module):
@@ -125,7 +132,9 @@ class PatchEmbed(Module):
         x = rearrange(
             x, "b (t pt) c (h ph) (w pw) -> b (t h w) (pt c ph pw)", pt=pt, ph=ph, pw=pw
         )
-        return self.proj(x.to(self.proj.weight.dtype))  # match the bf16 (mp) weights, like path's vision
+        return self.proj(
+            x.to(self.proj.weight.dtype)
+        )  # match the bf16 (mp) weights, like path's vision
 
 
 class PlanHead(Module):
@@ -197,7 +206,9 @@ class PlanViT(BaseModel):
             return inputs
         img, big = inputs[ModelInputs.IMG], inputs[ModelInputs.BIG_IMG]
         frame = torch.cat([img[:, -1], big[:, -1]], dim=1).unsqueeze(1)
-        return (frame.float() - 127.5) / 63.75  # uint8 YUV -> normalized float (mean 255/2, std 255/4 like path)
+        return (
+            frame.float() - 127.5
+        ) / 63.75  # uint8 YUV -> normalized float (mean 255/2, std 255/4 like path)
 
     def forward(
         self, inputs: dict[str, torch.Tensor] | torch.Tensor

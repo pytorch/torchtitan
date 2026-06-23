@@ -1,13 +1,21 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Config assembly + flavors for plan_vit, mirroring path/config_registry.py.
 
 Width flavors scale n_head at fixed head_dim=64 (the clean muP axis); base = w256. Two cameras are
 channel-stacked into in_channels=24 (no VAE). The trainer-side config functions live below the model side.
 """
+
 from __future__ import annotations
 
 import math
 import os
 from functools import partial
+from xx.ml_tools.constants.model import SUPERCOMBO_FPS
 
 import torch.nn as nn
 
@@ -22,8 +30,6 @@ from torchtitan.experiments.path.loss import PathLoss
 from torchtitan.models.common import Embedding, LayerNorm, Linear
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.protocols.model_spec import ModelSpec
-from xx.ml_tools.constants.model import SUPERCOMBO_FPS
-
 from .model import (
     parallelize_plan_vit,
     PatchEmbed,
@@ -33,7 +39,6 @@ from .model import (
     PlanViTBlock,
     PlanViTMLP,
 )
-
 from .trainer import PlanViTTrainer
 
 _LINEAR_INIT = {
@@ -82,7 +87,9 @@ def _hidden(dim: int, mult: float, multiple_of: int = 256) -> int:
     return multiple_of * math.ceil(int(dim * mult) / multiple_of)
 
 
-def _attention(dim: int, n_head: int, *, mup: bool, qk_norm: bool = True) -> PlanViTAttention.Config:
+def _attention(
+    dim: int, n_head: int, *, mup: bool, qk_norm: bool = True
+) -> PlanViTAttention.Config:
     head_dim = dim // n_head
     return PlanViTAttention.Config(
         norm=_ln(dim),
@@ -102,7 +109,9 @@ def _mlp(dim: int, *, mup: bool, mult: float = 4.0) -> PlanViTMLP.Config:
     return PlanViTMLP.Config(
         norm=_ln(dim),
         c_fc=_lin(dim, hidden, std=_hidden_std(dim, mup=mup)),
-        c_proj=_lin(hidden, dim, std=_hidden_std(hidden, mup=mup) / math.sqrt(2 * N_LAYER)),
+        c_proj=_lin(
+            hidden, dim, std=_hidden_std(hidden, mup=mup) / math.sqrt(2 * N_LAYER)
+        ),
         act="gelu_tanh",
         dropout=0.0,
     )
@@ -122,7 +131,9 @@ def _model_config(flavor: str, *, mup: bool, qk_norm: bool = True) -> PlanViT.Co
         n_embd=n_embd,
         output_mult=(BASE_WIDTH / n_embd) if mup else 1.0,  # muP readout multiplier 1/m
         patch_embed=PatchEmbed.Config(
-            proj=_lin(patch_dim, n_embd, std=patch_dim**-0.5),  # input embed: width-independent
+            proj=_lin(
+                patch_dim, n_embd, std=patch_dim**-0.5
+            ),  # input embed: width-independent
             patch_size=PATCH_SIZE,
         ),
         pos_embedding=Embedding.Config(
@@ -130,7 +141,8 @@ def _model_config(flavor: str, *, mup: bool, qk_norm: bool = True) -> PlanViT.Co
         ),
         blocks=[
             PlanViTBlock.Config(
-                attention=_attention(n_embd, n_head, mup=mup, qk_norm=qk_norm), mlp=_mlp(n_embd, mup=mup)
+                attention=_attention(n_embd, n_head, mup=mup, qk_norm=qk_norm),
+                mlp=_mlp(n_embd, mup=mup),
             )
             for _ in range(N_LAYER)
         ],
