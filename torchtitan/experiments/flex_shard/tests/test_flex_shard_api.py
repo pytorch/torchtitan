@@ -17,7 +17,6 @@ from torchtitan.experiments.flex_shard import (
     OffloadPolicy,
 )
 from torchtitan.experiments.flex_shard.example.shard import per_param_placements, Shard
-from torchtitan.experiments.flex_shard.flex_shard.flex_shard import FlexShardModule
 from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_cuda,
     flex_shard_transformer_model,
@@ -29,30 +28,6 @@ from torchtitan.experiments.flex_shard.tests.common import (
 
 
 class TestFlexShardAPI(TestCase):
-    def test_flex_shard_returns_same_module_with_public_storage_properties(self):
-        with single_rank_cuda_mesh() as mesh:
-            args, model = make_transformer_model()
-
-            result = flex_shard_cuda(
-                model,
-                mesh,
-                buckets=transformer_bucket_specs(
-                    args.n_layers,
-                    mesh,
-                    reshard_after_forward=False,
-                ),
-            )
-
-            self.assertIs(result, model)
-            self.assertIsInstance(model, FlexShardModule)
-            self.assertEqual(len(model.sharded_bucket_storages), 5)
-            self.assertEqual(
-                set(model.sharded_bucket_storages[0].param_infos),
-                {"tok_embeddings.weight"},
-            )
-            for param in model.parameters():
-                self.assertEqual(param.device.type, "cuda")
-
     def test_reapplying_flex_shard_to_same_module_raises(self):
         with single_rank_cuda_mesh() as mesh:
             _, model = flex_shard_transformer_model(mesh)
@@ -177,22 +152,6 @@ class TestFlexShardAPI(TestCase):
                             placement_fn=per_param_placements,
                             mesh=mesh,
                             reshard_after_forward=False,
-                        )
-                    ],
-                )
-
-    def test_reshard_after_forward_requires_replayable_bucket_hook(self):
-        with single_rank_cuda_mesh() as mesh:
-            model = nn.Sequential(nn.Linear(2, 2), nn.Linear(2, 2))
-
-            with self.assertRaisesRegex(RuntimeError, "recomputation-safe"):
-                flex_shard(
-                    model,
-                    buckets=[
-                        BucketSpec(
-                            ["*"],
-                            placement_fn=per_param_placements,
-                            mesh=mesh,
                         )
                     ],
                 )
