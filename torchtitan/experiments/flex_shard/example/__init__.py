@@ -19,7 +19,6 @@ from .owned import (
     GroupedOwnedSegmentSpec,
     make_grouped_owned_expert_block_placement_fn,
     make_grouped_owned_expert_block_segments,
-    make_grouped_owned_placement_fn,
 )
 from .ragged_shard import (
     GroupedRaggedShard,
@@ -43,7 +42,6 @@ __all__ = [
     "make_fp8_two_orientation_grouped_ragged_placement_fn",
     "make_grouped_owned_expert_block_placement_fn",
     "make_grouped_owned_expert_block_segments",
-    "make_grouped_owned_placement_fn",
     "make_grouped_ragged_placement_fn",
     "make_ragged_placement_fn",
     "make_shard_placement_fn",
