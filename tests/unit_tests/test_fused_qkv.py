@@ -95,6 +95,36 @@ class TestFusedQKVCheckpointInterop(unittest.TestCase):
         self.assertTrue(torch.equal(wqkv_b[:, _HPK].reshape(-1), stock.wk.bias))
         self.assertTrue(torch.equal(wqkv_b[:, _HPK + 1].reshape(-1), stock.wv.bias))
 
+    def test_hf_adapter_roundtrip(self):
+        """HF adapter works with FusedQKVLinear's hook-produced wq/wk/wv keys."""
+        from torchtitan.models.llama3 import llama3_configs
+        from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
+        from torchtitan.models.qwen3 import qwen3_configs
+        from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
+
+        for config_name, configs, adapter_cls in (
+            ("llama3", llama3_configs, Llama3StateDictAdapter),
+            ("qwen3", qwen3_configs, Qwen3StateDictAdapter),
+        ):
+            with self.subTest(model=config_name):
+                model_config = configs["debugmodel_fused_qkv"](attn_backend="flex")
+                model = model_config.build()
+                model.eval()
+
+                sd_original = model.state_dict()
+                adapter = adapter_cls(model_config, hf_assets_path=None)
+
+                hf_sd = adapter.to_hf(sd_original)
+                sd_restored = adapter.from_hf(hf_sd)
+
+                model2 = model_config.build()
+                model2.load_state_dict(sd_restored)
+
+                sd_after = model2.state_dict()
+                self.assertEqual(set(sd_original.keys()), set(sd_after.keys()))
+                for k in sd_original:
+                    self.assertTrue(torch.equal(sd_original[k], sd_after[k]), k)
+
 
 if __name__ == "__main__":
     unittest.main()
