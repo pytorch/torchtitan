@@ -196,13 +196,14 @@ class GptOssGroupedExperts(Module):
         topk_expert_ids_BLK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
         *,
-        num_local_tokens_after_seq_dim_padding: int,
+        num_local_tokens_for_combine: int,
+        global_seq_len_for_combine: int | None = None,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add."""
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
         T = B * L
-        local_seq_len_after_padding = num_local_tokens_after_seq_dim_padding // B
+        local_seq_len_for_combine = num_local_tokens_for_combine // B
         x_TD = x_BLD.view(T, D)
         topk_scores_TK = topk_scores_BLK.view(T, K)
         topk_expert_ids_TK = topk_expert_ids_BLK.view(T, K)
@@ -225,8 +226,14 @@ class GptOssGroupedExperts(Module):
             routed_output_RD,
             metadata,
             x_TD,
-            num_local_tokens_after_padding=num_local_tokens_after_seq_dim_padding,
-            local_seq_len_after_padding=local_seq_len_after_padding,
+            num_local_tokens_for_combine=num_local_tokens_for_combine,
+            local_seq_len_for_combine=local_seq_len_for_combine,
+            global_seq_len_for_combine=global_seq_len_for_combine,
+            num_global_tokens_for_combine=(
+                B * global_seq_len_for_combine
+                if global_seq_len_for_combine is not None
+                else None
+            ),
         )
         # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
         # won't cause _StridedShard in the downstream view (e.g., CP is used).
