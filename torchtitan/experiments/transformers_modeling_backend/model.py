@@ -87,30 +87,20 @@ def _flex_torchtitan_attention_forward(
     scaling = kwargs.get("scaling")
     block_mask = attention_mask if isinstance(attention_mask, BlockMask) else None
 
-    flex_module = getattr(module, "_flex_kernel", None)
-    if flex_module is not None:
-        # HF layout (B, N, L, H) -> native layout (B, L, N, H)
-        q_BLNH = query_BNLH.transpose(1, 2)
-        k_BLNH = key_BNLH.transpose(1, 2)
-        v_BLNH = value_BNLH.transpose(1, 2)
-        out_BLNH = flex_module(
-            q_BLNH, k_BLNH, v_BLNH, attention_masks=block_mask, scale=scaling
-        )
-        # Native layout (B, L, N, H) -> HF layout (B, N, L, H)
-        return out_BLNH.transpose(1, 2), None
+    # This forward is only registered as the "flex_torchtitan" attention impl,
+    # and HFTransformerModel attaches a _flex_kernel to every self_attn when that
+    # impl is selected, so the kernel module is always present here.
+    flex_module = module._flex_kernel
 
-    # Fallback: call flex_attention directly (no CP support)
-    from torch.nn.attention.flex_attention import flex_attention
-
-    out_BNLH = flex_attention(
-        query_BNLH,
-        key_BNLH,
-        value_BNLH,
-        block_mask=block_mask,
-        scale=scaling,
-        enable_gqa=True,
+    # HF layout (B, N, L, H) -> native layout (B, L, N, H)
+    q_BLNH = query_BNLH.transpose(1, 2)
+    k_BLNH = key_BNLH.transpose(1, 2)
+    v_BLNH = value_BNLH.transpose(1, 2)
+    out_BLNH = flex_module(
+        q_BLNH, k_BLNH, v_BLNH, attention_masks=block_mask, scale=scaling
     )
-    return out_BNLH, None
+    # Native layout (B, L, N, H) -> HF layout (B, N, L, H)
+    return out_BLNH.transpose(1, 2), None
 
 
 class SliceableModuleDict(ModuleDict):
