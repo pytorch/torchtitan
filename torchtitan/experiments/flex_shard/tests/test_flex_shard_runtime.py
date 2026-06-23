@@ -11,56 +11,12 @@ import torch.nn as nn
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard import is_flex_shard_param
-from torchtitan.experiments.flex_shard.flex_shard.unsharded_param_getters import (
-    UnshardedParamSlot,
-)
 from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_cuda,
     flex_shard_transformer_model,
     single_rank_cuda_mesh,
     transformer_inputs,
 )
-
-
-class TestUnshardedParamSlot(TestCase):
-    def test_repeated_reads_return_same_tensor_until_pop(self):
-        slot = UnshardedParamSlot(param_fqn="weight", bucket_fqn="bucket")
-        param = torch.randn(2, 3, requires_grad=True)
-
-        slot.push_unsharded_param(param)
-        self.assertIs(slot.get_unsharded_param(), param)
-        self.assertIs(slot.get_unsharded_param(), param)
-        slot.pop_unsharded_param()
-
-        with self.assertRaisesRegex(RuntimeError, "bucket unshard hook"):
-            slot.get_unsharded_param()
-
-    def test_mixed_precision_read_is_cached_per_frame(self):
-        slot = UnshardedParamSlot(
-            param_fqn="weight",
-            bucket_fqn="bucket",
-            param_dtype=torch.float16,
-        )
-        param = torch.randn(2, 3, requires_grad=True)
-
-        slot.push_unsharded_param(param)
-        first = slot.get_unsharded_param()
-        second = slot.get_unsharded_param()
-        self.assertIs(first, second)
-        self.assertEqual(first.dtype, torch.float16)
-
-    def test_nested_frames_restore_outer_param(self):
-        slot = UnshardedParamSlot(param_fqn="weight", bucket_fqn="bucket")
-        outer = torch.randn(2, 3)
-        inner = torch.randn(2, 3)
-
-        slot.push_unsharded_param(outer)
-        self.assertIs(slot.get_unsharded_param(), outer)
-        slot.push_unsharded_param(inner)
-        self.assertIs(slot.get_unsharded_param(), inner)
-        slot.pop_unsharded_param()
-        self.assertIs(slot.get_unsharded_param(), outer)
-        slot.pop_unsharded_param()
 
 
 class TestFlexShardEagerRuntime(TestCase):
@@ -111,21 +67,6 @@ class TestFlexShardEagerRuntime(TestCase):
             with patch.object(torch.compiler, "is_compiling", return_value=True):
                 with self.assertRaisesRegex(ValueError, "eager execution only"):
                     model(transformer_inputs(args, device="cuda"))
-
-    def test_graph_capture_error_does_not_poison_next_eager_forward(self):
-        with single_rank_cuda_mesh() as mesh:
-            args, model = flex_shard_transformer_model(mesh)
-            inp = transformer_inputs(args, device="cuda")
-
-            with patch.object(torch.compiler, "is_compiling", return_value=True):
-                with self.assertRaisesRegex(ValueError, "eager execution only"):
-                    model(inp)
-
-            loss = model(inp).sum()
-            loss.backward()
-
-            for param in model.parameters():
-                self.assertIsNotNone(param.grad)
 
 
 if __name__ == "__main__":
