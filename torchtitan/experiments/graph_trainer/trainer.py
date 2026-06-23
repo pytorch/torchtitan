@@ -35,6 +35,7 @@ from torchtitan.experiments.graph_trainer.registry import (
     PASS_PIPELINE_REGISTRY,
     POST_INIT_HOOKS,
     PRE_TRAIN_STEP_HOOKS,
+    TRACE_CALL_INPUT_PREPARERS,
     TRACE_INPUT_PREPARERS,
 )
 from torchtitan.tools.logging import logger
@@ -235,6 +236,7 @@ class GraphTrainer(Trainer):
                         fwd_bwd_fn,
                         module=model,
                         prepare_inputs=self._prepare_trace_inputs,
+                        prepare_call_inputs=self._prepare_trace_call_inputs,
                     )(
                         inputs,
                         labels,
@@ -283,6 +285,19 @@ class GraphTrainer(Trainer):
             prepare = TRACE_INPUT_PREPARERS.get(pass_name)
             if prepare is not None:
                 prepare(self.config.compile, args, kwargs)
+
+    def _prepare_trace_call_inputs(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        for pass_name in trace_input_preparer_keys(self.config.compile):
+            prepare = TRACE_CALL_INPUT_PREPARERS.get(pass_name)
+            if prepare is not None:
+                prepared = prepare(self.config.compile, args, kwargs)
+                if prepared is not None:
+                    args, kwargs = prepared
+        return args, kwargs
 
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]

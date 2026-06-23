@@ -91,7 +91,7 @@ real expert-parallel collectives. Enable it only with `aot_fx_trace` and
 `expert_parallel_degree > 1`:
 
 ```bash
-NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel_ep \
+NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel \
     ./run_train.sh \
     --compile.mode aot_fx_trace \
     --compile.ep_overlap.enabled \
@@ -147,7 +147,7 @@ MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_debugmodel ./run_train.s
 DeepSeek V3 debug model:
 
 ```bash
-MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel_ep ./run_train.sh \
+MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel ./run_train.sh \
   --compile.mode aot_fx_trace \
   --compile.enable_autoparallel \
   --parallelism.data_parallel_shard_degree 4 \

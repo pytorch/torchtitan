@@ -66,6 +66,7 @@ def build_decoder_config_for_backend(
 
 
 _MODULE_FQN = "module_fqn"
+_EP_TOKEN_EXCHANGE = "EP_token_exchange"
 _NOT_IN_LAYERS = -1
 
 

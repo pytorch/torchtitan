@@ -53,7 +53,13 @@ class EpOverlapConfig:
     """
 
     disable_early_grad_accumulation: bool = False
-    """Disable the scheduler optimization that accumulates chunk gradients early."""
+    """Disable graph chunking's early parameter-gradient accumulation.
+
+    Early accumulation is the performant default: graph chunking materializes
+    parameter-gradient live-outs before distributed grad cast/communication
+    when legal. This flag preserves eager chunking's cast/reduction order for
+    strict bitwise tests.
+    """
 
 
 @dataclass(kw_only=True, slots=True)

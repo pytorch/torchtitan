@@ -26,12 +26,6 @@ def graph_trainer_deepseek_v3_debugmodel() -> GraphTrainer.Config:
     return config
 
 
-def graph_trainer_deepseek_v3_debugmodel_ep() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(deepseek_v3_debugmodel(), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
-    return config
-
-
 def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_debugmodel(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
@@ -50,14 +44,6 @@ def graph_trainer_deepseek_v3_debugmodel_minimal_async_ep() -> GraphTrainer.Conf
     )
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
-
-
-def graph_trainer_deepseek_v3_debugmodel_flex_attn() -> GraphTrainer.Config:
-    return graph_trainer_deepseek_v3_debugmodel()
-
-
-def graph_trainer_deepseek_v3_debugmodel_flex_attn_ep() -> GraphTrainer.Config:
-    return graph_trainer_deepseek_v3_debugmodel_ep()
 
 
 def graph_trainer_deepseek_v3_16b() -> GraphTrainer.Config:
