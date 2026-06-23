@@ -266,14 +266,10 @@ class TestFp8AllGather(FSDPTest):
 
     @skip_if_lt_x_gpu(2)
     def test_fp8_allgather_composes_with_reshard_after_forward(self) -> None:
-        # reshard_after_forward=True must (a) checkpoint-wrap the bucket's
-        # execution-unit module and (b) leave the fp8 unshard bit-identical. The fp8
-        # all-gather uses c10d.allgather_, which the reshard policy already tags
-        # MUST_RECOMPUTE, so the gathered fp8 is freed after forward and
-        # re-quantized + re-gathered in backward. (Full forward/backward recompute
-        # needs an fp8-aware consumer -- the plan's Phase 4/5.)
-        from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-            CheckpointWrapper,
+        # reshard_after_forward=True must install RAF saved-tensor hooks on the
+        # bucket's execution-unit module and leave the fp8 unshard bit-identical.
+        from torchtitan.experiments.flex_shard.flex_shard.reshard_after_forward import (
+            _RAF_SAVED_TENSOR_HOOKS_INSTALLED_ATTR,
         )
 
         block = 4
@@ -296,11 +292,14 @@ class TestFp8AllGather(FSDPTest):
             ],
         )
 
-        # The bucket's execution-unit module is wrapped for reshard-after-forward.
-        self.assertIsInstance(model.mlp, CheckpointWrapper)
+        # RAF-only wrapping uses saved-tensor hooks. Existing AC wrappers are
+        # composed separately by the core RAF path.
+        self.assertTrue(
+            getattr(model.mlp, _RAF_SAVED_TENSOR_HOOKS_INSTALLED_ATTR, False)
+        )
 
         # The fp8 unshard is unaffected by reshard wrapping: drive it via the bucket
-        # storage (FQN-stable across the checkpoint wrapper) and compare bit-for-bit.
+        # storage and compare bit-for-bit.
         storage = model.sharded_bucket_storages[0]
         infos = list(storage.param_infos.values())
         placement = infos[0].placement
