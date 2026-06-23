@@ -239,7 +239,6 @@ def rl_grpo_gpt_oss_20b_varlen() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -295,7 +294,6 @@ def rl_grpo_gpt_oss_debug_varlen() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             loss=GRPOLoss.Config(),
@@ -345,7 +343,6 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> RLTrainer.Config:
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 enable_sequence_parallel=False,
-                disable_loss_parallel=True,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             debug=batch_invariant_config,
