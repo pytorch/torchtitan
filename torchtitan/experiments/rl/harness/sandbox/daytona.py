@@ -33,6 +33,33 @@ logger = logging.getLogger(__name__)
 HARNESS_LABELS = {"owner": "titan_swe_r2e"}
 
 
+# Process-wide AsyncDaytona client, shared by every sandbox in this worker: one
+# client = one pooled TLS session reused across all concurrent rollouts. A
+# per-sandbox client instead opens its own pool, and the handshake storm under a
+# many-way boot fanout over a high-latency link times out the exec requests.
+_SHARED_CLIENT = None
+_SHARED_CLIENT_LOCK = None
+
+
+async def _get_shared_client(*, api_key: str | None, api_url, target):
+    global _SHARED_CLIENT, _SHARED_CLIENT_LOCK
+    import asyncio
+
+    from daytona import AsyncDaytona, DaytonaConfig  # type: ignore
+
+    if not api_key:
+        raise RuntimeError(
+            "DAYTONA_API_KEY is not set; required for the daytona sandbox backend."
+        )
+    if _SHARED_CLIENT_LOCK is None:
+        _SHARED_CLIENT_LOCK = asyncio.Lock()
+    async with _SHARED_CLIENT_LOCK:
+        if _SHARED_CLIENT is None:
+            cfg = DaytonaConfig(api_key=api_key, api_url=api_url, target=target)
+            _SHARED_CLIENT = AsyncDaytona(cfg)
+    return _SHARED_CLIENT
+
+
 class DaytonaSandbox:
     """Async sandbox over a Daytona cloud sandbox (https://daytona.io).
 
@@ -68,24 +95,13 @@ class DaytonaSandbox:
         return self._sb
 
     async def __aenter__(self) -> DaytonaSandbox:
-        from daytona import (  # type: ignore
-            AsyncDaytona,
-            CreateSandboxFromImageParams,
-            DaytonaConfig,
-            Resources,
-        )
+        from daytona import CreateSandboxFromImageParams, Resources  # type: ignore
 
-        api_key = _getenv(*self.api_key_env)
-        if not api_key:
-            raise RuntimeError(
-                "DAYTONA_API_KEY is not set; required for the daytona sandbox backend."
-            )
-        cfg = DaytonaConfig(
-            api_key=api_key,
+        self._client = await _get_shared_client(
+            api_key=_getenv(*self.api_key_env),
             api_url=_getenv(*self.api_url_env) or None,
             target=_getenv(*self.target_env) or None,
         )
-        self._client = AsyncDaytona(cfg)
         cpu = int(_getenv("TT_DAYTONA_CPU", "SLIME_AGENT_DAYTONA_CPU", default="2"))
         mem = int(
             _getenv("TT_DAYTONA_MEM_GB", "SLIME_AGENT_DAYTONA_MEM_GB", default="4")
@@ -119,17 +135,13 @@ class DaytonaSandbox:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
+        # Delete only this sandbox; never close the process-wide shared client --
+        # other concurrent rollouts are still using its pooled connections.
         try:
             if self._sb is not None:
                 await self._client.delete(self._sb)
         except Exception as e:
             logger.warning("daytona delete %s failed: %s", self.sandbox_id[:8], e)
-        finally:
-            try:
-                if self._client is not None:
-                    await self._client.close()
-            except Exception:
-                pass
 
     async def exec(
         self,
