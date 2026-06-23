@@ -82,7 +82,7 @@ class Rollouter(Configurable):
         """The env to build per sample; `make_env_group` calls `build(env_input=sample)`."""
 
         token_env: TokenEnv.Config = field(default_factory=TokenEnv.Config)
-        """`TokenEnv` limits (e.g. `rollout_max_context_len`) passed to `make_env_group`."""
+        """`TokenEnv` wraps the `MessageEnv` in `make_env_group`."""
 
         advantage: Configurable.Config = field(
             default_factory=AdvantageEstimator.Config
@@ -281,11 +281,11 @@ class Rollouter(Configurable):
                         prompt_messages=env_step.next_prompt_messages or [],
                         completion_token_ids=completion.token_ids,
                         completion_logprobs=completion.token_logprobs,
-                        version_intervals=completion.version_intervals,
                         completion_message=next_env_step.completion_message,
                         env_messages=next_env_step.env_messages,
                         env_rewards=next_env_step.env_rewards,
-                        policy_version=completion.policy_version,
+                        min_policy_version=completion.min_policy_version,
+                        max_policy_version=completion.max_policy_version,
                         metrics=completion.metrics,
                     )
                 )

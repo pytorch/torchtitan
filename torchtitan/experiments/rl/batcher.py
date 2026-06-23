@@ -4,13 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Collects trainable `Episode`s until a rollout-count training batch is ready, then packs it.
+"""Collects trainable `TrainingSample`s until a rollout-group-count training batch is ready, then packs it.
 
-`EpisodeBatcher` accumulates `EpisodeBuilderOutput`s. When enough fresh rollouts have accumulated, it drops
-stale groups against the LIVE trainer version and packs a `PackedTrainingBatch` of `[num_microbatches][dp_degree]`
-microbatches; surplus episodes carry to the next batch. The tensor packing (next-fit rows, the loss-target
-`[:-1]/[1:]` split, per-sample padding, collation) is the same as before; only the step trigger changed
-(token-ready fixed grid -> rollout-count variable grid). Tensor packing is meant to run under `asyncio.to_thread`.
+`Batcher` accumulates `TrainingSampleBuilderOutput`s. When enough fresh rollouts groups have accumulated, it drops
+stale groups against the LIVE trainer version and packs a `TrainingBatch` of `[num_microbatches][dp_degree]`
+`TrainingMicrobatch`es; surplus training samples carry to the next batch.
+
+TODO: move this module to components/
 """
 
 import logging
@@ -21,9 +21,11 @@ from dataclasses import dataclass, field
 import torch
 
 from torchtitan.config import Configurable
-from torchtitan.experiments.rl.controller.episode_builder import EpisodeBuilderOutput
+from torchtitan.experiments.rl.components.training_sample_builder import (
+    TrainingSampleBuilderOutput,
+)
 from torchtitan.experiments.rl.observability import metrics as m
-from torchtitan.experiments.rl.types import Episode, TrainingBatch
+from torchtitan.experiments.rl.types import TrainingMicrobatch, TrainingSample
 
 logger = logging.getLogger(__name__)
 
@@ -44,20 +46,6 @@ _DTYPES: dict[str, torch.dtype] = {
 }
 
 
-def oldest_sampled_version(episode: Episode) -> int:
-    """The oldest policy version the episode's tokens were sampled at (conservative staleness).
-
-    Reads the min over `version_intervals` so a packed multi-turn episode is as stale as its oldest turn;
-    falls back to `policy_version` when intervals are absent.
-
-    Example:
-        oldest_sampled_version(Episode(version_intervals=[(0, 5), (40, 6)], ...))  # -> 5
-    """
-    if not episode.version_intervals:
-        return episode.policy_version
-    return min(version for _start, version in episode.version_intervals)
-
-
 @dataclass(kw_only=True, slots=True)
 class BatchConfig:
     """Batch shape parameters for the RL batcher.
@@ -74,25 +62,28 @@ class BatchConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class PackedTrainingBatch:
+class TrainingBatch:
     """Packed microbatches for one optimizer step.
 
     Example:
-        # local_batch_size=2, dp_degree=1, three 5-token episodes, seq_len=10
+        # local_batch_size=2, dp_degree=1, three 5-token training_samples, seq_len=10
         # -> microbatches [[row[e5,e5]], [row[e5]]], num_global_valid_tokens = trained-token count
     """
 
-    microbatches: list[list[TrainingBatch]]  # [num_microbatches][dp_degree]
+    microbatches: list[list[TrainingMicrobatch]]  # [num_microbatches][dp_degree]
     num_global_valid_tokens: int
     metrics: list[m.Metric]
+    oldest_sampled_versions: list[
+        int
+    ]  # one per packed training_sample; trainer computes policy_age at consume time
 
 
-class EpisodeBatcher(Configurable):
-    """Accumulate episode groups, drop stale ones at flush, and pack rollout-count training batches.
+class Batcher(Configurable):
+    """Accumulate training_sample groups, drop stale ones at flush, and pack rollout-count training batches.
 
-    Example (target = 2 rollouts):
-        batcher.add_episode_group(episode_builder_output=EpisodeBuilderOutput([e_a], []))  # 1 rollout  -> []
-        batcher.add_episode_group(episode_builder_output=EpisodeBuilderOutput([e_b], []))  # 2 rollouts -> [batch]
+    Example (target = 2 rollouts; g1, g2 are TrainingSampleBuilderOutputs of one rollout each):
+        batcher.add_training_sample_group(training_sample_builder_output=g1)  # -> None (1 < target)
+        batcher.add_training_sample_group(training_sample_builder_output=g2)  # -> TrainingBatch (2 == target)
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -104,15 +95,15 @@ class EpisodeBatcher(Configurable):
         so that block boundaries align regardless of batch composition."""
 
         drop_rollout_group_if_any_stale: bool = False
-        """At flush, drop the whole group if ANY episode is stale (keeps GRPO groups intact), instead of dropping
-        stale episodes individually. No effect when `max_offpolicy_steps` is None."""
+        """When a group has any too-off-policy training_sample at flush: drop the WHOLE group (True,
+        keeps the GRPO group intact) or only the stale training_samples (False)."""
 
     def __init__(
         self,
         config: Config,
         *,
         target_rollouts_per_training_batch: int,
-        max_offpolicy_steps: int | None,
+        max_offpolicy_steps: int,
         trainer_policy_version: Callable[[], int],
         dp_degree: int,
         pad_id: int,
@@ -126,119 +117,135 @@ class EpisodeBatcher(Configurable):
         self._max_offpolicy_steps = max_offpolicy_steps
         self._trainer_policy_version = trainer_policy_version  # read live at flush
         self._dp_degree = dp_degree
-        self._episode_groups_for_next_training_batch: list[EpisodeBuilderOutput] = []
-        self._num_stale_episodes_dropped_since_pack = 0
+        self._groups_for_next_batch: list[TrainingSampleBuilderOutput] = []
+        self._num_stale_training_samples_dropped_since_pack = 0
 
-    def add_episode_group(
-        self, *, episode_builder_output: EpisodeBuilderOutput
-    ) -> list[PackedTrainingBatch]:
-        """Add one group's episodes; return every training batch that is now ready (0, 1, or more)."""
-        self._episode_groups_for_next_training_batch.append(episode_builder_output)
-        return self._pack_ready_training_batches()
+    def add_training_sample_group(
+        self, *, training_sample_builder_output: TrainingSampleBuilderOutput
+    ) -> TrainingBatch | None:
+        """Add one group's training_samples to the batcher;
 
-    def flush_remaining(self) -> PackedTrainingBatch | None:
+        Return a single training batch iff a full one is now ready, else None.
+        """
+        self._groups_for_next_batch.append(training_sample_builder_output)
+        trainer_version = self._trainer_policy_version()
+        self._drop_stale_groups(trainer_version)
+        has_full_batch = self._num_fresh_rollouts() >= self._target
+        if not has_full_batch:
+            return None  # accumulate until one full batch is ready
+        return self._pack_one_training_batch(trainer_version)
+
+    def flush_remaining(self) -> TrainingBatch | None:
         """Pack whatever is left at clean close (may be under target)."""
         self._drop_stale_groups(self._trainer_policy_version())
         if not self._num_fresh_rollouts():
             return None
         return self._pack_one_training_batch(self._trainer_policy_version())
 
-    def _pack_ready_training_batches(self) -> list[PackedTrainingBatch]:
-        packed_training_batches: list[PackedTrainingBatch] = []
-        while True:
-            version = self._trainer_policy_version()  # LIVE; no +1 (see TODO)
-            self._drop_stale_groups(version)
-            if self._num_fresh_rollouts() < self._target:
-                return packed_training_batches  # not enough yet; surplus carries over
-            # TODO(async-rl): staleness is filtered HERE, but the batch trains a bit later -- the trainer can
-            # advance during the off-thread pack (the "pack-window" race) and while the batch waits in the
-            # size-1 packed_training_batch_queue -- so the effective bound is ~max_offpolicy_steps + 1. Both are
-            # the same post-filter race. Investigate accounting for it (filter against trainer_policy_version +
-            # queue_depth, or re-validate after the pack) vs the exact trainer-pull on-policy mode. Left out for
-            # now to match the simpler ex-post drop other libraries use.
-            packed_training_batches.append(self._pack_one_training_batch(version))
-
     # --- staleness (the only staleness site; against the live trainer version) ---
 
+    # This drop is still needed with the strict-FIFO buffer: failed / zero-std / truncated groups make
+    # "groups in the buffer == train steps" inexact, so a training_sample can exceed max_offpolicy_steps
+    # even though the buffer never skipped one.
+    # TODO(async-rl): make off-policy handling pluggable (drop vs mask vs reweight) behind a manager seam.
     def _drop_stale_groups(self, version: int) -> None:
-        """Drop stale episodes (or whole stale groups) from the accumulator, against `version`."""
-        if self._max_offpolicy_steps is None:
-            return
-        survivors: list[EpisodeBuilderOutput] = []
-        for group in self._episode_groups_for_next_training_batch:
+        """Drop training_samples (or whole groups) too far off-policy from the accumulator, against `version`."""
+        survivors: list[TrainingSampleBuilderOutput] = []
+        for group in self._groups_for_next_batch:
             if (
-                not group.episodes
+                not group.training_samples
             ):  # metrics-only (failed / filtered) group: keep so its metrics ride out
                 survivors.append(group)
                 continue
             fresh = [
-                episode
-                for episode in group.episodes
-                if version - oldest_sampled_version(episode)
+                training_sample
+                for training_sample in group.training_samples
+                if version
+                - training_sample.min_policy_version  # min = the oldest version
                 <= self._max_offpolicy_steps
             ]
-            num_dropped = len(group.episodes) - len(fresh)
+            num_dropped = len(group.training_samples) - len(fresh)
             if self._drop_group_if_any_stale and num_dropped:
-                self._num_stale_episodes_dropped_since_pack += len(group.episodes)
+                self._num_stale_training_samples_dropped_since_pack += len(
+                    group.training_samples
+                )
                 survivors.append(
-                    EpisodeBuilderOutput(episodes=[], metrics=group.metrics)
+                    TrainingSampleBuilderOutput(
+                        training_samples=[], metrics=group.metrics
+                    )
                 )
             else:
-                self._num_stale_episodes_dropped_since_pack += num_dropped
+                self._num_stale_training_samples_dropped_since_pack += num_dropped
                 survivors.append(
-                    EpisodeBuilderOutput(episodes=fresh, metrics=group.metrics)
+                    TrainingSampleBuilderOutput(
+                        training_samples=fresh, metrics=group.metrics
+                    )
                 )
-        self._episode_groups_for_next_training_batch = survivors
+        self._groups_for_next_batch = survivors
 
     def _num_fresh_rollouts(self) -> int:
-        """Distinct rollouts (siblings) with at least one surviving episode (a rollout may branch into >1)."""
+        """Distinct rollouts (siblings) with at least one surviving training_sample (a rollout may branch into >1)."""
         return len(
             {
-                (episode.rollout_id.group_id, episode.rollout_id.rollout_id)
-                for group in self._episode_groups_for_next_training_batch
-                for episode in group.episodes
+                (
+                    training_sample.rollout_id.group_id,
+                    training_sample.rollout_id.rollout_id,
+                )
+                for group in self._groups_for_next_batch
+                for training_sample in group.training_samples
             }
         )
 
     # --- batch formation (count-triggered) + packing ---
 
-    def _pack_one_training_batch(self, version: int) -> PackedTrainingBatch:
-        """Take groups (oldest first) until `target` rollouts are reached, pack them, carry the remainder."""
-        taken_episodes: list[Episode] = []
-        taken_metrics: list[m.Metric] = []
-        taken_rollouts: set[tuple[str, int]] = set()
-        remaining = list(self._episode_groups_for_next_training_batch)
-        while remaining and len(taken_rollouts) < self._target:
-            group = remaining.pop(0)
-            taken_episodes.extend(group.episodes)
-            taken_metrics.extend(group.metrics)
-            taken_rollouts.update(
-                (episode.rollout_id.group_id, episode.rollout_id.rollout_id)
-                for episode in group.episodes
-            )
-        self._episode_groups_for_next_training_batch = remaining  # surplus carried over
-
-        # All taken episodes form this batch (next-fit into rows; max_rows is non-binding here).
-        rows = self._pack_episodes_into_rows(
-            taken_episodes, max_rows=len(taken_episodes)
-        )
-        packed_rows = [self._pack_episode_row(row) for row in rows]
-        return PackedTrainingBatch(
+    def _pack_one_training_batch(self, version: int) -> TrainingBatch:
+        """Pack the oldest accumulated groups (up to `target` rollouts) into one training batch."""
+        training_samples, metrics, rollouts = self._take_groups_up_to_target()
+        # Next-fit all taken training_samples into rows.
+        rows = self._pack_training_samples_into_rows(training_samples)
+        packed_rows = [self._pack_training_sample_row(row) for row in rows]
+        return TrainingBatch(
             microbatches=self._build_microbatch_grid(packed_rows),
             num_global_valid_tokens=sum(
                 int(row["loss_mask"].sum().item()) for row in packed_rows
             ),
             metrics=[
-                *taken_metrics,
-                *self._packing_metrics(
-                    packed_rows, taken_episodes, taken_rollouts, version
-                ),
+                *metrics,
+                *self._packing_metrics(packed_rows, training_samples, rollouts),
+            ],
+            # Trainer computes policy_age from these at consume time (faithful to what it trains on).
+            # min_policy_version is the oldest version this training_sample was sampled under.
+            oldest_sampled_versions=[
+                training_sample.min_policy_version
+                for training_sample in training_samples
             ],
         )
 
+    def _take_groups_up_to_target(
+        self,
+    ) -> tuple[list[TrainingSample], list[m.Metric], set[tuple[str, int]]]:
+        """Pop accumulated groups oldest-first until `target` rollouts are reached; carry the rest over."""
+        taken_training_samples: list[TrainingSample] = []
+        taken_metrics: list[m.Metric] = []
+        taken_rollouts: set[tuple[str, int]] = set()
+        remaining = list(self._groups_for_next_batch)
+        while remaining and len(taken_rollouts) < self._target:
+            group = remaining.pop(0)
+            taken_training_samples.extend(group.training_samples)
+            taken_metrics.extend(group.metrics)
+            taken_rollouts.update(
+                (
+                    training_sample.rollout_id.group_id,
+                    training_sample.rollout_id.rollout_id,
+                )
+                for training_sample in group.training_samples
+            )
+        self._groups_for_next_batch = remaining  # surplus carried over
+        return taken_training_samples, taken_metrics, taken_rollouts
+
     def _build_microbatch_grid(
         self, packed_rows: list[dict]
-    ) -> list[list[TrainingBatch]]:
+    ) -> list[list[TrainingMicrobatch]]:
         """Build `[num_microbatches][dp_degree]` from however many rows packing produced (variable count).
 
         Example:
@@ -247,10 +254,10 @@ class EpisodeBatcher(Configurable):
         rows_per_microbatch = self.local_batch_size * self._dp_degree
         num_microbatches = max(1, math.ceil(len(packed_rows) / rows_per_microbatch))
         while len(packed_rows) < num_microbatches * rows_per_microbatch:
-            packed_rows.append(self._pack_episode_row([]))  # pad-only row
-        grid: list[list[TrainingBatch]] = []
+            packed_rows.append(self._pack_training_sample_row([]))  # pad-only row
+        grid: list[list[TrainingMicrobatch]] = []
         for microbatch in range(num_microbatches):
-            ranks: list[TrainingBatch] = []
+            ranks: list[TrainingMicrobatch] = []
             for rank in range(self._dp_degree):
                 start = (microbatch * self._dp_degree + rank) * self.local_batch_size
                 ranks.append(
@@ -259,8 +266,8 @@ class EpisodeBatcher(Configurable):
             grid.append(ranks)
         return grid
 
-    def num_packed_tokens(self, episode: Episode) -> int:
-        """Tokens this episode contributes to a packed row.
+    def num_packed_tokens(self, training_sample: TrainingSample) -> int:
+        """Tokens this training_sample contributes to a packed row.
 
         The loss-target split drops the last token (``input_ids = raw[:-1]``), and batch-invariant
         mode rounds the length up to ``per_sample_pad_multiple``.
@@ -270,48 +277,44 @@ class EpisodeBatcher(Configurable):
             # token_ids of length 6, per_sample_pad_multiple=None  -> 5
             # token_ids of length 6, per_sample_pad_multiple=8      -> 8
         """
-        length = len(episode.token_ids) - 1
+        length = len(training_sample.token_ids) - 1
         if self._per_sample_pad_multiple:
             align = self._per_sample_pad_multiple
             length = ((length + align - 1) // align) * align
         return length
 
-    def _pack_episodes_into_rows(
-        self, episodes: list[Episode], *, max_rows: int
-    ) -> list[list[Episode]]:
-        """Next-fit episodes into rows of <= ``seq_len`` tokens, up to ``max_rows`` rows.
-
-        Surplus beyond ``max_rows`` is left for the next batch.
+    def _pack_training_samples_into_rows(
+        self, training_samples: list[TrainingSample]
+    ) -> list[list[TrainingSample]]:
+        """Next-fit training_samples into rows of <= ``seq_len`` tokens (the caller already capped the count).
 
         Example:
 
-            # seq_len=10, episode effective lengths [5, 5, 5], max_rows=2
-            _pack_episodes_into_rows([e5, e5, e5], max_rows=2)  # -> [[e5, e5], [e5]]
+            # seq_len=10, training_sample effective lengths [5, 5, 5]
+            _pack_training_samples_into_rows([e5, e5, e5])  # -> [[e5, e5], [e5]]
         """
-        rows: list[list[Episode]] = []
-        current_row: list[Episode] = []
+        # TODO(async-rl): packing is greedy next-fit; the seam for alternative algorithms (e.g. best-fit,
+        # each training_sample scanning earlier rows' remaining slots) lives here.
+        rows: list[list[TrainingSample]] = []
+        current_row: list[TrainingSample] = []
         current_len = 0
-        for episode in episodes:
-            length = self.num_packed_tokens(episode)
+        for training_sample in training_samples:
+            length = self.num_packed_tokens(training_sample)
             if (
                 current_row and current_len + length > self.seq_len
             ):  # doesn't fit -> close the row
                 rows.append(current_row)
-                if (
-                    len(rows) == max_rows
-                ):  # budget full -> leave the rest for the next batch
-                    return rows
                 current_row, current_len = [], 0
-            current_row.append(episode)
+            current_row.append(training_sample)
             current_len += length
-        if current_row and len(rows) < max_rows:
+        if current_row:
             rows.append(current_row)
         return rows
 
-    def _pack_episode_row(self, episodes: list[Episode]) -> dict:
-        """Concatenate one row's episodes into a single ``[1, seq_len]`` padded row.
+    def _pack_training_sample_row(self, training_samples: list[TrainingSample]) -> dict:
+        """Concatenate one row's training_samples into a single ``[1, seq_len]`` padded row.
 
-        Each episode's raw tokens (length N) split into ``input_ids = raw[:-1]`` and
+        Each training_sample's raw tokens (length N) split into ``input_ids = raw[:-1]`` and
         ``labels = raw[1:]`` (length N-1); each sample is padded to ``per_sample_pad_multiple``; then
         the row is padded up to ``seq_len``. ``positions`` restart at 0 per sample; ``seq_lens`` keeps
         the per-sample lengths (for the pad-fraction metric and packed-attention).
@@ -321,13 +324,13 @@ class EpisodeBatcher(Configurable):
         row: dict[str, list] = {key: [] for key in keys}
         positions: list[int] = []
         seq_lens: list[int] = []
-        for episode in episodes:
+        for training_sample in training_samples:
             sample = {
-                "input_ids": episode.token_ids[:-1],
-                "labels": episode.token_ids[1:],
-                "generator_logprobs": episode.logprobs[1:],
-                "loss_mask": episode.loss_mask[1:],
-                "advantages": episode.advantage[1:],
+                "input_ids": training_sample.token_ids[:-1],
+                "labels": training_sample.token_ids[1:],
+                "generator_logprobs": training_sample.logprobs[1:],
+                "loss_mask": training_sample.loss_mask[1:],
+                "advantages": training_sample.advantage[1:],
             }
             sample_len = len(sample["input_ids"])
             if self._per_sample_pad_multiple:
@@ -356,13 +359,13 @@ class EpisodeBatcher(Configurable):
         packed["seq_lens"] = seq_lens
         return packed
 
-    # TODO: accept a collate_fn on EpisodeBatcher.Config (like the pre-trainer's
+    # TODO: accept a collate_fn on Batcher.Config (like the pre-trainer's
     # dataloader) and wire a non-pretraining collate only when a caller actually
     # needs one.
     @staticmethod
-    def collate(rows: list[dict]) -> TrainingBatch:
-        """Concatenate packed rows into a single ``[B, L]`` TrainingBatch."""
-        return TrainingBatch(
+    def collate(rows: list[dict]) -> TrainingMicrobatch:
+        """Concatenate packed rows into a single ``[B, L]`` TrainingMicrobatch."""
+        return TrainingMicrobatch(
             token_ids=torch.cat([row["input_ids"] for row in rows]),
             labels=torch.cat([row["labels"] for row in rows]),
             positions=torch.cat([row["positions"] for row in rows]),
@@ -374,16 +377,14 @@ class EpisodeBatcher(Configurable):
     def _packing_metrics(
         self,
         packed_rows: list[dict],
-        episodes: list[Episode],
+        training_samples: list[TrainingSample],
         rollouts: set[tuple[str, int]],
-        version: int,
     ) -> list[m.Metric]:
-        """Per-training-batch packing, count, and staleness metrics."""
+        """Per-training-batch packing + count metrics. (policy age is logged at trainer consume time.)"""
         total_slots = len(packed_rows) * self.seq_len
         non_padded = sum(sum(row["seq_lens"]) for row in packed_rows)
-        staleness = [version - oldest_sampled_version(episode) for episode in episodes]
-        dropped, self._num_stale_episodes_dropped_since_pack = (
-            self._num_stale_episodes_dropped_since_pack,
+        dropped, self._num_stale_training_samples_dropped_since_pack = (
+            self._num_stale_training_samples_dropped_since_pack,
             0,
         )
         return [
@@ -400,13 +401,12 @@ class EpisodeBatcher(Configurable):
                 ),
             ),
             m.Metric("train_batch/num_rollouts", m.NoReduce(float(len(rollouts)))),
-            m.Metric("train_batch/num_episodes", m.NoReduce(float(len(episodes)))),
-            m.Metric("train_batch/staleness", m.Mean.from_list(staleness)),
             m.Metric(
-                "train_batch/staleness_max",
-                m.NoReduce(float(max(staleness, default=0))),
+                "train_batch/num_training_samples",
+                m.NoReduce(float(len(training_samples))),
             ),
             m.Metric(
-                "train_batch/num_stale_episodes_dropped", m.NoReduce(float(dropped))
+                "train_batch/num_stale_training_samples_dropped",
+                m.NoReduce(float(dropped)),
             ),
         ]

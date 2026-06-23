@@ -86,8 +86,11 @@ class TokenEnv(Configurable):
     class Config(Configurable.Config):
         """Limits enforced by the wrapper"""
 
-        rollout_max_context_len: int | None = None
-        """Hard cap on prompt length for the next turn. If the number of tokens meets/exceeds
+        # TODO(async-rl): split the length knobs by what they bound, so the family is unambiguous:
+        #   generator.sampling.max_tokens -> max_new_tokens ; batcher.batch.seq_len -> train_seq_len.
+        # vLLM caps generation; the packer still needs an explicit over-train_seq_len reject/truncate rule.
+        max_context_length: int | None = None
+        """Hard cap on the prompt length for the next turn. If the number of tokens meets/exceeds
         it, the turn is terminal; `None` disables the check."""
 
         # TODO: its unclear if timeout should be on this layer or handled by the messageEnv
@@ -297,5 +300,5 @@ class TokenEnv(Configurable):
         await self._message_env.close()
 
     def _is_prompt_too_long(self, *, prompt_len: int) -> bool:
-        cap = self._config.rollout_max_context_len
+        cap = self._config.max_context_length
         return cap is not None and prompt_len >= cap

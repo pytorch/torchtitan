@@ -28,7 +28,7 @@ from torchtitan.experiments.rl.actors.generator import (
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.batcher import BatchConfig, EpisodeBatcher
+from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.examples.search_r1.rollouter import SearchR1Rollouter
 from torchtitan.experiments.rl.losses import DAPOLoss
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
@@ -37,29 +37,28 @@ from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.experiments.rl.trainer import (
     AsyncControlConfig,
-    RLTrainer,
+    RLController,
     ValidationConfig,
 )
 from torchtitan.models.qwen3 import model_registry
 
 
-def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
+def rl_grpo_qwen3_1_7b_search_r1() -> RLController.Config:
     """GRPO Search-R1 (multi-turn retrieval QA) for Qwen3-1.7B.
 
     Runs on 8 GPUs: 4 generator (TP=4) + 1 trainer (TP=1), with a dense retrieval
     server on the spare GPUs. Requires a running retrieval server and the QA parquet
     data; see ``README.md``.
     """
-    return RLTrainer.Config(
+    return RLController.Config(
         model_spec=model_registry("1.7B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         async_control=AsyncControlConfig(
             num_training_steps=500,
-            num_rollout_workers=32,
             num_rollout_groups_per_train_step=8,
             group_size=8,
-            validation=ValidationConfig(num_samples=500, every_n_steps=5),
-            episode_batcher=EpisodeBatcher.Config(
+            validation=ValidationConfig(num_samples=500),
+            batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=1, seq_len=4096),
             ),
         ),
@@ -110,7 +109,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_8b_search_r1() -> RLTrainer.Config:
+def rl_grpo_qwen3_8b_search_r1() -> RLController.Config:
     """GRPO Search-R1 for Qwen3-8B — same recipe as the 1.7B config.
 
     Only the model and GPU split differ. 8 GPUs: 2 generator (TP=2) + 4 trainer

@@ -18,7 +18,7 @@ from torchtitan.config import Configurable
 from torchtitan.experiments.rl.rollout import Rollout, RolloutGroup, RolloutTurn
 from torchtitan.observability import structured_logger as sl
 
-# TODO(recorders): if a second recorder appears (e.g. an episode recorder), generalize to a list of
+# TODO(recorders): if a second recorder appears (e.g. an training_sample recorder), generalize to a list of
 # recorders behind one interface, instead of bespoke per-type classes.
 
 
@@ -134,7 +134,8 @@ class RolloutSampleRecorder(Configurable):
         (`log_tensors` / `log_logprobs`)."""
         encoded = {
             "turn_id": turn.rollout_id.turn_id,
-            "policy_version": turn.policy_version,
+            "min_policy_version": turn.min_policy_version,
+            "max_policy_version": turn.max_policy_version,
             "prompt_messages": turn.prompt_messages,
             "completion_message": turn.completion_message,
             "env_messages": turn.env_messages,

@@ -34,7 +34,7 @@ from torchtitan.distributed.activation_checkpoint import (
     SelectiveAC,
 )
 from torchtitan.distributed.utils import set_batch_invariance
-from torchtitan.experiments.rl.types import OptimStepOutput, TrainingBatch
+from torchtitan.experiments.rl.types import OptimStepOutput, TrainingMicrobatch
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 def compute_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Compute per-position logprobs from logits and pre-shifted labels.
 
-    ``labels`` is pre-shifted per episode in the batcher
+    ``labels`` is pre-shifted per training_sample in the batcher
     (``labels[i] = raw_token_ids[i+1]``), matching the pre-training
     dataloader convention.  No internal shift is needed.
     Output shape matches input: ``[batch, seq_len]``.
@@ -97,7 +97,7 @@ def verify_logprob_identity(
     """Compute per-rank drift between generator and trainer logprobs.
 
     Args:
-        generator_logprobs: [B, L] generator logprobs from TrainingBatch.
+        generator_logprobs: [B, L] generator logprobs from TrainingMicrobatch.
         trainer_logprobs: [B, L] trainer-computed logprobs.
         loss_mask: [B, L] bool mask; True for response tokens.
         num_global_valid_tokens: Total response tokens across all DP ranks.
@@ -122,7 +122,7 @@ def verify_logprob_identity(
 
 
 class PolicyTrainer(Actor, Configurable):
-    """Updates policy based on collected Episode using TorchTitan components.
+    """Updates policy based on collected TrainingSample using TorchTitan components.
 
     Exposes separate `forward_backward` and `optim_step` endpoints, called
     explicitly by the controller.
@@ -390,17 +390,17 @@ class PolicyTrainer(Actor, Configurable):
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        training_data: list[TrainingBatch],
+        training_data: list[TrainingMicrobatch],
         num_global_valid_tokens: int,
     ) -> dict[str, float]:
         """Run forward pass, compute loss, call backward, and reduce metrics.
 
         Args:
-            training_data: List of TrainingBatch, one per DP rank. Local rank
+            training_data: List of TrainingMicrobatch, one per DP rank. Local rank
                 picks training_data[self.dp_rank].
             num_global_valid_tokens: Total response tokens across all DP
                 ranks for this step. The controller computes this before
-                sharding episodes.
+                sharding training_samples.
 
         Returns:
             dict[str, float]: Globally-reduced metrics.
@@ -550,6 +550,7 @@ class PolicyTrainer(Actor, Configurable):
         if self._transfer_dtype is not None:
             # torchstore only applies `transfer_dtype` on the RDMA path, so under direct_rdma=False
             # cast to the generator dtype here (else the generator reads fp32 into its bf16 state dict).
+            # TODO(async-rl): push this cast into torchstore's CPU-staged path so callers don't cast manually.
             state_dict = {
                 name: tensor.to(self._transfer_dtype)
                 for name, tensor in state_dict.items()

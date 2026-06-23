@@ -99,10 +99,11 @@ def test_process_finished_requests_resolves_future_with_completion():
     async def main():
         generator = _generator()
         future = asyncio.get_running_loop().create_future()
-        # The engine loop stamps the admission version at admission (here, version 7).
+        # Admitted at v7 (the min); a weight pull then advanced the live version to 8 (the max).
+        generator.policy_version = 8
         generator._generation_futures = {
             "r0": GenerationFuture(
-                future=future, metrics_prefix="generator", version_intervals=[(0, 7)]
+                future=future, metrics_prefix="generator", min_policy_version=7
             )
         }
 
@@ -119,8 +120,8 @@ def test_process_finished_requests_resolves_future_with_completion():
         assert completion.token_ids == [10, 11]
         assert completion.token_logprobs == [-0.1, -0.1]
         assert completion.finish_reason == "length"
-        assert completion.policy_version == 7
-        assert completion.version_intervals == [(0, 7)]
+        assert completion.min_policy_version == 7  # min = admission version
+        assert completion.max_policy_version == 8  # max = live version at finish
         # The request is popped from the in-flight map.
         assert generator._generation_futures == {}
         # The per-generation metrics ride on the completion.

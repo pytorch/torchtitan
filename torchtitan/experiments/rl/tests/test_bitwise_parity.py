@@ -71,7 +71,7 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     TORCHTITAN_CONFIG_FORMAT,
     VLLM_MODEL_NAME,
 )
-from torchtitan.experiments.rl.trainer import RLTrainer
+from torchtitan.experiments.rl.trainer import RLController
 from torchtitan.models.common.attention import (
     create_attention_mask,
     FlexAttention,
@@ -92,7 +92,7 @@ logger = logging.getLogger(__name__)
 
 # TODO: directly testing against PolicyTrainer with debug model to avoid OOM
 def build_trainer_model(
-    config: RLTrainer.Config,
+    config: RLController.Config,
 ) -> tuple[torch.nn.Module, torch.device]:
     """Build, parallelize, and load weights for the trainer model.
 
@@ -191,7 +191,7 @@ def _set_generator_determinism(debug) -> None:
         torch.manual_seed(debug.seed)
 
 
-def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
+def build_inference_engine(config: RLController.Config) -> LLMEngine:
     """Create a vLLM LLMEngine with torchtitan model from the RL config."""
     gen_config = config.generator
 
@@ -248,7 +248,12 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
     engine_kwargs["max_model_len"] = config.model_spec.model.max_seq_len
-    max_num_seqs = config.num_rollout_workers * config.group_size
+    # Mirror RLController.setup_async for a single engine: always derive from rollout concurrency
+    # (rollout workers == buffer capacity) over the engine DP ranks.
+    ac = config.async_control
+    gen_dp = max(gen_config.parallelism.data_parallel_degree, 1)
+    rollout_concurrency = ac.max_buffered_rollout_groups * ac.group_size
+    max_num_seqs = (rollout_concurrency + gen_dp - 1) // gen_dp
     engine_kwargs["max_num_seqs"] = max_num_seqs
     vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,

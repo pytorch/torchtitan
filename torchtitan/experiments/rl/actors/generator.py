@@ -49,10 +49,15 @@ from vllm.v1.metrics.stats import CachingMetrics
 
 logger = logging.getLogger(__name__)
 
+# TODO(async-rl): this file is large. Split a backend-agnostic BaseGenerator (engine loop, weight
+# pull, metrics capture) from the vLLM-specific logic once a second backend needs it.
+
 
 # Latest vLLM engine-aggregate stats, written by `_EngineStatsCapture.record` on every engine
-# step and snapshotted onto each `Completion`'s metrics as it resolves. One engine per process
-# (DP=1), so a single module-level slot is enough; the in-process V1 path shares it directly.
+# step and snapshotted onto each `Completion`'s metrics as it resolves. vLLM constructs stat loggers
+# internally (we get no handle to pass in), and one engine lives per process (DP=1), so a module-level
+# slot is the narrowest bridge from the logger to the actor.
+# TODO(async-rl): make this instance-owned if vLLM ever exposes the StatLogger after engine construction.
 _LATEST_ENGINE_STATS: dict[str, float] = {}
 
 
@@ -166,7 +171,7 @@ class VLLMCudagraphConfig:
     """CUDA graph capture settings for the vLLM inference engine.
 
     torch.compile is configured separately via ``CompileConfig`` at the
-    ``RLTrainer`` level, shared by both trainer and generator.  Only CUDA
+    ``RLController`` level, shared by both trainer and generator.  Only CUDA
     graph capture, which is vLLM-specific, is controlled here.
 
     ``mode`` selects which vLLM cudagraph mode to capture; see that field and
@@ -402,7 +407,7 @@ class VLLMGenerator(Actor, Configurable):
         # max_num_seqs controls vLLM's maximum batch dimension: it sets
         # the upper bound for concurrent sequences, determines KV-cache
         # block allocation (and therefore GPU memory usage), and bounds
-        # the CUDA graph capture sizes. Set by the caller (RLTrainer); see its
+        # the CUDA graph capture sizes. Set by the caller (RLController); see its
         # setup_async TODO to derive it from run-ahead depth + KV capacity.
         self._max_num_seqs = max_num_seqs
 
@@ -700,16 +705,21 @@ class VLLMGenerator(Actor, Configurable):
                                 prompt=engine_input,
                                 params=self._build_sampling_params(request.sampling),
                             )
-                            # Stamp the admission (sampling) version. A pull takes priority over
-                            # STEP in `_decide_next_action`, so by here `policy_version` already
-                            # reflects any just-applied swap. Only rank 0 holds the futures.
-                            # TODO(async): record exact in-turn swap boundaries (a mid-decode pull
-                            #   splits this into >1 interval); FINAL_ONLY output hides per-step counts.
+                            # Stamp the admission (sampling) version = the MIN version this turn will
+                            # sample under. A pull takes priority over STEP in `_decide_next_action`, so by
+                            # here `policy_version` already reflects any just-applied swap. The MAX is read
+                            # off `self.policy_version` at finish. Only rank 0 holds the futures.
+                            # TODO(async-rl): consider switching the engine to RequestOutputKind.CUMULATIVE
+                            #   to record exact per-token (start_token, version) boundaries; today we keep
+                            #   only the per-turn min/max (FINAL_ONLY output hides per-step counts).
                             if self._rank == 0:
                                 self._generation_futures[
                                     request.request_id
-                                ].version_intervals = [(0, self.policy_version)]
+                                ].min_policy_version = self.policy_version
 
+                # TODO(async-rl): add a `flush_kv_cache_every_n_steps` config flag and reset the prefix
+                #   cache here every N engine steps (independent of weight sync), to bound KV growth /
+                #   fragmentation on long runs.
                 # Barrier (NCCL): engine.step() runs SPMD in lockstep.
                 # The step burst `max_engine_steps_between_decisions` gives the generator time to buffer
                 # new requests and avoid a prefill in between every engine decode step, which is inefficient.
@@ -817,19 +827,17 @@ class VLLMGenerator(Actor, Configurable):
                                 metric_type(_LATEST_ENGINE_STATS[key]),
                             )
                         )
-            # Attribute the completion to the version it was ADMITTED (sampled) at, not the
-            # current `self.policy_version` (a mid-flight hotswap may have advanced it): the
-            # off-policy filter must see the oldest version the tokens were sampled at.
-            admission_version = generation_future.version_intervals[0][1]
+            # min = the ADMITTED (sampling) version (stamped at admission); max = the version live now,
+            # at finish (a mid-flight hotswap may have advanced it). The off-policy filter reads the min.
             generation_future.future.set_result(
                 Completion(
-                    policy_version=admission_version,
+                    min_policy_version=generation_future.min_policy_version,
+                    max_policy_version=self.policy_version,
                     request_id=request_output.request_id,
                     token_ids=list(completion_output.token_ids),
                     token_logprobs=token_logprobs,
                     finish_reason=completion_output.finish_reason,
                     metrics=metrics,
-                    version_intervals=generation_future.version_intervals,
                 )
             )
 
@@ -912,8 +920,9 @@ class VLLMGenerator(Actor, Configurable):
         """
         # CPU-staged (direct_rdma=False): every generator reads its own copy from the trainer's CPU
         # StorageVolume, so multi-generator fanout is safe and the trainer's GPU weights are free
-        # during the read (the async weight-sync overlap). The trainer publishes alternating keys
-        # (version % 2) so a deferred pull is never overwritten by the next push (one in flight).
+        # during the read. The trainer alternates keys (version % 2): a 2-slot double-buffer that is safe
+        # because the controller awaits push(v) and pull(v) before the next step, so at most one pull is
+        # in flight. If pulls are ever overlapped across steps, widen this to a ring / per-version key.
         model_sd = self._get_model().model.state_dict()
         await ts.get_state_dict(
             f"model_state_dict_{version % 2}",
@@ -923,8 +932,8 @@ class VLLMGenerator(Actor, Configurable):
         )
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:
-            # TODO(async): under hot-swap, prefer per-token weight-version tracking (the episode
-            # `version_intervals`) over a full cache drop.
+            # TODO(async): under hot-swap, prefer per-token weight-version tracking (see the CUMULATIVE
+            # TODO in the engine loop) over a full cache drop.
             self._engine.reset_prefix_cache(
                 reset_running_requests=self.config.reset_running_requests_on_weight_sync,
             )
@@ -1012,12 +1021,14 @@ class CloseRequest:
 class GenerationFuture:
     """A generation request's future the loop resolves with its `Completion`. `metrics_prefix`
     namespaces the per-generation metrics built at completion (e.g. "generator" vs
-    "validation_generator"). `version_intervals` records the policy version the request was
-    admitted (sampled) at (see `Completion`)."""
+    "validation_generator"). `min_policy_version` is the version the request was admitted (sampled) at;
+    the max is read off `self.policy_version` at finish (see `Completion`)."""
 
     future: asyncio.Future[Completion]
     metrics_prefix: str
-    version_intervals: list[tuple[int, int]] = field(default_factory=list)
+    min_policy_version: int = (
+        0  # set at admission (the min version this turn sampled under)
+    )
 
 
 class LoopAction(enum.Enum):

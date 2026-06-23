@@ -49,7 +49,7 @@ def _assistant_turn(content: str) -> RolloutTurn:
         prompt_token_ids=[],
         completion_token_ids=[],
         completion_logprobs=[],
-        policy_version=0,
+        min_policy_version=0,
         completion_message={"role": "assistant", "content": content},
     )
 

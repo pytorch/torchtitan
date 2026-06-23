@@ -33,7 +33,7 @@ def _turn(*, completion_logprobs: list[float], policy_version: int = 1) -> Rollo
         prompt_token_ids=[1, 2, 3],
         completion_token_ids=[4, 5],
         completion_logprobs=completion_logprobs,
-        policy_version=policy_version,
+        min_policy_version=policy_version,
         prompt_messages=[{"role": "user", "content": "sort: b a c"}],
         completion_message={"role": "assistant", "content": "a b c"},
         env_messages=[{"role": "user", "content": "ok"}],
@@ -119,7 +119,7 @@ def test_record_dumps_the_rollout_minus_token_arrays(tmp_path) -> None:
 
     (turn,) = record["turns"]
     assert turn["turn_id"] == 0
-    assert turn["policy_version"] == 1
+    assert turn["min_policy_version"] == 1
     assert turn["completion_message"] == {"role": "assistant", "content": "a b c"}
     assert turn["env_messages"] == [{"role": "user", "content": "ok"}]
     # token-id / logprob arrays are large, so they are dropped unless opted in.
@@ -200,7 +200,7 @@ def test_none_policy_version_and_completion_message(tmp_path) -> None:
         prompt_token_ids=[1, 2],
         completion_token_ids=[],
         completion_logprobs=[],
-        policy_version=None,
+        min_policy_version=None,
         completion_message=None,
     )
     rollout = Rollout(
@@ -211,5 +211,5 @@ def test_none_policy_version_and_completion_message(tmp_path) -> None:
         reward=0.0,
     )
     record = _record_one(tmp_path, rollout)
-    assert record["turns"][0]["policy_version"] is None
+    assert record["turns"][0]["min_policy_version"] is None
     assert record["turns"][0]["completion_message"] is None
