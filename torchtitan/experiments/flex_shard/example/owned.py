@@ -254,10 +254,10 @@ class GroupedOwnedSegmentSpec:
 class GroupedOwned(Placement):
     """Grouped owner-partition placement for one physical bucket collective.
 
-    Unlike :class:`Owned`, each parameter may be split into multiple owner-local
-    segments, and different segments in one bucket may have different owners.
-    Forward gathers the padded owner partitions with one all-gather. Backward
-    packs full gradients in owner-partition order and uses one reduce-scatter.
+    Each parameter may be split into multiple owner-local segments, and
+    different segments in one bucket may have different owners. Forward gathers
+    the padded owner partitions with one all-gather. Backward packs full
+    gradients in owner-partition order and uses one reduce-scatter.
     """
 
     @dataclass(frozen=True)
@@ -1320,33 +1320,10 @@ def make_grouped_owned_expert_block_placement_fn(
     return placement_fn
 
 
-def make_grouped_owned_placement_fn(
-    segments_by_fqn: dict[str, list[GroupedOwnedSegmentSpec]],
-) -> PlacementFn:
-    """Return a placement function assigning one GroupedOwned placement per bucket."""
-
-    def placement_fn(
-        named_params: list[tuple[str, nn.Parameter]],
-        mesh: DeviceMesh,
-    ) -> dict[str, tuple[Placement, ...]]:
-        del mesh
-        expected = {fqn for fqn, _ in named_params}
-        actual = set(segments_by_fqn)
-        if expected != actual:
-            raise ValueError(
-                "GroupedOwned segment map must match the bucket FQNs exactly: "
-                f"missing={sorted(expected - actual)} extra={sorted(actual - expected)}"
-            )
-        placement = GroupedOwned(segments_by_fqn)
-        return {fqn: (placement,) for fqn, _ in named_params}
-
-    return placement_fn
-
 
 __all__ = [
     "GroupedOwned",
     "GroupedOwnedSegmentSpec",
     "make_grouped_owned_expert_block_placement_fn",
     "make_grouped_owned_expert_block_segments",
-    "make_grouped_owned_placement_fn",
 ]
