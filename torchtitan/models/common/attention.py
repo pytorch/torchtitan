@@ -18,6 +18,8 @@ from typing import Any, ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
+from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
@@ -686,18 +688,39 @@ class FusedQKVLinear(BaseQKVLinear):
         # Fused QKV: single matmul, then reshape and split along R dim.
         # [B, L, n_kv_heads * R * head_dim] -> [B, L, n_kv_heads, R, head_dim]
         # Use -1 for n_kv_heads so TP sharding is handled automatically.
-        qkv = self.wqkv(x)
-        qkv = qkv.view(bs, seqlen, -1, self.r_dim, self.head_dim)
-        xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
-        # Splitting along the R dim leaves xk/xv as strided views into the fused
-        # buffer (consecutive KV groups are R*head_dim apart, not head_dim).
-        # PyTorch ops respect strides, but downstream consumers that read raw
-        # memory (e.g. vLLM attention/KV-cache kernels) assume contiguous
-        # head-major layout, so materialize all three contiguously here.
-        xq = xq.reshape(bs, seqlen, -1, self.head_dim).contiguous()
-        xk = xk.reshape(bs, seqlen, -1, self.head_dim).contiguous()
-        xv = xv.reshape(bs, seqlen, -1, self.head_dim).contiguous()
-        return xq, xk, xv
+        qkv = self.wqkv(x).view(bs, seqlen, -1, self.r_dim, self.head_dim)
+        hpk, hd = self.heads_per_kv, self.head_dim
+
+        def _split(t):
+            # Use the (possibly local) tensor's own B/L so this is correct both
+            # for a plain tensor and inside local_map, where ``t`` is the local
+            # (e.g. CP-sharded) shard rather than the global tensor.
+            b, s = t.shape[0], t.shape[1]
+            xq, xk, xv = torch.split(t, [hpk, 1, 1], dim=-2)
+            # split leaves xk/xv as strided views into the fused buffer; vLLM
+            # attention/KV-cache kernels read raw memory assuming a contiguous
+            # head-major layout, so materialize all three contiguously here.
+            return (
+                xq.reshape(b, s, -1, hd).contiguous(),
+                xk.reshape(b, s, -1, hd).contiguous(),
+                xv.reshape(b, s, -1, hd).contiguous(),
+            )
+
+        if isinstance(qkv, DTensor):
+            # TEMPORARY: run the split on local tensors so its backward (cat)
+            # does not mix DTensor and plain grads under CP+PP. The asymmetric
+            # q vs k/v paths (RoPE on q/k; CP all-gathers k/v) otherwise feed
+            # cat() inconsistent grad types in PP's backward metadata inference.
+            # q/k/v reuse qkv's placements (symmetric at the split: TP shards the
+            # head axis, CP shards seq). TODO: remove it after spmd_types/full_dtensor
+            _split = local_map(
+                _split,
+                out_placements=(qkv.placements,) * 3,
+                in_placements=(qkv.placements,),
+                in_grad_placements=(qkv.placements,),
+                device_mesh=qkv.device_mesh,
+            )
+        return _split(qkv)
 
     @staticmethod
     def _split_qkv_on_save(module, state_dict, prefix, local_metadata) -> None:
