@@ -279,8 +279,11 @@ def rl_grpo_qwen3_32b_swe_r2e() -> RLTrainer.Config:
     return config
 
 
-# Qwen3-14B's native context (no RoPE extension needed).
-_QWEN3_14B_MAX_LEN = 40960
+# 14B context cap. Kept below Qwen3-14B's 40960 native max: seq_len sets the
+# collection target (num_tokens_target = global_batch * seq_len), so an
+# over-large seq_len makes the loop over-collect rollouts (each shorter than
+# seq_len) to fill it. 32768 is ~1.3x the 32B run's 24576 with a saner target.
+_QWEN3_14B_MAX_LEN = 32768
 
 
 def rl_grpo_qwen3_14b_swe_r2e() -> RLTrainer.Config:
