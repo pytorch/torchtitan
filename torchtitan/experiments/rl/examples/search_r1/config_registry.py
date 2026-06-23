@@ -74,9 +74,16 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
+                # First run with an empty checkpoint folder loads the HF weights;
+                # subsequent restarts resume from the latest mid-run checkpoint.
                 initial_load_in_hf=True,
-                interval=10000,  # only the initial HF load; no mid-run checkpoints
-                last_save_model_only=True,
+                # Mid-run checkpoints every `interval` steps so a preempted long
+                # run resumes instead of restarting from step 1. last_save full
+                # (not model-only) so the final checkpoint is also resumable;
+                # keep_latest_k bounds disk use for the larger models.
+                interval=50,
+                last_save_model_only=False,
+                keep_latest_k=3,
             ),
             # DAPO-style clip-higher (asymmetric clip); no KL / reference model.
             loss=DAPOLoss.Config(
