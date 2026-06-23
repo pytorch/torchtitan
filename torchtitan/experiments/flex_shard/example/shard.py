@@ -22,7 +22,7 @@ from ..flex_shard.placement_contract import (
     PlacementReduceGradResult,
     PlacementUnshardResult,
 )
-from ..flex_shard.reduce_policy import (
+from ..flex_shard.bucket_storage import (
     gradient_reduce_op_from_infos,
     GradientReduceOp,
 )
@@ -35,7 +35,6 @@ from ..flex_shard.utils import (
 from ._pack_utils import (
     copy_tensor_to_dtype,
     pack_tensors_into_flat_buffer,
-    pack_tensors_into_flat_buffer_with_scratch,
 )
 
 if TYPE_CHECKING:
@@ -120,13 +119,13 @@ class Shard(Placement):
             raise AssertionError("Expected at least one shard to assemble.")
         return torch.cat(per_rank_shards, dim=self.dim)
 
-    def _try_get_contiguous_flat_bucket_view(
+    def _get_contiguous_flat_bucket_view(
         self,
         tensors: list[torch.Tensor],
-    ) -> torch.Tensor | None:
-        """Return a flat alias when bucket tensors are already contiguous."""
+    ) -> torch.Tensor:
+        """Return the flat bucket-storage alias for local shard tensors."""
         if not tensors:
-            return None
+            raise AssertionError("Expected at least one local shard tensor.")
 
         dtype = tensors[0].dtype
         device = tensors[0].device
@@ -135,23 +134,31 @@ class Shard(Placement):
             return tensors[0].reshape(-1)
 
         first_tensor = non_empty_tensors[0]
+        total_numel = sum(tensor.numel() for tensor in tensors)
+        if torch.compiler.is_compiling():
+            return torch.as_strided(first_tensor, (total_numel,), (1,))
+
         storage_data_ptr = first_tensor.untyped_storage().data_ptr()
         expected_storage_offset = first_tensor.storage_offset()
-        total_numel = 0
         for tensor in tensors:
             numel = tensor.numel()
             if numel == 0:
                 continue
             if tensor.dtype != dtype or tensor.device != device:
-                return None
+                raise AssertionError(
+                    "Expected all Shard bucket tensors to share dtype and device."
+                )
             if not tensor.is_contiguous():
-                return None
+                raise AssertionError("Expected Shard bucket tensors to be contiguous.")
             if tensor.untyped_storage().data_ptr() != storage_data_ptr:
-                return None
+                raise AssertionError(
+                    "Expected Shard bucket tensors to share one bucket storage."
+                )
             if tensor.storage_offset() != expected_storage_offset:
-                return None
+                raise AssertionError(
+                    "Expected Shard bucket tensors to be adjacent in bucket storage."
+                )
             expected_storage_offset += numel
-            total_numel += numel
 
         return torch.as_strided(
             first_tensor,
@@ -219,17 +226,8 @@ class Shard(Placement):
         device = tensors[0].device
 
         with _record_copy_in_if_eager():
-            copy_in_scratch: list[torch.Tensor] = []
-            send_buf = None
-            if not torch.compiler.is_compiling():
-                send_buf = self._try_get_contiguous_flat_bucket_view(tensors)
-            if send_buf is None:
-                send_buf, copy_in_scratch = pack_tensors_into_flat_buffer_with_scratch(
-                    tensors,
-                    dtype,
-                )
-            else:
-                send_buf = copy_tensor_to_dtype(send_buf, dtype)
+            send_buf = self._get_contiguous_flat_bucket_view(tensors)
+            send_buf = copy_tensor_to_dtype(send_buf, dtype)
 
             per_rank_sizes: list[int] = []
             per_rank_param_offsets: list[list[int]] = []
@@ -263,7 +261,7 @@ class Shard(Placement):
 
         return PlacementPreparedUnshard(
             placement=self,
-            buffers=[send_buf, *gathered, *copy_in_scratch],
+            buffers=[send_buf, *gathered],
             placement_state=Shard._UnshardState(
                 infos=infos,
                 world_size=ws,
