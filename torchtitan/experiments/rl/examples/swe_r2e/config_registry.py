@@ -42,11 +42,6 @@ from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.examples.swe_r2e.data import SWER2EDataset
 from torchtitan.experiments.rl.examples.swe_r2e.rollouter import SWER2ERollouter
-from torchtitan.experiments.rl.generator_router import (
-    GeneratorRouter,
-    LeastLoadedRoutingStrategy,
-    StickySessionRoutingStrategy,
-)
 from torchtitan.experiments.rl.losses import DAPOLoss
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
@@ -96,16 +91,6 @@ def rl_grpo_qwen3_1_7b_swe_r2e() -> RLTrainer.Config:
         num_validation_samples=0,
         validation_freq=0,
         compile=CompileConfig(enable=False),
-        # Sticky-by-session routing: a Claude Code rollout re-sends a long, growing
-        # context (system + tools + history, ~16-20k tokens) every turn. Pinning a
-        # session to one generator lets vLLM's prefix cache hit across turns so only
-        # the new tokens are prefilled -- the dominant per-turn cost otherwise.
-        # LeastLoaded fallback balances the initial placement across generators.
-        generator_router=GeneratorRouter.Config(
-            strategy=StickySessionRoutingStrategy.Config(
-                fallback_strategy=LeastLoadedRoutingStrategy.Config()
-            )
-        ),
         rollouter=SWER2ERollouter.Config(
             train_dataset=SWER2EDataset.Config(data_path=_DEFAULT_DATA, seed=42),
             validation_dataset=SWER2EDataset.Config(
