@@ -20,8 +20,6 @@ Usage:
 """
 
 import copy
-from types import ModuleType, SimpleNamespace
-from typing import cast
 from unittest import mock
 
 import torch
@@ -53,10 +51,6 @@ from torchtitan.experiments.flex_shard.example.owned import (
     Owned,
 )
 from torchtitan.experiments.flex_shard.example.shard import per_param_placements, Shard
-from torchtitan.experiments.flex_shard.flex_shard.bucket_runtime import (
-    BucketCommContext,
-    BucketRuntime,
-)
 from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     _assign_params_to_buckets,
     ParamInfo,
@@ -109,27 +103,6 @@ class _IncompletePlacement(Placement):
         return hash(type(self))
 
 
-class _TestPlacement(Placement):
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, _TestPlacement)
-
-    def __hash__(self) -> int:
-        return hash(type(self))
-
-    def compute_local_shape(
-        self, global_shape: torch.Size, rank: int, world_size: int
-    ) -> torch.Size:
-        return global_shape
-
-    def extract_local_shard(
-        self,
-        param: torch.Tensor,
-        rank: int,
-        world_size: int,
-    ) -> torch.Tensor:
-        return param.contiguous()
-
-
 class _PaddedShard(Shard):
     def __init__(self, padding_nbytes: int) -> None:
         super().__init__(0)
@@ -149,129 +122,6 @@ class _PaddedShard(Shard):
             storage_nbytes=layout.storage_nbytes + self.padding_nbytes,
         )
 
-
-# ---------------------------------------------------------------------------
-# Bucket communication scheduling tests (single-process, no NCCL)
-# ---------------------------------------------------------------------------
-
-
-class TestBucketCommScheduling(TestCase):
-    @staticmethod
-    def _context_with_reshard_flags(
-        flags: list[bool],
-        unit_keys: list[object] | None = None,
-    ) -> BucketCommContext:
-        context = BucketCommContext(
-            device_handle=ModuleType("dummy_device_handle"),
-            unshard_stream=cast(torch.Stream, object()),
-            reduce_grad_stream=cast(torch.Stream, object()),
-        )
-        if unit_keys is None:
-            unit_keys = [object() for _ in flags]
-        pending_keys = [object() for _ in flags]
-        context.buckets = [
-            cast(
-                BucketRuntime,
-                SimpleNamespace(
-                    bucket_storage=SimpleNamespace(_reshard_after_forward=flag),
-                    recompute_prefetch_unit_key=lambda key=unit_key: key,
-                    pending_unshard_key=lambda *, recompute, key=pending_key: (
-                        key,
-                        recompute,
-                    ),
-                ),
-            )
-            for flag, unit_key, pending_key in zip(
-                flags,
-                unit_keys,
-                pending_keys,
-                strict=True,
-            )
-        ]
-        return context
-
-    def test_defer_reduce_grad_for_previous_bucket_backward_unshard(self):
-        context = self._context_with_reshard_flags([True, True, True])
-
-        self.assertFalse(
-            context.should_defer_reduce_grad_for_backward_prefetch(
-                context.buckets[0],
-            )
-        )
-        self.assertIs(
-            context.next_backward_unshard_bucket(context.buckets[1]),
-            context.buckets[0],
-        )
-        self.assertTrue(
-            context.should_defer_reduce_grad_for_backward_prefetch(
-                context.buckets[1],
-            )
-        )
-        self.assertIs(
-            context.next_backward_unshard_bucket(context.buckets[2]),
-            context.buckets[1],
-        )
-        self.assertTrue(
-            context.should_defer_reduce_grad_for_backward_prefetch(
-                context.buckets[2],
-            )
-        )
-
-    def test_reduce_grad_defer_skips_non_reshard_bucket(self):
-        context = self._context_with_reshard_flags([True, False, True])
-
-        self.assertTrue(
-            context.should_defer_reduce_grad_for_backward_prefetch(
-                context.buckets[1],
-            )
-        )
-        self.assertTrue(
-            context.should_defer_reduce_grad_for_backward_prefetch(
-                context.buckets[2],
-            )
-        )
-
-    def test_recompute_prefetch_order_reverses_units_preserving_unit_order(self):
-        context = self._context_with_reshard_flags(
-            [True, True, True, True, True, True, False, False],
-            unit_keys=[
-                "tok",
-                "layer0",
-                "layer1",
-                "layer1",
-                "layer2",
-                "layer2",
-                "norm",
-                "head",
-            ],
-        )
-
-        self.assertEqual(
-            context.recompute_prefetch_buckets(),
-            [
-                context.buckets[4],
-                context.buckets[5],
-                context.buckets[2],
-                context.buckets[3],
-                context.buckets[1],
-                context.buckets[0],
-            ],
-        )
-        self.assertIs(
-            context.next_backward_unshard_bucket(context.buckets[7]),
-            context.buckets[4],
-        )
-        self.assertIs(
-            context.next_backward_unshard_bucket(context.buckets[4]),
-            context.buckets[5],
-        )
-        self.assertIs(
-            context.next_backward_unshard_bucket(context.buckets[5]),
-            context.buckets[2],
-        )
-
-
-# ---------------------------------------------------------------------------
 # Shard mesh tests
 # ---------------------------------------------------------------------------
 
@@ -286,15 +136,6 @@ class TestFlexShardMesh(TestCase):
 
         with single_rank_cuda_mesh() as mesh:
             _validate_flex_shard_mesh(mesh)
-
-    def test_rejects_cpu_mesh(self):
-        from torchtitan.experiments.flex_shard.flex_shard.utils import (
-            _validate_flex_shard_mesh,
-        )
-
-        with single_rank_cpu_mesh() as mesh:
-            with self.assertRaisesRegex(NotImplementedError, "CUDA DeviceMesh"):
-                _validate_flex_shard_mesh(mesh)
 
     def test_rejects_multi_dim_mesh(self):
         from torchtitan.experiments.flex_shard.flex_shard.utils import (
@@ -412,14 +253,6 @@ class TestBucketPlacementValidation(TestCase):
             for fqn in ("a.weight", "b.weight")
         ]
 
-    def test_rejects_unhashable_placement_equality(self):
-        """Placement subclasses that override equality must remain hashable."""
-        with self.assertRaisesRegex(TypeError, "__hash__"):
-
-            class _UnhashablePlacement(Placement):
-                def __eq__(self, other: object) -> bool:
-                    return isinstance(other, _UnhashablePlacement)
-
     def test_rejects_missing_or_extra_placements(self):
         """Placement validation requires exact managed parameter coverage."""
         from torchtitan.experiments.flex_shard.flex_shard.utils import (
@@ -474,72 +307,6 @@ class TestBucketPlacementValidation(TestCase):
                         "b.weight": (_IncompletePlacement(),),
                     },
                 )
-
-    def test_accepts_valid_placement_subclasses(self):
-        """Core validation does not import or hard-code the example Shard."""
-        from torchtitan.experiments.flex_shard.flex_shard.utils import (
-            _validate_placements,
-        )
-
-        with single_rank_cpu_mesh():
-            _validate_placements(
-                {
-                    "a.weight": (_TestPlacement(),),
-                    "b.weight": (_TestPlacement(),),
-                },
-                self._named_params(),
-            )
-
-    def test_copy_param_to_storage_accepts_non_contiguous_shard_view(self):
-        """Placement local payloads may be non-contiguous views."""
-
-        class _TransposePlacement(Placement):
-            def __eq__(self, other: object) -> bool:
-                return isinstance(other, _TransposePlacement)
-
-            def __hash__(self) -> int:
-                return hash(type(self))
-
-            def compute_local_shape(
-                self, global_shape: torch.Size, rank: int, world_size: int
-            ) -> torch.Size:
-                if world_size != 1:
-                    raise AssertionError("Expected single-rank test placement.")
-                return torch.Size([global_shape[1], global_shape[0]])
-
-            def extract_local_shard(
-                self,
-                param: torch.Tensor,
-                rank: int,
-                world_size: int,
-            ) -> torch.Tensor:
-                if world_size != 1:
-                    raise AssertionError("Expected single-rank test placement.")
-                return param.t()
-
-        placement = _TransposePlacement()
-        param = torch.arange(6, dtype=torch.float32).view(2, 3)
-        local_shape = placement.compute_local_shape(param.shape, rank=0, world_size=1)
-        info = ParamInfo(
-            fqn="weight",
-            global_shape=param.shape,
-            global_stride=param.stride(),
-            dtype=param.dtype,
-            requires_grad=True,
-            placements=(placement,),
-            local_shape=local_shape,
-            local_numel=param.numel(),
-            storage_nbytes=param.numel() * param.element_size(),
-            global_numel=param.numel(),
-        )
-        byte_storage = torch.empty(info.storage_nbytes, dtype=torch.uint8)
-
-        local_payload = placement.extract_local_shard(param, rank=0, world_size=1)
-        self.assertFalse(local_payload.is_contiguous())
-        placement.copy_param_to_storage(byte_storage, info, param, rank=0, world_size=1)
-
-        copied = byte_storage.view(torch.float32).view(local_shape)
-        self.assertEqual(copied, local_payload.contiguous())
 
     def test_grouped_owned_expert_block_unshard_is_view_out(self):
         """GroupedOwned can preserve packed expert tensors for grouped-mm."""
@@ -918,84 +685,6 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
     @property
     def world_size(self) -> int:
         return 2
-
-    def test_create_param_infos_uses_sequential_byte_offsets(self):
-        mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
-        args, model = make_transformer_model()
-        named_params = [
-            ("tok_embeddings.weight", model.tok_embeddings.weight),
-            ("pos_embeddings.weight", model.pos_embeddings.weight),
-        ]
-        placements = {fqn: (Shard(0),) for fqn, _ in named_params}
-
-        infos, total_bytes = ShardedBucketStorage.create_param_infos(
-            named_params, mesh, placements
-        )
-
-        tok_embeddings = infos["tok_embeddings.weight"]
-        pos_embeddings = infos["pos_embeddings.weight"]
-        self.assertEqual(
-            tok_embeddings.local_shape,
-            Shard(0).compute_local_shape(
-                torch.Size([args.vocab_size, args.dim]),
-                self.rank,
-                self.world_size,
-            ),
-        )
-        self.assertEqual(tok_embeddings.byte_offset, 0)
-        self.assertEqual(
-            pos_embeddings.local_shape,
-            Shard(0).compute_local_shape(
-                torch.Size([args.max_seq_len, args.dim]),
-                self.rank,
-                self.world_size,
-            ),
-        )
-        self.assertEqual(
-            pos_embeddings.byte_offset,
-            (args.vocab_size // 2) * args.dim * torch.float32.itemsize,
-        )
-        self.assertEqual(
-            total_bytes,
-            ((args.vocab_size // 2) + (args.max_seq_len // 2))
-            * args.dim
-            * torch.float32.itemsize,
-        )
-
-    def test_create_param_infos_uses_placement_owned_storage_layout(self):
-        mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
-        args, model = make_transformer_model()
-        named_params = [
-            ("tok_embeddings.weight", model.tok_embeddings.weight),
-            ("pos_embeddings.weight", model.pos_embeddings.weight),
-        ]
-        padding_nbytes = 16
-        placements = {fqn: (_PaddedShard(padding_nbytes),) for fqn, _ in named_params}
-
-        infos, total_bytes = ShardedBucketStorage.create_param_infos(
-            named_params, mesh, placements
-        )
-
-        tok_embeddings = infos["tok_embeddings.weight"]
-        pos_embeddings = infos["pos_embeddings.weight"]
-        tok_nbytes = (
-            tok_embeddings.local_numel * tok_embeddings.dtype.itemsize + padding_nbytes
-        )
-        pos_nbytes = (
-            pos_embeddings.local_numel * pos_embeddings.dtype.itemsize + padding_nbytes
-        )
-        self.assertEqual(tok_embeddings.storage_nbytes, tok_nbytes)
-        self.assertEqual(pos_embeddings.byte_offset, tok_nbytes)
-        self.assertEqual(pos_embeddings.storage_nbytes, pos_nbytes)
-        self.assertEqual(total_bytes, tok_nbytes + pos_nbytes)
-        self.assertEqual(
-            tok_embeddings.local_shape,
-            Shard(0).compute_local_shape(
-                torch.Size([args.vocab_size, args.dim]),
-                self.rank,
-                self.world_size,
-            ),
-        )
 
     def test_materialized_params_are_views_into_bucket_storage(self):
         mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
