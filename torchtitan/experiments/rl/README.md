@@ -86,31 +86,31 @@ We use a unified model definition from torchtitan for the trainer and generator,
 ## Multi-node on SLURM
 
 For configurations whose total GPU footprint exceeds a single node (e.g.
-`rl_grpo_qwen3_14b`: trainer TP=8 + generator TP=8 = 16 GPUs), run the
-controller from a login node and let Monarch's `SlurmJob` submit the worker
-allocation:
+`rl_grpo_qwen3_14b`: trainer TP=8 + generator TP=8 = 16 GPUs), invoke the
+`slurm_launcher` entry point and let it submit one sbatch covering the trainer
+plus one mesh per generator on disjoint nodes:
 
 ```bash
-RL_LAUNCHER=slurm \
-RL_SLURM_PARTITION=<partition> \
+RL_SLURM_PARTITION=h100 \
 RL_SLURM_GPUS_PER_NODE=8 \
 RL_SLURM_TIME=02:00:00 \
-RL_SLURM_QOS=<qos>          # optional, passed as #SBATCH --qos=...
-RL_SLURM_ACCOUNT=<account>  # optional, passed as #SBATCH --account=...
-python -m torchtitan.experiments.rl.train \
+RL_SLURM_QOS=h100_dev \
+RL_SLURM_ACCOUNT=pytorch \
+python -m torchtitan.experiments.rl.slurm_launcher \
     --module rl --config rl_grpo_qwen3_14b
 ```
 
-`train.py` constructs `SlurmJob(meshes={"trainer": N, "generator": M}, ...)`,
-which submits a single sbatch covering both meshes, waits for the
-allocation to start, and returns the `HostMesh` objects ready to spawn the
-trainer/generator proc meshes onto. Trainer and generator land on disjoint
-nodes; both world sizes must be divisible by `RL_SLURM_GPUS_PER_NODE`.
+Every world size must be divisible by `RL_SLURM_GPUS_PER_NODE`. `RL_SLURM_QOS`
+and `RL_SLURM_ACCOUNT` are optional, passed through as `#SBATCH --qos=...` /
+`--account=...`; substitute values for your cluster.
 
-For single-node runs on SLURM, omit `RL_LAUNCHER` and use a standard
-allocation (`salloc` or `sbatch --wrap "python -m ..."`); the in-process
-`this_host()` path partitions GPUs between trainer and generator without
-needing a launcher.
+Add `RL_SLURM_BATCH=1` to detach: the same command then submits an sbatch that
+runs both the workers and the controller (via `sbatch --wrap`), and the
+login-node process exits as soon as submission completes.
+
+For single-node SLURM runs, invoke `train` directly inside a standard
+allocation (`salloc` or `sbatch --wrap "python -m ..."`); `this_host()`
+partitions GPUs between trainer and generator with no launcher involved.
 
 ## Reproducibility
 

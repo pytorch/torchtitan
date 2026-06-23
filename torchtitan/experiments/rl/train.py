@@ -25,7 +25,6 @@ python3 -m torchtitan.experiments.rl.train \
 import asyncio
 import logging
 import os
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -35,7 +34,6 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import monarch
 from monarch.actor import HostMesh, ProcMesh, this_host
-from monarch.job import SlurmJob
 
 from torchtitan.config import ConfigManager, ParallelismConfig
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
@@ -133,122 +131,6 @@ class HostMeshes:
     trainer: HostMesh
     generators: list[HostMesh]
     gpus_per_node: int
-
-
-def _maybe_launch_slurm_job(
-    trainer_world_size: int,
-    per_generator_world_size: int,
-    num_generators: int,
-) -> HostMeshes | None:
-    """Launch a Monarch SlurmJob and return HostMeshes when requested via env.
-
-    Activated by ``RL_LAUNCHER=slurm``. Submits one sbatch covering the trainer
-    and every generator on disjoint nodes: the trainer gets
-    ``trainer_world_size`` GPUs and each of ``num_generators`` generators gets
-    ``per_generator_world_size`` GPUs, every role occupying whole nodes (its
-    world size must be divisible by ``RL_SLURM_GPUS_PER_NODE``). For single-node
-    or colocated runs, omit ``RL_LAUNCHER`` and use the in-process
-    ``this_host()`` path instead.
-
-    Env vars:
-      RL_SLURM_PARTITION    (required)
-      RL_SLURM_GPUS_PER_NODE (optional, default 8)
-      RL_SLURM_TIME         (optional, HH:MM:SS)
-      RL_SLURM_QOS          (optional, e.g. h100_dev)
-      RL_SLURM_ACCOUNT      (optional, e.g. ram)
-      RL_SLURM_CPUS_PER_TASK (optional; partition default if unset, often too small)
-      RL_SLURM_MEM          (optional; partition default if unset, often too small)
-
-    Returns None when ``RL_LAUNCHER`` is unset or not ``slurm``.
-    """
-    launcher = os.environ.get("RL_LAUNCHER", "").lower()
-    if launcher != "slurm":
-        return None
-
-    partition = os.environ.get("RL_SLURM_PARTITION")
-    if not partition:
-        raise ValueError("RL_LAUNCHER=slurm requires RL_SLURM_PARTITION to be set")
-    gpus_per_node = int(os.environ.get("RL_SLURM_GPUS_PER_NODE", "8"))
-    time_limit = os.environ.get("RL_SLURM_TIME")  # HH:MM:SS, optional
-    qos = os.environ.get("RL_SLURM_QOS")
-    account = os.environ.get("RL_SLURM_ACCOUNT")
-    cpus_per_task_env = os.environ.get("RL_SLURM_CPUS_PER_TASK")
-    cpus_per_task = int(cpus_per_task_env) if cpus_per_task_env else None
-    mem = os.environ.get("RL_SLURM_MEM")
-
-    if trainer_world_size % gpus_per_node != 0:
-        raise ValueError(
-            f"trainer_world_size ({trainer_world_size}) must be divisible "
-            f"by RL_SLURM_GPUS_PER_NODE ({gpus_per_node})"
-        )
-    if per_generator_world_size % gpus_per_node != 0:
-        raise ValueError(
-            f"per_generator_world_size ({per_generator_world_size}) must be "
-            f"divisible by RL_SLURM_GPUS_PER_NODE ({gpus_per_node})"
-        )
-    trainer_nodes = trainer_world_size // gpus_per_node
-    generator_nodes = per_generator_world_size // gpus_per_node
-    # Disjoint nodes per role: the trainer plus one host mesh per generator.
-    meshes = {"trainer": trainer_nodes}
-    for i in range(num_generators):
-        meshes[f"generator_{i}"] = generator_nodes
-
-    # SlurmJob takes partition/time/gpus_per_node directly; anything else
-    # (qos, account, ...) goes through slurm_args, which is templated as
-    # `#SBATCH <arg>` lines into the generated sbatch script.
-    extra_slurm_args: list[str] = []
-    if qos:
-        extra_slurm_args.append(f"--qos={qos}")
-    if account:
-        extra_slurm_args.append(f"--account={account}")
-    logger.info(
-        "Launching SlurmJob: trainer=%d node(s), %d generator(s) x %d node(s), "
-        "gpus_per_node=%d, partition=%s, qos=%s, account=%s, "
-        "cpus_per_task=%s, mem=%s",
-        trainer_nodes,
-        num_generators,
-        generator_nodes,
-        gpus_per_node,
-        partition,
-        qos or "(default)",
-        account or "(default)",
-        cpus_per_task if cpus_per_task is not None else "(default)",
-        mem or "(default)",
-    )
-
-    job = SlurmJob(
-        meshes=meshes,
-        gpus_per_node=gpus_per_node,
-        partition=partition,
-        time_limit=time_limit,
-        cpus_per_task=cpus_per_task,
-        mem=mem,
-        job_name="torchtitan_rl",
-        slurm_args=extra_slurm_args,
-        # The worker srun must use the same Python the controller is
-        # running.
-        python_exe=sys.executable,
-        # Don't let SlurmJob fall through to its share_node() codepath
-        # (triggered when exclusive=False AND partition is set), which
-        # would query clusterscope for cpus_per_task / mem and quietly
-        # overwrite the values we just set.
-        exclusive=True,
-    )
-    if os.environ.get("MONARCH_BATCH_JOB") == "1":
-        # In-allocation batch client: the controller runs inside the allocation
-        # the submitter already created. Reconnect to the workers the runner
-        # started (via the cached BatchJob) instead of submitting a new job.
-        state = job.state()
-    else:
-        job.apply()
-        state = job.state()
-    return HostMeshes(
-        trainer=state.trainer,
-        generators=[
-            getattr(state, f"generator_{i}") for i in range(num_generators)
-        ],
-        gpus_per_node=gpus_per_node,
-    )
 
 
 def _compute_trainer_world_size(p: ParallelismConfig) -> int:
@@ -361,9 +243,17 @@ def spawn_proc_mesh(
     return trainer_mesh, generator_meshes
 
 
-async def main():
-    config = ConfigManager().parse_args()
-    assert isinstance(config, RLTrainer.Config)
+async def run(
+    config: RLTrainer.Config,
+    *,
+    trainer_world_size: int,
+    per_generator_world_size: int,
+    host_meshes: HostMeshes | None,
+) -> None:
+    """Run training given an already-resolved ``HostMeshes`` (or ``None`` for
+    single-node ``this_host()``). Launcher-agnostic: SLURM, MAST, and direct
+    local runs all funnel through here.
+    """
     sl.init_structured_logger(
         source="rl_controller",
         output_dir=config.dump_folder,
@@ -374,13 +264,6 @@ async def main():
 
     rl_trainer: RLTrainer = config.build()
     try:
-        trainer_world_size = _compute_trainer_world_size(config.trainer.parallelism)
-        per_generator_world_size = _compute_generator_world_size(
-            config.generator.parallelism
-        )
-        host_meshes = _maybe_launch_slurm_job(
-            trainer_world_size, per_generator_world_size, config.num_generators
-        )
         trainer_mesh, generator_meshes = spawn_proc_mesh(
             trainer_world_size,
             per_generator_world_size,
@@ -396,6 +279,21 @@ async def main():
         logger.info("Interrupted; attempting graceful shutdown...")
     finally:
         await rl_trainer.close()
+
+
+async def main():
+    config = ConfigManager().parse_args()
+    assert isinstance(config, RLTrainer.Config)
+    trainer_world_size = _compute_trainer_world_size(config.trainer.parallelism)
+    per_generator_world_size = _compute_generator_world_size(
+        config.generator.parallelism
+    )
+    await run(
+        config,
+        trainer_world_size=trainer_world_size,
+        per_generator_world_size=per_generator_world_size,
+        host_meshes=None,
+    )
 
 
 if __name__ == "__main__":
