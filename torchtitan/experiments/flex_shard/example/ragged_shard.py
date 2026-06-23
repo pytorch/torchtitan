@@ -24,7 +24,7 @@ from ..flex_shard.placement_contract import (
     PlacementReduceGradResult,
     PlacementUnshardResult,
 )
-from ..flex_shard.reduce_policy import (
+from ..flex_shard.bucket_storage import (
     gradient_reduce_op_from_infos,
     GradientReduceOp,
 )
