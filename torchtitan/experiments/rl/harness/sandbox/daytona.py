@@ -140,6 +140,12 @@ class DaytonaSandbox:
         timeout: int = 120,
         check: bool = False,
     ) -> ExecResult:
+        # A high-latency host->daytona link (e.g. cross-region MAST -> daytona-US)
+        # can make even a fast command's exec request time out. Raise every exec's
+        # timeout floor via TT_DAYTONA_EXEC_TIMEOUT_MIN (default 0 = unchanged).
+        import os
+
+        timeout = max(timeout, int(os.environ.get("TT_DAYTONA_EXEC_TIMEOUT_MIN", "0")))
         # exec lands as root on R2E images; drop privileges with runuser when a
         # non-root user is requested (keeps env via --whitelist-environment, the
         # same contract DockerSandbox uses).
