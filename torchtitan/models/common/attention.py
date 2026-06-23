@@ -701,62 +701,42 @@ class FusedQKVLinear(BaseQKVLinear):
         """Split fused ``wqkv`` into stock ``wq.weight``/``wk.weight``/``wv.weight``."""
         hd, hpk, r = module.head_dim, module.heads_per_kv, module.r_dim
 
-        wqkv_w = state_dict.pop(f"{prefix}wqkv.weight")
-        n_kv, in_f = wqkv_w.shape[0] // (r * hd), wqkv_w.shape[1]
-        w = wqkv_w.reshape(n_kv, r, hd, in_f)
-        state_dict[f"{prefix}wq.weight"] = w[:, :hpk].reshape(-1, in_f).contiguous()
-        state_dict[f"{prefix}wk.weight"] = w[:, hpk].reshape(-1, in_f).contiguous()
-        state_dict[f"{prefix}wv.weight"] = w[:, hpk + 1].reshape(-1, in_f).contiguous()
-
-        b_key = f"{prefix}wqkv.bias"
-        if b_key in state_dict:
-            b = state_dict.pop(b_key).reshape(n_kv, r, hd)
-            state_dict[f"{prefix}wq.bias"] = b[:, :hpk].reshape(-1).contiguous()
-            state_dict[f"{prefix}wk.bias"] = b[:, hpk].reshape(-1).contiguous()
-            state_dict[f"{prefix}wv.bias"] = b[:, hpk + 1].reshape(-1).contiguous()
+        for param, ndim in (("weight", 4), ("bias", 3)):
+            key = f"{prefix}wqkv.{param}"
+            if key not in state_dict:
+                continue
+            tensor = state_dict.pop(key)
+            n_kv = tensor.shape[0] // (r * hd)
+            tail = (tensor.shape[1],) if ndim == 4 else ()
+            w = tensor.reshape(n_kv, r, hd, *tail)
+            state_dict[f"{prefix}wq.{param}"] = (
+                w[:, :hpk].reshape(-1, *tail).contiguous()
+            )
+            state_dict[f"{prefix}wk.{param}"] = (
+                w[:, hpk].reshape(-1, *tail).contiguous()
+            )
+            state_dict[f"{prefix}wv.{param}"] = (
+                w[:, hpk + 1].reshape(-1, *tail).contiguous()
+            )
 
     @staticmethod
     def _merge_qkv_on_load(module, state_dict, prefix, *args) -> None:
         """Merge stock ``wq.weight``/``wk.weight``/``wv.weight`` back into ``wqkv``."""
         hd, hpk = module.head_dim, module.heads_per_kv
-        wq_key, wk_key, wv_key = (
-            f"{prefix}wq.weight",
-            f"{prefix}wk.weight",
-            f"{prefix}wv.weight",
-        )
 
-        if wq_key in state_dict and wk_key in state_dict and wv_key in state_dict:
-            wq, wk, wv = (
-                state_dict.pop(wq_key),
-                state_dict.pop(wk_key),
-                state_dict.pop(wv_key),
+        for param, ndim in (("weight", 4), ("bias", 3)):
+            keys = [f"{prefix}{w}.{param}" for w in ("wq", "wk", "wv")]
+            if not all(k in state_dict for k in keys):
+                continue
+            wq, wk, wv = (state_dict.pop(k) for k in keys)
+            n_kv = wk.shape[0] // hd
+            tail = (wq.shape[1],) if ndim == 4 else ()
+            q = wq.reshape(n_kv, hpk, hd, *tail)
+            k = wk.reshape(n_kv, 1, hd, *tail)
+            v = wv.reshape(n_kv, 1, hd, *tail)
+            state_dict[f"{prefix}wqkv.{param}"] = torch.cat([q, k, v], dim=1).reshape(
+                -1, *tail
             )
-            n_kv, in_f = wk.shape[0] // hd, wq.shape[1]
-            q = wq.reshape(n_kv, hpk, hd, in_f)
-            k = wk.reshape(n_kv, 1, hd, in_f)
-            v = wv.reshape(n_kv, 1, hd, in_f)
-            state_dict[f"{prefix}wqkv.weight"] = torch.cat([q, k, v], dim=1).reshape(
-                -1, in_f
-            )
-
-        bq_key, bk_key, bv_key = (
-            f"{prefix}wq.bias",
-            f"{prefix}wk.bias",
-            f"{prefix}wv.bias",
-        )
-        if bq_key in state_dict and bk_key in state_dict and bv_key in state_dict:
-            bq, bk, bv = (
-                state_dict.pop(bq_key),
-                state_dict.pop(bk_key),
-                state_dict.pop(bv_key),
-            )
-            n_kv = bk.shape[0] // hd
-            q_b = bq.reshape(n_kv, hpk, hd)
-            k_b = bk.reshape(n_kv, 1, hd)
-            v_b = bv.reshape(n_kv, 1, hd)
-            state_dict[f"{prefix}wqkv.bias"] = torch.cat(
-                [q_b, k_b, v_b], dim=1
-            ).reshape(-1)
 
 
 class GQAttention(BaseAttention):
