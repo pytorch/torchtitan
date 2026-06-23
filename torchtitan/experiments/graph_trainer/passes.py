@@ -31,6 +31,8 @@ from collections.abc import Callable
 
 import torch
 
+from torchtitan.experiments.graph_trainer.configs import validate_ep_overlap_config
+
 from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_pass
 from torchtitan.experiments.graph_trainer.cudagraph import (
     cudagraph_pass,
@@ -40,6 +42,9 @@ from torchtitan.experiments.graph_trainer.debug_utils import (
     log_graph_diff,
     snapshot_graph,
     tlparse_log_graph_pass,
+)
+from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
+    populate_eager_chunk_metadata_pass,
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     get_fsdp_param_module_order,
@@ -137,31 +142,41 @@ def compile_time_passes(
     passes: list[Callable] = [
         eliminate_dead_code_pass,
         canonicalize_graph_pass,
-        functools.partial(
-            tag_with_memory_policy_pass,
-            config=config,
-        ),
-        functools.partial(
-            apply_cpu_offload_pass,
-            prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
-            defer_n_layers=config.compile.cpu_offload_defer_n_layers,
-        ),
-        selective_activation_remat_pass,
-        # Run before bucketing so bucketed collectives inherit the dedicated PG.
-        reassign_collective_pgs_pass,
-        functools.partial(
-            joint_transformer_block_bucketing_reordering_pass,
-            module_bucket_plans=get_default_transformer_block_buckets(
-                n_layers,
-                chunked_loss_enabled=uses_chunked_loss,
-            ),
-            # FSDP2 packs buckets in managed parameter order. The traced state
-            # FQNs preserve that registration order, unlike graph execution order.
-            fsdp_param_module_order=get_fsdp_param_module_order(
-                traced_result.state_fqns
-            ),
-        ),
     ]
+    if config.compile.ep_overlap.enabled:
+        _overlap_dim, chunk_strategy, _module_fqn = validate_ep_overlap_config(
+            config.compile.ep_overlap
+        )
+        if chunk_strategy == "eager":
+            passes.append(populate_eager_chunk_metadata_pass)
+    passes.extend(
+        [
+            functools.partial(
+                tag_with_memory_policy_pass,
+                config=config,
+            ),
+            functools.partial(
+                apply_cpu_offload_pass,
+                prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
+                defer_n_layers=config.compile.cpu_offload_defer_n_layers,
+            ),
+            selective_activation_remat_pass,
+            # Run before bucketing so bucketed collectives inherit the dedicated PG.
+            reassign_collective_pgs_pass,
+            functools.partial(
+                joint_transformer_block_bucketing_reordering_pass,
+                module_bucket_plans=get_default_transformer_block_buckets(
+                    n_layers,
+                    chunked_loss_enabled=uses_chunked_loss,
+                ),
+                # FSDP2 packs buckets in managed parameter order. The traced state
+                # FQNs preserve that registration order, unlike graph execution order.
+                fsdp_param_module_order=get_fsdp_param_module_order(
+                    traced_result.state_fqns
+                ),
+            ),
+        ]
+    )
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 

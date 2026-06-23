@@ -28,10 +28,18 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     annotate_module_fqns,
 )
+from torchtitan.experiments.graph_trainer.configs import (
+    EpOverlapConfig,
+    GraphTrainerCompileConfig,
+)
 from torchtitan.experiments.graph_trainer.cudagraph import (
     insert_kernel_annotations_pass,
     is_cudagraphable,
     is_full_cudagraphable,
+)
+from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
+    maybe_apply_ep_overlap_eager_chunking,
+    populate_eager_chunk_metadata_pass,
 )
 from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
     isolate_ep_process_group_pass,
@@ -2405,6 +2413,276 @@ class TestIsFullCudagraphable(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), g)
         self.assertFalse(is_cudagraphable(s))
         self.assertFalse(is_full_cudagraphable(gm))
+
+
+class TestEagerChunking(TestCase):
+    def _config(
+        self,
+        *,
+        chunk_dim: str = "batch",
+        module_fqn: str = "layers.*",
+    ) -> GraphTrainerCompileConfig:
+        return GraphTrainerCompileConfig(
+            enable=True,
+            ep_overlap=EpOverlapConfig(
+                enabled=True,
+                strategy="eager",
+                chunk_dim=chunk_dim,
+                module_fqn=module_fqn,
+            ),
+        )
+
+    def test_eager_chunking_is_idempotent(self):
+        class Block(torch.nn.Module):
+            def forward(self, x):
+                return x.sin()
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([Block()])
+
+            def forward(self, x):
+                return self.layers[0](x)
+
+        model = Model()
+        config = self._config()
+        maybe_apply_ep_overlap_eager_chunking(model, config)
+        wrapped_forward = model.layers[0].forward
+        maybe_apply_ep_overlap_eager_chunking(model, config)
+
+        self.assertIs(model.layers[0].forward, wrapped_forward)
+
+    def test_eager_chunking_compile_disabled_is_noop(self):
+        class Block(torch.nn.Module):
+            def forward(self, x):
+                return x.sin()
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([Block()])
+
+            def forward(self, x):
+                return self.layers[0](x)
+
+        model = Model()
+        forward = model.layers[0].forward
+        config = self._config()
+        config.enable = False
+
+        maybe_apply_ep_overlap_eager_chunking(model, config)
+
+        self.assertIs(model.layers[0].forward.__func__, forward.__func__)
+
+    def test_eager_chunking_rejects_unsupported_output_type(self):
+        class Block(torch.nn.Module):
+            def forward(self, x):
+                return {"x": x}
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([Block()])
+
+            def forward(self, x):
+                return self.layers[0](x)
+
+        model = Model()
+        maybe_apply_ep_overlap_eager_chunking(model, self._config())
+
+        with self.assertRaisesRegex(TypeError, "layers.0.*dict"):
+            model(torch.randn(4, 3))
+
+    def test_transformer_batch_chunking_splits_positions_by_batch(self):
+        seen_positions = []
+
+        class Block(torch.nn.Module):
+            def forward(self, x, attention_masks=None, positions=None):
+                seen_positions.append(positions)
+                return x
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([Block()])
+
+            def forward(self, x, positions):
+                return self.layers[0](x, None, positions)
+
+        model = Model()
+        maybe_apply_ep_overlap_eager_chunking(model, self._config())
+        x = torch.randn(4, 4, 2)
+        positions = torch.arange(16).view(4, 4)
+
+        self.assertEqual(model(x, positions), x)
+        self.assertEqual([tuple(pos.shape) for pos in seen_positions], [(2, 4), (2, 4)])
+        self.assertEqual(seen_positions[0], positions[:2])
+        self.assertEqual(seen_positions[1], positions[2:])
+
+    def test_transformer_batch_chunking_rejects_same_extent_tensor_mask(self):
+        class Block(torch.nn.Module):
+            def forward(self, x, attention_masks):
+                return x + attention_masks
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([Block()])
+
+            def forward(self, x, attention_masks):
+                return self.layers[0](x, attention_masks)
+
+        model = Model()
+        maybe_apply_ep_overlap_eager_chunking(model, self._config())
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "attention_masks must be None, BlockMask.*upstream .*TransformerBlock",
+        ):
+            model(torch.randn(4, 3), torch.randn(4, 3))
+
+    def test_moe_chunking_splits_activation_only(self):
+        seen_shapes = []
+
+        class Moe(torch.nn.Module):
+            def forward(self, x):
+                seen_shapes.append(tuple(x.shape))
+                return x
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([torch.nn.Module()])
+                self.layers[0].moe = Moe()
+
+            def forward(self, x):
+                return self.layers[0].moe(x)
+
+        model = Model()
+        maybe_apply_ep_overlap_eager_chunking(
+            model,
+            self._config(chunk_dim="seq", module_fqn="layers.*.moe"),
+        )
+        x = torch.randn(2, 4, 3)
+
+        self.assertEqual(model(x), x)
+        self.assertEqual(seen_shapes, [(2, 2, 3), (2, 2, 3)])
+
+    def test_moe_chunking_rejects_extra_tensor_input(self):
+        class Moe(torch.nn.Module):
+            def forward(self, x, aux):
+                return x + aux
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([torch.nn.Module()])
+                self.layers[0].moe = Moe()
+
+            def forward(self, x, aux):
+                return self.layers[0].moe(x, aux)
+
+        model = Model()
+        maybe_apply_ep_overlap_eager_chunking(
+            model,
+            self._config(module_fqn="layers.*.moe"),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "expected exactly one positional activation tensor.*upstream MoE.forward",
+        ):
+            model(torch.randn(4, 3), torch.randn(4, 3))
+
+    def test_eager_chunking_traces_overlap_metadata(self):
+        class Block(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(3, 3)
+
+            def forward(self, x):
+                return torch.relu(self.linear(x))
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([Block()])
+
+            def forward(self, x):
+                return self.layers[0](x)
+
+        model = Model()
+        annotate_module_fqns(model)
+        maybe_apply_ep_overlap_eager_chunking(model, self._config())
+
+        traced = minimal_fx_tracer(lambda inputs: model(inputs), module=model)(
+            torch.randn(4, 3)
+        )
+        gm = populate_eager_chunk_metadata_pass(traced.gm)
+
+        body_nodes = [
+            node
+            for node in gm.graph.nodes
+            if node.meta.get("chunked_region_role") == "body"
+        ]
+        roles = {
+            node.meta.get("chunked_region_role")
+            for node in gm.graph.nodes
+            if node.meta.get("chunked_region_fqn") == "layers.0"
+        }
+        self.assertEqual({node.meta.get("chunk_id") for node in body_nodes}, {0, 1})
+        self.assertEqual(
+            {node.meta.get("chunked_region_fqn") for node in body_nodes},
+            {"layers.0"},
+        )
+        self.assertIn("split_boundary", roles)
+        self.assertIn("materialization", roles)
+
+    def test_eager_chunking_splits_block_mask_batch_metadata(self):
+        from torch.nn.attention.flex_attention import create_block_mask
+
+        seen_masks = []
+
+        def mask_mod(b, h, q_idx, kv_idx):
+            return (b == 2) & (q_idx >= kv_idx)
+
+        class Block(torch.nn.Module):
+            def forward(self, x, attention_masks, positions):
+                seen_masks.append(attention_masks)
+                return x
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([Block()])
+
+            def forward(self, x, attention_masks, positions):
+                return self.layers[0](x, attention_masks, positions)
+
+        model = Model()
+        maybe_apply_ep_overlap_eager_chunking(model, self._config())
+        block_mask = create_block_mask(
+            mask_mod,
+            B=4,
+            H=None,
+            Q_LEN=128,
+            KV_LEN=128,
+            device="cpu",
+        )
+        x = torch.randn(4, 128, 8)
+        positions = torch.arange(128).repeat(4, 1)
+
+        self.assertEqual(model(x, block_mask, positions).shape, x.shape)
+        self.assertEqual(len(seen_masks), 2)
+        self.assertEqual([mask.kv_num_blocks.size(0) for mask in seen_masks], [2, 2])
+
+        b = torch.tensor(0)
+        h = torch.tensor(0)
+        q_idx = torch.tensor(1)
+        kv_idx = torch.tensor(0)
+        self.assertFalse(seen_masks[0].mask_mod(b, h, q_idx, kv_idx).item())
+        self.assertTrue(seen_masks[1].mask_mod(b, h, q_idx, kv_idx).item())
 
 
 if __name__ == "__main__":

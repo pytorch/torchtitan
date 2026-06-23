@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import fnmatch
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -21,6 +22,7 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
 )
+from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.tools.logging import logger
 
 
@@ -71,13 +73,17 @@ def _is_backward_node(node: torch.fx.Node) -> bool:
     return node.meta.get("autograd_backward", False)
 
 
+def _get_module_fqn(node: torch.fx.Node) -> str:
+    return node.meta.get("custom", {}).get(_MODULE_FQN, "")
+
+
 def _get_layer_id(node: torch.fx.Node) -> int:
     """Extract the layer index from the node's module_fqn metadata.
 
     Nodes under ``layers.<N>`` return ``N``.
     All other nodes (tok_embeddings, norm, output) return ``_NOT_IN_LAYERS``.
     """
-    fqn = node.meta.get("custom", {}).get(_MODULE_FQN, "")
+    fqn = _get_module_fqn(node)
     parts = fqn.split(".")
     if parts[0] == "layers" and len(parts) >= 2:
         try:
@@ -99,6 +105,47 @@ def annotate_module_fqns(model: nn.Module) -> None:
     for fqn, submodule in model.named_modules():
         if fqn:  # skip root module
             submodule.forward = annotate_fn({_MODULE_FQN: fqn})(submodule.forward)
+
+
+def matches_module_fqn_pattern(pattern: str, fqn: str) -> bool:
+    """Match one module FQN against a component-wise fnmatch pattern."""
+    pattern_parts = pattern.split(".")
+    fqn_parts = fqn.split(".")
+    return len(pattern_parts) == len(fqn_parts) and all(
+        fnmatch.fnmatchcase(fqn_part, pattern_part)
+        for pattern_part, fqn_part in zip(pattern_parts, fqn_parts)
+    )
+
+
+_MOE_EP_REGIONS_ANNOTATED = False
+
+
+def annotate_moe_ep_regions() -> None:
+    """Annotate MoE EP compute, dispatch, and combine regions for FX passes."""
+    global _MOE_EP_REGIONS_ANNOTATED
+    if _MOE_EP_REGIONS_ANNOTATED:
+        return
+
+    from torchtitan.models.common.moe import MoE
+    from torchtitan.models.common.token_dispatcher import (
+        AllToAllTokenDispatcher,
+        LocalTokenDispatcher,
+    )
+
+    LocalTokenDispatcher.dispatch = annotate_fn({"EP": "dispatch"})(
+        LocalTokenDispatcher.dispatch
+    )
+    LocalTokenDispatcher.combine = annotate_fn({"EP": "combine"})(
+        LocalTokenDispatcher.combine
+    )
+    AllToAllTokenDispatcher.dispatch = annotate_fn({"EP": "dispatch"})(
+        AllToAllTokenDispatcher.dispatch
+    )
+    AllToAllTokenDispatcher.combine = annotate_fn({"EP": "combine"})(
+        AllToAllTokenDispatcher.combine
+    )
+    MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
+    _MOE_EP_REGIONS_ANNOTATED = True
 
 
 def parallelize_inputs(parallel_dims, args, kwargs):
@@ -249,7 +296,7 @@ def apply_simple_fsdp(
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
     )
 
-    if parallel_dims.ep_enabled and hasattr(model, "layers"):
+    if parallel_dims.ep_enabled and isinstance(model, Decoder):
         edp_mesh_names = (
             ["dp_replicate", "efsdp"]
             if parallel_dims.dp_replicate_enabled
@@ -259,18 +306,17 @@ def apply_simple_fsdp(
         assert edp_mesh is not None
 
         for _, transformer_block in model.layers.items():
-            if not getattr(transformer_block, "moe_enabled", False):
+            if not isinstance(transformer_block, TransformerBlock):
                 continue
-            assert hasattr(transformer_block, "moe")
+            moe = getattr(transformer_block, "moe", None)
+            if moe is None:
+                continue
             experts_shard_dim = 0
-            if (
-                edp_mesh["efsdp"].size() * parallel_dims.ep
-                > transformer_block.moe.experts.num_experts
-            ):
+            if edp_mesh["efsdp"].size() * parallel_dims.ep > moe.experts.num_experts:
                 experts_shard_dim = 1
 
-            transformer_block.moe.experts = data_parallel(
-                transformer_block.moe.experts,
+            moe.experts = data_parallel(
+                moe.experts,
                 edp_mesh,
                 dp_mode,
                 mp_policy=mp_policy,

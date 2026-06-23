@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from torchtitan.experiments.graph_trainer.configs import EpOverlapConfig
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 
 
@@ -82,6 +83,7 @@ class _StubCompileConfig:
     mode: str = "aot_fx_trace"
     backend: str = "aot_eager"
     passes: list = field(default_factory=list)
+    ep_overlap: EpOverlapConfig = field(default_factory=EpOverlapConfig)
 
 
 @dataclass
@@ -171,6 +173,22 @@ class TestConfigFingerprint(unittest.TestCase):
         fp_a = compute_config_fingerprint(_make_stub_model(), cfg_a, dims)
         fp_b = compute_config_fingerprint(_make_stub_model(), cfg_b, dims)
         self.assertNotEqual(fp_a, fp_b)
+
+        cfg_graph_batch = _StubCompileConfig(ep_overlap=EpOverlapConfig(enabled=True))
+        cfg_graph_seq = _StubCompileConfig(
+            ep_overlap=EpOverlapConfig(
+                enabled=True,
+                chunk_dim="seq",
+                module_fqn="layers.*.moe",
+            ),
+        )
+        fp_graph_batch = compute_config_fingerprint(
+            _make_stub_model(), cfg_graph_batch, dims
+        )
+        fp_graph_seq = compute_config_fingerprint(
+            _make_stub_model(), cfg_graph_seq, dims
+        )
+        self.assertNotEqual(fp_graph_batch, fp_graph_seq)
 
     def test_pass_order_sensitive(self):
         from torchtitan.experiments.graph_trainer.precompile import (

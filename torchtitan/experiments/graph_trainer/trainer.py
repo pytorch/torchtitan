@@ -17,7 +17,10 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     log_timer,
     maybe_register_blockmask_pytree_node,
 )
-from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.configs import (
+    GraphTrainerCompileConfig,
+    trace_input_preparer_keys,
+)
 from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
@@ -32,6 +35,7 @@ from torchtitan.experiments.graph_trainer.registry import (
     PASS_PIPELINE_REGISTRY,
     POST_INIT_HOOKS,
     PRE_TRAIN_STEP_HOOKS,
+    TRACE_INPUT_PREPARERS,
 )
 from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
@@ -227,7 +231,11 @@ class GraphTrainer(Trainer):
             else:
                 fwd_bwd_fn = make_fwd_bwd_step(model, self.loss_fn)
                 with self.train_context(), log_timer("minimal_fx_tracer"):
-                    self._traced_step = minimal_fx_tracer(fwd_bwd_fn, module=model)(
+                    self._traced_step = minimal_fx_tracer(
+                        fwd_bwd_fn,
+                        module=model,
+                        prepare_inputs=self._prepare_trace_inputs,
+                    )(
                         inputs,
                         labels,
                         global_valid_tokens,
@@ -265,6 +273,16 @@ class GraphTrainer(Trainer):
                 param.grad += grad
 
         return loss
+
+    def _prepare_trace_inputs(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> None:
+        for pass_name in trace_input_preparer_keys(self.config.compile):
+            prepare = TRACE_INPUT_PREPARERS.get(pass_name)
+            if prepare is not None:
+                prepare(self.config.compile, args, kwargs)
 
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
