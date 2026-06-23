@@ -21,7 +21,11 @@ from torchtitan.distributed.minimal_async_ep import (
     init_buffer as minimal_async_ep_init_buffer,
     MinimalAsyncEPDispatchMetadata,
 )
-from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+from torchtitan.distributed.spmd_types import (
+    current_spmd_mesh,
+    set_current_spmd_mesh,
+    spmd_sparse_mesh,
+)
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 from torchtitan.tools.utils import device_module, device_type
@@ -59,7 +63,6 @@ class LocalTokenDispatcher(Configurable):
     def __init__(self, config: Config):
         self.num_experts = config.num_experts
         self.top_k = config.top_k
-        self.sparse_mesh: DeviceMesh | None = None
 
     def wire_meshes(
         self,
@@ -226,8 +229,7 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher):
             yield
             return
 
-        assert self.sparse_mesh is not None, "spmd_types EP dispatch requires sparse_mesh"
-        with set_current_spmd_mesh(self.sparse_mesh):
+        with set_current_spmd_mesh(spmd_sparse_mesh()):
             yield
 
     def _sp_global_token_indices(
@@ -355,21 +357,28 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 # re-annotate after no-typecheck
                 spmd.assert_type(
                     num_global_tokens_per_local_expert_E,
-                    {"dp_replicate": spmd.V, "efsdp": spmd.V, "ep": spmd.S(0)},
+                    {"dp_replicate": spmd.P, "efsdp": spmd.P, "ep": spmd.S(0)},
                 )
                 if spmd.is_type_checking():  # sparse mesh reinterpret
                     routed_input_ND = spmd.reinterpret_mesh(
                         routed_input_ND, spmd.current_mesh()
                     )
-                assert self.sparse_mesh is not None
                 routed_input_RD = spmd.all_to_all(
                     routed_input_ND,
-                    self.sparse_mesh.get_group("ep"),
+                    current_spmd_mesh().get_group("ep"),
                     src=spmd.S(0),
                     dst=spmd.S(0),
                     output_split_sizes=output_splits_list,
                     input_split_sizes=input_splits_list,
                 )
+                # Convert to V for _permute, otherwise typechecker errors with P + V.
+                for axis in ("dp_replicate", "efsdp"):
+                    spmd.mutate_type(
+                        num_global_tokens_per_local_expert_E,
+                        axis,
+                        src=spmd.P,
+                        dst=spmd.V,
+                    )
             else:
                 routed_input_RD = all_to_all_single(
                     routed_input_ND,
@@ -515,10 +524,9 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
             # on the NCCL stream and won't block until the tensor is accessed.
             if get_spmd_backend() == "spmd_types":
-                assert self.sparse_mesh is not None
                 routed_output_RD = spmd.all_to_all(
                     routed_output_RD,
-                    self.sparse_mesh.get_group("ep"),
+                    current_spmd_mesh().get_group("ep"),
                     src=spmd.S(0),
                     dst=spmd.S(0),
                     output_split_sizes=metadata.input_splits,
