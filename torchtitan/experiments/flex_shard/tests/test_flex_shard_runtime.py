@@ -15,7 +15,6 @@ from torchtitan.experiments.flex_shard.flex_shard.bucket_runtime import (
 )
 from torchtitan.experiments.flex_shard.flex_shard.unsharded_param_getters import (
     _RafSavedTensorContext,
-    UnshardedParamSlot,
 )
 from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_cuda,
@@ -26,46 +25,7 @@ from torchtitan.experiments.flex_shard.tests.common import (
 )
 
 
-class TestUnshardedParamSlot(TestCase):
-    def test_repeated_reads_return_same_tensor_until_pop(self):
-        slot = UnshardedParamSlot(param_fqn="weight", bucket_fqn="bucket")
-        param = torch.randn(2, 3, requires_grad=True)
-
-        slot.push_unsharded_param(param)
-        self.assertIs(slot.get_unsharded_param(), param)
-        self.assertIs(slot.get_unsharded_param(), param)
-        slot.pop_unsharded_param()
-
-        with self.assertRaisesRegex(RuntimeError, "bucket unshard hook"):
-            slot.get_unsharded_param()
-
-    def test_mixed_precision_read_is_cached_per_frame(self):
-        slot = UnshardedParamSlot(
-            param_fqn="weight",
-            bucket_fqn="bucket",
-            param_dtype=torch.float16,
-        )
-        param = torch.randn(2, 3, requires_grad=True)
-
-        slot.push_unsharded_param(param)
-        first = slot.get_unsharded_param()
-        second = slot.get_unsharded_param()
-        self.assertIs(first, second)
-        self.assertEqual(first.dtype, torch.float16)
-
-    def test_nested_frames_restore_outer_param(self):
-        slot = UnshardedParamSlot(param_fqn="weight", bucket_fqn="bucket")
-        outer = torch.randn(2, 3)
-        inner = torch.randn(2, 3)
-
-        slot.push_unsharded_param(outer)
-        self.assertIs(slot.get_unsharded_param(), outer)
-        slot.push_unsharded_param(inner)
-        self.assertIs(slot.get_unsharded_param(), inner)
-        slot.pop_unsharded_param()
-        self.assertIs(slot.get_unsharded_param(), outer)
-        slot.pop_unsharded_param()
-
+class TestRafSavedTensorContext(TestCase):
     def test_raf_saved_tensor_context_packs_view_of_registered_base(self):
         class _BaseHandle:
             def __init__(self, tensor: torch.Tensor) -> None:
