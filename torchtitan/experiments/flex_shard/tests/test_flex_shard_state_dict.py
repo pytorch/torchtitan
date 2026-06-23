@@ -21,7 +21,11 @@ def _make_flex_sharded_transformer(mesh, **kwargs):
     flex_shard_cuda(
         model,
         mesh,
-        buckets=transformer_bucket_specs(args.n_layers, reshard_after_forward=False),
+        buckets=transformer_bucket_specs(
+            args.n_layers,
+            mesh,
+            reshard_after_forward=False,
+        ),
     )
     return args, model
 
