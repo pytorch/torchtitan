@@ -57,6 +57,10 @@ def llama3_debugmodel() -> Trainer.Config:
     )
 
 
+def llama3_debugmodel_flex_attn() -> Trainer.Config:
+    return llama3_debugmodel()
+
+
 def llama3_debugmodel_fused_qkv() -> Trainer.Config:
     config = llama3_debugmodel()
     config.model_spec = model_registry("debugmodel_fused_qkv")
