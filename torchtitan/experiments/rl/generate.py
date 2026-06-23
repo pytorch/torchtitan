@@ -31,6 +31,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.config import apply_overrides
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.examples.alphabet_sort import config_registry
 from torchtitan.experiments.rl.models.vllm_registry import (
@@ -80,6 +81,10 @@ def generate() -> None:
     if not callable(config_factory):
         raise ValueError(f"Unknown RL config {args.config!r}")
     config = config_factory()
+    # Apply config overrides at config time (e.g. the fused_swiglu FFN), before
+    # the model_spec is registered/built. Mirrors RLTrainer.
+    if config.override.imports:
+        apply_overrides(config.override, config)
     gen_config = config.generator
     model_path = config.hf_assets_path
     max_num_seqs = args.max_num_seqs
@@ -95,7 +100,6 @@ def generate() -> None:
             initial_load_in_hf=True,
             initial_load_path=model_path,
         ),
-        override=config.override,
     )
     logger.info("Registered TorchTitan model with vLLM")
 

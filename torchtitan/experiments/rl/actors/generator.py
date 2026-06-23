@@ -21,7 +21,7 @@ import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
 from monarch.rdma import is_rdma_available
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
+from torchtitan.config import CompileConfig, Configurable, DebugConfig
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
@@ -340,7 +340,6 @@ class VLLMGenerator(Actor, Configurable):
         compile_config: CompileConfig,
         max_num_seqs: int,
         output_dir: str,
-        override: OverrideConfig | None = None,
     ):
         init_logger()
         sl.init_structured_logger(
@@ -367,7 +366,6 @@ class VLLMGenerator(Actor, Configurable):
             parallelism=config.parallelism,
             compile_config=compile_config,
             checkpoint_config=config.checkpoint,
-            override=override,
         )
 
         # Set vLLM environment variables from config before any vLLM initialization

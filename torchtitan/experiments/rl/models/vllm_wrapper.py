@@ -21,19 +21,12 @@ import torch.distributed as dist
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config import (
-    apply_overrides,
-    CompileConfig,
-    OverrideConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
-from vllm.compilation import codegen as _codegen
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -59,37 +52,6 @@ def _dtensor_safe_weak_ref_tensor(tensor):
 
 
 _torch_utils.weak_ref_tensor = _dtensor_safe_weak_ref_tensor
-
-
-# NOTE: Monkeypatch vLLM's _node_ref to handle DTensor placement types
-# whose repr() uses unqualified class names not available in the generated
-# code's exec namespace (which only has `import torch`).
-_original_node_ref = _codegen._node_ref
-
-
-# TODO: Followup with core vLLM fix
-# https://github.com/pytorch/torchtitan/issues/3067
-# Accept *args: the FAP piecewise codegen callsite passes additional positional
-# args in newer vLLM; only the first arg is the value to render. Forward all of
-# them to the original so the wrapper matches whatever arity vLLM uses.
-def _patched_node_ref(*args):
-    arg = args[0]
-    try:
-        from torch.distributed.tensor.placement_types import Partial, Placement
-
-        if isinstance(arg, Placement):
-            cls = type(arg)
-            # Partial.__repr__ leaves reduce_op unquoted (e.g. "Partial(sum)")
-            # which would resolve to the builtin sum, not the string "sum".
-            if isinstance(arg, Partial):
-                return f"{cls.__module__}.{cls.__name__}({arg.reduce_op!r})"
-            return f"{cls.__module__}.{repr(arg)}"
-    except ImportError:
-        pass
-    return _original_node_ref(*args)
-
-
-_codegen._node_ref = _patched_node_ref
 
 
 @support_torch_compile(
@@ -126,7 +88,6 @@ class VLLMModelWrapper(Module):
         checkpoint_config: CheckpointManager.Config,
         vllm_config: VllmConfig,
         prefix: str = "",
-        override: OverrideConfig | None = None,
     ):
         super().__init__()
 
@@ -199,12 +160,6 @@ class VLLMModelWrapper(Module):
         self.config.update_from_config(
             config=_InferenceConfig(parallelism=training_parallelism)
         )
-
-        # Apply config overrides after update_from_config (which sets the
-        # sharding configs the override factories read) and before build --
-        # mirroring core Trainer's order. See torchtitan/trainer.py.
-        if override is not None and override.imports:
-            apply_overrides(override, self.config)
 
         # Build model on meta device to avoid allocating full model on every GPU
         with torch.device("meta"):

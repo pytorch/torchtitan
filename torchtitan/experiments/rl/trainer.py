@@ -25,7 +25,7 @@ import torchstore as ts
 from monarch.actor import ProcMesh
 from monarch.spmd import setup_torch_elastic_env_async
 
-from torchtitan.config import CompileConfig, Configurable, OverrideConfig
+from torchtitan.config import apply_overrides, CompileConfig, Configurable, OverrideConfig
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import Batcher
@@ -204,6 +204,11 @@ class RLTrainer(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
+        # Apply overrides at config time to the full config tree (model_spec and
+        # any other overridable component), so both the trainer and generator
+        # build from the already-overridden model_spec. Mirrors core Trainer.
+        if config.override.imports:
+            apply_overrides(config.override, config)
         self.trainer: PolicyTrainer | None = None
         self.generator_router: GeneratorRouter | None = None
         self._proc_meshes = []
@@ -351,7 +356,6 @@ class RLTrainer(Configurable):
                 generator_dtype=config.generator.model_dtype,
                 compile_config=config.compile,
                 output_dir=config.dump_folder,
-                override=config.override,
             )
 
             generators = []
@@ -371,7 +375,6 @@ class RLTrainer(Configurable):
                         config.num_validation_samples,
                     ),
                     output_dir=config.dump_folder,
-                    override=config.override,
                 )
                 generators.append(generator)
             self.generator_router = config.generator_router.build(generators=generators)

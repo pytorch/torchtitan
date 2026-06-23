@@ -20,12 +20,10 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
-    apply_overrides,
     CommConfig,
     CompileConfig,
     Configurable,
     DebugConfig,
-    OverrideConfig,
     ParallelismConfig,
     TORCH_DTYPE_MAP,
     TrainingConfig,
@@ -171,7 +169,6 @@ class PolicyTrainer(Actor, Configurable):
         hf_assets_path: str = "",
         generator_dtype: str = "",
         output_dir: str,
-        override: OverrideConfig | None = None,
     ):
         init_logger()
         if not config.dump_folder:
@@ -227,7 +224,7 @@ class PolicyTrainer(Actor, Configurable):
             self.sd_adapter = None
 
         # Create training policy model
-        model = self._build_model(model_spec, config, device_type, override)
+        model = self._build_model(model_spec, config, device_type)
         model.train()
         self.model = model
         self.model_parts = [model]
@@ -298,7 +295,6 @@ class PolicyTrainer(Actor, Configurable):
         model_spec: ModelSpec,
         config: Config,
         device_type: str,
-        override: OverrideConfig | None = None,
     ):
         """Build, parallelize, and initialize a model with random weights.
 
@@ -326,12 +322,6 @@ class PolicyTrainer(Actor, Configurable):
         # model-agnostic `update_from_config` hook (RL's trainer bypasses
         # `torchtitan.Trainer's` call, so we invoke it directly).
         model_spec.model.update_from_config(config=config)
-
-        # Apply config overrides after update_from_config (which sets the
-        # sharding configs the override factories read) and before build --
-        # mirroring core Trainer's order. See torchtitan/trainer.py.
-        if override is not None and override.imports:
-            apply_overrides(override, model_spec.model)
 
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):

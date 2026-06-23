@@ -14,6 +14,8 @@ import dataclasses
 from collections.abc import Callable
 from typing import Literal
 
+import torch
+
 from torchtitan.models.common.attention import (
     FlexAttention,
     FusedQKVLinear,
@@ -70,6 +72,79 @@ def get_attention_config(
         raise ValueError(f"Unknown backend: {backend}")
 
 
+def _fused_qkv_param_init(
+    base_param_init: dict[str, Callable],
+    *,
+    n_heads: int,
+    n_kv_heads: int,
+    head_dim: int,
+) -> dict[str, Callable]:
+    """Init for the fused ``wqkv`` that is bit-identical to the stock separate
+    ``wq``/``wk``/``wv``.
+
+    Initializes q, k, v as three contiguous tensors of the exact stock-weight
+    shapes (in ``QKVLinear``'s ``wq``/``wk``/``wv`` build order, so the RNG draws
+    match the non-fused module), then assembles them into the fused
+    ``(n_kv_heads, R, head_dim, dim)`` layout (``R = heads_per_kv + 2``) -- the
+    same concatenation ``_merge_qkv_on_load`` uses -- and copies into the buffer.
+    Initializing directly on the fused buffer's strided slices would draw a
+    different sequence, so it would not be bit-identical.
+    """
+    heads_per_kv = n_heads // n_kv_heads
+    r_dim = heads_per_kv + 2
+
+    out: dict[str, Callable] = {}
+
+    weight_init = base_param_init.get("weight")
+    if weight_init is not None:
+
+        def _init_weight(t):
+            dim = t.shape[-1]
+            q = t.new_empty(n_heads * head_dim, dim)
+            k = t.new_empty(n_kv_heads * head_dim, dim)
+            v = t.new_empty(n_kv_heads * head_dim, dim)
+            weight_init(q)
+            weight_init(k)
+            weight_init(v)
+            fused = torch.cat(
+                [
+                    q.view(n_kv_heads, heads_per_kv, head_dim, dim),
+                    k.view(n_kv_heads, 1, head_dim, dim),
+                    v.view(n_kv_heads, 1, head_dim, dim),
+                ],
+                dim=1,
+            )
+            with torch.no_grad():
+                t.view(n_kv_heads, r_dim, head_dim, dim).copy_(fused)
+
+        out["weight"] = _init_weight
+
+    bias_init = base_param_init.get("bias")
+    if bias_init is not None:
+
+        def _init_bias(t):
+            q = t.new_empty(n_heads * head_dim)
+            k = t.new_empty(n_kv_heads * head_dim)
+            v = t.new_empty(n_kv_heads * head_dim)
+            bias_init(q)
+            bias_init(k)
+            bias_init(v)
+            fused = torch.cat(
+                [
+                    q.view(n_kv_heads, heads_per_kv, head_dim),
+                    k.view(n_kv_heads, 1, head_dim),
+                    v.view(n_kv_heads, 1, head_dim),
+                ],
+                dim=1,
+            )
+            with torch.no_grad():
+                t.view(n_kv_heads, r_dim, head_dim).copy_(fused)
+
+        out["bias"] = _init_bias
+
+    return out
+
+
 def make_gqa_config(
     *,
     dim: int,
@@ -96,7 +171,14 @@ def make_gqa_config(
             wqkv=Linear.Config(
                 in_features=dim,
                 out_features=(n_heads + 2 * n_kv) * per_head_dim,
-                param_init=wqkv_param_init,
+                # Per-slice init so the fused wqkv is bit-identical to the stock
+                # separate wq/wk/wv (see _fused_qkv_param_init).
+                param_init=_fused_qkv_param_init(
+                    wqkv_param_init,
+                    n_heads=n_heads,
+                    n_kv_heads=n_kv,
+                    head_dim=per_head_dim,
+                ),
             ),
         )
     else:

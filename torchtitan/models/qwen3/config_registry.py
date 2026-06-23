@@ -251,6 +251,14 @@ def qwen3_32b() -> Trainer.Config:
     )
 
 
+def qwen3_debugmodel_non_fused_qkv() -> Trainer.Config:
+    # Reverse test: exercise the separate wq/wk/wv path now that fused QKV is
+    # the debugmodel default.
+    config = qwen3_debugmodel()
+    config.model_spec = model_registry("debugmodel_non_fused_qkv")
+    return config
+
+
 def qwen3_moe_debug() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),

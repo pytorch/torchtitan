@@ -225,6 +225,24 @@ def _debugmodel(attn_backend: str) -> Qwen3Model.Config:
     )
 
 
+def _debugmodel_non_fused_qkv(attn_backend: str) -> Qwen3Model.Config:
+    # Reverse of the default fused QKV: keeps coverage for the separate
+    # wq/wk/wv path now that fuse_qkv defaults to True.
+    config = _debugmodel(attn_backend)
+    config.layers = _build_qwen3_layers(
+        fuse_qkv=False,
+        n_layers=8,
+        dim=256,
+        n_heads=16,
+        n_kv_heads=8,
+        head_dim=128,
+        hidden_dim=3072,
+        attn_backend=attn_backend,
+        rope=CosSinRoPE.Config(dim=128, max_seq_len=4096, theta=1000000.0),
+    )
+    return config
+
+
 def _0_6b(attn_backend: str) -> Qwen3Model.Config:
     dim = 1024
     head_dim = 128
@@ -572,6 +590,7 @@ def _235b_a22b(
 
 qwen3_configs = {
     "debugmodel": _debugmodel,
+    "debugmodel_non_fused_qkv": _debugmodel_non_fused_qkv,
     "0.6B": _0_6b,
     "1.7B": _1_7b,
     "4B": _4b,

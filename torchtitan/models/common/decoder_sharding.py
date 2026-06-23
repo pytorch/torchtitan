@@ -235,19 +235,36 @@ def set_dense_ffn_sharding(
     attn_x_layout: SpmdLayout,
     enable_sp: bool,
 ) -> None:
-    """Standard dense FFN (``w1``/``w2``/``w3``) TP sharding.
+    """Standard dense FFN TP sharding.
 
     Shared by llama3, qwen3, and deepseek_v3. ``attn_x_layout`` should match
     the layout that the layer's attention block emits so the FFN's input wrap is
     a no-op redistribute when placements already agree.
+
+    Handles both the stock :class:`FeedForward` (separate ``w1``/``w3``/``w2``)
+    and a fused gate+up FFN (e.g. ``FusedSwiGLU`` from the override mechanism),
+    which has no ``w1``/``w3`` -- only a single ``w13`` parameter sharded on the
+    hidden axis. The fused config is detected by its ``hidden_dim`` field (the
+    stock ``FeedForward.Config`` has ``w1``/``w2``/``w3`` instead), avoiding an
+    import of the override module into core. (Reached for RL, where the override
+    is applied at config time, before this per-actor sharding pass.)
     """
+    fused = hasattr(feed_forward_cfg, "hidden_dim")
     feed_forward_cfg.sharding_config = ShardingConfig(
+        # Fused gate+up: shard the single ``w13`` param on the hidden axis
+        # (dim 0), giving each TP rank a matching slice of both gate and up.
+        # Stock FFN's gate/up are sub-linears that carry their own colwise
+        # configs below, so it has no FFN-level state sharding.
+        state_shardings=(
+            {"w13": dense_param_placement(tp=spmd.S(0))} if fused else None
+        ),
         in_src_shardings={"x": attn_x_layout},
         in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
     )
-    feed_forward_cfg.w1.sharding_config = colwise_config()
-    feed_forward_cfg.w3.sharding_config = colwise_config()
     feed_forward_cfg.w2.sharding_config = rowwise_config(output_sp=enable_sp)
+    if not fused:
+        feed_forward_cfg.w1.sharding_config = colwise_config()
+        feed_forward_cfg.w3.sharding_config = colwise_config()
 
 
 def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:
