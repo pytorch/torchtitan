@@ -66,8 +66,7 @@ def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefini
             prefix.append(f"--parallelism.spmd_backend {backend}")
         if test_name != t.test_name:
             variant = tuple(
-                arg.replace(f"{t.test_name}/", f"{test_name}/")
-                for arg in variant
+                arg.replace(f"{t.test_name}/", f"{test_name}/") for arg in variant
             )
         new_args.append(tuple(prefix) + tuple(variant))
     return dataclasses.replace(
