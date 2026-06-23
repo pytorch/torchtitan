@@ -234,8 +234,14 @@ def _maybe_launch_slurm_job(
         # overwrite the values we just set.
         exclusive=True,
     )
-    job.apply()
-    state = job.state()
+    if os.environ.get("MONARCH_BATCH_JOB") == "1":
+        # In-allocation batch client: the controller runs inside the allocation
+        # the submitter already created. Reconnect to the workers the runner
+        # started (via the cached BatchJob) instead of submitting a new job.
+        state = job.state()
+    else:
+        job.apply()
+        state = job.state()
     return HostMeshes(
         trainer=state.trainer,
         generators=[
