@@ -147,22 +147,88 @@ class DaytonaSandbox:
 
         timeout = max(timeout, int(os.environ.get("TT_DAYTONA_EXEC_TIMEOUT_MIN", "0")))
         # exec lands as root on R2E images; drop privileges with runuser when a
-        # non-root user is requested (keeps env via --whitelist-environment, the
-        # same contract DockerSandbox uses).
+        # non-root user is requested. Inline env as `env K=V` (not the SDK env=)
+        # so the whole command is self-contained for the session API below.
+        env_prefix = (
+            "env " + " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items()) + " "
+            if env
+            else ""
+        )
         if user and user != "root":
             keys = ",".join((env or {}).keys())
             wl = f"--whitelist-environment={keys} " if keys else ""
-            full = f"runuser -u {shlex.quote(user)} {wl}-- bash -c {shlex.quote(cmd)}"
+            inner = f"runuser -u {shlex.quote(user)} {wl}-- bash -c {shlex.quote(cmd)}"
         else:
-            full = f"bash -c {shlex.quote(cmd)}"
-        r = await self._sb.process.exec(full, env=env or None, timeout=timeout)
-        rc = int(getattr(r, "exit_code", 0) or 0)
-        out = getattr(r, "result", "") or ""
+            inner = f"bash -c {shlex.quote(cmd)}"
+        rc, out = await self._session_exec(env_prefix + inner, timeout=timeout)
         if check and rc != 0:
             raise RuntimeError(
                 f"daytona exec failed (exit={rc}): {cmd[:120]}\n{out[:400]}"
             )
         return rc, out, ""
+
+    async def _session_exec(self, full: str, *, timeout: int) -> tuple[int, str]:
+        """Run ``full`` via Daytona's async session API (create_session +
+        execute_session_command(run_async=True) + poll get_session_command)
+        instead of the one-shot ``process.exec``. Polling is decoupled from
+        command execution, so a slow, high-latency host->daytona link (e.g.
+        cross-region MAST -> daytona-US) does not trip the SDK's
+        "request timeout: command execution timeout" on the exec call (which
+        one-shot ``process.exec`` does -- it holds one HTTP request open for the
+        whole command). Retries transient connection drops. The session is NOT
+        deleted (Daytona kills a session's child processes on delete, which would
+        kill the backgrounded claude). Mirrors genai/msl/rl daytona_environment.
+        """
+        import asyncio
+        import os
+        import uuid
+
+        from daytona import SessionExecuteRequest
+
+        retries = int(os.environ.get("TT_DAYTONA_EXEC_RETRIES", "5"))
+        backoff = 5.0
+        sid = cid = ""
+        for attempt in range(retries + 1):
+            try:
+                sid = uuid.uuid4().hex
+                await self._sb.process.create_session(sid)
+                resp = await self._sb.process.execute_session_command(
+                    sid,
+                    SessionExecuteRequest(command=full, run_async=True),
+                    timeout=timeout,
+                )
+                cid = resp.cmd_id
+                if not cid:
+                    raise RuntimeError("daytona session exec returned no cmd_id")
+                break
+            except Exception:
+                try:
+                    await self._sb.process.delete_session(sid)
+                except Exception:
+                    pass
+                if attempt >= retries:
+                    raise
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60.0)
+
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout + 120.0
+        cmd = await self._sb.process.get_session_command(sid, cid)
+        polls = 0
+        while cmd.exit_code is None:
+            if loop.time() > deadline:
+                raise TimeoutError(
+                    f"daytona exec poll exceeded {timeout + 120:.0f}s "
+                    f"(sandbox likely stopped/deleted); cmd={full[:80]}"
+                )
+            await asyncio.sleep(0.1 if polls < 5 else 1.0)
+            cmd = await self._sb.process.get_session_command(sid, cid)
+            polls += 1
+
+        logs = await self._sb.process.get_session_command_logs(sid, cid)
+        out = getattr(logs, "stdout", "") or ""
+        err = getattr(logs, "stderr", "") or ""
+        return int(cmd.exit_code), out + err
 
     async def write_file(
         self, sandbox_path: str, content: FileContent, *, user: str = "root"
