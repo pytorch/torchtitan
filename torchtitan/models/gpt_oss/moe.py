@@ -164,13 +164,12 @@ class GptOssGroupedExperts(Module):
         topk_expert_ids_BLK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
         *,
-        num_local_tokens_after_seq_dim_padding: int,
+        local_seq_len_after_padding: int,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add."""
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
         T = B * L
-        local_seq_len_after_padding = num_local_tokens_after_seq_dim_padding // B
         x_TD = x_BLD.view(T, D)
         topk_scores_TK = topk_scores_BLK.view(T, K)
         topk_expert_ids_TK = topk_expert_ids_BLK.view(T, K)
@@ -192,7 +191,7 @@ class GptOssGroupedExperts(Module):
             routed_output_RD,
             metadata,
             x_TD,
-            num_local_tokens_after_padding=num_local_tokens_after_seq_dim_padding,
+            local_batch_size=B,
             local_seq_len_after_padding=local_seq_len_after_padding,
         )
         # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
