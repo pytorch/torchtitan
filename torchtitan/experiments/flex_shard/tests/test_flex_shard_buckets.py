@@ -822,41 +822,6 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
         self.assertEqual(result[0], expected[0])
         self.assertEqual(result[1], expected[1])
 
-    def test_owned_reduce_grad_multi_param_bucket_to_owner(self):
-        mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
-        placement = Owned(0)
-        infos = [
-            _owned_param_info(
-                "a",
-                torch.Size([2, 2]),
-                placement,
-                rank=self.rank,
-                world_size=self.world_size,
-            ),
-            _owned_param_info(
-                "b",
-                torch.Size([3]),
-                placement,
-                rank=self.rank,
-                world_size=self.world_size,
-            ),
-        ]
-        grads = [
-            torch.full((2, 2), float(self.rank + 1)),
-            torch.full((3,), float(10 + self.rank)),
-        ]
-
-        prepared = placement.prepare_reduce_grad(grads, infos, mesh, None)
-        result = placement.reduce_prepared_grad(prepared).sharded_grads
-
-        if self.rank == 0:
-            self.assertEqual(result[0], torch.full((2, 2), 1.5))
-            self.assertEqual(result[1], torch.full((3,), 10.5))
-        else:
-            self.assertEqual(result[0].numel(), 0)
-            self.assertEqual(result[1].numel(), 0)
-
-
 # ---------------------------------------------------------------------------
 # Distributed per-bucket ShardedBucketStorage tests (torchrun only)
 # ---------------------------------------------------------------------------
@@ -880,6 +845,41 @@ class TestDistributedBuckets(FSDPTest):
             (self.world_size,),
             mesh_dim_names=("fsdp",),
         )
+
+    @skip_if_lt_x_gpu(2)
+    def test_owned_reduce_grad_multi_param_bucket_to_owner(self):
+        mesh = self._init_mesh()
+        placement = Owned(0)
+        infos = [
+            _owned_param_info(
+                "a",
+                torch.Size([2, 2]),
+                placement,
+                rank=self.rank,
+                world_size=self.world_size,
+            ),
+            _owned_param_info(
+                "b",
+                torch.Size([3]),
+                placement,
+                rank=self.rank,
+                world_size=self.world_size,
+            ),
+        ]
+        grads = [
+            torch.full((2, 2), float(self.rank + 1), device=device_type),
+            torch.full((3,), float(10 + self.rank), device=device_type),
+        ]
+
+        prepared = placement.prepare_reduce_grad(grads, infos, mesh, None)
+        result = placement.reduce_prepared_grad(prepared).sharded_grads
+
+        if self.rank == 0:
+            self.assertEqual(result[0], torch.full((2, 2), 1.5, device=device_type))
+            self.assertEqual(result[1], torch.full((3,), 10.5, device=device_type))
+        else:
+            self.assertEqual(result[0].numel(), 0)
+            self.assertEqual(result[1].numel(), 0)
 
     def _flex_shard(self, model, mesh, **kwargs):
         from torchtitan.experiments.flex_shard import flex_shard
