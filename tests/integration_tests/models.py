@@ -5,7 +5,25 @@
 # LICENSE file in the root directory of this source tree.
 
 
+import dataclasses
+
 from tests.integration_tests import OverrideDefinitions
+
+
+def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
+    """Inject ``--parallelism.spmd_backend`` into every model test variant."""
+    test_name = f"{t.test_name}_{backend}"
+    new_args = []
+    for variant in t.override_args:
+        variant = tuple(
+            arg.replace(f"{t.test_name}/", f"{test_name}/") for arg in variant
+        )
+        new_args.append((f"--parallelism.spmd_backend {backend}",) + tuple(variant))
+    return dataclasses.replace(
+        t,
+        override_args=tuple(new_args),
+        test_name=test_name,
+    )
 
 
 def build_model_tests_list() -> list[OverrideDefinitions]:
@@ -160,4 +178,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
     ]
 
-    return model_tests
+    return [
+        *model_tests,
+        *[_enable_spmd_backend(t, "full_dtensor") for t in model_tests],
+        *[_enable_spmd_backend(t, "spmd_types") for t in model_tests],
+    ]
