@@ -408,18 +408,18 @@ def _fused_silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
 def _silu_and_mul_2d(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     hidden = gate.shape[-1]
 
-    # TODO(pianpwk): Migrate this no_typecheck workaround to a custom op SPMD
+    # TODO(pianpwk): Migrate this local workaround to a custom op SPMD
     # propagation rule registration system.
-    with spmd.no_typecheck():
+    with spmd.local():
         out = silu_and_mul_op(
             gate.reshape(-1, hidden), up.reshape(-1, hidden)
         ).reshape(gate.shape)
 
-    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-        spmd.assert_type(
-            out,
-            {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},
-        )
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            spmd.assert_type(
+                out,
+                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},
+            )
     return out
 
 
@@ -556,16 +556,16 @@ class FusedGroupedExperts(GroupedExperts):
         gate_up_R2F = torch._grouped_mm(x_RD.bfloat16(), w13_E_D_2F, offs=offsets_E)
         gate_RF, up_RF = gate_up_R2F.reshape(-1, F, 2).unbind(-1)
 
-        # TODO(pianpwk): Migrate this no_typecheck workaround to a custom op SPMD
+        # TODO(pianpwk): Migrate this local workaround to a custom op SPMD
         # propagation rule registration system.
-        with spmd.no_typecheck():
+        with spmd.local():
             h_RF = silu_and_mul_op(gate_RF, up_RF, offsets_E)
 
-        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-            spmd.assert_type(
-                h_RF,
-                {"dp_replicate": spmd.R, "efsdp": spmd.V, "ep": spmd.V},
-            )  # local SPMD region in MoE
+            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+                spmd.assert_type(
+                    h_RF,
+                    {"dp_replicate": spmd.R, "efsdp": spmd.V, "ep": spmd.V},
+                )  # local SPMD region in MoE
         return torch._grouped_mm(
             h_RF, w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
         ).type_as(x_RD)
