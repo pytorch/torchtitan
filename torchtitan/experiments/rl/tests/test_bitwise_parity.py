@@ -199,7 +199,7 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     use_flex = isinstance(inner_attn, FlexAttention.Config)
 
     # Mirror the production VLLMGenerator so the test exercises the same
-    # batch-invariant path.
+    # batch-invariant path (v2 runner is required for the logprob-kernel patch).
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     if use_flex:
         os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
