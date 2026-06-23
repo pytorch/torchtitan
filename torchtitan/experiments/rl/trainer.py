@@ -9,6 +9,7 @@ RL trainer used for synchronous grpo training.
 """
 
 import asyncio
+import copy
 import logging
 import math
 import os
@@ -16,6 +17,7 @@ import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
 
 # must run before torch import
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -25,12 +27,21 @@ import torchstore as ts
 from monarch.actor import ProcMesh
 from monarch.spmd import setup_torch_elastic_env_async
 
-from torchtitan.config import apply_overrides, CompileConfig, Configurable, OverrideConfig
+from torchtitan.config import (
+    apply_overrides,
+    CompileConfig,
+    Configurable,
+    OverrideConfig,
+)
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import Batcher
 from torchtitan.experiments.rl.generator_router import GeneratorRouter, RoutingContext
 from torchtitan.experiments.rl.losses import GRPOLoss
+from torchtitan.experiments.rl.models.attention import (
+    get_vllm_backend,
+    VLLM_ATTENTION_OVERRIDE,
+)
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout import (
@@ -41,6 +52,7 @@ from torchtitan.experiments.rl.rollout import (
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
 from torchtitan.experiments.rl.types import Episode
+from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -73,10 +85,11 @@ class RLTrainer(Configurable):
 
         override: OverrideConfig = field(default_factory=OverrideConfig)
         """Config overrides (e.g. ``torchtitan.overrides.fused_swiglu``) applied
-        to the shared ``model_spec`` inside *both* the trainer and generator
-        actors, after each actor's ``update_from_config`` and before ``build()``
-        -- mirroring core ``Trainer``'s order. Applying to both keeps trainer and
-        generator FFN numerics consistent (so batch-invariant parity holds)."""
+        in the controller (``setup_async``) to a per-actor deep copy of
+        ``model_spec``, after ``update_from_config`` and before
+        the actor builds -- mirroring core ``Trainer``'s order. Applied to both
+        trainer and generator specs (the generator also gets the ``vllm_attention``
+        swap) so their FFN numerics stay consistent for batch-invariant parity."""
 
         hf_assets_path: str = "./tests/assets/tokenizer"
         """Path to HF assets folder (model weights, tokenizer, config files)."""
@@ -204,11 +217,6 @@ class RLTrainer(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
-        # Apply overrides at config time to the full config tree (model_spec and
-        # any other overridable component), so both the trainer and generator
-        # build from the already-overridden model_spec. Mirrors core Trainer.
-        if config.override.imports:
-            apply_overrides(config.override, config)
         self.trainer: PolicyTrainer | None = None
         self.generator_router: GeneratorRouter | None = None
         self._proc_meshes = []
@@ -346,17 +354,65 @@ class RLTrainer(Configurable):
             for generator_mesh in generator_meshes:
                 await setup_torch_elastic_env_async(generator_mesh)
 
+            # Prepare the trainer's model spec in the controller: deep-copy then
+            # fill sharding (update_from_config) and apply overrides, before
+            # spawning. The actor only builds. (Each actor gets its own copy
+            # because trainer/generator parallelism -- and thus sharding -- differ.)
+            trainer_spec = replace(
+                config.model_spec, model=copy.deepcopy(config.model_spec.model)
+            )
+            trainer_spec.model.update_from_config(config=config.trainer)
+            if config.override.imports:
+                apply_overrides(config.override, trainer_spec.model)
+
             # Spawn actors on their respective meshes
             self.trainer = trainer_mesh.spawn(
                 "trainer",
                 PolicyTrainer,
                 config.trainer,
-                model_spec=config.model_spec,
+                model_spec=trainer_spec,
                 hf_assets_path=config.hf_assets_path,
                 generator_dtype=config.generator.model_dtype,
                 compile_config=config.compile,
                 output_dir=config.dump_folder,
             )
+
+            # Validate the original attention backend before the swap (the
+            # generator's vLLM path supports only varlen/flex), then prepare the
+            # generator's spec: update_from_config with the (translated)
+            # inference parallelism, then apply overrides once -- the vLLM
+            # attention swap plus any user overrides. update_from_config reads
+            # only ``.parallelism``, so a SimpleNamespace shim suffices.
+            gen_inner = config.model_spec.model.layers[0].attention.inner_attention
+            if not isinstance(
+                gen_inner, (VarlenAttention.Config, FlexAttention.Config)
+            ):
+                raise ValueError(
+                    "Generator requires a varlen or flex attention backend."
+                )
+            gen_spec = replace(
+                config.model_spec, model=copy.deepcopy(config.model_spec.model)
+            )
+            gen_spec.model.update_from_config(
+                config=SimpleNamespace(
+                    parallelism=config.generator.parallelism.to_training()
+                )
+            )
+            apply_overrides(
+                OverrideConfig(
+                    imports=[VLLM_ATTENTION_OVERRIDE, *config.override.imports]
+                ),
+                gen_spec.model,
+            )
+            # Translate the original attention backend to its vLLM backend and
+            # set it on the swapped wrapper configs -- the swap above erased the
+            # Flex/Varlen type the generator reads to build the engine.
+            for orig_layer, gen_layer in zip(
+                config.model_spec.model.layers, gen_spec.model.layers
+            ):
+                gen_layer.attention.inner_attention.vllm_attention_backend = (
+                    get_vllm_backend(orig_layer.attention.inner_attention)
+                )
 
             generators = []
             for idx, generator_mesh in enumerate(generator_meshes):
@@ -367,7 +423,7 @@ class RLTrainer(Configurable):
                     actor_name,
                     VLLMGenerator,
                     config.generator,
-                    model_spec=config.model_spec,
+                    model_spec=gen_spec,
                     model_path=config.hf_assets_path,
                     compile_config=config.compile,
                     max_num_seqs=max(

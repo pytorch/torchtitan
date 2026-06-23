@@ -93,55 +93,36 @@ def _fused_qkv_param_init(
     heads_per_kv = n_heads // n_kv_heads
     r_dim = heads_per_kv + 2
 
+    def _make_init(base_init: Callable) -> Callable:
+        # ``tail`` is the per-row shape: () for bias, (in_features,) for weight.
+        # Building q/k/v with the exact stock shapes and drawing them in
+        # wq/wk/wv order keeps the RNG sequence identical to the non-fused module.
+        def _init(t):
+            tail = t.shape[1:]
+            q = t.new_empty(n_heads * head_dim, *tail)
+            k = t.new_empty(n_kv_heads * head_dim, *tail)
+            v = t.new_empty(n_kv_heads * head_dim, *tail)
+            base_init(q)
+            base_init(k)
+            base_init(v)
+            fused = torch.cat(
+                [
+                    q.view(n_kv_heads, heads_per_kv, head_dim, *tail),
+                    k.view(n_kv_heads, 1, head_dim, *tail),
+                    v.view(n_kv_heads, 1, head_dim, *tail),
+                ],
+                dim=1,
+            )
+            with torch.no_grad():
+                t.view(n_kv_heads, r_dim, head_dim, *tail).copy_(fused)
+
+        return _init
+
     out: dict[str, Callable] = {}
-
-    weight_init = base_param_init.get("weight")
-    if weight_init is not None:
-
-        def _init_weight(t):
-            dim = t.shape[-1]
-            q = t.new_empty(n_heads * head_dim, dim)
-            k = t.new_empty(n_kv_heads * head_dim, dim)
-            v = t.new_empty(n_kv_heads * head_dim, dim)
-            weight_init(q)
-            weight_init(k)
-            weight_init(v)
-            fused = torch.cat(
-                [
-                    q.view(n_kv_heads, heads_per_kv, head_dim, dim),
-                    k.view(n_kv_heads, 1, head_dim, dim),
-                    v.view(n_kv_heads, 1, head_dim, dim),
-                ],
-                dim=1,
-            )
-            with torch.no_grad():
-                t.view(n_kv_heads, r_dim, head_dim, dim).copy_(fused)
-
-        out["weight"] = _init_weight
-
-    bias_init = base_param_init.get("bias")
-    if bias_init is not None:
-
-        def _init_bias(t):
-            q = t.new_empty(n_heads * head_dim)
-            k = t.new_empty(n_kv_heads * head_dim)
-            v = t.new_empty(n_kv_heads * head_dim)
-            bias_init(q)
-            bias_init(k)
-            bias_init(v)
-            fused = torch.cat(
-                [
-                    q.view(n_kv_heads, heads_per_kv, head_dim),
-                    k.view(n_kv_heads, 1, head_dim),
-                    v.view(n_kv_heads, 1, head_dim),
-                ],
-                dim=1,
-            )
-            with torch.no_grad():
-                t.view(n_kv_heads, r_dim, head_dim).copy_(fused)
-
-        out["bias"] = _init_bias
-
+    for param in ("weight", "bias"):
+        base_init = base_param_init.get(param)
+        if base_init is not None:
+            out[param] = _make_init(base_init)
     return out
 
 

@@ -97,7 +97,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module qwen3 --config qwen3_debugmodel_fused_qkv",
+                    "--module qwen3 --config qwen3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.context_parallel_degree 2",
@@ -112,6 +112,21 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             # configs are tuned for NVIDIA H100; skip on ROCm where it is
             # unvalidated (see torchtitan/overrides/helion_rope.py).
             skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module qwen3 --config qwen3_debugmodel_non_fused_qkv",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.context_parallel_degree 2",
+                ],
+            ],
+            # Reverse test: fused QKV is the debugmodel default, so exercise the
+            # separate wq/wk/wv projection path under FSDP+TP+CP.
+            "Qwen3 non-fused QKV FSDP+TP+CP",
+            "qwen3_non_fused_qkv_fsdp+tp+cp",
+            ngpu=8,
         ),
         # Integration Test Cases for Qwen3.5
         OverrideDefinitions(

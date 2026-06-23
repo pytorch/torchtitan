@@ -17,7 +17,10 @@ Run: torchrun --nproc_per_node=4 \
 from __future__ import annotations
 
 import argparse
+import copy
 import os
+from dataclasses import replace
+from types import SimpleNamespace
 
 # Must set spawn method before any CUDA operations or vLLM imports
 # CUDA cannot be re-initialized in forked subprocesses
@@ -31,9 +34,13 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config import apply_overrides
+from torchtitan.config import apply_overrides, OverrideConfig
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.examples.alphabet_sort import config_registry
+from torchtitan.experiments.rl.models.attention import (
+    get_vllm_backend,
+    VLLM_ATTENTION_OVERRIDE,
+)
 from torchtitan.experiments.rl.models.vllm_registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -81,18 +88,39 @@ def generate() -> None:
     if not callable(config_factory):
         raise ValueError(f"Unknown RL config {args.config!r}")
     config = config_factory()
-    # Apply config overrides at config time (e.g. the fused_swiglu FFN), before
-    # the model_spec is registered/built. Mirrors RLTrainer.
-    if config.override.imports:
-        apply_overrides(config.override, config)
     gen_config = config.generator
     model_path = config.hf_assets_path
     max_num_seqs = args.max_num_seqs
     is_rank0 = os.environ.get("RANK", "0") == "0"
 
+    inner_attn = config.model_spec.model.layers[0].attention.inner_attention
+    if not isinstance(inner_attn, (VarlenAttention.Config, FlexAttention.Config)):
+        raise ValueError("Only varlen and flex attention backends are supported.")
+
+    # Prepare the generator's model spec (deep-copy -> update_from_config ->
+    # apply overrides once: the vLLM attention swap plus any user overrides)
+    # before registering. The varlen/flex check above runs pre-swap.
+    # update_from_config reads only ``.parallelism``.
+    gen_spec = replace(config.model_spec, model=copy.deepcopy(config.model_spec.model))
+    gen_spec.model.update_from_config(
+        config=SimpleNamespace(parallelism=gen_config.parallelism.to_training())
+    )
+    apply_overrides(
+        OverrideConfig(imports=[VLLM_ATTENTION_OVERRIDE, *config.override.imports]),
+        gen_spec.model,
+    )
+    # Translate the original attention backend to its vLLM backend and set it on
+    # the swapped wrapper configs (the swap erased the Flex/Varlen type).
+    for orig_layer, gen_layer in zip(
+        config.model_spec.model.layers, gen_spec.model.layers
+    ):
+        gen_layer.attention.inner_attention.vllm_attention_backend = get_vllm_backend(
+            orig_layer.attention.inner_attention
+        )
+
     # Register TorchTitan model with vLLM before engine creation
     register_to_vllm(
-        config.model_spec,
+        gen_spec,
         parallelism=gen_config.parallelism,
         compile_config=config.compile,
         checkpoint_config=CheckpointManager.Config(
@@ -102,10 +130,6 @@ def generate() -> None:
         ),
     )
     logger.info("Registered TorchTitan model with vLLM")
-
-    inner_attn = config.model_spec.model.layers[0].attention.inner_attention
-    if not isinstance(inner_attn, (VarlenAttention.Config, FlexAttention.Config)):
-        raise ValueError("Only varlen and flex attention backends are supported.")
 
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     set_batch_invariance(gen_config.debug.batch_invariant)

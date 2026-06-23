@@ -34,7 +34,6 @@ from torchtitan.experiments.rl.models.vllm_registry import (
 )
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import Completion
-from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools.logging import init_logger
@@ -44,7 +43,6 @@ from vllm.config import AttentionConfig, CompilationConfig
 from vllm.config.compilation import CompilationMode
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
 
@@ -368,12 +366,11 @@ class VLLMGenerator(Actor, Configurable):
             checkpoint_config=config.checkpoint,
         )
 
-        # Set vLLM environment variables from config before any vLLM initialization
+        # Set vLLM environment variables from config before any vLLM initialization.
+        # model_spec is controller-prepared: inner_attention is already swapped to
+        # VLLMAttentionWrapper, which records the original backend for selection
+        # below. (The varlen/flex validation runs in the controller, pre-swap.)
         inner_attn = model_spec.model.layers[0].attention.inner_attention
-        assert isinstance(
-            inner_attn,
-            (VarlenAttention.Config, FlexAttention.Config),
-        ), "Only varlen and flex attention backends are allowed."
 
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
         set_batch_invariance(config.debug.batch_invariant)
@@ -419,11 +416,7 @@ class VLLMGenerator(Actor, Configurable):
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=not config.cudagraph.enable,
             attention_config=AttentionConfig(
-                backend=(
-                    AttentionBackendEnum.FLEX_ATTENTION
-                    if isinstance(inner_attn, FlexAttention.Config)
-                    else AttentionBackendEnum.CUSTOM
-                ),
+                backend=inner_attn.vllm_attention_backend,
             ),
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,

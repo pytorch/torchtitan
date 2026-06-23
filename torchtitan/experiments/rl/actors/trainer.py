@@ -298,6 +298,10 @@ class PolicyTrainer(Actor, Configurable):
     ):
         """Build, parallelize, and initialize a model with random weights.
 
+        ``model_spec`` arrives sharding-filled and overridden -- the controller
+        runs ``update_from_config`` + ``apply_overrides`` before spawning this
+        actor (see ``RLTrainer.setup_async``).
+
         Checkpoint loading (e.g. from HF) is handled separately by
         CheckpointManager after model and optimizer construction.
 
@@ -318,11 +322,8 @@ class PolicyTrainer(Actor, Configurable):
             (VarlenAttention.Config, FlexAttention.Config),
         ), "Only varlen and flex attention backends are allowed."
 
-        # Fill sharding configs on the config BEFORE build via the
-        # model-agnostic `update_from_config` hook (RL's trainer bypasses
-        # `torchtitan.Trainer's` call, so we invoke it directly).
-        model_spec.model.update_from_config(config=config)
-
+        # update_from_config (sharding fill) and apply_overrides already ran in
+        # the controller before spawn; this actor only builds + parallelizes.
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
                 model = model_spec.model.build()
