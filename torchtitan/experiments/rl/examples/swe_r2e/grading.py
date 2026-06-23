@@ -115,6 +115,23 @@ def _r2e_match(parsed: dict[str, str], expected: dict[str, str]) -> bool:
     return True
 
 
+def _r2e_fraction(parsed: dict[str, str], expected: dict[str, str]) -> float:
+    """Fraction of expected ``(test -> status)`` reproduced (0.0..1.0). Same
+    key-matching as ``_r2e_match`` (exact, then substring); 1.0 == fully solved."""
+    if not expected:
+        return 0.0
+    n_match = 0
+    for tname, estatus in expected.items():
+        key = (
+            tname
+            if tname in parsed
+            else next((k for k in parsed if tname in k or k in tname), None)
+        )
+        if key is not None and parsed[key] == estatus:
+            n_match += 1
+    return n_match / len(expected)
+
+
 async def _run_r2e(
     ev: Sandbox, workdir: str, r2e: dict, timeout: int
 ) -> tuple[float, bool]:
@@ -144,5 +161,13 @@ async def _run_r2e(
         timeout=timeout,
     )
     parsed = _parse_junit(await ev.read_file(xml, user="root"))
-    solved = _r2e_match(parsed, expected)
-    return (1.0 if solved else 0.0), solved
+    # Per-test pass fraction (r2egym's _calculate_reward_r2e is per-test). A binary
+    # all-or-nothing reward is too sparse for a weaker policy: within a GRPO group of
+    # siblings on one task, none solving -> all reward 0 -> zero advantage -> no
+    # gradient. The fraction gives dense, within-group reward variance (siblings that
+    # reproduce more of the expected test outcomes score higher). SWE_REWARD_DENSE=0
+    # restores the binary solved reward.
+    frac = _r2e_fraction(parsed, expected)
+    solved = frac >= 1.0
+    dense = os.environ.get("SWE_REWARD_DENSE", "1") != "0"
+    return (frac if dense else (1.0 if solved else 0.0)), solved
