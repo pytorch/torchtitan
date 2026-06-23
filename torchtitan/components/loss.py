@@ -559,9 +559,18 @@ class ChunkedCELoss(BaseLoss):
         # local seq=0 and breaking GradAccumulator's slice writes.
         # ``local_map`` runs the chunking body on plain tensors; under the
         # non-DTensor (eager) path we call ``_chunk_local`` directly.
-        # ``.contiguous()`` breaks shared storage from ``torch.chunk``.
+        # Equal chunk sizes also match GradAccumulator's sequential slice
+        # writes, which use one chunk length for each write offset.
         def _chunk_local(t):
-            return tuple(c.contiguous() for c in torch.chunk(t, num_chunks, dim=1))
+            seq_len = t.shape[1]
+            torch._check(
+                seq_len % num_chunks == 0,
+                lambda: "ChunkedCELoss sequence length must be divisible by num_chunks",
+            )
+            chunk_len = seq_len // num_chunks
+            return tuple(
+                c.contiguous() for c in torch.split(t, [chunk_len] * num_chunks, dim=1)
+            )
 
         def _chunk(t):
             if not isinstance(t, DTensor):

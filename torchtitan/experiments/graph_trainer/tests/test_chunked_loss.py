@@ -59,26 +59,30 @@ class TestChunkedCELossWithParamGrads(TestCase):
         self.assertEqual(loss.num_chunks, 4)
 
     def test_bitwise_equal_with_chunked_celoss(self):
-        torch.manual_seed(42)
-        B, L, D, V = 2, 8, 32, 64
-        labels = torch.randint(0, V, (B, L))
-        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
-        hidden_states = torch.randn(B, L, D)
+        for seq_len, num_chunks in ((8, 4), (4, 4)):
+            with self.subTest(seq_len=seq_len, num_chunks=num_chunks):
+                torch.manual_seed(42)
+                B, D, V = 2, 32, 64
+                labels = torch.randint(0, V, (B, seq_len))
+                global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
+                hidden_states = torch.randn(B, seq_len, D)
 
-        model_a, loss_a_fn = _make_model_and_loss(D, V)
-        model_b, loss_b_fn = _make_model_and_loss(D, V, with_param_grads=True)
-        model_b.output.load_state_dict(model_a.output.state_dict())
+                model_a, loss_a_fn = _make_model_and_loss(D, V, num_chunks)
+                model_b, loss_b_fn = _make_model_and_loss(
+                    D, V, num_chunks, with_param_grads=True
+                )
+                model_b.output.load_state_dict(model_a.output.state_dict())
 
-        loss_a, h_grad_a, w_grad_a = _chunked_loss_and_grads(
-            model_a, loss_a_fn, hidden_states, labels, global_valid_tokens
-        )
-        loss_b, h_grad_b, w_grad_b = _chunked_loss_and_grads(
-            model_b, loss_b_fn, hidden_states, labels, global_valid_tokens
-        )
+                loss_a, h_grad_a, w_grad_a = _chunked_loss_and_grads(
+                    model_a, loss_a_fn, hidden_states, labels, global_valid_tokens
+                )
+                loss_b, h_grad_b, w_grad_b = _chunked_loss_and_grads(
+                    model_b, loss_b_fn, hidden_states, labels, global_valid_tokens
+                )
 
-        self.assertEqual(loss_b, loss_a)
-        self.assertEqual(h_grad_b, h_grad_a)
-        self.assertEqual(w_grad_b, w_grad_a)
+                self.assertEqual(loss_b, loss_a)
+                self.assertEqual(h_grad_b, h_grad_a)
+                self.assertEqual(w_grad_b, w_grad_a)
 
     def test_does_not_touch_dot_grad(self):
         torch.manual_seed(0)
