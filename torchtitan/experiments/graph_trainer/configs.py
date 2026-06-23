@@ -139,6 +139,17 @@ class GraphTrainerCompileConfig(CompileConfig):
     two collectives can overlap. It is a no-op when the graph contains no
     FSDP all-gathers."""
 
+    enable_fsdp_dense_region_overlap: bool = False
+    """When True, schedule FSDP AG/RS buckets into neighboring dense regions.
+
+    This is disabled by default because it changes FSDP collective placement
+    and is intended for performance/integration validation, not
+    bitwise-equivalence tests. When EP overlap is also enabled, this scheduler
+    only composes with graph chunking rooted at ``layers.*.moe``; otherwise the
+    explicit request is skipped with a warning. Without EP overlap, it can run
+    as a standalone FSDP scheduling ablation.
+    """
+
     ep_overlap: EpOverlapConfig = field(default_factory=EpOverlapConfig)
     """Configuration for EP-overlap chunking and scheduling."""
 
