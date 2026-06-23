@@ -336,8 +336,9 @@ class CheckpointManager(Configurable):
         """
 
         load_step: int = -1
-        """Load the checkpoint at the specified step. If -1, load the latest
-        checkpoint."""
+        """The step to load when checkpoint.initial_load_path points at a folder.
+        If -1, the latest step in that folder is used. Ignored when
+        initial_load_path points at a specific step directory."""
 
         exclude_from_loading: list[str] = field(default_factory=list)
         """
@@ -765,21 +766,64 @@ class CheckpointManager(Configurable):
         )
         return True
 
+    def _is_checkpoint_dir(self, path: str) -> bool:
+        """True if `path` is itself a checkpoint dir (DCP `.metadata` or HF index)."""
+        return os.path.isfile(os.path.join(path, ".metadata")) or os.path.isfile(
+            os.path.join(path, "model.safetensors.index.json")
+        )
+
+    def _resolve_initial_load(self, step: int) -> str | None:
+        """Resolve `initial_load_path` to a concrete checkpoint dir.
+
+        Returns the checkpoint dir, or None when the path is a folder that has no
+        checkpoint yet (caller starts from random init). Raises when an explicitly
+        named ``step-N`` directory is given but missing.
+        """
+        path = self.initial_load_path
+        assert path is not None, "initial_load_path must be set."
+        # Case 1: the path is itself a checkpoint dir -> load it directly.
+        if os.path.isdir(path) and self._is_checkpoint_dir(path):
+            return path
+        # Case 2: the path is a folder -> resolve the latest (or `step`) checkpoint.
+        if os.path.isdir(path):
+            found = self._find_load_step(folder=path) if step == -1 else step
+            if found == -1:
+                return None
+            checkpoint_id = self._create_checkpoint_id(found, folder=path)
+            if not os.path.isdir(checkpoint_id):
+                raise FileNotFoundError(
+                    f"--checkpoint.load_step={found} not found at {checkpoint_id}"
+                )
+            return checkpoint_id
+        # Case 3: the path does not exist.
+        if re.fullmatch(r"step-\d+", os.path.basename(path.rstrip("/"))):
+            raise ValueError(f"checkpoint.initial_load_path does not exist: {path}")
+        return None
+
     @sl.log_trace_span("checkpoint_load")
     @torch.no_grad()
     def load(self, step: int = -1) -> bool:
-        """Load the checkpoint for the given step.
+        """Load a checkpoint, driven entirely by `initial_load_path`.
 
-        This function orchestrates the states loading process.
-        If the local checkpoint folder does not yet exist, it attempts an initial load
-        from a specified path (in either native or HF format) or performs loading using
-        provided HF assets path from the state dict adapter. Otherwise, it retrieves
-        the checkpoint corresponding to the specified step, defaulting to the latest
-        available if the `step` is -1.
+        Loading is never auto-resumed from `folder` (which is save-only). The
+        behavior depends on `initial_load_path`:
+
+        - If `initial_load_path` is unset: optionally initialize model weights
+          from the HF assets path (when `initial_load_in_hf=True`), otherwise
+          load nothing.
+        - If `initial_load_path` is set: it is resolved to a concrete checkpoint
+          dir. It may point at a specific `step-N` checkpoint dir, or at a folder
+          (in which case the latest, or `step`, checkpoint is selected). When it
+          is a folder with no checkpoint yet, loading is skipped (random init).
+
+        `initial_load_model_only` controls whether only model weights are loaded
+        (model-only init) or the full training state (model, optimizer, lr
+        scheduler, train state) is restored. Full-state loads require a DCP
+        checkpoint; HF saves are model-only.
 
         Args:
-            step (int, optional): The training step to restore.
-                Defaults to -1 (latest available).
+            step (int, optional): The step to load when `initial_load_path`
+                points at a folder. Defaults to -1 (latest available).
 
         Returns:
             bool: Whether the checkpoint was successfully located and loaded.
@@ -788,82 +832,62 @@ class CheckpointManager(Configurable):
         if not self.enable:
             return False
 
-        model_only = False
-        from_hf = False
-        from_quantized = False
-
-        if not os.path.exists(self.folder):
-            model_only = self.initial_load_model_only
-            from_hf = self.initial_load_in_hf
-            from_quantized = self.initial_load_in_hf_quantized
-
-            if from_hf:
-                assert model_only, (
-                    "Only model can be loaded when loading from "
-                    "HF's safetensors checkpoint."
-                )
-            if from_quantized:
-                assert from_hf, "Quantized checkpoint can only be loaded from HF format"
-
-            if self.initial_load_path:
-                checkpoint_id = self.initial_load_path
-                if not os.path.isdir(checkpoint_id):
-                    raise ValueError(
-                        f"Checkpoint.initial_load_path is invalid: {checkpoint_id}"
-                    )
-                if from_hf:
-                    logger.info(
-                        "Loading from HF safetensors from "
-                        f"--checkpoint.initial_load_path: {checkpoint_id}"
-                    )
-
-            elif from_hf:
+        # No external source: optionally init model weights from HF assets, else nothing.
+        if not self.initial_load_path:
+            if self.initial_load_in_hf:
                 assert (
                     self.sd_adapter and self.sd_adapter.hf_assets_path
-                ), "from_hf=True requires sd_adapter and hf_assets_path."
+                ), "initial_load_in_hf=True requires sd_adapter and hf_assets_path."
                 checkpoint_id = self.sd_adapter.hf_assets_path
                 if not os.path.isdir(checkpoint_id):
                     raise ValueError(
-                        "model.hf_assets_path is being used to load HF weights "
-                        "but the path is not valid. Either make sure hf_assets_path is "
-                        "correct or provide a valid checkpoint.initial_load_path"
+                        "model.hf_assets_path is being used to load HF weights but "
+                        "the path is not valid. Set a valid hf_assets_path or "
+                        "checkpoint.initial_load_path."
                     )
                 logger.info(
-                    "Loading HF safetensors from "
-                    f"--model.hf_assets_path: {checkpoint_id}"
+                    f"Loading HF safetensors from --model.hf_assets_path: {checkpoint_id}"
                 )
-
-            else:
-                return False
-
-        else:
-            if self.initial_load_path:
-                logger.warning(
-                    "checkpoint.initial_load_path is provided but the "
-                    "checkpoint.folder exists. Checkpointer will use the checkpoints "
-                    f"from the checkpoint.folder {self.folder}."
+                states = self._states_to_load(model_only=True)
+                self.dcp_load(
+                    states,
+                    checkpoint_id=checkpoint_id,
+                    from_hf=True,
+                    from_quantized=self.initial_load_in_hf_quantized,
                 )
-            if self.initial_load_in_hf:
-                logger.warning(
-                    "checkpoint.initial_load_in_hf is True but the checkpoint.folder "
-                    "exists. Checkpointer will not load from HF safetensors"
-                )
+                return True
+            return False
 
-            step = self._find_load_step() if step == -1 else step
-            if step == -1:
-                return False
+        # initial_load_path is set: resolve it to a concrete checkpoint dir.
+        checkpoint_id = self._resolve_initial_load(step)
+        if checkpoint_id is None:
+            logger.warning(
+                "checkpoint.initial_load_path=%s contains no checkpoint; starting "
+                "from random initialization. If you intended to resume, check the path.",
+                self.initial_load_path,
+            )
+            return False
 
-            model_only = step == 0
-            checkpoint_id = self._create_checkpoint_id(step)
-
-            if not os.path.isdir(checkpoint_id):
-                raise FileNotFoundError(
-                    f"--checkpoint.load_step={step} not found at {checkpoint_id}"
-                )
+        model_only = self.initial_load_model_only
+        from_hf = self.initial_load_in_hf
+        from_quantized = self.initial_load_in_hf_quantized
+        # Full training-state load requires DCP; HF saves are model-only.
+        if (not model_only) and os.path.isfile(
+            os.path.join(checkpoint_id, "model.safetensors.index.json")
+        ):
+            raise ValueError(
+                f"Cannot load full training state from an HF checkpoint at "
+                f"{checkpoint_id}; HF saves are model-only. Set "
+                "checkpoint.initial_load_model_only=True for model-only init."
+            )
+        if from_hf:
+            assert model_only, (
+                "Only model can be loaded when loading from HF's safetensors "
+                "checkpoint."
+            )
 
         logger.info(f"Loading the checkpoint from {checkpoint_id}.")
         begin = time.monotonic()
-
         states = self._states_to_load(model_only)
         self.dcp_load(
             states,
@@ -871,13 +895,10 @@ class CheckpointManager(Configurable):
             from_hf=from_hf,
             from_quantized=from_quantized,
         )
-
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
-            "Finished loading the checkpoint in "
-            f"{time.monotonic() - begin:.2f} seconds."
+            f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
         )
-
         return True
 
     def maybe_wait_for_staging(self) -> None:

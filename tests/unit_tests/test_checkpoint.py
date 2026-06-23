@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import os
 import shutil
 import tempfile
@@ -169,6 +170,9 @@ class TestCheckpointManager(unittest.TestCase):
             elif isinstance(val, torch.Tensor):
                 sd_to_save[key] = val
         torch.save(sd_to_save, os.path.join(checkpoint_id, "state_dict.pt"))
+        # Emit a DCP-style metadata marker so _find_load_step() treats this as a
+        # valid checkpoint (mirrors dcp.save writing .metadata).
+        open(os.path.join(checkpoint_id, ".metadata"), "a").close()
 
     def fake_load(self, states: dict, checkpoint_id=None):
         path = os.path.join(checkpoint_id, "state_dict.pt")
@@ -204,6 +208,9 @@ class TestCheckpointManager(unittest.TestCase):
             self.model_part.weight.zero_()
             self.model_part.bias.zero_()
         self.optimizers._fake_param = torch.tensor([42.0], dtype=torch.float32)
+        # Full-state load from the just-saved step-1 dir via initial_load_path.
+        manager.initial_load_path = os.path.join(self.test_folder, "step-1")
+        manager.initial_load_model_only = False
         manager.load(step=1)
 
         self.assertTrue(torch.equal(self.model_part.weight, w0))
@@ -306,6 +313,9 @@ class TestCheckpointManager(unittest.TestCase):
             open(os.path.join(d, ".metadata"), "w").close()
         cfg = self.trainer_config.checkpoint
         cfg.folder = "checkpoints"
+        # initial_load_path points at the folder -> auto-resolves the latest step.
+        cfg.initial_load_path = ckpt_folder
+        cfg.initial_load_model_only = False
         manager = CheckpointManager(
             dataloader=self.data_loader,
             model_parts=self.model_parts,
@@ -405,18 +415,313 @@ class TestCheckpointManager(unittest.TestCase):
         mock_load.assert_called_once()
         args1, kwargs1 = mock_load.call_args
         self.assertEqual(kwargs1.get("checkpoint_id"), path1)
-        # Phase 3: save new step under default folder, then load that
+        # Phase 3: save a new step under the default folder, then full-state load
+        # it via initial_load_path (folder is never auto-loaded).
         manager2.save(curr_step=2, last_step=True)
         # Default folder is test_folder, so step-2 under that
         step2_dir = os.path.join(self.test_folder, "step-2")
         self.assertTrue(os.path.isdir(step2_dir))
-        r2 = manager2.load(step=2)
+        # Use a dedicated manager pointed at step-2 for a full-state load.
+        # copy.copy clones the already-validated config (preserving folder="")
+        # without re-running the dataclass __post_init__ validation, which
+        # dataclasses.replace would.
+        resume_cfg = copy.copy(self.trainer_config.checkpoint)
+        resume_cfg.initial_load_path = step2_dir
+        resume_cfg.initial_load_model_only = False
+        manager3 = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=resume_cfg,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+        r2 = manager3.load(step=2)
         self.assertTrue(r2)
         self.assertEqual(mock_load.call_count, 2)
         args2, kwargs2 = mock_load.call_args_list[1]
         self.assertEqual(kwargs2.get("checkpoint_id"), step2_dir)
         manager1.close()
         manager2.close()
+        manager3.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_no_initial_load_path_does_not_load_from_folder(
+        self, mock_load, mock_save, mock_rank
+    ):
+        # folder is save-only: even with a checkpoint present, load() never
+        # auto-resumes from it when initial_load_path is unset.
+        mock_save.side_effect = self.fake_save
+        mock_load.side_effect = self.fake_load
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=self.trainer_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+        w0 = self.model_part.weight.clone()
+        manager.save(curr_step=1)
+        with torch.no_grad():
+            self.model_part.weight.zero_()
+        # folder now has step-1, but initial_load_path is unset -> no-op.
+        self.assertFalse(manager.load(step=-1))
+        self.assertFalse(torch.equal(self.model_part.weight, w0))
+        mock_load.assert_not_called()
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_initial_load_path_specific_step_dir(self, mock_load, mock_save, mock_rank):
+        # initial_load_path pointing at a specific DCP step-N dir, full-state load.
+        mock_save.side_effect = self.fake_save
+        mock_load.side_effect = self.fake_load
+        manager1 = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=self.trainer_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+        w0 = self.model_part.weight.clone()
+        p0 = self.optimizers._fake_param.clone()
+        manager1.save(curr_step=1)
+        step1_dir = os.path.join(self.test_folder, "step-1")
+        manager1.close()
+
+        empty_folder = os.path.join(self.base_temp_dir, "empty_specific_step")
+        os.makedirs(empty_folder, exist_ok=True)
+        cfg = CheckpointManager.Config(
+            enable=True,
+            async_mode="DISABLED",
+            folder=empty_folder,
+            interval=1,
+            keep_latest_k=2,
+            last_save_model_only=False,
+            export_dtype="float32",
+            exclude_from_loading=[],
+            initial_load_path=step1_dir,
+            initial_load_model_only=False,
+        )
+        manager2 = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=cfg,
+            sd_adapter=None,
+            base_folder="",
+        )
+        with torch.no_grad():
+            self.model_part.weight.zero_()
+        self.optimizers._fake_param = torch.tensor([42.0], dtype=torch.float32)
+        self.assertTrue(manager2.load(step=-1))
+        self.assertTrue(torch.equal(self.model_part.weight, w0))
+        self.assertTrue(torch.equal(self.optimizers._fake_param, p0))
+        _, kwargs = mock_load.call_args
+        self.assertEqual(kwargs.get("checkpoint_id"), step1_dir)
+        manager2.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_initial_load_path_folder_resolves_latest(
+        self, mock_load, mock_save, mock_rank
+    ):
+        # initial_load_path pointing at a folder with step-* dirs auto-resolves
+        # the latest one.
+        ckpt_folder = os.path.join(self.base_temp_dir, "folder_with_steps")
+        os.makedirs(ckpt_folder, exist_ok=True)
+        for s in (3, 7):
+            d = os.path.join(ckpt_folder, f"step-{s}")
+            os.makedirs(d, exist_ok=True)
+            open(os.path.join(d, ".metadata"), "w").close()
+        cfg = CheckpointManager.Config(
+            enable=True,
+            async_mode="DISABLED",
+            folder=os.path.join(self.base_temp_dir, "save_only_folder"),
+            interval=1,
+            keep_latest_k=2,
+            last_save_model_only=False,
+            export_dtype="float32",
+            exclude_from_loading=[],
+            initial_load_path=ckpt_folder,
+            initial_load_model_only=False,
+        )
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=cfg,
+            sd_adapter=None,
+            base_folder="",
+        )
+        self.assertTrue(manager.load(step=-1))
+        mock_load.assert_called_once()
+        _, kwargs = mock_load.call_args
+        self.assertEqual(
+            kwargs.get("checkpoint_id"), os.path.join(ckpt_folder, "step-7")
+        )
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.logger")
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_initial_load_path_folder_without_steps_warns(
+        self, mock_load, mock_logger, mock_rank
+    ):
+        # initial_load_path points at an existing folder with no step-* dirs ->
+        # load() returns False and warns about starting from random init.
+        empty_folder = os.path.join(self.base_temp_dir, "no_steps_folder")
+        os.makedirs(empty_folder, exist_ok=True)
+        cfg = CheckpointManager.Config(
+            enable=True,
+            async_mode="DISABLED",
+            folder=os.path.join(self.base_temp_dir, "save_only_folder2"),
+            interval=1,
+            keep_latest_k=2,
+            last_save_model_only=False,
+            export_dtype="float32",
+            exclude_from_loading=[],
+            initial_load_path=empty_folder,
+            initial_load_model_only=False,
+        )
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=cfg,
+            sd_adapter=None,
+            base_folder="",
+        )
+        self.assertFalse(manager.load(step=-1))
+        mock_load.assert_not_called()
+        warned = any(
+            "no checkpoint" in str(c.args) or "random initialization" in str(c.args)
+            for c in mock_logger.warning.call_args_list
+        )
+        self.assertTrue(warned)
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    def test_initial_load_path_missing_explicit_step_raises(self, mock_rank):
+        # A non-existent path whose basename is step-N -> ValueError (explicit
+        # step demanded but missing).
+        missing = os.path.join(self.base_temp_dir, "ghost", "step-5")
+        cfg = CheckpointManager.Config(
+            enable=True,
+            async_mode="DISABLED",
+            folder=os.path.join(self.base_temp_dir, "save_only_folder3"),
+            interval=1,
+            keep_latest_k=2,
+            last_save_model_only=False,
+            export_dtype="float32",
+            exclude_from_loading=[],
+            initial_load_path=missing,
+            initial_load_model_only=False,
+        )
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=cfg,
+            sd_adapter=None,
+            base_folder="",
+        )
+        with self.assertRaisesRegex(ValueError, "does not exist"):
+            manager.load(step=-1)
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.logger")
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_initial_load_path_missing_folder_like_warns(
+        self, mock_load, mock_logger, mock_rank
+    ):
+        # A non-existent folder-like path (basename not step-N) -> lenient:
+        # load() returns False with a warning.
+        missing = os.path.join(self.base_temp_dir, "ghost", "checkpoint")
+        cfg = CheckpointManager.Config(
+            enable=True,
+            async_mode="DISABLED",
+            folder=os.path.join(self.base_temp_dir, "save_only_folder4"),
+            interval=1,
+            keep_latest_k=2,
+            last_save_model_only=False,
+            export_dtype="float32",
+            exclude_from_loading=[],
+            initial_load_path=missing,
+            initial_load_model_only=False,
+        )
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=cfg,
+            sd_adapter=None,
+            base_folder="",
+        )
+        self.assertFalse(manager.load(step=-1))
+        mock_load.assert_not_called()
+        warned = any(
+            "no checkpoint" in str(c.args) or "random initialization" in str(c.args)
+            for c in mock_logger.warning.call_args_list
+        )
+        self.assertTrue(warned)
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    def test_initial_load_path_hf_full_state_raises(self, mock_rank):
+        # initial_load_path at an HF dir with initial_load_model_only=False ->
+        # ValueError (can't full-state-load from HF).
+        hf_dir = os.path.join(self.base_temp_dir, "hf_ckpt")
+        os.makedirs(hf_dir, exist_ok=True)
+        open(os.path.join(hf_dir, "model.safetensors.index.json"), "w").close()
+        cfg = CheckpointManager.Config(
+            enable=True,
+            async_mode="DISABLED",
+            folder=os.path.join(self.base_temp_dir, "save_only_folder5"),
+            interval=1,
+            keep_latest_k=2,
+            last_save_model_only=False,
+            export_dtype="float32",
+            exclude_from_loading=[],
+            initial_load_path=hf_dir,
+            initial_load_model_only=False,
+        )
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=cfg,
+            sd_adapter=None,
+            base_folder="",
+        )
+        with self.assertRaisesRegex(ValueError, "HF checkpoint"):
+            manager.load(step=-1)
+        manager.close()
 
     @mock.patch("torchtitan.components.checkpoint.logger")
     @mock.patch("torch.distributed.get_rank", return_value=0)

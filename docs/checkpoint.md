@@ -41,10 +41,35 @@ checkpoint=CheckpointManager.Config(
 ```
 When used in command line: `--checkpoint.exclude_from_loading data_loader,lr_scheduler`.
 
-5. EXAMPLE CHECKPOINT CONFIGURATION
+5. LOADING / RESUMING FROM A CHECKPOINT
+`folder` is the directory checkpoints are *saved* to ({--dump_folder}/{--checkpoint.folder}); it is save-only and is never auto-loaded. Loading is driven entirely by `initial_load_path`:
+
+- If `initial_load_path` is unset, training starts from random initialization (the save `folder` is not auto-loaded just because it contains checkpoints).
+- If `initial_load_path` points at a specific `step-N` directory, that checkpoint is loaded.
+- If `initial_load_path` points at a folder that contains `step-*` checkpoints, the latest is resolved automatically; set `load_step` to load a specific step instead.
+
+`initial_load_model_only` controls how much state is restored (only used when `initial_load_path` is set). The default is `True` (model-only init, from a DCP or HF checkpoint). Set it to `False` for a full-state resume (model, optimizer, lr scheduler, and train state); a full-state load requires a DCP checkpoint.
+
+To resume training from your own previous run, point `initial_load_path` at that run's checkpoint directory ({dump_folder}/{folder}) and disable model-only loading:
+```python
+checkpoint=CheckpointManager.Config(
+    initial_load_path="/abs/path/to/outputs/checkpoint",  # absolute path required
+    initial_load_model_only=False,
+    load_step=5,  # optional; omit to load the latest step
+),
+```
+Or via CLI: `--checkpoint.initial_load_path /abs/path/to/outputs/checkpoint --checkpoint.no_initial_load_model_only`. Add `--checkpoint.load_step 5` to load a specific step instead of the latest.
+
+Behavior when `initial_load_path` has no checkpoint:
+- A folder with no `step-*` (or a non-existent folder-like path) → a warning is logged and training starts from random init.
+- A non-existent explicit `step-N` path → an error is raised.
+
+6. EXAMPLE CHECKPOINT CONFIGURATION
 ```python
 checkpoint=CheckpointManager.Config(
     interval=10,
+    initial_load_path="/abs/path/to/outputs/checkpoint",
+    initial_load_model_only=False,
     load_step=5,
     last_save_model_only=True,
     export_dtype="bfloat16",
