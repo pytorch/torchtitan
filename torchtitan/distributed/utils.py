@@ -379,12 +379,19 @@ def get_train_context(
             if parallel_dims is not None and parallel_dims.spmd_backend == "spmd_types":
                 if not parallel_dims._single_axis_meshes:
                     parallel_dims.build_mesh()
-                from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+                from torchtitan.distributed.spmd_types import (
+                    set_current_spmd_mesh,
+                    set_spmd_meshes,
+                    spmd_dense_mesh,
+                )
+
+                set_spmd_meshes(
+                    dense_mesh=parallel_dims.spmd_dense_mesh(),
+                    sparse_mesh=parallel_dims.spmd_sparse_mesh(),
+                )
 
                 stack.enter_context(
-                    set_current_spmd_mesh(
-                        parallel_dims._global_meshes["spmd_dense_for_fwdbwd"]
-                    )
+                    set_current_spmd_mesh(spmd_dense_mesh())
                 )
             if spmd_typechecking:
                 stack.enter_context(spmd_typecheck(local=False))
@@ -647,7 +654,7 @@ def _clip_grad_norm_with_ep(
         assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
         mesh_dim_names = p.device_mesh.mesh_dim_names
         assert mesh_dim_names is not None
-        if "ep" in mesh_dim_names or "efsdp" in mesh_dim_names:
+        if "ep" in mesh_dim_names:
             ep_params.append(p)
             ep_grads.append(p.grad)
         else:

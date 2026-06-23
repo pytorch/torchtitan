@@ -13,7 +13,6 @@ import spmd_types as spmd
 import torch
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.protocols.module import Module
 
 __all__ = [
@@ -340,9 +339,6 @@ class CosSinRoPE(RoPE):
         head_dim = query.shape[-1]
         cos = rope_cache[..., :head_dim]
         sin = rope_cache[..., head_dim:]
-        if cos.device != query.device:
-            cos = cos.to(device=query.device)
-            sin = sin.to(device=query.device)
         query_f = query.float()
         key_f = key.float()
         xq_out = (query_f * cos) + (CosSinRoPE._rotate_half(query_f) * sin)
@@ -356,6 +352,7 @@ class CosSinRoPE(RoPE):
         return torch.cat((-x2, x1), dim=-1)
 
 
+@spmd.local_map(out_types={"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R})
 def _reshape_for_broadcast(
     rope_cache: torch.Tensor,
     query_shape: torch.Size | tuple[int, ...],
@@ -375,15 +372,18 @@ def _reshape_for_broadcast(
             for i, d in enumerate(query_shape)
         ]
         return rope_cache.view(*shape)
+    elif positions.size(0) == 1:
+        assert positions.shape == (1, seqlen)
+        rope_cache = rope_cache[positions.squeeze(0)]
+        assert rope_cache.shape == (seqlen, cache_width)
+        shape = [
+            d if i == 1 else cache_width if i == ndim - 1 else 1
+            for i, d in enumerate(query_shape)
+        ]
+        return rope_cache.view(*shape)
     else:
         assert positions.shape == (bsz, seqlen)
-        # Local-shape expansion; the typechecker does not know this is S(0).
-        with spmd.no_typecheck():
-            rope_cache_expanded = rope_cache[None, :, None, :].expand(bsz, -1, -1, -1)
-        if get_spmd_backend() == "spmd_types":
-            spmd.assert_type(
-                rope_cache_expanded, {"dp": spmd.S(0), "cp": spmd.R, "tp": spmd.R}
-            )
+        rope_cache_expanded = rope_cache[None, :, None, :].expand(bsz, -1, -1, -1)
         rope_cache = torch.gather(
             rope_cache_expanded,
             dim=1,
