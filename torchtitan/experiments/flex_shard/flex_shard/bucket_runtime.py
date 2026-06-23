@@ -28,6 +28,7 @@ from .bucket_comm import (
 from .bucket_storage import BucketSpec, ParamInfo, ShardedBucketStorage
 from .unsharded_param_getters import UnshardedParamSlot
 from .utils import (
+    _disable_selective_checkpoint_dispatch,
     _get_bucket_storage_debug_fqn,
     _record_function_if_eager,
     _strip_checkpoint_wrapped_module_path,
@@ -886,11 +887,12 @@ class BucketRuntime:
             bucket=self,
             prefetched_result=prefetched_result,
         )
-        full_params = list(_BucketUnshard.apply(runtime, *local_shards))
-        if not is_compiling:
-            self.prefetch_next()
-        if not is_compiling and not is_recompute:
-            self.context.flush_pending_reduce_grad_launches(max_to_flush=1)
+        with _disable_selective_checkpoint_dispatch():
+            full_params = list(_BucketUnshard.apply(runtime, *local_shards))
+            if not is_compiling:
+                self.prefetch_next()
+            if not is_compiling and not is_recompute:
+                self.context.flush_pending_reduce_grad_launches(max_to_flush=1)
         for param_index, (bucket_param, full_param) in enumerate(
             zip(self.bucket_params, full_params, strict=True)
         ):
