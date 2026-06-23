@@ -85,21 +85,23 @@ def test_step_drains_the_queue() -> None:
     request = _request()
     generator = _bare_generator(pending=[request])
     decision = asyncio.run(generator._decide_next_action())
-    # DP=1: a single group holds the whole batch.
-    assert decision.action is LoopAction.STEP and decision.requests_by_dp == [[request]]
+    # DP=1: a single DP rank holds the whole batch.
+    assert decision.action is LoopAction.STEP and decision.requests_per_dp_rank == [
+        [request]
+    ]
     assert generator._queued_generation_requests == []  # drained into the decision
 
 
 def test_step_with_empty_queue_when_only_in_flight_work_remains() -> None:
     # No queue, no pull, but the engine still has in-flight requests to step.
     decision = asyncio.run(_bare_generator(unfinished=True)._decide_next_action())
-    assert decision.action is LoopAction.STEP and decision.requests_by_dp == [[]]
+    assert decision.action is LoopAction.STEP and decision.requests_per_dp_rank == [[]]
 
 
 def test_step_routes_all_requests_to_dp0_for_now() -> None:
-    # Hardcoded routing: every queued request lands in group 0; other groups empty.
+    # Hardcoded routing: every queued request lands on DP rank 0; other ranks empty.
     requests = [_request("r0"), _request("r1")]
     generator = _bare_generator(pending=requests, dp_size=3)
     decision = asyncio.run(generator._decide_next_action())
     assert decision.action is LoopAction.STEP
-    assert decision.requests_by_dp == [requests, [], []]
+    assert decision.requests_per_dp_rank == [requests, [], []]

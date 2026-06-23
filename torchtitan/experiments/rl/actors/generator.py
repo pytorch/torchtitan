@@ -460,14 +460,12 @@ class VLLMGenerator(Actor, Configurable):
         )  # Signals to wake up when there is work
 
         # --- Data-parallel rank layout ---
-        # Number of DP groups (vLLM pure DP degree); 1 disables data parallelism.
+        # Number of vLLM DP ranks; 1 disables data parallelism.
         self._dp_degree = config.parallelism.data_parallel_degree
-        # Ranks per DP group: the TP (and any EP) ranks that share one DP replica.
-        ranks_per_dp = dist.get_world_size() // self._dp_degree
-        # Which DP group this rank belongs to (== vLLM's data_parallel_rank).
-        self._dp_group_idx = self._rank // ranks_per_dp
-        # Whether this rank is its group's TP-leader (the lowest rank in the group).
-        self._is_dp_master = self._rank % ranks_per_dp == 0
+        # Number of ranks per DP rank.
+        ranks_per_dp = config.parallelism.tensor_parallel_degree
+        # Which DP replica this rank belongs to (== vLLM's data_parallel_rank).
+        self._dp_rank = self._rank // ranks_per_dp
 
         # Confirm the layout calculated above matches vLLM's
         vllm_parallel_config = self._engine.vllm_config.parallel_config
@@ -476,9 +474,9 @@ class VLLMGenerator(Actor, Configurable):
             f"({self._dp_degree}) != vLLM data_parallel_size "
             f"({vllm_parallel_config.data_parallel_size})"
         )
-        assert vllm_parallel_config.data_parallel_rank == self._dp_group_idx, (
-            f"DP layout mismatch on rank {self._rank}: our dp_group_idx "
-            f"({self._dp_group_idx}) != vLLM data_parallel_rank "
+        assert vllm_parallel_config.data_parallel_rank == self._dp_rank, (
+            f"DP layout mismatch on rank {self._rank}: our dp_rank "
+            f"({self._dp_rank}) != vLLM data_parallel_rank "
             f"({vllm_parallel_config.data_parallel_rank})"
         )
 
@@ -655,21 +653,21 @@ class VLLMGenerator(Actor, Configurable):
                     continue  # back to the start for the next decision
 
                 if decision.action is LoopAction.STEP:
-                    # Admit only this rank's DP-group slice. TP ranks in the same group
-                    # computes the same _dp_group_idx, so they add the identical set in
-                    # the same FCFS order.
-                    my_requests = decision.requests_by_dp[self._dp_group_idx]
-                    if my_requests:
+                    # Admit only this rank's DP replica slice. TP ranks in the same
+                    # replica compute the same _dp_rank, so they add the identical
+                    # set in the same FCFS order.
+                    local_requests = decision.requests_per_dp_rank[self._dp_rank]
+                    if local_requests:
                         # render_cmpl is vLLM's input pipeline (tokenize is a no-op for tokenized prompts);
                         # the high-level entry stays resilient to vLLM internals vs vllm.inputs.tokens_input.
                         engine_inputs = self._engine.renderer.render_cmpl(
                             [
                                 {"prompt_token_ids": request.prompt_token_ids}
-                                for request in my_requests
+                                for request in local_requests
                             ]
                         )
                         for request, engine_input in zip(
-                            my_requests, engine_inputs, strict=True
+                            local_requests, engine_inputs, strict=True
                         ):
                             self._engine.add_request(
                                 request_id=request.request_id,
@@ -710,13 +708,13 @@ class VLLMGenerator(Actor, Configurable):
             )
 
             if self._close_request is not None:
-                return LoopDecision(action=LoopAction.CLOSE, requests_by_dp=[])
+                return LoopDecision(action=LoopAction.CLOSE, requests_per_dp_rank=[])
 
             # A weight pull takes priority over admitting new requests.
             if self._model_state_dict_pull_request is not None:
                 return LoopDecision(
                     action=LoopAction.PULL_MODEL_STATE_DICT,
-                    requests_by_dp=[],
+                    requests_per_dp_rank=[],
                     pull_version=self._model_state_dict_pull_request.version,
                 )
 
@@ -725,13 +723,16 @@ class VLLMGenerator(Actor, Configurable):
                 self._queued_generation_requests,
                 [],
             )
-            # TODO: route across DP groups via a routing strategy. For now all
-            # requests go to DP group 0.
-            requests_by_dp: list[list[GenerationRequest]] = [
+            # TODO: route across DP ranks via a routing strategy. For now all
+            # requests go to DP rank 0.
+            requests_per_dp_rank: list[list[GenerationRequest]] = [
                 [] for _ in range(self._dp_degree)
             ]
-            requests_by_dp[0] = queued
-            return LoopDecision(action=LoopAction.STEP, requests_by_dp=requests_by_dp)
+            requests_per_dp_rank[0] = queued
+            return LoopDecision(
+                action=LoopAction.STEP,
+                requests_per_dp_rank=requests_per_dp_rank,
+            )
 
     def _process_finished_requests(self, request_outputs: list[RequestOutput]) -> None:
         """RANK 0: resolve each finished request's future with its `Completion` (metrics included)."""
@@ -987,9 +988,9 @@ class LoopDecision:
 
     action: LoopAction
 
-    requests_by_dp: list[list[GenerationRequest]] | None = None
-    # per-DP-group requests to admit before a STEP burst; index == DP group, fixed
-    # length data_parallel_degree. Each rank admits only its own group's slice.
+    requests_per_dp_rank: list[list[GenerationRequest]] | None = None
+    # Per-DP-rank requests to admit before a STEP burst; index == DP rank, fixed
+    # length data_parallel_degree. Each rank admits only its own DP-rank slice.
     # (empty unless any queued)
 
     pull_version: int | None = None
