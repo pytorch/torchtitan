@@ -16,6 +16,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple
 
+import spmd_types as spmd
+
 import torch
 import torch.nn.functional as F
 from torch.nn.attention import (
@@ -34,8 +36,6 @@ from torch.nn.attention.flex_attention import (
     flex_attention,
 )
 from torch.nn.attention.varlen import AuxRequest as VarlenAuxRequest, varlen_attn
-
-import spmd_types as spmd
 
 from torchtitan.distributed.compile import maybe_regional_inductor
 from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
@@ -184,20 +184,14 @@ class VarlenAttention(Module):
             assert isinstance(result, torch.Tensor)
             if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
                 # exclude CP from typecheck as varlen + CP is not yet supported.
-                spmd.assert_type(
-                    result, spmd.V, spmd.PartitionSpec("dp", "tp", None)
-                )
+                spmd.assert_type(result, spmd.V, spmd.PartitionSpec("dp", "tp", None))
             out_BLNH = result.view(B, L, -1, H).to(q_BLNH.dtype)
             return out_BLNH
 
         out_TNH, lse_NT = result
         if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-            spmd.assert_type(
-                out_TNH, spmd.V, spmd.PartitionSpec("dp", "tp", None)
-            )
-            spmd.assert_type(
-                lse_NT, spmd.V, spmd.PartitionSpec("tp", "dp")
-            )
+            spmd.assert_type(out_TNH, spmd.V, spmd.PartitionSpec("dp", "tp", None))
+            spmd.assert_type(lse_NT, spmd.V, spmd.PartitionSpec("tp", "dp"))
 
         out_BLNH = out_TNH.view(B, L, -1, H).to(q_BLNH.dtype)
         # FA varlen returns the LSE as (N, T); reorder to (B, L, N) so
@@ -756,7 +750,9 @@ class FusedQKVLinear(BaseQKVLinear):
         with spmd.local():  # TODO(pianpwk): same QKV:S(2) unflatten case handled by even sharding
             qkv = qkv.view(bs, seqlen, -1, self.r_dim, self.head_dim)
         if get_spmd_backend() == "spmd_types":
-            spmd.assert_type(qkv, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None, None))
+            spmd.assert_type(
+                qkv, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None, None)
+            )
 
         # torch.split returns contiguous views for size-1 splits (xk, xv).
         # xq (size heads_per_kv) is non-contiguous; reshape triggers a copy.
