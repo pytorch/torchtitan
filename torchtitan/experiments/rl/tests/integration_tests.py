@@ -105,6 +105,47 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             "rl_grpo_moe_debug_tp4_ep4",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            # Two runs sharing the same dump_folder: the first trains 2 steps and
+            # writes a full checkpoint at step 2; the second resumes from it and
+            # trains through step 4. The second run errors if resume is broken
+            # (missing checkpoint, wrong step, generator/policy-version mismatch).
+            [
+                [
+                    "--module alphabet_sort",
+                    "--config rl_grpo_qwen3_0_6b_varlen",
+                    "--num_steps 2",
+                    "--trainer.parallelism.tensor_parallel_degree 2",
+                    "--generator.parallelism.tensor_parallel_degree 2",
+                    "--group_size 2",
+                    "--batcher.batch.seq_len 1024",
+                    "--renderer.enable-thinking False",
+                    "--generator.sampling.max_tokens 256",
+                    "--trainer.debug.no_batch_invariant",
+                    "--generator.debug.no_batch_invariant",
+                    "--metrics.no-enable-wandb",
+                    "--trainer.checkpoint.interval 2",
+                ],
+                [
+                    "--module alphabet_sort",
+                    "--config rl_grpo_qwen3_0_6b_varlen",
+                    "--num_steps 4",
+                    "--trainer.parallelism.tensor_parallel_degree 2",
+                    "--generator.parallelism.tensor_parallel_degree 2",
+                    "--group_size 2",
+                    "--batcher.batch.seq_len 1024",
+                    "--renderer.enable-thinking False",
+                    "--generator.sampling.max_tokens 256",
+                    "--trainer.debug.no_batch_invariant",
+                    "--generator.debug.no_batch_invariant",
+                    "--metrics.no-enable-wandb",
+                    "--trainer.checkpoint.interval 2",
+                ],
+            ],
+            "RL GRPO checkpoint save + resume",
+            "rl_grpo_checkpoint_resume",
+            ngpu=4,
+        ),
     ]
 
 

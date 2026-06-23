@@ -205,9 +205,7 @@ class RLTrainer(Configurable):
         self.config = config
         self.trainer: PolicyTrainer | None = None
         self.generator_router: GeneratorRouter | None = None
-        # Step to resume from: 0 for a fresh run, or the restored checkpoint
-        # step when resuming. Set in setup_async once the trainer has loaded
-        # any existing checkpoint.
+        # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.
         self.start_step = 0
         self._proc_meshes = []
         self.metrics_processor: m.MetricsProcessor = config.metrics.build(
@@ -386,12 +384,9 @@ class RLTrainer(Configurable):
         with sl.log_trace_span("torchstore_init"):
             await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
 
-        # Resume support: the trainer's __init__ already ran
-        # CheckpointManager.load(), which (when a checkpoint exists in its
-        # folder) restored the model, optimizer, LR scheduler, and
-        # policy_version. Read that version back so the loop resumes at the right
-        # step and the generators pull weights tagged with the matching version
-        # (0 for a fresh run).
+        # The trainer's __init__ already ran CheckpointManager.load(); read back
+        # the restored policy_version (0 if fresh) so the loop resumes at the
+        # right step and the generators pull weights at the matching version.
         self.start_step = self._get_rank_0_value(
             await self.trainer.get_policy_version.call()
         )
@@ -838,11 +833,9 @@ class RLTrainer(Configurable):
                 break
 
             # --- checkpoint ---
-            # Persist full training state (model + optimizer + LR scheduler +
-            # policy_version) so a preempted run can resume. The trainer's
-            # CheckpointManager only writes on its configured interval and on
-            # the final step; other steps are a no-op. Saved after the
-            # divergence check so a NaN step is not checkpointed.
+            # Save full training state for resume; CheckpointManager writes only
+            # on its interval and the final step. After the divergence check so a
+            # NaN step is not checkpointed.
             with sl.log_trace_span("trainer_save_checkpoint"):
                 await self.trainer.save_checkpoint.call(
                     step, last_step=(step == num_steps)

@@ -75,13 +75,9 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
-                # First run with an empty checkpoint folder loads the HF weights;
-                # subsequent restarts resume from the latest mid-run checkpoint.
-                initial_load_in_hf=True,
-                # Mid-run checkpoints every `interval` steps so a preempted long
-                # run resumes instead of restarting from step 1. last_save full
-                # (not model-only) so the final checkpoint is also resumable;
-                # keep_latest_k bounds disk use for the larger models.
+                initial_load_in_hf=True,  # first run loads HF; restarts resume from DCP
+                # Mid-run checkpoints so a preempted run resumes; full last save
+                # (not model-only) keeps it resumable; keep_latest_k caps disk.
                 interval=50,
                 last_save_model_only=False,
                 keep_latest_k=3,
