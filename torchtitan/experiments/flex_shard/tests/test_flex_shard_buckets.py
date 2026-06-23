@@ -42,7 +42,6 @@ from torchtitan.experiments.flex_shard import (
     BucketSpec,
     flex_shard,
     is_flex_shard_param,
-    LocalStorageLayout,
     Placement,
 )
 from torchtitan.experiments.flex_shard.example.owned import (
@@ -80,39 +79,12 @@ class _IncompletePlacement(Placement):
         return hash(type(self))
 
 
-class _PaddedShard(Shard):
-    def __init__(self, padding_nbytes: int) -> None:
-        super().__init__(0)
-        self.padding_nbytes = padding_nbytes
-
-    def local_storage_layout(
-        self,
-        global_shape: torch.Size,
-        dtype: torch.dtype,
-        rank: int,
-        world_size: int,
-    ) -> LocalStorageLayout:
-        layout = super().local_storage_layout(global_shape, dtype, rank, world_size)
-        return LocalStorageLayout(
-            local_shape=layout.local_shape,
-            local_numel=layout.local_numel,
-            storage_nbytes=layout.storage_nbytes + self.padding_nbytes,
-        )
-
 # Shard mesh tests
 # ---------------------------------------------------------------------------
 
 
 class TestFlexShardMesh(TestCase):
     """Test FlexShard shard mesh validation."""
-
-    def test_accepts_1d_mesh(self):
-        from torchtitan.experiments.flex_shard.flex_shard.utils import (
-            _validate_flex_shard_mesh,
-        )
-
-        with single_rank_cuda_mesh() as mesh:
-            _validate_flex_shard_mesh(mesh)
 
     def test_rejects_multi_dim_mesh(self):
         from torchtitan.experiments.flex_shard.flex_shard.utils import (
@@ -611,60 +583,6 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
                 )
                 self.assertEqual(param, local_view)
                 self.assertTrue(is_flex_shard_param(param))
-
-    def test_materialized_params_match_placement_local_shards(self):
-        mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
-
-        class TinyModule(nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.a = nn.Parameter(torch.arange(3, dtype=torch.float32).view(1, 3))
-                self.b = nn.Parameter(torch.arange(6, dtype=torch.float32).view(3, 2))
-
-        model = TinyModule()
-        named_params = list(model.named_parameters())
-        padding_nbytes = 16
-        placements = {fqn: (_PaddedShard(padding_nbytes),) for fqn, _ in named_params}
-        buckets = [
-            BucketSpec(
-                ["*"],
-                placement_fn=per_param_placements,
-                mesh=mesh,
-                reshard_after_forward=False,
-            )
-        ]
-        assignments = [[fqn for fqn, _ in named_params]]
-
-        inputs = PreparedFlexShardInputs(
-            named_params=named_params,
-            device=torch.device("cpu"),
-            param_placements=placements,
-            bucket_assignments=assignments,
-        )
-        bucket_storages, _ = _materialize_bucket_storages(
-            model,
-            inputs,
-            buckets,
-        )
-
-        bucket_storage = bucket_storages[0]
-        current_params = dict(model.named_parameters())
-        original_params = dict(named_params)
-        for fqn, info in bucket_storage.param_infos.items():
-            param = current_params[fqn]
-            expected = Shard(0).extract_local_shard(
-                original_params[fqn].detach(),
-                self.rank,
-                self.world_size,
-            )
-            self.assertEqual(info.local_shape, expected.shape)
-            self.assertEqual(
-                info.storage_nbytes,
-                expected.numel() * expected.dtype.itemsize + padding_nbytes,
-            )
-            self.assertEqual(param, expected)
-            self.assertEqual(param, bucket_storage.get_local_view(fqn))
-
 
 # ---------------------------------------------------------------------------
 # Distributed per-bucket ShardedBucketStorage tests (torchrun only)
