@@ -8,11 +8,11 @@ import math
 from dataclasses import dataclass
 from typing import Literal
 
-import torch
 import spmd_types as spmd
+
+import torch
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
-from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.protocols.module import Module
 
