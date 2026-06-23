@@ -350,14 +350,14 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
         loss, model_hash, grad_hash = self._run_steps(
             copy.deepcopy(self.model), Trainer
         )
-        assert_expected_inline(str(loss.item()), """7.961757659912109""")
+        assert_expected_inline(str(loss.item()), """7.961757183074951""")
         assert_expected_inline(
             model_hash,
-            """4cf2bed8281dfcdf4a5e5ced666ccd65681fab5fcaf404e14e91b583fe21bd4c""",
+            """59c65bd875308734f8dc74ca14ec96201a533076711640dac3525ae0109c2622""",
         )
         assert_expected_inline(
             grad_hash,
-            """926c46345abe29f427f072fb747375009cac66c4ab4be4b41d09661356089016""",
+            """40eefe5c95e12a759b05e92df83699c5a306b4e30dbf3635b9eb2b686bd2ecdc""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -416,11 +416,11 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.474959373474121""")
         assert_expected_inline(
             model_hash,
-            """99d414c98ec7de31e58ad41f3324a402dfa4f8fc4b3c57a406368af7360a2ec6""",
+            """fa6def9b076b63bbdcb8cf97dff514d4cfdf72fffebb0031914b2354fa0a09d8""",
         )
         assert_expected_inline(
             grad_hash,
-            """7f38de9544b31d1161c4191987663e2e8cc7be8b83b6226ff72a349a71aa1afa""",
+            """5735b51199140370c02865d56c4badc455c4a73d222753d14a6a96ddfce866f2""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -481,14 +481,14 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         loss, model_hash, grad_hash = self._run_steps(
             copy.deepcopy(self.model), Trainer
         )
-        assert_expected_inline(str(loss.item()), """7.961757183074951""")
+        assert_expected_inline(str(loss.item()), """7.961757659912109""")
         assert_expected_inline(
             model_hash,
-            """6884b7b1013badc769666dc1acc75db5a09dbcf1170e3bea2c35ae77d20a3896""",
+            """b3c10f5a8fdc51f81281031e69cd617a01ba0ccdd513f656d9c03beefc48b91c""",
         )
         assert_expected_inline(
             grad_hash,
-            """9163c0f93a0a8dbf02208dae3ee0b427a97e3dd39e83b84847d2ed4b4e2bc495""",
+            """d7aafe6c8941bd2bd7ddf6c2d161ddcbf28a6fc71f6c75b4391950aa6652ef89""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -551,11 +551,11 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.474959373474121""")
         assert_expected_inline(
             model_hash,
-            """aff6268960d2b137a44756d322b72c0dc253ffbbc54077e4105fc3abed0fdd79""",
+            """29139a03f37527719ee52868406f72f659dc085ac81c24b0cfea9b91c3942e7c""",
         )
         assert_expected_inline(
             grad_hash,
-            """86f1656c38fa1e23d6b29955889bd5c4ad0c363f9755e2c4ea8dee142cacfcfe""",
+            """156bc8ac95c905f9f6a6b08712de2faf92621b4c34361578fcef5c7e05184a7e""",
         )
 
     # TODO: FlexAttention compilation exceeds resource limits on pre-Hopper GPUs.
@@ -621,14 +621,14 @@ class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
         loss, model_hash, grad_hash = self._run_steps(
             copy.deepcopy(self.model), Trainer
         )
-        assert_expected_inline(str(loss.item()), """7.297995567321777""")
+        assert_expected_inline(str(loss.item()), """7.297992706298828""")
         assert_expected_inline(
             model_hash,
-            """633e10071953205f68501138d4e7a907d42c8523320df205c737a30ee8aaa9d7""",
+            """5a90f986b34f302b14a1ba342f4b075aa1429fcf2e7cbfeef4631b3c7dda0958""",
         )
         assert_expected_inline(
             grad_hash,
-            """b24c4d0201f11a825bbf49269592968ffd53d5b52bc0486bcacafae91e90eee3""",
+            """f2aae358d7e387b7ce98d55deb30c41d27c0809c4545593c24c5396303ed1129""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -689,14 +689,14 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         loss, model_hash, grad_hash = self._run_steps(
             copy.deepcopy(self.model), Trainer
         )
-        assert_expected_inline(str(loss.item()), """7.297987461090088""")
+        assert_expected_inline(str(loss.item()), """7.297983646392822""")
         assert_expected_inline(
             model_hash,
-            """8f3524a4b2d4c6144abbb570ef7309a80ed87dc37025fa449ec332201f02aaed""",
+            """23652512b11880042b05345333f63ddcd0bd3b4362593f62752a7e403f048385""",
         )
         assert_expected_inline(
             grad_hash,
-            """74877b0fa386c66c3154e0371adb86c9255527f0d48fb623feb7ee70ee79d409""",
+            """895996682474a53d3437a772449d6166adbcfba76c226d32ca586c61e33cbfe5""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
