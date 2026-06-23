@@ -14,13 +14,11 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.distributed as dist
 
-from .reduce_policy import GradientReduceOp
-
 if TYPE_CHECKING:
     import torch.nn as nn
     from torch.distributed.device_mesh import DeviceMesh
 
-    from .bucket_storage import ParamInfo
+    from .bucket_storage import GradientReduceOp, ParamInfo
 
 
 @dataclass(frozen=True)
