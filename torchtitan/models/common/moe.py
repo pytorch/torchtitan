@@ -79,15 +79,19 @@ class GroupedExperts(Module):
             w2_EDF = self.w2_EDF
             w3_EFD = self.w3_EFD
 
+        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         if (
             get_spmd_backend() == "spmd_types"
             and spmd.is_type_checking()
             and spmd_mesh_size("ep") == 1
         ):
-            for axis in ("dp", "cp"):  # if no EP, convert to V for grouped_mm
-                spmd.mutate_type(num_tokens_per_expert_E, axis, src=spmd.P, dst=spmd.V)
+            for axis in ("dp", "cp"):
+                # if no EP, convert to V for grouped_mm, which would otherwise see
+                # x:R, w1:V, offsets:P in local SPMD typechecking.
+                # spmd.P is not currently allowed to mix with spmd.V.
+                # TODO(pianpwk): likely relax this in spmd_types.
+                spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
-        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         h_RF = F.silu(
             torch._grouped_mm(
                 x_RD.bfloat16(),
@@ -162,10 +166,6 @@ class GroupedExperts(Module):
         self.token_dispatcher.wire_meshes(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
-        )
-        self.token_dispatcher.sparse_mesh = parallel_dims.get_optional_mesh(
-            ["dp_replicate", "efsdp", "ep"],
-            include_singleton_axes=True,
         )
 
 
