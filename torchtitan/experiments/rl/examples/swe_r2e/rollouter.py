@@ -75,6 +75,22 @@ def _env_int(name: str, default: int) -> int:
     return int(val) if val and val.strip() else default
 
 
+# Cap concurrently-ACTIVE rollouts. Every live rollout drives a file-relay bridge
+# whose per-turn fs ops run on the controller's single asyncio loop; at the full
+# 8x8=64 fanout the 64 bridge poll loops + adapter handlers saturate the loop over
+# a high-latency host->daytona link and model replies stop coming back (the agent
+# sits in 'requesting' forever). Gating the boot+agent+grade body to a modest
+# number keeps the bridge responsive; all groups are still collected, in waves.
+_ROLLOUT_SEM: asyncio.Semaphore | None = None
+
+
+def _rollout_sem() -> asyncio.Semaphore:
+    global _ROLLOUT_SEM
+    if _ROLLOUT_SEM is None:
+        _ROLLOUT_SEM = asyncio.Semaphore(_env_int("SWE_ROLLOUT_CONCURRENCY", 16))
+    return _ROLLOUT_SEM
+
+
 class SWER2ERollouter(Rollouter):
     """Drives Claude Code in a sandbox per sibling, then grades the patch (R2E)."""
 
@@ -194,6 +210,10 @@ class SWER2ERollouter(Rollouter):
         applied = False
         diff_text = ""
         error_msg = ""
+        # Gate the active body (acquire OUTSIDE the wall-clock guard so queueing for
+        # a slot is not charged against the rollout's time budget).
+        sem = _rollout_sem()
+        await sem.acquire()
         try:
             async with asyncio.timeout(self._guard_sec):
                 async with boot_agent_sandbox(sample.image) as sb:
@@ -226,6 +246,7 @@ class SWER2ERollouter(Rollouter):
             status = RolloutStatus.ERROR
             error_msg = f"{type(e).__name__}: {e}"
         finally:
+            sem.release()
             captured = await adapter.finish_session(rollout_id)
 
         # Drop empty-completion turns so rollout_to_episodes only sees trainable
