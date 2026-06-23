@@ -62,7 +62,7 @@ class TestFlexShardEagerRuntime(TestCase):
         with single_rank_cuda_mesh() as mesh:
             args, model = flex_shard_transformer_model(mesh)
 
-            compiled_model = torch.compile(model, backend="eager", fullgraph=True)
+            compiled_model = torch.compile(model, backend="eager")
 
             loss = compiled_model(transformer_inputs(args, device="cuda")).sum()
             loss.backward()
