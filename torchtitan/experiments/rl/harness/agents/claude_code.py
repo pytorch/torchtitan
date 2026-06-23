@@ -14,7 +14,8 @@ OpenAI/Anthropic-compatible API is a matter of a different run command.
 
 Responsibilities:
   - ``boot_agent_sandbox``: create a fresh sandbox from the task image and install
-    the Node 22 + Claude Code toolchain from host tarballs (no-op if prebaked).
+    the Claude Code CLI by downloading the self-contained binary from its CDN
+    inside the sandbox (no-op if the image already ships it).
   - ``ensure_agent_user``: create an unprivileged ``agent`` user that owns workdir.
   - ``run_claude_code``: write the problem statement, (for Daytona) start the
     file-relay bridge, spawn ``claude -p`` pointed at the adapter, poll a done
@@ -22,8 +23,7 @@ Responsibilities:
   - ``git_diff``: capture the agent's patch for grading.
 
 Env knobs (set by the launcher):
-  ``SWE_HOST_NODE_TARBALL``  host path to a Node 22 tarball (.xz or .tar) (REQUIRED)
-  ``SWE_HOST_CC_TARBALL``    host path to the Claude Code tarball (REQUIRED)
+  ``SWE_CLAUDE_CDN``         Claude Code binary CDN base (default Anthropic GCS)
   ``SWE_BOOT_CONCURRENCY``   max simultaneous sandbox boots (default 8)
   ``SWE_BOOT_RETRIES``       retries for a transient boot/install failure (default 2)
   ``SWE_CLAUDE_EXTRA_ARGS``  extra args appended to ``claude -p`` (settings, disallowed tools)
@@ -39,15 +39,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import lzma
 import os
 import shlex
-import shutil
-import tempfile
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from torchtitan.experiments.rl.harness.sandbox import (
     DaytonaSandbox,
@@ -57,14 +53,17 @@ from torchtitan.experiments.rl.harness.sandbox import (
 
 logger = logging.getLogger(__name__)
 
-SWE_HOST_NODE_TARBALL = Path(
-    os.environ.get("SWE_HOST_NODE_TARBALL", "/path/to/node-v22.20.0-linux-x64.tar.xz")
-)
-SWE_HOST_CC_TARBALL = Path(
-    os.environ.get("SWE_HOST_CC_TARBALL", "/path/to/claude-code-linux-x64.tgz")
-)
 SWE_BOOT_CONCURRENCY = int(os.environ.get("SWE_BOOT_CONCURRENCY", "8"))
 SWE_BOOT_RETRIES = int(os.environ.get("SWE_BOOT_RETRIES", "2"))
+# Claude Code CDN (GCS): the self-contained ``linux-x64/claude`` binary is fetched
+# from here INSIDE the sandbox (its own fast egress) instead of uploaded from the
+# controller. ``{CDN}/stable`` -> version; ``{CDN}/{version}/linux-x64/claude`` ->
+# binary. Mirrors genai/msl/rl claude_code_download.sh.
+CLAUDE_CDN = os.environ.get(
+    "SWE_CLAUDE_CDN",
+    "https://storage.googleapis.com/"
+    "claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases",
+)
 CC_PROMPT = os.environ.get(
     "SWE_CC_PROMPT",
     "Read PROBLEM_STATEMENT.md in the current directory and resolve the issue. "
@@ -75,6 +74,13 @@ CC_PROMPT = os.environ.get(
     "PROBLEM_STATEMENT.md and do NOT commit. When finished, print a one-line "
     "summary and exit.",
 )
+
+# Claude Code's stream-json trajectory: write it under the agent's HOME, OUTSIDE
+# the repo workdir, so the agent can't Read its own (huge) trajectory mid-run and
+# blow its context. It's untracked either way (git_diff is tracked-only), but the
+# read-leak was real (a rollout Read /testbed/claude_code_trajectory.jsonl -> +10k
+# tokens -> context overflow).
+_TRAJ_PATH = "/home/agent/claude_code_trajectory.jsonl"
 
 # Anthropic model name the adapter answers to; arbitrary (the adapter ignores it).
 ADAPTER_MODEL_NAME = "titan-actor"
@@ -87,9 +93,10 @@ async def boot_agent_sandbox(image: str) -> AsyncIterator[Sandbox]:
     """Boot a fresh sandbox and install the Claude Code toolchain.
 
     Creates the sandbox from the task image (backend chosen by
-    ``TT_SANDBOX_BACKEND``), installs Node 22 + Claude Code CLI from host tarballs
-    (skipped when the image already ships them), retries transient boot/install
-    failures, and closes the sandbox when the caller leaves the context.
+    ``TT_SANDBOX_BACKEND``) and installs the Claude Code CLI by downloading the
+    self-contained binary from its CDN INSIDE the sandbox (the sandbox's own fast
+    egress), retries transient boot failures, and closes the sandbox when the
+    caller leaves the context.
     """
     global _BOOT_SEM
     if _BOOT_SEM is None:
@@ -103,8 +110,7 @@ async def boot_agent_sandbox(image: str) -> AsyncIterator[Sandbox]:
             async with _BOOT_SEM:
                 await cand.__aenter__()
                 try:
-                    await install_node22(cand, SWE_HOST_NODE_TARBALL)
-                    await install_claude_code(cand, SWE_HOST_CC_TARBALL)
+                    await install_toolchain(cand)
                 except BaseException:
                     await cand.__aexit__(None, None, None)
                     raise
@@ -129,77 +135,28 @@ async def boot_agent_sandbox(image: str) -> AsyncIterator[Sandbox]:
         await sb.__aexit__(None, None, None)
 
 
-async def install_node22(sb: Sandbox, host_tarball: Path) -> None:
-    """Install Node 22 over the base image (cli.js needs >= 20).
+async def install_toolchain(sb: Sandbox) -> None:
+    """Install the Claude Code CLI by downloading the self-contained binary from
+    its CDN INSIDE the sandbox (the sandbox's own fast egress), in ONE exec.
 
-    Decompresses .xz on the host (cached) so sandboxes without xz-utils can still
-    run plain ``tar xf``. No-op if the image already ships node >= 20.
+    This is the key latency fix for high-latency controller->sandbox links (e.g.
+    cross-region MAST -> daytona-US, ~10x slower than a local box): uploading the
+    ~76MB Claude tarball + a Node tarball from the controller and running ~6 install
+    execs each cost a slow round-trip and time out ("command execution timeout").
+    Instead the sandbox curls the binary from the CDN at datacenter speed (~1s),
+    in a single exec. The binary is a self-contained Node SEA, so no separate Node
+    install is needed (matches genai/msl/rl claude_code_download.sh). No-op if the
+    image already ships a working ``claude``.
     """
-    _, out, _ = await sb.exec(
-        'v=$(node --version 2>/dev/null | sed "s/^v//;s/\\..*//"); '
-        '[ -n "$v" ] && [ "$v" -ge 20 ] && echo OK || echo MISSING',
-        user="root",
-        timeout=30,
-        check=False,
-    )
-    if "OK" in (out or ""):
-        return
-    host_tarball = Path(host_tarball)
-    if host_tarball.suffix == ".xz":
-        plain = Path(tempfile.gettempdir()) / f"tt_claude_code.{host_tarball.stem}.tar"
-        if not plain.exists():
-            tmp = plain.with_suffix(".tar.partial")
-            with lzma.open(host_tarball, "rb") as src, open(tmp, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-            os.replace(tmp, plain)
-        host_tarball = plain
-    await sb.write_file("/tmp/node22.tar", host_tarball)
-    await sb.exec(
-        "set -e && mkdir -p /opt/node22 && "
-        "tar xf /tmp/node22.tar -C /opt/node22 --strip-components=1 && "
-        "ln -sf /opt/node22/bin/node /usr/local/bin/node && "
-        "ln -sf /opt/node22/bin/npm  /usr/local/bin/npm && "
-        "ln -sf /opt/node22/bin/npx  /usr/local/bin/npx && "
-        "hash -r 2>/dev/null || true && node --version && npm --version",
-        user="root",
-        timeout=180,
-        check=True,
-    )
-
-
-async def install_claude_code(sb: Sandbox, host_tarball: Path) -> None:
-    """Install the Claude Code CLI from a host tarball.
-
-    No-op if the image already ships a working ``claude``. Two tarball shapes are
-    supported: the small ``@anthropic-ai/claude-code`` npm wrapper
-    (``npm install -g``) and the self-contained
-    ``@anthropic-ai/claude-code-linux-x64`` package (a ``package/claude`` native
-    binary, dropped straight into ``/usr/local/bin``).
-    """
-    ec, _, _ = await sb.exec("claude --version", user="root", timeout=30, check=False)
+    ec, _, _ = await sb.exec("claude --version", user="root", timeout=60, check=False)
     if ec == 0:
         return
-    await sb.write_file("/tmp/claude-code.tgz", host_tarball)
-    ec, out, _ = await sb.exec(
-        "tar tzf /tmp/claude-code.tgz 2>/dev/null | grep -qx package/claude "
-        "&& echo BIN || echo NPM",
-        user="root",
-        timeout=60,
-        check=False,
-    )
-    if "BIN" in (out or ""):
-        await sb.exec(
-            "set -e && tar xzf /tmp/claude-code.tgz -C /tmp package/claude && "
-            "install -m 0755 /tmp/package/claude /usr/local/bin/claude && "
-            "rm -rf /tmp/package && claude --version",
-            user="root",
-            timeout=180,
-            check=True,
-        )
-        return
     await sb.exec(
-        "npm install -g --prefix=/usr/local --no-audit --no-fund /tmp/claude-code.tgz "
-        "&& ls -la /usr/local/bin/claude && /usr/local/bin/claude --version",
+        "set -e\n"
+        f"ver=$(curl -fsSL {CLAUDE_CDN}/stable)\n"
+        f'curl -fsSL -o /usr/local/bin/claude "{CLAUDE_CDN}/$ver/linux-x64/claude"\n'
+        "chmod 0755 /usr/local/bin/claude\n"
+        "claude --version\n",
         user="root",
         timeout=300,
         check=True,
@@ -316,9 +273,7 @@ async def dump_trajectory(sb: Sandbox, workdir: str, session_id: str) -> None:
     if not dump_dir:
         return
     try:
-        traj = await sb.read_file(
-            f"{workdir}/claude_code_trajectory.jsonl", user="agent"
-        )
+        traj = await sb.read_file(_TRAJ_PATH, user="agent")
         if not (traj or "").strip():
             return
         os.makedirs(dump_dir, exist_ok=True)
@@ -348,7 +303,7 @@ async def _spawn_claude_code(
     """
     done = f"{workdir}/.cagent_done"
     launcher = f"{workdir}/.cagent_run.sh"
-    traj = f"{workdir}/claude_code_trajectory.jsonl"
+    traj = _TRAJ_PATH
 
     launcher_body = (
         "#!/bin/bash\n"
