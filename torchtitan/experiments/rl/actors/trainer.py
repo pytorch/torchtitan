@@ -280,10 +280,23 @@ class PolicyTrainer(Actor, Configurable):
         )
 
     def state_dict(self) -> dict[str, Any]:
+        # Registered as the checkpoint's "train_state". policy_version is the
+        # number of completed optim steps (one per training step), so it doubles
+        # as the resume step counter.
         return {"policy_version": self.policy_version}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         self.policy_version = state_dict["policy_version"]
+
+    @endpoint
+    async def get_policy_version(self) -> int:
+        """Return the current policy version.
+
+        After __init__ runs CheckpointManager.load(), this is the step a resumed
+        run restored from (0 for a fresh run). The controller reads it to resume
+        the training loop and to pull generator weights at the matching version.
+        """
+        return self.policy_version
 
     @endpoint
     async def close(self) -> None:
