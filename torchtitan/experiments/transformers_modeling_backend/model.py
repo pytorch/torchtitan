@@ -27,10 +27,13 @@ from torchtitan.protocols.module import ModuleDict
 from torchtitan.tools.logging import logger
 
 
+# Shape suffix legend (matches torchtitan/models/common/attention.py):
+#   B = batch, L = sequence length, N = num heads, H = head dimension.
+# HF attention layout is (B, N, L, H); native TorchTitan layout is (B, L, N, H).
 class HFFlexAttention(FlexAttention):
     """FlexAttention kernel for HF models.
 
-    Accepts Q/K/V in native TorchTitan layout (batch, seq, heads, dim) so that
+    Accepts Q/K/V in native TorchTitan layout (B, L, N, H) so that
     apply_cp_to_forward's K/V all-gather (dim=1, the seq dim) works correctly.
     The caller (_flex_torchtitan_attention_forward) transposes from HF layout
     before calling this module, and transposes back after.
@@ -41,9 +44,9 @@ class HFFlexAttention(FlexAttention):
 
     def forward(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        q_BLNH: torch.Tensor,
+        k_BLNH: torch.Tensor,
+        v_BLNH: torch.Tensor,
         *,
         attention_masks: BlockMask | None = None,
         scale: float | None = None,
@@ -52,22 +55,24 @@ class HFFlexAttention(FlexAttention):
     ) -> torch.Tensor:
         from torch.nn.attention.flex_attention import flex_attention
 
-        # Transpose to (batch, heads, seq, dim) for flex_attention kernel
-        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
-        out = flex_attention(
-            q,
-            k,
-            v,
+        # Transpose to (B, N, L, H) for the flex_attention kernel
+        q_BNLH = q_BLNH.transpose(1, 2)
+        k_BNLH = k_BLNH.transpose(1, 2)
+        v_BNLH = v_BLNH.transpose(1, 2)
+        out_BNLH = flex_attention(
+            q_BNLH,
+            k_BNLH,
+            v_BNLH,
             block_mask=attention_masks,
             scale=scale,
             enable_gqa=enable_gqa,
         )
-        # Transpose back to (batch, seq, heads, dim)
-        return out.transpose(1, 2)
+        # Transpose back to (B, L, N, H)
+        return out_BNLH.transpose(1, 2)
 
 
 def _flex_torchtitan_attention_forward(
-    module, query, key, value, attention_mask, **kwargs
+    module, query_BNLH, key_BNLH, value_BNLH, attention_mask, **kwargs
 ):
     """FlexAttention forward registered via AttentionInterface.
 
@@ -75,32 +80,37 @@ def _flex_torchtitan_attention_forward(
     each HF attention layer, so apply_cp_to_forward's K/V all-gather wrapping
     applies automatically.
 
-    Transposes Q/K/V from HF layout (batch, heads, seq, dim) to native
-    TorchTitan layout (batch, seq, heads, dim) before calling the module,
-    so CP's dim=1 all-gather targets the sequence dimension correctly.
+    Transposes Q/K/V from HF layout (B, N, L, H) to native TorchTitan layout
+    (B, L, N, H) before calling the module, so CP's dim=1 all-gather targets
+    the sequence dimension correctly.
     """
     scaling = kwargs.get("scaling")
     block_mask = attention_mask if isinstance(attention_mask, BlockMask) else None
 
     flex_module = getattr(module, "_flex_kernel", None)
     if flex_module is not None:
-        # HF layout → native layout: (batch, heads, seq, dim) → (batch, seq, heads, dim)
-        q = query.transpose(1, 2)
-        k = key.transpose(1, 2)
-        v = value.transpose(1, 2)
-        out = flex_module(
-            q, k, v, attention_masks=block_mask, scale=scaling
+        # HF layout (B, N, L, H) -> native layout (B, L, N, H)
+        q_BLNH = query_BNLH.transpose(1, 2)
+        k_BLNH = key_BNLH.transpose(1, 2)
+        v_BLNH = value_BNLH.transpose(1, 2)
+        out_BLNH = flex_module(
+            q_BLNH, k_BLNH, v_BLNH, attention_masks=block_mask, scale=scaling
         )
-        # Native layout → HF layout
-        return out.transpose(1, 2), None
+        # Native layout (B, L, N, H) -> HF layout (B, N, L, H)
+        return out_BLNH.transpose(1, 2), None
 
     # Fallback: call flex_attention directly (no CP support)
     from torch.nn.attention.flex_attention import flex_attention
 
-    out = flex_attention(
-        query, key, value, block_mask=block_mask, scale=scaling, enable_gqa=True
+    out_BNLH = flex_attention(
+        query_BNLH,
+        key_BNLH,
+        value_BNLH,
+        block_mask=block_mask,
+        scale=scaling,
+        enable_gqa=True,
     )
-    return out, None
+    return out_BNLH, None
 
 
 class SliceableModuleDict(ModuleDict):
