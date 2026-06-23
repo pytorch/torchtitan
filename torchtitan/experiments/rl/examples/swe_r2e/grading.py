@@ -161,13 +161,13 @@ async def _run_r2e(
         timeout=timeout,
     )
     parsed = _parse_junit(await ev.read_file(xml, user="root"))
-    # Per-test pass fraction (r2egym's _calculate_reward_r2e is per-test). A binary
-    # all-or-nothing reward is too sparse for a weaker policy: within a GRPO group of
-    # siblings on one task, none solving -> all reward 0 -> zero advantage -> no
-    # gradient. The fraction gives dense, within-group reward variance (siblings that
-    # reproduce more of the expected test outcomes score higher). SWE_REWARD_DENSE=0
-    # restores the binary solved reward.
+    # Default reward is binary (1.0 iff fully solved). SWE_REWARD_DENSE=1 opts into a
+    # dense per-test pass fraction (r2egym's _calculate_reward_r2e is per-test): the
+    # binary reward is sparse for a weaker policy (a GRPO group with no solve has
+    # all-zero reward -> zero advantage -> no gradient), whereas the fraction gives
+    # within-group variance (siblings reproducing more expected test outcomes score
+    # higher). Kept opt-in so the binary reward stays the default.
     frac = _r2e_fraction(parsed, expected)
     solved = frac >= 1.0
-    dense = os.environ.get("SWE_REWARD_DENSE", "1") != "0"
+    dense = os.environ.get("SWE_REWARD_DENSE", "0") == "1"
     return (frac if dense else (1.0 if solved else 0.0)), solved
