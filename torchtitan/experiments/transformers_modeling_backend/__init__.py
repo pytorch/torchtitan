@@ -94,6 +94,15 @@ flavors = {
             n_kv_heads=16,
         ),
     ),
+    "debugmodel_flex": HFTransformerModel.Config(
+        model_config=TitanModelConfig(
+            use_flex_attn=True,
+            dim=256,
+            n_layers=2,
+            n_heads=16,
+            n_kv_heads=16,
+        ),
+    ),
     "debugmodel_moe": HFTransformerModel.Config(
         model_config=TitanMoeModelConfig(
             dim=2048,

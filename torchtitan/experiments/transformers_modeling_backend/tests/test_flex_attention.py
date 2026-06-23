@@ -81,5 +81,40 @@ class TestFlexCrossDocumentLeakage(unittest.TestCase):
         self.assertFalse(torch.allclose(out1[:, :len_a], out2[:, :len_a]))
 
 
+class TestFlexCpGuard(unittest.TestCase):
+    """flex attention + context parallelism must fail loud (not silently wrong).
+
+    The guard sits at the top of parallelize_hf_transformers, before any model
+    work, so lightweight stubs are enough — no GPU/distributed needed.
+    """
+
+    def test_flex_cp_is_guarded(self):
+        import types
+
+        from torchtitan.experiments.transformers_modeling_backend.parallelize import (
+            parallelize_hf_transformers,
+        )
+
+        model = types.SimpleNamespace(
+            model=types.SimpleNamespace(
+                config=types.SimpleNamespace(use_flex_attn=True)
+            )
+        )
+        parallel_dims = types.SimpleNamespace(
+            cp_enabled=True, tp=1, cp=2, seq_len_divisor=1
+        )
+        training = types.SimpleNamespace(seq_len=8)
+        with self.assertRaisesRegex(NotImplementedError, "context parallelism"):
+            parallelize_hf_transformers(
+                model,
+                parallel_dims=parallel_dims,
+                training=training,
+                parallelism=None,
+                compile_config=None,
+                ac_config=None,
+                dump_folder="",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

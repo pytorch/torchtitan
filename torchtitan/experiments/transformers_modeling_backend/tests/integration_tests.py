@@ -77,6 +77,33 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
             "transformers_modeling_backend_fsdp+tp_moe",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module transformers_modeling_backend",
+                    "--config transformers_modeling_backend_debugmodel_flex",
+                    "--parallelism.data_parallel_shard_degree -1",
+                    "--training.steps 2",
+                ],
+            ],
+            "Transformers Backend Flex FSDP",
+            "transformers_modeling_backend_flex_fsdp",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module transformers_modeling_backend",
+                    "--config transformers_modeling_backend_debugmodel_flex",
+                    "--parallelism.data_parallel_shard_degree -1",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--training.steps 2",
+                ],
+            ],
+            "Transformers Backend Flex FSDP+TP",
+            "transformers_modeling_backend_flex_fsdp+tp",
+            ngpu=2,
+        ),
     ]
     return integration_tests_flavors
 

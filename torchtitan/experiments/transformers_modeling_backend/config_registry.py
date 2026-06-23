@@ -56,6 +56,45 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
     )
 
 
+def transformers_modeling_backend_debugmodel_flex() -> TransformersBackendConfig:
+    """Dense debug config with flex attention enabled (use_flex_attn=True).
+
+    Exercises the packed/document-mask flex path (get_attention_masks -> trainer
+    capability gate -> forward -> local_map under TP). Same as debugmodel but
+    with the debugmodel_flex flavor.
+    """
+    return TransformersBackendConfig(
+        loss=CrossEntropyLoss.Config(),
+        hf_assets_path="./tests/assets/tokenizer",
+        hf_model="Qwen/Qwen3-4B-Instruct-2507",
+        debug=DebugConfig(print_config=True),
+        model_spec=model_registry("debugmodel_flex"),
+        profiler=Profiler.Config(profile_freq=5),
+        optimizer=default_adamw(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2,
+            decay_ratio=0.8,
+            decay_type="linear",
+            min_lr_factor=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=2,
+            seq_len=2048,
+            steps=10,
+        ),
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        metrics=MetricsProcessor.Config(log_freq=1),
+        parallelism=ParallelismConfig(pipeline_parallel_schedule="1F1B"),
+        checkpoint=CheckpointManager.Config(
+            interval=10,
+            last_save_model_only=False,
+        ),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="selective",
+        ),
+    )
+
+
 def transformers_modeling_backend_debugmodel_moe() -> TransformersBackendConfig:
     return TransformersBackendConfig(
         loss=CrossEntropyLoss.Config(),
