@@ -143,12 +143,22 @@ class DaytonaBridge:
         host_adapter_url: str,
         *,
         port: int = DEFAULT_PORT,
-        poll_interval: float = 0.05,
+        poll_interval: float | None = None,
     ):
+        import os
+
         self._sb = sb  # DaytonaSandbox wrapper (has .daytona -> AsyncSandbox)
         self._fs = sb.daytona.fs
         self.host_adapter_url = host_adapter_url.rstrip("/")
         self.port = port
+        # The host busy-polls each sandbox's req dir over the Daytona fs API; at a
+        # large rollout fanout (e.g. 8 prompts x 8 samples = 64 live bridges) a tight
+        # interval blows past the account's fs request-rate cap (Tier 3 ~833 req/s):
+        # 64 / 0.05s = 1280 list_files/s. 0.2s -> 320/s leaves headroom for the
+        # per-turn download/upload calls. Adds at most poll_interval to per-turn
+        # latency, negligible against multi-second generation. Tune via env.
+        if poll_interval is None:
+            poll_interval = float(os.environ.get("SWE_BRIDGE_POLL_INTERVAL", "0.2"))
         self.poll_interval = poll_interval
         self._task: asyncio.Task | None = None
         self._session: aiohttp.ClientSession | None = None
