@@ -139,6 +139,17 @@ jobs:
           --import-result="${MOE_LOSS_FILE}" --assert-equal --steps=100
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
 
+        echo "Checking Llama3 FlexAttention FSDP+TP+CP SPMD loss parity against full_dtensor"
+        export spmd_dense_options="--activation_checkpoint.mode=none --parallelism.tensor_parallel_degree=2 --parallelism.context_parallel_degree=2"
+        python3 scripts/loss_compare.py . . \
+          --baseline-config=llama3_debugmodel \
+          --test-config=llama3_debugmodel \
+          --baseline-options="${spmd_dense_options} --parallelism.spmd_backend=full_dtensor" \
+          --test-options="${spmd_dense_options} --parallelism.spmd_backend=spmd_types --debug.spmd_typechecking" \
+          --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/spmd_loss_comparison" \
+          --no-seed-checkpoint --assert-equal --steps=10
+        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
+
         python -m tests.integration_tests.run_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
 
         # Cleanup the checkpoints so that we don't waste network bandwidth and time.
