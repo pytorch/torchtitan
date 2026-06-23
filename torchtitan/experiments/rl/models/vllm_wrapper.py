@@ -210,6 +210,21 @@ class VLLMModelWrapper(Module):
         # TP-sharded.
         self._inject_attention_sinks()
 
+        # Optionally route the row-parallel wo/w2 TP all-reduce through vLLM's
+        # custom all-reduce instead of DTensor's NCCL ring redistribute. Only
+        # meaningful with TP; bound per-instance so shared classes are untouched.
+        if parallelism.allreduce_backend == "vllm" and self.parallel_dims.tp_enabled:
+            from torchtitan.experiments.rl.models.vllm_allreduce import (
+                apply_vllm_allreduce,
+            )
+
+            apply_vllm_allreduce(self.model)
+        elif parallelism.allreduce_backend not in ("nccl", "vllm"):
+            raise ValueError(
+                f"Unknown allreduce_backend {parallelism.allreduce_backend!r}; "
+                "expected 'nccl' or 'vllm'."
+            )
+
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:
         """Give each gpt-oss attention's vLLM backend its sink-rescale hook."""
