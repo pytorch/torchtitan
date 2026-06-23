@@ -44,12 +44,42 @@ def _with_fqn(label: str, fqn: str | None) -> str:
     return label
 
 
+def _inside_selective_checkpoint_dispatch() -> bool:
+    try:
+        from torch.utils._python_dispatch import _get_current_dispatch_mode_stack
+    except ImportError:
+        return False
+
+    for mode in _get_current_dispatch_mode_stack():
+        mode_type = type(mode)
+        if (
+            mode_type.__module__ == "torch.utils.checkpoint"
+            and mode_type.__name__
+            in {"_CachingTorchDispatchMode", "_CachedTorchDispatchMode"}
+        ):
+            return True
+    return False
+
+
+def _disable_selective_checkpoint_dispatch() -> AbstractContextManager[Any]:
+    if not _inside_selective_checkpoint_dispatch():
+        return nullcontext()
+
+    from torch.utils._python_dispatch import _disable_current_modes
+
+    return _disable_current_modes()
+
+
 def _record_function_if_eager(
     label: str,
     fqn: str | None,
 ) -> AbstractContextManager[Any]:
     """Return a profiler range in eager and a no-op context during compile."""
-    if torch.compiler.is_compiling() or _SUPPRESS_EAGER_PROFILING.get():
+    if (
+        torch.compiler.is_compiling()
+        or _SUPPRESS_EAGER_PROFILING.get()
+        or _inside_selective_checkpoint_dispatch()
+    ):
         return nullcontext()
     return torch.profiler.record_function(_with_fqn(label, fqn))
 
