@@ -9,7 +9,7 @@ from __future__ import annotations
 import fnmatch
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 
 import torch
 import torch.nn as nn
@@ -17,7 +17,6 @@ from torch._prims_common import make_contiguous_strides_for
 
 from .sharded_param import set_sharding_info
 from .utils import _get_single_placement, _set_param_on_module
-from .reduce_policy import GradientReduceOp, validate_gradient_reduce_op
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -32,6 +31,31 @@ PlacementFn = Callable[
     [list[tuple[str, nn.Parameter]], "DeviceMesh"],
     dict[str, tuple["Placement", ...]],
 ]
+
+GradientReduceOp = Literal["avg", "sum"]
+
+
+def validate_gradient_reduce_op(op: str) -> GradientReduceOp:
+    if op not in ("avg", "sum"):
+        raise ValueError(
+            "FlexShard gradient_reduce_op must be either 'avg' or 'sum', "
+            f"but got {op!r}."
+        )
+    return cast(GradientReduceOp, op)
+
+
+def gradient_reduce_op_from_infos(infos: list[ParamInfo]) -> GradientReduceOp:
+    if not infos:
+        raise AssertionError("Expected at least one ParamInfo.")
+    op = infos[0].gradient_reduce_op
+    for info in infos[1:]:
+        if info.gradient_reduce_op != op:
+            raise ValueError(
+                "FlexShard requires one gradient_reduce_op per communication "
+                f"bucket, but {infos[0].fqn!r} uses {op!r} and {info.fqn!r} "
+                f"uses {info.gradient_reduce_op!r}."
+            )
+    return validate_gradient_reduce_op(op)
 
 
 @dataclass(frozen=True)

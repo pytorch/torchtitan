@@ -17,9 +17,10 @@ from .bucket_storage import (
     _assign_params_to_buckets,
     BucketParamFQNsByIndex,
     BucketSpec,
+    GradientReduceOp,
     ShardedBucketStorage,
+    validate_gradient_reduce_op,
 )
-from .reduce_policy import GradientReduceOp, validate_gradient_reduce_op
 from .reshard_after_forward import _apply_reshard_after_forward
 from .sharded_param import is_flex_shard_param
 from .unsharded_param_getters import _install_unsharded_param_getters
