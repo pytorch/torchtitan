@@ -489,7 +489,18 @@ async def _handle_messages(request: web.Request) -> web.StreamResponse:
             if remaining < sampling.max_tokens:
                 sampling = dataclasses.replace(sampling, max_tokens=remaining)
 
-        request_id = f"{session.routing_session_id}/turn={len(session.turns)}"
+        # Unique per generate call (not just per turn): a slow one-shot response can
+        # make the agent's HTTP client time out and re-issue the SAME turn while the
+        # first generation is still in flight; with handler_cancellation the first
+        # handler is cancelled (lock released) before it appends, so the retry would
+        # resubmit an identical request_id and the generator rejects it as "already
+        # in flight" -> 500 -> the agent gives up (captured=0). A nonce makes every
+        # submission distinct; the cancelled handler never appends, so no double
+        # capture. routing_session_id (sticky generator routing) stays stable.
+        request_id = (
+            f"{session.routing_session_id}/turn={len(session.turns)}"
+            f"/{secrets.token_hex(4)}"
+        )
         completion = await session.generate_fn(
             prompt_token_ids=prompt_ids,
             request_id=request_id,

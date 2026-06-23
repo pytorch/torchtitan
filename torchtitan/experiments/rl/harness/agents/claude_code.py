@@ -327,6 +327,14 @@ async def _spawn_claude_code(
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
         "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+        # The adapter relays the model reply in ONE shot only after the full
+        # generation (file-relay bridge cannot stream incrementally). A long
+        # generation (big model + up to max_tokens) can exceed the client's
+        # default request timeout, making it retry mid-generation -- wasteful and,
+        # under high fanout, a source of duplicate in-flight requests. Wait long
+        # enough to receive the one-shot reply on the first attempt. Override via
+        # SWE_API_TIMEOUT_MS.
+        "API_TIMEOUT_MS": os.environ.get("SWE_API_TIMEOUT_MS", "900000"),
     }
     env_keys = ",".join(env.keys())
     await sb.exec(
