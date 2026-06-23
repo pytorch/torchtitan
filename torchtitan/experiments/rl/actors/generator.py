@@ -15,10 +15,11 @@ import os
 from dataclasses import dataclass, field
 from typing import Literal
 
+import cloudpickle
 import torch
 import torch.distributed as dist
 import torchstore as ts
-from monarch.actor import Actor, current_rank, endpoint
+from monarch.actor import Actor, Channel, current_rank, endpoint, Port, PortReceiver
 from monarch.rdma import is_rdma_available
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
@@ -472,6 +473,20 @@ class VLLMGenerator(Actor, Configurable):
         ranks_per_dp = config.parallelism.tensor_parallel_degree
         # Which DP replica this rank belongs to (== vLLM's data_parallel_rank).
         self._dp_rank = self._rank // ranks_per_dp
+        # Whether this rank is its replica's TP-leader (the lowest rank in the replica).
+        self._is_dp_master = self._rank % ranks_per_dp == 0
+
+        # Used by DP-master to temporarily store the metrics prefix for a request
+        # it processes. The DP-master builds completions for its own replica's
+        # requests, so it needs to know the caller's metrics prefix.
+        self._request_metrics_prefix: dict[str, str] = {}
+
+        # --- Result fan-in ---
+        # When DP> 1, used by DP masters to fan in their results to rank 0.
+        # None if DP=1 (no fan-in needed).
+        self._result_port: Port | None = None
+        self._result_rx: PortReceiver | None = None
+        self._drain_task: asyncio.Task | None = None
 
         # Confirm the layout calculated above matches vLLM's
         vllm_parallel_config = self._engine.vllm_config.parallel_config
@@ -597,6 +612,7 @@ class VLLMGenerator(Actor, Configurable):
                     request_id=request_id,
                     prompt_token_ids=prompt_token_ids,
                     sampling=sampling,
+                    metrics_prefix=metrics_prefix,
                 )
             )
             # Wakes the engine loop only if it is idle in `_decide_next_action`.
@@ -628,6 +644,8 @@ class VLLMGenerator(Actor, Configurable):
             check `_decide_next_action` --> "CLOSE"        --> stop
         """
         try:
+            # One-time setup when DP>1: set up the result-fan-in port before the first decision.
+            self._setup_result_port()
             while True:
                 # Rank 0 decides next decision; followers pass None and learn from the broadcast.
                 decision = await self._decide_next_action() if self._rank == 0 else None
@@ -675,6 +693,12 @@ class VLLMGenerator(Actor, Configurable):
                         for request, engine_input in zip(
                             local_requests, engine_inputs, strict=True
                         ):
+                            # Only the DP-master builds completions, so only it needs
+                            # the per-request metrics prefix (popped in _build_completions).
+                            if self._is_dp_master:
+                                self._request_metrics_prefix[
+                                    request.request_id
+                                ] = request.metrics_prefix
                             self._engine.add_request(
                                 request_id=request.request_id,
                                 prompt=engine_input,
@@ -709,8 +733,11 @@ class VLLMGenerator(Actor, Configurable):
                 lambda: self._close_request is not None
                 or self._model_state_dict_pull_request is not None
                 or self._queued_generation_requests
-                # rank-0-only decision: use the local (no DP all-reduce) check;
-                or self._engine.output_processor.has_unfinished_requests()
+                # Used to determine whether there are any in-process requests in
+                # this generator across all ranks. A future stays registered
+                # until its completion comes back, so this keeps rank 0 issuing
+                # STEP while any peer DP rank is still running.
+                or self._generation_futures
             )
 
             if self._close_request is not None:
@@ -730,39 +757,64 @@ class VLLMGenerator(Actor, Configurable):
                 [],
             )
             # TODO: route across DP ranks via a routing strategy. For now all
-            # requests go to DP rank 0.
+            # requests go to the highest DP rank, which exercises the result
+            # fan-in if DP>1: its master sends completions back to rank 0.
             requests_per_dp_rank: list[list[GenerationRequest]] = [
                 [] for _ in range(self._dp_degree)
             ]
-            requests_per_dp_rank[0] = queued
+            requests_per_dp_rank[-1] = queued
             return LoopDecision(
                 action=LoopAction.STEP,
                 requests_per_dp_rank=requests_per_dp_rank,
             )
 
-    def _dispatch_finished_requests(self, request_outputs: list[RequestOutput]) -> None:
-        """RANK 0: build completions for finished requests and resolve their futures.
-
-        Today rank 0 holds every request's output and every future, so it builds
-        and resolves locally. The split into ``_build_completions`` (turn engine
-        outputs into ``Completion``s) and ``_resolve_completions`` (resolve the
-        rank-0 futures) is the seam where DP result fan-in will later route a peer
-        group's completions back to rank 0.
+    def _setup_result_port(self) -> None:
+        """When DP>1, before the engine loop runs, distribute the result-fan-in
+        port once, and start the background drain task to receive results from
+        peer DP masters.
         """
-        if self._rank != 0:
-            return  # other ranks hold no futures
+        if self._dp_degree == 1:
+            return
+
+        if self._rank == 0:
+            self._result_port, self._result_rx = Channel.open()
+        # Monarch Port objects need cloudpickle, so we cloudpickle it into bytes
+        # first. Otherwise, broadcast_object_list will attempt to pickle the
+        # port object with stdlib pickle and result in error.
+        container = [cloudpickle.dumps(self._result_port) if self._rank == 0 else None]
+        dist.broadcast_object_list(
+            container, src=0, group=self._broadcast_group, device=torch.device("cpu")
+        )
+        assert container[0] is not None
+        self._result_port = cloudpickle.loads(container[0])
+        if self._rank == 0:
+            self._drain_task = asyncio.create_task(self._drain_results())
+
+    def _dispatch_finished_requests(self, request_outputs: list[RequestOutput]) -> None:
+        """Per DP-master, after each ``engine.step()``: get finished completions to rank 0.
+
+        Rank 0 (DP rank 0's master) resolves its own DP rank's completions directly; every
+        other DP rank's master pushes them over the port to rank 0's drain task. Non-master
+        ranks hold no finished outputs and do nothing.
+        """
+        if not self._is_dp_master:
+            return
 
         completions = self._build_completions(request_outputs)
-        self._resolve_completions(completions)
+        if self._rank == 0:
+            self._resolve_completions(completions)
+        elif completions:
+            self._result_port.send(completions)
 
     def _build_completions(
         self, request_outputs: list[RequestOutput]
     ) -> list[tuple[str, Completion]]:
         """Turn finished ``RequestOutput``s into ``(request_id, Completion)`` pairs.
 
-        Builds the per-generation timing metrics; the
-        ``inflight_requests_at_completion`` metric is attached later in
-        ``_resolve_completions`` because it depends on the rank-0 future count.
+        Runs on the DP-master that holds the outputs (which may not be rank 0).
+        Metrics from request_outputs are attached to the Completion. When the
+        completion reached rank 0, the ``inflight_requests_at_completion`` metric
+        will be attached there, since only rank 0 has the generation_future count.
         """
         completions: list[tuple[str, Completion]] = []
         for request_output in request_outputs:
@@ -782,9 +834,7 @@ class VLLMGenerator(Actor, Configurable):
             ]
 
             # prepare metrics
-            metrics_prefix = self._generation_futures[
-                request_output.request_id
-            ].metrics_prefix
+            metrics_prefix = self._request_metrics_prefix.pop(request_output.request_id)
             metrics = _prepare_generation_request_metrics(
                 request_output, prefix=metrics_prefix
             )
@@ -805,7 +855,9 @@ class VLLMGenerator(Actor, Configurable):
         return completions
 
     def _resolve_completions(self, completions: list[tuple[str, Completion]]) -> None:
-        """RANK 0: attach the in-flight metric and resolve each request's future."""
+        """RANK 0: attach the inflight_requests_at_completion metric and resolve
+        each request's future.
+        """
         for request_id, completion in completions:
             # in flight when this one finished (includes itself; counted before the pop)
             inflight_requests_at_completion = float(len(self._generation_futures))
@@ -821,6 +873,14 @@ class VLLMGenerator(Actor, Configurable):
                 )
 
             generation_future.future.set_result(completion)
+
+    async def _drain_results(self) -> None:
+        """Resolve completions pushed by peer masters. Use by RANK 0 background
+        task when DP>1.
+        """
+        while True:
+            completions = await self._result_rx.recv()
+            self._resolve_completions(completions)
 
     def _fail_outstanding_futures(self, exc: BaseException) -> None:
         """Fail every unresolved future after an exception or engine teardown."""
@@ -950,6 +1010,15 @@ class VLLMGenerator(Actor, Configurable):
                 logger.exception("engine loop raised during shutdown")
             self._engine_loop_task = None
 
+        # Stop the result-drain task (rank 0, DP>1).
+        if self._drain_task is not None:
+            self._drain_task.cancel()
+            try:
+                await self._drain_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._drain_task = None
+
         # The loop has stopped; fail any futures it left unresolved so awaiting callers get an
         # exception instead of hanging.
         self._fail_outstanding_futures(
@@ -978,6 +1047,7 @@ class GenerationRequest:
     request_id: str
     prompt_token_ids: list[int]  # [prompt_tokens]
     sampling: SamplingConfig
+    metrics_prefix: str
 
 
 @dataclass(kw_only=True, slots=True)

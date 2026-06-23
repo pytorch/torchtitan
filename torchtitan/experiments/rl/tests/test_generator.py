@@ -79,12 +79,17 @@ def _request_output(*, request_id="r0", outputs=None, num_generation_tokens=4):
 
 
 def _generator():
-    """A bare generator (no __init__ / engine build) with just the CB state set."""
+    """A bare generator (no __init__ / engine build) with just the CB state set.
+
+    DP=1: rank 0 is the single group's master, so it builds and resolves locally.
+    """
     generator = VLLMGenerator.__new__(VLLMGenerator)
     generator._engine = _FakeEngine()
     generator._rank = 0
+    generator._is_dp_master = True
     generator.policy_version = 7
     generator._generation_futures = {}
+    generator._request_metrics_prefix = {}
     generator.config = SimpleNamespace(
         sampling=SamplingConfig(temperature=0.0, top_p=1.0, max_tokens=4),
         debug=SimpleNamespace(seed=None),
@@ -102,6 +107,8 @@ def test_dispatch_finished_requests_resolves_future_with_completion():
         generator._generation_futures = {
             "r0": GenerationFuture(future=future, metrics_prefix="generator")
         }
+        # The admitting master records the request's metrics prefix; _build_completions pops it.
+        generator._request_metrics_prefix = {"r0": "generator"}
 
         generator._dispatch_finished_requests(
             [
@@ -130,10 +137,11 @@ def test_dispatch_finished_requests_resolves_future_with_completion():
     asyncio.run(main())
 
 
-def test_dispatch_finished_requests_noop_on_followers():
-    # Followers hold no futures, so dispatch is a no-op (it returns before building).
+def test_dispatch_finished_requests_noop_on_non_master():
+    # Non-DP-master ranks hold no finished outputs, so dispatch returns before building.
     generator = _generator()
     generator._rank = 1
+    generator._is_dp_master = False
     generator._dispatch_finished_requests([_request_output(request_id="r0")])
     assert generator._generation_futures == {}
 

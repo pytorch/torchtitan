@@ -24,29 +24,24 @@ from torchtitan.experiments.rl.actors.generator import (
 )
 
 
-class _FakeEngine:
-    def __init__(self, *, unfinished: bool = False) -> None:
-        self._unfinished = unfinished
-
-    def has_unfinished_requests(self) -> bool:
-        return self._unfinished
-
-
 def _bare_generator(
     *,
     close_requested: bool = False,
     model_state_dict_pull_request: ModelStateDictPullRequest | None = None,
     pending: list[GenerationRequest] | None = None,
-    unfinished: bool = False,
+    inflight: bool = False,
     dp_size: int = 1,
 ) -> VLLMGenerator:
     # Bypass __init__ (which builds the vLLM engine); set only the loop's state.
+    # _decide_next_action keys on rank 0's own _generation_futures (no engine), so
+    # no fake engine is needed here.
     generator = object.__new__(VLLMGenerator)
     generator._engine_loop_condition = asyncio.Condition()
     generator._close_request = CloseRequest() if close_requested else None
     generator._model_state_dict_pull_request = model_state_dict_pull_request
     generator._queued_generation_requests = pending or []
-    generator._engine = _FakeEngine(unfinished=unfinished)
+    # A registered-but-unresolved future models in-flight work (possibly in a peer DP rank).
+    generator._generation_futures = {"inflight": object()} if inflight else {}
     generator._dp_degree = dp_size
     return generator
 
@@ -93,15 +88,16 @@ def test_step_drains_the_queue() -> None:
 
 
 def test_step_with_empty_queue_when_only_in_flight_work_remains() -> None:
-    # No queue, no pull, but the engine still has in-flight requests to step.
-    decision = asyncio.run(_bare_generator(unfinished=True)._decide_next_action())
+    # No queue, no pull, but a registered future means a request is still in flight
+    # (possibly in a peer DP rank), so rank 0 must keep issuing STEP.
+    decision = asyncio.run(_bare_generator(inflight=True)._decide_next_action())
     assert decision.action is LoopAction.STEP and decision.requests_per_dp_rank == [[]]
 
 
-def test_step_routes_all_requests_to_dp0_for_now() -> None:
-    # Hardcoded routing: every queued request lands on DP rank 0; other ranks empty.
+def test_step_routes_all_requests_to_highest_dp_for_now() -> None:
+    # Hardcoded routing: every queued request lands in the highest DP rank.
     requests = [_request("r0"), _request("r1")]
     generator = _bare_generator(pending=requests, dp_size=3)
     decision = asyncio.run(generator._decide_next_action())
     assert decision.action is LoopAction.STEP
-    assert decision.requests_per_dp_rank == [requests, [], []]
+    assert decision.requests_per_dp_rank == [[], [], requests]
