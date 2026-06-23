@@ -9,9 +9,12 @@ from typing import Literal
 
 import torch
 import torch.nn.functional as F
+import spmd_types as spmd
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+from torchtitan.distributed.spmd_types import spmd_mesh_size
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
@@ -76,8 +79,15 @@ class GroupedExperts(Module):
             w2_EDF = self.w2_EDF
             w3_EFD = self.w3_EFD
 
-        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
+        if (
+            get_spmd_backend() == "spmd_types"
+            and spmd.is_type_checking()
+            and spmd_mesh_size("ep") == 1
+        ):
+            for axis in ("dp", "cp"):  # if no EP, convert to V for grouped_mm
+                spmd.mutate_type(num_tokens_per_expert_E, axis, src=spmd.P, dst=spmd.V)
 
+        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         h_RF = F.silu(
             torch._grouped_mm(
                 x_RD.bfloat16(),
@@ -127,9 +137,10 @@ class GroupedExperts(Module):
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
-        routed_output_RD = self._experts_forward(
-            routed_input_RD, num_global_tokens_per_local_expert_e
-        )
+        with self.token_dispatcher.sparse_spmd_mesh():
+            routed_output_RD = self._experts_forward(
+                routed_input_RD, num_global_tokens_per_local_expert_e
+            )
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
@@ -151,6 +162,10 @@ class GroupedExperts(Module):
         self.token_dispatcher.wire_meshes(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
+        )
+        self.token_dispatcher.sparse_mesh = parallel_dims.get_optional_mesh(
+            ["dp_replicate", "efsdp", "ep"],
+            include_singleton_axes=True,
         )
 
 
