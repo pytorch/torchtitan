@@ -47,6 +47,7 @@ from torchtitan.distributed.context_parallel import prepare_context_parallel_inp
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.moe import MoE
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
@@ -155,6 +156,27 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     raise ValueError(
                         f"Training sequence length ({self.training.seq_len}) must be "
                         f"divisible by sequence parallel degree ({sp_degree})."
+                    )
+
+            if (
+                self.parallelism.spmd_backend == "spmd_types"
+                and self.parallelism.expert_parallel_degree > 1
+                and self.model_spec is not None
+                and any(self.model_spec.model.traverse(MoE.Config))
+            ):
+                cp_tp_degree = (
+                    self.parallelism.context_parallel_degree
+                    * self.parallelism.tensor_parallel_degree
+                )
+                if cp_tp_degree > 1 and self.training.seq_len % cp_tp_degree != 0:
+                    # TODO(pianpwk): Enable global shape tracking for uneven MoE seqlen split.
+                    raise ValueError(
+                        "spmd_types MoE with expert parallelism requires the "
+                        "CP-local sequence length to shard evenly over TP. "
+                        f"Training sequence length ({self.training.seq_len}) "
+                        f"must be divisible by CP * TP ({cp_tp_degree}); got "
+                        f"CP={self.parallelism.context_parallel_degree}, "
+                        f"TP={self.parallelism.tensor_parallel_degree}."
                     )
 
         def to_dict(self) -> dict[str, Any]:

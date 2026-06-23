@@ -9,9 +9,12 @@ from typing import Literal
 
 import torch
 import torch.nn.functional as F
+import spmd_types as spmd
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+from torchtitan.distributed.spmd_types import spmd_mesh_size
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
@@ -76,8 +79,15 @@ class GroupedExperts(Module):
             w2_EDF = self.w2_EDF
             w3_EFD = self.w3_EFD
 
-        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
+        if (
+            get_spmd_backend() == "spmd_types"
+            and spmd.is_type_checking()
+            and spmd_mesh_size("ep") == 1
+        ):
+            for axis in ("dp", "cp"):  # if no EP, convert to V for grouped_mm
+                spmd.mutate_type(num_tokens_per_expert_E, axis, src=spmd.P, dst=spmd.V)
 
+        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         h_RF = F.silu(
             torch._grouped_mm(
                 x_RD.bfloat16(),
@@ -127,9 +137,10 @@ class GroupedExperts(Module):
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
-        routed_output_RD = self._experts_forward(
-            routed_input_RD, num_global_tokens_per_local_expert_e
-        )
+        with self.token_dispatcher.sparse_spmd_mesh():
+            routed_output_RD = self._experts_forward(
+                routed_input_RD, num_global_tokens_per_local_expert_e
+            )
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
@@ -151,6 +162,10 @@ class GroupedExperts(Module):
         self.token_dispatcher.wire_meshes(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
+        )
+        self.token_dispatcher.sparse_mesh = parallel_dims.get_optional_mesh(
+            ["dp_replicate", "efsdp", "ep"],
+            include_singleton_axes=True,
         )
 
 
@@ -335,11 +350,13 @@ class MoE(Module):
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None
+        enable_sp_for_dense_activations: bool = True
 
     def __init__(self, config: Config):
         super().__init__()
 
         num_experts = config.num_experts
+        self.enable_sp_for_dense_activations = config.enable_sp_for_dense_activations
         self.experts = config.experts.build()
         self.router = config.router.build()
         self.shared_experts = (
@@ -401,21 +418,28 @@ class MoE(Module):
             L = L + seq_pad
         # ---------------------------------------------------------------------
 
-        # Virtual padding: pad each batch's (post real-pad) sequence length up to
-        # a multiple of ``sp_size`` so combine() can infer per-rank offsets from a
-        # uniform shard length.
-        seq_dim_pad_tokens = (-L) % sp_size
-        # Padding is logically appended to the sequence tail of each batch,
-        # not to a specific SP rank. This lets combine() infer each SP rank's
-        # start/end offsets from the uniform padded shard length; for example,
-        # if L < sp_size, only the first L ranks have real tokens. No padded
-        # token is materialized or routed.
         local_batch_size = (
             x_BLD._local_tensor.shape[0] if isinstance(x_BLD, DTensor) else B
         )
-        num_local_tokens_after_seq_dim_padding = (
-            local_batch_size * (L + seq_dim_pad_tokens) // sp_size
-        )
+        if get_spmd_backend() == "spmd_types":
+            seq_dim_pad_tokens = 0
+            sp_divisor = 1 if self.enable_sp_for_dense_activations else sp_size
+            if self.training and L % sp_divisor != 0:
+                raise ValueError(
+                    "spmd_types MoE requires the local sequence length to shard "
+                    f"evenly over TP: got L={L}, TP={sp_divisor}."
+                )
+            num_local_tokens_after_seq_dim_padding = local_batch_size * L // sp_divisor
+        else:
+            # Virtual padding: pad each batch's (post real-pad) sequence length
+            # up to a multiple of ``sp_size`` so combine() can infer per-rank
+            # offsets from a uniform shard length. The padding is logically
+            # appended to the sequence tail of each batch; no padded token is
+            # materialized or routed.
+            seq_dim_pad_tokens = (-L) % sp_size
+            num_local_tokens_after_seq_dim_padding = (
+                local_batch_size * (L + seq_dim_pad_tokens) // sp_size
+            )
 
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # scores_BLE shape (B, L, E)

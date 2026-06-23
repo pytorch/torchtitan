@@ -7,9 +7,11 @@
 import math
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 from torch import nn
 
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -101,22 +103,44 @@ class Attention(BaseAttention):
         else:
             q = self.wq_a(x)
             q = self.wq_b(self.q_norm(q))
-        q = q.view(bsz, seqlen, -1, self.qk_head_dim)
+
+        # TODO(pianpwk): same QKV:S(2) unflatten case handled by even sharding
+        with spmd.local():
+            q = q.view(bsz, seqlen, -1, self.qk_head_dim)
+
+        if get_spmd_backend() == "spmd_types":
+            spmd.assert_type(
+                q,
+                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},
+            )
         q_nope, q_pe = torch.split(
             q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
         )
 
         # Key-value projection
         kv = self.wkv_a(x)
-        kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv, k_pe = torch.split(
+            kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
 
         q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(2), positions)
         q = torch.cat([q_nope, q_pe], dim=-1)
 
         kv = self.wkv_b(self.kv_norm(kv))
-        kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
-        k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1)
+
+        with spmd.local():  # QKV even shard unflatten, but the expand is truly local SPMD
+            kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
+            k_nope, v = torch.split(
+                kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+            )
+            k = torch.cat([k_nope, k_pe.expand(-1, -1, k_nope.size(2), -1)], dim=-1)
+
+        if get_spmd_backend() == "spmd_types":
+            for t in [k, v]:
+                spmd.assert_type(
+                    t,
+                    {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},
+                )
 
         output = self.inner_attention(
             q, k, v, attention_masks=attention_masks, scale=self.softmax_scale
