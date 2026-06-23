@@ -31,6 +31,7 @@ from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.examples.search_r1.rollouter import SearchR1Rollouter
 from torchtitan.experiments.rl.losses import DAPOLoss
+from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
@@ -93,11 +94,9 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
                 tensor_parallel_degree=4,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
             ),
             # cudagraph on: decode-only graphs (FULL_DECODE_ONLY) are safe at this
             # config's large batch; plain full graphs corrupted here before. See #3668.
