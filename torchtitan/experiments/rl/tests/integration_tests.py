@@ -106,16 +106,25 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
         OverrideDefinitions(
-            # Two runs sharing the same dump_folder: the first trains 2 steps and
-            # writes a full checkpoint at step 2; the second resumes from it and
-            # trains through step 4. The second run errors if resume is broken
-            # (missing checkpoint, wrong step, generator/policy-version mismatch).
+            # Two runs sharing the same dump_folder, with different parallelism
+            # to exercise resharding on resume:
+            #   run 1: trainer DP=2 (TP=1) + 2 generators (TP=2); train 2 steps,
+            #          write a full checkpoint at step 2.
+            #   run 2: trainer TP=2 (DP=1) + 1 generator (TP=4); resume from the
+            #          step-2 checkpoint and train through step 4.
+            # This covers (1) trainer DCP checkpoint resharding (DP->TP),
+            # (2) trainer->generator TorchStore resharding, and (3) the
+            # multi-generator vs single-generator paths. The second run errors
+            # if resume is broken. lr_scheduler.total_steps is pinned so the LR
+            # is identical across save/load.
             [
                 [
                     "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen",
                     "--num_steps 2",
-                    "--trainer.parallelism.tensor_parallel_degree 2",
+                    "--num_generators 2",
+                    "--trainer.parallelism.data_parallel_shard_degree 2",
+                    "--trainer.parallelism.tensor_parallel_degree 1",
                     "--generator.parallelism.tensor_parallel_degree 2",
                     "--group_size 2",
                     "--batcher.batch.seq_len 1024",
@@ -125,13 +134,16 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--generator.debug.no_batch_invariant",
                     "--metrics.no-enable-wandb",
                     "--trainer.checkpoint.interval 2",
+                    "--trainer.lr_scheduler.total_steps 4",
                 ],
                 [
                     "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen",
                     "--num_steps 4",
+                    "--num_generators 1",
+                    "--trainer.parallelism.data_parallel_shard_degree 1",
                     "--trainer.parallelism.tensor_parallel_degree 2",
-                    "--generator.parallelism.tensor_parallel_degree 2",
+                    "--generator.parallelism.tensor_parallel_degree 4",
                     "--group_size 2",
                     "--batcher.batch.seq_len 1024",
                     "--renderer.enable-thinking False",
@@ -140,11 +152,12 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--generator.debug.no_batch_invariant",
                     "--metrics.no-enable-wandb",
                     "--trainer.checkpoint.interval 2",
+                    "--trainer.lr_scheduler.total_steps 4",
                 ],
             ],
-            "RL GRPO checkpoint save + resume",
+            "RL GRPO checkpoint save + resume (resharding)",
             "rl_grpo_checkpoint_resume",
-            ngpu=4,
+            ngpu=8,
         ),
     ]
 

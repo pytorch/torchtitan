@@ -391,7 +391,7 @@ class RLTrainer(Configurable):
             await self.trainer.get_policy_version.call()
         )
         if self.start_step > 0:
-            logger.info("Resuming RL training from step %d", self.start_step)
+            logger.info(f"Resuming RL training from step {self.start_step}")
 
         # Initial weight sync from trainer to generator
         with sl.log_trace_span("trainer_push_model_state_dict"):
@@ -653,9 +653,8 @@ class RLTrainer(Configurable):
         num_groups = self.config.num_groups_per_rollout_batch
         start_step = self.start_step  # 0 fresh, >0 when resuming a checkpoint
         logger.info(
-            "Pre-training validation; then RL training steps %d..%d",
-            start_step + 1,
-            num_steps,
+            f"Pre-training validation; then RL training steps "
+            f"{start_step + 1}..{num_steps}"
         )
 
         # Validation before training to compare before/after. On resume the
