@@ -16,6 +16,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple
 
+import spmd_types as spmd
+
 import torch
 import torch.nn.functional as F
 from torch.nn.attention import (
@@ -36,7 +38,7 @@ from torch.nn.attention.flex_attention import (
 from torch.nn.attention.varlen import AuxRequest as VarlenAuxRequest, varlen_attn
 
 from torchtitan.distributed.compile import maybe_regional_inductor
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
+from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
 
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -163,29 +165,38 @@ class VarlenAttention(Module):
         if out_transform is not None:
             varlen_kwargs["return_aux"] = VarlenAuxRequest(lse=True)
 
-        result = varlen_attn(
-            q_TNH,
-            k_TNH,
-            v_TNH,
-            cu_seq_q,
-            cu_seq_k,
-            max_q,
-            max_k,
-            scale=scale,
-            window_size=self.window_size,
-            **varlen_kwargs,
-        )
+        # FA3 varlen attention takes rank-local metadata tensors.
+        # TODO(pianpwk): Move this op contract into pytorch/spmd_types.
+        with spmd.no_typecheck():
+            result = varlen_attn(
+                q_TNH,
+                k_TNH,
+                v_TNH,
+                cu_seq_q,
+                cu_seq_k,
+                max_q,
+                max_k,
+                scale=scale,
+                window_size=self.window_size,
+                **varlen_kwargs,
+            )
 
         # varlen_attn returns the packed output (T, N, H), plus the LSE when an
         # out_transform epilogue was requested.
         if out_transform is None:
             assert isinstance(result, torch.Tensor)
+            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+                # exclude CP from typecheck as varlen + CP is not yet supported.
+                spmd.assert_type(result, spmd.V, spmd.PartitionSpec("dp", "tp", None))
             out_BLNH = result.view(B, L, -1, H).to(q_BLNH.dtype)
             return out_BLNH
 
         out_TNH, lse_NT = result
-        out_BLNH = out_TNH.view(B, L, -1, H).to(q_BLNH.dtype)
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            spmd.assert_type(out_TNH, spmd.V, spmd.PartitionSpec("dp", "tp", None))
+            spmd.assert_type(lse_NT, spmd.V, spmd.PartitionSpec("tp", "dp"))
 
+        out_BLNH = out_TNH.view(B, L, -1, H).to(q_BLNH.dtype)
         # FA varlen returns the LSE as (N, T); reorder to (B, L, N) so
         # out_transform can broadcast per (token, head).
         lse_BLN = lse_NT.transpose(0, 1).reshape(B, L, -1)
@@ -235,6 +246,41 @@ class FlexAttention(Module):
         super().__init__()
         self.kernel_options = config.kernel_options
 
+    @staticmethod
+    def compiled_flex_attn(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        block_mask: BlockMask | None,
+        scale: float | None,
+        enable_gqa: bool,
+        return_aux: AuxRequest,
+        kernel_options: dict,
+    ):
+        """Run compiled FlexAttention outside SPMD typechecking.
+
+        Compiled regions are not currently compatible with SPMD typechecking,
+        so propagate types at the boundary instead of typechecking into Flex.
+        TODO(pianpwk): Move flex-typechecking into pytorch/spmd_types.
+        """
+        with spmd.no_typecheck():
+            out, aux = FlexAttention._compiled_flex_attn(
+                q,
+                k,
+                v,
+                block_mask=block_mask,
+                scale=scale,
+                enable_gqa=enable_gqa,
+                return_aux=return_aux,
+                kernel_options=kernel_options,
+            )
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            spmd.assert_type(out, spmd.V, spmd.PartitionSpec("dp", "tp", "cp", None))
+            if return_aux.lse:
+                spmd.assert_type(aux.lse, spmd.V, spmd.PartitionSpec("dp", "tp", "cp"))
+        return out, aux
+
     def forward(
         self,
         q_BLNH: torch.Tensor,
@@ -270,7 +316,7 @@ class FlexAttention(Module):
         # an inductor sub-compile (see distributed/compile.py). A null context on
         # the default inductor / eager paths, so no dead metadata is emitted.
         with maybe_regional_inductor(FlexAttention.inductor_configs):
-            out_BNLH, aux = FlexAttention._compiled_flex_attn(
+            out_BNLH, aux = FlexAttention.compiled_flex_attn(
                 q_BNLH,
                 k_BNLH,
                 v_BNLH,
@@ -643,9 +689,23 @@ class QKVLinear(BaseQKVLinear):
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
         # Use -1 instead of n_heads (or n_kv_heads) to infer the
         # actual local heads from sizes as TP may have sharded them.
-        xq = xq.view(bs, seqlen, -1, self.head_dim)
-        xk = xk.view(bs, seqlen, -1, self.head_dim)
-        xv = xv.view(bs, seqlen, -1, self.head_dim)
+
+        def local_qkv_head_split(x):
+            # Drop into local region, we can't propagate S(2) -> qkv head unflatten.
+            # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
+            with spmd.local():
+                x_ = x.view(bs, seqlen, -1, self.head_dim)
+                if get_spmd_backend() == "spmd_types":
+                    spmd.assert_type(
+                        x_, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None)
+                    )
+            return x_
+
+        xq, xk, xv = (
+            local_qkv_head_split(xq),
+            local_qkv_head_split(xk),
+            local_qkv_head_split(xv),
+        )
         return xq, xk, xv
 
 
