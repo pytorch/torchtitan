@@ -16,7 +16,7 @@ from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import has_cuda_capability
+from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
 
 from .utils import module_filter_fn, swap_token_dispatcher
 
@@ -82,11 +82,16 @@ class Float8LinearConverter(QuantizationConverter):
         cfg = self.config
         filter_fqns = cfg.filter_fqns
 
-        if has_cuda_capability(8, 9) or (cfg.emulate and not cfg.model_compile_enabled):
+        if (
+            has_cuda_capability(8, 9)
+            or has_rocm_capability(9, 4)
+            or (cfg.emulate and not cfg.model_compile_enabled)
+        ):
             pass
         else:
             raise ValueError(
-                "Failed to swap to Float8Linear because float8 is only supported on SM89 or later. "
+                "Failed to swap to Float8Linear because float8 is only supported on "
+                "NVIDIA SM89 or later, or AMD gfx942 (MI300) or later. "
                 "To enable testing on older hardware, set `float8.emulate` to True in eager mode.",
             )
 
@@ -219,8 +224,11 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
                 "torchao is not installed. Please install it to use float8 MoE training."
             )
 
-        if not has_cuda_capability(8, 9):
-            raise ValueError("Float8 MoE training only supported on SM89 or later.")
+        if not (has_cuda_capability(8, 9) or has_rocm_capability(9, 4)):
+            raise ValueError(
+                "Float8 MoE training only supported on NVIDIA SM89 or later, "
+                "or AMD gfx942 (MI300) or later."
+            )
 
         if not self.config.model_compile_enabled:
             logger.warning(
