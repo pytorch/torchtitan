@@ -6,20 +6,17 @@
 
 from torch.fx.traceback import annotate_fn
 
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    CompileConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
+    apply_cp_to_attention,
     apply_simple_fsdp,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.qwen3.model import GraphTrainerQwen3Model
-from torchtitan.models.llama4.parallelize import apply_moe_ep_tp
 
 
 def annotate_qwen3(model: GraphTrainerQwen3Model) -> None:
@@ -54,7 +51,7 @@ def parallelize_qwen3(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
+    ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
     """
@@ -71,21 +68,16 @@ def parallelize_qwen3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
         """
 
+    if parallel_dims.cp_enabled:
+        apply_cp_to_attention(model, parallel_dims)
+
     annotate_qwen3(model)
 
-    if parallel_dims.tp_enabled:
-        tp_mesh = parallel_dims.get_mesh("tp")
-        # Config-based sharding: ShardingConfig is populated on the model
-        # config in Trainer.Config.__post_init__; Module.parallelize applies it.
-        model.parallelize(tp_mesh)
-
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        apply_moe_ep_tp(
-            model,
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            enable_sp=parallelism.enable_sequence_parallel,
-        )
+        model.parallelize(parallel_dims)
+
+    if parallel_dims.tp_enabled:
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
     # real backend (see ParallelDims._mesh_exist), even at degree 1, so that

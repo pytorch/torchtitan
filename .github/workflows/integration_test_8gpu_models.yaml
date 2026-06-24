@@ -31,6 +31,8 @@ permissions:
 jobs:
   # Step 1: Dynamically compute the matrix based on conditions
   set-matrix:
+    # Skip scheduled runs on forks, where they would only fail and email the fork owner
+    if: github.repository_owner == 'pytorch' || github.event_name != 'schedule'
     uses: ./.github/workflows/set-matrix.yaml
 
   # Step 2: Use the dynamic matrix in the build-test job
@@ -74,7 +76,6 @@ jobs:
         fi
 
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
-        python -m pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"

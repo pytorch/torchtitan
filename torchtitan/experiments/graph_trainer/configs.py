@@ -8,21 +8,23 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
 from typing import Literal
 
-from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
-from torchtitan.config import ActivationCheckpointConfig
+from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.config.configs import CompileConfig
+from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.experiments.graph_trainer.chunked_loss import (
+    ChunkedCELossWithParamGrads,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerCompileConfig(CompileConfig):
-    mode: Literal["jit", "aot", "aot_fx_trace"] | None = "aot_fx_trace"
+    mode: Literal["jit", "aot_fx_trace"] | None = "aot_fx_trace"
     """
     Compilation mode. Options:
         aot_fx_trace: non-strict tracing of fwd+loss+bwd via make_fx
         jit: standard torch.compile() with custom backend (deprecated)
-        aot: explicit joint graph export + custom graph passes (deprecated)
     """
 
     backend: str = "aot_eager"
@@ -31,28 +33,35 @@ class GraphTrainerCompileConfig(CompileConfig):
     """
     Compiler pass names to apply.
     In JIT mode: applied as graph passes (e.g., auto_bucketing, transformer_block_bucketing)
-    In AOT mode: applied to the partitioned forward/backward graphs
     """
-
-    joint_passes: list[str] = field(default_factory=list)
-    """Joint graph pass names to apply on the joint forward-backward
-    graph before partitioning. Only used in AOT mode."""
 
     enable_passes: bool = True
     """When False, skip all graph passes (both default and user-configured)."""
 
+    disable_passes: list[str] = field(default_factory=list)
+    """Pass names to selectively disable for debugging and ablation
+    studies. A pass is skipped if its name exactly matches any entry.
+    Example: --compile.disable_passes custom_codegen_pass,cudagraph_pass"""
+
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
-    memory_policy: Literal["default", "eager", "cpu_offload_all"] = "default"
+    memory_policy: Literal["default", "full", "eager", "sac_and_offload"] = "default"
     """
     Memory optimization policy for activation management (SAC, offload).
-        default: save all compute-intensive ops and FSDP all_gathers.
-        eager: alternate mm ops between save/recompute, matching the eager
-            AC policy in torchtitan.distributed.activation_checkpoint.
-        cpu_offload_all: offload all eligible activations to CPU.
-            Work in progress — for development and testing only.
+        default: SAC — save all compute-intensive ops and FSDP all_gathers.
+        full: full recompute — only layer outputs are saved. Mirrors
+            eager's full AC (checkpoint_wrapper with no context_fn).
+        eager: SAC alternating mm ops between save/recompute, matching the
+            eager AC policy in torchtitan.distributed.activation_checkpoint.
+        sac_and_offload: SAC + CPU offload — apply default SAC first,
+            then offload surviving MUST_SAVE activations to CPU within
+            the cpu_offload_budget_gb budget.
     """
+
+    pass_pipeline: str = "default"
+    """Pass pipeline selection. Controls which graph pass pipeline, post-init
+    hooks, and pre-train-step hooks are activated."""
 
     inductor_compilation: Literal["regional", "full"] = "regional"
     """
@@ -68,8 +77,23 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Enable passes that improve performance but may change numerics
     compared to the uncompiled path (e.g. RMSNorm Inductor fusion)."""
 
-    enable_cudagraph: bool = True
-    """When False, skip the cudagraph pass even if the graph is compatible."""
+    cpu_offload_prefetch_n_layers: int = 1
+    """Prefetch reloads this many layers ahead in the backward graph
+    to overlap H2D transfers with compute."""
+
+    cpu_offload_defer_n_layers: int = 1
+    """Defer forward wait_tensor ops this many layers past the last consumer
+    to overlap D2H transfers with compute."""
+
+    cpu_offload_budget_gb: float = 100.0
+    """Maximum CPU memory budget (in GB per rank) for offloaded activations.
+    Tensors are selected largest-first until the budget is exhausted."""
+
+    enable_fsdp_ag_rs_overlap: bool = False
+    """When True, run ``overlap_fsdp_ag_rs_pass``. The pass moves backward
+    FSDP all-gathers onto a separate CUDA stream from reduce-scatters so the
+    two collectives can overlap. It is a no-op when the graph contains no
+    FSDP all-gathers."""
 
     precompile_artifact_dir: str = ""
     """
@@ -78,6 +102,20 @@ class GraphTrainerCompileConfig(CompileConfig):
     here to skip compilation. For multi-node setups use a shared filesystem
     path.
     """
+
+    enable_autoparallel: bool = False
+    """Use AutoParallelGraph (ILP solver-based SPMD sharding) instead of
+    manual TP/FSDP/EP. Forces the AOT compilation path internally."""
+
+
+def validate_autoparallel_config(
+    compile_config: GraphTrainerCompileConfig,
+) -> None:
+    if compile_config.enable_autoparallel and compile_config.mode != "aot_fx_trace":
+        raise ValueError(
+            "AutoParallel graph_trainer integration only supports "
+            "--compile.mode aot_fx_trace"
+        )
 
 
 def to_graph_trainer_config(
@@ -113,14 +151,19 @@ def to_graph_trainer_config(
     d.pop("compile")
 
     # graph_trainer uses graph-based SAC instead of eager AC. Override any
-    # non-"none" AC mode to "selective" so callers don't need per-config fixups.
+    # enabled AC policy with the default selective one so callers don't need
+    # per-config fixups.
     ac = d.get("activation_checkpoint")
-    if ac is not None and ac.mode != "none":
-        d["activation_checkpoint"] = ActivationCheckpointConfig(mode="selective")
+    if ac is not None:
+        d["activation_checkpoint"] = SelectiveAC.Config()
 
-    # TODO: graph_trainer doesn't yet support ChunkedCELoss
-    if isinstance(d.get("loss"), ChunkedCELoss.Config):
-        d["loss"] = CrossEntropyLoss.Config()
+    # graph_trainer's tracer requires explicit autograd outputs for lm_head
+    # params instead of relying on .grad side effects from chunk_loss.backward().
+    loss_cfg = d.get("loss")
+    if isinstance(loss_cfg, ChunkedCELoss.Config):
+        d["loss"] = ChunkedCELossWithParamGrads.Config(
+            **{f.name: getattr(loss_cfg, f.name) for f in fields(loss_cfg)}
+        )
 
     # Merge CUDA graph kernel annotations into profiler traces when profiling
     # is active.  No-op otherwise (and no-op when requirements aren't met).

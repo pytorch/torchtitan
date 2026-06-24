@@ -4,11 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import sys
 import unittest
+from unittest import mock
 
 import pytest
 from torchtitan.config import ConfigManager
-from torchtitan.trainer import Trainer
 
 
 class TestConfigManager(unittest.TestCase):
@@ -30,6 +31,14 @@ class TestConfigManager(unittest.TestCase):
         )
         assert config.model_spec.name == "llama3"
         assert config.model_spec.flavor == "debugmodel"
+
+    def test_parse_args_uses_current_sys_argv(self):
+        """parse_args() without args reads sys.argv at call time."""
+        config_manager = ConfigManager()
+        argv = ["train.py", "--module", "nonexistent", "--config", "foo"]
+        with mock.patch.object(sys, "argv", argv):
+            with pytest.raises(ImportError, match="Cannot import module 'nonexistent'"):
+                config_manager.parse_args()
 
     def test_model_without_config_errors(self):
         """--module alone raises ValueError."""
@@ -60,6 +69,18 @@ class TestConfigManager(unittest.TestCase):
         config_manager = ConfigManager()
         with pytest.raises(ValueError, match="Available config functions"):
             config_manager.parse_args(["--module", "llama3", "--config", "nonexistent"])
+
+    def test_rl_examples_registered_as_shorthands(self):
+        """RL examples are valid --module shorthands (resolved under rl/examples).
+
+        End-to-end resolution + build is covered by the RL integration tests
+        (they run ``--module alphabet_sort``); kept out of here since importing an
+        example's config_registry pulls in vLLM, which isn't available on CPU.
+        """
+        from torchtitan.experiments import _supported_experiments
+
+        assert "alphabet_sort" in _supported_experiments
+        assert "search_r1" in _supported_experiments
 
     def test_cli_overrides(self):
         """CLI args override config defaults."""
@@ -136,6 +157,8 @@ class TestConfigManager(unittest.TestCase):
     def test_extend_trainer_config_directly(self):
         """Test that _merge_configs works to extend config types."""
         from dataclasses import dataclass
+
+        from torchtitan.trainer import Trainer
 
         @dataclass
         class CustomCheckpoint:

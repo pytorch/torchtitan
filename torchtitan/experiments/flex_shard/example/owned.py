@@ -34,7 +34,6 @@ from ..flex_shard.bucket_storage import (
 from ..flex_shard.utils import (
     _record_comm_if_eager,
     _record_copy_in_if_eager,
-    _record_copy_out_if_eager,
     _record_function_if_eager,
     _record_view_out_if_eager,
 )
@@ -836,64 +835,6 @@ class GroupedOwned(Placement):
                     return torch.Size([len(sorted_segments), *info.global_shape[1:]])
         return torch.Size([local_numel])
 
-    def _try_get_contiguous_owner_partition_view(
-        self,
-        tensors: list[torch.Tensor],
-        layout: _Layout,
-        rank: int,
-        dtype: torch.dtype,
-    ) -> torch.Tensor | None:
-        expected_numel = layout.rank_numels[rank]
-        if sum(tensor.numel() for tensor in tensors) != expected_numel:
-            return None
-        non_empty_tensors = [tensor for tensor in tensors if tensor.numel() > 0]
-        if not non_empty_tensors:
-            device = tensors[0].device if tensors else torch.device("cuda")
-            return torch.empty(0, dtype=dtype, device=device)
-
-        first = non_empty_tensors[0]
-        if first.dtype != dtype or not first.is_contiguous():
-            return None
-        storage_data_ptr = first.untyped_storage().data_ptr()
-        expected_storage_offset = first.storage_offset()
-        for tensor in non_empty_tensors:
-            if tensor.dtype != dtype or tensor.device != first.device:
-                return None
-            if not tensor.is_contiguous():
-                return None
-            if tensor.untyped_storage().data_ptr() != storage_data_ptr:
-                return None
-            if tensor.storage_offset() != expected_storage_offset:
-                return None
-            expected_storage_offset += tensor.numel()
-
-        return first.as_strided(
-            (expected_numel,),
-            (1,),
-            storage_offset=first.storage_offset(),
-        )
-
-    def _owner_partition_matches_tensor_order(
-        self,
-        infos: list[ParamInfo],
-        layout: _Layout,
-        rank: int,
-    ) -> bool:
-        segments_by_fqn: dict[str, list[GroupedOwned._Segment]] = {}
-        for segment in layout.segments:
-            if segment.owner_rank == rank:
-                segments_by_fqn.setdefault(segment.fqn, []).append(segment)
-        expected_rank_offset = 0
-        for info in infos:
-            for segment in sorted(
-                segments_by_fqn.get(info.fqn, []),
-                key=lambda segment: segment.param_rank_offset,
-            ):
-                if segment.rank_offset != expected_rank_offset:
-                    return False
-                expected_rank_offset += segment.numel
-        return expected_rank_offset == layout.rank_numels[rank]
-
     def _try_view_full_param_from_padded_gathered(
         self,
         gathered: torch.Tensor,
@@ -1022,29 +963,11 @@ class GroupedOwned(Placement):
             with _record_view_out_if_eager():
                 return direct_views, []
 
-        with _record_copy_out_if_eager():
-            full_params: list[torch.Tensor] = []
-            for info in infos:
-                segments = sorted(
-                    segments_by_fqn[info.fqn],
-                    key=lambda segment: segment.param_offset,
-                )
-                full = torch.empty(
-                    info.global_numel,
-                    dtype=gathered.dtype,
-                    device=gathered.device,
-                )
-                for segment in segments:
-                    full.narrow(0, segment.param_offset, segment.numel).copy_(
-                        gathered.narrow(
-                            0,
-                            segment.owner_rank * layout.padded_rank_numel
-                            + segment.rank_offset,
-                            segment.numel,
-                        )
-                    )
-                full_params.append(full.view(info.global_shape))
-        return full_params, []
+        raise NotImplementedError(
+            "GroupedOwned all-gather requires a layout that can expose every "
+            "full parameter as a view of the gathered bucket. Use the expert-block "
+            "GroupedOwned factory or provide view-compatible segment metadata."
+        )
 
     def _views_from_rank_flat(
         self,
@@ -1396,47 +1319,29 @@ class GroupedOwned(Placement):
         device = tensors[0].device
         with _record_copy_in_if_eager():
             true_send_numel = layout.rank_numels[rank]
-            local_owner_view = self._try_get_contiguous_owner_partition_view(
-                tensors,
-                layout,
-                rank,
-                dtype,
-            )
-            if local_owner_view is not None and not self._owner_partition_matches_tensor_order(
-                infos,
-                layout,
-                rank,
-            ):
-                local_owner_view = None
-            if (
-                local_owner_view is not None
-                and true_send_numel == layout.padded_rank_numel
-            ):
-                send = local_owner_view
-            else:
-                send = torch.empty(layout.padded_rank_numel, dtype=dtype, device=device)
-                if layout.padded_rank_numel != true_send_numel:
-                    send.zero_()
-                if local_owner_view is not None:
-                    send.narrow(0, 0, true_send_numel).copy_(local_owner_view)
-                else:
-                    segments_by_fqn: dict[str, list[GroupedOwned._Segment]] = {}
-                    for segment in layout.segments:
-                        if segment.owner_rank == rank:
-                            segments_by_fqn.setdefault(segment.fqn, []).append(segment)
-                    for tensor, info in zip(tensors, infos, strict=True):
-                        tensor_flat = tensor.reshape(-1).to(dtype)
-                        for segment in sorted(
-                            segments_by_fqn.get(info.fqn, []),
-                            key=lambda segment: segment.param_rank_offset,
-                        ):
-                            send.narrow(0, segment.rank_offset, segment.numel).copy_(
-                                tensor_flat.narrow(
-                                    0,
-                                    segment.param_rank_offset,
-                                    segment.numel,
-                                )
-                            )
+            # GroupedOwned uses a deterministic owner-partition send layout for
+            # all-gather. Local parameter storage may be exposed in module FQN
+            # order, so always pack instead of relying on storage aliasing.
+            send = torch.empty(layout.padded_rank_numel, dtype=dtype, device=device)
+            if layout.padded_rank_numel != true_send_numel:
+                send.zero_()
+            segments_by_fqn: dict[str, list[GroupedOwned._Segment]] = {}
+            for segment in layout.segments:
+                if segment.owner_rank == rank:
+                    segments_by_fqn.setdefault(segment.fqn, []).append(segment)
+            for tensor, info in zip(tensors, infos, strict=True):
+                tensor_flat = tensor.reshape(-1).to(dtype)
+                for segment in sorted(
+                    segments_by_fqn.get(info.fqn, []),
+                    key=lambda segment: segment.param_rank_offset,
+                ):
+                    send.narrow(0, segment.rank_offset, segment.numel).copy_(
+                        tensor_flat.narrow(
+                            0,
+                            segment.param_rank_offset,
+                            segment.numel,
+                        )
+                    )
             gathered = torch.empty(
                 world_size * layout.padded_rank_numel,
                 dtype=dtype,

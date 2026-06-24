@@ -349,6 +349,10 @@ class TestBucketPlacementValidation(TestCase):
 
             prepared = placement.prepare_unshard_bucket(local_shards, infos, mesh, None)
             send_buf = prepared.buffers[0]
+            self.assertNotEqual(
+                send_buf.untyped_storage().data_ptr(),
+                bucket_storage.byte_storage.untyped_storage().data_ptr(),
+            )
             expected_send = torch.cat(
                 [
                     param.detach()[expert_idx].reshape(-1)
