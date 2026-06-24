@@ -6,7 +6,7 @@
 
 """Converts one generated rollout group into trainable training_samples.
 
-RolloutGroup -> data-validity filters -> rollout_to_training_samples -> TrainingSampleBuilderOutput
+RolloutGroup -> data-validity filters -> rollout_to_training_samples -> TrainingSampleGroup
 
 Policy-version staleness is handled later by `Batcher`.
 """
@@ -17,20 +17,11 @@ from dataclasses import dataclass
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.rollout import Rollout, RolloutGroup
-from torchtitan.experiments.rl.types import TrainingSample, RolloutID
-
-
-@dataclass(frozen=True, slots=True)
-class TrainingSampleBuilderOutput:
-    """TrainingSamples and metrics emitted for one rollout group.
-
-    Example:
-        TrainingSampleBuilderOutput(training_samples=[], metrics=[failure_metric])
-        # -> failed or filtered group; metrics still reach the trainer logger
-    """
-
-    training_samples: list[TrainingSample]
-    metrics: list[m.Metric]
+from torchtitan.experiments.rl.types import (
+    RolloutID,
+    TrainingSample,
+    TrainingSampleGroup,
+)
 
 
 class TrainingSampleBuilder(Configurable):
@@ -38,7 +29,7 @@ class TrainingSampleBuilder(Configurable):
 
     Example:
         builder = config.training_sample_builder.build()
-        output = builder.build_training_samples(rollout_group=group)
+        output = builder.build_from_group(rollout_group=group)
         # output.training_samples is empty for failed, untrainable, or zero-std groups.
         # output.metrics still carries the counters for that group.
     """
@@ -53,19 +44,21 @@ class TrainingSampleBuilder(Configurable):
     def __init__(self, config: Config) -> None:
         self.config = config
 
-    def build_training_samples(self, *, rollout_group: RolloutGroup) -> TrainingSampleBuilderOutput:
+    def build_from_group(self, *, rollout_group: RolloutGroup) -> TrainingSampleGroup:
         """Apply group-level filters and convert surviving rollouts to training_samples.
 
         Example:
             # rollouts=[] from a failed generation
-            build_training_samples(rollout_group=failed_group)
-            # -> TrainingSampleBuilderOutput(training_samples=[], metrics=[failure_metric])
+            build_from_group(rollout_group=failed_group)
+            # -> TrainingSampleGroup(group_id=..., training_samples=[], metrics=[failure_metric])
         """
         metrics: list[m.Metric] = list(rollout_group.metrics)
 
         # Failed generation: empty group carrying its failure metric.
         if not rollout_group.rollouts:
-            return TrainingSampleBuilderOutput(training_samples=[], metrics=metrics)
+            return TrainingSampleGroup(
+                group_id=rollout_group.group_id, training_samples=[], metrics=metrics
+            )
 
         # Untrainable: any sibling with no completion tokens -> drop the whole group
         if any(
@@ -73,9 +66,13 @@ class TrainingSampleBuilder(Configurable):
             for rollout in rollout_group.rollouts
         ):
             metrics.append(
-                m.Metric("training_sample_builder/num_groups_dropped_untrainable", m.Sum(1.0))
+                m.Metric(
+                    "training_sample_builder/num_groups_dropped_untrainable", m.Sum(1.0)
+                )
             )
-            return TrainingSampleBuilderOutput(training_samples=[], metrics=metrics)
+            return TrainingSampleGroup(
+                group_id=rollout_group.group_id, training_samples=[], metrics=metrics
+            )
 
         # Zero-std reward: no learning signal across siblings.
         rewards = [rollout.reward for rollout in rollout_group.rollouts]
@@ -88,9 +85,13 @@ class TrainingSampleBuilder(Configurable):
         )
         if self.config.drop_zero_std_reward_groups and is_zero_std:
             metrics.append(
-                m.Metric("training_sample_builder/num_groups_dropped_zero_std", m.Sum(1.0))
+                m.Metric(
+                    "training_sample_builder/num_groups_dropped_zero_std", m.Sum(1.0)
+                )
             )
-            return TrainingSampleBuilderOutput(training_samples=[], metrics=metrics)
+            return TrainingSampleGroup(
+                group_id=rollout_group.group_id, training_samples=[], metrics=metrics
+            )
 
         # One rollout may branch into multiple trainable training_samples.
         training_samples: list[TrainingSample] = []
@@ -105,7 +106,10 @@ class TrainingSampleBuilder(Configurable):
         ]
         advantages = [rollout.advantage for rollout in rollout_group.rollouts]
         metrics += [
-            m.Metric("training_sample_builder/num_training_samples", m.Sum(float(len(training_samples)))),
+            m.Metric(
+                "training_sample_builder/num_training_samples",
+                m.Sum(float(len(training_samples))),
+            ),
             m.Metric("advantage", m.SummaryStats.from_list(advantages)),
             m.Metric(
                 "rollout/branches_per_rollout", m.Mean.from_list(branches_per_rollout)
@@ -113,10 +117,18 @@ class TrainingSampleBuilder(Configurable):
             m.Metric(
                 "rollout/branches_per_rollout", m.Max.from_list(branches_per_rollout)
             ),
-            m.Metric("rollout/min_policy_version", m.Min.from_list(min_policy_versions)),
-            m.Metric("rollout/min_policy_version", m.Max.from_list(min_policy_versions)),
+            m.Metric(
+                "rollout/min_policy_version", m.Min.from_list(min_policy_versions)
+            ),
+            m.Metric(
+                "rollout/min_policy_version", m.Max.from_list(min_policy_versions)
+            ),
         ]
-        return TrainingSampleBuilderOutput(training_samples=training_samples, metrics=metrics)
+        return TrainingSampleGroup(
+            group_id=rollout_group.group_id,
+            training_samples=training_samples,
+            metrics=metrics,
+        )
 
     # TODO(async-rl): evaluate renaming TrainingSample -> RolloutSegment once we align the overloaded
     # "sample" names (the dataset/input side also uses "sample").

@@ -13,26 +13,23 @@ from torchtitan.experiments.rl.observability import metrics as m
 
 @dataclass(frozen=True, slots=True)
 class RolloutID:
-    """Identifies a rollout/turn end-to-end
+    """Identifies a rollout/turn end-to-end.
 
     Example:
 
-        RolloutID(group_id=5, rollout_id=2, turn_id=0).to_string(turn=True)
+        RolloutID(group_id=5, rollout_id=2, turn_id=0).to_string()
         # -> "group=5/rollout=2/turn=0"
+        RolloutID(group_id=5, rollout_id=2, turn_id=0).to_string(include_turn=False)
+        # -> "group=5/rollout=2"
     """
 
-    group_id: int  # globally unique per GRPO group (e.g. group_id=5);
+    group_id: int  # globally unique per GRPO group (e.g. group_id=5)
     rollout_id: int  # sibling index within the group (0..group_size-1)
     turn_id: int  # turn index within the rollout
 
-    @property
-    def to_string(self, turn=True) -> str:
-        if turn:
-            return (
-                f"group={self.group_id}/rollout={self.rollout_id}/turn={self.turn_id}"
-            )
-        else:
-            return f"group={self.group_id}/rollout={self.rollout_id}"
+    def to_string(self, *, include_turn: bool = True) -> str:
+        base = f"group={self.group_id}/rollout={self.rollout_id}"
+        return f"{base}/turn={self.turn_id}" if include_turn else base
 
 
 @dataclass(kw_only=True, slots=True)
@@ -87,6 +84,20 @@ class TrainingSample:
     advantage: list[float]  # [L] advantage on assistant tokens, 0.0 elsewhere
 
 
+@dataclass(frozen=True, slots=True)
+class TrainingSampleGroup:
+    """The training samples + metrics built from one rollout group.
+
+    Example:
+        TrainingSampleGroup(group_id=3, training_samples=[], metrics=[failure_metric])
+        # -> failed / filtered / zero-std group; metrics still reach the trainer logger
+    """
+
+    group_id: int
+    training_samples: list[TrainingSample]
+    metrics: list[m.Metric]
+
+
 @dataclass(kw_only=True, slots=True)
 class TrainingMicrobatch:
     """Packed training batch for the RL trainer.
@@ -102,6 +113,26 @@ class TrainingMicrobatch:
     generator_logprobs: torch.Tensor  # [B, L]
     loss_mask: torch.Tensor  # [B, L]
     advantages: torch.Tensor  # [B, L]
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingBatch:
+    """Packed microbatches for one optimizer step.
+
+    Example:
+        # 5 training samples, effective length 5 each; seq_len=10, local_batch_size=2, dp_degree=1
+        # next-fit rows -> [[s5, s5], [s5, s5], [s5]] = 3 rows; rows_per_microbatch = 2 * 1 = 2
+        # -> 2 microbatches (3 rows padded to 4 with one pad-only row):
+        #    microbatches = [[TrainingMicrobatch(token_ids=[2, 10])],
+        #                    [TrainingMicrobatch(token_ids=[2, 10])]]   # mb1 = 1 real row + 1 pad row
+        # num_global_valid_tokens = count of loss_mask=True tokens across the 5 samples
+    """
+
+    microbatches: list[list[TrainingMicrobatch]]  # [num_microbatches][dp_degree]
+    num_global_valid_tokens: int
+    metrics: list[m.Metric]
+    # one per packed training_sample; trainer computes policy_age at consume time
+    min_policy_versions: list[int]
 
 
 @dataclass(frozen=True, slots=True)

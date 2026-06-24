@@ -74,7 +74,6 @@ class _EngineStatsCapture(StatLoggerBase):
         del vllm_config, engine_index
         # cumulative hit-rate over a recent-request window
         self._prefix_cache = CachingMetrics()
-        self._total_generation_tokens = 0.0
         # latest iteration's preemptions (KV-pressure signal)
         self._num_preempted_reqs = 0.0
 
@@ -82,7 +81,6 @@ class _EngineStatsCapture(StatLoggerBase):
         self, scheduler_stats, iteration_stats, mm_cache_stats=None, engine_idx: int = 0
     ) -> None:
         if iteration_stats is not None:
-            self._total_generation_tokens += iteration_stats.num_generation_tokens
             self._num_preempted_reqs = float(iteration_stats.num_preempted_reqs)
         if scheduler_stats is None:
             return
@@ -93,7 +91,6 @@ class _EngineStatsCapture(StatLoggerBase):
             num_waiting=float(scheduler_stats.num_waiting_reqs),
             num_preempted_reqs=self._num_preempted_reqs,
             prefix_cache_hit_rate=float(self._prefix_cache.hit_rate),
-            total_generation_tokens=self._total_generation_tokens,
         )
 
     def log_engine_initialized(self) -> None:

@@ -50,7 +50,8 @@ class Rollouter(Configurable):
 
         sample = rollouter.get_training_sample()        # one sample from the dataset
         group = await rollouter.run_group_rollouts(     # build envs, drive turns, score
-            generate_fn=generate_fn, sample=sample, group_id="step=3/group=0",
+            generate_fn=generate_fn, sample=sample,
+            group_id=group_index,  # assigned by the data input loop (a monotonic int)
             group_size=N, sampling=sampling, renderer=renderer)
 
     `MessageEnv` works in messages; `TokenEnv` (what `make_env_group` returns)
@@ -159,7 +160,7 @@ class Rollouter(Configurable):
         *,
         generate_fn: GenerateFn,
         sample: object,
-        group_id: str,
+        group_id: int,
         group_size: int,
         sampling: SamplingConfig,
         renderer: Renderer,
@@ -231,7 +232,7 @@ class Rollouter(Configurable):
         generate_fn: GenerateFn,
         env: TokenEnv,
         sampling: SamplingConfig,
-        group_id: str,
+        group_id: int,
         rollout_id: int,
     ) -> Rollout:
         """Produce a single rollout, alternating between env and generator calls,
@@ -264,9 +265,9 @@ class Rollouter(Configurable):
                 # generator call
                 completion = await generate_fn(
                     prompt_token_ids=env_step.next_prompt_token_ids,
-                    request_id=turn_rollout_id.request_id,
+                    request_id=turn_rollout_id.to_string(),
                     # Per-sample sticky key: a sample's turns reuse one generator's prefix cache.
-                    routing_session_id=f"{group_id}/sample={rollout_id}",
+                    routing_session_id=turn_rollout_id.to_string(include_turn=False),
                     sampling_config=sampling,
                 )
 

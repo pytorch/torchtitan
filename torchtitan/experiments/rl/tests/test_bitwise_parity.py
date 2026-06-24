@@ -248,12 +248,20 @@ def build_inference_engine(config: RLController.Config) -> LLMEngine:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
     engine_kwargs["max_model_len"] = config.model_spec.model.max_seq_len
-    # Mirror RLController.setup_async for a single engine: always derive from rollout concurrency
-    # (rollout workers == buffer capacity) over the engine DP ranks.
+    # Mirror RLController.setup_async for a single engine: derive from active rollout concurrency
+    # (num_group_workers, or the validation pass), not from the off-policy buffer depth.
     ac = config.async_control
     gen_dp = max(gen_config.parallelism.data_parallel_degree, 1)
-    rollout_concurrency = ac.max_buffered_rollout_groups * ac.group_size
-    max_num_seqs = (rollout_concurrency + gen_dp - 1) // gen_dp
+    num_group_workers = (
+        ac.num_group_workers
+        if ac.num_group_workers is not None
+        else ac.num_rollout_groups_per_train_step
+    )
+    rollout_concurrency = max(
+        num_group_workers * ac.group_size,
+        ac.validation.num_samples,
+    )
+    max_num_seqs = min((rollout_concurrency + gen_dp - 1) // gen_dp, 512)
     engine_kwargs["max_num_seqs"] = max_num_seqs
     vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,

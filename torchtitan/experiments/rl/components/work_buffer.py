@@ -6,11 +6,11 @@
 
 """Buffers rollout groups between data input, rollout workers, and the batcher.
 
-data input -> WAITING -> rollout worker -> GENERATED -> batcher
+data input -> WAITING -> rollout worker -> FINALIZED -> batcher
 
 The buffer is a bounded, strict-FIFO run-ahead queue: it caps how far generation may run ahead of the
-trainer (count backpressure) and hands the batcher the OLDEST generated group, stalling if that group
-is still generating. Policy-version staleness is enforced once, later, by `Batcher` at flush.
+trainer (count backpressure) and hands the batcher the OLDEST finalized group, stalling if that group
+is still in flight. Policy-version staleness is enforced once, later, by `Batcher` at flush.
 """
 
 import asyncio
@@ -24,12 +24,12 @@ from torchtitan.experiments.rl.rollout import RolloutGroup
 from torchtitan.observability import structured_logger as sl
 
 
-class _RolloutGroupWorkBufferState(enum.Enum):
+class _WorkState(enum.Enum):
     """Where a rollout group is in the input -> generation -> batching lifecycle."""
 
     WAITING = "waiting"
-    GENERATING = "generating"
-    GENERATED = "generated"
+    INFLIGHT = "inflight"
+    FINALIZED = "finalized"
 
 
 @dataclass(slots=True)
@@ -40,19 +40,17 @@ class RolloutGroupWork:
     (`init=False`, so the input loop can't set them).
 
     Example:
-        RolloutGroupWork(group_id="step=3/group=5", sample=sample)
+        RolloutGroupWork(group_id=5, sample=sample)
     """
 
-    group_id: str
+    group_id: int
     sample: object
-    state: _RolloutGroupWorkBufferState = field(
-        default=_RolloutGroupWorkBufferState.WAITING, init=False
-    )
+    state: _WorkState = field(default=_WorkState.WAITING, init=False)
     rollout_group: RolloutGroup | None = field(
         default=None, init=False
-    )  # set once GENERATED
+    )  # set once FINALIZED
     # TODO(async-rl): emit JSON lifecycle logging per RolloutGroupWork keyed by group_id:
-    # admitted/claimed/generated/batched/trained/dropped timestamps + policy version at admission and
+    # admitted/claimed/finalized/batched/trained/dropped timestamps + policy version at admission and
     # at trainer consumption, for faithful end-to-end visibility.
 
 
@@ -60,21 +58,21 @@ class RolloutGroupWorkBuffer(Configurable):
     """Bounded strict-FIFO buffer of rollout groups moving input -> generation -> batching.
 
     Count backpressure: admission blocks once `len(buffer) >= max_buffered_rollout_groups`. The batcher
-    takes the OLDEST group and stalls if it is still generating (no skipping, no eviction).
+    takes the OLDEST group and stalls if it is still in flight (no skipping, no eviction).
 
     Example:
         buffer = config.rollout_buffer.build(max_buffered_rollout_groups=32)
 
         # input loop:
         if await buffer.wait_for_slot():
-            await buffer.add_work(RolloutGroupWork(group_id="g0", sample=sample))
+            await buffer.add_work(RolloutGroupWork(group_id=0, sample=sample))
 
         # rollout worker:
         work = await buffer.claim_next()
-        await buffer.record_result(RolloutGroup(group_id=work.group_id, rollouts=rollouts))
+        await buffer.finalize_work(RolloutGroup(group_id=work.group_id, rollouts=rollouts))
 
         # batcher:
-        rollout_group = await buffer.take_generated()
+        rollout_group = await buffer.take_finalized()
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -84,11 +82,14 @@ class RolloutGroupWorkBuffer(Configurable):
     def __init__(self, config: Config, *, max_buffered_rollout_groups: int) -> None:
         self._max_buffered_rollout_groups = max_buffered_rollout_groups
         self._work_by_group_id: collections.OrderedDict[
-            str, RolloutGroupWork
+            int, RolloutGroupWork
         ] = collections.OrderedDict()
-        # One Condition guards all three waits (slot-free / claimable-WAITING / takeable-GENERATED):
+        # One Condition guards all three waits (slot-free / claimable-WAITING / takeable-FINALIZED):
         # every mutation notify_all()s and waiters re-check their predicate. N workers wait to claim,
         # so a single Condition is lost-wakeup-proof here.
+        # TODO(async-rl): if the claim herd ever shows up in a profile, move the WAITING->INFLIGHT
+        # handoff to an asyncio.Queue (one get() wakes one worker); keep the strict-FIFO FINALIZED
+        # consumption on the Condition.
         self._condition = asyncio.Condition()
         self._closed = False
         # TODO(async-rl): warm start — admit a small number of groups at first and grow the effective cap as the
@@ -116,29 +117,29 @@ class RolloutGroupWorkBuffer(Configurable):
                 if self._closed:
                     return None
                 for work in self._work_by_group_id.values():
-                    if work.state is _RolloutGroupWorkBufferState.WAITING:
-                        work.state = _RolloutGroupWorkBufferState.GENERATING
+                    if work.state is _WorkState.WAITING:
+                        work.state = _WorkState.INFLIGHT
                         return work
                 await self._condition.wait()
 
-    async def record_result(self, rollout_group: RolloutGroup) -> None:
-        """Rollout loop: store one generated group and wake the batcher."""
+    async def finalize_work(self, rollout_group: RolloutGroup) -> None:
+        """Rollout loop: write the generated result into the existing work entry and wake the batcher."""
         async with self._condition:
             work = self._work_by_group_id.get(rollout_group.group_id)
             if work is None:
-                # The buffer was closed and cleared while this group generated.
+                # The buffer was closed and cleared while this group was in flight.
                 return
-            work.state = _RolloutGroupWorkBufferState.GENERATED
+            work.state = _WorkState.FINALIZED
             work.rollout_group = rollout_group
             self._condition.notify_all()
 
-    @sl.log_trace_span("take_generated")
-    async def take_generated(self) -> RolloutGroup | None:
-        """Batcher loop: strict FIFO — return the OLDEST group once it is GENERATED, else stall.
+    @sl.log_trace_span("take_finalized")
+    async def take_finalized(self) -> RolloutGroup | None:
+        """Batcher loop: strict FIFO — return the OLDEST group once it is FINALIZED, else stall.
 
         Example:
-            # head g0 still GENERATING, g1 GENERATED -> WAITS for g0 (no skipping)
-            await buffer.take_generated()
+            # head g0 still INFLIGHT, g1 FINALIZED -> WAITS for g0 (no skipping)
+            await buffer.take_finalized()
         """
         async with self._condition:
             while True:
@@ -146,12 +147,12 @@ class RolloutGroupWorkBuffer(Configurable):
                     return None
                 if self._work_by_group_id:
                     head_id, head = next(iter(self._work_by_group_id.items()))
-                    if head.state is _RolloutGroupWorkBufferState.GENERATED:
+                    if head.state is _WorkState.FINALIZED:
                         del self._work_by_group_id[head_id]
                         self._condition.notify_all()
                         assert head.rollout_group is not None
                         return head.rollout_group
-                await self._condition.wait()  # head still GENERATING -> STALL
+                await self._condition.wait()  # head still INFLIGHT -> STALL
 
     async def close(self) -> None:
         """`run()` shutdown: abandon buffered work and wake every waiter."""
@@ -166,19 +167,19 @@ class RolloutGroupWorkBuffer(Configurable):
         capacity_used = len(self._work_by_group_id) / max(
             self._max_buffered_rollout_groups, 1
         )
-        S = _RolloutGroupWorkBufferState
+        S = _WorkState
         return [
             m.Metric(
                 "rollout_buffer/num_groups_waiting",
                 m.NoReduce(float(states.count(S.WAITING))),
             ),
             m.Metric(
-                "rollout_buffer/num_groups_generating",
-                m.NoReduce(float(states.count(S.GENERATING))),
+                "rollout_buffer/num_groups_inflight",
+                m.NoReduce(float(states.count(S.INFLIGHT))),
             ),
             m.Metric(
-                "rollout_buffer/num_groups_generated",
-                m.NoReduce(float(states.count(S.GENERATED))),
+                "rollout_buffer/num_groups_finalized",
+                m.NoReduce(float(states.count(S.FINALIZED))),
             ),
             m.Metric("rollout_buffer/capacity_used_frac", m.NoReduce(capacity_used)),
         ]

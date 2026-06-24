@@ -29,7 +29,7 @@ def _recorder(tmp_path, **config_kwargs) -> RolloutSampleRecorder:
 
 def _turn(*, completion_logprobs: list[float], policy_version: int = 1) -> RolloutTurn:
     return RolloutTurn(
-        rollout_id=RolloutID(group_id="step=1/group=0", rollout_id=0, turn_id=0),
+        rollout_id=RolloutID(group_id=0, rollout_id=0, turn_id=0),
         prompt_token_ids=[1, 2, 3],
         completion_token_ids=[4, 5],
         completion_logprobs=completion_logprobs,
@@ -41,7 +41,7 @@ def _turn(*, completion_logprobs: list[float], policy_version: int = 1) -> Rollo
 
 
 def _group(group_idx: int, *, rewards: list[float | None]) -> RolloutGroup:
-    group_id = f"step=1/group={group_idx}"
+    group_id = group_idx
     return RolloutGroup(
         group_id=group_id,
         rollouts=[
@@ -111,7 +111,7 @@ def test_record_dumps_the_rollout_minus_token_arrays(tmp_path) -> None:
 
     (record,) = _read_lines(tmp_path / "rollout_samples.jsonl")
     assert record["step"] == 3 and record["is_validation"] is True
-    assert record["group_id"] == "step=1/group=0"
+    assert record["group_id"] == 0
     assert record["rollout_id"] == 0
     assert record["status"] == "completed"
     assert record["reward"] == 1.0
@@ -166,7 +166,7 @@ def _record_one(tmp_path, rollout: Rollout) -> dict:
 def test_empty_turns_rollout(tmp_path) -> None:
     # A rollout with no turns (e.g. a prompt too long): no turns, no crash.
     rollout = Rollout(
-        group_id="step=1/group=0",
+        group_id=0,
         rollout_id=0,
         status=RolloutStatus.TRUNCATED_PROMPT_TOO_LONG,
         turns=[],
@@ -184,7 +184,7 @@ def test_turn_metrics_are_excluded_not_serialized(tmp_path) -> None:
     turn = _turn(completion_logprobs=[-0.5, -1.5])
     turn.metrics = [m.Metric("generator/queue_time_ms", m.Mean(2.0))]
     rollout = Rollout(
-        group_id="step=1/group=0",
+        group_id=0,
         rollout_id=0,
         status=RolloutStatus.COMPLETED,
         turns=[turn],
@@ -196,7 +196,7 @@ def test_turn_metrics_are_excluded_not_serialized(tmp_path) -> None:
 
 def test_none_policy_version_and_completion_message(tmp_path) -> None:
     turn = RolloutTurn(
-        rollout_id=RolloutID(group_id="step=1/group=0", rollout_id=0, turn_id=0),
+        rollout_id=RolloutID(group_id=0, rollout_id=0, turn_id=0),
         prompt_token_ids=[1, 2],
         completion_token_ids=[],
         completion_logprobs=[],
@@ -204,7 +204,7 @@ def test_none_policy_version_and_completion_message(tmp_path) -> None:
         completion_message=None,
     )
     rollout = Rollout(
-        group_id="step=1/group=0",
+        group_id=0,
         rollout_id=0,
         status=RolloutStatus.ERROR,
         turns=[turn],

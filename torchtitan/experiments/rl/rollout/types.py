@@ -138,7 +138,7 @@ class Rollout:
     # TODO: add a `logs` field (per-turn debug records / event trace) to make a
     # full rollout reconstructable for debugging.
 
-    group_id: str
+    group_id: int
     """Prompt-group ID; siblings share it for advantage centering."""
 
     rollout_id: int
@@ -164,7 +164,7 @@ class Rollout:
 
 @dataclass(kw_only=True, slots=True)
 class RolloutGroup:
-    group_id: str
+    group_id: int
     """Prompt-group ID; siblings share it for advantage centering."""
 
     rollouts: list[Rollout]  # [group_size]
