@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 from collections.abc import Sequence
 
 import torch
@@ -48,7 +49,7 @@ def copy_tensor_to_dtype(
     return out
 
 
-def pack_segments_into_flat_buffer_triton_if_available(
+def pack_segments_into_flat_buffer_triton_if_supported(
     inputs: list[torch.Tensor],
     tensor_indices: Sequence[int],
     src_offsets: Sequence[int],
@@ -56,22 +57,25 @@ def pack_segments_into_flat_buffer_triton_if_available(
     dst_offsets: Sequence[int],
     out: torch.Tensor,
 ) -> list[torch.Tensor] | None:
-    """Use the optional Triton descriptor pack path when it is available."""
+    """Use Triton descriptor packing for supported inputs.
+
+    Triton is required for this backend. The function returns ``None`` only when
+    the current inputs should use the deterministic foreach copy fallback.
+    """
     if torch.compiler.is_compiling():
         return None
-    try:
-        from ._pack_kernels import pack_segments_into_flat_buffer_triton
-    except Exception:
-        return None
-
-    try:
-        return pack_segments_into_flat_buffer_triton(
-            inputs,
-            tensor_indices,
-            src_offsets,
-            numels,
-            dst_offsets,
-            out,
+    if importlib.util.find_spec("triton") is None:
+        raise AssertionError(
+            "GroupedOwned Triton segment packing requires the triton package."
         )
-    except Exception:
-        return None
+
+    from ._pack_kernels import pack_segments_into_flat_buffer_triton
+
+    return pack_segments_into_flat_buffer_triton(
+        inputs,
+        tensor_indices,
+        src_offsets,
+        numels,
+        dst_offsets,
+        out,
+    )
