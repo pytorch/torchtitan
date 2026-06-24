@@ -5,9 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from types import SimpleNamespace
 
 import torch.nn as nn
 
+from torchtitan.config import ParallelismConfig
 from torchtitan.models.common.param_init import skip_param_init
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.model import Llama3Model
@@ -15,7 +17,7 @@ from torchtitan.models.llama3.model import Llama3Model
 
 def _make_config(enable_weight_tying: bool = False) -> Llama3Model.Config:
     # Start from the standard debugmodel config and adjust weight tying.
-    config = llama3_configs["debugmodel"](attn_backend="sdpa")
+    config = llama3_configs["debugmodel"](attn_backend="flex")
     # Replace tok_embeddings param_init based on weight tying flag.
     import dataclasses
     from functools import partial
@@ -63,35 +65,38 @@ class TestLlama3WeightTying(unittest.TestCase):
             "tok_embeddings.weight and output.weight must remain tied after init_states",
         )
 
+    def test_tied_parameter_count_matches_unique_parameters(self):
+        """Tied embeddings should be counted once, not subtracted away."""
+        config = _make_config(enable_weight_tying=True)
+        model = Llama3Model(config)
+        unique_param_count = sum(
+            p.numel() for p in {id(p): p for p in model.parameters()}.values()
+        )
+        reported_param_count, _ = config.get_nparams_and_flops(model, seq_len=512)
+
+        self.assertEqual(reported_param_count, unique_param_count)
+
     def test_pp_guard_raises_when_weight_tying_and_pp_enabled(self):
         """update_from_config must raise NotImplementedError when PP > 1 and weight tying is on."""
-        from unittest.mock import MagicMock
-
         config = _make_config(enable_weight_tying=True)
 
-        trainer_config = MagicMock()
-        trainer_config.training.seq_len = 512
-        trainer_config.parallelism.pipeline_parallel_degree = 2
-        trainer_config.parallelism.context_parallel_degree = 1
-        trainer_config.parallelism.tensor_parallel_degree = 1
+        runtime_config = SimpleNamespace(
+            parallelism=ParallelismConfig(pipeline_parallel_degree=2)
+        )
 
         with self.assertRaises(NotImplementedError):
-            config.update_from_config(trainer_config=trainer_config)
+            config.update_from_config(config=runtime_config)
 
     def test_pp_guard_does_not_raise_without_weight_tying(self):
         """update_from_config must NOT raise when PP > 1 and weight tying is off."""
-        from unittest.mock import MagicMock
-
         config = _make_config(enable_weight_tying=False)
 
-        trainer_config = MagicMock()
-        trainer_config.training.seq_len = 512
-        trainer_config.parallelism.pipeline_parallel_degree = 2
-        trainer_config.parallelism.context_parallel_degree = 1
-        trainer_config.parallelism.tensor_parallel_degree = 1
+        runtime_config = SimpleNamespace(
+            parallelism=ParallelismConfig(pipeline_parallel_degree=2)
+        )
 
         # Should not raise
-        config.update_from_config(trainer_config=trainer_config)
+        config.update_from_config(config=runtime_config)
 
 
 if __name__ == "__main__":

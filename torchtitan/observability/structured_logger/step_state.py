@@ -59,7 +59,7 @@ Example::
 Note: inside a task, global tags are NOT visible (``get_step_tags`` returns
 the task's CV when non-empty). Actor contexts are intentionally isolated;
 if a tag needs to reach actors, set it per-task (e.g. via the controller's
-sync_step broadcast).
+sync_log_step broadcast).
 """
 
 import asyncio
