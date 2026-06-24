@@ -247,7 +247,9 @@ def _plan_vit(
     # derive data parallelism from the launch (like path), so any N nodes x GPUs validate
     local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
     world_size = int(os.environ.get("WORLD_SIZE", str(local_world_size)))
-    num_nodes = int(os.environ.get("GROUP_WORLD_SIZE", str(world_size // local_world_size)))
+    num_nodes = int(
+        os.environ.get("GROUP_WORLD_SIZE", str(world_size // local_world_size))
+    )
     return PlanViTTrainer.Config(
         loss=PathLoss.Config(),
         model_spec=model_registry(flavor, mup=mup),
@@ -256,7 +258,7 @@ def _plan_vit(
         optimizer=_optimizer_config(flavor, mup=mup, lr=lr, wd=wd),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=round(STEPS * 0.1),
-            total_steps=STEPS,
+            total_steps=None,  # use the real training.steps; a fixed value wraps the cosine on longer runs
             decay_ratio=0.8,
             decay_type="cosine",
             min_lr_factor=0.0,
