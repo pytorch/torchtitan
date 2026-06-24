@@ -37,16 +37,19 @@ from ..flex_shard.utils import (
     _record_function_if_eager,
     _record_view_out_if_eager,
 )
-from ._pack_utils import (
+from .utils import (
     pack_tensors_into_flat_buffer,
     pack_tensors_into_flat_buffer_with_scratch,
     pack_segments_into_flat_buffer_triton_if_supported,
+    _to_dist_reduce_op,
 )
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
     from ..flex_shard.bucket_storage import ParamInfo, PlacementFn
+
+
 @dataclass
 class _ReduceScratchSlot:
     send: torch.Tensor
@@ -1513,7 +1516,7 @@ class GroupedOwned(Placement):
                 dist.reduce_scatter_tensor(
                     output=recv,
                     input=send,
-                    op=self.dist_reduce_op(state.gradient_reduce_op),
+                    op=_to_dist_reduce_op(state.gradient_reduce_op),
                     group=state.pg,
                 )
             finally:
