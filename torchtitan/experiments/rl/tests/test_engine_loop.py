@@ -38,6 +38,7 @@ def _bare_generator(
     model_state_dict_pull_request: ModelStateDictPullRequest | None = None,
     pending: list[GenerationRequest] | None = None,
     unfinished: bool = False,
+    dp_size: int = 1,
 ) -> VLLMGenerator:
     # Bypass __init__ (which builds the vLLM engine); set only the loop's state.
     generator = object.__new__(VLLMGenerator)
@@ -46,12 +47,13 @@ def _bare_generator(
     generator._model_state_dict_pull_request = model_state_dict_pull_request
     generator._queued_generation_requests = pending or []
     generator._engine = _FakeEngine(unfinished=unfinished)
+    generator._dp_degree = dp_size
     return generator
 
 
-def _request() -> GenerationRequest:
+def _request(request_id: str = "r0") -> GenerationRequest:
     return GenerationRequest(
-        request_id="r0",
+        request_id=request_id,
         prompt_token_ids=[1, 2],
         sampling=SamplingConfig(),
     )
@@ -83,11 +85,23 @@ def test_step_drains_the_queue() -> None:
     request = _request()
     generator = _bare_generator(pending=[request])
     decision = asyncio.run(generator._decide_next_action())
-    assert decision.action is LoopAction.STEP and decision.requests == [request]
+    # DP=1: a single DP rank holds the whole batch.
+    assert decision.action is LoopAction.STEP and decision.requests_per_dp_rank == [
+        [request]
+    ]
     assert generator._queued_generation_requests == []  # drained into the decision
 
 
 def test_step_with_empty_queue_when_only_in_flight_work_remains() -> None:
     # No queue, no pull, but the engine still has in-flight requests to step.
     decision = asyncio.run(_bare_generator(unfinished=True)._decide_next_action())
-    assert decision.action is LoopAction.STEP and decision.requests == []
+    assert decision.action is LoopAction.STEP and decision.requests_per_dp_rank == [[]]
+
+
+def test_step_routes_all_requests_to_dp0_for_now() -> None:
+    # Hardcoded routing: every queued request lands on DP rank 0; other ranks empty.
+    requests = [_request("r0"), _request("r1")]
+    generator = _bare_generator(pending=requests, dp_size=3)
+    decision = asyncio.run(generator._decide_next_action())
+    assert decision.action is LoopAction.STEP
+    assert decision.requests_per_dp_rank == [requests, [], []]
