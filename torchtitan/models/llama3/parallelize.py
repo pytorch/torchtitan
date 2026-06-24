@@ -40,13 +40,6 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
-        Sequence length {training.seq_len} must be divisible by the product of TP degree
-        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
-        """
-
     if parallelism.spmd_backend in ("full_dtensor", "spmd_types"):
         validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)

@@ -13,7 +13,7 @@ import spmd_types as spmd
 from torch import nn
 from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.spmd_types import set_sparse_mesh, spmd_mesh_size
+from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
@@ -141,7 +141,7 @@ class GroupedExperts(Module):
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
-        with set_sparse_mesh():
+        with maybe_set_sparse_mesh():
             routed_output_RD = self._experts_forward(
                 routed_input_RD, num_global_tokens_per_local_expert_e
             )
@@ -350,13 +350,15 @@ class MoE(Module):
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None
-        seq_sharded_input: bool = False
+        # TODO(pianpwk): Remove this once MoE combine can derive the local
+        # sequence shape directly from the input layout.
+        seq_dim_tp_sharded: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
 
         num_experts = config.num_experts
-        self.seq_sharded_input = config.seq_sharded_input
+        self.seq_dim_tp_sharded = config.seq_dim_tp_sharded
         self.experts = config.experts.build()
         self.router = config.router.build()
         self.shared_experts = (
@@ -409,10 +411,10 @@ class MoE(Module):
         # of ``sp_size`` without materializing padded tokens.
         B, L, D = x_BLD.shape
         sp_size = getattr(self.experts.token_dispatcher, "sp_size", 1)
-        if get_spmd_backend() == "spmd_types" and self.seq_sharded_input:
-            # spmd_types training with dense SP enabled guarantees even
-            # CP*TP sequence sharding, so L is already the local TP sequence
-            # length to use for combine indexing.
+        if not isinstance(x_BLD, DTensor) and self.seq_dim_tp_sharded:
+            # Local dense activation with SP enabled guarantees even CP*TP
+            # sequence sharding, so L is already the local TP sequence length
+            # to use for combine indexing.
             seq_pad = 0
             seq_dim_pad_tokens = 0
             num_local_tokens_after_seq_dim_padding = B * L
@@ -423,11 +425,6 @@ class MoE(Module):
             # MoE-region sequence length.
             seq_pad = sp_size - L if L < sp_size else 0
             if seq_pad:
-                if self.training:
-                    raise ValueError(
-                        "MoE short-sequence padding for L < sp_size: "
-                        f"got L={L}, sp_size={sp_size} while the module is in training mode."
-                    )
                 x_BLD = F.pad(x_BLD, (0, 0, 0, seq_pad))
                 L = L + seq_pad
             seq_dim_pad_tokens = (-L) % sp_size
