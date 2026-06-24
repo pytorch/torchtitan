@@ -49,6 +49,38 @@ def _is_pp_only(variant: tuple[str, ...], ngpu: int) -> bool:
     )
 
 
+def _supports_spmd_typechecking(test_name: str, variant: tuple[str, ...]) -> bool:
+    """List of tests/variants to test spmd_types backend, but without typechecking."""
+    unsupported_tests = [
+        # Compile is not compatible with SPMD typechecking yet.
+        "1d_compile_spmd_types",
+        "1d_compile_sac_op_spmd_types",
+        "2d_compile_spmd_types",
+        "2d_asynctp_compile_spmd_types",
+        "3d_compile_spmd_types",
+        "torchcomms_3d_dp+cp+pp+compile_spmd_types",
+        "torchcomms_3d_dp+tp+pp+compile_spmd_types",
+        # PP is not compatible with SPMD typechecking yet.
+        "pp_dp_1f1b_spmd_types",
+        "pp_tp_gpipe_spmd_types",
+        "pp_dp_tp_spmd_types",
+        "validation_tp_cp_pp_spmd_types",
+        "float8_emulate_lora_spmd_types",
+        # non-chunked CE loss isn't happy yet.
+        (
+            "2d_eager_spmd_types",
+            [
+                "--module llama3 --config llama3_debugmodel_ce_loss",
+                "--parallelism.tensor_parallel_degree 2",
+            ],
+        ),
+    ]
+    return (
+        test_name not in unsupported_tests
+        and (test_name, variant) not in unsupported_tests
+    )
+
+
 def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
     """Inject ``--parallelism.spmd_backend`` into every variant.
 
@@ -60,15 +92,24 @@ def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefini
     new_args = []
     for variant in t.override_args:
         prefix: list[str] = []
+        suffix: list[str] = []
         has_cp = any("context_parallel_degree" in arg for arg in variant)
         has_compile = any("compile.enable" in arg for arg in variant)
+        has_ac_mode = any("activation-checkpoint:" in arg for arg in variant)
         if not _is_pp_only(variant, t.ngpu) and not (has_cp and has_compile):
             prefix.append(f"--parallelism.spmd_backend {backend}")
+            if (
+                backend == "spmd_types"
+                and not has_ac_mode
+                and _supports_spmd_typechecking(test_name, variant)
+            ):
+                prefix.append("--debug.spmd_typechecking")
+                suffix.append("activation-checkpoint:none")
         if test_name != t.test_name:
             variant = tuple(
                 arg.replace(f"{t.test_name}/", f"{test_name}/") for arg in variant
             )
-        new_args.append(tuple(prefix) + tuple(variant))
+        new_args.append(tuple(prefix) + tuple(variant) + tuple(suffix))
     return dataclasses.replace(
         t,
         override_args=tuple(new_args),
