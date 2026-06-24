@@ -29,7 +29,10 @@ permissions:
 
 jobs:
   build-test:
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    # Skip scheduled runs on forks, where they would only fail and email the fork owner
+    if: >-
+      (github.repository_owner == 'pytorch' || github.event_name != 'schedule') &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     with:
       runner: linux.g5.48xlarge.nvidia.gpu
@@ -52,19 +55,28 @@ jobs:
 
         pip config --user set global.progress_bar off
 
+        # torch nightly now depends on cuda-toolkit[...] extras (e.g.
+        # nvidia-curand==10.4.0.35) whose wheels live on PyPI, not on the pytorch
+        # nightly index. --index-url *replaces* the default PyPI index, so add it
+        # back via --extra-index-url or pip cannot resolve those cuda deps.
         python -m pip install --force-reinstall --pre \
-          torch --index-url https://download.pytorch.org/whl/nightly/cu130
-        python -m pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
+          torch \
+          --index-url https://download.pytorch.org/whl/nightly/cu130 \
+          --extra-index-url https://pypi.org/simple
+        python -m pip install git+https://github.com/meta-pytorch/autoparallel.git
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
         python -m torchtitan.experiments.graph_trainer.tests.integration_tests --test_suite graph_trainer_default --gpu_arch_type cuda $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+        python -m torchtitan.experiments.graph_trainer.tests.integration_tests --test_suite graph_trainer_autoparallel --gpu_arch_type cuda $RUNNER_TEMP/artifacts-to-be-uploaded/autoparallel --ngpu 4
 
 
-        # Run the numerics unit tests (dense models only; MoE tests run in the H100 workflow)
+        # Run the numerics unit tests. Standard MoE and DeepSeek V3 AutoParallel
+        # tests run in the H100 workflow.
         pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestSimpleFSDP -v
         pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics -v -k "dense"
+        pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerAutoParallelNumerics::test_llama3_aot_fx_trace_autoparallel_vs_eager -v
 
         # Run the graph passes unit tests
         pytest torchtitan/experiments/graph_trainer/tests/test_passes.py -v

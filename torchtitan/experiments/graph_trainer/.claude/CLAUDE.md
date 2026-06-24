@@ -66,11 +66,19 @@ two-step process:
    - `apply_cpu_offload_pass` — inserts offload/reload/wait ops for
      `MUST_CPU_OFFLOAD` nodes.
    - `selective_activation_remat_pass` — duplicates `MUST_RECOMPUTE`
-     ops before backward and DCEs the originals.
+     ops in front of their backward consumers and erases originals whose
+     consumers were all backward.
 
 The `--compile.memory_policy` config selects the tagging strategy.
 New policies (e.g. budget-aware mixed SAC + offload) should be added
 as new branches in `tag_with_memory_policy_pass`.
+
+**NUMA binding for CPU offload:** On multi-NUMA machines (e.g. GB200
+NVLink-C2C), D2H/H2D bandwidth is ~350 GB/s NUMA-local vs ~120 GB/s
+cross-NUMA. `Trainer` automatically applies NUMA binding
+(`AffinityMode.NODE`) on CUDA hardware at init, pinning each worker
+to the NUMA node of its GPU. Falls back gracefully on non-CUDA
+hardware or when `numactl` is unavailable.
 
 **Inspecting tags:** `log_activation_memory_policy` (`log_activation_memory_policy.py`)
 prints all forward nodes consumed by backward, grouped by layer with
@@ -109,8 +117,7 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmo
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
-    --parallelism.expert_parallel_degree=4 \
-    --parallelism.expert_tensor_parallel_degree=1
+    --parallelism.expert_parallel_degree=4
 ```
 
 ### Tests
@@ -298,6 +305,11 @@ This verifies that the aot_fx_trace path produces bitwise identical losses
 and gradients across runs, and matches eager numerics exactly. Any change
 that breaks this test must be investigated and fixed before proceeding with
 other tests.
+
+### Numerics Debugging
+
+For investigating numerics divergence, use the `numerics_debugging` skill at
+[`.claude/skills/numerics_debugging/SKILL.md`](../../../../.claude/skills/numerics_debugging/SKILL.md).
 
 ### Async Tensor Parallel (micro-pipeline TP)
 

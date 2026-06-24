@@ -6,19 +6,29 @@
 
 import unittest
 from dataclasses import dataclass
+from unittest.mock import patch
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
+from expecttest import assert_expected_inline
+from torch.distributed.tensor import distribute_tensor, Shard
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 
-from torchtitan.models.common.linear import Linear
+from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims, SpmdLayout
+from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList, Sequential
+from torchtitan.protocols.sharding import ShardingConfig
 
 
 class TestModuleInitStates(unittest.TestCase):
     """Tests for Module.init_states behavior."""
 
     def test_default_init_states_no_param_init_raises(self):
-        """Subclass with parameters but no param_init raises ValueError."""
+        """Subclass with own params but no param_init and no reset_parameters raises."""
 
         class SimpleModule(Module):
             def __init__(self):
@@ -28,6 +38,21 @@ class TestModuleInitStates(unittest.TestCase):
         m = SimpleModule()
         with self.assertRaises(ValueError):
             m.init_states()
+
+    def test_init_states_falls_back_to_reset_parameters(self):
+        """No param_init + reset_parameters available -> reset_parameters runs.
+
+        Wrappers like ``Linear``/``LayerNorm``/``Conv2d`` inherit
+        ``reset_parameters`` from their nn base; the base ``Module`` calls
+        it when no custom ``param_init`` is provided.
+        """
+        m = Linear.Config(in_features=4, out_features=8, bias=True).build()
+        nn.init.zeros_(m.weight)
+        nn.init.ones_(m.bias)
+        m.init_states()
+        # reset_parameters uses kaiming_uniform; result is non-zero, non-one.
+        self.assertFalse(torch.all(m.weight == 0))
+        self.assertFalse(torch.all(m.bias == 1))
 
     def test_init_states_auto_recurses(self):
         """init_states automatically recurses into Module children."""
@@ -139,57 +164,82 @@ class TestDiamondInheritance(unittest.TestCase):
             nn.Module.__init__ = orig_init
 
 
-class TestFromNnModule(unittest.TestCase):
-    """Tests for Module.from_nn_module utility."""
+class TestNnModuleWrappers(unittest.TestCase):
+    """Tests for native Module wrappers in nn_modules.py."""
 
     def test_is_subclass(self):
-        """Created class is subclass of both original and Module."""
-        Conv2d = Module.from_nn_module(nn.Conv2d)
+        """Wrapper class is subclass of both original and Module."""
+        from torchtitan.models.common.nn_modules import Conv2d
+
         self.assertTrue(issubclass(Conv2d, nn.Conv2d))
         self.assertTrue(issubclass(Conv2d, Module))
 
     def test_isinstance(self):
-        """Instance satisfies isinstance checks for both original and Module."""
-        Conv2d = Module.from_nn_module(nn.Conv2d)
-        m = Conv2d(3, 16, 3)
+        """Instance satisfies isinstance checks."""
+        from torchtitan.models.common.nn_modules import Conv2d
+
+        m = Conv2d.Config(
+            in_channels=3,
+            out_channels=16,
+            kernel_size=3,
+        ).build()
         self.assertIsInstance(m, nn.Conv2d)
         self.assertIsInstance(m, Module)
 
     def test_init_states_calls_reset_parameters(self):
-        """For classes with reset_parameters, init_states delegates to it."""
-        LayerNorm = Module.from_nn_module(nn.LayerNorm)
-        m = LayerNorm(32)
+        """init_states delegates to reset_parameters when no param_init."""
+        from torchtitan.models.common.nn_modules import LayerNorm
+
+        m = LayerNorm.Config(normalized_shape=32).build()
         nn.init.zeros_(m.weight)
         m.init_states()
         self.assertTrue(torch.allclose(m.weight, torch.ones(32)))
 
+    def test_init_states_uses_custom_param_init(self):
+        """Custom param_init runs instead of reset_parameters fallback.
+
+        Guards against the old ``from_nn_module`` regression where the
+        injected ``_init_self_parameters`` unconditionally called
+        ``reset_parameters`` and silently dropped ``param_init``.
+        """
+        from torchtitan.models.common.nn_modules import LayerNorm
+
+        m = LayerNorm.Config(
+            normalized_shape=8,
+            param_init={"weight": nn.init.zeros_, "bias": nn.init.zeros_},
+        ).build()
+        m.init_states()
+        self.assertTrue(torch.all(m.weight == 0))
+        self.assertTrue(torch.all(m.bias == 0))
+
     def test_init_states_noop_for_parameterless(self):
-        """For classes without reset_parameters, init_states is a no-op."""
-        GELU = Module.from_nn_module(nn.GELU)
-        m = GELU()
+        """Parameterless modules handle init_states without error."""
+        from torchtitan.models.common.nn_modules import GELU
+
+        m = GELU.Config(approximate="tanh").build()
         m.init_states()  # should not raise
 
-    def test_cache(self):
-        """Repeated calls return the same class object."""
-        cls1 = Module.from_nn_module(nn.Conv2d)
-        cls2 = Module.from_nn_module(nn.Conv2d)
-        self.assertIs(cls1, cls2)
-
     def test_forward_unchanged(self):
-        """Forward output is identical to original class."""
-        LayerNorm = Module.from_nn_module(nn.LayerNorm)
+        """Forward output is identical to plain nn module."""
+        from torchtitan.models.common.nn_modules import LayerNorm
+
         torch.manual_seed(42)
         orig = nn.LayerNorm(16)
-        wrapped = LayerNorm(16)
+        wrapped = LayerNorm.Config(normalized_shape=16).build()
         wrapped.load_state_dict(orig.state_dict())
         x = torch.randn(2, 16)
         torch.testing.assert_close(orig(x), wrapped(x))
 
     def test_state_dict_unchanged(self):
-        """state_dict keys and values match the original class."""
-        Conv2d = Module.from_nn_module(nn.Conv2d)
+        """state_dict keys and values match the plain nn module."""
+        from torchtitan.models.common.nn_modules import Conv2d
+
         orig = nn.Conv2d(3, 16, 3)
-        wrapped = Conv2d(3, 16, 3)
+        wrapped = Conv2d.Config(
+            in_channels=3,
+            out_channels=16,
+            kernel_size=3,
+        ).build()
         wrapped.load_state_dict(orig.state_dict())
         for key in orig.state_dict():
             self.assertIn(key, wrapped.state_dict())
@@ -197,14 +247,48 @@ class TestFromNnModule(unittest.TestCase):
                 orig.state_dict()[key], wrapped.state_dict()[key]
             )
 
+    def test_config_has_typed_fields(self):
+        """Config classes have proper typed fields."""
+        from torchtitan.models.common.nn_modules import LayerNorm
+        from torchtitan.protocols.sharding import ShardingConfig
+
+        self.assertTrue(issubclass(LayerNorm.Config, Module.Config))
+        cfg = LayerNorm.Config(normalized_shape=16, eps=1e-5)
+        self.assertIsNone(cfg.sharding_config)
+        self.assertIsNone(cfg.param_init)
+
+        cfg = LayerNorm.Config(
+            normalized_shape=16,
+            sharding_config=ShardingConfig(),
+        )
+        self.assertIsInstance(cfg.sharding_config, ShardingConfig)
+
+    def test_config_build_propagates_sharding(self):
+        """Config.build propagates sharding_config to instance."""
+        from torchtitan.models.common.nn_modules import LayerNorm
+        from torchtitan.protocols.sharding import ShardingConfig
+
+        sc = ShardingConfig()
+        instance = LayerNorm.Config(
+            normalized_shape=16,
+            eps=1e-5,
+            sharding_config=sc,
+        ).build()
+        self.assertIsInstance(instance, LayerNorm)
+        self.assertEqual(instance.normalized_shape, (16,))
+        self.assertEqual(instance.eps, 1e-5)
+        self.assertIs(instance._sharding_config, sc)
+
 
 class TestContainerInitStates(unittest.TestCase):
     """Tests for ModuleList, ModuleDict, Sequential init_states."""
 
     def test_module_list_init_states(self):
         """ModuleList.init_states initializes children."""
-        LayerNorm = Module.from_nn_module(nn.LayerNorm)
-        norms = ModuleList([LayerNorm(8) for _ in range(3)])
+        from torchtitan.models.common.nn_modules import LayerNorm
+
+        ln_cfg = LayerNorm.Config(normalized_shape=8)
+        norms = ModuleList([ln_cfg.build() for _ in range(3)])
         for n in norms:
             nn.init.zeros_(n.weight)
         norms.init_states()
@@ -213,8 +297,10 @@ class TestContainerInitStates(unittest.TestCase):
 
     def test_module_dict_init_states(self):
         """ModuleDict.init_states initializes children."""
-        LayerNorm = Module.from_nn_module(nn.LayerNorm)
-        norms = ModuleDict({"a": LayerNorm(8), "b": LayerNorm(8)})
+        from torchtitan.models.common.nn_modules import LayerNorm
+
+        ln_cfg = LayerNorm.Config(normalized_shape=8)
+        norms = ModuleDict({"a": ln_cfg.build(), "b": ln_cfg.build()})
         for n in norms.values():
             nn.init.zeros_(n.weight)
         norms.init_states()
@@ -223,8 +309,9 @@ class TestContainerInitStates(unittest.TestCase):
 
     def test_sequential_init_states(self):
         """Sequential.init_states recurses into children."""
-        GELU = Module.from_nn_module(nn.GELU)
-        seq = Sequential(GELU())
+        from torchtitan.models.common.nn_modules import GELU
+
+        seq = Sequential(GELU.Config().build())
         seq.init_states()  # should not raise
 
     def test_containers_are_module(self):
@@ -268,6 +355,65 @@ class TestConfigBuildPropagatesParamInit(unittest.TestCase):
         self.assertTrue(torch.all(m.linear.weight == 1))
 
 
+class TestModuleRedistributionDTensor(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 2
+
+    def _parallel_dims(self):
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=self.world_size,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+        )
+        with patch(
+            "torchtitan.distributed.parallel_dims.device_type", self.device_type
+        ):
+            parallel_dims.build_mesh()
+        return parallel_dims
+
+    class Identity(Module):
+        def forward(self, x):
+            return x
+
+    @with_comms
+    def test_dtensor_must_match_declared_src_shardings(self):
+        parallel_dims = self._parallel_dims()
+        mesh = parallel_dims.get_mesh("tp")
+        module = self.Identity()
+        module._sharding_config = ShardingConfig()
+        module._sharding_config.in_src_shardings = {
+            "x": SpmdLayout({MeshAxisName.TP: spmd.R})
+        }
+        module._sharding_config.out_src_shardings = SpmdLayout(
+            {MeshAxisName.TP: spmd.R}
+        )
+        module._cache_pos_arg_names()
+        x = distribute_tensor(
+            torch.randn(4, 4, device=self.device_type),
+            mesh,
+            (Shard(0),),
+        )
+
+        with self.assertRaises(ValueError) as cm:
+            module._redistribute_inputs(parallel_dims, (x,), {})
+        assert_expected_inline(
+            str(cm.exception),
+            """Identity.x: input DTensor has placements (Shard(dim=0),), but in_src_shardings expects (Replicate(),).""",
+        )
+
+        with self.assertRaises(ValueError) as cm:
+            module._redistribute_outputs(parallel_dims, x)
+        assert_expected_inline(
+            str(cm.exception),
+            """Identity: output DTensor has placements (Shard(dim=0),), but out_src_shardings expects (Replicate(),).""",
+        )
+
+
 class TestVerifyModuleProtocol(unittest.TestCase):
     """Tests for BaseModel.verify_module_protocol."""
 
@@ -278,7 +424,7 @@ class TestVerifyModuleProtocol(unittest.TestCase):
         class GoodModel(BaseModel):
             @dataclass(kw_only=True, slots=True)
             class Config(BaseModel.Config):
-                def update_from_config(self, *, trainer_config, **kwargs):
+                def update_from_config(self, *, config, **kwargs):
                     pass
 
                 def get_nparams_and_flops(self, model, seq_len):
@@ -299,7 +445,7 @@ class TestVerifyModuleProtocol(unittest.TestCase):
         class BadModel(BaseModel):
             @dataclass(kw_only=True, slots=True)
             class Config(BaseModel.Config):
-                def update_from_config(self, *, trainer_config, **kwargs):
+                def update_from_config(self, *, config, **kwargs):
                     pass
 
                 def get_nparams_and_flops(self, model, seq_len):
@@ -320,7 +466,7 @@ class TestVerifyModuleProtocol(unittest.TestCase):
         class ThirdPartyModel(BaseModel):
             @dataclass(kw_only=True, slots=True)
             class Config(BaseModel.Config):
-                def update_from_config(self, *, trainer_config, **kwargs):
+                def update_from_config(self, *, config, **kwargs):
                     pass
 
                 def get_nparams_and_flops(self, model, seq_len):

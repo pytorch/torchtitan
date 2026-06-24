@@ -155,6 +155,11 @@ class TraceEventsOnlyFilter(logging.Filter):
         return False
 
 
+# TODO(observability): rename `rank` -> `mesh_rank`. The value is the rank within
+# the actor's proc mesh (`current_rank().rank`), not globally unique across
+# multiple RL meshes (e.g. trainer + generator each start at 0).
+# TODO(observability): handle duplicate `source` across actor meshes -- today
+# (source, rank) collides if two meshes share a name (e.g. two generators).
 def init_structured_logger(
     source: str, output_dir: str, rank: int | None = None, enable: bool = True
 ) -> None:
@@ -176,7 +181,7 @@ def init_structured_logger(
     Example::
 
         init_structured_logger(source="trainer", output_dir="./outputs")
-        log_trace_instant("binary_start")
+        log_trace_instant("structured_logger_started")
     """
     global _is_initialized, _disabled
 
