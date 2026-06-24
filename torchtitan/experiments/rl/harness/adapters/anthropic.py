@@ -478,11 +478,8 @@ async def _handle_messages(request: web.Request) -> web.StreamResponse:
                         extends_previous=extends_previous,
                     )
                 )
-                # Match the request's transport: a streaming client (stream=True)
-                # that gets a one-shot JSON body here sees no SSE events and aborts
-                # with "Stream ended without receiving any events", turning a clean
-                # context-budget stop into a hard error. Emit an SSE max_tokens stop
-                # for streaming requests, JSON otherwise.
+                # Streaming clients (stream=True) abort with "Stream ended ..." on a
+                # one-shot JSON body, so emit SSE for them; JSON otherwise.
                 empty_blocks = [{"type": "text", "text": ""}]
                 if body.get("stream") is True or "text/event-stream" in (
                     request.headers.get("Accept", "")

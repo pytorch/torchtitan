@@ -133,12 +133,8 @@ class DaytonaSandbox:
             auto_stop_interval=auto_stop,
             auto_delete_interval=auto_delete,
         )
-        # Daytona create/auth is occasionally flaky under a wide rollout fanout: the
-        # control plane transiently rejects a valid API key with 401 "Bearer token
-        # is invalid" (rate-limit-like) when many sandboxes boot at once -- observed
-        # at the tail of a long over-collected step, ~12% of that round's boots.
-        # Retry with JITTERED exponential backoff: a synchronized 64-way retry storm
-        # would re-hit the same rate-limit window, so spread retries over [0.5, 1.5)x.
+        # Daytona create transiently 401s a valid key under a concurrent boot burst.
+        # Retry with jittered backoff so a wide fanout does not retry in lockstep.
         retries = int(_getenv("TT_DAYTONA_CREATE_RETRIES", default="5"))
         backoff = 5.0
         for attempt in range(retries + 1):
@@ -246,10 +242,8 @@ class DaytonaSandbox:
                     pass
                 if attempt >= retries:
                     raise
-                # JITTERED backoff: create_session transiently 401s ("Bearer token
-                # is invalid") under a concurrent boot burst; a synchronized 64-way
-                # retry storm re-hits the same rate-limit window, so spread retries
-                # over [0.5, 1.5)x the backoff to de-correlate them.
+                # Jittered backoff: spread retries over [0.5, 1.5)x so a wide
+                # fanout does not retry in lockstep against the same rate limit.
                 await asyncio.sleep(backoff * (0.5 + random.random()))
                 backoff = min(backoff * 2, 60.0)
 
@@ -257,11 +251,8 @@ class DaytonaSandbox:
         deadline = loop.time() + timeout + 120.0
 
         async def poll():
-            # Daytona transiently returns an empty exit_code string (not null)
-            # while a command is still finishing; the SDK then raises DaytonaError
-            # "failed to convert exit code to int: strconv.Atoi: parsing ''".
-            # Treat that as "still running" and keep polling. A targeted match
-            # (not a blanket except) lets real errors (sandbox deleted) propagate.
+            # Daytona briefly returns an empty exit_code mid-command; the SDK then
+            # raises "convert exit code to int". Treat only that as "still running".
             try:
                 return await self._sb.process.get_session_command(sid, cid)
             except Exception as e:
