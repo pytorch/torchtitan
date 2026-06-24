@@ -290,6 +290,10 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
 
         Runs _LossParallelCrossEntropy under typing checking: logits S(2)@TP, labels I@TP -> I@TP.
         """
+        # Ensure the determinism.
+        torch.use_deterministic_algorithms(True)
+        torch.set_num_threads(1)
+
         B, L = 4, 32
         mesh_configs = (
             ((4,), ("tp",), (Shard(2),), (Replicate(),)),

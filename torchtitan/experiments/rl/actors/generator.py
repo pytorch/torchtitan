@@ -375,7 +375,7 @@ class VLLMGenerator(Actor, Configurable):
             (VarlenAttention.Config, FlexAttention.Config),
         ), "Only varlen and flex attention backends are allowed."
 
-        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         set_batch_invariance(config.debug.batch_invariant)
         if config.debug.batch_invariant:
             # batch_invariant_ops (via set_batch_invariance) covers

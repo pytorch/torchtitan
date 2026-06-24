@@ -564,6 +564,7 @@ class Module(nn.Module, Configurable):
 
                 # SPMD source placements are part of the config contract: assert
                 # before redistributing so typechecking catches placement mismatch.
+                # Gate assertion so compile doesn't error.
                 if spmd.is_type_checking():
                     spmd.assert_type(
                         value,
@@ -659,6 +660,7 @@ class Module(nn.Module, Configurable):
                 )
             # SPMD source placements are part of the config contract: assert
             # before redistributing so typechecking catches placement mismatch.
+            # Gate assertion so compile doesn't error.
             if spmd.is_type_checking():
                 spmd.assert_type(
                     outputs,

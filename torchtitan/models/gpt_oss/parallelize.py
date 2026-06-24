@@ -4,12 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import torch._dynamo
+
 from torchtitan.config import (
     CompileConfig,
     ParallelismConfig,
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
+
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile
@@ -21,6 +24,36 @@ from torchtitan.distributed.full_dtensor import (
     validate_config,
 )
 from torchtitan.models.gpt_oss.model import GptOssModel
+
+
+def _raise_dynamo_recompile_limit(
+    model: GptOssModel,
+) -> None:
+    # TP/EP sharding can compile a block before every DTensor local tensor has
+    # resolved from AsyncCollectiveTensor to a plain Tensor. Dynamo specializes
+    # on both states, and fullgraph=True turns the recompile cap into a hard
+    # failure instead of falling back. GPT-OSS needs a slightly higher cap
+    # because it alternates sliding-window and full-attention layers.
+    # TODO: remove once https://github.com/pytorch/pytorch/issues/187073 is fixed
+    min_recompile_limit = 12 if _has_sliding_window_attention(model) else 10
+    # PyTorch types this config as Literal[8], but runtime accepts larger ints.
+    # pyrefly: ignore [bad-assignment]
+    torch._dynamo.config.recompile_limit = max(
+        torch._dynamo.config.recompile_limit,
+        min_recompile_limit,
+    )
+
+
+def _has_sliding_window_attention(model: GptOssModel) -> bool:
+    for module in model.modules():
+        window_size = getattr(module, "window_size", None)
+        if (
+            isinstance(window_size, (tuple, list))
+            and len(window_size) > 0
+            and window_size[0] != -1
+        ):
+            return True
+    return False
 
 
 def parallelize_gptoss(
@@ -65,6 +98,8 @@ def parallelize_gptoss(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
+        if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+            _raise_dynamo_recompile_limit(model)
         apply_compile(model, compile_config)
 
     # Skip FSDP wrapper for inference. FSDP's forward hooks
