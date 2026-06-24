@@ -20,6 +20,7 @@ Usage:
 """
 
 import copy
+import importlib.util
 from unittest import mock
 
 import torch
@@ -282,6 +283,8 @@ class TestBucketPlacementValidation(TestCase):
 
     def test_grouped_owned_expert_block_unshard_is_view_out(self):
         """GroupedOwned can preserve packed expert tensors for grouped-mm."""
+        if importlib.util.find_spec("triton") is None:
+            self.skipTest("Triton is required for GroupedOwned CUDA segment packing.")
 
         class TinyExperts(nn.Module):
             def __init__(self) -> None:
@@ -294,8 +297,9 @@ class TestBucketPlacementValidation(TestCase):
                     (torch.arange(24, dtype=torch.float32) + 200).view(4, 2, 3)
                 )
 
-        with single_rank_cpu_mesh() as mesh:
-            model = TinyExperts()
+        with single_rank_cuda_mesh() as mesh:
+            device = torch.device("cuda", torch.cuda.current_device())
+            model = TinyExperts().to(device)
             named_params = list(model.named_parameters())
             original_params = {
                 fqn: param.detach().clone() for fqn, param in named_params
@@ -341,7 +345,7 @@ class TestBucketPlacementValidation(TestCase):
                 named_params,
                 {fqn: (placement,) for fqn, _ in named_params},
                 mesh,
-                torch.device("cpu"),
+                device,
                 bucket_spec,
             )
             infos = [bucket_storage.param_infos[fqn] for fqn, _ in named_params]
@@ -384,6 +388,8 @@ class TestBucketPlacementValidation(TestCase):
 
     def test_grouped_owned_full_param_unshard_is_view_out(self):
         """Whole-param GroupedOwned exposes contiguous full-param views."""
+        if importlib.util.find_spec("triton") is None:
+            self.skipTest("Triton is required for GroupedOwned CUDA segment packing.")
 
         class TinyDense(nn.Module):
             def __init__(self) -> None:
@@ -393,8 +399,9 @@ class TestBucketPlacementValidation(TestCase):
                     (torch.arange(8, dtype=torch.float32) + 10).view(4, 2)
                 )
 
-        with single_rank_cpu_mesh() as mesh:
-            model = TinyDense()
+        with single_rank_cuda_mesh() as mesh:
+            device = torch.device("cuda", torch.cuda.current_device())
+            model = TinyDense().to(device)
             named_params = list(model.named_parameters())
             original_params = {
                 fqn: param.detach().clone() for fqn, param in named_params
@@ -431,7 +438,7 @@ class TestBucketPlacementValidation(TestCase):
                 named_params,
                 {fqn: (placement,) for fqn, _ in named_params},
                 mesh,
-                torch.device("cpu"),
+                device,
                 bucket_spec,
             )
             infos = [bucket_storage.param_infos[fqn] for fqn, _ in named_params]
@@ -526,6 +533,75 @@ class TestBucketPlacementValidation(TestCase):
             )
             self.assertEqual(second.buffers[0].data_ptr(), first_ptr)
             other_placement.reduce_prepared_grad(second)
+
+    def test_grouped_owned_unshard_uses_triton_segment_pack(self):
+        """GroupedOwned packs forward all-gather sends with descriptor Triton."""
+        if importlib.util.find_spec("triton") is None:
+            self.skipTest("Triton is required for GroupedOwned CUDA segment packing.")
+
+        from torchtitan.experiments.flex_shard.example import owned as owned_module
+
+        with single_rank_cuda_mesh() as mesh:
+            placement = GroupedOwned(
+                {
+                    "a": [GroupedOwnedSegmentSpec("a#0", "a", 0, 4, 0)],
+                    "b": [GroupedOwnedSegmentSpec("b#0", "b", 0, 3, 0)],
+                }
+            )
+            local_shards = [
+                torch.arange(4, dtype=torch.float32, device="cuda").view(2, 2),
+                torch.arange(3, dtype=torch.float32, device="cuda").add(10),
+            ]
+            infos = [
+                ParamInfo(
+                    fqn="a",
+                    global_shape=local_shards[0].shape,
+                    global_stride=tuple(local_shards[0].stride()),
+                    dtype=torch.float32,
+                    param_dtype=torch.bfloat16,
+                    requires_grad=True,
+                    placements=(placement,),
+                    local_shape=local_shards[0].shape,
+                    local_numel=local_shards[0].numel(),
+                    global_numel=local_shards[0].numel(),
+                ),
+                ParamInfo(
+                    fqn="b",
+                    global_shape=local_shards[1].shape,
+                    global_stride=tuple(local_shards[1].stride()),
+                    dtype=torch.float32,
+                    param_dtype=torch.bfloat16,
+                    requires_grad=True,
+                    placements=(placement,),
+                    local_shape=local_shards[1].shape,
+                    local_numel=local_shards[1].numel(),
+                    global_numel=local_shards[1].numel(),
+                ),
+            ]
+
+            with mock.patch.object(
+                owned_module,
+                "pack_segments_into_flat_buffer_triton_if_supported",
+                wraps=owned_module.pack_segments_into_flat_buffer_triton_if_supported,
+            ) as pack:
+                prepared = placement.prepare_unshard_bucket(
+                    local_shards,
+                    infos,
+                    mesh,
+                    None,
+                )
+            torch.cuda.synchronize()
+
+            self.assertEqual(pack.call_count, 1)
+            self.assertEqual(prepared.buffers[0].dtype, torch.bfloat16)
+            self.assertEqual(
+                prepared.buffers[0].float(),
+                torch.tensor(
+                    [0, 1, 2, 3, 10, 11, 12],
+                    dtype=torch.float32,
+                    device="cuda",
+                ),
+            )
 
     def test_rejects_shard_dim_out_of_range(self):
         """Placement layout validation happens during bucket storage planning."""
