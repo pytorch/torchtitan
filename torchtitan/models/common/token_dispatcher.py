@@ -21,7 +21,7 @@ from torchtitan.distributed.minimal_async_ep import (
 )
 from torchtitan.distributed.spmd_types import (
     current_spmd_mesh,
-    set_sparse_mesh,
+    maybe_set_sparse_mesh,
 )
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.ops.scatter_add import deterministic_scatter_add
@@ -307,52 +307,85 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             topk_scores_experts_sorted_N,
         ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
 
-        # generate the input splits and output splits for all-to-all
-        with torch.no_grad(), spmd.no_typecheck():
-            num_global_tokens_per_local_expert_E = all_to_all_single(
-                num_local_tokens_per_expert_E,
-                None,
-                None,
-                group=self.ep_mesh,
-            )
-            # Need to wait explicitly because it is used by a triton kernel later
-            # which doesn't realize that AsyncCollectiveTensor needs unwrapping
-            num_global_tokens_per_local_expert_E = (
-                torch.ops._c10d_functional.wait_tensor(
-                    num_global_tokens_per_local_expert_E
-                )
-            )
-            if get_spmd_backend() == "spmd_types":
-                # re-annotate after no-typecheck
-                spmd.assert_type(
-                    num_global_tokens_per_local_expert_E,
-                    {"dp_replicate": spmd.P, "efsdp": spmd.P, "ep": spmd.S(0)},
-                )
-            input_splits = (
-                num_local_tokens_per_expert_E.view(ep_size, -1)
-                .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=True)
-            )
-            # NOTE: this would incur a device-to-host sync
-            output_splits = (
-                num_global_tokens_per_local_expert_E.view(ep_size, -1)
-                .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=False)
-            )
-            input_splits_list = input_splits.tolist()
-            output_splits_list = output_splits.tolist()
+        use_spmd_types = get_spmd_backend() == "spmd_types"
+        if use_spmd_types and spmd.is_type_checking():  # sparse mesh reinterpret
+            for axis in ["dp", "cp", "tp"]:
+                spmd.mutate_type(num_local_tokens_per_expert_E, axis, src=spmd.P, dst=spmd.V)
 
-        with set_sparse_mesh():
+        # generate the input splits and output splits for all-to-all
+        with maybe_set_sparse_mesh():
             pg = (
                 current_spmd_mesh().get_group("ep")
-                if get_spmd_backend() == "spmd_types"
+                if use_spmd_types
                 else self.ep_mesh.get_group()
             )
-            if get_spmd_backend() == "spmd_types":
-                if spmd.is_type_checking():  # sparse mesh reinterpret
-                    routed_input_ND = spmd.reinterpret_mesh(
-                        routed_input_ND, spmd.current_mesh()
+            if use_spmd_types:
+                num_local_tokens_per_expert_E = spmd.reinterpret_mesh(
+                    num_local_tokens_per_expert_E, spmd.current_mesh()
+                )
+                routed_input_ND = spmd.reinterpret_mesh(
+                    routed_input_ND, spmd.current_mesh()
+                )
+
+            with torch.no_grad():
+                if use_spmd_types:
+                    num_local_tokens_per_expert_EP_e = (
+                        num_local_tokens_per_expert_E.view(ep_size, -1)
                     )
+                    num_global_tokens_per_local_expert_EP_e = spmd.all_to_all(
+                        num_local_tokens_per_expert_EP_e,
+                        pg,
+                        src=spmd.V,
+                        dst=spmd.V,
+                    )
+                    # Need to wait explicitly because it is used by a triton kernel later
+                    # which doesn't realize that AsyncCollectiveTensor needs unwrapping
+                    num_global_tokens_per_local_expert_EP_e = (
+                        torch.ops._c10d_functional.wait_tensor(
+                            num_global_tokens_per_local_expert_EP_e
+                        )
+                    )
+                    num_global_tokens_per_local_expert_E = (
+                        num_global_tokens_per_local_expert_EP_e.reshape(-1)
+                    )
+                    input_splits = (
+                        num_local_tokens_per_expert_EP_e.sum(dim=1)
+                        .to(torch.device("cpu"), non_blocking=True)
+                    )
+                    # NOTE: this would incur a device-to-host sync
+                    output_splits = (
+                        num_global_tokens_per_local_expert_EP_e.sum(dim=1)
+                        .to(torch.device("cpu"), non_blocking=False)
+                    )
+                else:
+                    with spmd.no_typecheck():
+                        num_global_tokens_per_local_expert_E = all_to_all_single(
+                            num_local_tokens_per_expert_E,
+                            None,
+                            None,
+                            group=self.ep_mesh,
+                        )
+                        # Need to wait explicitly because it is used by a triton kernel later
+                        # which doesn't realize that AsyncCollectiveTensor needs unwrapping
+                        num_global_tokens_per_local_expert_E = (
+                            torch.ops._c10d_functional.wait_tensor(
+                                num_global_tokens_per_local_expert_E
+                            )
+                        )
+                        input_splits = (
+                            num_local_tokens_per_expert_E.view(ep_size, -1)
+                            .sum(dim=1)
+                            .to(torch.device("cpu"), non_blocking=True)
+                        )
+                        # NOTE: this would incur a device-to-host sync
+                        output_splits = (
+                            num_global_tokens_per_local_expert_E.view(ep_size, -1)
+                            .sum(dim=1)
+                            .to(torch.device("cpu"), non_blocking=False)
+                        )
+                input_splits_list = input_splits.tolist()
+                output_splits_list = output_splits.tolist()
+
             routed_input_RD = spmd.all_to_all(
                 routed_input_ND,
                 pg,
@@ -409,17 +442,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         e = num_global_tokens_per_local_expert_E.shape[0] // ep_size
         device = num_global_tokens_per_local_expert_E.device
         total = routed_input_RD.shape[0]
-
-        if get_spmd_backend() == "spmd_types":
-            # Counts below become local segment lengths/offsets, and the expert
-            # offsets passed to grouped_mm after this function returns.
-            for axis in ("dp_replicate", "efsdp"):
-                spmd.mutate_type(
-                    num_global_tokens_per_local_expert_E,
-                    axis,
-                    src=spmd.P,
-                    dst=spmd.V,
-                )
 
         # (EP, e) matrix of token counts per (rank, local_expert)
         t_mat = num_global_tokens_per_local_expert_E.view(ep_size, e)
@@ -504,7 +526,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 local_seq_len_after_padding=local_seq_len_after_padding,
             )
 
-        with set_sparse_mesh():
+        with maybe_set_sparse_mesh():
             pg = (
                 current_spmd_mesh().get_group("ep")
                 if get_spmd_backend() == "spmd_types"
