@@ -96,6 +96,7 @@ class DaytonaSandbox:
 
     async def __aenter__(self) -> DaytonaSandbox:
         import asyncio
+        import random
 
         from daytona import CreateSandboxFromImageParams, Resources  # type: ignore
 
@@ -132,10 +133,13 @@ class DaytonaSandbox:
             auto_stop_interval=auto_stop,
             auto_delete_interval=auto_delete,
         )
-        # Daytona create is occasionally flaky (transient DaytonaAuthenticationError
-        # or 5xx from the control plane -- ~4% of boots in a wide rollout fanout).
-        # Retry with exponential backoff; a single bad boot should not lose a sample.
-        retries = int(_getenv("TT_DAYTONA_CREATE_RETRIES", default="3"))
+        # Daytona create/auth is occasionally flaky under a wide rollout fanout: the
+        # control plane transiently rejects a valid API key with 401 "Bearer token
+        # is invalid" (rate-limit-like) when many sandboxes boot at once -- observed
+        # at the tail of a long over-collected step, ~12% of that round's boots.
+        # Retry with JITTERED exponential backoff: a synchronized 64-way retry storm
+        # would re-hit the same rate-limit window, so spread retries over [0.5, 1.5)x.
+        retries = int(_getenv("TT_DAYTONA_CREATE_RETRIES", default="5"))
         backoff = 5.0
         for attempt in range(retries + 1):
             try:
@@ -150,7 +154,7 @@ class DaytonaSandbox:
                     retries + 1,
                     e,
                 )
-                await asyncio.sleep(backoff)
+                await asyncio.sleep(backoff * (0.5 + random.random()))
                 backoff = min(backoff * 2, 60.0)
         self.sandbox_id = self._sb.id
         return self
@@ -214,6 +218,7 @@ class DaytonaSandbox:
         """
         import asyncio
         import os
+        import random
         import uuid
 
         from daytona import SessionExecuteRequest
@@ -241,7 +246,11 @@ class DaytonaSandbox:
                     pass
                 if attempt >= retries:
                     raise
-                await asyncio.sleep(backoff)
+                # JITTERED backoff: create_session transiently 401s ("Bearer token
+                # is invalid") under a concurrent boot burst; a synchronized 64-way
+                # retry storm re-hits the same rate-limit window, so spread retries
+                # over [0.5, 1.5)x the backoff to de-correlate them.
+                await asyncio.sleep(backoff * (0.5 + random.random()))
                 backoff = min(backoff * 2, 60.0)
 
         loop = asyncio.get_event_loop()
