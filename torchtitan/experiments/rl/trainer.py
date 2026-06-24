@@ -205,6 +205,8 @@ class RLTrainer(Configurable):
         self.config = config
         self.trainer: PolicyTrainer | None = None
         self.generator_router: GeneratorRouter | None = None
+        # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.
+        self.start_step = 0
         self._proc_meshes = []
         self.metrics_processor: m.MetricsProcessor = config.metrics.build(
             log_dir=config.dump_folder,
@@ -382,11 +384,22 @@ class RLTrainer(Configurable):
         with sl.log_trace_span("torchstore_init"):
             await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
 
+        # The trainer's __init__ already ran CheckpointManager.load(); read back
+        # the restored policy_version (0 if fresh) so the loop resumes at the
+        # right step and the generators pull weights at the matching version.
+        self.start_step = self._get_rank_0_value(
+            await self.trainer.get_policy_version.call()
+        )
+        if self.start_step > 0:
+            logger.info(f"Resuming RL training from step {self.start_step}")
+
         # Initial weight sync from trainer to generator
         with sl.log_trace_span("trainer_push_model_state_dict"):
             await self.trainer.push_model_state_dict.call()
         with sl.log_trace_span("generator_pull_model_state_dict"):
-            await self.generator_router.pull_model_state_dict(policy_version=0)
+            await self.generator_router.pull_model_state_dict(
+                policy_version=self.start_step
+            )
 
     @sl.log_trace_span("_collect_rollouts")
     async def _collect_rollouts(
@@ -638,12 +651,17 @@ class RLTrainer(Configurable):
     async def train(self):
         num_steps = self.config.num_steps
         num_groups = self.config.num_groups_per_rollout_batch
-        logger.info(f"Pre-training validation; then {num_steps} steps of RL training")
+        start_step = self.start_step  # 0 fresh, >0 when resuming a checkpoint
+        logger.info(
+            f"Pre-training validation; then RL training steps "
+            f"{start_step + 1}..{num_steps}"
+        )
 
-        # collect validation metrics before training to compare before/after
-        pre_validation_metrics = await self.validate(step=0)
+        # Validation before training to compare before/after. On resume the
+        # baseline is the restored policy at `start_step`.
+        pre_validation_metrics = await self.validate(step=start_step)
         self.metrics_processor.log(
-            step=0,
+            step=start_step,
             metrics=pre_validation_metrics,
             is_validation=True,
         )
@@ -653,7 +671,7 @@ class RLTrainer(Configurable):
 
         sl.log_trace_instant("training_start")
 
-        for step in range(1, num_steps + 1):
+        for step in range(start_step + 1, num_steps + 1):
             sl.set_step(step)
 
             # Propagate the step counter to actors for structured logging.
@@ -812,6 +830,15 @@ class RLTrainer(Configurable):
             if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
                 logger.error("Loss is NaN/Inf; training diverged")
                 break
+
+            # --- checkpoint ---
+            # Save full training state for resume; CheckpointManager writes only
+            # on its interval and the final step. After the divergence check so a
+            # NaN step is not checkpointed.
+            with sl.log_trace_span("trainer_save_checkpoint"):
+                await self.trainer.save_checkpoint.call(
+                    step, last_step=(step == num_steps)
+                )
 
             # --- periodic validation ---
             # TODO(async): validation is generation-only, so overlap it with the next
