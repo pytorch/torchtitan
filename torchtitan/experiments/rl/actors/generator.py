@@ -146,10 +146,10 @@ def _prepare_generation_request_metrics(
     ]
 
 
-# vLLM's chunked-prefill chunk size (max_num_batched_tokens). "FULL" also graphs
-# prefill, whose per-step token count is bounded by this, so its capture sizes
-# must reach it (else prefill falls back to eager). The generator does not
-# override max_num_batched_tokens, so this is vLLM's default.
+# vLLM's chunked-prefill chunk size (max_num_batched_tokens). "FULL" and
+# "PIECEWISE" also graph prefill, whose per-step token count is bounded by this,
+# so their capture sizes must reach it (else prefill falls back to eager). The
+# generator does not override max_num_batched_tokens, so this is vLLM's default.
 # TODO: this value still needs discussion -- ideally read the engine's actual
 # max_num_batched_tokens rather than hardcoding the default.
 _VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
@@ -172,19 +172,23 @@ class VLLMCudagraphConfig:
     enable: bool = True
     """Whether to enable CUDA graph capture."""
 
-    mode: Literal["FULL_DECODE_ONLY", "FULL"] = "FULL_DECODE_ONLY"
+    mode: Literal[
+        "FULL_DECODE_ONLY", "FULL_AND_PIECEWISE", "PIECEWISE", "FULL"
+    ] = "FULL_DECODE_ONLY"
     """Which vLLM cudagraph mode to capture (when ``enable``):
 
     - ``"FULL_DECODE_ONLY"`` (default): graph pure-decode batches; prefill / mixed
-      batches run eager. Cheap (no inductor compile) and the only mode that is
-      correct with our varlen/FA3 attention backend (#3668).
-    - ``"FULL"``: graph the whole forward, prefill included. Corrupts generation
-      with our varlen backend (#3668); kept for experiments / repro only.
-
-    FULL_AND_PIECEWISE (graph prefill piecewise around attention) is not offered:
-    the only correct path is vLLM's slow whole-model inductor compile, and the
-    cheap path (breakable cudagraph) corrupts because our varlen attention op
-    lacks an eager break-point. See #3709.
+      batches run eager. Cheap (no inductor compile) and correct with our
+      varlen/FA3 attention backend (#3668).
+    - ``"FULL_AND_PIECEWISE"``: FULL graph for pure single-token decode (whole
+      forward incl. attention -- safe because decode has a fixed query_len==1
+      layout) AND breakable PIECEWISE for prefill / mixed batches (attention runs
+      eager at a stream-capture break). Best coverage: the common decode path
+      gets a full graph while only mixed batches pay the eager-break cost.
+      Requires ``VLLM_USE_BREAKABLE_CUDAGRAPH=1``.
+    - ``"FULL"``: graph the whole forward, prefill included, attention captured
+      too. Only valid with the flex attention backend, which survives FULL
+      capture of mixed prefill+decode batches
     """
 
     # TODO: Validate CUDA graph capture with MoE / Expert Parallelism.
@@ -204,18 +208,21 @@ class VLLMCudagraphConfig:
 
         Capture sizes are powers of 2 up to the cap, plus ``max_num_seqs`` itself
         so the decode batch is captured exactly. The cap is ``max_num_seqs`` for
-        ``FULL_DECODE_ONLY`` (decode batch == num_seqs); ``FULL`` also graphs
-        prefill, so it extends to the prefill chunk size.
+        ``FULL_DECODE_ONLY`` (decode batch == num_seqs); ``FULL``, ``PIECEWISE``
+        and ``FULL_AND_PIECEWISE`` also graph prefill, so they extend to the
+        prefill chunk size.
 
-        ``mode=CompilationMode.NONE`` captures cudagraphs without vLLM's
-        whole-model inductor compile, which we never use (#3709).
+        All modes capture with ``mode=CompilationMode.NONE`` (no inductor compile).
+        ``PIECEWISE`` / ``FULL_AND_PIECEWISE`` run attention eager via vLLM's
+        BREAKABLE cudagraph, which requires ``VLLM_USE_BREAKABLE_CUDAGRAPH=1``
+        (vLLM itself also forces ``mode=NONE`` when that env is set) (#3709).
         """
         if not self.enable:
             return None
         if max_num_seqs <= 0:
             raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}")
         cap = max_num_seqs
-        if self.mode == "FULL":
+        if self.mode in ("FULL", "PIECEWISE", "FULL_AND_PIECEWISE"):
             cap = max(cap, _VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS)
         sizes = [1 << i for i in range(int(math.log2(cap)) + 1)]
         if max_num_seqs not in sizes:
@@ -699,6 +706,16 @@ class VLLMGenerator(Actor, Configurable):
         self.model_spec = model_spec
 
         self._max_num_seqs = max_num_seqs
+
+        # Breakable cudagraph modes (PIECEWISE / FULL_AND_PIECEWISE) run attention
+        # eager via the @eager_break_during_capture decorator in models/attention.py,
+        # which reads VLLM_USE_BREAKABLE_CUDAGRAPH at import time -- so the env must be
+        # set before register_to_vllm imports that module (#3709).
+        if config.cudagraph.enable and config.cudagraph.mode in (
+            "PIECEWISE",
+            "FULL_AND_PIECEWISE",
+        ):
+            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
 
         # Register TorchTitan model + parser with vLLM
         register_to_vllm(
