@@ -11,6 +11,8 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from torchtitan.experiments.flex_shard import is_flex_shard_param
 from torchtitan.experiments.flex_shard.flex_shard.bucket_runtime import (
     _accumulate_sharded_grads,
+    _BucketUnshard,
+    BucketCommContext,
     ParamOwnerRef,
 )
 from torchtitan.experiments.flex_shard.flex_shard.unsharded_param_getters import (
@@ -87,6 +89,39 @@ class TestRafSavedTensorContext(TestCase):
 
 
 class TestFlexShardEagerRuntime(TestCase):
+    def test_bucket_unshard_backward_releases_raf_saved_unshard_cache(self):
+        class _BucketStorage:
+            _reshard_after_forward = True
+
+        bucket_storage = _BucketStorage()
+        bucket_id = id(bucket_storage)
+
+        class _Context:
+            release_raf_saved_unshard_cache = (
+                BucketCommContext.release_raf_saved_unshard_cache
+            )
+
+            def __init__(self) -> None:
+                self.raf_saved_unshard_cache = {bucket_id: [torch.ones(1)]}
+
+        class _Bucket:
+            pass
+
+        bucket = _Bucket()
+        bucket.context = _Context()
+        bucket.bucket_storage = bucket_storage
+        bucket.bucket_params = []
+
+        ctx = type("_Ctx", (), {})()
+        ctx.runtime = type("_Runtime", (), {"bucket": bucket})()
+        ctx.num_inputs = 0
+        ctx.local_shard_dtypes = ()
+
+        self.assertIn(bucket_id, ctx.runtime.bucket.context.raf_saved_unshard_cache)
+        result = _BucketUnshard.backward(ctx)
+        self.assertEqual(result, (None,))
+        self.assertNotIn(bucket_id, ctx.runtime.bucket.context.raf_saved_unshard_cache)
+
     def test_accumulate_sharded_grads_matches_param_layout_for_fused_optimizer(self):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is required for fused AdamW.")

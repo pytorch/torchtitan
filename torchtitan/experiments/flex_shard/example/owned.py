@@ -746,6 +746,16 @@ class GroupedOwned(Placement):
             if padding > 0:
                 send_by_owner[owner].narrow(0, numel, padding).zero_()
 
+    def _zero_unshard_send_padding(
+        self,
+        send: torch.Tensor,
+        true_send_numel: int,
+        layout: _Layout,
+    ) -> None:
+        padding = layout.padded_rank_numel - true_send_numel
+        if padding > 0:
+            send.narrow(0, true_send_numel, padding).zero_()
+
     @staticmethod
     def _segment_source_offset(
         tensor: torch.Tensor,
@@ -794,6 +804,73 @@ class GroupedOwned(Placement):
         except RuntimeError:
             return None
         return flat_storage_span, offsets
+
+    def _pack_unshard_send_triton(
+        self,
+        send: torch.Tensor,
+        tensors: list[torch.Tensor],
+        infos: list[ParamInfo],
+        layout: _Layout,
+        rank: int,
+    ) -> list[torch.Tensor]:
+        if send.device.type != "cuda":
+            raise AssertionError("GroupedOwned Triton pack requires a CUDA send buffer.")
+        segments_by_fqn: dict[str, list[GroupedOwned._Segment]] = {}
+        for segment in layout.segments:
+            if segment.owner_rank == rank:
+                segments_by_fqn.setdefault(segment.fqn, []).append(segment)
+
+        inputs: list[torch.Tensor] = []
+        tensor_indices: list[int] = []
+        src_offsets: list[int] = []
+        numels: list[int] = []
+        dst_offsets: list[int] = []
+        input_dtype: torch.dtype | None = None
+        for tensor, info in zip(tensors, infos, strict=True):
+            segments = sorted(
+                segments_by_fqn.get(info.fqn, []),
+                key=lambda segment: segment.param_rank_offset,
+            )
+            if not segments:
+                continue
+            if not tensor.is_contiguous():
+                raise AssertionError(
+                    "GroupedOwned Triton unshard copy-in requires contiguous "
+                    f"local storage for {info.fqn!r}; got shape={tuple(tensor.shape)} "
+                    f"stride={tuple(tensor.stride())}."
+                )
+            flat_input = tensor.reshape(-1)
+            if input_dtype is None:
+                input_dtype = flat_input.dtype
+            elif flat_input.dtype != input_dtype:
+                raise AssertionError(
+                    "GroupedOwned Triton unshard copy-in requires one input dtype "
+                    f"per bucket, but got {input_dtype} and {flat_input.dtype}."
+                )
+            input_index = len(inputs)
+            inputs.append(flat_input)
+            for segment in segments:
+                tensor_indices.append(input_index)
+                src_offsets.append(segment.param_rank_offset)
+                numels.append(segment.numel)
+                dst_offsets.append(segment.rank_offset)
+
+        if not tensor_indices:
+            return []
+        pack_scratch = pack_segments_into_flat_buffer_triton_if_supported(
+            inputs,
+            tensor_indices,
+            src_offsets,
+            numels,
+            dst_offsets,
+            send,
+        )
+        if pack_scratch is None:
+            raise AssertionError(
+                "GroupedOwned CUDA unshard copy-in expected Triton segment pack "
+                "to support this bucket."
+            )
+        return pack_scratch
 
     def _pack_reduce_send_triton(
         self,
@@ -1010,31 +1087,22 @@ class GroupedOwned(Placement):
         dtype = self._require_uniform_dtype(tensors, infos, "unsharded_dtype", "unshard")
         layout = self._layout_from_infos(infos, world_size)
         device = tensors[0].device
+        if device.type != "cuda":
+            raise NotImplementedError("GroupedOwned fused unshard pack requires CUDA")
         with _record_copy_in_if_eager():
             true_send_numel = layout.rank_numels[rank]
             # GroupedOwned uses a deterministic owner-partition send layout for
             # all-gather. Local parameter storage may be exposed in module FQN
             # order, so always pack instead of relying on storage aliasing.
             send = torch.empty(layout.padded_rank_numel, dtype=dtype, device=device)
-            if layout.padded_rank_numel != true_send_numel:
-                send.zero_()
-            segments_by_fqn: dict[str, list[GroupedOwned._Segment]] = {}
-            for segment in layout.segments:
-                if segment.owner_rank == rank:
-                    segments_by_fqn.setdefault(segment.fqn, []).append(segment)
-            for tensor, info in zip(tensors, infos, strict=True):
-                tensor_flat = tensor.reshape(-1).to(dtype)
-                for segment in sorted(
-                    segments_by_fqn.get(info.fqn, []),
-                    key=lambda segment: segment.param_rank_offset,
-                ):
-                    send.narrow(0, segment.rank_offset, segment.numel).copy_(
-                        tensor_flat.narrow(
-                            0,
-                            segment.param_rank_offset,
-                            segment.numel,
-                        )
-                    )
+            self._zero_unshard_send_padding(send, true_send_numel, layout)
+            pack_scratch = self._pack_unshard_send_triton(
+                send,
+                tensors,
+                infos,
+                layout,
+                rank,
+            )
             gathered = torch.empty(
                 world_size * layout.padded_rank_numel,
                 dtype=dtype,
@@ -1042,7 +1110,7 @@ class GroupedOwned(Placement):
             )
         return PlacementPreparedUnshard(
             placement=self,
-            buffers=[send, gathered],
+            buffers=[send, gathered, *pack_scratch],
             placement_state=GroupedOwned._UnshardState(
                 infos=infos,
                 layout=layout,
