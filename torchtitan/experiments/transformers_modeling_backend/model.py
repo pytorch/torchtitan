@@ -690,6 +690,21 @@ class HFTransformerModel(BaseModel):
 
         self.model.apply(selective_init)
 
+        # HF rotary embeddings compute their `inv_freq` buffer in __init__, not in
+        # `_init_weights`. With meta-device init + `to_empty()`, that buffer is
+        # left uninitialized (zeros), which silently disables RoPE (no positional
+        # information -> near-random outputs). Recompute it from each rotary
+        # module's `rope_init_fn` so positions work after materialization.
+        for module in self.model.modules():
+            rope_init_fn = getattr(module, "rope_init_fn", None)
+            if rope_init_fn is not None and hasattr(module, "inv_freq"):
+                device = module.inv_freq.device
+                inv_freq, attention_scaling = rope_init_fn(module.config, device)
+                module.inv_freq.copy_(
+                    inv_freq.to(device=device, dtype=module.inv_freq.dtype)
+                )
+                module.attention_scaling = attention_scaling
+
         # TODO(3outeille): For pipeline parallel, only tie weights if both input and output embeddings are on the same device
         # Maybe better way of handling this?
         if not isinstance(self.tok_embeddings, nn.Identity) and not isinstance(

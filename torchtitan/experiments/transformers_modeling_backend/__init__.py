@@ -18,17 +18,25 @@ __all__ = [
 
 @dataclass
 class TitanDenseModelConfig:
-    """Arguments for the base TorchTitan model."""
+    """Arguments for the base TorchTitan model.
 
-    dim: int = 4096
-    n_layers: int = 32
-    n_heads: int = 32
+    HF-derived fields default to None so they do NOT override the values loaded
+    from the HF config via AutoConfig.from_pretrained(). A non-None default is
+    injected over the HF config (see HFTransformerModel.Config.update_from_config),
+    which silently forces the wrong architecture/hyperparameters for any model
+    whose config differs (e.g. rope_theta=1e6 for Qwen3). Set a field explicitly
+    only to intentionally override the HF config (e.g. debugmodel sizes).
+    """
+
+    dim: int | None = None
+    n_layers: int | None = None
+    n_heads: int | None = None
     n_kv_heads: int | None = None
     vocab_size: int | None = None
     multiple_of: int = 256
     ffn_dim_multiplier: float | None = None
-    norm_eps: float = 1e-5
-    rope_theta: float = 10000
+    norm_eps: float | None = None
+    rope_theta: float | None = None
     max_seq_len: int = 2048
     depth_init: bool = True
     use_flex_attn: bool = False
