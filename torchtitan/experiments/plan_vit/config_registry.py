@@ -244,6 +244,10 @@ def _optimizer_config(
 def _plan_vit(
     flavor: str, *, mup: bool, lr: float = SWEEP_LR, wd: float = 3e-2
 ) -> PlanViTTrainer.Config:
+    # derive data parallelism from the launch (like path), so any N nodes x GPUs validate
+    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
+    world_size = int(os.environ.get("WORLD_SIZE", str(local_world_size)))
+    num_nodes = int(os.environ.get("GROUP_WORLD_SIZE", str(world_size // local_world_size)))
     return PlanViTTrainer.Config(
         loss=PathLoss.Config(),
         model_spec=model_registry(flavor, mup=mup),
@@ -268,7 +272,8 @@ def _plan_vit(
             mixed_precision_reduce="float32",
         ),
         parallelism=ParallelismConfig(
-            data_parallel_replicate_degree=1, data_parallel_shard_degree=8
+            data_parallel_replicate_degree=num_nodes,
+            data_parallel_shard_degree=local_world_size,
         ),
         checkpoint=CheckpointManager.Config(enable=False),
         metrics=MetricsProcessor.Config(
