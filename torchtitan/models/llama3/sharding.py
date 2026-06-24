@@ -6,9 +6,11 @@
 
 from typing import TYPE_CHECKING
 
-from torch.distributed.tensor import Placement, Replicate, Shard
+import spmd_types as spmd
 
 from torchtitan.models.common.decoder_sharding import (
+    dense_activation_placement,
+    dense_sequence_parallel_placement,
     norm_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
@@ -23,7 +25,6 @@ if TYPE_CHECKING:
 def set_llama3_sharding_config(
     config: "Llama3Model.Config",
     *,
-    loss_parallel: bool,
     enable_sp: bool,
 ) -> None:
     """Fill ``sharding_config`` on all Llama3 sub-configs.
@@ -34,11 +35,8 @@ def set_llama3_sharding_config(
     placements under FSDP-only) are skipped at parallelize time.
 
     ``enable_sp`` controls SequenceParallel (decoupled from TP).
-    ``loss_parallel`` controls whether the output projection is vocab-parallel.
     """
-    set_decoder_sharding_config(
-        config, loss_parallel=loss_parallel, enable_sp=enable_sp
-    )
+    set_decoder_sharding_config(config, enable_sp=enable_sp)
     for layer_cfg in config.layers:
         _set_llama3_layer_sharding(layer_cfg, enable_sp=enable_sp)
 
@@ -59,7 +57,11 @@ def _set_llama3_layer_sharding(
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.attention_norm.sharding_config = norm
     layer_cfg.ffn_norm.sharding_config = norm
-    attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
+    attn_x_layout = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I)
+    )
 
     set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
     set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)
@@ -67,6 +69,6 @@ def _set_llama3_layer_sharding(
     assert layer_cfg.feed_forward is not None
     set_dense_ffn_sharding(
         layer_cfg.feed_forward,
-        attn_x_placement=attn_x_placement,
+        attn_x_layout=attn_x_layout,
         enable_sp=enable_sp,
     )

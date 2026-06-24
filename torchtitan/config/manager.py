@@ -31,7 +31,9 @@ class ConfigManager:
     def __init__(self):
         self.register_tyro_rules(custom_registry)
 
-    def parse_args(self, args: list[str] = sys.argv[1:]):
+    def parse_args(self, args: list[str] | None = None):
+        if args is None:
+            args = sys.argv[1:]
         loaded_config, args = self._load_config(args)
         config_cls = type(loaded_config)
 
@@ -101,8 +103,13 @@ class ConfigManager:
 
         # Import config_registry from module based on module specification
         if module_name in all_supported:
-            # short module from supported module list  (search models first, then experiments)
-            for prefix in ("torchtitan.models", "torchtitan.experiments"):
+            # short module from supported module list (search models, then
+            # experiments, then RL examples for their per-example config_registry)
+            for prefix in (
+                "torchtitan.models",
+                "torchtitan.experiments",
+                "torchtitan.experiments.rl.examples",
+            ):
                 module_path = f"{prefix}.{module_name}.config_registry"
                 try:
                     module = importlib.import_module(module_path)
@@ -112,7 +119,8 @@ class ConfigManager:
             if module is None:
                 raise ImportError(
                     f"Cannot import config_registry for module '{module_name}' "
-                    f"from torchtitan.models or torchtitan.experiments"
+                    f"from torchtitan.models, torchtitan.experiments, or "
+                    f"torchtitan.experiments.rl.examples"
                 )
         else:
             # Fully qualified module path: try appending .config_registry first,

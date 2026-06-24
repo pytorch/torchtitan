@@ -36,7 +36,7 @@ def main() -> None:
         # pyrefly: ignore [missing-attribute]
         enable=config.debug.enable_structured_logging,
     )
-    sl.log_trace_instant("binary_start")
+    sl.log_trace_instant("structured_logger_started")
 
     trainer: Trainer | None = None
 
