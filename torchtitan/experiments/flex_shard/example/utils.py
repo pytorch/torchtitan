@@ -10,6 +10,9 @@ import importlib.util
 from collections.abc import Sequence
 
 import torch
+import torch.distributed as dist
+
+from ..flex_shard.bucket_storage import GradientReduceOp
 
 
 def foreach_copy_(
@@ -112,7 +115,7 @@ def _try_pack_tensors_into_flat_buffer_triton(
     if torch.compiler.is_compiling():
         return None
     try:
-        from ._pack_kernels import pack_tensors_into_flat_buffer_triton
+        from ._copy_kernels import pack_tensors_into_flat_buffer_triton
     except Exception:
         return None
 
@@ -142,7 +145,7 @@ def pack_segments_into_flat_buffer_triton_if_supported(
             "GroupedOwned Triton segment packing requires the triton package."
         )
 
-    from ._pack_kernels import pack_segments_into_flat_buffer_triton
+    from ._copy_kernels import pack_segments_into_flat_buffer_triton
 
     return pack_segments_into_flat_buffer_triton(
         inputs,
@@ -152,3 +155,20 @@ def pack_segments_into_flat_buffer_triton_if_supported(
         dst_offsets,
         out,
     )
+
+
+def _to_dist_reduce_op(op: GradientReduceOp) -> dist.ReduceOp.RedOpType:
+    if op == "avg":
+        return dist.ReduceOp.AVG
+    return dist.ReduceOp.SUM
+
+
+__all__ = [
+    "copy_tensor_to_dtype",
+    "copy_tensors_into_flat_buffer",
+    "foreach_copy_",
+    "pack_segments_into_flat_buffer_triton_if_supported",
+    "pack_tensors_into_flat_buffer",
+    "pack_tensors_into_flat_buffer_with_scratch",
+    "_to_dist_reduce_op",
+]
