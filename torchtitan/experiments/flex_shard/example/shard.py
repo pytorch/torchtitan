@@ -32,8 +32,9 @@ from ..flex_shard.utils import (
     _record_copy_out_if_eager,
     _record_function_if_eager,
 )
-from ._pack_utils import (
+from .utils import (
     copy_tensor_to_dtype,
+    _to_dist_reduce_op,
 )
 
 if TYPE_CHECKING:
@@ -396,7 +397,7 @@ class Shard(Placement):
             dist.reduce_scatter_tensor(
                 output=recv_buf,
                 input=send_buf,
-                op=self.dist_reduce_op(prepared.placement_state.gradient_reduce_op),
+                op=_to_dist_reduce_op(prepared.placement_state.gradient_reduce_op),
                 group=prepared.placement_state.pg,
             )
         with _record_function_if_eager(
