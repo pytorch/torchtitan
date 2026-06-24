@@ -12,8 +12,8 @@ from torch.distributed.device_mesh import DeviceMesh
 from torchtitan.experiments.flex_shard import BucketSpec
 from torchtitan.experiments.flex_shard.example.owned import (
     make_grouped_owned_expert_block_placement_fn,
+    make_grouped_owned_full_param_placement_fn,
 )
-from torchtitan.experiments.flex_shard.example.shard import make_shard_placement_fn
 from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     MixedPrecisionPolicy,
     PlacementFn,
@@ -25,13 +25,15 @@ class DeepSeekV3FlexShardPolicy:
     """Placement policy for the experimental DeepSeek V3 FlexShard path."""
 
     common_placement_fn: PlacementFn = field(
-        default_factory=lambda: make_shard_placement_fn(0)
+        default_factory=make_grouped_owned_full_param_placement_fn
     )
     routed_expert_placement_fn: PlacementFn = field(
-        default_factory=make_grouped_owned_expert_block_placement_fn
+        default_factory=lambda: make_grouped_owned_expert_block_placement_fn(
+            suffix_order=(".w1_EFD", ".w3_EFD", ".w2_EDF")
+        )
     )
     output_placement_fn: PlacementFn = field(
-        default_factory=lambda: make_shard_placement_fn(0)
+        default_factory=make_grouped_owned_full_param_placement_fn
     )
 
     def __post_init__(self) -> None:
