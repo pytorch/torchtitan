@@ -273,10 +273,18 @@ class PolicyTrainer(Actor, Configurable):
         )
 
     def state_dict(self) -> dict[str, Any]:
+        # Checkpoint "train_state": policy_version == completed optim steps, so it
+        # doubles as the resume step counter.
         return {"policy_version": self.policy_version}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         self.policy_version = state_dict["policy_version"]
+
+    @endpoint
+    async def get_policy_version(self) -> int:
+        """Current policy version: after load(), the step a resume restored from
+        (0 if fresh). The controller uses it to resume and re-sync generators."""
+        return self.policy_version
 
     @endpoint
     async def close(self) -> None:
