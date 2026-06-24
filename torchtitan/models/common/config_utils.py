@@ -80,15 +80,33 @@ def _fused_qkv_param_init(
     head_dim: int,
 ) -> dict[str, Callable]:
     """Init for the fused ``wqkv`` that is bit-identical to the stock separate
-    ``wq``/``wk``/``wv``.
+    ``wq``/``wk``/``wv`` and independent of the sharding degree.
 
-    Initializes q, k, v as three contiguous tensors of the exact stock-weight
-    shapes (in ``QKVLinear``'s ``wq``/``wk``/``wv`` build order, so the RNG draws
-    match the non-fused module), then assembles them into the fused
-    ``(n_kv_heads, R, head_dim, dim)`` layout (``R = heads_per_kv + 2``) -- the
-    same concatenation ``_merge_qkv_on_load`` uses -- and copies into the buffer.
-    Initializing directly on the fused buffer's strided slices would draw a
-    different sequence, so it would not be bit-identical.
+    The non-fused module initializes ``wq``/``wk``/``wv`` as three separate
+    contiguous parameters. This reproduces those exact draws: it initializes q,
+    k, v as three contiguous tensors of the stock-weight shapes (in
+    ``QKVLinear``'s ``wq``/``wk``/``wv`` build order), then assembles them into
+    the fused ``(n_kv_heads, R, head_dim, dim)`` layout (``R = heads_per_kv + 2``)
+    -- the same concatenation ``_merge_qkv_on_load`` uses -- and copies into the
+    buffer.
+
+    Parallelism-agnostic RNG: at init ``t`` is the (possibly sharded) param --
+    e.g. a ``Shard(0)`` DTensor for the colwise wqkv. ``t.new_empty(...)``
+    returns ``Replicate`` DTensors, so each ``base_init`` runs on the full tensor
+    and draws the same values on every rank (the weights do not depend on the
+    TP/FSDP degree). ``cat`` of ``Replicate`` stays ``Replicate``, and the final
+    ``copy_`` scatters it into the sharded ``t`` (each rank keeps its shard). So
+    the path is "init replicated, then shard," which both matches the non-fused
+    module and keeps RNG independent of the parallelism. (Verified on 2-GPU TP:
+    ``new_empty`` -> ``Replicate``, q identical across ranks, gathered param ==
+    replicated init-then-assemble.)
+
+    Drawing into contiguous tensors, rather than initializing the fused buffer's
+    strided q/k/v slices in place, is what keeps the local draws bit-identical
+    across devices: CPU ``normal_``/``trunc_normal_`` are sensitive to the
+    destination's strides, so a strided slice draws a different sequence than a
+    contiguous tensor of the same shape (CUDA happens to match, but we do not
+    rely on it).
     """
     heads_per_kv = n_heads // n_kv_heads
     r_dim = heads_per_kv + 2
@@ -99,6 +117,9 @@ def _fused_qkv_param_init(
         # wq/wk/wv order keeps the RNG sequence identical to the non-fused module.
         def _init(t):
             tail = t.shape[1:]
+            # If t is a sharded DTensor, new_empty (with the full stock shape)
+            # returns Replicate DTensors, so base_init runs replicated and draws
+            # the same values on every rank (parallelism-agnostic RNG).
             q = t.new_empty(n_heads * head_dim, *tail)
             k = t.new_empty(n_kv_heads * head_dim, *tail)
             v = t.new_empty(n_kv_heads * head_dim, *tail)
@@ -114,6 +135,8 @@ def _fused_qkv_param_init(
                 dim=1,
             )
             with torch.no_grad():
+                # fused is Replicate (cat of Replicates); copy_ scatters it into
+                # t, so each rank writes only its own shard of the fused param.
                 t.view(n_kv_heads, r_dim, head_dim, *tail).copy_(fused)
 
         return _init

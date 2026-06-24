@@ -94,7 +94,7 @@ class VLLMModelWrapper(Module):
         checkpoint_config: CheckpointManager.Config,
         vllm_config: VllmConfig,
         prefix: str = "",
-        override: OverrideConfig | None = None,
+        override: OverrideConfig,
     ):
         super().__init__()
 
@@ -171,7 +171,7 @@ class VLLMModelWrapper(Module):
         # Apply config overrides (e.g. the fused gate+up SwiGLU) after
         # update_from_config (which fills the sharding the override factories
         # read) and before build
-        if override is not None and override.imports:
+        if override.imports:
             apply_overrides(override, self.config)
 
         # Build model on meta device to avoid allocating full model on every GPU

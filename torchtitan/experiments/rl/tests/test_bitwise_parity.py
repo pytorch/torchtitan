@@ -638,6 +638,7 @@ class BitwiseParityTestBase(unittest.TestCase):
             parallelism=config.generator.parallelism,
             compile_config=config.compile,
             checkpoint_config=generator_checkpoint,
+            override=config.generator.override,
         )
 
         # Test runs trainer and generator in the same process, so limit

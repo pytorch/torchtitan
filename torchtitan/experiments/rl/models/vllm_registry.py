@@ -181,7 +181,7 @@ def register_to_vllm(
     parallelism: InferenceParallelismConfig,
     compile_config: CompileConfig,
     checkpoint_config: CheckpointManager.Config,
-    override: OverrideConfig | None = None,
+    override: OverrideConfig,
 ) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
 
@@ -215,6 +215,9 @@ def register_to_vllm(
             weight loading. Set ``enable=True`` with ``initial_load_in_hf``
             and ``initial_load_path`` for standalone inference. Set
             ``enable=False`` to skip loading (RL loop, weights from TorchStore).
+        override: Config overrides applied to the generator's model spec after
+            ``update_from_config`` and before build (empty ``OverrideConfig`` for
+            no overrides).
     """
     from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
     from vllm.logger import init_logger
