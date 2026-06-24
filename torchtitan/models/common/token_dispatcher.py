@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import cast, ClassVar
 
@@ -23,8 +21,7 @@ from torchtitan.distributed.minimal_async_ep import (
 )
 from torchtitan.distributed.spmd_types import (
     current_spmd_mesh,
-    set_current_spmd_mesh,
-    spmd_sparse_mesh,
+    set_sparse_mesh,
 )
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.ops.scatter_add import deterministic_scatter_add
@@ -72,10 +69,6 @@ class LocalTokenDispatcher(Configurable):
     ) -> None:
         """No-op for the EP=1 dispatcher. Subclasses override."""
         del ep_mesh, tp_mesh
-
-    @contextmanager
-    def sparse_spmd_mesh(self) -> Iterator[None]:
-        yield
 
     def _local_reorder(
         self,
@@ -223,15 +216,6 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher):
             self.sp_size = tp_mesh.size()
             self.sp_rank = tp_mesh._sym_get_coordinate(0)
 
-    @contextmanager
-    def sparse_spmd_mesh(self) -> Iterator[None]:
-        if self.ep_mesh is None or get_spmd_backend() != "spmd_types":
-            yield
-            return
-
-        with set_current_spmd_mesh(spmd_sparse_mesh()):
-            yield
-
     def _sp_global_token_indices(
         self,
         local_indices: torch.Tensor,
@@ -338,6 +322,12 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                     num_global_tokens_per_local_expert_E
                 )
             )
+            if get_spmd_backend() == "spmd_types":
+                # re-annotate after no-typecheck
+                spmd.assert_type(
+                    num_global_tokens_per_local_expert_E,
+                    {"dp_replicate": spmd.P, "efsdp": spmd.P, "ep": spmd.S(0)},
+                )
             input_splits = (
                 num_local_tokens_per_expert_E.view(ep_size, -1)
                 .sum(dim=1)
@@ -352,40 +342,25 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             input_splits_list = input_splits.tolist()
             output_splits_list = output_splits.tolist()
 
-        with self.sparse_spmd_mesh():
+        with set_sparse_mesh():
+            pg = (
+                current_spmd_mesh().get_group("ep")
+                if get_spmd_backend() == "spmd_types"
+                else self.ep_mesh.get_group()
+            )
             if get_spmd_backend() == "spmd_types":
-                # re-annotate after no-typecheck
-                spmd.assert_type(
-                    num_global_tokens_per_local_expert_E,
-                    {"dp_replicate": spmd.P, "efsdp": spmd.P, "ep": spmd.S(0)},
-                )
                 if spmd.is_type_checking():  # sparse mesh reinterpret
                     routed_input_ND = spmd.reinterpret_mesh(
                         routed_input_ND, spmd.current_mesh()
                     )
-                routed_input_RD = spmd.all_to_all(
-                    routed_input_ND,
-                    current_spmd_mesh().get_group("ep"),
-                    src=spmd.S(0),
-                    dst=spmd.S(0),
-                    output_split_sizes=output_splits_list,
-                    input_split_sizes=input_splits_list,
-                )
-                # Convert to V for _permute, otherwise typechecker errors with P + V.
-                for axis in ("dp_replicate", "efsdp"):
-                    spmd.mutate_type(
-                        num_global_tokens_per_local_expert_E,
-                        axis,
-                        src=spmd.P,
-                        dst=spmd.V,
-                    )
-            else:
-                routed_input_RD = all_to_all_single(
-                    routed_input_ND,
-                    output_splits_list,
-                    input_splits_list,
-                    self.ep_mesh,
-                )
+            routed_input_RD = spmd.all_to_all(
+                routed_input_ND,
+                pg,
+                src=spmd.V,
+                dst=spmd.V,
+                output_split_sizes=output_splits_list,
+                input_split_sizes=input_splits_list,
+            )
             # Reorder from rank-major to expert-major via _permute.
             #
             # num_global_tokens_per_local_expert_E layout after all-to-all
@@ -434,6 +409,17 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         e = num_global_tokens_per_local_expert_E.shape[0] // ep_size
         device = num_global_tokens_per_local_expert_E.device
         total = routed_input_RD.shape[0]
+
+        if get_spmd_backend() == "spmd_types":
+            # Counts below become local segment lengths/offsets, and the expert
+            # offsets passed to grouped_mm after this function returns.
+            for axis in ("dp_replicate", "efsdp"):
+                spmd.mutate_type(
+                    num_global_tokens_per_local_expert_E,
+                    axis,
+                    src=spmd.P,
+                    dst=spmd.V,
+                )
 
         # (EP, e) matrix of token counts per (rank, local_expert)
         t_mat = num_global_tokens_per_local_expert_E.view(ep_size, e)
@@ -518,29 +504,26 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 local_seq_len_after_padding=local_seq_len_after_padding,
             )
 
-        with self.sparse_spmd_mesh():
+        with set_sparse_mesh():
+            pg = (
+                current_spmd_mesh().get_group("ep")
+                if get_spmd_backend() == "spmd_types"
+                else self.ep_mesh.get_group()
+            )
             # Reverse expert-major reordering
             routed_output_RD = self._unpermute(
                 routed_output_RD, metadata.input_shape, metadata.permuted_indices
             )
             # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
             # on the NCCL stream and won't block until the tensor is accessed.
-            if get_spmd_backend() == "spmd_types":
-                routed_output_RD = spmd.all_to_all(
-                    routed_output_RD,
-                    current_spmd_mesh().get_group("ep"),
-                    src=spmd.S(0),
-                    dst=spmd.S(0),
-                    output_split_sizes=metadata.input_splits,
-                    input_split_sizes=metadata.output_splits,
-                )
-            else:
-                routed_output_RD = all_to_all_single(
-                    routed_output_RD,
-                    metadata.input_splits,
-                    metadata.output_splits,
-                    self.ep_mesh,
-                )
+            routed_output_RD = spmd.all_to_all(
+                routed_output_RD,
+                pg,
+                src=spmd.V,
+                dst=spmd.V,
+                output_split_sizes=metadata.input_splits,
+                input_split_sizes=metadata.output_splits,
+            )
 
         if get_spmd_backend() == "spmd_types":
             if spmd.is_type_checking():  # dense mesh reinterpret
