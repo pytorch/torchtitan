@@ -9,6 +9,8 @@ from .owned import (
     GroupedOwnedSegmentSpec,
     make_grouped_owned_expert_block_placement_fn,
     make_grouped_owned_expert_block_segments,
+    make_grouped_owned_full_param_placement_fn,
+    make_grouped_owned_full_param_segments,
 )
 from .shard import make_shard_placement_fn, per_param_placements, Shard
 
@@ -17,6 +19,8 @@ __all__ = [
     "GroupedOwnedSegmentSpec",
     "make_grouped_owned_expert_block_placement_fn",
     "make_grouped_owned_expert_block_segments",
+    "make_grouped_owned_full_param_placement_fn",
+    "make_grouped_owned_full_param_segments",
     "make_shard_placement_fn",
     "per_param_placements",
     "Shard",

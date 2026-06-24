@@ -9,14 +9,13 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.config import (
-    ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.flex_shard import (
     disable_flex_shard_gradient_division,
@@ -29,7 +28,6 @@ from torchtitan.experiments.flex_shard.grad_norm import (
     install_flex_shard_grad_norm_clipping,
 )
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
-from torchtitan.models.llama4.parallelize import apply_moe_ep_tp
 from torchtitan.tools.logging import logger
 
 from .placement_policy import DeepSeekV3FlexShardPolicy
@@ -42,7 +40,7 @@ def parallelize_deepseekv3(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
+    ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
     """Apply the experimental eager FlexShard path to DeepSeek V3."""
@@ -60,23 +58,10 @@ def parallelize_deepseekv3(
         """
 
     if parallel_dims.ep_enabled:
-        apply_moe_ep_tp(
-            model,
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-            ep_mesh=parallel_dims.get_mesh("ep"),
-            enable_sp=parallelism.enable_sequence_parallel,
-        )
+        model.parallelize(parallel_dims)
 
-    model_compile_enabled = (
-        compile_config.enable and "model" in compile_config.components
-    )
-    if ac_config.mode != "none":
-        apply_ac(
-            model,
-            ac_config,
-            model_compile_enabled=model_compile_enabled,
-            base_folder=dump_folder,
-        )
+    if ac_config is not None:
+        ac_config.build(dump_folder=dump_folder).apply(model)
 
     dp_mesh = parallel_dims.get_mesh("fsdp")
     efsdp_mesh = parallel_dims.get_mesh("efsdp") if parallel_dims.ep_enabled else None
