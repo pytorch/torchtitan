@@ -192,7 +192,7 @@ def _model_config(
     plan_layers: int = 4,
     mlp_multiple_of: int = 256,
     attention_impl: str = "FLEX",
-    attention_mask: str = "NONE",
+    attention_mask: str = "LAST_FRAME_CAUSAL",
     norm: str = "RMSNorm",
 ) -> WorldModel.Config:
     stats = COMPRESSOR_STATS[COMPRESSOR_MODEL]
