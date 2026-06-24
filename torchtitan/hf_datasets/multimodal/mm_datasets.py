@@ -531,6 +531,11 @@ class MMDataLoader(ParallelAwareDataloader):
         video_max_frames: int = 768
         """Maximum number of frames to sample from a video."""
 
+        # Other loading configs
+        build_mrope_positions: bool = False
+        """Build 3D MRoPE position IDs (``mrope_positions``) for models that use
+        multi-dimensional RoPE"""
+
     def __init__(
         self,
         config: Config,
@@ -574,6 +579,7 @@ class MMDataLoader(ParallelAwareDataloader):
             temporal_patch_size=config.temporal_patch_size,
             spatial_merge_size=config.spatial_merge_size,
             tokenizer=tokenizer,
+            build_mrope_positions=config.build_mrope_positions,
         )
 
         dataloader_kwargs = {

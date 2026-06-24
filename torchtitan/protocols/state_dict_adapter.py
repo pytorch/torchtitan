@@ -10,11 +10,9 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any
 
-import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
 from torchtitan.tools.logging import logger
-
 from .model import BaseModel
 
 
@@ -87,6 +85,7 @@ class StateDictAdapter(BaseStateDictAdapter):
         model_config: BaseModel.Config,
         hf_assets_path: str | None,
     ):
+        self.model_config = model_config
         self.hf_assets_path = hf_assets_path
         if hf_assets_path:
             mapping_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
@@ -111,6 +110,19 @@ class StateDictAdapter(BaseStateDictAdapter):
         else:
             self.fqn_to_index_mapping = None
 
+    def _validate_hf_rope_config(
+        self,
+        expected_rope_cls: type,
+    ) -> None:
+        for layer in self.model_config.layers:  # pyrefly: ignore [missing-attribute]
+            rope = layer.attention.rope
+            if not isinstance(rope, expected_rope_cls):
+                expected_name = expected_rope_cls.__qualname__
+                raise ValueError(
+                    f"HF checkpoint conversion assumes {expected_name}; "
+                    f"got {type(rope).__name__}."
+                )
+
     def get_hf_storage_reader(
         self, path: str, from_quantized: bool = False
     ) -> HuggingFaceStorageReader:
@@ -119,42 +131,3 @@ class StateDictAdapter(BaseStateDictAdapter):
                 "Loading from quantized checkpoint format is not supported for this model."
             )
         return HuggingFaceStorageReader(path)
-
-    @staticmethod
-    def fused_to_separate_qkv(
-        fused_weight: torch.Tensor,
-        n_heads: int,
-        n_kv_heads: int,
-        head_dim: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Split fused wqkv weight [n_kv * R * hd, dim] into separate Q, K, V."""
-        heads_per_kv = n_heads // n_kv_heads
-        r_dim = heads_per_kv + 2
-        dim = fused_weight.shape[1]
-        # [n_kv_heads, R, head_dim, dim]
-        w = fused_weight.view(n_kv_heads, r_dim, head_dim, dim)
-        wq = w[:, :heads_per_kv, :, :].reshape(n_heads * head_dim, dim)
-        wk = w[:, heads_per_kv, :, :].reshape(n_kv_heads * head_dim, dim)
-        wv = w[:, heads_per_kv + 1, :, :].reshape(n_kv_heads * head_dim, dim)
-        return wq, wk, wv
-
-    @staticmethod
-    def separate_to_fused_qkv(
-        wq: torch.Tensor,
-        wk: torch.Tensor,
-        wv: torch.Tensor,
-        n_heads: int,
-        n_kv_heads: int,
-        head_dim: int,
-    ) -> torch.Tensor:
-        """Combine separate Q, K, V weights into fused wqkv layout."""
-        heads_per_kv = n_heads // n_kv_heads
-        r_dim = heads_per_kv + 2
-        dim = wq.shape[1]
-        # Reshape to per-KV-group: [n_kv_heads, heads_per_kv, head_dim, dim]
-        q = wq.view(n_kv_heads, heads_per_kv, head_dim, dim)
-        k = wk.view(n_kv_heads, 1, head_dim, dim)
-        v = wv.view(n_kv_heads, 1, head_dim, dim)
-        # [n_kv_heads, R, head_dim, dim]
-        fused = torch.cat([q, k, v], dim=1)
-        return fused.reshape(n_kv_heads * r_dim * head_dim, dim)

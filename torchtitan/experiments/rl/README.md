@@ -8,7 +8,7 @@ This directory contains code for RL training using TorchTitan model definitions 
 The integration consists of the following components:
 
 1. **vLLM Model Wrapper** (`models/vllm_wrapper.py`): Adapts TorchTitan models for vLLM's inference engine
-2. **RL Training Loop** (`grpo.py`): GRPO-based RL training with Monarch actors (single-turn only for now)
+2. **RL Training Loop** (`train.py`): GRPO-based RL training with Monarch actors (single-turn only for now)
 
 
 ## Key features available
@@ -27,11 +27,12 @@ uv venv --python 3.12 titan-rl
 source titan-rl/bin/activate
 ```
 
-1. Install Monarch and TorchStore from main:
+1. Install Monarch, TorchStore, and Renderers from main:
 ```bash
-uv pip install torchmonarch==0.4.1
+uv pip install torchmonarch
 uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
 uv pip install pygtrie portpicker
+uv pip install "git+https://github.com/PrimeIntellect-ai/renderers.git@main"
 ```
 
 2. Install Flash Attention 3 kernels:
@@ -58,9 +59,10 @@ uv pip install torch vllm torchcomms  --pre \
 **NOTE:** The pre-built vLLM wheels are only compatible with CUDA 13.0, though they should work with most older CUDA versions. Alternatively, you can install the corresponding vLLM pre-built wheels directly from https://download.pytorch.org/whl/nightly/cu130, for example: `uv pip install vllm-1.0.0.dev20260219+cu130-<suffix>.whl`. Ensure the build version number (e.g., `dev20260219`) matches your PyTorch nightly installation.
 
 
-5. Install TorchTitan in editable mode:
+5. From the TorchTitan repository root, add the checkout to `PYTHONPATH`. Monarch-spawned RL worker processes inherit this environment variable, so they can import the local `torchtitan` package:
 ```bash
-uv pip install -e .
+cd {your_local_torchtitan_root_path}
+export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 ```
 
 6. Download `Qwen/Qwen3-0.6B` (or `Qwen/Qwen3-1.7B`) checkpoint from HuggingFace to `torchtitan/experiments/rl/example_checkpoint` folder.
@@ -72,10 +74,12 @@ python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-1.7B --local_dir torch
 
 7. Run simple GRPO RL loop to learn sum digits task. This also serves as an end-to-end smoke test that your environment is set up correctly.
 ```bash
-python torchtitan/experiments/rl/grpo.py --module rl --config rl_grpo_qwen3_0_6b
+python -m torchtitan.experiments.rl.train --module alphabet_sort --config rl_grpo_qwen3_0_6b_varlen
 ```
 
 **NOTE:** If you downloaded your HF model to a different path than the one in step 4, specify it in your command with `--hf_assets_path=<path_to_model_checkpoint>`.
+
+**Metrics:** W&B is on by default — run `wandb login` first, or pass `--metrics.no-enable-wandb` to disable. TensorBoard is also supported via `--metrics.enable-tensorboard`.
 
 We use a unified model definition from torchtitan for the trainer and generator, ensuring bitwise-identical models to address a class of subtle correctness bugs in RL for LLMs.
 
@@ -100,7 +104,7 @@ If you want to run true on-policy mode in TorchTitan RL and debug generator/trai
 Now we only support logprob bitwise parity when trainer and generator are under the same parallelism.
 Example:
 ```bash
-python torchtitan/experiments/rl/grpo.py --module rl --config  rl_grpo_qwen3_0_6b_batch_invariant
+python -m torchtitan.experiments.rl.train --module alphabet_sort --config rl_grpo_qwen3_0_6b_varlen_batch_invariant
 ```
 
 This config sets `DebugConfig(batch_invariant=True, deterministic=True)` and `training.dtype="bfloat16"` (required so the trainer computes in the same precision as the generator, as a limitation because TP only doesn't naturally support mixed precision training).

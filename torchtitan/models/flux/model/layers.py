@@ -12,13 +12,8 @@ import torch
 from einops import rearrange
 from torch import nn, Tensor
 from torchtitan.models.common.attention import ScaledDotProductAttention
-from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.rmsnorm import RMSNorm
+from torchtitan.models.common.nn_modules import GELU, LayerNorm, Linear, RMSNorm, SiLU
 from torchtitan.protocols.module import Module, Sequential
-
-LayerNorm = Module.from_nn_module(nn.LayerNorm)
-GELU = Module.from_nn_module(nn.GELU)
-SiLU = Module.from_nn_module(nn.SiLU)
 
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
@@ -106,7 +101,7 @@ class MLPEmbedder(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.in_layer = config.in_layer.build()
-        self.silu = SiLU()
+        self.silu = SiLU.Config().build()
         self.out_layer = config.out_layer.build()
 
     def forward(self, x: Tensor) -> Tensor:
@@ -209,33 +204,32 @@ class DoubleStreamBlock(Module):
 
         self.num_heads = config.num_heads
         self.hidden_size = config.hidden_size
-        self.img_mod = config.img_mod.build()
-        self.img_norm1 = LayerNorm(
-            config.hidden_size, elementwise_affine=False, eps=1e-6
+        ln_cfg = LayerNorm.Config(
+            normalized_shape=config.hidden_size,
+            elementwise_affine=False,
+            eps=1e-6,
         )
+        gelu_cfg = GELU.Config(approximate="tanh")
+
+        self.img_mod = config.img_mod.build()
+        self.img_norm1 = ln_cfg.build()
         self.img_attn = config.img_attn.build()
 
-        self.img_norm2 = LayerNorm(
-            config.hidden_size, elementwise_affine=False, eps=1e-6
-        )
+        self.img_norm2 = ln_cfg.build()
         self.img_mlp = Sequential(
             config.img_mlp_in.build(),
-            GELU(approximate="tanh"),
+            gelu_cfg.build(),
             config.img_mlp_out.build(),
         )
 
         self.txt_mod = config.txt_mod.build()
-        self.txt_norm1 = LayerNorm(
-            config.hidden_size, elementwise_affine=False, eps=1e-6
-        )
+        self.txt_norm1 = ln_cfg.build()
         self.txt_attn = config.txt_attn.build()
 
-        self.txt_norm2 = LayerNorm(
-            config.hidden_size, elementwise_affine=False, eps=1e-6
-        )
+        self.txt_norm2 = ln_cfg.build()
         self.txt_mlp = Sequential(
             config.txt_mlp_in.build(),
-            GELU(approximate="tanh"),
+            gelu_cfg.build(),
             config.txt_mlp_out.build(),
         )
 
@@ -323,11 +317,13 @@ class SingleStreamBlock(Module):
         self.norm = config.norm.build()
 
         self.hidden_size = config.hidden_size
-        self.pre_norm = LayerNorm(
-            config.hidden_size, elementwise_affine=False, eps=1e-6
-        )
+        self.pre_norm = LayerNorm.Config(
+            normalized_shape=config.hidden_size,
+            elementwise_affine=False,
+            eps=1e-6,
+        ).build()
 
-        self.mlp_act = GELU(approximate="tanh")
+        self.mlp_act = GELU.Config(approximate="tanh").build()
         self.modulation = config.modulation.build()
         self.inner_attention = ScaledDotProductAttention.Config().build()
 
@@ -362,12 +358,14 @@ class LastLayer(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.norm_final = LayerNorm(
-            config.hidden_size, elementwise_affine=False, eps=1e-6
-        )
+        self.norm_final = LayerNorm.Config(
+            normalized_shape=config.hidden_size,
+            elementwise_affine=False,
+            eps=1e-6,
+        ).build()
         self.linear = config.linear.build()
         self.adaLN_modulation = Sequential(
-            SiLU(),
+            SiLU.Config().build(),
             config.adaln_linear.build(),
         )
 
