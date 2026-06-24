@@ -164,6 +164,12 @@ class RLTrainer(Configurable):
                     )
 
             if self.trainer.debug.batch_invariant:
+                if torch.version.hip is not None:
+                    raise ValueError(
+                        "batch_invariant mode is not supported on ROCm: the varlen "
+                        "attention path cannot force num_splits=1 (rejected by ROCm), "
+                        "so split-k reductions are non-deterministic."
+                    )
                 if not self.trainer.debug.deterministic:
                     raise ValueError("batch_invariant requires deterministic=True")
                 # TODO: Replace trainer dtype constraint to use mixed

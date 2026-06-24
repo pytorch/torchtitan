@@ -39,6 +39,7 @@ __all__ = [
     "spmd_validate_redistributions",
     "set_current_spmd_mesh",
     "set_spmd_meshes",
+    "set_sparse_mesh",
     "spmd_layout_to_dtensor_placements",
 ]
 
@@ -63,11 +64,9 @@ def spmd_dense_mesh() -> DeviceMesh:
     return mesh
 
 
-def spmd_sparse_mesh() -> DeviceMesh:
-    """Return the registered sparse SPMD mesh."""
-    mesh = getattr(_MESH_TLS, "sparse_mesh", None)
-    assert mesh is not None, "SPMD sparse mesh has not been registered"
-    return mesh
+def spmd_sparse_mesh() -> DeviceMesh | None:
+    """Return the registered sparse SPMD mesh, if EP is enabled."""
+    return getattr(_MESH_TLS, "sparse_mesh", None)
 
 
 def _spmd_mesh_stack() -> list[DeviceMesh | None]:
@@ -122,6 +121,17 @@ def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
         finally:
             popped = stack.pop()
             assert popped is mesh
+
+
+@contextlib.contextmanager
+def set_sparse_mesh() -> Iterator[None]:
+    """Activate the registered sparse mesh under spmd_types, otherwise no-op."""
+    if get_spmd_backend() != "spmd_types" or (mesh := spmd_sparse_mesh()) is None:
+        yield
+        return
+
+    with set_current_spmd_mesh(mesh):
+        yield
 
 
 def spmd_layout_to_dtensor_placements(
