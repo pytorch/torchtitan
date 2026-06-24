@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from functools import partial
 
 import torch
-import torch._dynamo
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
@@ -192,19 +191,6 @@ class VLLMModelWrapper(Module):
         # Build model on meta device to avoid allocating full model on every GPU
         with torch.device("meta"):
             self.model = self.config.build()
-
-        # With TP, collectives may return AsyncCollectiveTensor (overlap
-        # path) or plain Tensor (sync path) depending on timing.  Dynamo
-        # specializes on tensor type, so each switch triggers a
-        # recompile.  Because of this, the default recompile_limit (8) is
-        # too low; exceeding it fails under
-        # fullgraph=True so set to 10 for now and bump to 12 for sliding window
-        has_sliding_window = any(
-            getattr(layer_cfg.attention, "sliding_window_size", None) is not None
-            for layer_cfg in model_config.layers
-        )
-        if compile_config.enable:
-            torch._dynamo.config.recompile_limit = 12 if has_sliding_window else 10
 
         self.model = self.parallelize_fn(
             model=self.model,
