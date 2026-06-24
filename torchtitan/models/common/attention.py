@@ -151,8 +151,11 @@ class VarlenAttention(Module):
         # returns None when FA2 is the implicit default (SM < 9.0).
         # For FA3, only force num_splits=1 in batch-invariant mode
         # to prevent non-deterministic split-k reductions.
+        # ROCm's _flash_attention_forward rejects num_splits entirely.
         fa_impl = current_flash_attention_impl()
-        if fa_impl in (None, "FA2") or is_in_batch_invariant_mode():
+        if (
+            fa_impl in (None, "FA2") or is_in_batch_invariant_mode()
+        ) and torch.version.hip is None:
             varlen_kwargs["num_splits"] = 1
 
         # Forward enable_gqa from GQAttention when Q and KV head counts differ
