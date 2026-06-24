@@ -102,7 +102,7 @@ def generate() -> None:
     if not isinstance(inner_attn, (VarlenAttention.Config, FlexAttention.Config)):
         raise ValueError("Only varlen and flex attention backends are supported.")
 
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     set_batch_invariance(gen_config.debug.batch_invariant)
     if gen_config.debug.batch_invariant:
         # batch_invariant_ops doesn't cover bmm; the MoE router gate is a bmm in
