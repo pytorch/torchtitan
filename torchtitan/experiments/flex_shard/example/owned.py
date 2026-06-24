@@ -11,7 +11,7 @@ import math
 import os
 
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -603,6 +603,9 @@ class GroupedOwnedSegmentSpec:
     storage_order: int = 0
 
 
+GroupedOwnedViewKind = Literal["full_param", "expert_block"]
+
+
 class GroupedOwned(Placement):
     """Grouped owner-partition placement for one physical bucket collective.
 
@@ -631,6 +634,7 @@ class GroupedOwned(Placement):
         rank_numels: list[int]
         total_numel: int
         padded_rank_numel: int
+        view_kind: GroupedOwnedViewKind
 
     @dataclass(frozen=True)
     class _UnshardState:
@@ -655,7 +659,14 @@ class GroupedOwned(Placement):
     def __init__(
         self,
         segments_by_fqn: dict[str, list[GroupedOwnedSegmentSpec]],
+        *,
+        view_kind: GroupedOwnedViewKind = "full_param",
     ) -> None:
+        if view_kind not in ("full_param", "expert_block"):
+            raise ValueError(
+                "GroupedOwned view_kind must be 'full_param' or 'expert_block', "
+                f"but got {view_kind!r}."
+            )
         normalized: dict[str, tuple[GroupedOwnedSegmentSpec, ...]] = {}
         for fqn, segments in segments_by_fqn.items():
             if not segments:
@@ -676,6 +687,7 @@ class GroupedOwned(Placement):
                     )
             normalized[fqn] = normalized_segments
         self.segments_by_fqn = normalized
+        self.view_kind = view_kind
         self._hash_key = tuple(
             (fqn, segments) for fqn, segments in sorted(normalized.items())
         )
@@ -683,13 +695,16 @@ class GroupedOwned(Placement):
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, GroupedOwned):
             return False
-        return self._hash_key == other._hash_key
+        return self.view_kind == other.view_kind and self._hash_key == other._hash_key
 
     def __hash__(self) -> int:
-        return hash((type(self), self._hash_key))
+        return hash((type(self), self.view_kind, self._hash_key))
 
     def __repr__(self) -> str:
-        return f"GroupedOwned(num_params={len(self.segments_by_fqn)})"
+        return (
+            f"GroupedOwned(num_params={len(self.segments_by_fqn)}, "
+            f"view_kind={self.view_kind!r})"
+        )
 
     @staticmethod
     def _empty_shape(global_shape: torch.Size) -> torch.Size:
@@ -801,6 +816,7 @@ class GroupedOwned(Placement):
             rank_numels=rank_numels,
             total_numel=total_numel,
             padded_rank_numel=padded_rank_numel,
+            view_kind=self.view_kind,
         )
 
     def _local_param_shape(
@@ -834,15 +850,17 @@ class GroupedOwned(Placement):
                     return torch.Size([len(sorted_segments), *info.global_shape[1:]])
         return torch.Size([local_numel])
 
-    def _try_view_full_param_from_padded_gathered(
+    def _view_full_param_from_padded_gathered(
         self,
         gathered: torch.Tensor,
         info: ParamInfo,
         segments: list[_Segment],
         layout: _Layout,
-    ) -> torch.Tensor | None:
+    ) -> torch.Tensor:
         if not segments:
-            return None
+            raise NotImplementedError(
+                f"GroupedOwned full-param view requires segments for {info.fqn!r}."
+            )
         expected_param_offset = 0
         base_storage_offset = (
             segments[0].owner_rank * layout.padded_rank_numel
@@ -851,15 +869,25 @@ class GroupedOwned(Placement):
         )
         for segment in segments:
             if segment.param_offset != expected_param_offset:
-                return None
+                raise NotImplementedError(
+                    "GroupedOwned full-param view requires segments to cover "
+                    f"{info.fqn!r} in parameter order; expected offset "
+                    f"{expected_param_offset}, got {segment.param_offset}."
+                )
             storage_offset = (
                 segment.owner_rank * layout.padded_rank_numel + segment.rank_offset
             )
             if storage_offset != base_storage_offset + segment.param_offset:
-                return None
+                raise NotImplementedError(
+                    "GroupedOwned full-param view requires contiguous gathered "
+                    f"storage for {info.fqn!r}."
+                )
             expected_param_offset += segment.numel
         if expected_param_offset != info.global_numel:
-            return None
+            raise NotImplementedError(
+                f"GroupedOwned full-param view covered {expected_param_offset} "
+                f"elements for {info.fqn!r}, expected {info.global_numel}."
+            )
 
         return gathered.narrow(
             0,
@@ -867,7 +895,7 @@ class GroupedOwned(Placement):
             info.global_numel,
         ).view(info.global_shape)
 
-    def _try_strided_expert_block_view(
+    def _strided_expert_block_view(
         self,
         flat: torch.Tensor,
         info: ParamInfo,
@@ -876,45 +904,74 @@ class GroupedOwned(Placement):
         global_storage: bool,
         layout: _Layout | None = None,
         local_rank: int | None = None,
-    ) -> torch.Tensor | None:
+    ) -> torch.Tensor:
         if len(info.global_shape) != 3 or not segments:
-            return None
+            raise NotImplementedError(
+                f"GroupedOwned expert-block view requires a 3D tensor for {info.fqn!r}."
+            )
         num_experts = info.global_shape[0]
         if global_storage and len(segments) != num_experts:
-            return None
+            raise NotImplementedError(
+                "GroupedOwned expert-block global view requires one segment per "
+                f"expert for {info.fqn!r}; got {len(segments)} segments for "
+                f"{num_experts} experts."
+            )
         expert_numel = math.prod(info.global_shape[1:])
         if expert_numel <= 0:
-            return None
+            raise NotImplementedError(
+                f"GroupedOwned expert-block view requires non-empty experts for {info.fqn!r}."
+            )
         sorted_segments = sorted(segments, key=lambda segment: segment.param_offset)
         base_expert_idx = sorted_segments[0].param_offset // expert_numel
         if global_storage and base_expert_idx != 0:
-            return None
+            raise NotImplementedError(
+                f"GroupedOwned expert-block global view for {info.fqn!r} must start "
+                f"at expert 0, got expert {base_expert_idx}."
+            )
         storage_offsets: list[int] = []
         for expert_idx, segment in enumerate(sorted_segments):
             if segment.param_offset != (base_expert_idx + expert_idx) * expert_numel:
-                return None
+                raise NotImplementedError(
+                    "GroupedOwned expert-block view requires contiguous expert "
+                    f"segments for {info.fqn!r}."
+                )
             if segment.numel != expert_numel:
-                return None
+                raise NotImplementedError(
+                    "GroupedOwned expert-block view requires one full expert per "
+                    f"segment for {info.fqn!r}."
+                )
             if global_storage:
                 if layout is None:
-                    return None
+                    raise AssertionError("Expected layout for global expert-block view.")
                 storage_offsets.append(
                     segment.owner_rank * layout.padded_rank_numel + segment.rank_offset
                 )
             else:
                 if local_rank is None or segment.owner_rank != local_rank:
-                    return None
+                    raise AssertionError(
+                        "Expected only local-rank segments for local expert-block view."
+                    )
                 storage_offsets.append(segment.rank_offset)
-        if len(storage_offsets) == 1:
-            return None
-        expert_stride = storage_offsets[1] - storage_offsets[0]
+        expert_stride = (
+            storage_offsets[1] - storage_offsets[0]
+            if len(storage_offsets) > 1
+            else expert_numel
+        )
         if expert_stride <= 0:
-            return None
+            raise NotImplementedError(
+                f"GroupedOwned expert-block view has non-positive expert stride "
+                f"for {info.fqn!r}: {expert_stride}."
+            )
         for prev, cur in zip(storage_offsets, storage_offsets[1:]):
             if cur - prev != expert_stride:
-                return None
+                raise NotImplementedError(
+                    f"GroupedOwned expert-block view requires uniform expert stride "
+                    f"for {info.fqn!r}."
+                )
         if storage_offsets[-1] + expert_numel > flat.numel():
-            return None
+            raise NotImplementedError(
+                f"GroupedOwned expert-block view for {info.fqn!r} exceeds storage."
+            )
         row_stride = info.global_shape[2]
         return flat.as_strided(
             (len(sorted_segments), *tuple(info.global_shape[1:])),
@@ -938,23 +995,23 @@ class GroupedOwned(Placement):
                 segments_by_fqn[info.fqn],
                 key=lambda segment: segment.param_offset,
             )
-            direct_view = self._try_view_full_param_from_padded_gathered(
-                gathered,
-                info,
-                segments,
-                layout,
-            )
-            if direct_view is None:
-                direct_view = self._try_strided_expert_block_view(
+            if layout.view_kind == "full_param":
+                direct_view = self._view_full_param_from_padded_gathered(
+                    gathered,
+                    info,
+                    segments,
+                    layout,
+                )
+            elif layout.view_kind == "expert_block":
+                direct_view = self._strided_expert_block_view(
                     gathered,
                     info,
                     segments,
                     global_storage=True,
                     layout=layout,
                 )
-            if direct_view is None:
-                direct_views = []
-                break
+            else:
+                raise AssertionError(f"Unknown GroupedOwned view_kind: {layout.view_kind}")
             direct_views.append(direct_view)
 
         # Avoid keeping the whole gathered bucket alive for a subset of params.
@@ -997,15 +1054,16 @@ class GroupedOwned(Placement):
                     )
                 )
                 continue
-            strided_view = self._try_strided_expert_block_view(
-                flat,
-                info,
-                segments,
-                global_storage=False,
-                local_rank=rank,
-            )
-            if strided_view is not None:
-                grads.append(strided_view)
+            if layout.view_kind == "expert_block":
+                grads.append(
+                    self._strided_expert_block_view(
+                        flat,
+                        info,
+                        segments,
+                        global_storage=False,
+                        local_rank=rank,
+                    )
+                )
                 continue
             start = segments[0].rank_offset
             grads.append(
@@ -1495,6 +1553,51 @@ def _assign_params_to_ranks(
     return assignments
 
 
+def make_grouped_owned_full_param_segments(
+    named_params: list[tuple[str, nn.Parameter]],
+    world_size: int,
+) -> dict[str, list[GroupedOwnedSegmentSpec]]:
+    """Build one whole-parameter GroupedOwned segment per parameter.
+
+    Parameters are assigned to owners with greedy LPT by numel. This accepts
+    padding waste in exchange for a simple owner-partition layout where every
+    gathered full parameter is a contiguous view.
+    """
+    if world_size <= 0:
+        raise ValueError(f"world_size must be positive, but got {world_size}.")
+    assignments = _assign_params_to_ranks(named_params, world_size)
+    return {
+        fqn: [
+            GroupedOwnedSegmentSpec(
+                name=f"{fqn}#full",
+                fqn=fqn,
+                param_offset=0,
+                numel=param.numel(),
+                owner_rank=assignments[fqn],
+                storage_order=param_order,
+            )
+        ]
+        for param_order, (fqn, param) in enumerate(named_params)
+    }
+
+
+def make_grouped_owned_full_param_placement_fn() -> PlacementFn:
+    """Return a whole-parameter GroupedOwned placement function."""
+
+    def placement_fn(
+        named_params: list[tuple[str, nn.Parameter]],
+        mesh: DeviceMesh,
+    ) -> dict[str, tuple[Placement, ...]]:
+        segments_by_fqn = make_grouped_owned_full_param_segments(
+            named_params,
+            mesh.size(),
+        )
+        placement = GroupedOwned(segments_by_fqn, view_kind="full_param")
+        return {fqn: (placement,) for fqn, _ in named_params}
+
+    return placement_fn
+
+
 def param_boundary_placements(
     named_params: list[tuple[str, nn.Parameter]],
     mesh: DeviceMesh,
@@ -1595,7 +1698,7 @@ def make_grouped_owned_expert_block_placement_fn(
             mesh.size(),
             suffix_order=suffix_order,
         )
-        placement = GroupedOwned(segments_by_fqn)
+        placement = GroupedOwned(segments_by_fqn, view_kind="expert_block")
         return {fqn: (placement,) for fqn, _ in named_params}
 
     return placement_fn
@@ -1699,6 +1802,8 @@ __all__ = [
     "GroupedOwnedSegmentSpec",
     "make_grouped_owned_expert_block_placement_fn",
     "make_grouped_owned_expert_block_segments",
+    "make_grouped_owned_full_param_placement_fn",
+    "make_grouped_owned_full_param_segments",
     "make_owned_placement_fn",
     "Owned",
     "param_boundary_placements",

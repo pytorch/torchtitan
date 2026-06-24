@@ -322,7 +322,7 @@ class TestBucketPlacementValidation(TestCase):
                             + param_order,
                         )
                     )
-            placement = GroupedOwned(segments_by_fqn)
+            placement = GroupedOwned(segments_by_fqn, view_kind="expert_block")
 
             def placement_fn(
                 named_params: list[tuple[str, nn.Parameter]],
@@ -381,6 +381,78 @@ class TestBucketPlacementValidation(TestCase):
                     full_param.stride()[0],
                     len(ordered_params) * original_param[0].numel(),
                 )
+
+    def test_grouped_owned_full_param_unshard_is_view_out(self):
+        """Whole-param GroupedOwned exposes contiguous full-param views."""
+
+        class TinyDense(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.w1 = nn.Parameter(torch.arange(6, dtype=torch.float32).view(2, 3))
+                self.w2 = nn.Parameter(
+                    (torch.arange(8, dtype=torch.float32) + 10).view(4, 2)
+                )
+
+        with single_rank_cpu_mesh() as mesh:
+            model = TinyDense()
+            named_params = list(model.named_parameters())
+            original_params = {
+                fqn: param.detach().clone() for fqn, param in named_params
+            }
+            segments_by_fqn = {
+                fqn: [
+                    GroupedOwnedSegmentSpec(
+                        name=f"{fqn}#full",
+                        fqn=fqn,
+                        param_offset=0,
+                        numel=param.numel(),
+                        owner_rank=0,
+                        storage_order=param_order,
+                    )
+                ]
+                for param_order, (fqn, param) in enumerate(named_params)
+            }
+            placement = GroupedOwned(segments_by_fqn, view_kind="full_param")
+
+            def placement_fn(
+                named_params: list[tuple[str, nn.Parameter]],
+                _mesh,
+            ) -> dict[str, tuple[Placement, ...]]:
+                return {fqn: (placement,) for fqn, _ in named_params}
+
+            bucket_spec = BucketSpec(
+                ["*"],
+                placement_fn=placement_fn,
+                mesh=mesh,
+                reshard_after_forward=False,
+            )
+            bucket_storage = ShardedBucketStorage.from_bucket(
+                model,
+                named_params,
+                {fqn: (placement,) for fqn, _ in named_params},
+                mesh,
+                torch.device("cpu"),
+                bucket_spec,
+            )
+            infos = [bucket_storage.param_infos[fqn] for fqn, _ in named_params]
+            local_shards = [bucket_storage.get_local_view(fqn) for fqn, _ in named_params]
+
+            prepared = placement.prepare_unshard_bucket(local_shards, infos, mesh, None)
+            placement.run_prepared_unshard(prepared)
+            result = placement.finish_prepared_unshard(prepared).full_params
+            gathered_bucket = prepared.buffers[1]
+
+            for full_param, (fqn, original_param) in zip(
+                result,
+                named_params,
+                strict=True,
+            ):
+                self.assertEqual(full_param, original_params[fqn])
+                self.assertEqual(
+                    full_param.untyped_storage().data_ptr(),
+                    gathered_bucket.untyped_storage().data_ptr(),
+                )
+                self.assertTrue(full_param.is_contiguous())
 
     def test_grouped_owned_reduce_grad_reuses_packed_send_buffer(self):
         """GroupedOwned packs reduce-grad with reusable fp32 scratch."""
