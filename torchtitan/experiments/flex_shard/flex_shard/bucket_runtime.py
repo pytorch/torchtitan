@@ -352,6 +352,10 @@ class BucketCommContext:
             self.raf_saved_unshard_cache.pop(next(iter(self.raf_saved_unshard_cache)))
         self.queue_raf_saved_unshard_cache_clear()
 
+    def release_raf_saved_unshard_cache(self, bucket_id: int) -> None:
+        """Release one bucket's RAF saved-tensor recompute cache."""
+        self.raf_saved_unshard_cache.pop(bucket_id, None)
+
     def wait_and_clear_reduce_grad_states(
         self,
         debug_fqn: str | None,
@@ -402,14 +406,18 @@ class BucketCommContext:
             self.reduce_grad_stream,
         )
         with self.device_handle.stream(self.reduce_grad_stream):
-            sharded_grads = result.finish()
-            result.record_sharded_grads(
-                _accumulate_sharded_grads(
-                    pending.param_owners,
-                    sharded_grads,
-                ),
-                self.reduce_grad_stream,
-            )
+            with _record_function_if_eager(
+                "FlexShard::reduce_grad_accumulate",
+                bucket.debug_fqn,
+            ):
+                sharded_grads = result.finish()
+                result.record_sharded_grads(
+                    _accumulate_sharded_grads(
+                        pending.param_owners,
+                        sharded_grads,
+                    ),
+                    self.reduce_grad_stream,
+                )
         self.reduce_grad_states.append(PendingReduceGrad(result))
 
     def queue_reduce_grad_launch(
@@ -850,14 +858,18 @@ class BucketRuntime:
                 debug_fqn=self.debug_fqn,
             )
             with self.context.device_handle.stream(self.context.reduce_grad_stream):
-                sharded_grads = result.finish()
-                result.record_sharded_grads(
-                    _accumulate_sharded_grads(
-                        param_owners,
-                        sharded_grads,
-                    ),
-                    self.context.reduce_grad_stream,
-                )
+                with _record_function_if_eager(
+                    "FlexShard::reduce_grad_accumulate",
+                    self.debug_fqn,
+                ):
+                    sharded_grads = result.finish()
+                    result.record_sharded_grads(
+                        _accumulate_sharded_grads(
+                            param_owners,
+                            sharded_grads,
+                        ),
+                        self.context.reduce_grad_stream,
+                    )
             self.context.reduce_grad_states.append(PendingReduceGrad(result))
             self.context.queue_reduce_grad_wait()
 
@@ -1006,6 +1018,9 @@ class _BucketUnshard(torch.autograd.Function):
                 valid_infos,
                 valid_param_owners,
             )
+
+        if not is_compiling and bucket.bucket_storage._reshard_after_forward:
+            bucket.context.release_raf_saved_unshard_cache(id(bucket.bucket_storage))
 
         return (None, *([None] * ctx.num_inputs))
 
