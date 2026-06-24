@@ -12,6 +12,8 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+from torchtitan.components.moe_metrics import maybe_record_grouped_gemm
+
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
@@ -39,6 +41,13 @@ class GroupedExperts(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.num_experts = config.num_experts
+        # Index of the transformer layer this expert group belongs to. Set by
+        # Decoder.__init__ after construction; -1 means "unknown" (e.g. when the
+        # module is built outside a Decoder). Used only for metrics attribution.
+        self.layer_id: int = -1
+        # Router top_k for this MoE block, set by Decoder.__init__ alongside
+        # layer_id; -1 means "unknown". Used only for metrics attribution.
+        self.top_k: int = -1
         self.w1_EFD = nn.Parameter(
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
@@ -54,6 +63,7 @@ class GroupedExperts(Module):
         self,
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
+        dispatch_metadata: object | None = None,
     ) -> torch.Tensor:
         """Raw expert computation without dispatch/combine.
 
@@ -77,6 +87,42 @@ class GroupedExperts(Module):
             w3_EFD = self.w3_EFD
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
+
+        metadata_tokens_per_expert = getattr(
+            dispatch_metadata, "num_tokens_per_local_expert_e", None
+        )
+        metadata_padded_tokens_per_expert = getattr(
+            dispatch_metadata, "padded_num_tokens_per_local_expert_e", None
+        )
+        metadata_dispatcher = getattr(dispatch_metadata, "dispatcher", None)
+
+        maybe_record_grouped_gemm(
+            x_RD=x_RD,
+            w1_EFD=w1_EFD,
+            w2_EDF=w2_EDF,
+            w3_EFD=w3_EFD,
+            num_tokens_per_expert_E=(
+                metadata_tokens_per_expert
+                if isinstance(metadata_tokens_per_expert, torch.Tensor)
+                else num_tokens_per_expert_E
+            ),
+            padded_num_tokens_per_expert_E=(
+                metadata_padded_tokens_per_expert
+                if isinstance(metadata_padded_tokens_per_expert, torch.Tensor)
+                else num_tokens_per_expert_E
+            ),
+            dispatcher=(
+                metadata_dispatcher
+                if isinstance(metadata_dispatcher, str)
+                else type(self.token_dispatcher)
+                .__name__.replace("TokenDispatcher", "")
+                .lower()
+            ),
+            layer_id=self.layer_id,
+            ep_rank=getattr(self.token_dispatcher, "ep_rank", 0),
+            ep_size=getattr(self.token_dispatcher, "ep_size", 1),
+            top_k=self.top_k,
+        )
 
         h_RF = F.silu(
             torch._grouped_mm(
@@ -128,7 +174,9 @@ class GroupedExperts(Module):
             num_local_tokens_per_expert_E,
         )
         routed_output_RD = self._experts_forward(
-            routed_input_RD, num_global_tokens_per_local_expert_e
+            routed_input_RD,
+            num_global_tokens_per_local_expert_e,
+            metadata,
         )
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
