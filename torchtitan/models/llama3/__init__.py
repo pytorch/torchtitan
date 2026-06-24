@@ -73,7 +73,7 @@ def _build_llama3_layers(
     hidden_dim: int,
     rope: RoPE.Config,
     n_kv_heads: int | None = None,
-    fuse_qkv: bool = False,
+    fuse_qkv: bool = True,
     attn_backend: str,
 ) -> list[TransformerBlock.Config]:
     """Build a list of per-layer TransformerBlock configs with depth-scaled inits."""
@@ -122,41 +122,11 @@ def _debugmodel(attn_backend: str) -> Llama3Model.Config:
             in_features=dim, out_features=2048, param_init=_output_linear_init(dim)
         ),
         layers=_build_llama3_layers(
-            n_layers=n_layers,
-            dim=dim,
-            n_heads=n_heads,
-            hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
-            rope=ComplexRoPE.Config(
-                dim=dim // n_heads,
-                max_seq_len=131072,
-                theta=500000,
-                scaling="llama",
-            ),
-            attn_backend=attn_backend,
-        ),
-    )
-
-
-def _debugmodel_fused_qkv(attn_backend: str) -> Llama3Model.Config:
-    dim = 256
-    n_heads = 16
-    n_layers = 6
-    return Llama3Model.Config(
-        dim=dim,
-        vocab_size=2048,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=2048, embedding_dim=dim, param_init=_EMBEDDING_INIT
-        ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        lm_head=Linear.Config(
-            in_features=dim, out_features=2048, param_init=_output_linear_init(dim)
-        ),
-        layers=_build_llama3_layers(
-            n_layers=n_layers,
-            dim=dim,
-            n_heads=n_heads,
-            hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
             fuse_qkv=True,
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=n_heads,
+            hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
                 max_seq_len=131072,
@@ -190,6 +160,7 @@ def _1b(attn_backend: str) -> Llama3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         layers=_build_llama3_layers(
+            fuse_qkv=True,
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
@@ -230,6 +201,7 @@ def _3b(attn_backend: str) -> Llama3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         layers=_build_llama3_layers(
+            fuse_qkv=True,
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
@@ -267,6 +239,7 @@ def _8b(attn_backend: str) -> Llama3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         layers=_build_llama3_layers(
+            fuse_qkv=True,
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
@@ -304,6 +277,7 @@ def _70b(attn_backend: str) -> Llama3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         layers=_build_llama3_layers(
+            fuse_qkv=True,
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
@@ -341,6 +315,7 @@ def _405b(attn_backend: str) -> Llama3Model.Config:
             param_init=_output_linear_init(dim),
         ),
         layers=_build_llama3_layers(
+            fuse_qkv=True,
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
@@ -361,7 +336,6 @@ def _405b(attn_backend: str) -> Llama3Model.Config:
 
 llama3_configs = {
     "debugmodel": _debugmodel,
-    "debugmodel_fused_qkv": _debugmodel_fused_qkv,
     "1B": _1b,
     "3B": _3b,
     "8B": _8b,
