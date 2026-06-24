@@ -263,6 +263,23 @@ class Decoder(BaseModel):
         # which returns (tokens, positions) and binds them positionally, maps
         # positions to the right parameter (it would otherwise land in the
         # attention_masks slot and break the maskless SDPA backend).
+
+        # Rebuild varlen cu_seqlens from positions. The packed cu_seqlens carry
+        # whole-batch document offsets; under pipeline parallelism the batch is
+        # split into microbatches, but PP's per-microbatch tensor chunking
+        # cannot split these (non batch-aligned) cu_seqlens correctly, leaving
+        # offsets that index past each microbatch's tokens -> out-of-bounds
+        # varlen-attention reads and NaNs. positions is split correctly per
+        # microbatch, so it is the safe source of truth; varlen + CP is
+        # unsupported, so no CP-sharded mask is overwritten here.
+        attn_config = self.config.first_attention
+        if (
+            positions is not None
+            and attn_config is not None
+            and isinstance(attn_config.inner_attention, VarlenAttention.Config)
+        ):
+            attention_masks = create_varlen_metadata_for_document(positions)
+
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 

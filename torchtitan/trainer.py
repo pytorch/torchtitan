@@ -45,7 +45,7 @@ from torchtitan.distributed.activation_checkpoint import (
 )
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
@@ -644,18 +644,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         positions = extra_kwargs.get("positions", None)
 
         # positions and attention_masks are optional (Decoder.forward defaults
-        # both to None). Build attention masks only for the masked backends
-        # (Flex/Varlen), which is where get_attention_masks is defined. A
-        # maskless backend (e.g. the SDPA config used by the graph_trainer
-        # tests) still receives positions for RoPE but no masks — it relies on
-        # is_causal instead.
+        # both to None). Build Flex attention masks (BlockMask) here and forward
+        # them to every PP stage. A maskless backend (e.g. the SDPA config used
+        # by the graph_trainer tests) still receives positions for RoPE but no
+        # masks -- it relies on is_causal instead.
+        #
+        # Varlen masks are intentionally NOT built/forwarded here: their packed
+        # cu_seqlens carry whole-batch document offsets that PP's per-microbatch
+        # tensor chunking cannot split correctly (offsets would index past each
+        # microbatch's tokens -> out-of-bounds attention -> NaNs). They are
+        # rebuilt per-microbatch from positions inside Decoder.forward instead.
         if isinstance(self.model_config, Decoder.Config) and positions is not None:
             inner_attention = getattr(
                 self.model_config.first_attention, "inner_attention", None
             )
-            if isinstance(
-                inner_attention, (FlexAttention.Config, VarlenAttention.Config)
-            ):
+            if isinstance(inner_attention, FlexAttention.Config):
                 model = cast(Decoder, self.model_parts[0])
                 extra_kwargs["attention_masks"] = model.get_attention_masks(
                     positions=positions,
