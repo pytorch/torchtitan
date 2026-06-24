@@ -246,16 +246,30 @@ class DaytonaSandbox:
 
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout + 120.0
-        cmd = await self._sb.process.get_session_command(sid, cid)
+
+        async def poll():
+            # Daytona transiently returns an empty exit_code string (not null)
+            # while a command is still finishing; the SDK then raises DaytonaError
+            # "failed to convert exit code to int: strconv.Atoi: parsing ''".
+            # Treat that as "still running" and keep polling. A targeted match
+            # (not a blanket except) lets real errors (sandbox deleted) propagate.
+            try:
+                return await self._sb.process.get_session_command(sid, cid)
+            except Exception as e:
+                if "convert exit code" in str(e):
+                    return None
+                raise
+
+        cmd = await poll()
         polls = 0
-        while cmd.exit_code is None:
+        while cmd is None or cmd.exit_code is None:
             if loop.time() > deadline:
                 raise TimeoutError(
                     f"daytona exec poll exceeded {timeout + 120:.0f}s "
                     f"(sandbox likely stopped/deleted); cmd={full[:80]}"
                 )
             await asyncio.sleep(0.1 if polls < 5 else 1.0)
-            cmd = await self._sb.process.get_session_command(sid, cid)
+            cmd = await poll()
             polls += 1
 
         logs = await self._sb.process.get_session_command_logs(sid, cid)
