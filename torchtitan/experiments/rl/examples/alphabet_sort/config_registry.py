@@ -269,9 +269,6 @@ def rl_grpo_gpt_oss_debug_varlen() -> RLTrainer.Config:
     group_size = 8
     return RLTrainer.Config(
         model_spec=gpt_oss_model_registry("debugmodel", attn_backend="varlen"),
-        # Debug tokenizer (vocab 2048, matches debugmodel); the gpt_oss renderer
-        # needs gpt-oss special tokens absent here, so use the qwen3 renderer
-        # like the other debug configs.
         hf_assets_path="tests/assets/tokenizer",
         num_steps=3,
         num_groups_per_rollout_batch=5,
@@ -279,7 +276,10 @@ def rl_grpo_gpt_oss_debug_varlen() -> RLTrainer.Config:
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
         group_size=group_size,
-        renderer=RendererConfig(name="gpt_oss", enable_thinking=False),
+        # Debug tokenizer (vocab 2048, matches debugmodel); the gpt_oss renderer
+        # needs gpt-oss special tokens absent here, so use the qwen3 renderer
+        # like the other debug configs.
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
@@ -327,7 +327,10 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> RLTrainer.Config:
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
         group_size=group_size,
-        renderer=RendererConfig(name="gpt-oss", enable_thinking=False),
+        # Debug tokenizer (vocab 2048, matches debugmodel); the gpt_oss renderer
+        # needs gpt-oss special tokens absent here, so use the qwen3 renderer
+        # like the other debug configs.
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         batcher=Batcher.Config(
             batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
