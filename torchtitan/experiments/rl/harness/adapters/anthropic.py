@@ -478,14 +478,23 @@ async def _handle_messages(request: web.Request) -> web.StreamResponse:
                         extends_previous=extends_previous,
                     )
                 )
-                resp = _message_response(
-                    body,
-                    [{"type": "text", "text": ""}],
-                    "max_tokens",
-                    len(prompt_ids),
-                    0,
+                # Match the request's transport: a streaming client (stream=True)
+                # that gets a one-shot JSON body here sees no SSE events and aborts
+                # with "Stream ended without receiving any events", turning a clean
+                # context-budget stop into a hard error. Emit an SSE max_tokens stop
+                # for streaming requests, JSON otherwise.
+                empty_blocks = [{"type": "text", "text": ""}]
+                if body.get("stream") is True or "text/event-stream" in (
+                    request.headers.get("Accept", "")
+                ):
+                    return await _stream_response(
+                        request, empty_blocks, "max_tokens", len(prompt_ids), 0
+                    )
+                return web.json_response(
+                    _message_response(
+                        body, empty_blocks, "max_tokens", len(prompt_ids), 0
+                    )
                 )
-                return web.json_response(resp)
             if remaining < sampling.max_tokens:
                 sampling = dataclasses.replace(sampling, max_tokens=remaining)
 

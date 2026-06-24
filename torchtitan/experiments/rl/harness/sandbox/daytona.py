@@ -95,6 +95,8 @@ class DaytonaSandbox:
         return self._sb
 
     async def __aenter__(self) -> DaytonaSandbox:
+        import asyncio
+
         from daytona import CreateSandboxFromImageParams, Resources  # type: ignore
 
         self._client = await _get_shared_client(
@@ -130,7 +132,26 @@ class DaytonaSandbox:
             auto_stop_interval=auto_stop,
             auto_delete_interval=auto_delete,
         )
-        self._sb = await self._client.create(params, timeout=create_timeout)
+        # Daytona create is occasionally flaky (transient DaytonaAuthenticationError
+        # or 5xx from the control plane -- ~4% of boots in a wide rollout fanout).
+        # Retry with exponential backoff; a single bad boot should not lose a sample.
+        retries = int(_getenv("TT_DAYTONA_CREATE_RETRIES", default="3"))
+        backoff = 5.0
+        for attempt in range(retries + 1):
+            try:
+                self._sb = await self._client.create(params, timeout=create_timeout)
+                break
+            except Exception as e:
+                if attempt >= retries:
+                    raise
+                logger.warning(
+                    "daytona create failed (attempt %d/%d): %s",
+                    attempt + 1,
+                    retries + 1,
+                    e,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60.0)
         self.sandbox_id = self._sb.id
         return self
 
