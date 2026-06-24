@@ -38,7 +38,7 @@ from ..flex_shard.utils import (
 )
 from ._pack_utils import (
     foreach_copy_,
-    try_pack_segments_into_flat_buffer_triton,
+    pack_segments_into_flat_buffer_triton_if_available,
 )
 
 if TYPE_CHECKING:
@@ -736,7 +736,7 @@ class GroupedOwned(Placement):
             return None
         return flat_storage_span, offsets
 
-    def _try_pack_reduce_send_triton(
+    def _pack_reduce_send_triton_if_available(
         self,
         send_by_owner: torch.Tensor,
         tensors: list[torch.Tensor],
@@ -776,7 +776,7 @@ class GroupedOwned(Placement):
                     + segment.rank_offset
                 )
 
-        return try_pack_segments_into_flat_buffer_triton(
+        return pack_segments_into_flat_buffer_triton_if_available(
             inputs,
             tensor_indices,
             src_offsets,
@@ -792,7 +792,7 @@ class GroupedOwned(Placement):
         infos: list[ParamInfo],
         layout: _Layout,
     ) -> list[torch.Tensor]:
-        pack_scratch = self._try_pack_reduce_send_triton(
+        pack_scratch = self._pack_reduce_send_triton_if_available(
             send_by_owner,
             tensors,
             infos,
