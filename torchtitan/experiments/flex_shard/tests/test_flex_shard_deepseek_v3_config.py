@@ -10,6 +10,7 @@ import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.config import CompileConfig
+from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.experiments.flex_shard.deepseek_v3.config_registry import (
     flex_shard_deepseek_v3_16b,
@@ -82,15 +83,15 @@ class TestFlexShardDeepSeekV3Config(TestCase):
     def _expert_params(self):
         return [
             (
-                "layers.0.moe.experts.w1",
+                "layers.0.moe.experts.w1_EFD",
                 torch.nn.Parameter(torch.empty(4, 2, 3)),
             ),
             (
-                "layers.0.moe.experts.w2",
+                "layers.0.moe.experts.w2_EDF",
                 torch.nn.Parameter(torch.empty(4, 3, 2)),
             ),
             (
-                "layers.0.moe.experts.w3",
+                "layers.0.moe.experts.w3_EFD",
                 torch.nn.Parameter(torch.empty(4, 2, 3)),
             ),
         ]
@@ -101,7 +102,7 @@ class TestFlexShardDeepSeekV3Config(TestCase):
         self.assertTrue(config.compile.enable)
         self.assertEqual(config.compile.components, ["loss"])
         self.assertEqual(config.parallelism.expert_parallel_degree, 8)
-        self.assertEqual(config.activation_checkpoint.mode, "selective")
+        self.assertIsInstance(config.activation_checkpoint, SelectiveAC.Config)
 
     def test_default_policy_uses_grouped_owned_for_routed_experts(self):
         buckets, _, efsdp_mesh = self._build_buckets()
@@ -111,8 +112,9 @@ class TestFlexShardDeepSeekV3Config(TestCase):
 
         placements = expert_bucket.placement_fn(self._expert_params(), efsdp_mesh)
 
-        grouped_owned = placements["layers.0.moe.experts.w1"][0]
+        grouped_owned = placements["layers.0.moe.experts.w1_EFD"][0]
         self.assertIsInstance(grouped_owned, GroupedOwned)
+        self.assertEqual(grouped_owned.view_kind, "expert_block")
         for fqn, _ in self._expert_params():
             self.assertIs(placements[fqn][0], grouped_owned)
         self.assertIs(expert_bucket.mesh, efsdp_mesh)
@@ -133,7 +135,7 @@ class TestFlexShardDeepSeekV3Config(TestCase):
             self.assertEqual(placements[fqn], (Shard(0),))
         self.assertIs(expert_bucket.mesh, efsdp_mesh)
 
-    def test_common_and_output_params_stay_sharded(self):
+    def test_common_and_output_params_use_whole_param_grouped_owned(self):
         buckets, dp_mesh, _ = self._build_buckets()
         common_bucket = self._bucket_with_pattern(
             buckets, "layers.0.*attention.*"
@@ -161,9 +163,15 @@ class TestFlexShardDeepSeekV3Config(TestCase):
         common_placements = common_bucket.placement_fn(common_params, dp_mesh)
         output_placements = output_bucket.placement_fn(output_params, dp_mesh)
 
+        common_grouped_owned = common_placements["layers.0.attention.wq.weight"][0]
+        output_grouped_owned = output_placements["lm_head.weight"][0]
+        self.assertIsInstance(common_grouped_owned, GroupedOwned)
+        self.assertEqual(common_grouped_owned.view_kind, "full_param")
+        self.assertIsInstance(output_grouped_owned, GroupedOwned)
+        self.assertEqual(output_grouped_owned.view_kind, "full_param")
         for fqn, _ in common_params:
-            self.assertEqual(common_placements[fqn], (Shard(0),))
-        self.assertEqual(output_placements["lm_head.weight"], (Shard(0),))
+            self.assertIs(common_placements[fqn][0], common_grouped_owned)
+        self.assertIs(output_placements["lm_head.weight"][0], output_grouped_owned)
         self.assertIs(common_bucket.mesh, dp_mesh)
         self.assertIs(output_bucket.mesh, dp_mesh)
 
