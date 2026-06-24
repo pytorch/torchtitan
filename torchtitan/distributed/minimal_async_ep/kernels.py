@@ -432,6 +432,9 @@ def fill_dispatch_metadata_kernel(
     num_local_experts: int,
     max_tokens_per_segment: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    counts = counts.contiguous()
+    local_dest_offsets = local_dest_offsets.contiguous()
+    local_count_starts = local_count_starts.contiguous()
     dst_ranks = torch.empty(
         num_routed_tokens,
         device=counts.device,
@@ -468,6 +471,9 @@ def fill_combine_metadata_kernel(
     receive_capacity: int,
     max_tokens_per_segment: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    segment_lens = segment_lens.contiguous()
+    output_starts = output_starts.contiguous()
+    source_input_starts = source_input_starts.contiguous()
     dst_ranks = torch.empty(
         receive_capacity,
         device=segment_lens.device,

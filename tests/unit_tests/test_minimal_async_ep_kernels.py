@@ -96,13 +96,36 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         assert_equal(grad_scores, expected_grad_scores)
 
     def test_metadata_kernels_match_reference(self):
-        counts = torch.tensor([2, 0, 1, 1], device="cuda", dtype=torch.int64)
+        counts_storage = torch.tensor(
+            [2, 1, 0, 0, 1, 0, 1, 0],
+            device="cuda",
+            dtype=torch.int64,
+        )
+        counts = counts_storage[::2]
         local_count_starts = counts.cumsum(0) - counts
-        local_dest_offsets = torch.tensor(
+        local_count_starts_storage = torch.empty(8, device="cuda", dtype=torch.int64)
+        local_count_starts_storage[::2] = local_count_starts
+        local_count_starts_storage[1::2] = torch.tensor(
+            [1, 0, 0, 0],
+            device="cuda",
+            dtype=torch.int64,
+        )
+        local_count_starts = local_count_starts_storage[::2]
+        local_dest_offsets_storage = torch.empty(8, device="cuda", dtype=torch.int64)
+        local_dest_offsets_storage[::2] = torch.tensor(
             [0, 0, 5, 9],
             device="cuda",
             dtype=torch.int64,
         )
+        local_dest_offsets_storage[1::2] = torch.tensor(
+            [7, 0, 0, 0],
+            device="cuda",
+            dtype=torch.int64,
+        )
+        local_dest_offsets = local_dest_offsets_storage[::2]
+        self.assertFalse(counts.is_contiguous())
+        self.assertFalse(local_dest_offsets.is_contiguous())
+        self.assertFalse(local_count_starts.is_contiguous())
         dst_ranks, dst_rows = fill_dispatch_metadata_kernel(
             counts,
             local_dest_offsets,
@@ -120,13 +143,41 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
             torch.tensor([0, 1, 5, 9], device="cuda", dtype=torch.int64),
         )
 
-        segment_lens = torch.tensor([2, 1, 0, 1], device="cuda", dtype=torch.int64)
-        output_starts = segment_lens.cumsum(0) - segment_lens
-        source_input_starts = torch.tensor(
+        segment_lens_storage = torch.tensor(
+            [2, 1, 1, 0, 0, 0, 1, 0],
+            device="cuda",
+            dtype=torch.int64,
+        )
+        segment_lens = segment_lens_storage[::2]
+        output_starts_values = segment_lens.cumsum(0) - segment_lens
+        output_starts_storage = torch.empty(8, device="cuda", dtype=torch.int64)
+        output_starts_storage[::2] = output_starts_values
+        output_starts_storage[1::2] = torch.tensor(
+            [3, 0, 0, 0],
+            device="cuda",
+            dtype=torch.int64,
+        )
+        output_starts = output_starts_storage[::2]
+        source_input_starts_storage = torch.empty(
+            2,
+            8,
+            device="cuda",
+            dtype=torch.int64,
+        )
+        source_input_starts_storage[:, ::2] = torch.tensor(
             [[0, 0, 4, 6], [0, 0, 8, 10]],
             device="cuda",
             dtype=torch.int64,
         )
+        source_input_starts_storage[:, 1::2] = torch.tensor(
+            [[99, 99, 99, 99], [99, 99, 99, 99]],
+            device="cuda",
+            dtype=torch.int64,
+        )
+        source_input_starts = source_input_starts_storage[:, ::2]
+        self.assertFalse(segment_lens.is_contiguous())
+        self.assertFalse(output_starts.is_contiguous())
+        self.assertFalse(source_input_starts.is_contiguous())
         combine_ranks, combine_rows, num_valid_rows = fill_combine_metadata_kernel(
             segment_lens,
             output_starts,
