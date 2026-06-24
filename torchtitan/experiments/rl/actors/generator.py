@@ -459,6 +459,27 @@ class VLLMGenerator(Actor, Configurable):
             asyncio.Condition()
         )  # Signals to wake up when there is work
 
+        # --- Data-parallel rank layout ---
+        # Number of vLLM DP ranks; 1 disables data parallelism.
+        self._dp_degree = config.parallelism.data_parallel_degree
+        # Number of ranks per DP rank.
+        ranks_per_dp = config.parallelism.tensor_parallel_degree
+        # Which DP replica this rank belongs to (== vLLM's data_parallel_rank).
+        self._dp_rank = self._rank // ranks_per_dp
+
+        # Confirm the layout calculated above matches vLLM's
+        vllm_parallel_config = self._engine.vllm_config.parallel_config
+        assert vllm_parallel_config.data_parallel_size == self._dp_degree, (
+            f"DP layout mismatch on rank {self._rank}: our dp_size "
+            f"({self._dp_degree}) != vLLM data_parallel_size "
+            f"({vllm_parallel_config.data_parallel_size})"
+        )
+        assert vllm_parallel_config.data_parallel_rank == self._dp_rank, (
+            f"DP layout mismatch on rank {self._rank}: our dp_rank "
+            f"({self._dp_rank}) != vLLM data_parallel_rank "
+            f"({vllm_parallel_config.data_parallel_rank})"
+        )
+
         # Engine-loop INBOX (rank 0): requests the controller submits; the loop reads them to decide.
         self._queued_generation_requests: list[GenerationRequest] = []
         self._model_state_dict_pull_request: ModelStateDictPullRequest | None = None
@@ -632,18 +653,21 @@ class VLLMGenerator(Actor, Configurable):
                     continue  # back to the start for the next decision
 
                 if decision.action is LoopAction.STEP:
-                    # Add any newly-queued requests; all ranks add the identical set in FCFS order.
-                    if decision.requests:
+                    # Admit only this rank's DP replica slice. TP ranks in the same
+                    # replica compute the same _dp_rank, so they add the identical
+                    # set in the same FCFS order.
+                    local_requests = decision.requests_per_dp_rank[self._dp_rank]
+                    if local_requests:
                         # render_cmpl is vLLM's input pipeline (tokenize is a no-op for tokenized prompts);
                         # the high-level entry stays resilient to vLLM internals vs vllm.inputs.tokens_input.
                         engine_inputs = self._engine.renderer.render_cmpl(
                             [
                                 {"prompt_token_ids": request.prompt_token_ids}
-                                for request in decision.requests
+                                for request in local_requests
                             ]
                         )
                         for request, engine_input in zip(
-                            decision.requests, engine_inputs, strict=True
+                            local_requests, engine_inputs, strict=True
                         ):
                             self._engine.add_request(
                                 request_id=request.request_id,
@@ -684,22 +708,31 @@ class VLLMGenerator(Actor, Configurable):
             )
 
             if self._close_request is not None:
-                return LoopDecision(action=LoopAction.CLOSE, requests=[])
+                return LoopDecision(action=LoopAction.CLOSE, requests_per_dp_rank=[])
 
             # A weight pull takes priority over admitting new requests.
             if self._model_state_dict_pull_request is not None:
                 return LoopDecision(
                     action=LoopAction.PULL_MODEL_STATE_DICT,
-                    requests=[],
+                    requests_per_dp_rank=[],
                     pull_version=self._model_state_dict_pull_request.version,
                 )
 
             # STEP: admit whatever is queued (may be empty -> just keep stepping in-flight work).
-            requests, self._queued_generation_requests = (
+            queued, self._queued_generation_requests = (
                 self._queued_generation_requests,
                 [],
             )
-            return LoopDecision(action=LoopAction.STEP, requests=requests)
+            # TODO: route across DP ranks via a routing strategy. For now all
+            # requests go to DP rank 0.
+            requests_per_dp_rank: list[list[GenerationRequest]] = [
+                [] for _ in range(self._dp_degree)
+            ]
+            requests_per_dp_rank[0] = queued
+            return LoopDecision(
+                action=LoopAction.STEP,
+                requests_per_dp_rank=requests_per_dp_rank,
+            )
 
     def _process_finished_requests(self, request_outputs: list[RequestOutput]) -> None:
         """RANK 0: resolve each finished request's future with its `Completion` (metrics included)."""
@@ -955,8 +988,10 @@ class LoopDecision:
 
     action: LoopAction
 
-    requests: list[GenerationRequest] | None = None
-    # requests to admit before a STEP burst (empty unless any queued)
+    requests_per_dp_rank: list[list[GenerationRequest]] | None = None
+    # Per-DP-rank requests to admit before a STEP burst; index == DP rank, fixed
+    # length data_parallel_degree. Each rank admits only its own DP-rank slice.
+    # (empty unless any queued)
 
     pull_version: int | None = None
     # set iff action is PULL_MODEL_STATE_DICT
