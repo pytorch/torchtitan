@@ -231,7 +231,7 @@ def set_moe_sharding_config(
     """
     # Always set sharding configs regardless of whether TP is enabled.
     # ``resolve_mesh`` filters out disabled axes at runtime.
-    moe_cfg.seq_sharded_input = enable_ep and enable_sp
+    moe_cfg.seq_dim_tp_sharded = enable_ep and enable_sp
     moe_cfg.sharding_config = _moe_sharding_config(
         enable_ep=enable_ep, enable_sp=enable_sp
     )
