@@ -89,7 +89,10 @@ def _graph_placeholder_fake_inputs(gm):
             continue
         val = node.meta.get("val")
         if val is None:
-            raise RuntimeError(f"Missing placeholder meta val for {node}")
+            # Optional inputs (e.g. None fields of a flattened flex-attention
+            # BlockMask) flatten to unused placeholders with no fake val; skip
+            # them — only real fake tensors are needed to recover the fake mode.
+            continue
         fake_inputs.append(val)
     return fake_inputs
 
@@ -1137,6 +1140,9 @@ class TestTraceModels(unittest.TestCase):
     LR = 1e-3
 
     def setUp(self):
+        # Reset dynamo/inductor caches so compiled state (fake tensors, guards)
+        # from a prior test can't leak into the next regional_inductor run.
+        torch._dynamo.reset()
         torch.manual_seed(42)
         torch.use_deterministic_algorithms(True)
         self._flex_orig = _disable_flex_autotune()
@@ -1433,9 +1439,6 @@ class TestTraceModels(unittest.TestCase):
                     f"{node.name} missing compile_with_inductor annotation",
                 )
 
-    # TODO: Fix scatter() dtype mismatch — scatter_add expects self.dtype == src.dtype
-    # but GptOss produces mismatched dtypes during tracing.
-    @unittest.skip("scatter(): Expected self.dtype to be equal to src.dtype")
     def test_gpt_oss(self):
         from torch.nn.attention.flex_attention import and_masks
 
@@ -1700,8 +1703,6 @@ class TestTraceFSDP(FSDPTest):
             dtype=torch.bfloat16,
         )
 
-    # TODO: Fix scatter() dtype mismatch — same root cause as TestTraceModels.test_gpt_oss.
-    @unittest.skip("scatter(): Expected self.dtype to be equal to src.dtype")
     def test_gpt_oss_fsdp(self):
         from torch.nn.attention.flex_attention import and_masks
 
