@@ -58,6 +58,18 @@ class TestFlexShardEagerRuntime(TestCase):
             with self.assertRaisesRegex(RuntimeError, "bucket unshard hook"):
                 _ = model.output.weight
 
+    def test_torch_compile_forward_backward_on_cuda_mesh(self):
+        with single_rank_cuda_mesh() as mesh:
+            args, model = flex_shard_transformer_model(mesh)
+
+            compiled_model = torch.compile(model, backend="eager")
+
+            loss = compiled_model(transformer_inputs(args, device="cuda")).sum()
+            loss.backward()
+
+            for param in model.parameters():
+                self.assertIsNotNone(param.grad)
+
 
 if __name__ == "__main__":
     run_tests()
