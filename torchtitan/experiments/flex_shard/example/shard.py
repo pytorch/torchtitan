@@ -34,7 +34,6 @@ from ..flex_shard.utils import (
 )
 from ._pack_utils import (
     copy_tensor_to_dtype,
-    pack_tensors_into_flat_buffer,
 )
 
 if TYPE_CHECKING:

@@ -48,38 +48,6 @@ def copy_tensor_to_dtype(
     return out
 
 
-def copy_tensors_to_dtype(
-    tensors: list[torch.Tensor],
-    dtypes: list[torch.dtype],
-) -> list[torch.Tensor]:
-    """Copy tensors to matching contiguous dtype buffers with one foreach call."""
-    if len(tensors) != len(dtypes):
-        raise AssertionError(
-            f"Expected {len(tensors)} tensors to match {len(dtypes)} dtypes."
-        )
-
-    outputs: list[torch.Tensor] = []
-    copy_srcs: list[torch.Tensor] = []
-    copy_dsts: list[torch.Tensor] = []
-    for tensor, dtype in zip(tensors, dtypes, strict=True):
-        if tensor.is_contiguous() and tensor.dtype == dtype:
-            outputs.append(tensor)
-            continue
-
-        out = torch.empty(
-            tensor.shape,
-            dtype=dtype,
-            device=tensor.device,
-        )
-        outputs.append(out)
-        if tensor.numel() > 0:
-            copy_srcs.append(tensor)
-            copy_dsts.append(out)
-
-    foreach_copy_(copy_dsts, copy_srcs)
-    return outputs
-
-
 def pack_tensors_into_flat_buffer(
     tensors: list[torch.Tensor],
     dtype: torch.dtype,
@@ -153,7 +121,7 @@ def _try_pack_tensors_into_flat_buffer_triton(
         return None
 
 
-def try_pack_segments_into_flat_buffer_triton(
+def pack_segments_into_flat_buffer_triton_if_available(
     inputs: list[torch.Tensor],
     tensor_indices: Sequence[int],
     src_offsets: Sequence[int],
@@ -161,7 +129,7 @@ def try_pack_segments_into_flat_buffer_triton(
     dst_offsets: Sequence[int],
     out: torch.Tensor,
 ) -> list[torch.Tensor] | None:
-    """Try the optional Triton descriptor pack path, falling back on any issue."""
+    """Use the optional Triton descriptor pack path when it is available."""
     if torch.compiler.is_compiling():
         return None
     try:
