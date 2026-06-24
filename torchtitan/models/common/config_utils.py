@@ -97,16 +97,7 @@ def _fused_qkv_param_init(
     TP/FSDP degree). ``cat`` of ``Replicate`` stays ``Replicate``, and the final
     ``copy_`` scatters it into the sharded ``t`` (each rank keeps its shard). So
     the path is "init replicated, then shard," which both matches the non-fused
-    module and keeps RNG independent of the parallelism. (Verified on 2-GPU TP:
-    ``new_empty`` -> ``Replicate``, q identical across ranks, gathered param ==
-    replicated init-then-assemble.)
-
-    Drawing into contiguous tensors, rather than initializing the fused buffer's
-    strided q/k/v slices in place, is what keeps the local draws bit-identical
-    across devices: CPU ``normal_``/``trunc_normal_`` are sensitive to the
-    destination's strides, so a strided slice draws a different sequence than a
-    contiguous tensor of the same shape (CUDA happens to match, but we do not
-    rely on it).
+    module and keeps RNG independent of the parallelism.
     """
     heads_per_kv = n_heads // n_kv_heads
     r_dim = heads_per_kv + 2
