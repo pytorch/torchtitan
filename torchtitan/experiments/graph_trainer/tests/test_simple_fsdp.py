@@ -47,7 +47,6 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
             tp=1,
             pp=1,
             ep=1,
-            etp=1,
             world_size=1,
         )
         training = TrainingConfig(

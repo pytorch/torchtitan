@@ -24,18 +24,34 @@ defaults:
     shell: bash -l -eo pipefail {0}
 
 permissions:
-      id-token: write
-      contents: read
+  id-token: write
+  contents: read
 
 jobs:
-  build-test:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8')
-    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+  # Step 1: Dynamically compute the matrix based on conditions
+  set-matrix:
+    # Skip scheduled runs on forks, where they would only fail and email the fork owner
+    if: >-
+      (github.repository_owner == 'pytorch' || github.event_name != 'schedule') &&
+      (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8'))
+    uses: ./.github/workflows/set-matrix.yaml
     with:
-      runner: linux.aws.h100.8
-      gpu-arch-type: cuda
-      gpu-arch-version: "13.0"
-      docker-image: torchtitan-ubuntu-22.04-clang12
+      runner-cuda: mt-l-bx86iamx-176-1800-h100-8
+      is-experimental: true
+
+  # Step 2: Use the dynamic matrix in the build-test job
+  build-test:
+    needs: set-matrix
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      # Private-ECR image, tagged with the .ci/docker hash from set-matrix.yaml.
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.docker-image }}:${{ needs.set-matrix.outputs.docker-hash }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
       timeout: 45
@@ -52,19 +68,28 @@ jobs:
 
         pip config --user set global.progress_bar off
 
-        python -m pip install --force-reinstall --pre \
-          torch --index-url https://download.pytorch.org/whl/nightly/cu130
-        python -m pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
+        # Pre-install torch's pure-python deps from the in-cluster pypi-cache for speed.
+        python -m pip install filelock typing-extensions "setuptools<82" sympy networkx jinja2 fsspec numpy
+        # Clear PIP_EXTRA_INDEX_URL so the default cpu index can't supply a +cpu torch.
+        python -m pip uninstall -y torch
+        PIP_EXTRA_INDEX_URL= python -m pip install --pre \
+          torch --index-url ${{ matrix.index-url }}
+        python -m pip install git+https://github.com/meta-pytorch/autoparallel.git
 
-        sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
-        sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
+        mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+        # Install DeepEP for HybridEP integration test
+        bash /install_deepep.sh
 
         # Disable Nvlink Sharp. The CI machine seems to be in unstable state to support
         # NVLS according to several CI runs.
-        NCCL_NVLS_ENABLE=0 python -m torchtitan.experiments.graph_trainer.tests.integration_tests --test_suite graph_trainer_h100 --gpu_arch_type cuda $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+        # DeepEP needs CUDA_HOME specified to JIT kernels.
+        CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 python -m torchtitan.experiments.graph_trainer.tests.integration_tests --test_suite graph_trainer_h100 --gpu_arch_type cuda $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+        NCCL_NVLS_ENABLE=0 python -m torchtitan.experiments.graph_trainer.tests.integration_tests --test_suite graph_trainer_autoparallel_h100 --gpu_arch_type cuda $RUNNER_TEMP/artifacts-to-be-uploaded/autoparallel --ngpu 4
 
         # Run the MoE numerics tests
         NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics -v -k "moe"
+        NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerAutoParallelNumerics::test_deepseek_v3_aot_fx_trace_autoparallel_vs_eager -v
 
         # Run precompile integration tests (DSv3 with EP; Llama3 runs in default workflow)
         NCCL_NVLS_ENABLE=0 python -m torchtitan.experiments.graph_trainer.tests.run_precompile_tests $RUNNER_TEMP/artifacts-to-be-uploaded/precompile --ngpu 8 --test_name aot_fx_trace_deepseek_v3_precompile_fsdp_tp_ep

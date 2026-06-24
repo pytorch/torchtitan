@@ -6,18 +6,20 @@
 
 from typing import TYPE_CHECKING
 
-from torch.distributed.tensor import Placement, Replicate, Shard
+import spmd_types as spmd
 
 from torchtitan.models.common.decoder_sharding import (
     colwise_config,
     dense_activation_placement,
     dense_param_placement,
+    dense_sequence_parallel_placement,
     norm_config,
     rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_inner_attention_local_map,
 )
+from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.deepseek_v3.model import Attention
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -28,31 +30,49 @@ if TYPE_CHECKING:
     )
 
 
+# Routed-expert layout for the shared ``GroupedExperts`` (w1/w2/w3).
+_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
+    "w1_EFD": spmd.S(1),
+    "w2_EDF": spmd.S(2),
+    "w3_EFD": spmd.S(1),
+}
+
+
 def set_deepseek_v3_sharding_config(
     config: "DeepSeekV3Model.Config",
     *,
-    loss_parallel: bool,
     enable_sp: bool,
+    enable_ep: bool,
 ) -> None:
     """Fill ``sharding_config`` on all DeepSeek V3 sub-configs.
 
-    No-op when TP is not enabled.
+    Dense sub-configs (attention, norms, dense FFN) are populated
+    unconditionally — ``Module.parallelize`` filters disabled axes
+    at runtime.
+
+    MoE sub-configs (router, shared experts, routed experts) are
+    populated unconditionally — ``resolve_mesh`` filters disabled
+    axes at runtime.
     """
 
-    set_decoder_sharding_config(
-        config, loss_parallel=loss_parallel, enable_sp=enable_sp
-    )
+    set_decoder_sharding_config(config, enable_sp=enable_sp)
     for layer_cfg in config.layers:
-        _set_deepseek_v3_layer_sharding(layer_cfg, enable_sp=enable_sp)
+        _set_deepseek_v3_layer_sharding(
+            layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep
+        )
 
 
 def _set_deepseek_v3_layer_sharding(
-    layer_cfg: "DeepSeekV3TransformerBlock.Config", *, enable_sp: bool
+    layer_cfg: "DeepSeekV3TransformerBlock.Config",
+    *,
+    enable_sp: bool,
+    enable_ep: bool,
 ) -> None:
     """Set sharding on one DeepSeek V3 transformer layer.
 
     MLA attention: low-rank projections (wkv_a, wq_a, kv_norm, q_norm)
     stay replicated. Up-projections (wkv_b, wq_b, wq) are colwise.
+    MoE FFN is routed through ``set_moe_sharding_config``.
     """
     attention = layer_cfg.attention
     assert isinstance(attention, Attention.Config)
@@ -60,24 +80,30 @@ def _set_deepseek_v3_layer_sharding(
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.attention_norm.sharding_config = norm
     layer_cfg.ffn_norm.sharding_config = norm
-    attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
+    attn_x_layout = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.R)
+    )
 
-    # MLA attention input: x is gathered to Replicate; freqs_cis always Replicate.
+    # MLA attention input: x is gathered to Replicate. RoPE is read from the
+    # attention layer's local cache.
     attention.sharding_config = ShardingConfig(
         in_src_shardings={
-            "x": dense_activation_placement(tp=attn_x_placement),
-            "freqs_cis": dense_param_placement(tp=Replicate()),
+            "x": attn_x_layout,
         },
         in_dst_shardings={
-            "x": dense_activation_placement(tp=Replicate()),
-            "freqs_cis": dense_param_placement(tp=Replicate()),
+            "x": dense_activation_placement(tp=spmd.R),
         },
+    )
+    attention.rope.sharding_config = ShardingConfig(
+        state_shardings={"cache": dense_param_placement(tp=spmd.R)},
     )
     # Low-rank projections and norms keep Replicate weights on TP. We still
     # distribute them (Replicate DTensor) so DTensor activations flow through
     # without mixing plain Tensor + DTensor in the matmul.
     replicate_weight = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=Replicate())},
+        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
     )
     attention.wkv_a.sharding_config = replicate_weight
     attention.kv_norm.sharding_config = replicate_weight
@@ -103,6 +129,15 @@ def _set_deepseek_v3_layer_sharding(
     if layer_cfg.feed_forward is not None:
         set_dense_ffn_sharding(
             layer_cfg.feed_forward,
-            attn_x_placement=attn_x_placement,
+            attn_x_layout=attn_x_layout,
             enable_sp=enable_sp,
+        )
+
+    # MoE FFN (MoE-enabled layers only).
+    if layer_cfg.moe is not None:
+        set_moe_sharding_config(
+            layer_cfg.moe,
+            enable_ep=enable_ep,
+            enable_sp=enable_sp,
+            expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
