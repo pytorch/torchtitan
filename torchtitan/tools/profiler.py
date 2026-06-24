@@ -14,7 +14,6 @@ from typing import Annotated
 
 import torch
 import tyro
-
 from torchtitan.config import Configurable
 from torchtitan.config.function import Function
 from torchtitan.observability import structured_logger as sl
@@ -24,7 +23,7 @@ from torchtitan.tools.utils import device_module
 # Paths expects by meta internal tooling
 PROFILE_DIR = "profiling/traces"  # Profiler.Config.save_traces_folder default
 PROFILE_ITER_DIR = "iteration_{step}"  # PROFILE_DIR/{PROFILE_ITER_DIR}
-PROFILE_FILE = "rank{rank}_trace.json"  # PROFILE_DIR/PROFILE_ITER_DIR/{PROFILE_FILE}
+PROFILE_FILE = "rank{rank}_trace.json.gz"  # PROFILE_DIR/PROFILE_ITER_DIR/{PROFILE_FILE}
 
 MEMORY_DIR = (
     "profiling/memory_snapshot"  # Profiler.Config.save_memory_snapshot_folder default
@@ -34,9 +33,6 @@ MEMORY_EXIT_DIR = "step_{step:012d}_exit"  # OOM dump variant
 MEMORY_FILE = (
     "{rank:06d}_step_{step}.pickle"  # MEMORY_DIR/MEMORY_STEP_DIR/{MEMORY_FILE}
 )
-
-# how much memory allocation/free ops to record in memory snapshots
-MEMORY_SNAPSHOT_MAX_ENTRIES = 100000
 
 
 class MemoryProfiler:
@@ -54,9 +50,15 @@ class MemoryProfiler:
         snapshot_dir: str,
         leaf_folder: str,
         rank: int,
+        max_entries: int,
     ) -> None:
         device_module.memory._record_memory_history(
-            max_entries=MEMORY_SNAPSHOT_MAX_ENTRIES
+            # stacks="python" records only Python frames (not C++), which is much
+            # cheaper to capture and serialize, keeping the snapshot dump from
+            # taking minutes -- the default stacks="all" symbolizes C++ frames,
+            # which is very slow for torchtitan workload.
+            stacks="python",
+            max_entries=max_entries,
         )
         # when resume training, we start from the last step
         self.step_num = step_num
@@ -87,7 +89,8 @@ class MemoryProfiler:
             curr_snapshot_dir, MEMORY_FILE.format(rank=self._rank, step=curr_step)
         )
         with open(output_file, "wb") as output:
-            pickle.dump(device_module.memory._snapshot(), output)
+            # Protocol 4 for compatibility with pytorch.org/memory_viz JS parser
+            pickle.dump(device_module.memory._snapshot(), output, protocol=4)
         logger.info(
             f"Finished dumping memory snapshot in {time.monotonic() - begin:.2f} seconds"
         )
@@ -161,32 +164,18 @@ class Profiler(Configurable):
         This is used to configure torch.profiler.schedule.
         """
 
-        profiler_repeat: int | None = None
-        """
-        The number of times to repeat the profiling cycle
-
-        This is used to configure torch.profiler.schedule.
-        """
-
-        profiler_skip_first: int | None = None
-        """
-        The number of initial profiling cycles to skip
-
-        This is used to configure torch.profiler.schedule.
-        """
-
-        profiler_skip_first_wait: int | None = None
-        """
-        The number of initial profiling cycles to skip the wait time
-
-        This is used to configure torch.profiler.schedule.
-        """
-
         enable_memory_snapshot: bool = False
         """Whether to dump memory snapshot."""
 
         save_memory_snapshot_folder: str = MEMORY_DIR
         """Memory snapshot files location."""
+
+        memory_snapshot_max_entries: int = 1_000_000
+        """Max alloc/free events recorded per memory snapshot (ring buffer).
+
+        Caps the history passed to ``_record_memory_history``; the oldest events
+        are dropped once full. Bounds host memory and snapshot size / dump time.
+        """
 
         trace_post_processor: Annotated[
             Function.Config | None, tyro.conf.Suppress
@@ -290,16 +279,6 @@ class Profiler(Configurable):
             cfg.profiler_active,
         )
 
-        additional_params = {
-            key: val
-            for key, val in [
-                ("repeat", cfg.profiler_repeat),
-                ("skip_first", cfg.profiler_skip_first),
-                ("skip_first_wait", cfg.profiler_skip_first_wait),
-            ]
-            if val is not None
-        }
-
         rank = torch.distributed.get_rank()
         post_processor = (
             cfg.trace_post_processor.build() if cfg.trace_post_processor else None
@@ -383,5 +362,10 @@ class Profiler(Configurable):
 
         logger.info(f"Memory profiler active. Snapshot will be saved at {snapshot_dir}")
         return MemoryProfiler(
-            global_step, cfg.profile_freq, snapshot_dir, leaf_folder, rank
+            global_step,
+            cfg.profile_freq,
+            snapshot_dir,
+            leaf_folder,
+            rank,
+            cfg.memory_snapshot_max_entries,
         )

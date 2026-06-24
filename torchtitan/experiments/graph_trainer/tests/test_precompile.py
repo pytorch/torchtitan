@@ -9,6 +9,7 @@ import pickle
 import tempfile
 import unittest
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -76,80 +77,11 @@ class TestDiskStorageAdapter(unittest.TestCase):
                 storage.save("../../escape", b"data")
 
 
-class TestPrecompiledArtifact(unittest.TestCase):
-    def test_artifact_pickle_roundtrip(self):
-        from torchtitan.experiments.graph_trainer.precompile import PrecompiledArtifact
-
-        artifact = PrecompiledArtifact(
-            serialized_fn=b"fake_serialized_data",
-            params_spec=("layer.weight", "layer.bias"),
-            buffers_spec=("running_mean",),
-            out_spec=None,
-            metadata={"world_size": 8, "model_name": "test"},
-        )
-
-        data = pickle.dumps(artifact)
-        loaded = pickle.loads(data)
-
-        self.assertEqual(loaded.serialized_fn, artifact.serialized_fn)
-        self.assertEqual(loaded.params_spec, artifact.params_spec)
-        self.assertEqual(loaded.buffers_spec, artifact.buffers_spec)
-        self.assertEqual(loaded.metadata, artifact.metadata)
-
-
-class TestApplyCompileValidation(unittest.TestCase):
-    """Test that apply_compile raises on invalid precompile configurations."""
-
-    def _make_args(self, **compile_overrides):
-        from torchtitan.config import ParallelismConfig
-        from torchtitan.distributed import ParallelDims
-        from torchtitan.experiments.graph_trainer.configs import (
-            GraphTrainerCompileConfig,
-        )
-
-        compile_config = GraphTrainerCompileConfig(
-            enable=True, mode="aot", **compile_overrides
-        )
-        parallelism = ParallelismConfig()
-        parallel_dims = ParallelDims(
-            dp_shard=2, dp_replicate=1, cp=1, tp=1, pp=1, ep=1, world_size=2
-        )
-        return dict(
-            model=torch.nn.Linear(4, 4),
-            compile_config=compile_config,
-            parallelism=parallelism,
-            parallel_dims=parallel_dims,
-            dump_folder="/tmp/test_dump",
-        )
-
-    def test_precompile_missing_artifact_raises(self):
-        from torchtitan.experiments.graph_trainer.compile import apply_compile
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            args = self._make_args(
-                precompile_artifact_dir=tmpdir,
-                passes=["full_inductor_compilation"],
-            )
-            with self.assertRaisesRegex(ValueError, "not found"):
-                apply_compile(**args)
-
-    def test_precompile_without_serializable_pass_raises(self):
-        from torchtitan.experiments.graph_trainer.compile import apply_compile
-
-        args = self._make_args(
-            precompile_artifact_dir="/tmp/test",
-            passes=["auto_bucketing"],
-        )
-        with self.assertRaisesRegex(ValueError, "serializable output"):
-            apply_compile(**args)
-
-
 @dataclass
 class _StubCompileConfig:
-    mode: str = "aot"
+    mode: str = "aot_fx_trace"
     backend: str = "aot_eager"
     passes: list = field(default_factory=list)
-    joint_passes: list = field(default_factory=list)
 
 
 @dataclass
@@ -183,213 +115,6 @@ def _make_stub_model(params=None, buffers=None):
     model.named_parameters.side_effect = lambda: iter(params)
     model.named_buffers.side_effect = lambda: iter(buffers)
     return model
-
-
-class TestPrecompileSaveLoad(unittest.TestCase):
-    def test_save_load_roundtrip(self):
-        from torch._dynamo.aot_compile_types import (
-            BundledAOTAutogradSerializableCallable,
-        )
-
-        from torchtitan.experiments.graph_trainer.precompile import (
-            precompile_load,
-            precompile_save,
-        )
-
-        model = torch.nn.Linear(4, 4)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            storage = DiskStorageAdapter(tmpdir)
-            compiled_fn = MagicMock(spec=BundledAOTAutogradSerializableCallable)
-            with patch.object(
-                BundledAOTAutogradSerializableCallable,
-                "serialize_compile_artifacts",
-                return_value=b"fake_serialized",
-            ):
-                precompile_save(
-                    model,
-                    compiled_fn,
-                    storage,
-                    out_spec=None,
-                    config_fingerprint="abc123",
-                )
-
-            self.assertTrue(storage.exists("default"))
-
-            # Load should succeed with matching model
-            wrapper = precompile_load(model, storage, expected_fingerprint="abc123")
-            self.assertTrue(callable(wrapper))
-
-    def test_load_param_mismatch(self):
-        from torchtitan.experiments.graph_trainer.precompile import (
-            precompile_load,
-            PrecompiledArtifact,
-        )
-
-        artifact = PrecompiledArtifact(
-            serialized_fn=b"fake",
-            params_spec=("layer.weight", "layer.bias"),
-            buffers_spec=(),
-            out_spec=None,
-        )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            storage = DiskStorageAdapter(tmpdir)
-            storage.save("default", pickle.dumps(artifact))
-
-            # Model with different params should fail
-            model = torch.nn.Linear(8, 8)
-            model.extra = torch.nn.Parameter(torch.zeros(1))
-            with self.assertRaisesRegex(ValueError, "Parameter mismatch"):
-                precompile_load(model, storage, expected_fingerprint="")
-
-    def test_load_buffer_mismatch(self):
-        from torchtitan.experiments.graph_trainer.precompile import (
-            precompile_load,
-            PrecompiledArtifact,
-        )
-
-        artifact = PrecompiledArtifact(
-            serialized_fn=b"fake",
-            params_spec=("weight", "bias"),
-            buffers_spec=("running_mean",),
-            out_spec=None,
-        )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            storage = DiskStorageAdapter(tmpdir)
-            storage.save("default", pickle.dumps(artifact))
-
-            # nn.Linear has no buffers, so buffers_spec won't match
-            model = torch.nn.Linear(4, 4)
-            with self.assertRaisesRegex(ValueError, "Buffer mismatch"):
-                precompile_load(model, storage, expected_fingerprint="")
-
-    def test_load_fingerprint_mismatch(self):
-        from torchtitan.experiments.graph_trainer.precompile import (
-            precompile_load,
-            PrecompiledArtifact,
-        )
-
-        model = torch.nn.Linear(4, 4)
-        artifact = PrecompiledArtifact(
-            serialized_fn=b"fake",
-            params_spec=tuple(n for n, _ in model.named_parameters()),
-            buffers_spec=tuple(n for n, _ in model.named_buffers()),
-            out_spec=None,
-            config_fingerprint="old_fingerprint",
-        )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            storage = DiskStorageAdapter(tmpdir)
-            storage.save("default", pickle.dumps(artifact))
-
-            with self.assertRaisesRegex(ValueError, "fingerprint mismatch"):
-                precompile_load(model, storage, expected_fingerprint="new_fingerprint")
-
-    def test_load_with_out_spec_unflattens(self):
-        from torch._dynamo.aot_compile_types import (
-            BundledAOTAutogradSerializableCallable,
-        )
-
-        from torchtitan.experiments.graph_trainer.precompile import (
-            precompile_load,
-            PrecompiledArtifact,
-        )
-
-        model = torch.nn.Linear(4, 4)
-        # Build an out_spec from a dict so we can verify unflattening
-        example_output = {"loss": torch.tensor(1.0), "logits": torch.tensor(2.0)}
-        flat_values, out_spec = torch.utils._pytree.tree_flatten(example_output)
-
-        artifact = PrecompiledArtifact(
-            serialized_fn=b"fake",
-            params_spec=tuple(n for n, _ in model.named_parameters()),
-            buffers_spec=tuple(n for n, _ in model.named_buffers()),
-            out_spec=out_spec,
-        )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            storage = DiskStorageAdapter(tmpdir)
-            storage.save("default", pickle.dumps(artifact))
-
-            # Mock deserialize to return a fn that returns flat outputs
-            def fake_compiled_fn(*args, **kwargs):
-                return flat_values
-
-            with patch.object(
-                BundledAOTAutogradSerializableCallable,
-                "deserialize_compile_artifacts",
-                return_value=fake_compiled_fn,
-            ):
-                wrapper = precompile_load(model, storage, expected_fingerprint="")
-                result = wrapper((), {})
-
-            self.assertIsInstance(result, dict)
-            self.assertIn("loss", result)
-            self.assertIn("logits", result)
-            self.assertEqual(result["loss"].item(), 1.0)
-            self.assertEqual(result["logits"].item(), 2.0)
-
-    def test_load_legacy_artifact_warns(self):
-        from torchtitan.experiments.graph_trainer.precompile import (
-            precompile_load,
-            PrecompiledArtifact,
-        )
-
-        model = torch.nn.Linear(4, 4)
-        artifact = PrecompiledArtifact(
-            serialized_fn=b"fake",
-            params_spec=tuple(n for n, _ in model.named_parameters()),
-            buffers_spec=tuple(n for n, _ in model.named_buffers()),
-            out_spec=None,
-            config_fingerprint="",
-        )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            storage = DiskStorageAdapter(tmpdir)
-            storage.save("default", pickle.dumps(artifact))
-
-            with self.assertLogs(level="WARNING") as cm:
-                precompile_load(model, storage, expected_fingerprint="some_fp")
-            self.assertTrue(any("legacy artifact" in msg for msg in cm.output))
-
-
-class TestPrecompileSaveValidation(unittest.TestCase):
-    def test_non_serializable_compiled_fn_raises(self):
-        from torchtitan.experiments.graph_trainer.precompile import precompile_save
-
-        model = torch.nn.Linear(4, 4)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            storage = DiskStorageAdapter(tmpdir)
-
-            def not_serializable(*args):
-                return None
-
-            with self.assertRaisesRegex(
-                TypeError, "BundledAOTAutogradSerializableCallable"
-            ):
-                precompile_save(
-                    model,
-                    not_serializable,
-                    storage,
-                    out_spec=None,
-                )
-
-    def test_unwrap_from_wrapped_attribute(self):
-        """Test that precompile_save can unwrap a plain function whose
-        __wrapped__ attribute is a BundledAOTAutogradSerializableCallable,
-        matching PyTorch's aot_compile_joint_with_descriptors behavior."""
-        from functools import wraps
-
-        from torch._dynamo.aot_compile_types import (
-            BundledAOTAutogradSerializableCallable,
-        )
-
-        from torchtitan.experiments.graph_trainer.precompile import _unwrap_serializable
-
-        inner = MagicMock(spec=BundledAOTAutogradSerializableCallable)
-
-        @wraps(inner)
-        def wrapper(*args, **kwargs):
-            return inner(*args, **kwargs)
-
-        result = _unwrap_serializable(wrapper)
-        self.assertIs(result, inner)
 
 
 class TestConfigFingerprint(unittest.TestCase):
@@ -461,6 +186,25 @@ class TestConfigFingerprint(unittest.TestCase):
         self.assertNotEqual(fp_ab, fp_ba)
 
 
+class TestPrecompileLossSetup(unittest.TestCase):
+    def test_chunked_loss_setup_matches_trainer_boundary(self):
+        from torchtitan.experiments.graph_trainer.chunked_loss import (
+            ChunkedCELossWithParamGrads,
+        )
+        from torchtitan.experiments.graph_trainer.precompile_main import (
+            _prepare_loss_for_precompile,
+        )
+
+        lm_head = torch.nn.Linear(2, 3)
+        model = SimpleNamespace(lm_head=lm_head, _skip_lm_head=False)
+        loss_fn = ChunkedCELossWithParamGrads.Config().build()
+
+        _prepare_loss_for_precompile(model, loss_fn)
+
+        self.assertIs(loss_fn.lm_head, lm_head)
+        self.assertTrue(model._skip_lm_head)
+
+
 class TestPrecompiledFxTraceArtifact(unittest.TestCase):
     def test_artifact_pickle_roundtrip(self):
         from torchtitan.experiments.graph_trainer.make_fx_tracer import SubclassLayout
@@ -493,6 +237,63 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
         self.assertEqual(len(loaded.input_subclass_layouts), 2)
         self.assertEqual(loaded.num_flat_outputs, 2)
         self.assertEqual(loaded.config_fingerprint, "test_fp_123")
+
+    def test_artifact_pickle_with_blockmask_treespec(self):
+        """Verify artifact pickles when user_inputs_spec contains BlockMask.
+
+        BlockMask's pytree context stores a _MaskModWrapper holding the
+        mask_mod closure, which is not picklable. The artifact must not
+        serialize user_inputs_spec (the mask_mod is already compiled into
+        standalone Inductor HOPs baked into serialized_gm).
+        """
+        from torch.nn.attention.flex_attention import create_block_mask
+
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            maybe_register_blockmask_pytree_node,
+        )
+        from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
+        from torchtitan.experiments.graph_trainer.precompile import (
+            PrecompiledFxTraceArtifact,
+        )
+        from torchtitan.models.common.attention import get_causal_mask_mod
+
+        maybe_register_blockmask_pytree_node()
+
+        mask_mod = get_causal_mask_mod()
+        block_mask = create_block_mask(mask_mod, B=1, H=1, Q_LEN=128, KV_LEN=128)
+
+        # Build a user_inputs_spec that includes BlockMask — this is what
+        # minimal_fx_tracer produces when FlexAttention is configured.
+        _, blockmask_spec = torch.utils._pytree.tree_flatten(
+            ((torch.zeros(2),), {"attention_masks": block_mask})
+        )
+
+        # Sanity: the raw TreeSpec itself is NOT picklable (the bug).
+        with self.assertRaises((TypeError, AttributeError)):
+            pickle.dumps(blockmask_spec)
+
+        # Build a TracedResult with the unpicklable spec, then create
+        # the artifact via from_traced_result — this must succeed because
+        # user_inputs_spec is excluded from serialization.
+        gm = torch.fx.GraphModule(torch.nn.Module(), torch.fx.Graph())
+        dummy_spec = torch.utils._pytree.tree_flatten(((), {}))[1]
+        traced_result = TracedResult(
+            gm=gm,
+            example_inputs=(),
+            num_flat_inputs=0,
+            input_subclass_layouts={},
+            user_inputs_spec=blockmask_spec,
+            tensor_input_indices=[],
+            num_flat_outputs=0,
+            output_subclass_layouts={},
+            output_spec=dummy_spec,
+            state_fqns=[],
+        )
+
+        artifact = PrecompiledFxTraceArtifact.from_traced_result(traced_result)
+        data = pickle.dumps(artifact)
+        loaded = pickle.loads(data)
+        self.assertEqual(loaded.serialized_gm, artifact.serialized_gm)
 
     def test_fx_trace_save_load_fingerprint_mismatch(self):
         from torchtitan.experiments.graph_trainer.precompile import (
@@ -536,9 +337,7 @@ class TestCudagraphPass(unittest.TestCase):
             return args
 
         with self.assertRaisesRegex(TypeError, "requires a GraphModule"):
-            cudagraph_pass(
-                plain_fn, (torch.zeros(4),), is_forward=True, static_input_indices=[0]
-            )
+            cudagraph_pass(plain_fn, (torch.zeros(4),), static_input_indices=[0])
 
     def test_graphmodule_wraps_forward(self):
         """cudagraph_pass wraps gm.forward with CUDAGraphWrapper."""
@@ -552,11 +351,72 @@ class TestCudagraphPass(unittest.TestCase):
         ) as MockWrapper:
             mock_instance = MagicMock()
             MockWrapper.return_value = mock_instance
-            result = cudagraph_pass(
-                gm, example_inputs, is_forward=True, static_input_indices=[0]
-            )
+            result = cudagraph_pass(gm, example_inputs, static_input_indices=[0])
             self.assertIs(result, gm)
             self.assertIs(gm.forward, mock_instance)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_minimal_async_ep_custom_ops_are_wrapped_by_cudagraph_pass(self):
+        """MinimalAsyncEP custom ops should not force cudagraph_pass fallback."""
+        import torchtitan.distributed.minimal_async_ep  # noqa: F401
+        from torchtitan.experiments.graph_trainer.passes import cudagraph_pass
+
+        def cuda_i64(*shape):
+            return torch.empty(*shape, device="cuda", dtype=torch.int64)
+
+        def cuda_f32(*shape):
+            return torch.empty(*shape, device="cuda", dtype=torch.float32)
+
+        graph = torch.fx.Graph()
+        op_outputs = [
+            (
+                torch.ops.minimal_async_ep.dispatch.default,
+                (
+                    cuda_f32(16, 8),
+                    cuda_i64(12),
+                    cuda_i64(12),
+                    cuda_i64(16),
+                    cuda_i64(16),
+                    cuda_i64(1),
+                    cuda_i64(12),
+                    cuda_i64(12),
+                    cuda_i64(4),
+                ),
+            ),
+            (
+                torch.ops.minimal_async_ep.combine.default,
+                (cuda_f32(4, 8), cuda_f32(12, 8)),
+            ),
+            (
+                torch.ops.minimal_async_ep.dispatch_backward.default,
+                cuda_f32(4, 8),
+            ),
+            (
+                torch.ops.minimal_async_ep.combine_backward.default,
+                (cuda_f32(16, 8), cuda_f32(12)),
+            ),
+        ]
+        nodes = []
+        for target, meta_val in op_outputs:
+            node = graph.call_function(target, args=())
+            node.meta["val"] = meta_val
+            nodes.append(node)
+        graph.output(tuple(nodes))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        with patch(
+            "torchtitan.experiments.graph_trainer.cudagraph.CUDAGraphWrapper"
+        ) as MockWrapper:
+            mock_instance = MagicMock()
+            MockWrapper.return_value = mock_instance
+            result = cudagraph_pass(gm, (), static_input_indices=[])
+
+            self.assertIs(result, gm)
+            self.assertIs(gm.forward, mock_instance)
+            MockWrapper.assert_called_once()
+            _, example_inputs, static_input_indices = MockWrapper.call_args.args
+            self.assertEqual(example_inputs, ())
+            self.assertEqual(static_input_indices, [])
 
 
 class TestCudagraphFingerprintConsistency(unittest.TestCase):

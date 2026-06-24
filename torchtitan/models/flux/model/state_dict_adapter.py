@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import re
-
 from collections import defaultdict
 from typing import Any
 
@@ -204,13 +203,16 @@ class FluxStateDictAdapter(StateDictAdapter):
                     "single_blocks.{}.linear1.bias",
                     "single_blocks.{}.linear1.weight",
                 ]:
+                    # pyrefly: ignore [missing-attribute]
+                    hidden_size = self.model_config.hidden_size
                     mlp_hidden_dim = int(
-                        self.model_config.hidden_size * self.model_config.mlp_ratio
+                        hidden_size
+                        * self.model_config.mlp_ratio  # pyrefly: ignore [missing-attribute]
                     )
                     split_plan = [
-                        self.model_config.hidden_size,
-                        self.model_config.hidden_size,
-                        self.model_config.hidden_size,
+                        hidden_size,
+                        hidden_size,
+                        hidden_size,
                         mlp_hidden_dim,
                     ]
                     # split into q, k, v, mlp
@@ -222,7 +224,9 @@ class FluxStateDictAdapter(StateDictAdapter):
                 else:
                     # split into q, k, v
                     split_vals = torch.split(
-                        value, self.model_config.hidden_size, dim=0
+                        value,
+                        self.model_config.hidden_size,  # pyrefly: ignore [missing-attribute]
+                        dim=0,
                     )
 
                 new_keys = (

@@ -1,4 +1,5 @@
 ciflow_push_tags:
   - ciflow/8gpu
   - ciflow/h100.8
+  - ciflow/rl
 labeler_config: labeler.yml

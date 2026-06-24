@@ -10,9 +10,8 @@ import dataclasses
 import hashlib
 import os
 import pickle
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import Any, NewType, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import NewType, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from torchtitan.distributed import ParallelDims
@@ -20,7 +19,6 @@ if TYPE_CHECKING:
 
 import torch
 import torch.utils._pytree as pytree
-from torch._dynamo.aot_compile_types import BundledAOTAutogradSerializableCallable
 
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     SubclassLayout,
@@ -30,20 +28,6 @@ from torchtitan.experiments.graph_trainer.storage import StorageAdapter
 from torchtitan.tools.logging import logger
 
 ConfigFingerprint = NewType("ConfigFingerprint", str)
-
-# Single artifact key — there is exactly one compiled artifact per
-# precompile_artifact_dir, so no key-based dispatch is needed.
-_ARTIFACT_KEY = "default"
-
-
-@dataclass
-class PrecompiledArtifact:
-    serialized_fn: bytes
-    params_spec: tuple[str, ...]
-    buffers_spec: tuple[str, ...]
-    out_spec: pytree.TreeSpec | None
-    metadata: dict[str, Any] = field(default_factory=dict)
-    config_fingerprint: ConfigFingerprint = ConfigFingerprint("")
 
 
 def compute_config_fingerprint(
@@ -70,16 +54,9 @@ def compute_config_fingerprint(
     h.update(f"compile:mode:{compile_config.mode}\n".encode())
     h.update(f"compile:backend:{compile_config.backend}\n".encode())
     h.update(f"compile:passes:{list(compile_config.passes)}\n".encode())
-    h.update(f"compile:joint_passes:{list(compile_config.joint_passes)}\n".encode())
 
-    # Include PyTorch version since compiled artifacts (AOT graphs,
-    # Triton kernels) are not guaranteed to be compatible across
-    # different PyTorch versions.
     h.update(f"torch_version:{torch.__version__}\n".encode())
 
-    # Compiled Triton kernels are architecture-specific (e.g. SM80 vs
-    # SM90), so artifacts saved on one GPU type may not work on another.
-    # Include the GPU capability to catch cross-machine mismatches.
     if torch.cuda.is_available():
         capability = torch.cuda.get_device_capability()
         h.update(f"cuda_capability:{capability}\n".encode())
@@ -101,154 +78,6 @@ def _register_coor_ops() -> None:
 
     _register_distributed_opaque_types()
     from torch.distributed._ops import device_mesh as _dm_ops  # noqa: F401
-
-
-def _unwrap_serializable(
-    compiled_fn: Any,
-) -> BundledAOTAutogradSerializableCallable:
-    """
-    Extract the BundledAOTAutogradSerializableCallable from compiled_fn.
-    PyTorch's aot_compile_joint_with_descriptors wraps the serializable
-    callable in a plain function via functools.wraps, so we walk the
-    __wrapped__ chain until we find the serializable callable.
-    """
-    current = compiled_fn
-    while current is not None:
-        if isinstance(current, BundledAOTAutogradSerializableCallable):
-            return current
-        current = getattr(current, "__wrapped__", None)
-    raise TypeError(
-        "precompile_save requires the compiled function to be a "
-        "BundledAOTAutogradSerializableCallable, but got "
-        f"{type(compiled_fn).__name__}. Ensure your compiler pass "
-        "pipeline produces serializable output (e.g. by including "
-        "'full_inductor_compilation' in --compile.passes)."
-    )
-
-
-def precompile_save(
-    model: torch.nn.Module,
-    compiled_fn: BundledAOTAutogradSerializableCallable,
-    storage: StorageAdapter,
-    out_spec: pytree.TreeSpec | None,
-    metadata: dict[str, Any] | None = None,
-    config_fingerprint: ConfigFingerprint | None = None,
-) -> str:
-    """
-    Serialize a compiled function and save it via the storage adapter.
-
-    Returns the path/URI of the saved artifact.
-    """
-    compiled_fn = _unwrap_serializable(compiled_fn)
-
-    serialized_fn = BundledAOTAutogradSerializableCallable.serialize_compile_artifacts(
-        compiled_fn
-    )
-
-    params_spec = tuple(name for name, _ in model.named_parameters())
-    buffers_spec = tuple(name for name, _ in model.named_buffers())
-
-    artifact = PrecompiledArtifact(
-        serialized_fn=serialized_fn,
-        params_spec=params_spec,
-        buffers_spec=buffers_spec,
-        out_spec=out_spec,
-        metadata=metadata or {},
-        config_fingerprint=config_fingerprint or ConfigFingerprint(""),
-    )
-
-    data = pickle.dumps(artifact)
-    path = storage.save(_ARTIFACT_KEY, data)
-    logger.info(
-        f"Precompile artifact saved: "
-        f"params={len(params_spec)}, buffers={len(buffers_spec)}, "
-        f"size={len(data)} bytes, fingerprint={config_fingerprint}, "
-        f"path={path}"
-    )
-    return path
-
-
-def precompile_load(
-    model: torch.nn.Module,
-    storage: StorageAdapter,
-    expected_fingerprint: ConfigFingerprint,
-) -> Callable:
-    """
-    Load a precompiled artifact and return a wrapper function that
-    binds model parameters/buffers (same calling convention as
-    joint_graph_builder's wrapper_fn).
-    """
-    data = storage.load(_ARTIFACT_KEY)
-    # SAFETY: pickle.loads executes arbitrary code during deserialization.
-    # This is acceptable here because storage backends are assumed to be
-    # trusted (local disk or controlled shared filesystem).
-    artifact: PrecompiledArtifact = pickle.loads(data)
-
-    current_params = tuple(name for name, _ in model.named_parameters())
-    current_buffers = tuple(name for name, _ in model.named_buffers())
-    if current_params != artifact.params_spec:
-        raise ValueError(
-            f"Parameter mismatch between saved artifact and current model. "
-            f"Saved: {artifact.params_spec}, Current: {current_params}"
-        )
-    if current_buffers != artifact.buffers_spec:
-        raise ValueError(
-            f"Buffer mismatch between saved artifact and current model. "
-            f"Saved: {artifact.buffers_spec}, Current: {current_buffers}"
-        )
-
-    _validate_config_fingerprint(artifact.config_fingerprint, expected_fingerprint)
-
-    logger.info(
-        f"Precompile artifact loaded: "
-        f"params={len(artifact.params_spec)}, "
-        f"buffers={len(artifact.buffers_spec)}, "
-        f"fingerprint={artifact.config_fingerprint}, "
-        f"metadata={artifact.metadata}"
-    )
-
-    out_spec = artifact.out_spec
-    serialized_fn_bytes = artifact.serialized_fn
-    compiled_fn: Callable | None = None
-
-    def wrapper_fn(args, kwargs):
-        nonlocal compiled_fn
-        # Defer deserialization to first call so that Triton kernels
-        # are loaded on the correct CUDA device (which is guaranteed
-        # to be set by the time the first forward runs).
-        # NOTE: not thread-safe — assumes single-threaded forward calls.
-        if compiled_fn is None:
-            logger.info(
-                f"Deserializing compiled fn on device {torch.cuda.current_device()}"
-            )
-
-            _register_coor_ops()
-
-            compiled_fn = (
-                BundledAOTAutogradSerializableCallable.deserialize_compile_artifacts(
-                    serialized_fn_bytes
-                )
-            )
-
-        # Build the flat input tuple: params + buffers + user args.
-        # This mirrors the calling convention in joint_graph_builder's
-        # wrapper_fn (graph_utils.py).
-        inputs = (
-            *model.parameters(),
-            *model.buffers(),
-            *args,
-        )
-        # The deserialized fn returns flat outputs. We need to
-        # unflatten them using the saved out_spec to match the
-        # original model output structure. See also graph_utils.py:wrapper_fn
-        # which does NOT unflatten because the live-compiled fn already
-        # handles it via unflattened_compiled_fn.
-        flat_outputs = compiled_fn(*inputs, **kwargs)
-        if out_spec is not None:
-            return pytree.tree_unflatten(flat_outputs, out_spec)
-        return flat_outputs
-
-    return wrapper_fn
 
 
 def _validate_config_fingerprint(
@@ -316,6 +145,11 @@ class PrecompiledFxTraceArtifact:
     output_subclass_layouts: dict[int, SubclassLayout]
     output_spec: pytree.TreeSpec
     tensor_input_indices: list[int]
+    # user_inputs_spec is intentionally omitted: it can contain
+    # FlexAttention _MaskModWrapper objects that are not picklable,
+    # and the mask_mod is already compiled into standalone Inductor
+    # HOPs (AOTCompiledArtifact) baked into serialized_gm. The spec
+    # is only used for optional runtime validation in run_traced().
     config_fingerprint: ConfigFingerprint = ConfigFingerprint("")
 
     @classmethod
@@ -334,7 +168,7 @@ class PrecompiledFxTraceArtifact:
         """
         from torch.fx._graph_pickler import GraphPickler, Options
 
-        from torchtitan.experiments.graph_trainer.passes import (
+        from torchtitan.experiments.graph_trainer.inductor_passes import (
             _node_metadata_key_filter_distributed,
         )
 
@@ -378,16 +212,21 @@ class PrecompiledFxTraceArtifact:
         gm = GraphPickler.loads(self.serialized_gm, fake_mode)
         gm.recompile()
 
+        # Provide a minimal dummy spec since user_inputs_spec is not
+        # serialized (see comment on the dataclass field above).
+        dummy_spec = pytree.tree_flatten(((), {}))[1]
+
         return TracedResult(
             gm=gm,
             example_inputs=(),
-            state_fqns=self.state_fqns,
             num_flat_inputs=self.num_flat_inputs,
             input_subclass_layouts=self.input_subclass_layouts,
+            user_inputs_spec=dummy_spec,
+            tensor_input_indices=self.tensor_input_indices,
             num_flat_outputs=self.num_flat_outputs,
             output_subclass_layouts=self.output_subclass_layouts,
             output_spec=self.output_spec,
-            tensor_input_indices=self.tensor_input_indices,
+            state_fqns=self.state_fqns,
         )
 
 
@@ -425,7 +264,7 @@ def precompile_fx_trace_load(
     """Load a precompiled aot_fx_trace artifact.
 
     Returns a TracedResult with the deserialized GraphModule and
-    metadata. The caller uses this with run_traced_train_step to
+    metadata. The caller uses this with run_traced(..., module=model) to
     execute the graph (same path as non-precompiled aot_fx_trace).
 
     DeviceMesh objects are graph inputs (placeholders), not baked-in
