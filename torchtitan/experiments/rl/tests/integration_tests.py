@@ -79,7 +79,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_moe_debug_varlen",
+                    "--config rl_grpo_gpt_oss_debug_varlen",
                     "--num_steps 5",
                     "--hf_assets_path tests/assets/tokenizer",
                     "--trainer.parallelism.tensor_parallel_degree 4",
@@ -101,7 +101,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO MoE TP=4 EP=4",
+            "RL GRPO GPT-OSS MoE varlen TP=4 EP=4",
             "rl_grpo_moe_debug_tp4_ep4",
             ngpu=8,
         ),
