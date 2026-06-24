@@ -13,7 +13,7 @@ import spmd_types as spmd
 from torch import nn
 from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.spmd_types import set_sparse_mesh, spmd_mesh_size
+from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.nn_modules import Linear
@@ -141,7 +141,7 @@ class GroupedExperts(Module):
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
-        with set_sparse_mesh():
+        with maybe_set_sparse_mesh():
             routed_output_RD = self._experts_forward(
                 routed_input_RD, num_global_tokens_per_local_expert_e
             )
