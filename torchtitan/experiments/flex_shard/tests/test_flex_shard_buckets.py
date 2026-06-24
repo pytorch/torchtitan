@@ -384,7 +384,7 @@ class TestBucketPlacementValidation(TestCase):
 
     def test_grouped_owned_reduce_grad_reuses_packed_send_buffer(self):
         """GroupedOwned packs reduce-grad with reusable fp32 scratch."""
-        with single_rank_cpu_mesh() as mesh:
+        with single_rank_cuda_mesh() as mesh:
             placement = GroupedOwned(
                 {
                     "a": [GroupedOwnedSegmentSpec("a#0", "a", 0, 4, 0)],
@@ -392,8 +392,8 @@ class TestBucketPlacementValidation(TestCase):
                 }
             )
             params = {
-                "a": nn.Parameter(torch.empty(2, 2)),
-                "b": nn.Parameter(torch.empty(3)),
+                "a": nn.Parameter(torch.empty(2, 2, device="cuda")),
+                "b": nn.Parameter(torch.empty(3, device="cuda")),
             }
             infos = [
                 ParamInfo(
@@ -411,15 +411,19 @@ class TestBucketPlacementValidation(TestCase):
                 for fqn, param in params.items()
             ]
             grads = [
-                torch.arange(4, dtype=torch.bfloat16).view(2, 2),
-                torch.arange(3, dtype=torch.bfloat16).add(10),
+                torch.arange(4, dtype=torch.bfloat16, device="cuda").view(2, 2),
+                torch.arange(3, dtype=torch.bfloat16, device="cuda").add(10),
             ]
 
             first = placement.prepare_reduce_grad(grads, infos, mesh, None)
             self.assertEqual(first.buffers[0].dtype, torch.float32)
             self.assertEqual(
                 first.buffers[0],
-                torch.tensor([0, 1, 2, 3, 10, 11, 12], dtype=torch.float32),
+                torch.tensor(
+                    [0, 1, 2, 3, 10, 11, 12],
+                    dtype=torch.float32,
+                    device="cuda",
+                ),
             )
             first_result = placement.reduce_prepared_grad(first)
             self.assertEqual(first_result.sharded_grads[0], grads[0].float())

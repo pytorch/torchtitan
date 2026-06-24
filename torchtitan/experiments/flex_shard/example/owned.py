@@ -38,10 +38,9 @@ from ..flex_shard.utils import (
     _record_view_out_if_eager,
 )
 from ._pack_utils import (
-    foreach_copy_,
     pack_tensors_into_flat_buffer,
     pack_tensors_into_flat_buffer_with_scratch,
-    pack_segments_into_flat_buffer_triton_if_available,
+    pack_segments_into_flat_buffer_triton_if_supported,
 )
 
 if TYPE_CHECKING:
@@ -1090,15 +1089,15 @@ class GroupedOwned(Placement):
             return None
         return flat_storage_span, offsets
 
-    def _pack_reduce_send_triton_if_available(
+    def _pack_reduce_send_triton(
         self,
         send_by_owner: torch.Tensor,
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
         layout: _Layout,
-    ) -> list[torch.Tensor] | None:
+    ) -> list[torch.Tensor]:
         if send_by_owner.device.type != "cuda":
-            return None
+            raise AssertionError("GroupedOwned Triton pack requires a CUDA send buffer.")
         segments_by_fqn: dict[str, list[GroupedOwned._Segment]] = {}
         for segment in layout.segments:
             segments_by_fqn.setdefault(segment.fqn, []).append(segment)
@@ -1113,12 +1112,19 @@ class GroupedOwned(Placement):
             segments = segments_by_fqn[info.fqn]
             source = self._flat_source_for_segments(tensor, segments)
             if source is None:
-                return None
+                raise AssertionError(
+                    "GroupedOwned Triton pack requires contiguous tensors or "
+                    f"supported strided expert views; got {info.fqn!r} with "
+                    f"shape={tuple(tensor.shape)} stride={tuple(tensor.stride())}."
+                )
             flat_input, source_offsets = source
             if input_dtype is None:
                 input_dtype = flat_input.dtype
             elif flat_input.dtype != input_dtype:
-                return None
+                raise AssertionError(
+                    "GroupedOwned Triton pack requires one input dtype per "
+                    f"bucket, but got {input_dtype} and {flat_input.dtype}."
+                )
             input_index = len(inputs)
             inputs.append(flat_input)
             for segment, source_offset in zip(segments, source_offsets, strict=True):
@@ -1130,7 +1136,7 @@ class GroupedOwned(Placement):
                     + segment.rank_offset
                 )
 
-        return pack_segments_into_flat_buffer_triton_if_available(
+        pack_scratch = pack_segments_into_flat_buffer_triton_if_supported(
             inputs,
             tensor_indices,
             src_offsets,
@@ -1138,6 +1144,12 @@ class GroupedOwned(Placement):
             dst_offsets,
             send_by_owner.reshape(-1),
         )
+        if pack_scratch is None:
+            raise AssertionError(
+                "GroupedOwned CUDA reduce copy-in expected Triton segment pack "
+                "to support this bucket."
+            )
+        return pack_scratch
 
     def _pack_reduce_send(
         self,
@@ -1146,37 +1158,12 @@ class GroupedOwned(Placement):
         infos: list[ParamInfo],
         layout: _Layout,
     ) -> list[torch.Tensor]:
-        pack_scratch = self._pack_reduce_send_triton_if_available(
+        return self._pack_reduce_send_triton(
             send_by_owner,
             tensors,
             infos,
             layout,
         )
-        if pack_scratch is not None:
-            return pack_scratch
-
-        segments_by_fqn: dict[str, list[GroupedOwned._Segment]] = {}
-        for segment in layout.segments:
-            segments_by_fqn.setdefault(segment.fqn, []).append(segment)
-
-        dst_views: list[torch.Tensor] = []
-        src_views: list[torch.Tensor] = []
-        for tensor, info in zip(tensors, infos, strict=True):
-            tensor_flat = tensor.reshape(-1)
-            for segment in segments_by_fqn[info.fqn]:
-                dst_views.append(
-                    send_by_owner[segment.owner_rank].narrow(
-                        0,
-                        segment.rank_offset,
-                        segment.numel,
-                    )
-                )
-                src_views.append(
-                    tensor_flat.narrow(0, segment.param_offset, segment.numel)
-                )
-        if dst_views:
-            foreach_copy_(dst_views, src_views)
-        return []
 
     @override
     def compute_local_shape(
