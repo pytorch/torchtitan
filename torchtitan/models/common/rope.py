@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from typing import Literal
 
 import spmd_types as spmd
-
 import torch
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
