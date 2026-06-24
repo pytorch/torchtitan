@@ -7,9 +7,9 @@
 """
 Integration tests for the RL unified workstream.
 
-Runs the full GRPO training loop (simple_grpo.py) with different
+Runs the full GRPO training loop (train.py) with different
 parallelism configurations. Uses OverrideDefinitions from the shared
-test infrastructure but with a custom runner since simple_grpo.py is
+test infrastructure but with a custom runner since train.py is
 a Monarch script (run with ``python``, not ``torchrun``).
 
 Usage:
@@ -20,6 +20,7 @@ Usage:
 import argparse
 import os
 import subprocess
+import sys
 import time
 
 from tests.integration_tests import OverrideDefinitions
@@ -32,36 +33,77 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module rl",
-                    "--config rl_grpo_qwen3_0_6b",
+                    "--module alphabet_sort",
+                    "--config rl_grpo_qwen3_0_6b_varlen",
+                    "--num_steps 5",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
-                    "--generator.sampling.n 2",
+                    "--num_generators 3",
+                    "--group_size 2",
+                    "--batcher.batch.seq_len 1024",
+                    "--renderer.enable-thinking False",
+                    "--generator.sampling.max_tokens 256",
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
                     "--compile.no-enable",
                     "--generator.cudagraph.no-enable",
+                    "--metrics.no-enable-wandb",
                 ],
             ],
             "RL GRPO TP=2 no compile",
             "rl_grpo_tp2_no_compile",
-            ngpu=4,
+            ngpu=8,
         ),
         OverrideDefinitions(
             [
                 [
-                    "--module rl",
-                    "--config rl_grpo_qwen3_0_6b",
+                    "--module alphabet_sort",
+                    "--config rl_grpo_qwen3_0_6b_varlen",
+                    "--num_steps 5",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
-                    "--generator.sampling.n 2",
+                    "--group_size 2",
+                    "--batcher.batch.seq_len 1024",
+                    "--renderer.enable-thinking False",
+                    "--generator.sampling.max_tokens 256",
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
+                    "--metrics.no-enable-wandb",
                 ],
             ],
             "RL GRPO TP=2 compile",
             "rl_grpo_tp2_compile",
             ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module alphabet_sort",
+                    "--config rl_grpo_gpt_oss_debug_varlen",
+                    "--num_steps 5",
+                    "--hf_assets_path tests/assets/tokenizer",
+                    "--trainer.parallelism.tensor_parallel_degree 4",
+                    "--trainer.parallelism.expert_parallel_degree 4",
+                    "--trainer.parallelism.data_parallel_shard_degree 1",
+                    "--generator.parallelism.tensor_parallel_degree 4",
+                    "--generator.parallelism.expert_parallel_degree 4",
+                    "--generator.parallelism.data_parallel_degree 1",
+                    "--group_size 2",
+                    "--batcher.batch.seq_len 1024",
+                    "--renderer.enable-thinking False",
+                    "--generator.sampling.max_tokens 256",
+                    "--trainer.debug.no_batch_invariant",
+                    "--generator.debug.no_batch_invariant",
+                    "--trainer.checkpoint.no-enable",  # use random-init weights
+                    "--generator.checkpoint.no-enable",  # use random-init weights
+                    "--compile.no-enable",
+                    "--generator.cudagraph.no-enable",
+                    "--metrics.no-enable-wandb",
+                ],
+            ],
+            "RL GRPO GPT-OSS MoE varlen TP=4 EP=4",
+            "rl_grpo_moe_debug_tp4_ep4",
+            ngpu=8,
         ),
     ]
 
@@ -71,13 +113,39 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module rl",
-                    "--config rl_grpo_qwen3_0_6b_batch_invariant",
+                    "--module alphabet_sort",
+                    "--config rl_grpo_qwen3_0_6b_varlen_batch_invariant",
+                    "--num_steps 5",
+                    "--group_size 2",
+                    "--batcher.batch.seq_len 1024",
+                    "--renderer.enable-thinking False",
+                    "--generator.sampling.max_tokens 256",
+                    "--metrics.no-enable-wandb",
                 ],
             ],
             "RL GRPO TP=2 batch-invariant + deterministic",
             "rl_grpo_tp2_batch_invariant",
             ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module alphabet_sort",
+                    "--config rl_grpo_qwen3_moe_debug_varlen_batch_invariant",
+                    "--num_steps 5",
+                    "--hf_assets_path tests/assets/tokenizer",
+                    "--group_size 2",
+                    "--batcher.batch.seq_len 1024",
+                    "--renderer.enable-thinking False",
+                    "--generator.sampling.max_tokens 256",
+                    "--trainer.checkpoint.no-enable",  # use random-init weights
+                    "--generator.checkpoint.no-enable",
+                    "--metrics.no-enable-wandb",
+                ],
+            ],
+            "RL GRPO MoE TP=4 EP=4 batch-invariant",
+            "rl_grpo_moe_debug_tp4_ep4_batch_invariant",
+            ngpu=8,
         ),
     ]
 
@@ -96,7 +164,7 @@ def run_single_test(
     """Run a single RL integration test.
 
     Unlike the standard run_tests which uses ``./run_train.sh`` (torchrun),
-    this runs ``python simple_grpo.py`` directly since the RL script manages
+    this runs the RL training module directly since the RL script manages
     its own distributed setup via Monarch.
     """
     test_name = test_flavor.test_name
@@ -104,8 +172,9 @@ def run_single_test(
 
     for override_arg in test_flavor.override_args:
         cmd_parts = [
-            "python",
-            "torchtitan/experiments/rl/grpo.py",
+            sys.executable,
+            "-m",
+            "torchtitan.experiments.rl.train",
             f"--dump_folder {dump_folder}",
         ]
         if hf_assets_path:

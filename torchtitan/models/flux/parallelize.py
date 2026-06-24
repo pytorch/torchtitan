@@ -16,15 +16,18 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 
 from torchtitan.config import (
-    ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
-from torchtitan.distributed.fsdp import disable_fsdp_gradient_division
+from torchtitan.distributed.fsdp import (
+    disable_fsdp_gradient_division,
+    enable_fsdp_symm_mem,
+)
 from torchtitan.tools.logging import logger
 
 
@@ -35,11 +38,11 @@ def parallelize_flux(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
+    ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
-    if ac_config.mode != "none":
-        apply_ac(model, ac_config)
+    if ac_config is not None:
+        apply_ac(model)
 
     if parallel_dims.cp_enabled:
         apply_cp(model, parallel_dims.get_mesh("cp"))
@@ -47,14 +50,15 @@ def parallelize_flux(
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
 
-    names = ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-    dp_mesh = parallel_dims.get_mesh(names)
+    dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
+    assert dp_mesh is not None
     apply_fsdp(
         model,
         dp_mesh,
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         cpu_offload=training.enable_cpu_offload,
+        enable_symm_mem=parallelism.enable_fsdp_symm_mem,
     )
 
     logger.info("Applied fully_shard to the model")
@@ -68,6 +72,7 @@ def apply_fsdp(
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
     cpu_offload: bool = False,
+    enable_symm_mem: bool = False,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -78,6 +83,7 @@ def apply_fsdp(
         param_dtype (torch.dtype): The data type to use for model parameters.
         reduce_dtype (torch.dtype): The data type to use for reduction operations.
         cpu_offload (bool): Whether to offload model parameters to CPU. Defaults to False.
+        enable_symm_mem (bool): Whether to enable symmetric-memory FSDP communication.
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
@@ -117,6 +123,9 @@ def apply_fsdp(
     # Wrap all the rest of model
     fully_shard(model, **fsdp_config)
 
+    if enable_symm_mem:
+        enable_fsdp_symm_mem(model)
+
     # Disable FSDP's automatic gradient division for all FSDP modules
     disable_fsdp_gradient_division(model)
 
@@ -141,8 +150,8 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     )
 
 
-def apply_ac(model: nn.Module, ac_config):
-    """Apply activation checkpointing to the model."""
+def apply_ac(model: nn.Module):
+    """Apply full activation checkpointing to the Flux double/single blocks."""
 
     # pyrefly: ignore [missing-attribute]
     for layer_id, block in model.double_blocks.named_children():
@@ -156,7 +165,7 @@ def apply_ac(model: nn.Module, ac_config):
         # pyrefly: ignore [missing-attribute]
         model.single_blocks.register_module(layer_id, block)
 
-    logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
+    logger.info("Applied full activation checkpointing to the model")
 
 
 def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
@@ -192,8 +201,6 @@ def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
     # Apply CP using direct forward wrapping (always uses SDPA for Flux)
     apply_cp_to_forward(attention_modules, cp_mesh)
 
-    logger.info("Applied Context Parallel to the Flux model")
-
 
 def parallelize_encoders(
     t5_model: nn.Module,
@@ -201,14 +208,15 @@ def parallelize_encoders(
     parallel_dims: ParallelDims,
     *,
     training: TrainingConfig,
+    enable_symm_mem: bool = False,
 ):
     mp_policy = MixedPrecisionPolicy(
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
     )
 
-    names = ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-    dp_mesh = parallel_dims.get_mesh(names)
+    dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
+    assert dp_mesh is not None
     fsdp_config: dict[str, Any] = {
         "mesh": dp_mesh,
         "mp_policy": mp_policy,
@@ -223,6 +231,10 @@ def parallelize_encoders(
         fully_shard(block, **fsdp_config)
     # pyrefly: ignore [no-matching-overload]
     fully_shard(t5_model.hf_module, **fsdp_config)
+
+    if enable_symm_mem:
+        # pyrefly: ignore [bad-argument-type]
+        enable_fsdp_symm_mem(t5_model.hf_module)
 
     # Disable FSDP's automatic gradient division for all FSDP modules
     # pyrefly: ignore [bad-argument-type]

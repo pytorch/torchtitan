@@ -4,13 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Graph passes that remove semantically no-op nodes.
+"""Graph cleanup passes for traced forward-backward graphs.
 
-These passes simplify traced forward-backward graphs by eliminating nodes
-that are identity operations in the context of a fully traced graph (no
-autograd, no symbolic shape changes).  Removing them reduces graph noise
-and improves downstream pass effectiveness (bucketing, scheduling,
-cudagraph compatibility).
+These passes simplify traced graphs by eliminating nodes that are identity
+operations in the context of a fully traced graph (no autograd, no symbolic
+shape changes) and by canonicalizing equivalent view ops to a single target.
+Removing/normalizing them reduces graph noise and improves downstream pass
+effectiveness (bucketing, scheduling, cudagraph compatibility).
+
+``canonicalize_graph_pass`` bundles every individual sub-pass here into a
+single pass-list entry; the sub-passes remain public so they can be tested
+(and reasoned about) in isolation.
 """
 
 import sys
@@ -18,6 +22,82 @@ import sys
 import torch
 
 from torchtitan.tools.logging import logger
+
+# Op overloads that are registered side-effectful but that we want DCE to treat
+# as pure (so unused instances, and their now-orphaned input chains, are dropped).
+# Currently just the ``aten._assert_async`` runtime asserts; add other removable
+# side-effect ops here as they come up.
+_FORCE_PURE_TARGETS = (
+    torch.ops.aten._assert_async.msg,
+    torch.ops.aten._assert_async.default,
+)
+
+
+def _is_impure_for_dce(node: torch.fx.Node) -> bool:
+    """``is_impure_node`` for DCE that forces :data:`_FORCE_PURE_TARGETS` pure.
+
+    Mirrors the default ``node.is_impure()`` for every node except the targets in
+    :data:`_FORCE_PURE_TARGETS`, which we report as pure so dead-code elimination
+    can drop them (and their now-orphaned input chains). See
+    ``eliminate_dead_code_pass``.
+    """
+    if node.op == "call_function" and node.target in _FORCE_PURE_TARGETS:
+        return False
+    return node.is_impure()
+
+
+def eliminate_dead_code_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Remove dead nodes -- no users and no side effects -- from the graph.
+
+    Delegates to FX's ``Graph.eliminate_dead_code``, which preserves *impure*
+    nodes (in-place mutations, ``copy_``, collectives -- anything for which
+    ``node.is_impure()`` is True), so only genuinely unused pure computation is
+    dropped. Running it first shrinks the graph for every downstream pass (memory
+    policy, bucketing, cudagraph partitioning), and removes orphaned subtrees left
+    by tracing so they don't get scheduled or counted.
+
+    Dead ``aten._assert_async`` runtime asserts are dropped too, via the custom
+    :func:`_is_impure_for_dce` (default DCE keeps them, and their condition chain,
+    as side-effectful). They are pure runtime guards with no bearing on numerics.
+
+    Keeping a side-effecting custom op alive: a custom op with a real side effect
+    but no users (e.g. a debug/log op, a barrier, an in-place buffer write) is
+    *dead* to FX and will be dropped here unless it declares itself impure.
+    ``node.is_impure()`` (``torch._library.utils.is_impure``) treats an op's
+    ``call_function`` node as impure when any of:
+
+    * Its schema mutates an input -- the natural choice when the op really writes
+      a tensor. Declare it via
+      ``torch.library.custom_op(..., mutates_args={"buf"})`` (or
+      ``mutates_args="unknown"`` as a catch-all), which makes the arg ``Tensor(a!)``
+      so ``schema.is_mutable`` is True.
+    * It is registered as effectful -- the right choice for a pure side effect with
+      no tensor to mutate:
+      ``torch.library._register_effectful_op(op, EffectType.ORDERED)`` (from
+      ``torch._library.effects``). This also keeps the op *ordered* (token-threaded)
+      in functionalized/export graphs, not just un-DCE'd.
+    * It is in ``torch.fx.node._side_effectful_functions`` -- the private set used
+      by aten asserts / ``record_function``; direct but lowest-level, and gives
+      none of the functionalization/ordering guarantees of the above.
+
+    Random ops are also kept (``op._nondeterministic_seeded``). Note that marking
+    an op impure also blocks reordering/CSE on it, which is usually the intent for
+    a side effect.
+
+    Args:
+        gm: The traced graph module.
+        example_inputs: Unused, accepted for pass interface compatibility.
+
+    Returns:
+        The graph module with dead code removed.
+    """
+    if gm.graph.eliminate_dead_code(is_impure_node=_is_impure_for_dce):
+        gm.graph.lint()
+        gm.recompile()
+        logger.info("Eliminated dead code from the graph")
+    return gm
 
 
 def remove_detach_pass(
@@ -103,6 +183,49 @@ def remove_identity_view_pass(
     return gm
 
 
+def remove_b2b_transpose_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Remove back-to-back ``t(t(x))`` transposes that cancel out.
+
+    ``aten.t`` on a (<=2-D) tensor swaps the two dimensions.  Applying it
+    twice yields the original tensor (identical shape and strides), so the
+    back-to-back pair is a no-op regardless of shape.  These pairs appear in
+    traced graphs from ``F.linear`` when FSDP redistributes weight tensors.
+
+    Args:
+        gm: The traced graph module.
+        example_inputs: Unused, accepted for pass interface compatibility.
+
+    Returns:
+        The graph module with back-to-back transpose pairs collapsed.
+    """
+    count = 0
+    for node in list(gm.graph.nodes):
+        # A node whose target is the ``aten.t.default`` OpOverload is always a
+        # call_function node, so no explicit node.op check is needed.
+        if node.target is not torch.ops.aten.t.default:
+            continue
+        inp = node.args[0]
+        if isinstance(inp, torch.fx.Node) and inp.target is torch.ops.aten.t.default:
+            original = inp.args[0]
+            node.replace_all_uses_with(original)
+            gm.graph.erase_node(node)
+            count += 1
+            # The inner transpose may still feed other consumers; only erase
+            # it once it has no remaining users.
+            if not inp.users:
+                gm.graph.erase_node(inp)
+                count += 1
+
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Removed {count} back-to-back transpose node(s) from the graph")
+
+    return gm
+
+
 def remove_identity_slice_pass(
     gm: torch.fx.GraphModule, example_inputs=None
 ) -> torch.fx.GraphModule:
@@ -164,4 +287,67 @@ def remove_identity_slice_pass(
 
     gm.graph.lint()
     gm.recompile()
+    return gm
+
+
+def normalize_view_ops_as_reshape(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Retarget ``aten.view`` and ``aten._unsafe_view`` to ``aten.reshape``.
+
+    These three ops are equivalent on contiguous tensors; downstream passes
+    pattern-match on ``aten.reshape.default``, so this canonicalizes the
+    others to that single target.
+
+    Args:
+        gm: The traced graph module.
+        example_inputs: Unused, accepted for pass interface compatibility.
+
+    Returns:
+        The graph module with view ops normalized to reshape.
+    """
+    view_targets = {
+        torch.ops.aten.view.default,
+        torch.ops.aten._unsafe_view.default,
+    }
+    count = 0
+    for node in gm.graph.nodes:
+        if node.op == "call_function" and node.target in view_targets:
+            node.target = torch.ops.aten.reshape.default
+            count += 1
+
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Normalized {count} view op(s) to reshape")
+
+    return gm
+
+
+def canonicalize_graph_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Canonicalize and simplify the graph as a single pass-list entry.
+
+    Bundles the numerics-preserving simplification passes so the pass list
+    in ``compile_time_passes`` has one entry instead of several:
+
+    1. ``remove_detach_pass`` — drop autograd-only ``detach`` nodes.
+    2. ``remove_identity_view_pass`` — drop ``view``/``reshape``/
+       ``_unsafe_view`` nodes whose output shape equals their input.
+    3. ``remove_b2b_transpose_pass`` — collapse back-to-back ``t(t(x))`` pairs.
+    4. ``remove_identity_slice_pass`` — drop full-dimension slices.
+    5. ``normalize_view_ops_as_reshape`` — canonicalize remaining
+       ``view``/``_unsafe_view`` nodes to ``reshape``.
+
+    Each sub-pass lints and recompiles internally, so no extra work is
+    needed here. The ordering is irrelevant for correctness (the sub-passes
+    act on disjoint op sets, and identity-view removal also handles
+    ``reshape``), but is kept stable for readable tlparse diffs.
+    """
+    gm = remove_detach_pass(gm, example_inputs)
+    gm = remove_identity_view_pass(gm, example_inputs)
+    gm = remove_b2b_transpose_pass(gm, example_inputs)
+    gm = remove_identity_slice_pass(gm, example_inputs)
+    gm = normalize_view_ops_as_reshape(gm, example_inputs)
     return gm

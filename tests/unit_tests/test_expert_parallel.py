@@ -5,9 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+import unittest.mock
 
 import torch
-import torch.nn.functional as F
 
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 
@@ -19,20 +19,23 @@ class TestPermute(unittest.TestCase):
     Output layout: (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
     """
 
-    def _make_dispatcher(self) -> AllToAllTokenDispatcher:
+    def _make_dispatcher(self, num_ranks: int) -> AllToAllTokenDispatcher:
         """Create a minimal AllToAllTokenDispatcher for testing _permute."""
-        cfg = AllToAllTokenDispatcher.Config(
-            num_experts=1, top_k=1, score_before_experts=True
-        )
-        return AllToAllTokenDispatcher(cfg)
+        cfg = AllToAllTokenDispatcher.Config(num_experts=1, top_k=1)
+        dispatcher = AllToAllTokenDispatcher(cfg)
+        # Mock ep_mesh with a simple object that has .size() returning num_ranks
+        mock_mesh = unittest.mock.MagicMock()
+        mock_mesh.size.return_value = num_ranks
+        dispatcher.ep_mesh = mock_mesh
+        return dispatcher
 
     def _permute(self, tokens_per_expert_group, experts_per_rank, num_ranks):
         """Helper that calls _permute and returns (permuted_indices, num_tokens_per_expert)."""
-        dispatcher = self._make_dispatcher()
+        dispatcher = self._make_dispatcher(num_ranks)
         total = tokens_per_expert_group.sum().item()
         dummy_input = torch.zeros(total, 1)
         _, _, permuted_indices, num_tokens_per_expert = dispatcher._permute(
-            dummy_input, tokens_per_expert_group, num_ranks, experts_per_rank
+            dummy_input, tokens_per_expert_group
         )
         return permuted_indices, num_tokens_per_expert
 
@@ -140,51 +143,6 @@ class TestPermute(unittest.TestCase):
             set(permuted_indices.tolist()),
             set(range(total)),
         )
-
-
-class TestSPPaddingRoundTrip(unittest.TestCase):
-    """Verify AllToAllTokenDispatcher's SP padding/unpadding recovers the
-    original tokens for an uneven ``bs * slen`` (not divisible by ``sp_size``).
-
-    See docs/moe_sp_padding.md. Like TestPermute above, this runs on CPU by
-    only exercising the pure-tensor helper ``_split_along_sp`` rather than
-    going through dispatch()/combine() (which need CUDA + a real EP mesh).
-    """
-
-    def test_round_trip_recovers_original(self):
-        original_num_tokens = 7  # not divisible by sp_size=4
-        sp_size = 4
-        dim = 3
-
-        cfg = AllToAllTokenDispatcher.Config(
-            num_experts=4, top_k=1, score_before_experts=True
-        )
-        dispatcher = AllToAllTokenDispatcher(cfg)
-        dispatcher.sp_size = sp_size
-
-        x = torch.randn(original_num_tokens, dim)
-
-        # Pad (matches what dispatch() does on entry).
-        pad = (-original_num_tokens) % sp_size
-        x_padded = F.pad(x, (0, 0, 0, pad))
-        self.assertEqual(x_padded.shape, (8, dim))
-
-        # Split per rank, then reassemble (this is what the EP all-to-all
-        # gathers back in real distributed training).
-        local_num_tokens = x_padded.shape[0] // sp_size
-        per_rank_slices = []
-        for rank in range(sp_size):
-            dispatcher.sp_rank = rank
-            (slice_,) = dispatcher._split_along_sp(x_padded)
-            torch.testing.assert_close(
-                slice_,
-                x_padded[rank * local_num_tokens : (rank + 1) * local_num_tokens],
-            )
-            per_rank_slices.append(slice_)
-        reassembled = torch.cat(per_rank_slices, dim=0)
-
-        # Unpad to recover original prefix bitwise.
-        torch.testing.assert_close(reassembled[:original_num_tokens], x)
 
 
 if __name__ == "__main__":

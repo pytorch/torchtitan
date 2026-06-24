@@ -6,7 +6,7 @@ already a must on GB200, and this is the direction all hardware is heading.
 
 GraphTrainer exists because distributed training at scale will require a
 compiler. The question is when, not if. It captures the full training step
-— forward, loss, backward — as a single FX graph, then transforms and
+— forward, loss, backward (and optionally optimizer.step) — as a single FX graph, then transforms and
 optimizes that graph before execution. Built as an experiment on top of
 torchtitan, it serves as both a proving ground for compiler-driven
 training and a demonstration of how to use PyTorch's compiler as a
@@ -35,7 +35,7 @@ point. With a graph representation, scheduling is just node reordering.
 ## What GraphTrainer Bets On
 
 **Single unified graph.** Capture the entire training step — forward, loss,
-backward — as one flat FX graph. No separate graphs stitched together, no
+backward (and optionally optimizer.step) — as one flat FX graph. No separate graphs stitched together, no
 opaque boundaries. Full visibility into every operation — in particular, all backward
 computations are explicit.
 
@@ -54,6 +54,15 @@ fused, and overlapped by passes — not hidden behind opaque module hooks.
 — no hidden autograd state, no opaque memory management. Piecewise
 CUDAGraph wrapping is straightforward because you can see exactly what
 needs to be captured.
+
+**Hardware heterogeneity.** Most non-GPU accelerators — TPUs, Trainium, and
+others — assume the existence of a graph and perform better with a full
+graph to optimize over.
+
+**Autoresearch.** A graph is a concrete artifact that agents can analyze
+and transform programmatically — a better substrate for agentic
+optimization than eager code that spreads behavior across runtime hooks
+and autograd state.
 
 **Debuggability.** The graph is inspectable. You can dump it, diff it
 before and after a pass, and see exactly what changed. When something
