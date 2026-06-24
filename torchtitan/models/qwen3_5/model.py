@@ -689,9 +689,12 @@ class Qwen35Model(Decoder):
         pixel_values_videos: torch.Tensor | None,
         grid_thw: torch.Tensor | None,
         grid_thw_videos: torch.Tensor | None,
-        special_tokens: dict[str, int],
+        special_tokens: dict[str, int] | None,
     ) -> torch.Tensor:
         """Embed tokens, run vision encoder, scatter vision into text.
+
+        ``special_tokens`` may be ``None`` for text-only inputs (no pixel values),
+        in which case the vision branches are skipped.
 
         Args:
             tokens: Input token IDs (batch_size, seq_len)
@@ -704,14 +707,12 @@ class Qwen35Model(Decoder):
         Returns:
             (batch, seq_len, dim) embeddings with vision tokens scattered in
         """
-        image_token_id = special_tokens["image_id"]
-        video_token_id = special_tokens["video_id"]
-
         inputs_embeds = (
             self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
         )
 
         if pixel_values is not None and grid_thw is not None:
+            image_token_id = special_tokens["image_id"]
             merged_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values, grid_thw=grid_thw
             )
@@ -726,6 +727,7 @@ class Qwen35Model(Decoder):
                 )
 
         if pixel_values_videos is not None and grid_thw_videos is not None:
+            video_token_id = special_tokens["video_id"]
             merged_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values_videos, grid_thw=grid_thw_videos
             )

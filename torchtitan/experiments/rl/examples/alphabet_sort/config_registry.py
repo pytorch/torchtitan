@@ -44,6 +44,7 @@ from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.trainer import RLTrainer
 from torchtitan.models.gpt_oss import model_registry as gpt_oss_model_registry
 from torchtitan.models.qwen3 import model_registry
+from torchtitan.models.qwen3_5 import model_registry as qwen3_5_model_registry
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -64,6 +65,25 @@ def _qwen3_rl_model_registry(
     converters = list(converters or [])
     converters.append(LMHeadCastConverter.Config())
     return model_registry(flavor, attn_backend=attn_backend, converters=converters)
+
+
+def _qwen3_5_rl_model_registry(
+    flavor: str,
+    *,
+    attn_backend: str,
+    converters: list[ModelConfigConverter.Config] | None = None,
+) -> ModelSpec:
+    """``qwen3_5.model_registry`` for RL, with the lm_head fp32 cast always on.
+
+    Qwen3.5 is a hybrid model (GatedDeltaNet linear-attention layers + a
+    full-attention layer every ``full_attention_interval``); ``attn_backend``
+    only selects the inner attention for the full-attention layers.
+    """
+    converters = list(converters or [])
+    converters.append(LMHeadCastConverter.Config())
+    return qwen3_5_model_registry(
+        flavor, attn_backend=attn_backend, converters=converters
+    )
 
 
 def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
@@ -200,6 +220,73 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLTrainer.Config:
         config.generator, debug=_BATCH_INVARIANT_DEBUG
     )
     return config
+
+
+def rl_grpo_qwen3_5_4b_varlen() -> RLTrainer.Config:
+    """GRPO training config for Qwen3.5-4B (hybrid GatedDeltaNet + full attention).
+
+    Qwen3.5 layers are mostly GatedDeltaNet (linear attention); ``attn_backend``
+    only affects the full-attention layers (every ``full_attention_interval``).
+    The renderer resolves Qwen3.5's chat template from the tokenizer ("auto").
+
+    TODO: GatedDeltaNet generation in the vLLM ``TorchTitanCausalLM`` wrapper has
+    no recurrent-state cache, so the generator recomputes the linear-attention
+    layers over the full sequence each decode step; validate logprob drift via
+    the ``bit_wise/*`` metrics before trusting on-policy training.
+    """
+    group_size = 8
+    return RLTrainer.Config(
+        model_spec=_qwen3_5_rl_model_registry("4B", attn_backend="varlen"),
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3.5-4B",
+        num_steps=10,
+        num_groups_per_rollout_batch=5,
+        num_validation_samples=20,
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        rollouter=AlphabetSortRollouter.Config(),
+        group_size=group_size,
+        renderer=RendererConfig(name="qwen3_5", enable_thinking=False),
+        generator_router=GeneratorRouter.Config(
+            strategy=StickySessionRoutingStrategy.Config(
+                fallback_strategy=LeastLoadedRoutingStrategy.Config()
+            )
+        ),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        batcher=Batcher.Config(
+            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
+        ),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=2e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
+            ),
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
+                tensor_parallel_degree=4,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=700,
+            ),
+        ),
+    )
 
 
 def rl_grpo_gpt_oss_20b_varlen() -> RLTrainer.Config:

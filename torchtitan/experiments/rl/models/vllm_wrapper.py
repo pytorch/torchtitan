@@ -124,9 +124,20 @@ class VLLMModelWrapper(Module):
         self.state_dict_adapter = model_spec.state_dict_adapter
         self.parallelize_fn = model_spec.parallelize_fn
 
-        # Replace inner_attention with VLLMAttentionWrapper in config
+        # Replace inner_attention with VLLMAttentionWrapper in config.
+        # Hybrid models (e.g. Qwen3.5) only carry an attention config on their
+        # full-attention layers, so derive head dims from the first such layer.
         model_config = model_spec.model
-        attn_config = model_config.layers[0].attention
+        attn_config = next(
+            (
+                a
+                for layer in model_config.layers
+                if (a := getattr(layer, "attention", None)) is not None
+            ),
+            None,
+        )
+        if attn_config is None:
+            raise ValueError("Model has no full-attention layer for the vLLM wrapper.")
         n_heads = attn_config.n_heads
         n_kv_heads = attn_config.n_kv_heads or n_heads
         head_dim = (
@@ -136,7 +147,11 @@ class VLLMModelWrapper(Module):
         )
         new_layers = []
         for layer_cfg in model_config.layers:
-            inner = layer_cfg.attention.inner_attention
+            # Linear-attention layers (e.g. Qwen3.5 GatedDeltaNet) have no
+            # inner_attention to swap; pass them through unchanged.
+            if getattr(layer_cfg, "attention", None) is None:
+                new_layers.append(layer_cfg)
+                continue
             vllm_backend = VLLMAttentionWrapper.Config(
                 hidden_size=model_config.dim,
                 num_heads=n_heads,

@@ -320,9 +320,17 @@ class PolicyTrainer(Actor, Configurable):
 
         from torchtitan.models.common.attention import VarlenAttention
 
-        inner_attn = model_spec.model.layers[0].attention.inner_attention
+        # Hybrid models (e.g. Qwen3.5: GatedDeltaNet linear-attention layers with a
+        # full-attention layer every N) don't carry an attention config on every
+        # layer, so validate the first full-attention layer via `first_attention`
+        # rather than assuming layers[0].
+        attn_config = model_spec.model.first_attention
+        if attn_config is None:
+            raise ValueError(
+                "RL requires at least one full-attention layer for attention masks."
+            )
         assert isinstance(
-            model_spec.model.layers[0].attention.inner_attention,
+            attn_config.inner_attention,
             (VarlenAttention.Config, FlexAttention.Config),
         ), "Only varlen and flex attention backends are allowed."
 

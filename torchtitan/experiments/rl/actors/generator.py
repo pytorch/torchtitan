@@ -368,10 +368,16 @@ class VLLMGenerator(Actor, Configurable):
             checkpoint_config=config.checkpoint,
         )
 
-        # Set vLLM environment variables from config before any vLLM initialization
-        inner_attn = model_spec.model.layers[0].attention.inner_attention
+        # Set vLLM environment variables from config before any vLLM initialization.
+        # Hybrid models (e.g. Qwen3.5) only carry an attention config on their
+        # full-attention layers, so validate via `first_attention` not layers[0].
+        attn_config = model_spec.model.first_attention
+        if attn_config is None:
+            raise ValueError(
+                "RL requires at least one full-attention layer for attention masks."
+            )
         assert isinstance(
-            inner_attn,
+            attn_config.inner_attention,
             (VarlenAttention.Config, FlexAttention.Config),
         ), "Only varlen and flex attention backends are allowed."
 
