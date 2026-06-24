@@ -6,7 +6,7 @@
 
 import itertools
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -15,13 +15,8 @@ from torch.nn.attention import (
     current_flash_attention_impl,
 )
 from torch.nn.attention.varlen import AuxRequest
-from torchtitan.config import override
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
-from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    FlexAttention,
-    GQAttention,
-)
+from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import warn_once
 from torchtitan.tools.utils import has_cuda_capability
@@ -256,10 +251,6 @@ class VLLMAttentionWrapper(Module):
         scale: float | None = None
         sliding_window_size: int | None = None
         """Causal sliding-window size (``None`` => full attention)."""
-        vllm_attention_backend: AttentionBackendEnum = AttentionBackendEnum.CUSTOM
-        """vLLM attention backend, resolved from the swapped-out torchtitan
-        attention type by the ``vllm_attention`` override. The generator reads
-        this when building the vLLM engine. """
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -361,52 +352,3 @@ class VLLMAttentionWrapper(Module):
         out_BLNH = out_TD.view(batch_size, seq_len, -1, head_dim)
 
         return out_BLNH
-
-
-def get_vllm_backend(inner_attention) -> AttentionBackendEnum:
-    """Translate a torchtitan inner-attention config to its vLLM engine backend.
-
-    Called by the controller to set ``VLLMAttentionWrapper.Config``'s
-    ``vllm_attention_backend`` after the swap (which erases the original type).
-    Extend this when adding support for a new attention backend. Default is the
-    CUSTOM (PyTorch varlen) backend; FlexAttention uses vLLM's flex backend.
-    """
-    if isinstance(inner_attention, FlexAttention.Config):
-        return AttentionBackendEnum.FLEX_ATTENTION
-    return AttentionBackendEnum.CUSTOM
-
-
-# Canonical import path for the generator's always-on override set, so the
-# controller can include it when preparing the generator's model spec.
-VLLM_ATTENTION_OVERRIDE = __name__
-
-
-@override(
-    "vllm_attention",
-    target=GQAttention.Config,
-    description="Swap inner attention to the vLLM paged-attention backend.",
-)
-def vllm_attention(cfg: GQAttention.Config) -> GQAttention.Config:
-    """Replace ``inner_attention`` with :class:`VLLMAttentionWrapper`.
-
-    Applied after ``update_from_config``, which has already written the q/k/v
-    ``LocalMapConfig`` onto the stock inner attention. The factory carries that
-    ``sharding_config`` forward onto the vLLM backend so the TP placements
-    survive the swap -- the same contract ``fused_swiglu`` uses for the FFN.
-    The vLLM backend itself is set by the controller (see ``get_vllm_backend``)
-    after the swap, since the swap erases the original Flex/Varlen type. Pure
-    config manipulation (no live ``vllm_config`` needed).
-    """
-    n_kv_heads = cfg.n_kv_heads or cfg.n_heads
-    head_dim = cfg.head_dim if cfg.head_dim is not None else cfg.dim // cfg.n_heads
-    vllm_inner = VLLMAttentionWrapper.Config(
-        hidden_size=cfg.dim,
-        num_heads=cfg.n_heads,
-        num_kv_heads=n_kv_heads,
-        head_dim=head_dim,
-        sliding_window_size=getattr(cfg, "sliding_window_size", None),
-    )
-    # Carry the inner-attention sharding (q/k/v LocalMapConfig set by
-    # update_from_config) forward so the swap does not drop TP placements.
-    vllm_inner.sharding_config = cfg.inner_attention.sharding_config
-    return replace(cfg, inner_attention=vllm_inner)

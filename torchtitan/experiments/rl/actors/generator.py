@@ -21,7 +21,7 @@ import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
 from monarch.rdma import is_rdma_available
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config import CompileConfig, Configurable, DebugConfig
+from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
@@ -34,6 +34,7 @@ from torchtitan.experiments.rl.models.vllm_registry import (
 )
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import Completion
+from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools.logging import init_logger
@@ -43,6 +44,7 @@ from vllm.config import AttentionConfig, CompilationConfig
 from vllm.config.compilation import CompilationMode
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +267,11 @@ class VLLMGenerator(Actor, Configurable):
         sampling: SamplingConfig = field(default_factory=SamplingConfig)
         """Default sampling parameters for generation."""
 
+        override: OverrideConfig = field(default_factory=OverrideConfig)
+        """Config overrides (e.g. ``torchtitan.overrides.fused_swiglu``) applied to
+        this generator's model spec after ``update_from_config`` and before build.
+        Separate from the trainer's override so the two can differ."""
+
         model_dtype: str = "bfloat16"
         """Data type for model weights, passed directly to vLLM (auto, float16, bfloat16, float32)."""
 
@@ -364,13 +371,15 @@ class VLLMGenerator(Actor, Configurable):
             parallelism=config.parallelism,
             compile_config=compile_config,
             checkpoint_config=config.checkpoint,
+            override=config.override,
         )
 
-        # Set vLLM environment variables from config before any vLLM initialization.
-        # model_spec is controller-prepared: inner_attention is already swapped to
-        # VLLMAttentionWrapper, which records the original backend for selection
-        # below. (The varlen/flex validation runs in the controller, pre-swap.)
+        # Set vLLM environment variables from config before any vLLM initialization
         inner_attn = model_spec.model.layers[0].attention.inner_attention
+        assert isinstance(
+            inner_attn,
+            (VarlenAttention.Config, FlexAttention.Config),
+        ), "Only varlen and flex attention backends are allowed."
 
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
         set_batch_invariance(config.debug.batch_invariant)
@@ -416,7 +425,11 @@ class VLLMGenerator(Actor, Configurable):
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=not config.cudagraph.enable,
             attention_config=AttentionConfig(
-                backend=inner_attn.vllm_attention_backend,
+                backend=(
+                    AttentionBackendEnum.FLEX_ATTENTION
+                    if isinstance(inner_attn, FlexAttention.Config)
+                    else AttentionBackendEnum.CUSTOM
+                ),
             ),
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,

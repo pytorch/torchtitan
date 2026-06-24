@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config import CompileConfig, ParallelismConfig
+from torchtitan.config import CompileConfig, OverrideConfig, ParallelismConfig
 from torchtitan.protocols.model_spec import ModelSpec
 
 
@@ -181,6 +181,7 @@ def register_to_vllm(
     parallelism: InferenceParallelismConfig,
     compile_config: CompileConfig,
     checkpoint_config: CheckpointManager.Config,
+    override: OverrideConfig | None = None,
 ) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
 
@@ -239,6 +240,7 @@ def register_to_vllm(
                 checkpoint_config=checkpoint_config,
                 vllm_config=vllm_config,
                 prefix=prefix,
+                override=override,
             )
 
     VLLMModelFromSpec.__name__ = VLLM_MODEL_NAME

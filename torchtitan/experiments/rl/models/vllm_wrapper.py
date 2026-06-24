@@ -11,6 +11,8 @@ This module provides TorchTitanVLLMModel: Core model class that adapts
 TorchTitan models for vLLM.
 """
 
+import dataclasses
+from dataclasses import dataclass
 from functools import partial
 
 import torch
@@ -19,8 +21,15 @@ import torch.distributed as dist
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config import (
+    apply_overrides,
+    CompileConfig,
+    OverrideConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
@@ -85,6 +94,7 @@ class VLLMModelWrapper(Module):
         checkpoint_config: CheckpointManager.Config,
         vllm_config: VllmConfig,
         prefix: str = "",
+        override: OverrideConfig | None = None,
     ):
         super().__init__()
 
@@ -94,12 +104,38 @@ class VLLMModelWrapper(Module):
         self.state_dict_adapter = model_spec.state_dict_adapter
         self.parallelize_fn = model_spec.parallelize_fn
 
-        # model_spec arrives fully prepared by the controller -- sharding-filled
-        # (update_from_config) and overridden (user overrides + the vLLM
-        # attention swap). This wrapper only builds + parallelizes. See
-        # RLTrainer.setup_async / generate.py.
+        # Replace inner_attention with VLLMAttentionWrapper in config
         model_config = model_spec.model
-        self.config = model_config
+        attn_config = model_config.layers[0].attention
+        n_heads = attn_config.n_heads
+        n_kv_heads = attn_config.n_kv_heads or n_heads
+        head_dim = (
+            attn_config.head_dim
+            if attn_config.head_dim is not None
+            else model_config.dim // n_heads
+        )
+        new_layers = []
+        for layer_cfg in model_config.layers:
+            inner = layer_cfg.attention.inner_attention
+            vllm_backend = VLLMAttentionWrapper.Config(
+                hidden_size=model_config.dim,
+                num_heads=n_heads,
+                num_kv_heads=n_kv_heads,
+                head_dim=head_dim,
+                sliding_window_size=getattr(
+                    layer_cfg.attention, "sliding_window_size", None
+                ),
+            )
+            new_layers.append(
+                dataclasses.replace(
+                    layer_cfg,
+                    attention=dataclasses.replace(
+                        layer_cfg.attention, inner_attention=vllm_backend
+                    ),
+                )
+            )
+        self.config = dataclasses.replace(model_config, layers=new_layers)
+        logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
         # Translate the inference parallelism into torchtitan's full
         # ParallelismConfig that ParallelDims / parallelize_fn consume.
@@ -118,7 +154,25 @@ class VLLMModelWrapper(Module):
             world_size=dist.get_world_size(),
         )
 
-        logger.debug(f"Creating model with config: {self.config.to_dict()}")
+        # Fill sharding configs on the config BEFORE build so every sub-module
+        # is constructed with its ShardingConfig attached (required by the
+        # declarative model.parallelize() API). Need to be called after Attention
+        # module replacement.
+        # Provides the generic config shape (has .parallelism) so
+        # update_from_config can extract parallelism uniformly.
+        @dataclass(kw_only=True, slots=True)
+        class _InferenceConfig:
+            parallelism: ParallelismConfig
+
+        self.config.update_from_config(
+            config=_InferenceConfig(parallelism=training_parallelism)
+        )
+
+        # Apply config overrides (e.g. the fused gate+up SwiGLU) after
+        # update_from_config (which fills the sharding the override factories
+        # read) and before build
+        if override is not None and override.imports:
+            apply_overrides(override, self.config)
 
         # Build model on meta device to avoid allocating full model on every GPU
         with torch.device("meta"):
