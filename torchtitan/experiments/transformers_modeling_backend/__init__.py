@@ -10,6 +10,7 @@ from .model import HFTransformerModel
 
 from .parallelize import parallelize_hf_transformers
 from .pipeline import pipeline_hf_transformers
+from .state_dict_adapter import HFTransformerStateDictAdapter
 
 __all__ = [
     "HFTransformerModel",
@@ -66,5 +67,5 @@ def model_registry(flavor: str) -> ModelSpec:
         parallelize_fn=parallelize_hf_transformers,
         pipelining_fn=pipeline_hf_transformers,
         post_optimizer_build_fn=None,
-        state_dict_adapter=None,
+        state_dict_adapter=HFTransformerStateDictAdapter,
     )

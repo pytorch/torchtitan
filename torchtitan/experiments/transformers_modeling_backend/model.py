@@ -260,16 +260,25 @@ class HFTransformerModel(BaseModel):
             self.use_cache = False
             self.initializer_range = 1.0  # use as std for normal init in embedding
 
-            if not hasattr(self, "inter_dim"):  # Only for llama model
-                ffn_hidden_size = 4 * self.dim
-                ffn_hidden_size = int(2 * ffn_hidden_size / 3)
-                if self.ffn_dim_multiplier is not None:
-                    ffn_hidden_size = int(self.ffn_dim_multiplier * ffn_hidden_size)
-                self.intermediate_size = self.multiple_of * (
-                    (ffn_hidden_size + self.multiple_of - 1) // self.multiple_of
-                )
-
-            self.head_dim = self.dim // self.num_attention_heads
+            # When dim is explicitly overridden (e.g. debugmodel), derive the
+            # dependent sizes from it. Otherwise keep what AutoConfig loaded from
+            # the HF config -- models like Qwen3 decouple head_dim and
+            # intermediate_size from hidden_size/num_heads, so deriving them here
+            # would silently build the wrong architecture.
+            dim_overridden = self._titan_injected_model_args.get("dim") is not None
+            if dim_overridden:
+                if not hasattr(self, "inter_dim"):  # Only for llama model
+                    ffn_hidden_size = 4 * self.dim
+                    ffn_hidden_size = int(2 * ffn_hidden_size / 3)
+                    if self.ffn_dim_multiplier is not None:
+                        ffn_hidden_size = int(self.ffn_dim_multiplier * ffn_hidden_size)
+                    self.intermediate_size = self.multiple_of * (
+                        (ffn_hidden_size + self.multiple_of - 1) // self.multiple_of
+                    )
+                self.head_dim = self.dim // self.num_attention_heads
+            elif not getattr(self, "head_dim", None):
+                # HF config did not provide head_dim; use the standard derivation.
+                self.head_dim = self.dim // self.num_attention_heads
 
             return self
 
