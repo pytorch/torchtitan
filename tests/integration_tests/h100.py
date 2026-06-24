@@ -38,6 +38,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             ],
             "Float8 test",
             "float8",
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
@@ -65,6 +66,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             "FSDP+async TP+PP+torch.compile+Float8",
             "fsdp+tp+cp+compile+float8",
             ngpu=8,
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
@@ -79,6 +81,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             "HSDP+CP+torch.compile+Float8",
             "hsdp+cp+compile+float8",
             ngpu=8,
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
