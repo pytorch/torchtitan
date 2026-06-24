@@ -4,10 +4,23 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for async-controller pieces: batcher group-counting, the metrics timer drain, and RolloutID."""
+"""Unit tests for async-controller pieces: batcher group-counting, the active-slot buffer backpressure,
+the consume-time staleness invariant, the metrics timer drain, and RolloutID."""
+
+import asyncio
+
+import pytest
 
 from torchtitan.experiments.rl.batcher import Batcher
-from torchtitan.experiments.rl.components.metrics_utils import MetricsTimer
+from torchtitan.experiments.rl.components.metrics_utils import (
+    compute_policy_age_metrics,
+    MetricsTimer,
+)
+from torchtitan.experiments.rl.components.work_buffer import (
+    RolloutGroupWork,
+    RolloutGroupWorkBuffer,
+)
+from torchtitan.experiments.rl.rollout import RolloutGroup
 from torchtitan.experiments.rl.types import (
     RolloutID,
     TrainingSample,
@@ -38,11 +51,9 @@ def _trainable_group(group_id: int, *, num_samples: int) -> TrainingSampleGroup:
     )
 
 
-def _build_batcher(*, target_groups_per_batch: int) -> Batcher:
+def _build_batcher(*, num_groups_per_train_step: int) -> Batcher:
     return Batcher.Config().build(
-        target_groups_per_batch=target_groups_per_batch,
-        max_offpolicy_steps=3,
-        trainer_policy_version_getter=lambda: 0,
+        num_groups_per_train_step=num_groups_per_train_step,
         dp_degree=1,
         pad_id=0,
     )
@@ -51,7 +62,7 @@ def _build_batcher(*, target_groups_per_batch: int) -> Batcher:
 def test_batcher_counts_trainable_groups_not_rollouts() -> None:
     # Target is 2 GROUPS. A single group with many rollouts is not a full batch; two groups are,
     # regardless of how many rollouts each contributes.
-    batcher = _build_batcher(target_groups_per_batch=2)
+    batcher = _build_batcher(num_groups_per_train_step=2)
     assert (
         batcher.add_training_samples(
             training_sample_group=_trainable_group(0, num_samples=8)
@@ -67,7 +78,7 @@ def test_batcher_counts_trainable_groups_not_rollouts() -> None:
 def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     # Metric-only (empty) groups do not count toward the target and cannot form a zero-token batch;
     # they ride along until a trainable group completes the batch.
-    batcher = _build_batcher(target_groups_per_batch=1)
+    batcher = _build_batcher(num_groups_per_train_step=1)
     metric_only = TrainingSampleGroup(group_id=0, training_samples=[], metrics=[])
     assert batcher.add_training_samples(training_sample_group=metric_only) is None
     batch = batcher.add_training_samples(
@@ -91,44 +102,54 @@ def test_rollout_id_to_string_is_callable_and_uses_int_group_id() -> None:
     assert rollout_id.to_string(include_turn=False) == "group=5/rollout=2"
 
 
-def test_drop_rollout_group_if_any_stale_drops_whole_group() -> None:
-    # A group with one stale (v0) + one fresh (v10) sample at trainer version 10, max_offpolicy_steps=1.
-    def _sample(min_policy_version: int) -> TrainingSample:
-        return TrainingSample(
-            min_policy_version=min_policy_version,
-            max_policy_version=min_policy_version,
-            rollout_id=RolloutID(group_id=0, rollout_id=0, turn_id=0),
-            token_ids=[1, 2, 3],
-            loss_mask=[False, True, True],
-            logprobs=[0.0, 0.1, 0.2],
-            advantage=[0.0, 1.0, 1.0],
-        )
+def test_take_finalized_does_not_release_active_slot() -> None:
+    async def run() -> None:
+        buffer = RolloutGroupWorkBuffer.Config().build(max_active_rollout_groups=1)
+        if not await buffer.wait_for_slot():
+            raise RuntimeError("buffer closed unexpectedly")
+        await buffer.add_work(RolloutGroupWork(group_id=0, sample=object()))
+        await buffer.finalize_work(RolloutGroup(group_id=0, rollouts=[]))
+        await buffer.take_finalized()
 
-    def _mixed_group() -> TrainingSampleGroup:
-        return TrainingSampleGroup(
-            group_id=0, training_samples=[_sample(0), _sample(10)], metrics=[]
-        )
+        waiter = asyncio.create_task(buffer.wait_for_slot())
+        await asyncio.sleep(0)
+        assert not waiter.done()
 
-    def _batcher(*, drop_whole_group: bool) -> Batcher:
-        return Batcher.Config(drop_rollout_group_if_any_stale=drop_whole_group).build(
-            target_groups_per_batch=1,
-            max_offpolicy_steps=1,
-            trainer_policy_version_getter=lambda: 10,
+        await buffer.release_active_groups(1, reason="trained")
+        assert await waiter
+
+    asyncio.run(run())
+
+
+def test_untrainable_group_releases_before_training() -> None:
+    async def run() -> None:
+        buffer = RolloutGroupWorkBuffer.Config().build(max_active_rollout_groups=1)
+        batcher = Batcher.Config().build(
+            num_groups_per_train_step=1,
             dp_degree=1,
             pad_id=0,
         )
 
-    # flag on: the one stale sample drops the WHOLE group -> no trainable group -> no batch.
-    assert (
-        _batcher(drop_whole_group=True).add_training_samples(
-            training_sample_group=_mixed_group()
+        if not await buffer.wait_for_slot():
+            raise RuntimeError("buffer closed unexpectedly")
+        await buffer.add_work(RolloutGroupWork(group_id=0, sample=object()))
+
+        training_sample_group = TrainingSampleGroup(
+            group_id=0, training_samples=[], metrics=[]
         )
-        is None
-    )
-    # flag off: only the stale sample drops -> the fresh one survives -> a batch is packed.
-    assert (
-        _batcher(drop_whole_group=False).add_training_samples(
-            training_sample_group=_mixed_group()
+        await buffer.release_active_groups(1, reason="untrainable_group")
+        assert (
+            batcher.add_training_samples(training_sample_group=training_sample_group)
+            is None
         )
-        is not None
-    )
+
+    asyncio.run(run())
+
+
+def test_compute_policy_age_metrics_raises_on_consume_time_staleness() -> None:
+    with pytest.raises(RuntimeError, match="admitted stale training data"):
+        compute_policy_age_metrics(
+            trainer_policy_version=4,
+            min_policy_versions=[0],
+            max_offpolicy_steps=3,
+        )

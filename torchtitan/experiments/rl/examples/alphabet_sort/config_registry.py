@@ -78,7 +78,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLController.Config:
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         async_control=AsyncControlConfig(
             num_training_steps=10,
-            num_rollout_groups_per_train_step=8,
+            num_groups_per_train_step=8,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -137,7 +137,7 @@ def rl_grpo_qwen3_0_6b_flex() -> RLController.Config:
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         async_control=AsyncControlConfig(
             num_training_steps=10,
-            num_rollout_groups_per_train_step=8,
+            num_groups_per_train_step=8,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -223,7 +223,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> RLController.Config:
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/gpt-oss-20b",
         async_control=AsyncControlConfig(
             num_training_steps=10,
-            num_rollout_groups_per_train_step=5,
+            num_groups_per_train_step=5,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -285,7 +285,7 @@ def rl_grpo_gpt_oss_debug_varlen() -> RLController.Config:
         hf_assets_path="tests/assets/tokenizer",
         async_control=AsyncControlConfig(
             num_training_steps=3,
-            num_rollout_groups_per_train_step=5,
+            num_groups_per_train_step=5,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -335,7 +335,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> RLController.Config:
         hf_assets_path="tests/assets/tokenizer",
         async_control=AsyncControlConfig(
             num_training_steps=3,
-            num_rollout_groups_per_train_step=5,
+            num_groups_per_train_step=5,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -390,7 +390,7 @@ def rl_grpo_qwen3_1_7b() -> RLController.Config:
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         async_control=AsyncControlConfig(
             num_training_steps=10,
-            num_rollout_groups_per_train_step=8,
+            num_groups_per_train_step=8,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -444,7 +444,7 @@ def rl_grpo_qwen3_14b() -> RLController.Config:
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-14B",
         async_control=AsyncControlConfig(
             num_training_steps=10,
-            num_rollout_groups_per_train_step=8,
+            num_groups_per_train_step=8,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -503,7 +503,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLController.Config:
         hf_assets_path="tests/assets/tokenizer",
         async_control=AsyncControlConfig(
             num_training_steps=5,
-            num_rollout_groups_per_train_step=8,
+            num_groups_per_train_step=8,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -578,7 +578,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLController.Config:
         hf_assets_path="tests/assets/tokenizer",
         async_control=AsyncControlConfig(
             num_training_steps=10,
-            num_rollout_groups_per_train_step=8,
+            num_groups_per_train_step=8,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -645,7 +645,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLController.Config:
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-30B-A3B",
         async_control=AsyncControlConfig(
             num_training_steps=10,
-            num_rollout_groups_per_train_step=8,
+            num_groups_per_train_step=8,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(
@@ -707,7 +707,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLController.Config:
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         async_control=AsyncControlConfig(
             num_training_steps=10,
-            num_rollout_groups_per_train_step=8,
+            num_groups_per_train_step=8,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
             batcher=Batcher.Config(

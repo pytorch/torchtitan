@@ -345,7 +345,7 @@ class VLLMGenerator(Actor, Configurable):
         """Drop the prefix cache when weights change so new requests don't reuse KV computed under the old
         weights. vLLM only clears it while the engine is idle (true under sync training)."""
 
-        reset_running_requests_on_weight_sync: bool = False
+        reset_running_requests_on_weight_sync: bool = True
         """Affects requests ALREADY running at the pull: preempts them and recomputes their KV under
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only."""
 
@@ -931,6 +931,8 @@ class VLLMGenerator(Actor, Configurable):
         if self.config.reset_prefix_cache_on_weight_sync:
             # TODO(async): under hot-swap, prefer per-token weight-version tracking (see the CUMULATIVE
             # TODO in the engine loop) over a full cache drop.
+            # TODO(async-rl): salt the prefix cache per NEW rollout so a new rollout can't reuse stale-weight
+            #   KV, while an in-flight rollout keeps reusing its own KV (avoids the full drop).
             self._engine.reset_prefix_cache(
                 reset_running_requests=self.config.reset_running_requests_on_weight_sync,
             )

@@ -55,7 +55,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLController.Config:
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         async_control=AsyncControlConfig(
             num_training_steps=500,
-            num_rollout_groups_per_train_step=8,
+            num_groups_per_train_step=8,
             group_size=8,
             validation=ValidationConfig(num_samples=500),
             batcher=Batcher.Config(

@@ -252,11 +252,7 @@ def build_inference_engine(config: RLController.Config) -> LLMEngine:
     # (num_group_workers, or the validation pass), not from the off-policy buffer depth.
     ac = config.async_control
     gen_dp = max(gen_config.parallelism.data_parallel_degree, 1)
-    num_group_workers = (
-        ac.num_group_workers
-        if ac.num_group_workers is not None
-        else ac.num_rollout_groups_per_train_step
-    )
+    num_group_workers = ac.num_groups_per_train_step
     rollout_concurrency = max(
         num_group_workers * ac.group_size,
         ac.validation.num_samples,

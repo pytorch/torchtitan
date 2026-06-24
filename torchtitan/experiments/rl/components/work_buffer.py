@@ -8,9 +8,10 @@
 
 data input -> WAITING -> rollout worker -> FINALIZED -> batcher
 
-The buffer is a bounded, strict-FIFO run-ahead queue: it caps how far generation may run ahead of the
-trainer (count backpressure) and hands the batcher the OLDEST finalized group, stalling if that group
-is still in flight. Policy-version staleness is enforced once, later, by `Batcher` at flush.
+The buffer is a strict-FIFO run-ahead queue with an active-slot budget: it caps how far generation may
+run ahead of the trainer ((S+1)*B active slots) and hands the batcher the OLDEST finalized group,
+stalling if that group is still in flight. The trainer releases active slots after each weight pull, so
+nothing reaches the trainer with consume-time age > S.
 """
 
 import asyncio
@@ -55,32 +56,37 @@ class RolloutGroupWork:
 
 
 class RolloutGroupWorkBuffer(Configurable):
-    """Bounded strict-FIFO buffer of rollout groups moving input -> generation -> batching.
+    """Strict-FIFO rollout-group buffer with whole-pipeline active-slot backpressure.
 
-    Count backpressure: admission blocks once `len(buffer) >= max_buffered_rollout_groups`. The batcher
-    takes the OLDEST group and stalls if it is still in flight (no skipping, no eviction).
+    State:
+        WAITING -> INFLIGHT -> FINALIZED -> removed by take_finalized()
+
+    Active slot:
+        add_work() ------------------------------------------------------ release_active_groups()
+             | claim_next() | finalize_work() | take_finalized() | batcher | trainer |
 
     Example:
-        buffer = config.rollout_buffer.build(max_buffered_rollout_groups=32)
-
-        # input loop:
-        if await buffer.wait_for_slot():
-            await buffer.add_work(RolloutGroupWork(group_id=0, sample=sample))
-
-        # rollout worker:
-        work = await buffer.claim_next()
-        await buffer.finalize_work(RolloutGroup(group_id=work.group_id, rollouts=rollouts))
-
-        # batcher:
-        rollout_group = await buffer.take_finalized()
+        # max_offpolicy_steps=1, num_groups_per_train_step=2 -> capacity=4
+        # g0..g3 admitted and still active; g0 was already take_finalized()'d into the batcher.
+        await buffer.wait_for_slot()  # waits: take_finalized does not free active slots
+        await buffer.release_active_groups(2, reason="trained")
+        await buffer.wait_for_slot()  # returns: the trainer released one train step
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         """No tunables: capacity is passed in by the controller from the run-ahead sizing."""
 
-    def __init__(self, config: Config, *, max_buffered_rollout_groups: int) -> None:
-        self._max_buffered_rollout_groups = max_buffered_rollout_groups
+    def __init__(self, config: Config, *, max_active_rollout_groups: int) -> None:
+        self._max_active_rollout_groups = max_active_rollout_groups
+        self._active_rollout_groups = 0
+        self._active_rollout_groups_peak = (
+            0  # high-water mark of active slots since start
+        )
+        # TODO(async-rl): stall-only backpressure today; strict FIFO + (S+1)*B active budget bounds consume age
+        #   <= S, so nothing is ever stale enough to drop. When we move past stall-only, extract this active-slot
+        #   counter into a StalenessBudget/manager and add there: (a) drop/recycle a stale group instead of
+        #   stalling on it, (b) a drop_rollout_group_if_any_stale all-or-nothing mode.
         self._work_by_group_id: collections.OrderedDict[
             int, RolloutGroupWork
         ] = collections.OrderedDict()
@@ -95,18 +101,34 @@ class RolloutGroupWorkBuffer(Configurable):
         # TODO(async-rl): warm start — admit a small number of groups at first and grow the effective cap as the
         # batcher consumes, so a cold start doesn't fill the whole off-policy window at policy version 0.
 
+    def _has_active_slot_unlocked(self) -> bool:
+        return self._active_rollout_groups < self._max_active_rollout_groups
+
     async def wait_for_slot(self) -> bool:
-        """Data input loop: block until one more group can be admitted. Returns False once closed."""
+        """Wait until one more rollout group may enter the active off-policy window.
+
+        Example:
+            # False means the buffer was closed, so the data input loop exits.
+            if await buffer.wait_for_slot():
+                await buffer.add_work(RolloutGroupWork(group_id=0, sample=sample))
+        """
         async with self._condition:
             await self._condition.wait_for(
-                lambda: self._closed
-                or len(self._work_by_group_id) < self._max_buffered_rollout_groups
+                lambda: self._closed or self._has_active_slot_unlocked()
             )
             return not self._closed
 
     async def add_work(self, work: RolloutGroupWork) -> None:
-        """Data input loop: admit one group as WAITING."""
+        """Admit one rollout group as WAITING and charge one active slot."""
         async with self._condition:
+            if not self._has_active_slot_unlocked():
+                raise RuntimeError(
+                    "RolloutGroupWorkBuffer.add_work called without an active slot"
+                )
+            self._active_rollout_groups += 1
+            self._active_rollout_groups_peak = max(
+                self._active_rollout_groups_peak, self._active_rollout_groups
+            )
             self._work_by_group_id[work.group_id] = work
             self._condition.notify_all()
 
@@ -146,13 +168,44 @@ class RolloutGroupWorkBuffer(Configurable):
                 if self._closed:
                     return None
                 if self._work_by_group_id:
-                    head_id, head = next(iter(self._work_by_group_id.items()))
-                    if head.state is _WorkState.FINALIZED:
-                        del self._work_by_group_id[head_id]
+                    oldest_group_id, oldest_work = next(
+                        iter(self._work_by_group_id.items())
+                    )
+                    if oldest_work.state is _WorkState.FINALIZED:
+                        del self._work_by_group_id[oldest_group_id]
                         self._condition.notify_all()
-                        assert head.rollout_group is not None
-                        return head.rollout_group
+                        if oldest_work.rollout_group is None:
+                            raise RuntimeError(
+                                f"finalized rollout group {oldest_group_id} has no payload"
+                            )
+                        return oldest_work.rollout_group
                 await self._condition.wait()  # head still INFLIGHT -> STALL
+
+    async def release_active_groups(self, count: int, *, reason: str) -> None:
+        """Free active slots for groups that can no longer become stale training data.
+
+        Args:
+            count: Number of rollout groups leaving the active window.
+            reason: Metric suffix such as `"trained"` or `"untrainable_group"`.
+
+        Example:
+            await buffer.release_active_groups(8, reason="trained")
+            await buffer.release_active_groups(1, reason="untrainable_group")
+        """
+        if count < 0:
+            raise ValueError(f"count must be non-negative, got {count}")
+        if count == 0:
+            return
+        async with self._condition:
+            if count > self._active_rollout_groups:
+                raise RuntimeError(
+                    f"release_active_groups({count}) exceeds active count {self._active_rollout_groups}"
+                )
+            self._active_rollout_groups -= count
+            sl.log_trace_scalar(
+                {f"rollout_active_budget/released/{reason}": float(count)}
+            )
+            self._condition.notify_all()
 
     async def close(self) -> None:
         """`run()` shutdown: abandon buffered work and wake every waiter."""
@@ -164,9 +217,6 @@ class RolloutGroupWorkBuffer(Configurable):
     def metrics(self) -> list[m.Metric]:
         """Trainer loop: point-in-time buffer gauges for this step."""
         states = [work.state for work in self._work_by_group_id.values()]
-        capacity_used = len(self._work_by_group_id) / max(
-            self._max_buffered_rollout_groups, 1
-        )
         S = _WorkState
         return [
             m.Metric(
@@ -181,5 +231,22 @@ class RolloutGroupWorkBuffer(Configurable):
                 "rollout_buffer/num_groups_finalized",
                 m.NoReduce(float(states.count(S.FINALIZED))),
             ),
-            m.Metric("rollout_buffer/capacity_used_frac", m.NoReduce(capacity_used)),
+            m.Metric(
+                "rollout_active_budget/capacity",
+                m.NoReduce(float(self._max_active_rollout_groups)),
+            ),
+            m.Metric(
+                "rollout_active_budget/in_use",
+                m.NoReduce(float(self._active_rollout_groups)),
+            ),
+            m.Metric(
+                "rollout_active_budget/in_use_peak",
+                m.NoReduce(float(self._active_rollout_groups_peak)),
+            ),
+            m.Metric(
+                "rollout_active_budget/available",
+                m.NoReduce(
+                    float(self._max_active_rollout_groups - self._active_rollout_groups)
+                ),
+            ),
         ]

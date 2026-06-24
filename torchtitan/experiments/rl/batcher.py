@@ -6,16 +6,15 @@
 
 """Collects trainable `TrainingSample`s until a group-count training batch is ready, then packs it.
 
-`Batcher` accumulates `TrainingSampleGroup`s. When enough trainable groups have accumulated, it drops
-stale groups against the LIVE trainer version and packs a `TrainingBatch` of `[num_microbatches][dp_degree]`
-`TrainingMicrobatch`es; surplus training samples carry to the next batch.
+`Batcher` accumulates `TrainingSampleGroup`s. When enough trainable groups have accumulated, it packs a
+`TrainingBatch` of `[num_microbatches][dp_degree]` `TrainingMicrobatch`es; surplus training samples carry
+to the next batch. Staleness policy lives in the buffer/trainer, not here.
 
 TODO: move this module to components/
 """
 
 import logging
 import math
-from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
@@ -28,7 +27,6 @@ from torchtitan.experiments.rl.types import (
     TrainingSample,
     TrainingSampleGroup,
 )
-from torchtitan.observability import structured_logger as sl
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +63,7 @@ class BatchConfig:
 
 
 class Batcher(Configurable):
-    """Accumulate training-sample groups, drop stale ones at flush, and pack group-count training batches.
+    """Accumulate training-sample groups and pack group-count training batches.
 
     Example (target = 2 groups; g1, g2 are TrainingSampleGroups of one rollout each):
         batcher.add_training_samples(training_sample_group=g1)  # -> None (1 < target)
@@ -80,17 +78,11 @@ class Batcher(Configurable):
         before packing. Used by flex attention in batch-invariant mode
         so that block boundaries align regardless of batch composition."""
 
-        drop_rollout_group_if_any_stale: bool = False
-        """If any training_sample in a group is too off-policy at flush: drop the WHOLE group (True,
-        keeps the GRPO group intact for advantage centering) or only the stale training_samples (False)."""
-
     def __init__(
         self,
         config: Config,
         *,
-        target_groups_per_batch: int,
-        max_offpolicy_steps: int,
-        trainer_policy_version_getter: Callable[[], int],
+        num_groups_per_train_step: int,
         dp_degree: int,
         pad_id: int,
     ) -> None:
@@ -98,95 +90,30 @@ class Batcher(Configurable):
         self.seq_len = config.batch.seq_len
         self.pad_id = pad_id
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
-        self._drop_group_if_any_stale = config.drop_rollout_group_if_any_stale
-        self._target_groups_per_batch = target_groups_per_batch
-        self._max_offpolicy_steps = max_offpolicy_steps
-        # read live at flush
-        self._trainer_policy_version_getter = trainer_policy_version_getter
+        self._num_groups_per_train_step = num_groups_per_train_step
         self._dp_degree = dp_degree
         self._groups_for_next_batch: list[TrainingSampleGroup] = []
-        self._num_stale_samples_dropped_since_pack = 0
 
     def add_training_samples(
         self, *, training_sample_group: TrainingSampleGroup
     ) -> TrainingBatch | None:
-        """Add one group's training_samples to the batcher.
+        """Add one rollout group and pack one train step once enough trainable groups are ready.
 
-        Return a single training batch iff `target_groups_per_batch` trainable groups have accumulated,
-        else None. Metric-only groups (failed / filtered / zero-std) are carried into the next emitted
-        batch but do not count toward the target, so a zero-token batch is impossible.
+        Args:
+            training_sample_group: One rollout group's trainable samples plus rollout metrics.
+
+        Example:
+            batcher = Batcher.Config().build(num_groups_per_train_step=2, dp_degree=1, pad_id=0)
+            batcher.add_training_samples(training_sample_group=group0)  # -> None
+            batcher.add_training_samples(training_sample_group=group1)  # -> TrainingBatch
         """
         self._groups_for_next_batch.append(training_sample_group)
-        self._drop_stale_groups(self._trainer_policy_version_getter())
-        if self._num_fresh_groups() < self._target_groups_per_batch:
+        if self._num_trainable_groups() < self._num_groups_per_train_step:
             return None  # accumulate until one full batch is ready
         return self._pack_one_training_batch()
 
-    # --- staleness (the only staleness site; against the live trainer version) ---
-
-    # Off-policy guard against the live trainer version. The buffer is strict-FIFO and stalls on the oldest
-    # group, so the trainer can't advance past an un-finalized head -> a group reaches the batcher with age
-    # <= max_offpolicy_steps and this never drops; kept as a cheap, logged guard (feedback #21).
-    # TODO(async-rl): make off-policy handling pluggable (drop vs mask vs reweight) behind a manager seam.
-    def _drop_stale_groups(self, trainer_policy_version: int) -> None:
-        """Drop too-off-policy training_samples (or whole groups, per `drop_rollout_group_if_any_stale`)
-        from the accumulator, against `trainer_policy_version`."""
-        groups_before = len(self._groups_for_next_batch)
-        samples_before = sum(
-            len(group.training_samples) for group in self._groups_for_next_batch
-        )
-        max_policy_age_before = max(
-            (
-                trainer_policy_version - training_sample.min_policy_version
-                for group in self._groups_for_next_batch
-                for training_sample in group.training_samples
-            ),
-            default=0,
-        )
-
-        survivors: list[TrainingSampleGroup] = []
-        num_dropped = 0
-        groups_with_drops = 0
-        for group in self._groups_for_next_batch:
-            fresh = [
-                training_sample
-                for training_sample in group.training_samples
-                if trainer_policy_version - training_sample.min_policy_version
-                <= self._max_offpolicy_steps  # min = the oldest version
-            ]
-            num_stale = len(group.training_samples) - len(fresh)
-            if num_stale:
-                groups_with_drops += 1
-            if self._drop_group_if_any_stale and num_stale:
-                # Whole-group drop: keep the GRPO group all-or-nothing so advantage centering stays valid.
-                num_dropped += len(group.training_samples)
-                fresh = []
-            else:
-                num_dropped += num_stale
-            survivors.append(
-                TrainingSampleGroup(
-                    group_id=group.group_id,
-                    training_samples=fresh,
-                    metrics=group.metrics,
-                )
-            )
-        self._groups_for_next_batch = survivors
-        self._num_stale_samples_dropped_since_pack += num_dropped
-
-        sl.log_trace_scalar(
-            {
-                "batcher/stale_filter/trainer_policy_version": trainer_policy_version,
-                "batcher/stale_filter/max_offpolicy_steps": self._max_offpolicy_steps,
-                "batcher/stale_filter/groups_before": groups_before,
-                "batcher/stale_filter/samples_before": samples_before,
-                "batcher/stale_filter/samples_dropped": num_dropped,
-                "batcher/stale_filter/groups_with_drops": groups_with_drops,
-                "batcher/stale_filter/max_policy_age_before": max_policy_age_before,
-            }
-        )
-
-    def _num_fresh_groups(self) -> int:
-        """Accumulated groups with at least one trainable training_sample (metric-only groups don't count)."""
+    def _num_trainable_groups(self) -> int:
+        """Number of accumulated rollout groups with at least one training sample."""
         return sum(
             bool(group.training_samples) for group in self._groups_for_next_batch
         )
@@ -194,13 +121,13 @@ class Batcher(Configurable):
     # --- batch formation (count-triggered) + packing ---
 
     def _pack_one_training_batch(self) -> TrainingBatch:
-        """Pack the oldest accumulated groups (up to `target_groups_per_batch` trainable groups) into one batch."""
+        """Pack the oldest accumulated groups (up to `num_groups_per_train_step` trainable groups) into one batch."""
         (
             training_samples,
             metrics,
             num_rollout_groups,
             num_metric_only_groups,
-        ) = self._take_groups_up_to_target()
+        ) = self._take_groups_for_train_step()
         # Next-fit all taken training_samples into rows.
         rows = self._pack_training_samples_into_rows(training_samples)
         packed_rows = [self._pack_training_sample_row(row) for row in rows]
@@ -226,10 +153,10 @@ class Batcher(Configurable):
             ],
         )
 
-    def _take_groups_up_to_target(
+    def _take_groups_for_train_step(
         self,
     ) -> tuple[list[TrainingSample], list[m.Metric], int, int]:
-        """Pop accumulated groups oldest-first until `target_groups_per_batch` trainable groups are taken.
+        """Pop accumulated groups oldest-first until `num_groups_per_train_step` trainable groups are taken.
 
         Metric-only groups encountered along the way are taken too (their metrics ride along) but do not
         count toward the target; the surplus is carried over.
@@ -239,7 +166,7 @@ class Batcher(Configurable):
         num_rollout_groups = 0
         num_metric_only_groups = 0
         remaining = list(self._groups_for_next_batch)
-        while remaining and num_rollout_groups < self._target_groups_per_batch:
+        while remaining and num_rollout_groups < self._num_groups_per_train_step:
             group = remaining.pop(0)
             taken_training_samples.extend(group.training_samples)
             taken_metrics.extend(group.metrics)
@@ -396,10 +323,6 @@ class Batcher(Configurable):
         """Per-training-batch packing + count metrics. (policy age is logged at trainer consume time.)"""
         total_slots = len(packed_rows) * self.seq_len
         non_padded = sum(sum(row["seq_lens"]) for row in packed_rows)
-        dropped, self._num_stale_samples_dropped_since_pack = (
-            self._num_stale_samples_dropped_since_pack,
-            0,
-        )
         return [
             m.Metric(
                 "train_batch/padding_frac",
@@ -423,9 +346,5 @@ class Batcher(Configurable):
             m.Metric(
                 "train_batch/num_training_samples",
                 m.NoReduce(float(len(training_samples))),
-            ),
-            m.Metric(
-                "train_batch/num_stale_samples_dropped",
-                m.NoReduce(float(dropped)),
             ),
         ]
