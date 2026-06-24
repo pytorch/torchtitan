@@ -39,7 +39,7 @@ __all__ = [
     "spmd_validate_redistributions",
     "set_current_spmd_mesh",
     "set_spmd_meshes",
-    "set_sparse_mesh",
+    "maybe_set_sparse_mesh",
     "spmd_layout_to_dtensor_placements",
 ]
 
@@ -124,7 +124,7 @@ def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def set_sparse_mesh() -> Iterator[None]:
+def maybe_set_sparse_mesh() -> Iterator[None]:
     """Activate the registered sparse mesh under spmd_types, otherwise no-op."""
     if get_spmd_backend() != "spmd_types" or (mesh := spmd_sparse_mesh()) is None:
         yield
