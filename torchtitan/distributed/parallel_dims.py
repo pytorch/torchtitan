@@ -517,9 +517,7 @@ class ParallelDims:
         """Dense SPMD mesh used for forward/backward typechecking."""
         if not self._single_axis_meshes:
             self.build_mesh()
-        mesh = self._global_meshes.get("spmd_dense_for_fwdbwd")
-        assert mesh is not None, "spmd_types dense mesh has not been built"
-        return mesh
+        return self._global_meshes["spmd_dense_for_fwdbwd"]
 
     def spmd_sparse_mesh(self) -> DeviceMesh | None:
         """Sparse SPMD mesh used inside expert dispatch."""
