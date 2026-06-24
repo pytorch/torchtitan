@@ -8,14 +8,10 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import MSELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.quantization import MXFP8LinearConverter
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    CompileConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference, SamplingConfig
 from torchtitan.models.flux.flux_datasets import FluxDataLoader
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
@@ -36,13 +32,11 @@ def flux_debugmodel() -> FluxTrainer.Config:
             max_t5_encoding_len=256,
         ),
         encoder=FluxEncoderConfig(
-            t5_encoder="google/t5-v1_1-xxl",
-            clip_encoder="openai/clip-vit-large-patch14",
             autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("flux-debug"),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=1,
             decay_ratio=0.0,
@@ -57,7 +51,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
             img_size=256,
         ),
         parallelism=ParallelismConfig(context_parallel_degree=1),
-        activation_checkpoint=ActivationCheckpointConfig(mode="full"),
+        activation_checkpoint=FullAC.Config(),
         checkpoint=CheckpointManager.Config(
             interval=10,
             last_save_model_only=False,
@@ -97,13 +91,11 @@ def flux_dev() -> FluxTrainer.Config:
             max_t5_encoding_len=512,
         ),
         encoder=FluxEncoderConfig(
-            t5_encoder="google/t5-v1_1-xxl",
-            clip_encoder="openai/clip-vit-large-patch14",
             autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
         ),
         metrics=MetricsProcessor.Config(log_freq=100),
         model_spec=model_registry("flux-dev"),
-        optimizer=OptimizersContainer.Config(lr=1e-4),
+        optimizer=default_adamw(lr=1e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=3000,
             decay_ratio=0.0,
@@ -117,7 +109,7 @@ def flux_dev() -> FluxTrainer.Config:
             prompt_dropout_prob=0.447,
             img_size=256,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(mode="full"),
+        activation_checkpoint=FullAC.Config(),
         checkpoint=CheckpointManager.Config(interval=1000),
         validator=FluxValidator.Config(
             freq=1000,
@@ -149,13 +141,11 @@ def flux_schnell() -> FluxTrainer.Config:
             max_t5_encoding_len=256,
         ),
         encoder=FluxEncoderConfig(
-            t5_encoder="google/t5-v1_1-xxl",
-            clip_encoder="openai/clip-vit-large-patch14",
             autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
         ),
         metrics=MetricsProcessor.Config(log_freq=100),
         model_spec=model_registry("flux-schnell"),
-        optimizer=OptimizersContainer.Config(lr=1e-4),
+        optimizer=default_adamw(lr=1e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=3000,
             decay_ratio=0.0,
@@ -169,7 +159,7 @@ def flux_schnell() -> FluxTrainer.Config:
             prompt_dropout_prob=0.447,
             img_size=256,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(mode="full"),
+        activation_checkpoint=FullAC.Config(),
         checkpoint=CheckpointManager.Config(interval=1000),
         validator=FluxValidator.Config(
             freq=1000,
@@ -202,7 +192,7 @@ def flux_schnell_mxfp8() -> FluxTrainer.Config:
     )
     config.model_spec = model_registry(
         "flux-schnell",
-        quantization=[
+        converters=[
             MXFP8LinearConverter.Config(
                 model_compile_enabled=model_compile_enabled,
                 fqns=[
@@ -230,7 +220,7 @@ def flux_dev_mxfp8() -> FluxTrainer.Config:
     )
     config.model_spec = model_registry(
         "flux-dev",
-        quantization=[
+        converters=[
             MXFP8LinearConverter.Config(
                 model_compile_enabled=model_compile_enabled,
                 fqns=[

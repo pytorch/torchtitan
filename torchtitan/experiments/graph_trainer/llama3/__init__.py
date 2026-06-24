@@ -11,15 +11,26 @@ from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 from torchtitan.protocols.model_spec import ModelSpec
 
+from ..common_utils import build_decoder_config_for_backend
 from .model import GraphTrainerLlama3Model
 from .parallelize import parallelize_llama
 
 
+def _parallelize_fn(model, *, compile_config, **kwargs):
+    if compile_config.enable_autoparallel:
+        from .parallelize_autoparallel import parallelize_autoparallel_llama
+
+        return parallelize_autoparallel_llama(
+            model, compile_config=compile_config, **kwargs
+        )
+    return parallelize_llama(model, compile_config=compile_config, **kwargs)
+
+
 def model_registry(
     flavor: str,
-    attn_backend: str = "sdpa",
+    attn_backend: str = "flex",
 ) -> ModelSpec:
-    base = llama3_configs[flavor](attn_backend=attn_backend)
+    base = build_decoder_config_for_backend(llama3_configs[flavor], attn_backend)
     config = GraphTrainerLlama3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}
     )
@@ -27,7 +38,7 @@ def model_registry(
         name="graph_trainer/llama3",
         flavor=flavor,
         model=config,
-        parallelize_fn=parallelize_llama,
+        parallelize_fn=_parallelize_fn,
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=None,
         state_dict_adapter=Llama3StateDictAdapter,
