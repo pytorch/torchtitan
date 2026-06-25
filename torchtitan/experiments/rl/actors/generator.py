@@ -877,6 +877,13 @@ class VLLMGenerator(Actor, Configurable):
             strict=False,
             direct_rdma=is_rdma_available(),
         )
+        # state_dict() returns hook-produced copies for fused modules (e.g.
+        # FusedQKVLinear's wqkv -> wq/wk/wv), so the in-place fill above never
+        # reaches the real param. Re-apply via load_state_dict to run the merge hook.
+        # Non-fused params share storage with model_sd, so reloading them is a
+        # harmless self-copy; only the fused wqkv is actually rebuilt.
+        # TODO: investigate can we avoid the copy and properly load fused qkv weights
+        self._get_model().model.load_state_dict(model_sd, strict=False)
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:
             # TODO(async): under hot-swap, prefer per-token weight-version tracking over a full
