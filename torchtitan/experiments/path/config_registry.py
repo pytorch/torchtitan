@@ -1,8 +1,31 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 from __future__ import annotations
 
 import math
 import os
 from functools import partial
+from xx.datasets.helpers import DEFAULT_BIG_TRAIN_LIST
+from xx.ml_tools.constants.model import (
+    frame_constants_from_fps,
+    FRAME_TYPE,
+    INPUT_FRAMES_NAMES,
+    ModelInputs,
+    N_FRAMES,
+    SUPERCOMBO_FPS,
+    TEMPORAL_INPUTS,
+)
+from xx.training.path.config import DatasetConfig as XXPathDatasetConfig
+from xx.training.path.hydra_configs import (
+    DRIVING_HEADS,
+    META_HEADS,
+    POSE_HEADS,
+    TEMPORAL_META_HEADS,
+)
 
 import torch.nn as nn
 
@@ -20,23 +43,13 @@ from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.common import Embedding, LayerNorm, Linear
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.protocols.model_spec import ModelSpec
-from xx.datasets.helpers import DEFAULT_BIG_TRAIN_LIST
-from xx.ml_tools.constants.model import (
-    SUPERCOMBO_FPS,
-    FRAME_TYPE,
-    INPUT_FRAMES_NAMES,
-    N_FRAMES,
-    TEMPORAL_INPUTS,
-    ModelInputs,
-    frame_constants_from_fps,
-)
-from xx.training.path.config import DatasetConfig as XXPathDatasetConfig
-from xx.training.path.hydra_configs import DRIVING_HEADS, META_HEADS, POSE_HEADS, TEMPORAL_META_HEADS
 
 from .dataset import PathDataLoader
+from .loss import PathLoss
 from .model import (
     Hydra,
     LinearEncoder,
+    parallelize_path,
     PathHead,
     PathMLP,
     PathModel,
@@ -49,15 +62,29 @@ from .model import (
     TemporalPolicy,
     TemporalSummarizer,
     Vision,
-    parallelize_path,
 )
-from .loss import PathLoss
 from .onnx_checkpoint import PathOnnxCheckpointManager
 from .trainer import PathTrainer
 from .validate import PathValidator
 
+# Plan ViT flavors ride PathTrainer too; re-exported so `--module path --config vit_*` resolves here,
+# the same way convnext_* do (the config manager looks the name up on this module).
+from .vit_config_registry import (  # noqa: F401
+    vit_mup_w1024,
+    vit_mup_w2048,
+    vit_mup_w256,
+    vit_mup_w512,
+    vit_standard_w1024,
+    vit_standard_w2048,
+    vit_standard_w256,
+    vit_standard_w512,
+)
 
-_LINEAR_INIT = {"weight": partial(nn.init.normal_, mean=0.0, std=0.02), "bias": nn.init.zeros_}
+
+_LINEAR_INIT = {
+    "weight": partial(nn.init.normal_, mean=0.0, std=0.02),
+    "bias": nn.init.zeros_,
+}
 _NORM_INIT = {"weight": nn.init.ones_, "bias": nn.init.zeros_}
 
 
@@ -90,10 +117,10 @@ def convnext_xxlarge() -> PathTrainer.Config:
 
 
 def _path(flavor: str) -> PathTrainer.Config:
-    steps = 1024*100
+    steps = 1024 * 100
     validation_freq = 1024
     reports = {
-        name: [validation_freq, steps //2 , steps]
+        name: [validation_freq, steps // 2, steps]
         for name in (
             "analyse_driving",
             "analyse_lat_no_noise",
@@ -107,10 +134,14 @@ def _path(flavor: str) -> PathTrainer.Config:
     mixed_precision_param = "bfloat16"
     local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
     world_size = int(os.environ.get("WORLD_SIZE", str(local_world_size)))
-    num_nodes = int(os.environ.get("GROUP_WORLD_SIZE", str(world_size // local_world_size)))
+    num_nodes = int(
+        os.environ.get("GROUP_WORLD_SIZE", str(world_size // local_world_size))
+    )
     reporterv2_host = os.getenv("REPORTERV2_HOST")
     reporterv2_training_id = os.getenv("REPORTERV2_TRAINING_ID")
-    checkpoint_base_folder = f"{reporterv2_host.rstrip('/')}/checkpoint" if reporterv2_host else ""
+    checkpoint_base_folder = (
+        f"{reporterv2_host.rstrip('/')}/checkpoint" if reporterv2_host else ""
+    )
     fps = SUPERCOMBO_FPS
     plan_only = False
     return PathTrainer.Config(
@@ -153,7 +184,9 @@ def _path(flavor: str) -> PathTrainer.Config:
         fps=fps,
         activation_checkpoint=FullAC.Config(),
         compile=CompileConfig(enable=True, components=["model"]),
-        metrics=MetricsProcessor.Config(log_freq=16, enable_reporterv2=True, save_freq=validation_freq),
+        metrics=MetricsProcessor.Config(
+            log_freq=16, enable_reporterv2=True, save_freq=validation_freq
+        ),
         validator=PathValidator.Config(
             enable=True,
             freq=validation_freq,
@@ -171,8 +204,12 @@ def _model_config(flavor: str) -> PathModel.Config:
     n_frames_input = N_FRAMES
     input_frame_names = INPUT_FRAMES_NAMES
     input_frame_type = FRAME_TYPE
-    frame_constants = frame_constants_from_fps(n_frames=n_frames_input, frame_type=input_frame_type)
-    in_channels = sum(frame_constants["frame_shapes"][name][0] for name in input_frame_names)
+    frame_constants = frame_constants_from_fps(
+        n_frames=n_frames_input, frame_type=input_frame_type
+    )
+    in_channels = sum(
+        frame_constants["frame_shapes"][name][0] for name in input_frame_names
+    )
     block_size = len(frame_constants["history_idxs"])
     temporal_len = frame_constants["temporal_len"]
     dim = vision_features
@@ -202,9 +239,13 @@ def _model_config(flavor: str) -> PathModel.Config:
             temporal_summarizer=TemporalSummarizer.Config(
                 mlp1=_mlp(dim, mlp_mult=2, bias=False, dropout=0.0),
                 mlp2=_mlp(dim, mlp_mult=2, bias=False, dropout=0.0),
-                desire_encoder=_encoder(TEMPORAL_INPUTS[ModelInputs.DESIRE][0] * temporal_len, dim),
+                desire_encoder=_encoder(
+                    TEMPORAL_INPUTS[ModelInputs.DESIRE][0] * temporal_len, dim
+                ),
                 traffic_encoder=_encoder(TEMPORAL_INPUTS[ModelInputs.TRAFFIC][0], dim),
-                action_t_encoder=_encoder(TEMPORAL_INPUTS[ModelInputs.ACTION_T][0], dim),
+                action_t_encoder=_encoder(
+                    TEMPORAL_INPUTS[ModelInputs.ACTION_T][0], dim
+                ),
                 transformer=PathTransformer.Config(
                     layers=[
                         PathTransformerBlock.Config(
@@ -214,17 +255,25 @@ def _model_config(flavor: str) -> PathModel.Config:
                         for _ in range(4)
                     ]
                 ),
-                pos_embedding=Embedding.Config(num_embeddings=block_size, embedding_dim=dim, param_init=_LINEAR_INIT),
+                pos_embedding=Embedding.Config(
+                    num_embeddings=block_size,
+                    embedding_dim=dim,
+                    param_init=_LINEAR_INIT,
+                ),
                 block_size=block_size,
                 dense_training_outputs=True,
             ),
-            temporal_hydra=_hydra(_heads(DRIVING_HEADS + TEMPORAL_META_HEADS), in_features=dim, mlp_mult=2),
+            temporal_hydra=_hydra(
+                _heads(DRIVING_HEADS + TEMPORAL_META_HEADS), in_features=dim, mlp_mult=2
+            ),
             history_idxs=tuple(int(x) for x in frame_constants["history_idxs"]),
         ),
     )
 
 
-def _dataloader_config(*, split: str, fps: int, plan_only: bool) -> PathDataLoader.Config:
+def _dataloader_config(
+    *, split: str, fps: int, plan_only: bool
+) -> PathDataLoader.Config:
     base = XXPathDatasetConfig(fps=fps, plan_only=plan_only)
     return PathDataLoader.Config(
         dataset=DEFAULT_BIG_TRAIN_LIST,
@@ -243,7 +292,9 @@ def _dataloader_config(*, split: str, fps: int, plan_only: bool) -> PathDataLoad
     )
 
 
-def _checkpoint_config(folder: str, base_folder: str, interval: int) -> PathOnnxCheckpointManager.Config:
+def _checkpoint_config(
+    folder: str, base_folder: str, interval: int
+) -> PathOnnxCheckpointManager.Config:
     frame_constants = frame_constants_from_fps(n_frames=N_FRAMES, frame_type=FRAME_TYPE)
     temporal_len = frame_constants["temporal_len"]
     vision_input_names = [ModelInputs.IMG, ModelInputs.BIG_IMG]
@@ -266,10 +317,10 @@ def _checkpoint_config(folder: str, base_folder: str, interval: int) -> PathOnnx
         [1, temporal_len, TEMPORAL_INPUTS[ModelInputs.ACTION_T][0]],
     ]
     return PathOnnxCheckpointManager.Config(
-        keep_latest_k=0, # keep all checkpoints
+        keep_latest_k=0,  # keep all checkpoints
         enable=True,
         checkpoint_base_folder=base_folder,
-        save_model_state_dict=True, # another copy of full state dict
+        save_model_state_dict=True,  # another copy of full state dict
         export_onnx=True,
         enable_first_step_checkpoint=True,
         folder=folder,
@@ -277,7 +328,7 @@ def _checkpoint_config(folder: str, base_folder: str, interval: int) -> PathOnnx
         input_names=input_names,
         input_shapes=input_shapes,
         input_dtypes=["float16"] * len(input_names),
-        onnx_model_dtype="float16", # WIP: test if fp16 doesn't degrade performance
+        onnx_model_dtype="float16",  # WIP: test if fp16 doesn't degrade performance
         vision_input_names=vision_input_names,
         temporal_policy_input_names=temporal_policy_input_names,
     )
@@ -286,7 +337,11 @@ def _checkpoint_config(folder: str, base_folder: str, interval: int) -> PathOnnx
 def _si_int(value: str | int) -> int:
     suffixes = {"k": 1_000, "m": 1_000_000, "g": 1_000_000_000}
     value = str(value).strip().lower()
-    return int(float(value[:-1]) * suffixes[value[-1]]) if value[-1] in suffixes else int(value)
+    return (
+        int(float(value[:-1]) * suffixes[value[-1]])
+        if value[-1] in suffixes
+        else int(value)
+    )
 
 
 def _optimizer_config() -> OptimizersContainer.Config:
@@ -310,7 +365,9 @@ def _optimizer_config() -> OptimizersContainer.Config:
 
 
 def _heads(heads) -> tuple[PathHead, ...]:
-    return tuple(PathHead(head.name, head.output_size, head.mlp, head.scale) for head in heads)
+    return tuple(
+        PathHead(head.name, head.output_size, head.mlp, head.scale) for head in heads
+    )
 
 
 def _hidden_dim(dim: int, mlp_mult: float, multiple_of: int = 256) -> int:
@@ -322,8 +379,12 @@ def _mlp(dim: int, *, mlp_mult: float, bias: bool, dropout: float) -> PathMLP.Co
     hidden = _hidden_dim(dim, mlp_mult)
     return PathMLP.Config(
         norm=LayerNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        c_fc=Linear.Config(in_features=dim, out_features=hidden, bias=bias, param_init=_LINEAR_INIT),
-        c_proj=Linear.Config(in_features=hidden, out_features=dim, bias=bias, param_init=_LINEAR_INIT),
+        c_fc=Linear.Config(
+            in_features=dim, out_features=hidden, bias=bias, param_init=_LINEAR_INIT
+        ),
+        c_proj=Linear.Config(
+            in_features=hidden, out_features=dim, bias=bias, param_init=_LINEAR_INIT
+        ),
         act="gelu_tanh",
         dropout=dropout,
     )
@@ -331,8 +392,15 @@ def _mlp(dim: int, *, mlp_mult: float, bias: bool, dropout: float) -> PathMLP.Co
 
 def _encoder(in_features: int, dim: int) -> LinearEncoder.Config:
     return LinearEncoder.Config(
-        in_layer=Linear.Config(in_features=in_features, out_features=dim, bias=True, param_init=_LINEAR_INIT),
-        out_layer=Linear.Config(in_features=dim, out_features=dim, bias=False, param_init=_LINEAR_INIT),
+        in_layer=Linear.Config(
+            in_features=in_features,
+            out_features=dim,
+            bias=True,
+            param_init=_LINEAR_INIT,
+        ),
+        out_layer=Linear.Config(
+            in_features=dim, out_features=dim, bias=False, param_init=_LINEAR_INIT
+        ),
     )
 
 
@@ -342,8 +410,12 @@ def _attention(*, dim: int, n_head: int, dropout: float) -> PathSelfAttention.Co
         norm=LayerNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
         q_norm=LayerNorm.Config(normalized_shape=head_dim, param_init=_NORM_INIT),
         k_norm=LayerNorm.Config(normalized_shape=head_dim, param_init=_NORM_INIT),
-        c_attn=Linear.Config(in_features=dim, out_features=3 * dim, bias=True, param_init=_LINEAR_INIT),
-        c_proj=Linear.Config(in_features=dim, out_features=dim, bias=True, param_init=_LINEAR_INIT),
+        c_attn=Linear.Config(
+            in_features=dim, out_features=3 * dim, bias=True, param_init=_LINEAR_INIT
+        ),
+        c_proj=Linear.Config(
+            in_features=dim, out_features=dim, bias=True, param_init=_LINEAR_INIT
+        ),
         inner_attention=ScaledDotProductAttention.Config(),
         n_head=n_head,
         head_dim=head_dim,
@@ -351,10 +423,16 @@ def _attention(*, dim: int, n_head: int, dropout: float) -> PathSelfAttention.Co
     )
 
 
-def _hydra(heads: tuple[PathHead, ...], *, in_features: int, mlp_mult: float) -> Hydra.Config:
+def _hydra(
+    heads: tuple[PathHead, ...], *, in_features: int, mlp_mult: float
+) -> Hydra.Config:
     return Hydra.Config(
         heads=heads,
-        head_mlps={head.name: _mlp(in_features, mlp_mult=mlp_mult, bias=False, dropout=0.0) for head in heads if head.mlp},
+        head_mlps={
+            head.name: _mlp(in_features, mlp_mult=mlp_mult, bias=False, dropout=0.0)
+            for head in heads
+            if head.mlp
+        },
         final_layers={
             head.name: Linear.Config(
                 in_features=in_features,
@@ -364,5 +442,9 @@ def _hydra(heads: tuple[PathHead, ...], *, in_features: int, mlp_mult: float) ->
             )
             for head in heads
         },
-        scale_layers={head.name: ScaleLayer.Config(n_features=head.output_size) for head in heads if head.scale},
+        scale_layers={
+            head.name: ScaleLayer.Config(n_features=head.output_size)
+            for head in heads
+            if head.scale
+        },
     )
