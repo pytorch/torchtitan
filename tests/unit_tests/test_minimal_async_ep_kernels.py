@@ -7,8 +7,10 @@
 import unittest
 
 import torch
+import triton.language as tl
 
 from torchtitan.distributed.minimal_async_ep.kernels import (
+    _copy_rows_to_peer_ptrs_kernel,
     copy_full_counts_to_peers_kernel,
     copy_rows_to_peers_kernel,
     expand_topk_grad_kernel,
@@ -258,6 +260,58 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
         assert_equal(row_dsts[1][3], src[2])
         assert_equal(row_dsts[0][4], src[0])
         assert_equal(row_dsts[1][5], torch.zeros(2, device="cuda"))
+
+    def test_copy_rows_uses_int64_for_source_stride_arithmetic(self):
+        row = 1_048_576
+        stride = 2048
+        base_offset = 2**31
+        high_offset = row * stride
+        storage_numel = base_offset + high_offset + 1
+        metadata_numel = row + 1
+
+        free_bytes, _ = torch.cuda.mem_get_info()
+        required_bytes = storage_numel + metadata_numel * 8 * 2 + 512 * 1024**2
+        if free_bytes < required_bytes:
+            self.skipTest(
+                f"need at least {required_bytes} free CUDA bytes, got {free_bytes}"
+            )
+
+        src_storage = torch.empty(storage_numel, device="cuda", dtype=torch.uint8)
+        src = src_storage[base_offset:]
+        dst = torch.zeros(1, device="cuda", dtype=torch.uint8)
+        dst_ptrs = torch.tensor([dst.data_ptr()], device="cuda", dtype=torch.int64)
+        dst_ranks = torch.full((metadata_numel,), -1, device="cuda", dtype=torch.int64)
+        dst_ranks[row] = 0
+        dst_rows = torch.zeros(metadata_numel, device="cuda", dtype=torch.int64)
+        num_valid_rows = torch.tensor(
+            [metadata_numel], device="cuda", dtype=torch.int64
+        )
+
+        src_storage[0] = 17
+        src_storage[base_offset + high_offset] = 93
+        torch.cuda.synchronize()
+
+        _copy_rows_to_peer_ptrs_kernel[(metadata_numel, 1)](
+            src,
+            dst_ptrs,
+            dst_ranks,
+            dst_rows,
+            num_valid_rows,
+            dst_rows,
+            NUM_ROWS=metadata_numel,
+            NUM_COLS=1,
+            SRC_ROW_STRIDE=stride,
+            SRC_COL_STRIDE=1,
+            DST_ROW_STRIDE=1,
+            DST_DTYPE=tl.uint8,
+            HAS_NUM_VALID_ROWS=True,
+            HAS_SRC_ROWS=False,
+            BLOCK_M=1,
+            BLOCK_N=1,
+        )
+        torch.cuda.synchronize()
+
+        self.assertEqual(int(dst.item()), 93)
 
 
 if __name__ == "__main__":
