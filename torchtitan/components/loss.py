@@ -137,9 +137,6 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
             )
 
         # All-reduce max for numerically stable distributed log-softmax.
-        # Functional collectives (out-of-place, string PG name) keep this
-        # serializable under make_fx for CooR precompile: raw dist.all_reduce
-        # bakes an unpicklable ProcessGroup torchbind object into the graph.
         local_max = torch.amax(logits_2d, dim=-1, keepdim=True)
         local_max = funcol.all_reduce(
             local_max, reduceOp=dist.ReduceOp.MAX.name, group=tp_group
