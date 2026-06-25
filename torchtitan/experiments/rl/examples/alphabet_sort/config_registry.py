@@ -701,6 +701,10 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> RLTrainer.Config:
     Both are CUDA-only; ``helion_rope`` additionally needs the optional ``helion``
     package. Checkpoints stay interchangeable with the non-fused/stock-RoPE 30B
     config.
+
+    Also routes the generator's row-parallel TP all-reduce (wo/w2) through
+    vLLM's custom one-shot/multimem AR (``allreduce_backend="vllm"``) instead of
+    DTensor's NCCL ring redistribute.
     """
     config = rl_grpo_qwen3_30b_a3b_varlen()
     # Applied after each actor's update_from_config and before build; separate
@@ -714,7 +718,11 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> RLTrainer.Config:
         config.trainer, override=OverrideConfig(imports=list(perf_imports))
     )
     config.generator = dataclasses.replace(
-        config.generator, override=OverrideConfig(imports=list(perf_imports))
+        config.generator,
+        override=OverrideConfig(imports=list(perf_imports)),
+        parallelism=dataclasses.replace(
+            config.generator.parallelism, allreduce_backend="vllm"
+        ),
     )
     return config
 

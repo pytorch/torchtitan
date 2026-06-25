@@ -69,22 +69,28 @@ _tp_all_reduce_patched = False
 def _patch_vllm_all_reduce() -> None:
     """Opt-in (allreduce_backend="vllm"): route the generator's tensor-parallel
     all-reduce through vLLM's custom one-shot/multimem AR instead of DTensor's
-    NCCL ring redistribute. Idempotent.
+    NCCL ring redistribute. Idempotent. Two changes:
 
-    Swapping torch.ops._c10d_functional.all_reduce for
-    tensor_model_parallel_all_reduce reuses vLLM's TP group -- the same ranks,
-    but the GroupCoordinator that owns the custom-AR shared buffers. DTensor
-    wraps the synchronous result in an AsyncCollectiveTensor whose wait_tensor
-    is a no-op.
+    1. Swap torch.ops._c10d_functional.all_reduce (the op every DTensor
+       Partial -> Replicate redistribute calls) for
+       tensor_model_parallel_all_reduce, which reuses vLLM's TP GroupCoordinator
+       -- the same ranks, but the group that owns the custom-AR shared buffers.
+       DTensor wraps the synchronous result in an AsyncCollectiveTensor whose
+       wait_tensor is a no-op. Only sum reductions are routed (the custom AR is
+       sum-only); others fall through to the original op. No-op at world_size 1.
 
-    Only all_reduce is intercepted, and vLLM's custom AR is sum-only, so any
-    non-sum reduction falls through to the original op. Eager +
-    CompilationMode.NONE cudagraph only (an inductor/dynamo path would capture
-    the original op and bypass this); no-op at world_size 1.
+    2. Force the custom AR onto its registered=False path so cudagraph capture
+       works. registered=True records graph buffers and calls cudaIpcGetMemHandle
+       on them, which fails for the expandable_segments (VMM) memory the RL stack
+       enables for Monarch RDMA. registered=False reduces via the init-time
+       buffer_ptrs (raw cudaMalloc, IPC-able), records no graph buffers, at the
+       cost of one staging copy per AR.
     """
     global _tp_all_reduce_patched
     if _tp_all_reduce_patched:
         return
+
+    from vllm.distributed import get_tp_group
 
     c10d = torch.ops._c10d_functional
     # Op schema: all_reduce(Tensor input, str reduce_op, Any group_name) -> Tensor.
@@ -102,10 +108,24 @@ def _patch_vllm_all_reduce() -> None:
         return original_all_reduce(input, reduce_op, group_name)
 
     c10d.all_reduce = all_reduce
+
+    # Force vLLM's TP custom AR onto its registered=False path (see point 2).
+    device_comm = get_tp_group().device_communicator
+    ca = getattr(device_comm, "ca_comm", None) if device_comm is not None else None
+    if ca is not None and not ca.disabled:
+
+        def custom_all_reduce(input):
+            # Mirrors CustomAllreduce.custom_all_reduce but always registered=False.
+            if ca.disabled or not ca.should_custom_ar(input):
+                return None
+            return ca.all_reduce(input, registered=False)
+
+        ca.custom_all_reduce = custom_all_reduce
+
     _tp_all_reduce_patched = True
     logger.info(
         "vllm_allreduce: routed _c10d_functional.all_reduce (TP sum reductions) "
-        "through vLLM custom all-reduce"
+        "through vLLM custom all-reduce (registered=False, cudagraph-safe)"
     )
 
 
