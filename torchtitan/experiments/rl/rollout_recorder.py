@@ -71,7 +71,7 @@ class RolloutSampleRecorder(Configurable):
     Example:
 
         recorder = RolloutSampleRecorder.Config().build(dump_dir="outputs/rl")
-        recorder.record(step=3, is_validation=False, rollout_groups=groups)
+        recorder.record(is_validation=False, rollout_groups=groups)
         # -> outputs/rl/rollout_samples.jsonl, one JSON line per recorded rollout
     """
 
@@ -97,23 +97,21 @@ class RolloutSampleRecorder(Configurable):
 
     @sl.log_trace_span("rollout_record")
     def record(
-        self, *, step: int, is_validation: bool, rollout_groups: list[RolloutGroup]
+        self,
+        *,
+        is_validation: bool,
+        rollout_groups: list[RolloutGroup],
     ) -> None:
         """Append the filtered rollouts to the JSONL, one JSON object per rollout."""
-        lines = [
-            json.dumps(
-                {
-                    "step": step,
-                    "is_validation": is_validation,
-                    **self._encode_rollout(rollout),
-                },
-                # Rollout messages can hold objects json.dumps can't serialize
-                # natively, e.g. tool-calling results
-                default=_json_default,
-            )
-            + "\n"
-            for rollout in self._filter(rollout_groups)
-        ]
+        lines = []
+        for rollout in self._filter(rollout_groups):
+            record = {
+                "is_validation": is_validation,
+                **self._encode_rollout(rollout),
+            }
+            # Rollout messages can hold objects json.dumps can't serialize
+            # natively, e.g. tool-calling results
+            lines.append(json.dumps(record, default=_json_default) + "\n")
         with self._path.open("a", encoding="utf-8") as file:
             file.write("".join(lines))
 

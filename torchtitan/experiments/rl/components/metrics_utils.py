@@ -45,11 +45,7 @@ class MetricsTimer:
             self.durations[key].append(time.perf_counter() - start)
 
     def flush(self) -> list[m.Metric]:
-        """Return one Mean metric per recorded span, then reset so the timer can be reused.
-
-        Callers that also need the raw durations (e.g. the perf panel) must snapshot
-        `self.durations` BEFORE calling this, since it drains them.
-        """
+        """Return one Mean metric per recorded span, then reset so the timer can be reused."""
         durations = self.durations
         self.durations = defaultdict(list)
         return [
@@ -84,34 +80,63 @@ def combine_microbatch_metrics(
 
 
 def compute_perf_ratio_metrics(
-    *, num_global_valid_tokens: int, durations: dict[str, list[float]]
+    *, num_global_valid_tokens: int, time_metrics: list[m.Metric]
 ) -> list[m.Metric]:
-    """Trainer-side timing metrics derived from one step's timings."""
-    step_s = sum(durations.get("timing/step/total", [0.0]))
-    wait_s = sum(durations.get("timing/step/wait_for_training_batch", []))
-    forward_backward_s = sum(durations.get("timing/step/forward_backward", []))
-    optim_s = sum(durations.get("timing/step/optim", []))
-    sync_s = sum(durations.get("timing/step/weight_sync/push", [])) + sum(
-        durations.get("timing/step/weight_sync/pull", [])
-    )
-    trainer_compute_s = forward_backward_s + optim_s
-    accounted_s = wait_s + trainer_compute_s + sync_s
-    timing_gap_ratio = (step_s - accounted_s) / step_s if step_s else 0.0
-    ratios = {
-        "perf/trainer/fwd_bwd_step_time_ratio": (
-            trainer_compute_s / step_s if step_s else 0.0
-        ),
-        "perf/trainer/weight_sync_step_time_ratio": sync_s / step_s if step_s else 0.0,
-        "perf/trainer/batch_step_time_ratio": wait_s / step_s if step_s else 0.0,
-        "perf/trainer/unaccounted_step_time_ratio": timing_gap_ratio,
-        "perf/trainer/tokens_per_second_full_step": (
-            num_global_valid_tokens / step_s if step_s else 0.0
-        ),
-        "perf/trainer/tokens_per_second_fwd_bwd": (
-            num_global_valid_tokens / trainer_compute_s if trainer_compute_s else 0.0
-        ),
+    """Trainer-side timing ratios from the flushed step timers. A ratio is emitted only if every span
+    it needs was recorded this step (no fallback zeros)."""
+    # Each span is recorded once/step; Mean.from_list stores the summed seconds in `.value`.
+    # Front-load each span's seconds into a short name (None if it was not recorded this step).
+    seconds = {
+        metric.key: metric.value.value
+        for metric in time_metrics
+        if isinstance(metric.value, m.Mean)
     }
-    return [m.Metric(key, m.NoReduce(value)) for key, value in ratios.items()]
+    step_s = seconds.get("timing/step/total")
+    wait_s = seconds.get("timing/step/wait_for_training_batch")
+    fwd_bwd_s = seconds.get("timing/step/forward_backward")
+    optim_s = seconds.get("timing/step/optim")
+    push_s = seconds.get("timing/step/push_model_state_dict")
+    pull_s = seconds.get("timing/step/pull_model_state_dict")
+
+    if not step_s:  # no step wall-clock -> no denominator to derive ratios from
+        return []
+
+    out: list[m.Metric] = []
+
+    def _add_metric(key: str, value: float) -> None:
+        out.append(m.Metric(key, m.NoReduce(value)))
+
+    # Throughput over the whole step (includes the idle wait for the next batch).
+    _add_metric(
+        "perf/trainer/tokens_per_second_full_step", num_global_valid_tokens / step_s
+    )
+
+    # Each span's share of the step wall-clock (skip a span that was not recorded).
+    if wait_s is not None:
+        _add_metric("perf/trainer/step_time_ratio/batch", wait_s / step_s)
+    if push_s is not None:
+        _add_metric("perf/trainer/step_time_ratio/push_model", push_s / step_s)
+    if pull_s is not None:
+        _add_metric("perf/trainer/step_time_ratio/pull_model", pull_s / step_s)
+
+    # Compute = forward/backward + optim: its share of the step, and its idle-free throughput.
+    if fwd_bwd_s is not None and optim_s is not None:
+        compute_s = fwd_bwd_s + optim_s
+        _add_metric("perf/trainer/step_time_ratio/fwd_bwd", compute_s / step_s)
+        if compute_s:
+            _add_metric(
+                "perf/trainer/tokens_per_second_fwd_bwd",
+                num_global_valid_tokens / compute_s,
+            )
+
+    # Step time the measured spans don't cover -- only when every span is present, else it misleads.
+    if None not in (wait_s, fwd_bwd_s, optim_s, push_s, pull_s):
+        accounted_s = wait_s + fwd_bwd_s + optim_s + push_s + pull_s
+        _add_metric(
+            "perf/trainer/step_time_ratio/unaccounted", (step_s - accounted_s) / step_s
+        )
+
+    return out
 
 
 def compute_policy_age_metrics(

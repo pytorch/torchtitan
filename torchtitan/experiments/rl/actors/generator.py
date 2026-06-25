@@ -651,6 +651,8 @@ class VLLMGenerator(Actor, Configurable):
                                 params=self._build_sampling_params(request.sampling),
                             )
                             # Add the MIN policy version; max is read off `self.policy_version` at finish.
+                            # TODO: move this to under the engine_step call, so we register the
+                            # true version on generation_start, not on generation_admission.
                             if self._rank == 0:
                                 self._generation_futures[
                                     request.request_id

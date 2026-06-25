@@ -62,9 +62,18 @@ class BatchConfig:
 
 
 class Batcher(Configurable):
-    """Accumulate training-sample groups and pack group-count training batches.
+    """Accumulate `num_groups_per_train_step` groups and packs
+    `[num_microbatches][dp_degree]` `TrainingMicrobatch`es of `[local_batch_size, seq_len]`.
 
-    Packs `[num_microbatches][dp_degree]` `TrainingMicrobatch`es of `[local_batch_size, seq_len]`.
+    Example:
+        # num_groups_per_train_step=2, dp_degree=2, local_batch_size=2
+        # The trigger is 2 trainable GROUPS, regardless of how many samples/tokens each contains.
+        batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=128)).build(
+            num_groups_per_train_step=2, dp_degree=2, pad_id=0,
+        )
+        _ = batcher.add_training_samples(training_sample_group=group0)  # -> None (only 1 trainable group)
+        batch = batcher.add_training_samples(training_sample_group=group1)  # -> TrainingBatch
+        # batch.microbatches: [num_microbatches][2 ranks]; each TrainingMicrobatch.token_ids: [2 rows, 128 tokens]
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -227,24 +236,31 @@ class Batcher(Configurable):
     ) -> list[list[TrainingMicrobatch]]:
         """Build `[num_microbatches][dp_degree]` from however many rows packing produced (variable count).
 
+        Each (microbatch, rank) takes its rows round-robin. Pad-only rows are appended last, so dealing them round-robin
+        spreads them across microbatches/ranks instead of all landing on the last one.
+
         Example:
-            # local_batch_size=2, dp_degree=2 -> 4 rows/microbatch; 5 rows -> pad to 8 -> 2 microbatches
+            # local_batch_size=2, dp_degree=2 -> 4 rows/microbatch; 5 real rows -> pad to 8 -> 2 microbatches.
+            # The 3 pad rows land on 3 different (microbatch, rank) pairs; none is all padding.
         """
         rows_per_microbatch = self.local_batch_size * self._dp_degree
         num_microbatches = max(1, math.ceil(len(packed_rows) / rows_per_microbatch))
 
         # Pad up to a full grid
         while len(packed_rows) < num_microbatches * rows_per_microbatch:
-            packed_rows.append(self._pack_training_sample_row([]))  # pad-only row
+            packed_rows.append(self._pack_training_sample_row([]))
 
-        # [num_rows] -> [num_microbatches][dp_degree]
+        # [num_rows] -> [num_microbatches][dp_degree], dealing rows round-robin so padding spreads out
         grid: list[list[TrainingMicrobatch]] = []
         for microbatch in range(num_microbatches):
             ranks: list[TrainingMicrobatch] = []
             for rank in range(self._dp_degree):
-                start = (microbatch * self._dp_degree + rank) * self.local_batch_size
+                start = microbatch * self._dp_degree + rank
+                # this (microbatch, rank)'s rows: every (num_microbatches * dp_degree)-th row from `start`
                 ranks.append(
-                    self.collate(packed_rows[start : start + self.local_batch_size])
+                    self.collate(
+                        packed_rows[start :: num_microbatches * self._dp_degree]
+                    )
                 )
             grid.append(ranks)
         return grid

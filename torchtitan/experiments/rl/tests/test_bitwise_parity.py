@@ -71,7 +71,7 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     TORCHTITAN_CONFIG_FORMAT,
     VLLM_MODEL_NAME,
 )
-from torchtitan.experiments.rl.trainer import RLController
+from torchtitan.experiments.rl.trainer import Controller
 from torchtitan.models.common.attention import (
     create_attention_mask,
     FlexAttention,
@@ -92,7 +92,7 @@ logger = logging.getLogger(__name__)
 
 # TODO: directly testing against PolicyTrainer with debug model to avoid OOM
 def build_trainer_model(
-    config: RLController.Config,
+    config: Controller.Config,
 ) -> tuple[torch.nn.Module, torch.device]:
     """Build, parallelize, and load weights for the trainer model.
 
@@ -191,7 +191,7 @@ def _set_generator_determinism(debug) -> None:
         torch.manual_seed(debug.seed)
 
 
-def build_inference_engine(config: RLController.Config) -> LLMEngine:
+def build_inference_engine(config: Controller.Config) -> LLMEngine:
     """Create a vLLM LLMEngine with torchtitan model from the RL config."""
     gen_config = config.generator
 
@@ -248,14 +248,16 @@ def build_inference_engine(config: RLController.Config) -> LLMEngine:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
     engine_kwargs["max_model_len"] = config.model_spec.model.max_seq_len
-    # Mirror RLController.setup_async for a single engine: derive from active rollout concurrency
-    # (num_group_workers, or the validation pass), not from the off-policy buffer depth.
-    ac = config.async_control
+    # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency
+    # (the active-buffer capacity num_group_workers, or the validation pass).
+    async_loop = config.async_loop
     gen_dp = max(gen_config.parallelism.data_parallel_degree, 1)
-    num_group_workers = ac.num_groups_per_train_step
+    num_group_workers = (
+        async_loop.max_offpolicy_steps + 1
+    ) * async_loop.num_groups_per_train_step
     rollout_concurrency = max(
-        num_group_workers * ac.group_size,
-        ac.validation.num_samples,
+        num_group_workers * async_loop.group_size,
+        async_loop.validation.num_samples,
     )
     max_num_seqs = min((rollout_concurrency + gen_dp - 1) // gen_dp, 512)
     engine_kwargs["max_num_seqs"] = max_num_seqs

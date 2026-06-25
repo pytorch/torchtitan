@@ -609,9 +609,7 @@ class Controller(Configurable):
             num_groups=num_samples, sampling=greedy, step=step
         )
 
-        self.rollout_recorder.record(
-            step=step, is_validation=True, rollout_groups=rollout_groups
-        )
+        self.rollout_recorder.record(is_validation=True, rollout_groups=rollout_groups)
 
         t_validate_s = time.perf_counter() - t_validate_start
         validation_metrics.append(m.Metric("timing/validate", m.NoReduce(t_validate_s)))
@@ -960,11 +958,11 @@ class Controller(Configurable):
                 # TODO(perf): overlap weight sync (today both are awaited synchronously).
                 with sl.log_trace_span(
                     "trainer_push_model_state_dict"
-                ), step_timer.record("timing/step/weight_sync/push"):
+                ), step_timer.record("timing/step/push_model_state_dict"):
                     await self.trainer.push_model_state_dict.call()
                 with sl.log_trace_span(
                     "generator_pull_model_state_dict"
-                ), step_timer.record("timing/step/weight_sync/pull"):
+                ), step_timer.record("timing/step/pull_model_state_dict"):
                     await self.generator_router.pull_model_state_dict(
                         policy_version=optim_result.policy_version
                     )
@@ -977,12 +975,9 @@ class Controller(Configurable):
                     reason="trained",
                 )
 
-            # Snapshot durations before flush() drains the timer (the perf panel reads them below).
-            durations = {
-                key: list(values) for key, values in step_timer.durations.items()
-            }
             # TODO(metrics): See if metrics are being computed at the right place. E.g. should we put all
             # rollout related metrics here, or move all of them to the rollouter.
+            time_metrics = step_timer.flush()
             self.metrics_processor.log(
                 step=step,
                 is_validation=False,
@@ -997,11 +992,11 @@ class Controller(Configurable):
                         for key, value in optim_result.metrics.items()
                     ],
                     *self._group_buffer.metrics(),
-                    *step_timer.flush(),
+                    *time_metrics,
                     *policy_age_panel,
                     *compute_perf_ratio_metrics(
                         num_global_valid_tokens=packed.num_global_valid_tokens,
-                        durations=durations,
+                        time_metrics=time_metrics,
                     ),
                 ],
             )

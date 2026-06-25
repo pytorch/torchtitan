@@ -5,14 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 """Unit tests for async-controller pieces: batcher group-counting, the active-slot buffer backpressure,
-the consume-time staleness invariant, the metrics timer drain, and RolloutID."""
+the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID."""
 
 import asyncio
 
 import pytest
 
-from torchtitan.experiments.rl.batcher import Batcher
+from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.components.metrics_utils import (
+    compute_perf_ratio_metrics,
     compute_policy_age_metrics,
     MetricsTimer,
 )
@@ -20,9 +21,10 @@ from torchtitan.experiments.rl.components.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
+from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.rollout import RolloutGroup
 from torchtitan.experiments.rl.types import (
-    RolloutID,
+    RolloutTurnID,
     TrainingSample,
     TrainingSampleGroup,
 )
@@ -32,7 +34,7 @@ def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:
     return TrainingSample(
         min_policy_version=0,
         max_policy_version=0,
-        rollout_id=RolloutID(group_id=group_id, rollout_id=rollout_id, turn_id=0),
+        rollout_id=RolloutTurnID(group_id=group_id, rollout_id=rollout_id, turn_id=0),
         token_ids=[1, 2, 3],
         loss_mask=[False, True, True],
         logprobs=[0.0, 0.1, 0.2],
@@ -88,16 +90,69 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     assert batch.num_global_valid_tokens > 0
 
 
-def test_metrics_timer_metrics_drains() -> None:
+def test_microbatch_grid_spreads_pad_rows_across_cells() -> None:
+    # 5 real rows, local_batch_size=2, dp_degree=2 -> 4 cells x 2 = 8 rows (3 pad).
+    # Round-robin dealing spreads the pad rows so no (microbatch, rank) cell is all-pad.
+    batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=2)).build(
+        num_groups_per_train_step=1,
+        dp_degree=2,
+        pad_id=0,
+    )
+    batch = batcher.add_training_samples(
+        training_sample_group=_trainable_group(0, num_samples=5)
+    )
+    assert batch is not None
+    cells = [microbatch for ranks in batch.microbatches for microbatch in ranks]
+    assert len(cells) == 4  # 2 microbatches x 2 ranks
+    for cell in cells:
+        assert cell.loss_mask.any(dim=1).any()  # at least one real (non-pad) row
+
+
+def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
+    time_metrics = [
+        m.Metric("timing/step/total", m.Mean.from_list([2.0])),
+        m.Metric("timing/step/forward_backward", m.Mean.from_list([0.5])),
+        m.Metric("timing/step/optim", m.Mean.from_list([0.5])),
+    ]
+    ratios = {
+        metric.key: metric.value.value
+        for metric in compute_perf_ratio_metrics(
+            num_global_valid_tokens=100, time_metrics=time_metrics
+        )
+    }
+    assert ratios["perf/trainer/tokens_per_second_full_step"] == 50.0
+    assert ratios["perf/trainer/step_time_ratio/fwd_bwd"] == 0.5
+    assert ratios["perf/trainer/tokens_per_second_fwd_bwd"] == 100.0
+
+
+def test_compute_perf_ratio_metrics_skips_missing_spans() -> None:
+    # Only `total` recorded -> emit the full-step throughput, skip every ratio whose span is absent.
+    time_metrics = [m.Metric("timing/step/total", m.Mean.from_list([2.0]))]
+    keys = {
+        metric.key
+        for metric in compute_perf_ratio_metrics(
+            num_global_valid_tokens=100, time_metrics=time_metrics
+        )
+    }
+    assert keys == {"perf/trainer/tokens_per_second_full_step"}
+
+
+def test_compute_perf_ratio_metrics_returns_empty_without_total() -> None:
+    assert (
+        compute_perf_ratio_metrics(num_global_valid_tokens=100, time_metrics=[]) == []
+    )
+
+
+def test_metrics_timer_flush_drains() -> None:
     timer = MetricsTimer()
     with timer.record("timing/x"):
         pass
-    assert timer.metrics()  # non-empty on first read
-    assert timer.metrics() == []  # drained on the second read
+    assert timer.flush()  # non-empty on first read
+    assert timer.flush() == []  # drained on the second read
 
 
 def test_rollout_id_to_string_is_callable_and_uses_int_group_id() -> None:
-    rollout_id = RolloutID(group_id=5, rollout_id=2, turn_id=0)
+    rollout_id = RolloutTurnID(group_id=5, rollout_id=2, turn_id=0)
     assert rollout_id.to_string() == "group=5/rollout=2/turn=0"
     assert rollout_id.to_string(include_turn=False) == "group=5/rollout=2"
 

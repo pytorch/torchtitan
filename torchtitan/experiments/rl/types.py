@@ -69,9 +69,21 @@ class Completion:
 
 @dataclass(kw_only=True, slots=True)
 class TrainingSample:
-    """A single processed multi-turn rollout, ready for training.
-    Example (single-turn): token_ids=[P, P, a, a], loss_mask=[0, 0, 1, 1],
-                           logprobs=[0, 0, l, l], advantage=[0, 0, A, A]"""
+    """A trainable token sequence from a rollout.
+
+    Example:
+        # Turn 0: prompt P0 -> assistant A0 -> env reply E0
+        # Turn 1: prompt [P0, A0, E0] -> assistant A1
+        TrainingSample(
+            rollout_id=RolloutTurnID(group_id=3, rollout_id=1, turn_id=1),
+            min_policy_version=7,
+            max_policy_version=9,            # weights updated during rollout
+            token_ids=P0 + A0 + E0 + A1,
+            loss_mask=[False]*len(P0) + [True]*len(A0) + [False]*len(E0) + [True]*len(A1),
+            logprobs=[0.0]*len(P0) + logprobs_A0 + [0.0]*len(E0) + logprobs_A1,
+            advantage=[0.0]*len(P0) + [adv]*len(A0) + [0.0]*len(E0) + [adv]*len(A1),
+        )
+    """
 
     min_policy_version: int
     """Oldest policy version among this branch's trained turns."""
