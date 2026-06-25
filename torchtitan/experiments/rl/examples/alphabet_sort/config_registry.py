@@ -14,7 +14,6 @@ Each function returns a complete ``RLTrainer.Config``, discoverable by
 import dataclasses
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import (
@@ -767,13 +766,3 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
             debug=batch_invariant_config,
         ),
     )
-
-
-def rl_grpo_qwen3_0_6b_varlen_batch_invariant_chunked() -> RLTrainer.Config:
-    """On-policy GRPO for Qwen3-0.6B with chunked loss."""
-    config = rl_grpo_qwen3_0_6b_varlen_batch_invariant()
-    config.trainer = dataclasses.replace(
-        config.trainer,
-        loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
-    )
-    return config

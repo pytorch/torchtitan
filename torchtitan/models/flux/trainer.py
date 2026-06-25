@@ -264,7 +264,7 @@ class FluxTrainer(Trainer):
             )
 
             # Scale loss as we used SUM reduction for mse loss function
-            loss, _ = self.loss_fn(latent_noise_pred, target, global_valid_tokens)
+            loss = self.loss_fn(latent_noise_pred, target) / global_valid_tokens
             # latent_noise_pred.shape=(bs, seq_len, vocab_size)
             # need to free to before bwd to avoid peaking memory
             # pyrefly: ignore[unsupported-delete]

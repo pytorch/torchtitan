@@ -12,15 +12,14 @@ from dataclasses import dataclass
 
 import torch
 
-from torchtitan.components.loss import BaseLoss, compute_logprobs
-from torchtitan.config import CompileConfig
+from torchtitan.config import Configurable
 
-# Clamp |log(pi_theta/pi_old)| before exp() so a large generator/trainer
-# logprob mismatch cannot overflow exp() to inf/NaN.
+# Clamp |log(π_θ/π_old)| before exp() so a large generator/trainer logprob mismatch —
+# notably the NaNs vLLM can emit under cudagraph — can't overflow exp() to inf/NaN.
 _MAX_LOG_RATIO = 10.0
 
 
-class DAPOLoss(BaseLoss):
+class DAPOLoss(Configurable):
     """Per-token clipped surrogate loss with DAPO-style "clip-higher".
 
     The same PPO clip as GRPO, but the importance ratio's lower and upper bounds are
@@ -30,12 +29,11 @@ class DAPOLoss(BaseLoss):
     loss rather than trained as if it were on-policy.
 
     The scalar loss is the sum of per-token losses over loss positions divided by
-    ``global_valid_tokens``, so gradient accumulation matches a single large batch.
-    ``pred`` is logits from the current policy.
+    ``num_global_valid_tokens``, so gradient accumulation matches a single large batch.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseLoss.Config):
+    class Config(Configurable.Config):
         ratio_clip_low: float = 0.2
         """Lower clip: the importance ratio is clamped to ``>= 1 - ratio_clip_low``."""
 
@@ -43,42 +41,32 @@ class DAPOLoss(BaseLoss):
         """Upper clip: the ratio is clamped to ``<= 1 + ratio_clip_high``. Set larger
         than ``ratio_clip_low`` for DAPO "clip-higher" (e.g. 0.28)."""
 
-    def __init__(
-        self,
-        config: Config,
-        *,
-        compile_config: CompileConfig | None = None,
-    ) -> None:
-        del compile_config
+    def __init__(self, config: Config) -> None:
         self.ratio_clip_low = config.ratio_clip_low
         self.ratio_clip_high = config.ratio_clip_high
 
     def __call__(
         self,
-        pred: torch.Tensor,
-        labels: torch.Tensor,
-        global_valid_tokens: float | None = None,
-        *,
+        trainer_logprobs: torch.Tensor,
         generator_logprobs: torch.Tensor,
-        advantages: torch.Tensor,
         loss_mask: torch.Tensor,
+        advantages: torch.Tensor,
+        num_global_valid_tokens: int,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute the per-token clip-higher surrogate loss.
 
         Args:
-            pred: [B, L, V] logits from the current policy.
-            labels: [B, L] pre-shifted target token ids.
-            generator_logprobs: [B, L] logprobs from the sampling policy.
+            trainer_logprobs: [B, L] log π_θ(a_t | s_t) from the current policy.
+            generator_logprobs: [B, L] log π_old(a_t | s_t) from the sampling policy.
             loss_mask: [B, L] bool mask; True for response tokens.
             advantages: [B, L] per-token advantages (0.0 for prompt/padding).
-            global_valid_tokens: total response tokens across all microbatches and
+            num_global_valid_tokens: total response tokens across all microbatches and
                 DP ranks; the loss denominator.
 
         Returns:
             (loss, metrics) where loss is a scalar tensor and metrics is a dict of
             scalar tensors pre-normalized for SUM reduction across DP ranks.
         """
-        trainer_logprobs = compute_logprobs(pred, labels)
         # A non-finite generator logprob (notably under cudagraph) has no valid
         # old-policy reference, so DROP that token from the loss + denominator (cleaner
         # than nan->0, which trains it as if it were on-policy). `response_mask` keeps
@@ -97,18 +85,10 @@ class DAPOLoss(BaseLoss):
         token_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
 
         masked_loss = token_loss * loss_mask
-        loss_denominator = (
-            max(global_valid_tokens, 1) if global_valid_tokens is not None else 1
-        )
+        loss_denominator = max(num_global_valid_tokens, 1)
         loss = masked_loss.sum() / loss_denominator
 
         with torch.no_grad():
-            diff = trainer_logprobs - generator_logprobs
-            diff_for_metrics = torch.where(
-                loss_mask,
-                diff,
-                torch.zeros_like(diff),
-            )
             masked_ratio = ratio * loss_mask
             metrics = {
                 "loss/mean": loss.detach(),
@@ -123,13 +103,6 @@ class DAPOLoss(BaseLoss):
                     (~torch.isfinite(generator_logprobs)).float() * response_mask
                 ).sum()
                 / loss_denominator,
-                "bit_wise/logprob_diff/mean": diff_for_metrics.float().sum()
-                / loss_denominator,
-                "bit_wise/ratio_tokens_different/mean": (
-                    (diff_for_metrics.abs() > 1e-6).float() * loss_mask
-                ).sum()
-                / loss_denominator,
-                "bit_wise/logprob_diff/max": diff_for_metrics.abs().max(),
             }
 
         return loss, metrics
