@@ -21,23 +21,29 @@ __all__ = [
 class TitanDenseModelConfig:
     """Arguments for the base TorchTitan model.
 
-    HF-derived fields default to None so they do NOT override the values loaded
-    from the HF config via AutoConfig.from_pretrained(). A non-None default is
-    injected over the HF config (see HFTransformerModel.Config.update_from_config),
-    which silently forces the wrong architecture/hyperparameters for any model
-    whose config differs (e.g. rope_theta=1e6 for Qwen3). Set a field explicitly
-    only to intentionally override the HF config (e.g. debugmodel sizes).
+    Two kinds of fields (see the groups below): those that mirror an HF config
+    key default to None so AutoConfig's value is used; TorchTitan-only fields
+    keep concrete defaults since they don't override anything from the HF config.
     """
 
+    # Fields that map to an HF config key: default None so the value from
+    # AutoConfig.from_pretrained is kept. A non-None default would be injected
+    # over the HF config and force the wrong architecture (e.g. rope_theta).
+    # Set explicitly only to intentionally override (e.g. debugmodel sizes).
     dim: int | None = None
     n_layers: int | None = None
     n_heads: int | None = None
     n_kv_heads: int | None = None
     vocab_size: int | None = None
-    multiple_of: int = 256
-    ffn_dim_multiplier: float | None = None
     norm_eps: float | None = None
     rope_theta: float | None = None
+
+    # TorchTitan-only fields with no HF equivalent: they don't override anything
+    # from the HF config, so they keep concrete defaults. (multiple_of and
+    # ffn_dim_multiplier are only used when deriving FFN size from an explicitly
+    # overridden dim; max_seq_len is set from training.seq_len.)
+    multiple_of: int = 256
+    ffn_dim_multiplier: float | None = None
     max_seq_len: int = 2048
     depth_init: bool = True
     use_flex_attn: bool = False
