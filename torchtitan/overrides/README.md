@@ -503,6 +503,15 @@ for the full recipe.
   recipe from "Custom kernels and `torch.compile`". `helion` is an optional
   dependency, so the module imports without it and falls back to the PyTorch RoPE
   when it (or CUDA) is unavailable; it is checkpoint-compatible with stock.
+- `torchtitan/overrides/nvfp4_linear.py` — **the parent-block / SP-comm
+  example.** Overrides the attention and feed-forward blocks to keep their
+  sequence-parallel input and swap their child `Linear`s for `NVFP4Linear`, which
+  keeps a bf16 weight and quantizes activations, weights, and gradients to NVFP4
+  on the fly using torchao's Triton kernels and TP collectives that move fp4
+  codes instead of bf16. `torchao`
+  is an optional dependency (imported lazily; the factory raises a clear error if
+  selected without it).
+
 The `TritonRoPE` snippets above are illustrative — no `triton_rope.py` is
 shipped — but RoPE is a fully valid override target (`helion_rope.py` is a real
 one): each attention module owns a `rope` submodule (`RoPE.Config`), so a custom

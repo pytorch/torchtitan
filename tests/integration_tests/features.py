@@ -573,6 +573,19 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--override.imports torchtitan.overrides.nvfp4_linear",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "Override: NVFP4 sequence-parallel attention/FFN blocks (FSDP2 + TP2)",
+            "override_nvfp4_linear",
+            ngpu=4,
+            skip_rocm_test=True,
+            skip_if_no_blackwell=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--module deepseek_v3 --config deepseek_v3_debugmodel",
                     "--override.imports torchtitan.overrides.fused_swiglu.fused_swiglu,"
                     "torchtitan.overrides.fused_swiglu.fused_grouped_experts",

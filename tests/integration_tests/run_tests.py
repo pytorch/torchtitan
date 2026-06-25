@@ -12,6 +12,8 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 
+import torch
+
 from torchtitan.tools.logging import logger
 
 from tests.integration_tests import OverrideDefinitions
@@ -196,6 +198,10 @@ def _filter_tests(
         if (
             getattr(args, "gpu_arch_type", "cuda") == "rocm"
             and test_flavor.skip_rocm_test
+        ):
+            continue
+        if test_flavor.skip_if_no_blackwell and (
+            not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 10
         ):
             continue
         if args.ngpu < test_flavor.ngpu:
