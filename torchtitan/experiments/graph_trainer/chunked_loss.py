@@ -9,11 +9,11 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from torchtitan.components.loss import ChunkedLossWrapper
+from torchtitan.components.loss import ChunkedCELoss
 
 
-class ChunkedLossWrapperWithParamGrads(ChunkedLossWrapper):
-    """ChunkedLossWrapper variant that exposes sharded lm_head param grads as
+class ChunkedCELossWithParamGrads(ChunkedCELoss):
+    """ChunkedCELoss variant that exposes sharded lm_head param grads as
     explicit autograd outputs of the returned loss tensor, so outer
     ``torch.autograd.grad(loss, [hidden_states, *lm_head.parameters()])``
     returns real grads instead of relying on ``param.grad`` side effects.
@@ -25,7 +25,7 @@ class ChunkedLossWrapperWithParamGrads(ChunkedLossWrapper):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(ChunkedLossWrapper.Config):
+    class Config(ChunkedCELoss.Config):
         pass
 
     @staticmethod
@@ -36,7 +36,7 @@ class ChunkedLossWrapperWithParamGrads(ChunkedLossWrapper):
         lm_head: nn.Module,
         fsdp_enabled: bool,
     ) -> torch.Tensor:
-        return _ChunkedLossWrapperWithParamGrads.apply(
+        return _ChunkedLossWithParamGrads.apply(
             hidden_states,
             accumulated_grad,
             total_loss,
@@ -46,7 +46,7 @@ class ChunkedLossWrapperWithParamGrads(ChunkedLossWrapper):
         )
 
 
-class _ChunkedLossWrapperWithParamGrads(torch.autograd.Function):
+class _ChunkedLossWithParamGrads(torch.autograd.Function):
     """Like ``_DecoderOutputGradientBackProp`` but also plumbs sharded grads
     for the lm_head parameters out as explicit autograd outputs, so outer
     ``torch.autograd.grad(loss, [hidden_states, *lm_head.parameters()])``

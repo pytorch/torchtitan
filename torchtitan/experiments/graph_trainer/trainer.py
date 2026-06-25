@@ -76,7 +76,7 @@ def make_fwd_bwd_step(model, loss_fn):
         # annotate_module_fqns won't tag it. Annotate it here so that
         # downstream passes (bucketing, SAC, kernel annotations) can
         # attribute loss nodes in the traced graph.
-        loss, _ = annotate_fn({_MODULE_FQN: "loss"})(loss_fn)(
+        loss = annotate_fn({_MODULE_FQN: "loss"})(loss_fn)(
             pred, labels, global_valid_tokens
         )
         params = [
