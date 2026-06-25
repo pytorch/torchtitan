@@ -18,10 +18,7 @@ from torchtitan.distributed.minimal_async_ep import (
     init_buffer as minimal_async_ep_init_buffer,
     MinimalAsyncEPDispatchMetadata,
 )
-from torchtitan.distributed.spmd_types import (
-    current_spmd_mesh,
-    maybe_set_sparse_mesh,
-)
+from torchtitan.distributed.spmd_types import current_spmd_mesh, maybe_set_sparse_mesh
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 from torchtitan.tools.utils import device_module, device_type
@@ -306,14 +303,18 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             topk_scores_experts_sorted_N,
         ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
 
-        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():  # sparse mesh reinterpret
+        if (
+            get_spmd_backend() == "spmd_types" and spmd.is_type_checking()
+        ):  # sparse mesh reinterpret
             for axis in ["dp", "cp", "tp"]:
-                spmd.mutate_type(num_local_tokens_per_expert_E, axis, src=spmd.P, dst=spmd.V)
+                spmd.mutate_type(
+                    num_local_tokens_per_expert_E, axis, src=spmd.P, dst=spmd.V
+                )
 
         # generate the input splits and output splits for all-to-all
         with maybe_set_sparse_mesh():
             pg = (
-                current_spmd_mesh().get_group("ep")
+                current_spmd_mesh().get_group("ep")  # pyrefly: ignore [missing-attribute]
                 if get_spmd_backend() == "spmd_types"
                 else self.ep_mesh.get_group()
             )
@@ -498,7 +499,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
 
         with maybe_set_sparse_mesh():
             pg = (
-                current_spmd_mesh().get_group("ep")
+                current_spmd_mesh().get_group("ep")  # pyrefly: ignore [missing-attribute]
                 if get_spmd_backend() == "spmd_types"
                 else self.ep_mesh.get_group()
             )
