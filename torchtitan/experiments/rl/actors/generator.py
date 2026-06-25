@@ -94,9 +94,9 @@ def _prepare_generation_request_metrics(
         if stats.num_generation_tokens > 1:
             first_to_last_token_ms = (stats.last_token_ts - stats.first_token_ts) * 1000
             metric_values[f"{prefix}/decode_time_ms"] = first_to_last_token_ms
-            metric_values[
-                f"{prefix}/inter_token_latency_ms"
-            ] = first_to_last_token_ms / (stats.num_generation_tokens - 1)
+            metric_values[f"{prefix}/inter_token_latency_ms"] = (
+                first_to_last_token_ms / (stats.num_generation_tokens - 1)
+            )
 
     # Emit each value with both Mean and Max aggregators.
     return [
@@ -305,6 +305,14 @@ class VLLMGenerator(Actor, Configurable):
         reset_running_requests_on_weight_sync: bool = False
         """Affects requests ALREADY running at the pull: preempts them and recomputes their KV under
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only."""
+
+        weight_sync_direct_rdma: bool | None = None
+        """Weight-sync transport for ``pull_model_state_dict``: ``None`` uses
+        ``is_rdma_available()`` (direct GPU-to-GPU RDMA when present); ``True``/``False`` force it
+        on/off. Direct RDMA fans out fine to multiple generators with a single-host trainer
+        (validated: 3 generators, ~4s pull, reward converges); the limitation is a MULTI-HOST
+        trainer, where direct RDMA SIGSEGVs in monarch_rdma (IbvMemoryRegion) -- use ``False``
+        (CPU-staged via StorageVolumes) there. Must match the trainer's ``weight_sync_direct_rdma``."""
 
         def __post_init__(self):
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
@@ -582,9 +590,9 @@ class VLLMGenerator(Actor, Configurable):
                 raise ValueError(f"request_id {request_id!r} is already in flight")
 
             # A placeholder future for the engine loop to resolve with this request's Completion.
-            generation_future: asyncio.Future[
-                Completion
-            ] = asyncio.get_running_loop().create_future()
+            generation_future: asyncio.Future[Completion] = (
+                asyncio.get_running_loop().create_future()
+            )
 
             # Register the future before enqueueing; the engine loop resolves it.
             self._generation_futures[request_id] = GenerationFuture(
@@ -848,9 +856,9 @@ class VLLMGenerator(Actor, Configurable):
             return
 
         # A placeholder future for the engine loop to resolve once the pull has been applied.
-        pull_model_state_dict_future: asyncio.Future[
-            int
-        ] = asyncio.get_running_loop().create_future()
+        pull_model_state_dict_future: asyncio.Future[int] = (
+            asyncio.get_running_loop().create_future()
+        )
 
         # `_engine_loop_condition` wakes the engine loop, if asleep, when a pull is queued.
         async with self._engine_loop_condition:
@@ -868,14 +876,18 @@ class VLLMGenerator(Actor, Configurable):
         """ALL RANKS: collectively copy the latest weights from TorchStore, optionally drop the
         prefix cache (so no new request reuses an old-weight prefix), and bump the policy version.
         """
-        # TODO: with >1 generator, trainer should probably use direct_rdma=False (CPU-staged, fanout-safe)
-        # is_rdma_available() is a hardware probe, not a fanout signal.
+        # Direct RDMA fans out fine to >1 generator with a single-host trainer; for a
+        # MULTI-HOST trainer it SIGSEGVs in monarch_rdma, so set
+        # weight_sync_direct_rdma=False (CPU-stage via StorageVolumes) there. ``None``
+        # falls back to the hardware probe.
+        cfg_rdma = self.config.weight_sync_direct_rdma
+        direct_rdma = is_rdma_available() if cfg_rdma is None else cfg_rdma
         model_sd = self._get_model().model.state_dict()
         await ts.get_state_dict(
             "model_state_dict",
             user_state_dict=model_sd,
             strict=False,
-            direct_rdma=is_rdma_available(),
+            direct_rdma=direct_rdma,
         )
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:

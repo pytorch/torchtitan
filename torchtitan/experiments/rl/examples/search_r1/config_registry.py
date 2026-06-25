@@ -6,7 +6,7 @@
 
 """Config entry points for the Search-R1 example.
 
-These set the full Search-R1 recipe entirely from the example's config — the core
+These set the full Search-R1 recipe entirely from the example's config -- the core
 defaults are unchanged, so every other config keeps vanilla GRPO. ``ConfigManager``
 discovers these directly from the example module::
 
@@ -22,6 +22,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.experiments.rl.actors.generator import (
     SamplingConfig,
     VLLMCudagraphConfig,
@@ -108,7 +109,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLTrainer.Config:
 
 
 def rl_grpo_qwen3_8b_search_r1() -> RLTrainer.Config:
-    """GRPO Search-R1 for Qwen3-8B — same recipe as the 1.7B config.
+    """GRPO Search-R1 for Qwen3-8B -- same recipe as the 1.7B config.
 
     Only the model and GPU split differ. 8 GPUs: 2 generator (TP=2) + 4 trainer
     (TP=4) + retriever on the spare GPUs. The fp32 trainer needs TP=4 to avoid OOM.
@@ -134,5 +135,112 @@ def rl_grpo_qwen3_8b_search_r1() -> RLTrainer.Config:
         parallelism=dataclasses.replace(
             config.generator.parallelism, tensor_parallel_degree=2
         ),
+    )
+    return config
+
+
+def rl_grpo_qwen3_32b_search_r1() -> RLTrainer.Config:
+    """GRPO Search-R1 for Qwen3-32B (dense): single-host trainer + N generators.
+
+    Trainer: single-host FSDP=8 (``data_parallel_shard_degree=8``, TP=1) in pure
+    bf16 (no fp32 master, fp32 gradient reduce) so 32B fits one 80GB host, with full
+    activation checkpointing. Weight sync uses direct GPU-to-GPU RDMA. Each generator
+    is TP=8 (1 host) with decode-only CUDA graphs. With ``--num_generators 3``:
+    1 controller + 1 trainer + 3 generator = 5 hosts.
+    """
+    config = rl_grpo_qwen3_1_7b_search_r1()
+    config.model_spec = model_registry("32B", attn_backend="varlen")
+    config.hf_assets_path = "torchtitan/experiments/rl/example_checkpoint/Qwen3-32B"
+    # Trainer per-layer compile off; the rollout's vLLM compile (generator
+    # cudagraph below) is separate and stays on.
+    config.compile = dataclasses.replace(config.compile, enable=False)
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        # Pure bf16 (no fp32 master) halves per-rank memory so FSDP=8 fits;
+        # gradients are still reduced in fp32.
+        training=dataclasses.replace(
+            config.trainer.training,
+            dtype="bfloat16",
+            mixed_precision_param="bfloat16",
+            mixed_precision_reduce="float32",
+        ),
+        # Full activation checkpointing to fit 32B's forward on one host.
+        ac_config=FullAC.Config(),
+        # Direct GPU-to-GPU RDMA weight sync. Works with a single-host trainer +
+        # multiple generators; requires Monarch RDMA (set False for CPU-staged).
+        weight_sync_direct_rdma=True,
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism,
+            data_parallel_shard_degree=8,
+            tensor_parallel_degree=1,
+        ),
+    )
+    config.generator = dataclasses.replace(
+        config.generator,
+        gpu_memory_limit=0.6,
+        # Direct RDMA weight sync (must match the trainer).
+        weight_sync_direct_rdma=True,
+        # Decode-only CUDA graphs: capture pure-decode batches, run prefill eagerly.
+        cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_DECODE_ONLY"),
+        parallelism=dataclasses.replace(
+            config.generator.parallelism, tensor_parallel_degree=8
+        ),
+    )
+    # One proc mesh per generator; override with --num_generators.
+    config.num_generators = 3
+    return config
+
+
+def rl_grpo_qwen3_32b_search_r1_fsdp16() -> RLTrainer.Config:
+    """GRPO Search-R1 for Qwen3-32B (dense): 2-host trainer (FSDP=16) + N generators.
+
+    Like ``rl_grpo_qwen3_32b_search_r1`` but shards the trainer 16-way across two
+    hosts (``data_parallel_shard_degree=16``, TP=1). 16-way sharding leaves room for
+    an fp32 master and the faster SelectiveAC. Uses CPU-staged weight sync (direct
+    RDMA is single-host-trainer only). With ``--num_generators 3``: 1 controller +
+    2 trainer + 3 generator = 6 hosts.
+    """
+    config = rl_grpo_qwen3_32b_search_r1()
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism,
+            data_parallel_shard_degree=16,
+            tensor_parallel_degree=1,
+        ),
+        ac_config=SelectiveAC.Config(),
+        # 16-way sharding affords an fp32 master; weight sync stays CPU-staged
+        # (direct RDMA is single-host-trainer only).
+        training=dataclasses.replace(config.trainer.training, dtype="float32"),
+        weight_sync_direct_rdma=False,
+    )
+    config.generator = dataclasses.replace(
+        config.generator, weight_sync_direct_rdma=False
+    )
+    return config
+
+
+def rl_grpo_qwen3_32b_search_r1_fsdp16_rdma() -> RLTrainer.Config:
+    """EXPERIMENTAL: FSDP=16 (2-host trainer) + direct-RDMA weight sync.
+
+    Same as ``rl_grpo_qwen3_32b_search_r1`` (bf16 + ``direct_rdma=True``) but with the
+    trainer sharded 16-way across two hosts. Direct RDMA currently works only with a
+    single-host trainer; across a multi-host trainer it hits a Monarch RDMA
+    limitation, so this recipe does not train yet -- use the CPU-staged
+    ``rl_grpo_qwen3_32b_search_r1_fsdp16`` for multi-host trainers.
+    """
+    # TODO: 2-host-trainer RDMA test case -- does NOT work yet. Direct RDMA across a
+    # multi-host trainer hits a Monarch RDMA limitation; fix the multi-host RDMA path
+    # so this trains like the single-host FSDP=8 RDMA recipe.
+    config = rl_grpo_qwen3_32b_search_r1()
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        # 16-way shard; keeps the base's bf16 + direct_rdma=True, SelectiveAC fits.
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism,
+            data_parallel_shard_degree=16,
+            tensor_parallel_degree=1,
+        ),
+        ac_config=SelectiveAC.Config(),
     )
     return config

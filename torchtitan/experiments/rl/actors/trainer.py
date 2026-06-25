@@ -166,6 +166,13 @@ class PolicyTrainer(Actor, Configurable):
         dump_folder: str = ""
         """Folder for AC debug dumps when using memory_budget mode."""
 
+        weight_sync_direct_rdma: bool | None = None
+        """Weight-sync transport for ``push_model_state_dict``: ``None`` uses
+        ``is_rdma_available()``; ``True``/``False`` force it on/off. Must match the
+        generator's ``weight_sync_direct_rdma`` (CPU-staged on both, or direct-RDMA on
+        both). Direct RDMA fans out fine to multiple generators with a single-host trainer;
+        set ``False`` for a MULTI-HOST trainer, where direct RDMA SIGSEGVs in monarch_rdma."""
+
     def __init__(
         self,
         config: Config,
@@ -569,9 +576,28 @@ class PolicyTrainer(Actor, Configurable):
         """
         from monarch.rdma import is_rdma_available
 
+        cfg_rdma = self.config.weight_sync_direct_rdma
+        direct_rdma = is_rdma_available() if cfg_rdma is None else cfg_rdma
+        state_dict = self.model.state_dict()
+        # torchstore honors ``transfer_dtype`` only on the direct-RDMA path
+        # (state_dict_utils._put_state_dict_direct_rdma); the CPU-staged
+        # StorageVolume path ignores it. Under mixed-precision FSDP the master
+        # weights are fp32, so on the CPU-staged path cast to the generator dtype
+        # here, else the generator's pull asserts a dtype mismatch (e.g.
+        # float32 != bfloat16). For direct-RDMA leave it to transfer_dtype, whose
+        # staging buffer avoids an extra full-precision copy.
+        if self._transfer_dtype is not None and not direct_rdma:
+            state_dict = {
+                name: (
+                    tensor.to(self._transfer_dtype)
+                    if tensor.dtype.is_floating_point
+                    else tensor
+                )
+                for name, tensor in state_dict.items()
+            }
         await ts.put_state_dict(
-            self.model.state_dict(),
+            state_dict,
             "model_state_dict",
-            direct_rdma=is_rdma_available(),
+            direct_rdma=direct_rdma,
             transfer_dtype=self._transfer_dtype,
         )
