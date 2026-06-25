@@ -250,8 +250,8 @@ class _Claim:
     ov: Override
     fqn: str
     cfg: Configurable.Config
-    parent: object
-    attr: str | int
+    parent: object | None
+    attr: str | int | None
 
 
 def _collect_claims(
@@ -281,7 +281,7 @@ def _check_node_conflicts(claims: list[_Claim]) -> None:
     the outcome order-dependent.
     """
     # (a) exact same node, identified by container + key.
-    by_node: dict[tuple[int, str | int], str] = {}
+    by_node: dict[tuple[int, str | int | None], str] = {}
     for c in claims:
         key = (id(c.parent), c.attr)
         owner = by_node.get(key)
@@ -339,6 +339,11 @@ def apply_overrides(
             c.parent[c.attr] = new_cfg
         elif isinstance(c.attr, str):
             setattr(c.parent, c.attr, new_cfg)
+        else:
+            raise ValueError(
+                f"Override '{c.ov.name}' claims root config '{c.fqn}', "
+                "which cannot be replaced in place."
+            )
         replacements.append(
             f"[Override] {c.ov.name}: {c.fqn} "
             f"{type(c.cfg).__qualname__} -> {type(new_cfg).__qualname__}"

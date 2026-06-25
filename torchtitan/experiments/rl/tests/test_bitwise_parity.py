@@ -52,14 +52,13 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.loss import IGNORE_INDEX, compute_logprobs
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
-from torchtitan.experiments.rl.actors.trainer import compute_logprobs
 from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_gpt_oss_debug_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
@@ -638,6 +637,7 @@ class BitwiseParityTestBase(unittest.TestCase):
             parallelism=config.generator.parallelism,
             compile_config=config.compile,
             checkpoint_config=generator_checkpoint,
+            override=config.generator.override,
         )
 
         # Test runs trainer and generator in the same process, so limit

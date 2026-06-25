@@ -15,7 +15,7 @@ meshes.
 from dataclasses import dataclass, field
 
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import Placement, Replicate, Shard
+from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
 from torchtitan.distributed.parallel_dims import MeshAxisName, SpmdLayout
 
@@ -133,13 +133,14 @@ def resolve_placements(
     it will be applied against. Missing declarations raise ``ValueError``;
     extra declarations (axes not in the mesh) are ignored.
 
-    ``Shard(d)`` on a size-1 mesh axis is normalized to ``Replicate()`` --
-    the two are operationally identical on a 1-rank axis, but DTensor's op
-    rules (placement-equality, view/reshape strict mode, ...) treat them
-    as distinct and reject ``Shard`` in places where ``Replicate`` would
-    work.
+    ``Shard(d)`` or ``Partial`` on a size-1 mesh axis is normalized to
+    ``Replicate()`` -- all three are operationally identical on a 1-rank axis
+    (no data is split, and a sum over a single rank is the identity), but
+    DTensor's op rules (placement-equality, view/reshape strict mode, ...)
+    treat them as distinct and reject ``Shard``/``Partial`` in places where
+    ``Replicate`` would work.
     """
-    # TODO(fegin): remove the ``Shard(d)`` on a size-1 mesh to ``Replicate()``
+    # TODO(fegin): remove the size-1 ``Shard(d)``/``Partial`` to ``Replicate()``
     # conversion once FlexShard replaces ``fully_shard``.
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
     placements = spmd_layout_to_dtensor_placements(layout)
@@ -154,7 +155,7 @@ def resolve_placements(
                 f"required: {list(mesh.mesh_dim_names)}."
             )
         p = placements[key]
-        if isinstance(p, Shard) and mesh.size(i) == 1:
+        if isinstance(p, (Shard, Partial)) and mesh.size(i) == 1:
             p = Replicate()
         result.append(p)
     return tuple(result)
