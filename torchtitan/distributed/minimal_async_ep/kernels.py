@@ -324,16 +324,16 @@ def _copy_rows_to_peer_ptrs_kernel(
         row_limit = tl.load(num_valid_rows)
         if row_start >= row_limit:
             return
-    row = row_start + tl.arange(0, BLOCK_M)
+    row = (row_start + tl.arange(0, BLOCK_M)).to(tl.int64)
     col = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     row_mask = row < row_limit
     col_mask = col < NUM_COLS
     mask = row_mask[:, None] & col_mask[None, :]
     src_row = row
     if HAS_SRC_ROWS:
-        src_row = tl.load(src_rows + row, mask=row_mask, other=0)
+        src_row = tl.load(src_rows + row, mask=row_mask, other=0).to(tl.int64)
     dst_rank = tl.load(dst_ranks + row, mask=row_mask, other=-1)
-    dst_row = tl.load(dst_rows + row, mask=row_mask, other=0)
+    dst_row = tl.load(dst_rows + row, mask=row_mask, other=0).to(tl.int64)
     dst_rank_mask = row_mask & (dst_rank >= 0)
     values = tl.load(
         src + src_row[:, None] * SRC_ROW_STRIDE + col[None, :] * SRC_COL_STRIDE,
@@ -432,6 +432,9 @@ def fill_dispatch_metadata_kernel(
     num_local_experts: int,
     max_tokens_per_segment: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    counts = counts.contiguous()
+    local_dest_offsets = local_dest_offsets.contiguous()
+    local_count_starts = local_count_starts.contiguous()
     dst_ranks = torch.empty(
         num_routed_tokens,
         device=counts.device,
@@ -468,6 +471,9 @@ def fill_combine_metadata_kernel(
     receive_capacity: int,
     max_tokens_per_segment: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    segment_lens = segment_lens.contiguous()
+    output_starts = output_starts.contiguous()
+    source_input_starts = source_input_starts.contiguous()
     dst_ranks = torch.empty(
         receive_capacity,
         device=segment_lens.device,
