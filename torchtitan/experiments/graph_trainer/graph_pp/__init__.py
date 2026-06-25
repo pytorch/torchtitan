@@ -8,8 +8,14 @@ from torchtitan.experiments.graph_trainer.graph_pp.partition import (
     GraphMeta,
     partition_joint_graph,
 )
+from torchtitan.experiments.graph_trainer.graph_pp.split_di_dw import (
+    GraphPPDiDwSplit,
+    split_di_dw_graph,
+)
 
 __all__ = [
+    "GraphPPDiDwSplit",
     "GraphMeta",
     "partition_joint_graph",
+    "split_di_dw_graph",
 ]
