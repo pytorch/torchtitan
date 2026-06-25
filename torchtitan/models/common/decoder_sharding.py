@@ -86,7 +86,7 @@ def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     return ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.S(1)),
-            "bias": dense_param_placement(tp=spmd.R),
+            "bias": dense_param_placement(tp=spmd.P),
         },
         out_src_shardings=dense_activation_placement(tp=spmd.P),
         out_dst_shardings=out_dst,
