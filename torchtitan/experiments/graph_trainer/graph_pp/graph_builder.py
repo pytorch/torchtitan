@@ -14,7 +14,7 @@ Flat calling convention and wrapping contract:
    before assigning to live ``param.grad``.
 3. Internal graph values stay flat because they never escape GraphPP graph
    execution: saved-for-backward values, unsharded FSDP params, raw grad
-   leaves, and reduce-grad inputs.
+   leaves, reduce-grad inputs, and multiplexed intermediate outputs.
 4. DTensor and other traceable tensor subclasses use the existing tracer layout
    metadata. GraphPP must not add a separate DTensor-specific wrapping path.
 """
@@ -45,6 +45,9 @@ from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConf
 from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import (
     split_backward_fsdp_collectives,
     split_forward_fsdp_collectives,
+)
+from torchtitan.experiments.graph_trainer.graph_pp.graph_multiplex import (
+    multiplex_fw_bw_graph,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.partition import (
     GraphMeta as PartitionGraphMeta,
@@ -1168,14 +1171,49 @@ def _build_graph_pp_overlap_graphs(
     *,
     compile_config: GraphTrainerCompileConfig,
 ) -> dict[tuple[int, int], GraphPPOverlapGraphs]:
-    del compile_config
-    required_pairs = _required_multiplex_pairs(schedule)
-    if required_pairs:
-        raise NotImplementedError(
-            "GraphPP OVERLAP_F_B requires multiplexed graph support, which is "
-            "introduced in the follow-up DualPipeV commit."
+    """Build multiplexed graphs required by ``OVERLAP_F_B`` schedule actions."""
+
+    stage_index_to_stage = {
+        stage.stage_index: cast(GraphPipelineStage, stage) for stage in schedule._stages
+    }
+    overlap_graphs: dict[tuple[int, int], GraphPPOverlapGraphs] = {}
+    for fw_stage_idx, bw_stage_idx in _required_multiplex_pairs(schedule):
+        pair = (fw_stage_idx, bw_stage_idx)
+        fw_stage = stage_index_to_stage[fw_stage_idx]
+        bw_stage = stage_index_to_stage[bw_stage_idx]
+        if fw_stage.graphs is None or bw_stage.graphs is None:
+            raise ValueError(
+                "GraphPP overlap graph construction requires both stage "
+                f"graphs first: forward_stage={fw_stage_idx}, "
+                f"backward_stage={bw_stage_idx}."
+            )
+        fw_graphs = cast(GraphTrainerStageGraphs, fw_stage.graphs)
+        bw_graphs = cast(GraphTrainerStageGraphs, bw_stage.graphs)
+        if fw_graphs.compiled or bw_graphs.compiled:
+            raise ValueError(
+                "GraphPP overlap graphs must be built before stage graphs are compiled."
+            )
+        multiplexed_graph = multiplex_fw_bw_graph(
+            fw_graphs.modules.fw,
+            bw_graphs.modules.full_bw,
         )
-    return {}
+        _annotate_graph_pp_graph(
+            multiplexed_graph,
+            stage_index=fw_stage_idx,
+            callable_name="multiplex",
+            action_name="OVERLAP_F_B",
+        )
+        compiled_graph = _compile_graph_pp_module(
+            multiplexed_graph,
+            compile_config=compile_config,
+            graph_name=f"stage_{fw_stage_idx}_fw_stage_{bw_stage_idx}_bw_multiplex",
+        )
+        overlap_graphs[pair] = GraphTrainerOverlapGraphs(
+            fw_graphs=fw_graphs,
+            bw_graphs=bw_graphs,
+            multiplexed_graph=compiled_graph,
+        )
+    return overlap_graphs
 
 
 def _example_args_from_stage_metadata(stage: GraphPipelineStage) -> tuple[Any, ...]:
