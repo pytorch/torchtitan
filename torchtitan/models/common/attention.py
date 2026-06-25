@@ -744,6 +744,9 @@ class FusedQKVLinear(BaseQKVLinear):
         self.register_state_dict_post_hook(self._split_qkv_on_save)
         self.register_load_state_dict_pre_hook(self._merge_qkv_on_load)
 
+    @spmd.local_map(
+        out_types=({"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},) * 3
+    )
     def forward(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
