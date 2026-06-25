@@ -119,9 +119,7 @@ class Attention(BaseAttention):
 
         # Key-value projection
         kv = self.wkv_a(x)
-        kv, k_pe = torch.split(
-            kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
-        )
+        kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
         q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(2), positions)
         q = torch.cat([q_nope, q_pe], dim=-1)
