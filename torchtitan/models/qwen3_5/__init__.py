@@ -21,7 +21,10 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
 )
 from torchtitan.models.common.nn_modules import LayerNorm
-from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
+from torchtitan.models.common.param_init import (  # noqa: F401
+    depth_scaled_std,
+    skip_param_init,
+)
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 
@@ -71,6 +74,9 @@ _LINEAR_INIT = {
 }
 _OFFSET_NORM_INIT = {"weight": nn.init.zeros_}
 _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
+# Tied configs share tok_embeddings.weight with lm_head; skip its init so the
+# shared param is initialized once (by lm_head), matching the llama3 convention.
+_EMBEDDING_SKIP_INIT = {"weight": skip_param_init}
 _POS_EMBED_INIT = {"pos_embed": partial(nn.init.trunc_normal_, mean=0.0, std=0.02)}
 
 _EPS = 1e-6
@@ -476,7 +482,6 @@ def _debugmodel(attn_backend: str) -> Qwen35Model.Config:
     return Qwen35Model.Config(
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
@@ -536,7 +541,6 @@ def _debugmodel_moe(
     return Qwen35Model.Config(
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
@@ -590,24 +594,24 @@ def _debugmodel_moe(
 def _0_8b(attn_backend: str) -> Qwen35Model.Config:
     """Qwen3.5-0.8B dense config with vision encoder.
 
-    NOTE: HF config has tie_word_embeddings=true. Torchtitan doesn't support
-    tied embeddings yet, so we use a separate lm_head. Checkpoint conversion
-    must handle this.
+    HF config has tie_word_embeddings=true, so lm_head shares the token
+    embedding weight (enable_weight_tying); the HF checkpoint carries no
+    separate lm_head.weight.
     """
     dim = 1024
     head_dim = 256
-    rotary_dim = 64  # partial_rotary_factor=0.25 → head_dim * 0.25
+    rotary_dim = 64  # partial_rotary_factor=0.25 -> head_dim * 0.25
     n_layers = 24
     vocab_size = 248320
     return Qwen35Model.Config(
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
+        enable_weight_tying=True,
         norm=_offset_norm(dim),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
-            param_init=_EMBEDDING_INIT,
+            param_init=_EMBEDDING_SKIP_INIT,
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -651,9 +655,9 @@ def _0_8b(attn_backend: str) -> Qwen35Model.Config:
 def _2b(attn_backend: str) -> Qwen35Model.Config:
     """Qwen3.5-2B dense config with vision encoder.
 
-    NOTE: HF config has tie_word_embeddings=true. Torchtitan doesn't support
-    tied embeddings yet, so we use a separate lm_head. Checkpoint conversion
-    must handle this.
+    HF config has tie_word_embeddings=true, so lm_head shares the token
+    embedding weight (enable_weight_tying); the HF checkpoint carries no
+    separate lm_head.weight.
     """
     dim = 2048
     head_dim = 256
@@ -663,12 +667,12 @@ def _2b(attn_backend: str) -> Qwen35Model.Config:
     return Qwen35Model.Config(
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
+        enable_weight_tying=True,
         norm=_offset_norm(dim),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
-            param_init=_EMBEDDING_INIT,
+            param_init=_EMBEDDING_SKIP_INIT,
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -712,8 +716,9 @@ def _2b(attn_backend: str) -> Qwen35Model.Config:
 def _4b(attn_backend: str) -> Qwen35Model.Config:
     """Qwen3.5-4B dense config with vision encoder.
 
-    NOTE: HF config has tie_word_embeddings=true. Torchtitan doesn't support
-    tied embeddings yet, so we use a separate lm_head.
+    HF config has tie_word_embeddings=true, so lm_head shares the token
+    embedding weight (enable_weight_tying); the HF checkpoint carries no
+    separate lm_head.weight.
     """
     dim = 2560
     head_dim = 256
@@ -723,12 +728,12 @@ def _4b(attn_backend: str) -> Qwen35Model.Config:
     return Qwen35Model.Config(
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
+        enable_weight_tying=True,
         norm=_offset_norm(dim),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
-            param_init=_EMBEDDING_INIT,
+            param_init=_EMBEDDING_SKIP_INIT,
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -779,7 +784,6 @@ def _9b(attn_backend: str) -> Qwen35Model.Config:
     return Qwen35Model.Config(
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
@@ -835,7 +839,6 @@ def _27b(attn_backend: str) -> Qwen35Model.Config:
     return Qwen35Model.Config(
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
@@ -894,7 +897,6 @@ def _35b_a3b(
     return Qwen35Model.Config(
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
@@ -957,7 +959,6 @@ def _122b_a10b(
     return Qwen35Model.Config(
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
@@ -1020,7 +1021,6 @@ def _397b_a17b(
     return Qwen35Model.Config(
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,

@@ -245,6 +245,31 @@ def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
         )
 
 
+# --- generator backend selection ---
+
+
+def test_backend_default_is_torchtitan_wrapper():
+    # Adding the backend/vllm_additional_config fields must preserve the old
+    # behavior for every config that does not opt in.
+    config = VLLMGenerator.Config(parallelism=_PARALLELISM)
+    assert config.backend == "torchtitan_wrapper"
+    assert config.vllm_additional_config == {}
+
+
+def test_qwen3_5_recipe_selects_vllm_native_backend():
+    pytest.importorskip("fla")  # qwen3_5 model imports flash-linear-attention
+    from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
+        rl_grpo_qwen3_5_4b_varlen,
+    )
+
+    gen = rl_grpo_qwen3_5_4b_varlen().generator
+    assert gen.backend == "vllm_native"
+    assert gen.vllm_additional_config == {"gdn_prefill_backend": "triton"}
+    # 4B fits one GPU for inference; TP>1 is a known follow-up.
+    assert gen.parallelism.tensor_parallel_degree == 1
+    assert gen.cudagraph.enable is False
+
+
 # --- CUDA graph config (VLLMCudagraphConfig.get_vllm_compilation_config) ---
 
 

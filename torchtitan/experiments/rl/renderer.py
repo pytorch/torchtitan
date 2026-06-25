@@ -21,9 +21,10 @@ logger = logging.getLogger(__name__)
 _RENDERER_BY_MODEL = {
     "qwen3": "qwen3",
     "qwen3_vl": "qwen3-vl",
-    # Qwen3.5 evolved from qwen3_vl; resolve its chat template from the tokenizer
-    # (no dedicated renderers entry yet). TODO: map to a qwen3_5 renderer if added.
-    "qwen3_5": "auto",
+    # Qwen3.5 has a dedicated renderer ("qwen3.5" -> Qwen35Renderer). Pass it
+    # explicitly so a local/renamed checkpoint path still resolves; "auto" only
+    # matches a known HF repo id and raises for this VLM family otherwise.
+    "qwen3_5": "qwen3.5",
     "gpt_oss": "gpt-oss",
     "deepseek_v3": "deepseek-v3",
     "default": "default",  # llama3

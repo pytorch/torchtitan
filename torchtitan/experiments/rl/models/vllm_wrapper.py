@@ -62,7 +62,10 @@ _original_node_ref = _codegen._node_ref
 
 # TODO: Followup with core vLLM fix
 # https://github.com/pytorch/torchtitan/issues/3067
-def _patched_node_ref(arg):
+# Accept and forward *args/**kwargs: vLLM's _node_ref signature has grown extra
+# params (e.g. consts, const_index) and may change again; only the first arg is
+# inspected here, the rest is delegated verbatim to the original.
+def _patched_node_ref(arg, *args, **kwargs):
     try:
         from torch.distributed.tensor.placement_types import Partial, Placement
 
@@ -75,7 +78,7 @@ def _patched_node_ref(arg):
             return f"{cls.__module__}.{repr(arg)}"
     except ImportError:
         pass
-    return _original_node_ref(arg)
+    return _original_node_ref(arg, *args, **kwargs)
 
 
 _codegen._node_ref = _patched_node_ref

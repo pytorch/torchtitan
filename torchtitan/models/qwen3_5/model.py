@@ -541,6 +541,11 @@ class Qwen35Model(Decoder):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
+        # Qwen3.5's final norm is OffsetRMSNorm, not the base Decoder's
+        # RMSNorm; narrow the inherited annotation so the field type matches
+        # its actual default (required for tyro CLI parsing of the config).
+        # pyrefly: ignore [bad-override]
+        norm: OffsetRMSNorm.Config
         vision_encoder: Qwen35VisionEncoder.Config
 
         def update_from_config(
@@ -712,6 +717,7 @@ class Qwen35Model(Decoder):
         )
 
         if pixel_values is not None and grid_thw is not None:
+            assert special_tokens is not None, "pixel_values require special_tokens"
             image_token_id = special_tokens["image_id"]
             merged_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values, grid_thw=grid_thw
@@ -727,6 +733,9 @@ class Qwen35Model(Decoder):
                 )
 
         if pixel_values_videos is not None and grid_thw_videos is not None:
+            assert (
+                special_tokens is not None
+            ), "pixel_values_videos require special_tokens"
             video_token_id = special_tokens["video_id"]
             merged_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values_videos, grid_thw=grid_thw_videos
@@ -763,7 +772,7 @@ class Qwen35Model(Decoder):
                 pixel_values_videos=pixel_values_videos,
                 grid_thw=grid_thw,
                 grid_thw_videos=grid_thw_videos,
-                special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
+                special_tokens=special_tokens,
             )
         else:
             x = tokens

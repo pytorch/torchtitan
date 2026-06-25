@@ -227,12 +227,18 @@ def rl_grpo_qwen3_5_4b_varlen() -> RLTrainer.Config:
 
     Qwen3.5 layers are mostly GatedDeltaNet (linear attention); ``attn_backend``
     only affects the full-attention layers (every ``full_attention_interval``).
-    The renderer resolves Qwen3.5's chat template from the tokenizer ("auto").
+    The renderer uses Qwen3.5's dedicated chat template (name ``qwen3_5``).
 
-    TODO: GatedDeltaNet generation in the vLLM ``TorchTitanCausalLM`` wrapper has
-    no recurrent-state cache, so the generator recomputes the linear-attention
-    layers over the full sequence each decode step; validate logprob drift via
-    the ``bit_wise/*`` metrics before trusting on-policy training.
+    The generator runs vLLM's native Qwen3.5 model (``backend="vllm_native"``):
+    its GatedDeltaNet kernels keep a recurrent-state cache across decode steps,
+    which the shared TorchTitanCausalLM wrapper has no equivalent for. The
+    trainer still trains the torchtitan model; each weight sync converts the
+    torchtitan state dict to HF and calls the vLLM model's load_weights.
+
+    The native generator and the trainer use different GatedDeltaNet kernels, so
+    logprobs are not bitwise aligned -- GRPO's importance ratio corrects the
+    drift. compile, generator cudagraph, and generator TP>1 are disabled here
+    pending follow-ups (see the inline notes).
     """
     group_size = 8
     return RLTrainer.Config(
@@ -241,7 +247,9 @@ def rl_grpo_qwen3_5_4b_varlen() -> RLTrainer.Config:
         num_steps=10,
         num_groups_per_rollout_batch=5,
         num_validation_samples=20,
-        compile=CompileConfig(enable=True, backend="aot_eager"),
+        # TODO: re-enable once torch.compile composes with the fla GatedDeltaNet
+        # op under activation checkpointing.
+        compile=CompileConfig(enable=False, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
         group_size=group_size,
         renderer=RendererConfig(name="qwen3_5", enable_thinking=False),
@@ -274,10 +282,20 @@ def rl_grpo_qwen3_5_4b_varlen() -> RLTrainer.Config:
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
+            backend="vllm_native",
+            # FlashInfer's GatedDeltaNet prefill kernel JIT-compiles per env; on
+            # toolchains where that build is unavailable, force the triton path.
+            vllm_additional_config={"gdn_prefill_backend": "triton"},
+            # enforce_eager: the native model's CUDA-graph capture is not yet
+            # validated, and at TP>1 it trips vLLM's custom all-reduce.
+            cudagraph=VLLMCudagraphConfig(enable=False),
             model_dtype="bfloat16",
+            # TODO: TP>1 fails in vLLM's custom all-reduce ("invalid argument")
+            # under Monarch's external_launcher during CUDA-graph capture; a 4B
+            # model fits one GPU for inference, so keep TP=1 until that is fixed.
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=1,
-                tensor_parallel_degree=4,
+                tensor_parallel_degree=1,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
