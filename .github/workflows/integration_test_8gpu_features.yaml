@@ -69,9 +69,13 @@ jobs:
         fi
         python -m pip install --force-reinstall --pre \
           "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
-        if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
-          python -m pip install --pre torchcomms --index-url ${{ matrix.index-url }}
-        fi
+
+        # The torchcomms feature tests are currently disabled, so do not install
+        # torchcomms in the main feature job. Its wheel pins torch exactly and
+        # can force CI off the latest torch nightly.
+        # if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
+        #   python -m pip install --pre torchcomms --index-url ${{ matrix.index-url }}
+        # fi
         end=$(date +%s)
         echo "pip install torch took $((end - start)) seconds"
 
