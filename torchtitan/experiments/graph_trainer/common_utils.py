@@ -157,16 +157,23 @@ def end_with_pass(passes: list[Callable], names: list[str]) -> bool:
 
 def get_default_transformer_block_buckets(
     n_layers: int,
+    *,
+    chunked_loss_enabled: bool = False,
 ) -> list[list[str] | str]:
     """Get default transformer block buckets for manual bucketing passes.
 
     Assumes the standard Decoder layout: tok_embeddings, layers.0..N-1,
     norm, and output (e.g., Llama3, DeepSeekV3, Qwen3).
     """
+    final_bucket = ["norm", "lm_head"]
+    if chunked_loss_enabled:
+        # Chunked loss moves the lm_head weight use under module_fqn "loss".
+        final_bucket.append("loss")
+
     return [
         "tok_embeddings",
         *[f"layers.{i}" for i in range(n_layers)],
-        ["norm", "lm_head"],
+        final_bucket,
     ]
 
 
