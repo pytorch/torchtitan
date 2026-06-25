@@ -200,7 +200,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
 
     # Mirror the production VLLMGenerator so the test exercises the same
     # batch-invariant path (v2 runner is required for the logprob-kernel patch).
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     if use_flex:
         os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
         backend_enum = AttentionBackendEnum.FLEX_ATTENTION
@@ -649,6 +649,7 @@ class BitwiseParityTestBase(unittest.TestCase):
             parallelism=config.generator.parallelism,
             compile_config=config.compile,
             checkpoint_config=generator_checkpoint,
+            override=config.generator.override,
         )
 
         # Test runs trainer and generator in the same process, so limit

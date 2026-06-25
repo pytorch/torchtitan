@@ -18,6 +18,8 @@ from typing import Any, ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
+from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
@@ -149,8 +151,11 @@ class VarlenAttention(Module):
         # returns None when FA2 is the implicit default (SM < 9.0).
         # For FA3, only force num_splits=1 in batch-invariant mode
         # to prevent non-deterministic split-k reductions.
+        # ROCm's _flash_attention_forward rejects num_splits entirely.
         fa_impl = current_flash_attention_impl()
-        if fa_impl in (None, "FA2") or is_in_batch_invariant_mode():
+        if (
+            fa_impl in (None, "FA2") or is_in_batch_invariant_mode()
+        ) and torch.version.hip is None:
             varlen_kwargs["num_splits"] = 1
 
         # Forward enable_gqa from GQAttention when Q and KV head counts differ
@@ -686,77 +691,81 @@ class FusedQKVLinear(BaseQKVLinear):
         # Fused QKV: single matmul, then reshape and split along R dim.
         # [B, L, n_kv_heads * R * head_dim] -> [B, L, n_kv_heads, R, head_dim]
         # Use -1 for n_kv_heads so TP sharding is handled automatically.
-        qkv = self.wqkv(x)
-        qkv = qkv.view(bs, seqlen, -1, self.r_dim, self.head_dim)
-        # torch.split returns contiguous views for size-1 splits (xk, xv).
-        # xq (size heads_per_kv) is non-contiguous; reshape triggers a copy.
-        xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
-        xq = xq.reshape(bs, seqlen, -1, self.head_dim)
-        xk = xk.reshape(bs, seqlen, -1, self.head_dim)
-        xv = xv.reshape(bs, seqlen, -1, self.head_dim)
-        return xq, xk, xv
+        qkv = self.wqkv(x).view(bs, seqlen, -1, self.r_dim, self.head_dim)
+        hpk, hd = self.heads_per_kv, self.head_dim
+
+        def _split(t):
+            # Use the (possibly local) tensor's own B/L so this is correct both
+            # for a plain tensor and inside local_map, where ``t`` is the local
+            # (e.g. CP-sharded) shard rather than the global tensor.
+            b, s = t.shape[0], t.shape[1]
+            xq, xk, xv = torch.split(t, [hpk, 1, 1], dim=-2)
+            # split leaves xk/xv as strided views into the fused buffer; vLLM
+            # attention/KV-cache kernels read raw memory assuming a contiguous
+            # head-major layout, so materialize all three contiguously here.
+            return (
+                xq.reshape(b, s, -1, hd).contiguous(),
+                xk.reshape(b, s, -1, hd).contiguous(),
+                xv.reshape(b, s, -1, hd).contiguous(),
+            )
+
+        if isinstance(qkv, DTensor):
+            # TEMPORARY: run the split on local tensors so its backward (cat)
+            # does not mix DTensor and plain grads under CP+PP. The asymmetric
+            # q vs k/v paths (RoPE on q/k; CP all-gathers k/v) otherwise feed
+            # cat() inconsistent grad types in PP's backward metadata inference.
+            # q/k/v reuse qkv's placements (symmetric at the split: TP shards the
+            # head axis, CP shards seq). TODO: remove it after spmd_types/full_dtensor
+            _split = local_map(
+                _split,
+                out_placements=(qkv.placements,) * 3,
+                in_placements=(qkv.placements,),
+                in_grad_placements=(qkv.placements,),
+                device_mesh=qkv.device_mesh,
+            )
+        return _split(qkv)
 
     @staticmethod
     def _split_qkv_on_save(module, state_dict, prefix, local_metadata) -> None:
-        """Split fused ``wqkv`` into stock ``wq.weight``/``wk.weight``/``wv.weight``."""
+        """Split fused ``wqkv`` into stock ``wq``/``wk``/``wv`` (weight and bias)."""
         hd, hpk, r = module.head_dim, module.heads_per_kv, module.r_dim
 
-        wqkv_w = state_dict.pop(f"{prefix}wqkv.weight")
-        n_kv, in_f = wqkv_w.shape[0] // (r * hd), wqkv_w.shape[1]
-        w = wqkv_w.reshape(n_kv, r, hd, in_f)
-        state_dict[f"{prefix}wq.weight"] = w[:, :hpk].reshape(-1, in_f).contiguous()
-        state_dict[f"{prefix}wk.weight"] = w[:, hpk].reshape(-1, in_f).contiguous()
-        state_dict[f"{prefix}wv.weight"] = w[:, hpk + 1].reshape(-1, in_f).contiguous()
-
-        b_key = f"{prefix}wqkv.bias"
-        if b_key in state_dict:
-            b = state_dict.pop(b_key).reshape(n_kv, r, hd)
-            state_dict[f"{prefix}wq.bias"] = b[:, :hpk].reshape(-1).contiguous()
-            state_dict[f"{prefix}wk.bias"] = b[:, hpk].reshape(-1).contiguous()
-            state_dict[f"{prefix}wv.bias"] = b[:, hpk + 1].reshape(-1).contiguous()
+        for param, ndim in (("weight", 4), ("bias", 3)):
+            key = f"{prefix}wqkv.{param}"
+            if key not in state_dict:
+                continue
+            tensor = state_dict.pop(key)
+            n_kv = tensor.shape[0] // (r * hd)
+            tail = (tensor.shape[1],) if ndim == 4 else ()
+            w = tensor.reshape(n_kv, r, hd, *tail)
+            state_dict[f"{prefix}wq.{param}"] = (
+                w[:, :hpk].reshape(-1, *tail).contiguous()
+            )
+            state_dict[f"{prefix}wk.{param}"] = (
+                w[:, hpk].reshape(-1, *tail).contiguous()
+            )
+            state_dict[f"{prefix}wv.{param}"] = (
+                w[:, hpk + 1].reshape(-1, *tail).contiguous()
+            )
 
     @staticmethod
     def _merge_qkv_on_load(module, state_dict, prefix, *args) -> None:
-        """Merge stock ``wq.weight``/``wk.weight``/``wv.weight`` back into ``wqkv``."""
+        """Merge stock ``wq``/``wk``/``wv`` back into fused ``wqkv`` (weight and bias)."""
         hd, hpk = module.head_dim, module.heads_per_kv
-        wq_key, wk_key, wv_key = (
-            f"{prefix}wq.weight",
-            f"{prefix}wk.weight",
-            f"{prefix}wv.weight",
-        )
 
-        if wq_key in state_dict and wk_key in state_dict and wv_key in state_dict:
-            wq, wk, wv = (
-                state_dict.pop(wq_key),
-                state_dict.pop(wk_key),
-                state_dict.pop(wv_key),
+        for param, ndim in (("weight", 4), ("bias", 3)):
+            keys = [f"{prefix}{w}.{param}" for w in ("wq", "wk", "wv")]
+            if not all(k in state_dict for k in keys):
+                continue
+            wq, wk, wv = (state_dict.pop(k) for k in keys)
+            n_kv = wk.shape[0] // hd
+            tail = (wq.shape[1],) if ndim == 4 else ()
+            q = wq.reshape(n_kv, hpk, hd, *tail)
+            k = wk.reshape(n_kv, 1, hd, *tail)
+            v = wv.reshape(n_kv, 1, hd, *tail)
+            state_dict[f"{prefix}wqkv.{param}"] = torch.cat([q, k, v], dim=1).reshape(
+                -1, *tail
             )
-            n_kv, in_f = wk.shape[0] // hd, wq.shape[1]
-            q = wq.reshape(n_kv, hpk, hd, in_f)
-            k = wk.reshape(n_kv, 1, hd, in_f)
-            v = wv.reshape(n_kv, 1, hd, in_f)
-            state_dict[f"{prefix}wqkv.weight"] = torch.cat([q, k, v], dim=1).reshape(
-                -1, in_f
-            )
-
-        bq_key, bk_key, bv_key = (
-            f"{prefix}wq.bias",
-            f"{prefix}wk.bias",
-            f"{prefix}wv.bias",
-        )
-        if bq_key in state_dict and bk_key in state_dict and bv_key in state_dict:
-            bq, bk, bv = (
-                state_dict.pop(bq_key),
-                state_dict.pop(bk_key),
-                state_dict.pop(bv_key),
-            )
-            n_kv = bk.shape[0] // hd
-            q_b = bq.reshape(n_kv, hpk, hd)
-            k_b = bk.reshape(n_kv, 1, hd)
-            v_b = bv.reshape(n_kv, 1, hd)
-            state_dict[f"{prefix}wqkv.bias"] = torch.cat(
-                [q_b, k_b, v_b], dim=1
-            ).reshape(-1)
 
 
 class GQAttention(BaseAttention):

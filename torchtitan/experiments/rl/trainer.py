@@ -276,6 +276,12 @@ class Controller(Configurable):
             # or the packing len, etc.
 
             if self.trainer.debug.batch_invariant:
+                if torch.version.hip is not None:
+                    raise ValueError(
+                        "batch_invariant mode is not supported on ROCm: the varlen "
+                        "attention path cannot force num_splits=1 (rejected by ROCm), "
+                        "so split-k reductions are non-deterministic."
+                    )
                 if not self.trainer.debug.deterministic:
                     raise ValueError("batch_invariant requires deterministic=True")
                 # TODO: Replace trainer dtype constraint to use mixed
@@ -311,6 +317,8 @@ class Controller(Configurable):
         self.config = config
         self.trainer: PolicyTrainer | None = None
         self.generator_router: GeneratorRouter | None = None
+        # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.
+        self.start_step = 0
         self._proc_meshes = []
         self.metrics_processor: m.MetricsProcessor = config.metrics.build(
             log_dir=config.dump_folder,
@@ -526,12 +534,21 @@ class Controller(Configurable):
         with sl.log_trace_span("torchstore_init"):
             await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
 
-        # Initial weight sync: only the trainer loads weights (HF/DCP formats), then publishes them for
-        # the generators to pull -- so the generator never needs to know about checkpoint formats.
+        # Resume: __init__ ran CheckpointManager.load(); read back the restored policy_version
+        # (0 if fresh) so the loop resumes at the right step and generators pull at that version.
+        self.start_step = self._get_rank_0_value(
+            await self.trainer.get_policy_version.call()
+        )
+        if self.start_step > 0:
+            logger.info(f"Resuming RL training from step {self.start_step}")
+
+        # Initial weight sync: only the trainer loads weights (HF/DCP); generators pull at start_step.
         with sl.log_trace_span("trainer_push_model_state_dict"):
             await self.trainer.push_model_state_dict.call()
         with sl.log_trace_span("generator_pull_model_state_dict"):
-            await self.generator_router.pull_model_state_dict(policy_version=0)
+            await self.generator_router.pull_model_state_dict(
+                policy_version=self.start_step
+            )
 
     # TODO: fold validation into a Validator(Configurable) the controller attaches, instead of 4 methods.
     @sl.log_trace_span("_collect_validation_rollouts")
@@ -634,14 +651,13 @@ class Controller(Configurable):
         )
 
         sl.log_trace_instant("validation_start")
-        pre_validation = await self._validate_and_log(step=0)
+        pre_validation = await self._validate_and_log(step=self.start_step)
         sl.log_trace_instant("training_start")
 
-        # Two policy version pointers: the trainer advances at the optimizer step;
-        # the generator version advances when a weight pull completes.
-        # TODO(resume): persist the training step (and policy versions) so a restarted job resumes mid-run.
-        self._trainer_policy_version = 0
-        self._generator_policy_version = 0
+        # Two policy version pointers, seeded from the resumed step: the trainer advances at the
+        # optimizer step; the generator version advances when a weight pull completes.
+        self._trainer_policy_version = self.start_step
+        self._generator_policy_version = self.start_step
 
         # Buffer capacity caps how far generation runs ahead of the trainer (bounds off-policy staleness).
         max_active_rollout_groups = (
@@ -896,8 +912,7 @@ class Controller(Configurable):
             waits for:    a TrainingBatch in the queue
             unblocked by: _batcher_loop training_batch_queue.put()
         """
-        # TODO(resume): start from the persisted step + restore optimizer/policy_version on a restarted job.
-        for step in range(1, num_training_steps + 1):
+        for step in range(self.start_step + 1, num_training_steps + 1):
             sl.set_step(step)  # propagate the step counter to the actors
             await self.trainer.sync_log_step.call(step)
             await self.generator_router.fanout("sync_log_step", step)
@@ -1000,3 +1015,10 @@ class Controller(Configurable):
                     ),
                 ],
             )
+
+            # Save full training state for resume; CheckpointManager writes only on its interval
+            # and the final step. After the divergence guard so a NaN step isn't checkpointed.
+            with sl.log_trace_span("trainer_save_checkpoint"):
+                await self.trainer.save_checkpoint.call(
+                    step, last_step=(step == num_training_steps)
+                )

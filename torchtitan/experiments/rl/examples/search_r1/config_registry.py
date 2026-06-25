@@ -80,9 +80,12 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
-                initial_load_in_hf=True,
-                interval=10000,  # only the initial HF load; no mid-run checkpoints
-                last_save_model_only=True,
+                initial_load_in_hf=True,  # first run loads HF; restarts resume from DCP
+                # Mid-run checkpoints so a preempted run resumes; full last save
+                # (not model-only) keeps it resumable; keep_latest_k caps disk.
+                interval=50,
+                last_save_model_only=False,
+                keep_latest_k=3,
             ),
             # DAPO-style clip-higher (asymmetric clip); no KL / reference model.
             loss=DAPOLoss.Config(

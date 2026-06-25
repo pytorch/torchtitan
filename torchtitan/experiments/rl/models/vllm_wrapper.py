@@ -16,18 +16,22 @@ from dataclasses import dataclass
 from functools import partial
 
 import torch
-import torch._dynamo
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import (
+    apply_overrides,
+    CompileConfig,
+    OverrideConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
-from vllm.compilation import codegen as _codegen
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -53,33 +57,6 @@ def _dtensor_safe_weak_ref_tensor(tensor):
 
 
 _torch_utils.weak_ref_tensor = _dtensor_safe_weak_ref_tensor
-
-
-# NOTE: Monkeypatch vLLM's _node_ref to handle DTensor placement types
-# whose repr() uses unqualified class names not available in the generated
-# code's exec namespace (which only has `import torch`).
-_original_node_ref = _codegen._node_ref
-
-
-# TODO: Followup with core vLLM fix
-# https://github.com/pytorch/torchtitan/issues/3067
-def _patched_node_ref(arg):
-    try:
-        from torch.distributed.tensor.placement_types import Partial, Placement
-
-        if isinstance(arg, Placement):
-            cls = type(arg)
-            # Partial.__repr__ leaves reduce_op unquoted (e.g. "Partial(sum)")
-            # which would resolve to the builtin sum, not the string "sum".
-            if isinstance(arg, Partial):
-                return f"{cls.__module__}.{cls.__name__}({arg.reduce_op!r})"
-            return f"{cls.__module__}.{repr(arg)}"
-    except ImportError:
-        pass
-    return _original_node_ref(arg)
-
-
-_codegen._node_ref = _patched_node_ref
 
 
 @support_torch_compile(
@@ -116,6 +93,7 @@ class VLLMModelWrapper(Module):
         checkpoint_config: CheckpointManager.Config,
         vllm_config: VllmConfig,
         prefix: str = "",
+        override: OverrideConfig,
     ):
         super().__init__()
 
@@ -189,22 +167,15 @@ class VLLMModelWrapper(Module):
             config=_InferenceConfig(parallelism=training_parallelism)
         )
 
+        # Apply config overrides (e.g. the fused gate+up SwiGLU) after
+        # update_from_config (which fills the sharding the override factories
+        # read) and before build
+        if override.imports:
+            apply_overrides(override, self.config)
+
         # Build model on meta device to avoid allocating full model on every GPU
         with torch.device("meta"):
             self.model = self.config.build()
-
-        # With TP, collectives may return AsyncCollectiveTensor (overlap
-        # path) or plain Tensor (sync path) depending on timing.  Dynamo
-        # specializes on tensor type, so each switch triggers a
-        # recompile.  Because of this, the default recompile_limit (8) is
-        # too low; exceeding it fails under
-        # fullgraph=True so set to 10 for now and bump to 12 for sliding window
-        has_sliding_window = any(
-            getattr(layer_cfg.attention, "sliding_window_size", None) is not None
-            for layer_cfg in model_config.layers
-        )
-        if compile_config.enable:
-            torch._dynamo.config.recompile_limit = 12 if has_sliding_window else 10
 
         self.model = self.parallelize_fn(
             model=self.model,

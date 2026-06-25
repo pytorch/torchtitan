@@ -19,6 +19,7 @@ from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import (
     CompileConfig,
     DebugConfig,
+    OverrideConfig,
     ParallelismConfig,
     TrainingConfig,
 )
@@ -279,9 +280,6 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
     group_size = 8
     return Controller.Config(
         model_spec=gpt_oss_model_registry("debugmodel", attn_backend="varlen"),
-        # Debug tokenizer (vocab 2048, matches debugmodel); the gpt_oss renderer
-        # needs gpt-oss special tokens absent here, so use the qwen3 renderer
-        # like the other debug configs.
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=3,
@@ -294,7 +292,10 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        renderer=RendererConfig(name="gpt_oss", enable_thinking=False),
+        # Debug tokenizer (vocab 2048, matches debugmodel); the gpt_oss renderer
+        # needs gpt-oss special tokens absent here, so use the qwen3 renderer
+        # like the other debug configs.
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=2e-6),
@@ -344,7 +345,10 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        renderer=RendererConfig(name="gpt_oss", enable_thinking=False),
+        # Debug tokenizer (vocab 2048, matches debugmodel); the gpt_oss renderer
+        # needs gpt-oss special tokens absent here, so use the qwen3 renderer
+        # like the other debug configs.
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=2e-6),
@@ -693,6 +697,38 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
             ),
         ),
     )
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
+    """Qwen3-30B-A3B GRPO with throughput overrides (8 GPUs: 4 gen + 4 train).
+
+    Same model/parallelism/data as ``rl_grpo_qwen3_30b_a3b_varlen``, but applies
+    two opt-in overrides (per-actor) to both the trainer and generator:
+
+    * ``fused_swiglu`` fuses the dense and grouped-experts gate+up projections
+      into a single weight (one GEMM; fused SiLU-and-mul Triton kernel).
+    * ``helion_rope`` applies cos/sin RoPE with a fused Helion kernel (qwen3 uses
+      ``CosSinRoPE``, which the override targets).
+
+    Both are CUDA-only; ``helion_rope`` additionally needs the optional ``helion``
+    package. Checkpoints stay interchangeable with the non-fused/stock-RoPE 30B
+    config.
+    """
+    config = rl_grpo_qwen3_30b_a3b_varlen()
+    # Applied after each actor's update_from_config and before build; separate
+    # OverrideConfig instances keep the trainer and generator overrides
+    # independent (they run in different actors).
+    perf_imports = [
+        "torchtitan.overrides.fused_swiglu",
+        "torchtitan.overrides.helion_rope",
+    ]
+    config.trainer = dataclasses.replace(
+        config.trainer, override=OverrideConfig(imports=list(perf_imports))
+    )
+    config.generator = dataclasses.replace(
+        config.generator, override=OverrideConfig(imports=list(perf_imports))
+    )
+    return config
 
 
 def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:

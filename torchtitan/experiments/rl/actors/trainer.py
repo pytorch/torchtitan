@@ -20,10 +20,12 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
+    apply_overrides,
     CommConfig,
     CompileConfig,
     Configurable,
     DebugConfig,
+    OverrideConfig,
     ParallelismConfig,
     TORCH_DTYPE_MAP,
     TrainingConfig,
@@ -157,6 +159,10 @@ class PolicyTrainer(Actor, Configurable):
         checkpoint: CheckpointManager.Config = field(
             default_factory=CheckpointManager.Config
         )
+        override: OverrideConfig = field(default_factory=OverrideConfig)
+        """Config overrides (e.g. ``torchtitan.overrides.fused_swiglu``) applied to
+        this trainer's model spec after ``update_from_config`` and before build.
+        Separate from the generator's override so the two can differ."""
         dump_folder: str = ""
         """Folder for AC debug dumps when using memory_budget mode."""
 
@@ -274,10 +280,18 @@ class PolicyTrainer(Actor, Configurable):
         )
 
     def state_dict(self) -> dict[str, Any]:
+        # Checkpoint "train_state": policy_version == completed optim steps, so it
+        # doubles as the resume step counter.
         return {"policy_version": self.policy_version}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         self.policy_version = state_dict["policy_version"]
+
+    @endpoint
+    async def get_policy_version(self) -> int:
+        """Current policy version: after load(), the step a resume restored from
+        (0 if fresh). The controller uses it to resume and re-sync generators."""
+        return self.policy_version
 
     @endpoint
     async def close(self) -> None:
@@ -323,6 +337,11 @@ class PolicyTrainer(Actor, Configurable):
         # model-agnostic `update_from_config` hook (RL's trainer bypasses
         # `torchtitan.Trainer's` call, so we invoke it directly).
         model_spec.model.update_from_config(config=config)
+
+        # Apply this trainer's config overrides after update_from_config (which
+        # sets the sharding configs the override factories read) and before build
+        if config.override.imports:
+            apply_overrides(config.override, model_spec.model)
 
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):

@@ -8,6 +8,7 @@ import math
 from dataclasses import dataclass
 from typing import Literal
 
+import spmd_types as spmd
 import torch
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
@@ -349,6 +350,7 @@ class CosSinRoPE(RoPE):
         return torch.cat((-x2, x1), dim=-1)
 
 
+@spmd.local_map(out_types={"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R})
 def _reshape_for_broadcast(
     rope_cache: torch.Tensor,
     query_shape: torch.Size | tuple[int, ...],
