@@ -2372,6 +2372,47 @@ class TestIsFullCudagraphable(TestCase):
         self.assertFalse(is_full_cudagraphable(gm))
 
 
+class TestFullInductorMarking(TestCase):
+    """_mark_nodes_for_full_inductor tags by get_attr value type."""
+
+    def test_graphmodule_attr_tagged_tensor_attr_not(self):
+        from torchtitan.experiments.graph_trainer.inductor_passes import (
+            _mark_nodes_for_full_inductor,
+        )
+
+        class Score(torch.nn.Module):
+            def forward(self, x):
+                return x
+
+        class Outer(torch.nn.Module):
+            def forward(self, x):
+                return x + 1
+
+        gm = torch.fx.symbolic_trace(Outer())
+        # A FlexAttention-style executable subgraph attr and a tensor constant.
+        gm.sdpa_score0 = torch.fx.symbolic_trace(Score())
+        gm._tp_mask = torch.zeros(4)
+        graph = gm.graph
+        ph = next(n for n in graph.nodes if n.op == "placeholder")
+        with graph.inserting_after(ph):
+            graph.get_attr("_tp_mask")
+            graph.get_attr("sdpa_score0")
+        gm.recompile()
+
+        _mark_nodes_for_full_inductor(gm)
+
+        def tagged(name):
+            node = next(n for n in graph.nodes if n.name == name)
+            return "compile_with_inductor" in node.meta.get("custom", {})
+
+        # GraphModule attr (flex score) must stay in-region; tensor constant must not.
+        self.assertTrue(tagged("sdpa_score0"))
+        self.assertFalse(tagged("_tp_mask"))
+        # Regular compute nodes are still tagged.
+        add = next(n for n in graph.nodes if n.op == "call_function")
+        self.assertIn("compile_with_inductor", add.meta.get("custom", {}))
+
+
 if __name__ == "__main__":
     from torch.testing._internal.common_utils import run_tests
 
