@@ -7,9 +7,10 @@
 from dataclasses import dataclass
 from typing import Literal
 
+import spmd_types as spmd
+
 import torch
 import torch.nn.functional as F
-import spmd_types as spmd
 from torch import nn
 from torch.distributed.tensor import DTensor
 
