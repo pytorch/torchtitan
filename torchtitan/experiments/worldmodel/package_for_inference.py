@@ -27,7 +27,6 @@ os.environ.setdefault("NCCL_P2P_DISABLE", "1")
 REPORTERV2_HOST = os.getenv("REPORTERV2_HOST", "mkv://data-gen.comma.life:3080/reporterv2")
 STRUCTURED_LOG_DIR = os.getenv("TORCHTITAN_STRUCTURED_LOG_DIR", "./outputs/worldmodel_package_for_inference")
 PACKAGE_NAME = "model.torchpackage"
-INFERENCE_STEPS = 1
 
 TORCH_EXPORT_INTERN_MODULES = [
     "torchtitan.config.**",
@@ -47,6 +46,9 @@ TORCH_EXPORT_EXTERN_MODULES = [
     "numpy.**",
     "einops.**",
     "typing_extensions.**",
+    "tyro.**",
+    "docstring_parser.**",
+    "typeguard.**",
     "dataclasses.**",
     "collections.**",
     "argparse.**",
@@ -199,10 +201,11 @@ def build_package(
 
     with sl.log_trace_span("worldmodel_package_model_io"):
         io_model = build_meta_model(model_io_config(model_config))
-        num_conditioning_frames = 0 if io_model.config.transformer.attention_mask == "NONE" else 14
+        assert io_model.config.transformer.attention_mask != "NONE"
+        num_conditioning_frames = io_model.config.input_size[0] - 1
         model_io = io_model.get_model_io(
             dtype=torch.bfloat16,
-            steps=INFERENCE_STEPS,
+            steps=1,
             num_conditioning_frames=num_conditioning_frames,
         )
         del io_model

@@ -15,7 +15,7 @@ from torch.distributed.tensor import distribute_tensor, DTensor
 from torch.distributed.tensor.experimental import local_map
 from torch.distributed.tensor.placement_types import Placement
 
-from torchtitan.config.configurable import Configurable
+from torchtitan.config import Configurable
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
 from torchtitan.protocols.types import NamedPlacement
@@ -84,7 +84,11 @@ class Module(nn.Module, Configurable):
         # replacing any DTensor entry with a plain tensor. Restore DTensor-ness
         # by re-distributing the freshly computed global tensor to the original
         # placements. ``distribute_tensor`` supports Replicate / Shard / Partial.
-        dtensor_meta = {name: (buf.device_mesh, buf.placements) for name, buf in self._buffers.items() if isinstance(buf, DTensor)}
+        dtensor_meta = {
+            name: (buf.device_mesh, buf.placements)
+            for name, buf in self._buffers.items()
+            if isinstance(buf, DTensor)
+        }
         self._init_self_buffers(buffer_device=buffer_device)
         for name, (mesh, placements) in dtensor_meta.items():
             new_buf = self._buffers.get(name)
@@ -123,7 +127,11 @@ class Module(nn.Module, Configurable):
 
         own_param_names = [name for name, _ in self.named_parameters(recurse=False)]
         if own_param_names:
-            raise ValueError(f"{type(self).__name__} has parameters {own_param_names} but neither param_init nor reset_parameters is available. Set param_init on the Config or define reset_parameters.")
+            raise ValueError(
+                f"{type(self).__name__} has parameters {own_param_names} "
+                "but neither param_init nor reset_parameters is available. "
+                "Set param_init on the Config or define reset_parameters."
+            )
 
     def _init_param(self, name: str, param: nn.Parameter) -> None:
         """Initialize a single parameter via dict lookup in ``_param_init``.
@@ -131,9 +139,17 @@ class Module(nn.Module, Configurable):
         Raises ``ValueError`` if ``_param_init`` is None or the name is missing.
         """
         if self._param_init is None:
-            raise ValueError(f"No param_init found for parameter '{name}' in {type(self).__name__}. Set param_init on this module's Config or use skip_param_init.")
+            raise ValueError(
+                f"No param_init found for parameter '{name}' in "
+                f"{type(self).__name__}. Set param_init on this "
+                f"module's Config or use skip_param_init."
+            )
         if name not in self._param_init:
-            raise ValueError(f"No initializer for parameter '{name}' in {type(self).__name__}. Available: {list(self._param_init.keys())}")
+            raise ValueError(
+                f"No initializer for parameter '{name}' in "
+                f"{type(self).__name__}. "
+                f"Available: {list(self._param_init.keys())}"
+            )
         self._param_init[name](param)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
@@ -189,7 +205,10 @@ class Module(nn.Module, Configurable):
         ``resolve_placements()``.
         """
         if self._parallelized:
-            raise ValueError(f"{type(self).__name__} has already been parallelized. Module.parallelize() must be called at most once per instance.")
+            raise ValueError(
+                f"{type(self).__name__} has already been parallelized. "
+                "Module.parallelize() must be called at most once per instance."
+            )
         self._parallelized = True
 
         queue = list(self.children())
@@ -230,7 +249,10 @@ class Module(nn.Module, Configurable):
         for name, param in self.named_parameters(recurse=False):
             named_placements = sharding_config.state_shardings.get(name)
             if named_placements is None:
-                raise ValueError(f"{type(self).__name__}.{name} has no placement declared in sharding_config.state_shardings.")
+                raise ValueError(
+                    f"{type(self).__name__}.{name} has no placement declared "
+                    "in sharding_config.state_shardings."
+                )
             axes = named_placements.keys()
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
@@ -257,7 +279,10 @@ class Module(nn.Module, Configurable):
         for name, buffer in self.named_buffers(recurse=False):
             named_placements = sharding_config.state_shardings.get(name)
             if named_placements is None:
-                raise ValueError(f"{type(self).__name__}.{name} (buffer) has no placement declared in sharding_config.state_shardings.")
+                raise ValueError(
+                    f"{type(self).__name__}.{name} (buffer) has no placement "
+                    "declared in sharding_config.state_shardings."
+                )
             if buffer is None:
                 # ``register_buffer(name, None)`` reserves a slot to be filled
                 # by ``init_states`` later; nothing to distribute yet.
@@ -297,7 +322,10 @@ class Module(nn.Module, Configurable):
         pos_args = self._cache_pos_arg_names()
         out_src = sharding_config.out_src_shardings
         if out_src is None:
-            raise AssertionError(f"{type(self).__name__}: local_map is set but out_src_shardings is None.")
+            raise AssertionError(
+                f"{type(self).__name__}: local_map is set but "
+                "out_src_shardings is None."
+            )
         if isinstance(out_src, tuple):
             out_src_list: list[NamedPlacement] = [p for p in out_src if p is not None]
         else:
@@ -305,23 +333,33 @@ class Module(nn.Module, Configurable):
 
         missing_in = [name for name in pos_args if name not in in_dst]
         if missing_in:
-            raise AssertionError(f"{type(self).__name__}: local_map is set but in_dst_shardings is missing entries for: {missing_in}")
+            raise AssertionError(
+                f"{type(self).__name__}: local_map is set but in_dst_shardings "
+                f"is missing entries for: {missing_in}"
+            )
         in_named: list[NamedPlacement] = [in_dst[name] for name in pos_args]
         out_named: list[NamedPlacement] = out_src_list
         # in_grad_placements may contain None for non-tensor args; filter
         # them out for mesh resolution -- local_map passes None through.
         grad_named: list[NamedPlacement | None] = list(lm.in_grad_placements)
 
-        resolved_mesh = parallel_dims.resolve_shared_mesh(in_named + out_named + grad_named)
+        resolved_mesh = parallel_dims.resolve_shared_mesh(
+            in_named + out_named + grad_named
+        )
         if resolved_mesh is None:
             return fn
 
-        out_placements: tuple[tuple[Placement, ...], ...] = tuple(resolve_placements(p, resolved_mesh) for p in out_named)
+        out_placements: tuple[tuple[Placement, ...], ...] = tuple(
+            resolve_placements(p, resolved_mesh) for p in out_named
+        )
         return local_map(
             fn,
             in_placements=tuple(resolve_placements(p, resolved_mesh) for p in in_named),
             out_placements=out_placements,
-            in_grad_placements=tuple(resolve_placements(p, resolved_mesh) if p is not None else None for p in grad_named),
+            in_grad_placements=tuple(
+                resolve_placements(p, resolved_mesh) if p is not None else None
+                for p in grad_named
+            ),
             device_mesh=resolved_mesh,
         )
 
@@ -342,10 +380,15 @@ class Module(nn.Module, Configurable):
         sharding_config = self._sharding_config
         assert sharding_config is not None
 
-        if sharding_config.in_dst_shardings is None and sharding_config.in_src_shardings is None:
+        if (
+            sharding_config.in_dst_shardings is None
+            and sharding_config.in_src_shardings is None
+        ):
             return args, kwargs
 
-        pos_arg_names = [name for name in self._cache_pos_arg_names() if name not in kwargs]
+        pos_arg_names = [
+            name for name in self._cache_pos_arg_names() if name not in kwargs
+        ]
         new_kwargs = dict(zip(pos_arg_names, args))
         new_kwargs.update(kwargs)
 
@@ -357,7 +400,9 @@ class Module(nn.Module, Configurable):
                 continue
             src_named_placements = in_src_shardings.get(name)
             dst_named_placements = in_dst_shardings.get(name)
-            mesh = parallel_dims.resolve_shared_mesh([src_named_placements, dst_named_placements])
+            mesh = parallel_dims.resolve_shared_mesh(
+                [src_named_placements, dst_named_placements]
+            )
             if mesh is None:
                 continue
 
