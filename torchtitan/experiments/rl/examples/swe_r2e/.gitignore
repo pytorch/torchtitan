@@ -1,0 +1,9 @@
+# Runtime artifacts produced by a run (not source).
+# Claude Code stream-json agent traces:
+trajectories/
+# training-view per-rollout traces:
+rollout_dumps/
+# launcher run logs:
+runlog/
+__pycache__/
+*.log
