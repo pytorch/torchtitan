@@ -228,7 +228,7 @@ class WorldModelDataLoader(BaseDataLoader):
 
 def main() -> None:
     from torchtitan.experiments.worldmodel.config_registry import _dataloader_config
-    from xx.datasets.helpers import DEFAULT_TRAIN_LIST
+    from xx.datasets.constants import DEFAULT_TRAIN_LIST
     config = _dataloader_config(split="train", dataset=DEFAULT_TRAIN_LIST)
     dataset = WorldModelDataLoader._build_dataset(config, val=False)
     inputs, targets = next(iter(dataset))

@@ -31,14 +31,15 @@ INFERENCE_STEPS = 1
 
 TORCH_EXPORT_INTERN_MODULES = [
     "torchtitan.config.**",
-    "torchtitan.experiments.worldmodel.**",
+    "torchtitan.experiments.worldmodel.inference",
+    "torchtitan.experiments.worldmodel.model",
+    "torchtitan.experiments.worldmodel.schedulers",
     "torchtitan.models.common.attention",
     "torchtitan.models.common.nn_modules",
     "torchtitan.observability.**",
     "torchtitan.protocols.**",
     "torchtitan.tools.logging",
     "torchtitan.tools.utils",
-    "xx.training.diffusion.schedulers",
 ]
 TORCH_EXPORT_EXTERN_MODULES = [
     "torch.**",
@@ -51,7 +52,7 @@ TORCH_EXPORT_EXTERN_MODULES = [
     "argparse.**",
     "sys.**",
 ]
-TORCH_EXPORT_DENY_MODULES = ["openpilot.**"]
+TORCH_EXPORT_DENY_MODULES = ["openpilot.**", "cereal", "cereal.**", "capnp", "capnp.**"]
 TORCH_EXPORT_MOCK_MODULES = ["**"]
 
 
@@ -198,9 +199,11 @@ def build_package(
 
     with sl.log_trace_span("worldmodel_package_model_io"):
         io_model = build_meta_model(model_io_config(model_config))
+        num_conditioning_frames = 0 if io_model.config.transformer.attention_mask == "NONE" else 14
         model_io = io_model.get_model_io(
             dtype=torch.bfloat16,
             steps=INFERENCE_STEPS,
+            num_conditioning_frames=num_conditioning_frames,
         )
         del io_model
         model = build_meta_model(model_config)

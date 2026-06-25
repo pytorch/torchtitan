@@ -21,8 +21,7 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.observability import structured_logger as sl
 from torchtitan.trainer import Trainer
 from xx.common.helpers import parse_info
-from xx.training.diffusion.schedulers import RFScheduler
-
+from .schedulers import RFScheduler
 from .dataset import WorldModelDataLoader
 from .loss import WorldModelLoss
 from .model import WorldModel

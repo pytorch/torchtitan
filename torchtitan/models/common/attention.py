@@ -239,6 +239,7 @@ class FlexAttention(Module):
             k,
             v,
             block_mask=attention_masks,
+            score_mod=score_mod,
             scale=scale,
             enable_gqa=enable_gqa,
             return_aux=AuxRequest(lse=return_lse),
