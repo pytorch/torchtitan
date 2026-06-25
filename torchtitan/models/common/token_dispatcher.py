@@ -314,7 +314,9 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         # generate the input splits and output splits for all-to-all
         with maybe_set_sparse_mesh():
             pg = (
-                current_spmd_mesh().get_group("ep")  # pyrefly: ignore [missing-attribute]
+                current_spmd_mesh().get_group(  # pyrefly: ignore [missing-attribute]
+                    "ep"
+                )
                 if get_spmd_backend() == "spmd_types"
                 else self.ep_mesh.get_group()
             )
@@ -499,7 +501,9 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
 
         with maybe_set_sparse_mesh():
             pg = (
-                current_spmd_mesh().get_group("ep")  # pyrefly: ignore [missing-attribute]
+                current_spmd_mesh().get_group(  # pyrefly: ignore [missing-attribute]
+                    "ep"
+                )
                 if get_spmd_backend() == "spmd_types"
                 else self.ep_mesh.get_group()
             )
