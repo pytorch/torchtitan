@@ -6,13 +6,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
-from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
 import torch
 import torch.nn as nn
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from .bucket_storage import ShardedBucketStorage
 from .utils import (
@@ -31,6 +30,7 @@ class _ReshardAfterForwardRecomputeState:
             default=frozenset(),
         )
 
+    @torch.compiler.assume_constant_result
     def is_recomputing(self, bucket_id: int) -> bool:
         """Return whether this bucket is in reshard-after-forward recompute."""
         return bucket_id in self._bucket_ids.get()
@@ -135,7 +135,7 @@ def _compose_with_ac_policy(
 
             ctx.policy_fn = merged_policy
         forward_ctx, recompute_ctx = contexts
-        return forward_ctx, _mark_recompute(
+        return forward_ctx, _MarkRecomputeTorchDispatchMode(
             recompute_ctx,
             recompute_state,
             recompute_bucket_ids,
@@ -154,7 +154,7 @@ def _make_reshard_only_context_fn(
         forward_ctx, recompute_ctx = create_selective_checkpoint_contexts(
             _reshard_after_forward_policy
         )
-        return forward_ctx, _mark_recompute(
+        return forward_ctx, _MarkRecomputeTorchDispatchMode(
             recompute_ctx,
             recompute_state,
             recompute_bucket_ids,
@@ -163,19 +163,45 @@ def _make_reshard_only_context_fn(
     return reshard_only_context_fn
 
 
-@contextmanager
-def _mark_recompute(
-    ctx: Any,
-    recompute_state: _ReshardAfterForwardRecomputeState,
-    recompute_bucket_ids: frozenset[int],
-) -> Generator[None, None, None]:
-    """Mark bucket-specific FlexShard reshard-after-forward recomputation."""
-    token = recompute_state.enter_recompute(recompute_bucket_ids)
-    try:
-        with ctx:
-            yield
-    finally:
-        recompute_state.exit_recompute(token)
+class _MarkRecomputeTorchDispatchMode(TorchDispatchMode):
+    """Context wrapper that marks bucket-specific recomputation during tracing."""
+
+    @classmethod
+    def ignore_compile_internals(cls) -> bool:
+        return True
+
+    def __init__(
+        self,
+        ctx: Any,
+        recompute_state: _ReshardAfterForwardRecomputeState,
+        recompute_bucket_ids: frozenset[int],
+    ) -> None:
+        super().__init__()
+        self.ctx = ctx
+        self.recompute_state = recompute_state
+        self.recompute_bucket_ids = recompute_bucket_ids
+        self._token: Any | None = None
+
+    def __enter__(self) -> _MarkRecomputeTorchDispatchMode:
+        self.ctx.__enter__()
+        self._token = self.recompute_state.enter_recompute(self.recompute_bucket_ids)
+        return super().__enter__()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        suppress = False
+        try:
+            suppress = bool(super().__exit__(exc_type, exc_val, exc_tb))
+        finally:
+            token = self._token
+            self._token = None
+            if token is not None:
+                self.recompute_state.exit_recompute(token)
+            suppress = bool(self.ctx.__exit__(exc_type, exc_val, exc_tb)) or suppress
+        return suppress
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        kwargs = {} if kwargs is None else kwargs
+        return func(*args, **kwargs)
 
 
 def _wrap_module(
