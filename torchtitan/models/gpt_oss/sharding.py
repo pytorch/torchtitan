@@ -36,7 +36,7 @@ _GPT_OSS_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
 
 
 def scaled_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
-    input_layout = dense_activation_placement(tp=spmd.S(-1))
+    input_layout = dense_activation_placement(tp=spmd.S(2))
     out_dst = (
         dense_sequence_parallel_placement()
         if output_sp
