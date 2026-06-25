@@ -747,7 +747,7 @@ class FusedQKVLinear(BaseQKVLinear):
     @spmd.local_map(
         out_types=({"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},) * 3
     )
-    def forward(
+    def forward(  # pyrefly: ignore[bad-override]
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         bs, seqlen, _ = x.shape
