@@ -426,9 +426,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
                 model.to_empty(device=init_device)
                 with torch.no_grad():
-                    # TODO: Change this back to init_weights once
-                    # autoparallel contains the wrap_init_states
-                    cast(BaseModel, model).init_weights(buffer_device=buffer_device)
+                    if config.training.enable_cpu_offload:
+                        # Disable simple_fsdp parametrization during init to
+                        # avoid triggering allgather on every parameter access.
+                        # With CPU offloading, params are CPU tensors on an NCCL
+                        # mesh -- the allgather deadlocks.
+                        from torchtitan.experiments.graph_trainer.simple_fsdp import (
+                            disable_active_parametrization,
+                        )
+                        with disable_active_parametrization():
+                            cast(BaseModel, model).init_weights(
+                                buffer_device=buffer_device
+                            )
+                    else:
+                        cast(BaseModel, model).init_weights(
+                            buffer_device=buffer_device
+                        )
                 model.train()
 
                 self.model_parts = [model]
