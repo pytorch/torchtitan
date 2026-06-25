@@ -322,6 +322,7 @@ class FlexAttention(Module):
                 q_BNLH,
                 k_BNLH,
                 v_BNLH,
+                score_mod=score_mod,  # pyrefly: ignore[unexpected-keyword]
                 block_mask=attention_masks,
                 scale=scale,
                 enable_gqa=enable_gqa,
