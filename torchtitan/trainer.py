@@ -147,16 +147,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "--compile.components."
                 )
 
-            # Pretraining inputs are shaped by TrainingConfig.seq_len when
-            # sequence_parallel is applied
-            if self.parallelism.enable_sequence_parallel:
-                sp_degree = self.parallelism.tensor_parallel_degree
-                if sp_degree > 1 and self.training.seq_len % sp_degree != 0:
-                    raise ValueError(
-                        f"Training sequence length ({self.training.seq_len}) must be "
-                        f"divisible by sequence parallel degree ({sp_degree})."
-                    )
-
         def to_dict(self) -> dict[str, Any]:
             d = {}
             for f in dataclasses.fields(self):
@@ -247,6 +237,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
+
+        # validate dense activation sequence length evenness
+        seq_len_divisor = (
+            parallel_dims.tp if config.parallelism.enable_sequence_parallel else 1
+        ) * (2 * parallel_dims.cp if parallel_dims.cp > 1 else 1)
+        if config.training.seq_len % seq_len_divisor != 0:
+            raise ValueError(
+                f"Training sequence length ({config.training.seq_len}) must be "
+                f"divisible by {seq_len_divisor} for the configured "
+                "sequence/context parallelism."
+            )
+
         # TODO(pianpwk): Transitional until the local-SPMD and full-DTensor
         # backends share one runtime mesh/type mechanism.
         dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
