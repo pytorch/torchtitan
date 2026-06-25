@@ -8,10 +8,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
 from typing import Literal
 
-from torchtitan.components.loss import ChunkedLossWrapper
+from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.config.configs import CompileConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.experiments.graph_trainer.chunked_loss import ChunkedLossWrapperWithParamGrads
+from torchtitan.experiments.graph_trainer.chunked_loss import (
+    ChunkedCELossWithParamGrads,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
@@ -158,8 +160,8 @@ def to_graph_trainer_config(
     # graph_trainer's tracer requires explicit autograd outputs for lm_head
     # params instead of relying on .grad side effects from chunk_loss.backward().
     loss_cfg = d.get("loss")
-    if isinstance(loss_cfg, ChunkedLossWrapper.Config):
-        d["loss"] = ChunkedLossWrapperWithParamGrads.Config(
+    if isinstance(loss_cfg, ChunkedCELoss.Config):
+        d["loss"] = ChunkedCELossWithParamGrads.Config(
             **{f.name: getattr(loss_cfg, f.name) for f in fields(loss_cfg)}
         )
 
