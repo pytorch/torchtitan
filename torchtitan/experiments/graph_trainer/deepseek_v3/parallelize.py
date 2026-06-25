@@ -6,13 +6,9 @@
 
 from torch.fx.traceback import annotate_fn
 
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    CompileConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
@@ -49,7 +45,6 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
     annotate_module_fqns(model)
 
 
-# Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
     model: GraphTrainerDeepSeekV3Model,
     *,
@@ -57,7 +52,7 @@ def parallelize_deepseekv3(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
+    ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
     # TODO: TP currently cannot handle uneven seq_len because we set

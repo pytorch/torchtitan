@@ -1,11 +1,19 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 from __future__ import annotations
 
 import argparse
 import copy
 import gc
+import importlib.util
 import io
 import os
 import posixpath
+from pathlib import Path
 from typing import Any
 
 import fsspec
@@ -13,38 +21,57 @@ import torch
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint._fsspec_filesystem import FsspecReader
 from torch.package import PackageExporter
+
+from torchtitan.experiments.worldmodel.model import WorldModel
+
+from torchtitan.experiments.worldmodel.model_config import model_registry
+from torchtitan.experiments.worldmodel.model_for_inference import WorldModelForInference
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.logging import init_logger, logger
 
-from torchtitan.experiments.worldmodel.model_config import model_registry
-from torchtitan.experiments.worldmodel.model_for_inference import WorldModelForInference
-from torchtitan.experiments.worldmodel.model import WorldModel
-
 
 os.environ.setdefault("NCCL_P2P_DISABLE", "1")
 
-REPORTERV2_HOST = os.getenv("REPORTERV2_HOST", "mkv://data-gen.comma.life:3080/reporterv2")
-STRUCTURED_LOG_DIR = os.getenv("TORCHTITAN_STRUCTURED_LOG_DIR", "./outputs/worldmodel_package_for_inference")
+REPORTERV2_HOST = os.getenv(
+    "REPORTERV2_HOST", "mkv://data-gen.comma.life:3080/reporterv2"
+)
+STRUCTURED_LOG_DIR = os.getenv(
+    "TORCHTITAN_STRUCTURED_LOG_DIR", "./outputs/worldmodel_package_for_inference"
+)
 PACKAGE_NAME = "model.torchpackage"
 
 TORCH_EXPORT_INTERN_MODULES = [
     "torchtitan.config.**",
+    "torchtitan.distributed",
+    "torchtitan.distributed.compile",
+    "torchtitan.distributed.parallel_dims",
+    "torchtitan.distributed.spmd_types",
+    "torchtitan.distributed.utils",
     "torchtitan.experiments.worldmodel.model_for_inference",
     "torchtitan.experiments.worldmodel.model",
     "torchtitan.experiments.worldmodel.schedulers",
     "torchtitan.models.common.attention",
+    "torchtitan.models.common.embedding",
     "torchtitan.models.common.nn_modules",
+    "torchtitan.models.common.rope",
     "torchtitan.observability.**",
     "torchtitan.protocols.**",
     "torchtitan.tools.logging",
     "torchtitan.tools.utils",
+]
+TORCH_EXPORT_STRIP_FUTURE_ANNOTATIONS_MODULES = [
+    "torchtitan.distributed.parallel_dims",
+    "torchtitan.models.common.embedding",
+    "torchtitan.protocols.module",
+    "torchtitan.protocols.model_spec",
 ]
 TORCH_EXPORT_EXTERN_MODULES = [
     "torch.**",
     "torchao.**",
     "numpy.**",
     "einops.**",
+    "spmd_types.**",
     "typing_extensions.**",
     "tyro.**",
     "docstring_parser.**",
@@ -56,6 +83,34 @@ TORCH_EXPORT_EXTERN_MODULES = [
 ]
 TORCH_EXPORT_DENY_MODULES = ["openpilot.**", "cereal", "cereal.**", "capnp", "capnp.**"]
 TORCH_EXPORT_MOCK_MODULES = ["**"]
+TORCH_EXPORT_CONFIG_INIT_SOURCE = """
+import torch
+
+TORCH_DTYPE_MAP = {
+    "float16": torch.float16,
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+}
+
+from .configs import (
+    CommConfig,
+    CompileConfig,
+    DebugConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
+from .configurable import Configurable
+
+__all__ = [
+    "Configurable",
+    "TORCH_DTYPE_MAP",
+    "CompileConfig",
+    "ParallelismConfig",
+    "CommConfig",
+    "TrainingConfig",
+    "DebugConfig",
+]
+""".lstrip()
 
 
 def resolve_checkpoint_path(checkpoint_id: str) -> str:
@@ -73,7 +128,9 @@ def default_output_path(checkpoint_path: str) -> str:
     return posixpath.join(checkpoint_path.rstrip("/"), PACKAGE_NAME)
 
 
-def build_meta_model(model_config: WorldModel.Config, *, dtype: torch.dtype = torch.bfloat16) -> WorldModelForInference:
+def build_meta_model(
+    model_config: WorldModel.Config, *, dtype: torch.dtype = torch.bfloat16
+) -> WorldModelForInference:
     with torch.device("meta"):
         return WorldModelForInference(model_config).to(dtype=dtype).eval()
 
@@ -107,14 +164,19 @@ def model_io_config(model_config: WorldModel.Config) -> WorldModel.Config:
 
 
 def empty_cpu_state_dict(model: torch.nn.Module) -> dict[str, torch.Tensor]:
-    return {name: torch.empty(tensor.shape, dtype=tensor.dtype, device="cpu") for name, tensor in model.state_dict().items()}
+    return {
+        name: torch.empty(tensor.shape, dtype=tensor.dtype, device="cpu")
+        for name, tensor in model.state_dict().items()
+    }
 
 
 def state_dict_nbytes(state_dict: dict[str, torch.Tensor]) -> int:
     return sum(tensor.numel() * tensor.element_size() for tensor in state_dict.values())
 
 
-def load_dcp_model_state_dict(checkpoint_path: str, model_config: WorldModel.Config) -> dict[str, torch.Tensor]:
+def load_dcp_model_state_dict(
+    checkpoint_path: str, model_config: WorldModel.Config
+) -> dict[str, torch.Tensor]:
     model = build_meta_model(model_config)
     state_dict = empty_cpu_state_dict(model)
     dcp.load(
@@ -129,7 +191,11 @@ def convert_state_dict_to_fp8(
     model_config: WorldModel.Config,
     state_dict: dict[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
-    from torchao.quantization import Float8DynamicActivationFloat8WeightConfig, Float8MMConfig, quantize_
+    from torchao.quantization import (
+        Float8DynamicActivationFloat8WeightConfig,
+        Float8MMConfig,
+        quantize_,
+    )
     from torchao.quantization.granularity import PerTensor
 
     model = WorldModelForInference(model_config).to(dtype=torch.bfloat16).eval()
@@ -152,6 +218,27 @@ def torch_save_bytes(obj: Any) -> bytes:
     return buffer.getvalue()
 
 
+def package_source(module_name: str) -> str:
+    spec = importlib.util.find_spec(module_name)
+    if spec is None or spec.origin is None:
+        raise ModuleNotFoundError(module_name)
+    source = Path(spec.origin).read_text()
+    source = source.replace("from __future__ import annotations\n\n", "")
+    if module_name == "torchtitan.distributed.parallel_dims":
+        source = source.replace(") -> ParallelDims:\n", ') -> "ParallelDims":\n')
+    return source
+
+
+def save_source_overrides(exporter: PackageExporter, module_names: list[str]) -> None:
+    exporter.save_source_string(
+        "torchtitan.config",
+        TORCH_EXPORT_CONFIG_INIT_SOURCE,
+        is_package=True,
+    )
+    for module_name in module_names:
+        exporter.save_source_string(module_name, package_source(module_name))
+
+
 def save_torch_package(
     *,
     model: WorldModelForInference,
@@ -166,13 +253,21 @@ def save_torch_package(
         exporter.intern(TORCH_EXPORT_INTERN_MODULES)
         exporter.extern(TORCH_EXPORT_EXTERN_MODULES)
         exporter.deny(TORCH_EXPORT_DENY_MODULES)
+        save_source_overrides(
+            exporter,
+            TORCH_EXPORT_STRIP_FUTURE_ANNOTATIONS_MODULES,
+        )
         exporter.mock(
             TORCH_EXPORT_MOCK_MODULES,
-            exclude=TORCH_EXPORT_INTERN_MODULES + TORCH_EXPORT_EXTERN_MODULES + TORCH_EXPORT_DENY_MODULES,
+            exclude=TORCH_EXPORT_INTERN_MODULES
+            + TORCH_EXPORT_EXTERN_MODULES
+            + TORCH_EXPORT_DENY_MODULES,
         )
         exporter.save_pickle("model", "model.pkl", model)
         exporter.save_pickle("meta", "meta.pkl", meta)
-        exporter.save_binary("assets", "state_dict.pt", torch_save_bytes(model_state_dict))
+        exporter.save_binary(
+            "assets", "state_dict.pt", torch_save_bytes(model_state_dict)
+        )
 
     package_buffer.seek(0)
     return package_buffer.getvalue()
@@ -230,7 +325,9 @@ def export_package(
 ) -> None:
     step = int(posixpath.basename(checkpoint_path.rstrip("/")))
     checkpoint_path = resolve_checkpoint_path(checkpoint_path)
-    output_path = default_output_path(checkpoint_path) if output_path is None else output_path
+    output_path = (
+        default_output_path(checkpoint_path) if output_path is None else output_path
+    )
     sl.set_step(step)
     logger.info("Packaging worldmodel checkpoint step=%s", step)
     logger.info("DCP checkpoint path: %s", checkpoint_path)
@@ -250,13 +347,17 @@ def export_package(
 
     with sl.log_trace_span("worldmodel_package_write"):
         write_bytes(output_path, package)
-    logger.info("Saved %.2f GiB torch package to %s", package_bytes / (1024**3), output_path)
+    logger.info(
+        "Saved %.2f GiB torch package to %s", package_bytes / (1024**3), output_path
+    )
     del package, state_dict
     gc.collect()
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Package worldmodel DCP checkpoints for inference.")
+    parser = argparse.ArgumentParser(
+        description="Package worldmodel DCP checkpoints for inference."
+    )
     parser.add_argument("checkpoint_path")
     parser.add_argument("output_path", nargs="?", default=None)
     parser.add_argument("--flavor", default="base")
@@ -266,7 +367,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     init_logger()
-    sl.init_structured_logger(source="worldmodel_package_for_inference", output_dir=STRUCTURED_LOG_DIR)
+    sl.init_structured_logger(
+        source="worldmodel_package_for_inference", output_dir=STRUCTURED_LOG_DIR
+    )
     with sl.log_trace_span("worldmodel_package_total"):
         export_package(
             checkpoint_path=args.checkpoint_path,

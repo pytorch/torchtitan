@@ -10,3 +10,4 @@ tokenizers >= 0.15.0
 safetensors
 einops
 pillow
+spmd_types==0.2.1

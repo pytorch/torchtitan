@@ -11,12 +11,12 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 from torchtitan.components.tokenizer import NoOpTokenizer
 from torchtitan.config import (
-    ActivationCheckpointConfig,
     CompileConfig,
     DebugConfig,
     ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.common import Embedding, LayerNorm, Linear
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.protocols.model_spec import ModelSpec
@@ -151,7 +151,7 @@ def _path(flavor: str) -> PathTrainer.Config:
             interval=validation_freq,
         ),
         fps=fps,
-        activation_checkpoint=ActivationCheckpointConfig(mode="full"),
+        activation_checkpoint=FullAC.Config(),
         compile=CompileConfig(enable=True, components=["model"]),
         metrics=MetricsProcessor.Config(log_freq=16, enable_reporterv2=True, save_freq=validation_freq),
         validator=PathValidator.Config(

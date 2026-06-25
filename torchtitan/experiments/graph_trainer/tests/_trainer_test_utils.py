@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components.loss import CrossEntropyLoss
-from torchtitan.config import ActivationCheckpointConfig
+from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.distributed.utils import get_train_context
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.trainer import Trainer
@@ -33,7 +33,7 @@ def build_minimal_trainer(
     trainer.model_parts = [model]
     trainer.loss_fn = CrossEntropyLoss.Config().build()
     trainer.parallel_dims = SimpleNamespace(pp_enabled=False, cp_enabled=False)
-    trainer.train_context = get_train_context(False)
+    trainer.train_context = get_train_context()
     trainer.model_config = model_config
     trainer.device = torch.device("cuda")
     trainer.tokenizer = tokenizer
@@ -51,28 +51,29 @@ def build_minimal_trainer(
                 inductor_compilation="regional",
                 numerics_changing_optim=compile_numerics_changing_optim,
                 disable_passes=[],
-                enable_fsdp_ag_rs_overlap=False,
                 debug_graph_passes=False,
                 cpu_offload_prefetch_n_layers=1,
                 cpu_offload_defer_n_layers=1,
                 cpu_offload_budget_gb=100.0,
             ),
             model_spec=SimpleNamespace(model=model_config),
-            activation_checkpoint=ActivationCheckpointConfig(
-                mode=activation_checkpoint_mode
-            ),
+            activation_checkpoint={
+                "none": None,
+                "selective": SelectiveAC.Config(),
+                "full": FullAC.Config(),
+            }[activation_checkpoint_mode],
             parallelism=SimpleNamespace(
                 pipeline_parallel_degree=1,
                 fsdp_reshard_after_forward=fsdp_reshard_after_forward,
                 enable_async_tensor_parallel=False,
-                full_dtensor=False,
+                spmd_backend="default",
             ),
         )
         trainer._fwd_bwd_step_module = None
         trainer._traced_step = None
     else:
         trainer.config = SimpleNamespace(
-            parallelism=SimpleNamespace(full_dtensor=False),
+            parallelism=SimpleNamespace(spmd_backend="default"),
         )
 
     return trainer

@@ -11,6 +11,11 @@ on:
         description: 'Override default (linux.g5.48xlarge.nvidia.gpu) CUDA runner label'
         required: false
         type: string
+      gpu-arch:
+        description: "Restrict the matrix to a single GPU arch ('cuda' or 'rocm'); 'all' (default) keeps both."
+        required: false
+        type: string
+        default: all
       is-experimental:
         description: 'Check if the workflow is experimental'
         required: false
@@ -18,7 +23,7 @@ on:
         default: false
     outputs:
       matrix:
-        description: dynamically set matrix
+        description: dynamically set matrix, narrowed to the gpu-arch input (both CUDA and ROCm when 'all')
         value: ${{ jobs.set.outputs.matrix }}
       docker-hash:
         description: Git tree hash of .ci/docker, used to build the OSDC image tag
@@ -61,24 +66,6 @@ jobs:
           ROCM_RUNNER="${ROCM_RUNNER_INPUT:-$DEFAULT_ROCM_RUNNER}"
           CUDA_RUNNER="${CUDA_RUNNER_INPUT:-$DEFAULT_CUDA_RUNNER}"
 
-          # Define ROCm matrix (empty for experimental workflows)
-          if [[ "${{ inputs.is-experimental }}" == "true" ]]; then
-            ROCM_MATRIX=""
-          else
-            ROCM_MATRIX="$(cat <<EOF
-          {
-            "name": "rocm",
-            "runner": "${ROCM_RUNNER}",
-            "gpu-arch-type": "rocm",
-            "gpu-arch-version": "7.1",
-            "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
-            "index-url": "https://download.pytorch.org/whl/nightly/rocm7.1",
-            "torch-version": ""
-          }
-          EOF
-          )"
-          fi
-
           # Define CUDA matrix
           CUDA_MATRIX="$(cat <<EOF
           {
@@ -93,6 +80,27 @@ jobs:
           EOF
           )"
 
+          # Define ROCm matrix. ``is-experiment`` means the workflow has
+          # not opted into ROCm validation, so keep these jobs CUDA-only.
+          if [[ "${{ inputs.is-experimental }}" == "true" ]]; then
+            ROCM_MATRIX=""
+            FULL_MATRIX="$CUDA_MATRIX"
+          else
+            ROCM_MATRIX="$(cat <<EOF
+          {
+            "name": "rocm",
+            "runner": "${ROCM_RUNNER}",
+            "gpu-arch-type": "rocm",
+            "gpu-arch-version": "7.2",
+            "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
+            "index-url": "https://download.pytorch.org/whl/nightly/rocm7.2",
+            "torch-version": ""
+          }
+          EOF
+          )"
+            FULL_MATRIX="$CUDA_MATRIX,$ROCM_MATRIX"
+          fi
+
           # Use default value as 'false' for unset environment variables
           IS_MAIN_PUSH="${IS_MAIN_PUSH:-false}"
           IS_SCHEDULE="${IS_SCHEDULE:-false}"
@@ -100,8 +108,8 @@ jobs:
           TRIGGERED_8GPU_LABEL="${TRIGGERED_8GPU_LABEL:-false}"
 
           # Decide which matrix entries to include based on event type
-          # Runs ROCm only for push tag OR when PR label gets triggered
-          if [[ "$IS_8GPU_TAG" == "true" || "$TRIGGERED_8GPU_LABEL" == "true" ]]; then
+          # Runs ROCm only for push tag OR when PR label gets triggered.
+          if [[ ( "$IS_8GPU_TAG" == "true" || "$TRIGGERED_8GPU_LABEL" == "true" ) && -n "$ROCM_MATRIX" ]]; then
             cat > matrix.json <<JSON
           {"include": [$ROCM_MATRIX]}
           JSON
@@ -109,15 +117,35 @@ jobs:
           # Runs CUDA and ROCm for normal PR (if PR label is present) OR for push to main, cron schedule
           elif [[ ("$IS_MAIN_PUSH" == "true" || "$IS_SCHEDULE" == "true") ]]; then
             cat > matrix.json <<JSON
-          {"include": [$CUDA_MATRIX,$ROCM_MATRIX]}
+          {"include": [$FULL_MATRIX]}
           JSON
 
-          # Runs CUDA only as default (includes normal PR, if PR label is NOT present)
+          # Runs CUDA only as default. This includes normal PRs without the
+          # 8GPU label and experimental labeled PRs where ROCm is disabled.
           else
             cat > matrix.json <<JSON
           {"include": [$CUDA_MATRIX]}
           JSON
           fi
+
+          # Optionally narrow the matrix to a single GPU arch. Each consuming
+          # workflow runs one arch on its own reusable workflow (the H100 CUDA
+          # workflow on linux_job_v3, the ROCm workflow on linux_job_v2 -- ROCm
+          # must stay on v2 because v3 does not authenticate ROCm runners to the
+          # private ECR). 'all' (the default) keeps both for the workflows that
+          # run a single combined linux_job_v2 job.
+          GPU_ARCH="${{ inputs.gpu-arch }}"
+          case "${GPU_ARCH:-all}" in
+            all) ;;
+            cuda|rocm)
+              jq -c --arg arch "$GPU_ARCH" '{include: [.include[] | select(.["gpu-arch-type"] == $arch)]}' matrix.json > matrix.filtered.json
+              mv matrix.filtered.json matrix.json
+              ;;
+            *)
+              echo "::error::Invalid gpu-arch '${GPU_ARCH}'. Expected one of: all, cuda, rocm." >&2
+              exit 1
+              ;;
+          esac
 
           # Export matrix to job outputs
           {

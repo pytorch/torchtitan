@@ -22,11 +22,12 @@ from .attention import (
     VarlenMetadata,
 )
 from .decoder import Decoder, TransformerBlock
+from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .moe import MoE
 from .nn_modules import (
+    Conv1d,
     Conv2d,
-    Embedding,
     GELU,
     GroupNorm,
     Identity,
@@ -35,15 +36,13 @@ from .nn_modules import (
     RMSNorm,
     SiLU,
 )
-from .rope import (
-    apply_rotary_emb_complex,
-    apply_rotary_emb_cos_sin,
-    apply_rotary_emb_single_complex,
-    RoPE,
-)
+from .rope import ComplexRoPE, CosSinRoPE, RoPE
 
 __all__ = [
+    "Conv1d",
     "Conv2d",
+    "ComplexRoPE",
+    "CosSinRoPE",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
     "Decoder",
@@ -72,8 +71,5 @@ __all__ = [
     "TransformerBlock",
     "VarlenAttention",
     "VarlenMetadata",
-    "apply_rotary_emb_complex",
-    "apply_rotary_emb_cos_sin",
-    "apply_rotary_emb_single_complex",
     "compute_ffn_hidden_dim",
 ]

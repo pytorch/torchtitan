@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 from __future__ import annotations
 
 import os
@@ -7,22 +13,28 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import (
-    ActivationCheckpointConfig,
     CompileConfig,
     DebugConfig,
     ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.distributed.activation_checkpoint import FullAC
 
-from .dataset_config import BASE_DIR_GT_10M, DEFAULT_10M_TRAIN_LIST, FEATURE_DIR, IMAGE_SIZE, _dataloader_config
+from .dataset_config import (
+    _dataloader_config,
+    BASE_DIR_GT_10M,
+    DEFAULT_10M_TRAIN_LIST,
+    FEATURE_DIR,
+    IMAGE_SIZE,
+)
 from .loss import WorldModelLoss
 from .model_config import (
+    _blocks_only_float8,
     COMPRESSOR_MODEL,
     LATENT_CHANNELS,
     LATENT_SIZE,
-    WORLD_MODEL_FLOAT8_FILTER_FQNS,
-    _blocks_only_float8,
     model_registry,
+    WORLD_MODEL_FLOAT8_FILTER_FQNS,
 )
 from .tokenizer import WorldModelTokenizer
 from .trainer import WorldModelTrainer, WorldModelValidator
@@ -67,7 +79,8 @@ def worldmodel() -> WorldModelTrainer.Config:
             "base",
             converters=[
                 _blocks_only_float8(
-                    model_compile_enabled=compile_config.enable and "model" in compile_config.components,
+                    model_compile_enabled=compile_config.enable
+                    and "model" in compile_config.components,
                 )
             ],
         ),
@@ -99,7 +112,7 @@ def worldmodel() -> WorldModelTrainer.Config:
             expert_parallel_degree=1,
             enable_sequence_parallel=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(mode="full"),
+        activation_checkpoint=FullAC.Config(),
         compile=compile_config,
         metrics=MetricsProcessor.Config(
             log_freq=16,
@@ -143,7 +156,11 @@ def worldmodel() -> WorldModelTrainer.Config:
 def _world_sizes() -> tuple[int, int, int]:
     local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
     world_size = int(os.environ.get("WORLD_SIZE", str(local_world_size)))
-    num_nodes = int(os.environ.get("GROUP_WORLD_SIZE", str(max(1, world_size // max(1, local_world_size)))))
+    num_nodes = int(
+        os.environ.get(
+            "GROUP_WORLD_SIZE", str(max(1, world_size // max(1, local_world_size)))
+        )
+    )
     return local_world_size, world_size, num_nodes
 
 

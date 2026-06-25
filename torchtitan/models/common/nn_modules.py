@@ -23,6 +23,33 @@ import torch.nn as nn
 from torchtitan.protocols.module import Module
 
 
+class Conv1d(nn.Conv1d, Module):
+    """Configurable nn.Conv1d."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        in_channels: int
+        out_channels: int
+        kernel_size: int
+        stride: int = 1
+        padding: int = 0
+        groups: int = 1
+        # Matches the upstream ``nn.Conv1d`` default (differs from
+        # ``Linear.Config.bias``, which defaults to False).
+        bias: bool = True
+
+    def __init__(self, config: Config):
+        super().__init__(
+            config.in_channels,
+            config.out_channels,
+            config.kernel_size,
+            stride=config.stride,
+            padding=config.padding,
+            groups=config.groups,
+            bias=config.bias,
+        )
+
+
 class Conv2d(nn.Conv2d, Module):
     """Configurable nn.Conv2d."""
 
@@ -46,18 +73,6 @@ class Conv2d(nn.Conv2d, Module):
             padding=config.padding,
             bias=config.bias,
         )
-
-
-class Embedding(nn.Embedding, Module):
-    """Configurable nn.Embedding."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        num_embeddings: int
-        embedding_dim: int
-
-    def __init__(self, config: Config):
-        super().__init__(config.num_embeddings, config.embedding_dim)
 
 
 class GELU(nn.GELU, Module):
@@ -162,8 +177,8 @@ class SiLU(nn.SiLU, Module):
 
 
 __all__ = [
+    "Conv1d",
     "Conv2d",
-    "Embedding",
     "GELU",
     "GroupNorm",
     "Identity",

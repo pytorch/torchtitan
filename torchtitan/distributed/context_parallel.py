@@ -78,7 +78,7 @@ def apply_cp_to_forward(
             original_forward = mod.forward
 
             def _make_cp_forward(orig_fn, mesh):
-                placement = [Shard(2)]
+                placement = [Shard(1)]
 
                 def cp_forward(q, k, v, **kwargs):
                     if not isinstance(q, DTensor):

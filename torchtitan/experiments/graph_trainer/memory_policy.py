@@ -22,7 +22,7 @@ from collections.abc import Callable
 import torch
 from torch.utils.checkpoint import CheckpointPolicy
 
-from torchtitan.distributed.activation_checkpoint import _get_save_ops
+from torchtitan.distributed.activation_checkpoint import _get_default_save_ops
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_layer_id,
@@ -50,7 +50,7 @@ def _make_default_memory_policy(
 ) -> Callable:
     """Create a SAC policy function from a set of op targets to save."""
     if save_ops is None:
-        save_ops = _get_save_ops()
+        save_ops = _get_default_save_ops()
         if not fsdp_reshard_after_forward:
             save_ops.add(torch.ops._c10d_functional.all_gather_into_tensor.default)
 
@@ -98,7 +98,7 @@ def _make_eager_memory_policy(save_ops: set | None = None) -> Callable:
     alternation pattern, just like eager AC's per-layer checkpoint_wrapper.
     """
     if save_ops is None:
-        save_ops = _get_save_ops()
+        save_ops = _get_default_save_ops()
     mm_ops = {torch.ops.aten.mm.default, torch.ops.aten.linear.default}
     mm_count = 0
     current_layer = None
@@ -178,6 +178,15 @@ def tag_sac_policy(
             parent = node.args[0]
             if isinstance(parent, torch.fx.Node) and "recompute" in parent.meta:
                 node.meta["recompute"] = parent.meta["recompute"]
+            continue
+
+        # Always save sym-int nodes (shape reads like sym_size/sym_stride, and
+        # tensor->int scalar conversions) rather than recompute them: recomputing
+        # a shape read pins the parent tensor alive in backward just to reread its
+        # size. We key off meta["val"] being a SymInt -- mirroring AOT Autograd's
+        # partitioner, which saves SymInts (cheap scalars) but never SymFloats.
+        if "val" in node.meta and isinstance(node.meta["val"], torch.SymInt):
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
             continue
 
         # NOTE: The eager SAC policy (activation_checkpoint.py) alternates
@@ -294,7 +303,8 @@ def _sac_and_offload_memory_policy_pass(
     """SAC + CPU offload: apply default SAC, then offload within budget."""
     _default_memory_policy_pass(gm, config=config)
     tag_all_offloadable_activations(
-        gm, cpu_budget_gb=config.compile.cpu_offload_budget_gb
+        gm,
+        cpu_budget_gb=config.compile.cpu_offload_budget_gb,
     )
     return gm
 

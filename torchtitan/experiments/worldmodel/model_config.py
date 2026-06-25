@@ -1,15 +1,21 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 from __future__ import annotations
 
 from collections.abc import Callable
+from xx.common.compressor_helpers import COMPRESSOR_STATS
 
 from torchtitan.components.optimizer import register_float8_precompute_scale_hook
 from torchtitan.components.quantization import Float8LinearConverter
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
-from xx.common.compressor_helpers import COMPRESSOR_STATS
 
-from .model import TransformerConfig, WorldModel, parallelize_worldmodel
+from .model import parallelize_worldmodel, TransformerConfig, WorldModel
 
 
 COMPRESSOR_MODEL = "c04337f8-b83f-4e34-b07a-5f7396978d67"
@@ -57,7 +63,7 @@ def _worldmodel_configs() -> dict[str, Callable[[], WorldModel.Config]]:
 
 def _debug_model_config() -> WorldModel.Config:
     return _model_config(
-        input_size=(10, 4, 4),
+        input_size=(15, 4, 4),
         patch_size=(1, 2, 2),
         hidden=128,
         heads=4,
@@ -70,7 +76,7 @@ def _debug_model_config() -> WorldModel.Config:
 
 def _model_config(
     *,
-    input_size: tuple[int, int, int] = (10, *LATENT_SIZE),
+    input_size: tuple[int, int, int] = (15, *LATENT_SIZE),
     patch_size: tuple[int, int, int] = (1, 2, 2),
     hidden: int = 2304,
     heads: int = 36,
@@ -126,7 +132,9 @@ def _model_config(
     )
 
 
-def _blocks_only_float8(*, model_compile_enabled: bool, emulate: bool = False) -> Float8LinearConverter.Config:
+def _blocks_only_float8(
+    *, model_compile_enabled: bool, emulate: bool = False
+) -> Float8LinearConverter.Config:
     return Float8LinearConverter.Config(
         recipe_name="tensorwise",
         filter_fqns=WORLD_MODEL_FLOAT8_FILTER_FQNS,
