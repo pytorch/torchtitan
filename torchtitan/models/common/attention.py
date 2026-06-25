@@ -20,6 +20,8 @@ import spmd_types as spmd
 
 import torch
 import torch.nn.functional as F
+from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
@@ -757,17 +759,42 @@ class FusedQKVLinear(BaseQKVLinear):
                     qkv, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None, None)
                 )
 
-        # torch.split returns contiguous views for size-1 splits (xk, xv).
-        # xq (size heads_per_kv) is non-contiguous; reshape triggers a copy.
-        xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
-        xq = xq.reshape(bs, seqlen, -1, self.head_dim)
-        xk = xk.reshape(bs, seqlen, -1, self.head_dim)
-        xv = xv.reshape(bs, seqlen, -1, self.head_dim)
-        return xq, xk, xv
+        hpk, hd = self.heads_per_kv, self.head_dim
+
+        def _split(t):
+            # Use the (possibly local) tensor's own B/L so this is correct both
+            # for a plain tensor and inside local_map, where ``t`` is the local
+            # (e.g. CP-sharded) shard rather than the global tensor.
+            b, s = t.shape[0], t.shape[1]
+            xq, xk, xv = torch.split(t, [hpk, 1, 1], dim=-2)
+            # split leaves xk/xv as strided views into the fused buffer; vLLM
+            # attention/KV-cache kernels read raw memory assuming a contiguous
+            # head-major layout, so materialize all three contiguously here.
+            return (
+                xq.reshape(b, s, -1, hd).contiguous(),
+                xk.reshape(b, s, -1, hd).contiguous(),
+                xv.reshape(b, s, -1, hd).contiguous(),
+            )
+
+        if isinstance(qkv, DTensor):
+            # TEMPORARY: run the split on local tensors so its backward (cat)
+            # does not mix DTensor and plain grads under CP+PP. The asymmetric
+            # q vs k/v paths (RoPE on q/k; CP all-gathers k/v) otherwise feed
+            # cat() inconsistent grad types in PP's backward metadata inference.
+            # q/k/v reuse qkv's placements (symmetric at the split: TP shards the
+            # head axis, CP shards seq). TODO: remove it after spmd_types/full_dtensor
+            _split = local_map(
+                _split,
+                out_placements=(qkv.placements,) * 3,
+                in_placements=(qkv.placements,),
+                in_grad_placements=(qkv.placements,),
+                device_mesh=qkv.device_mesh,
+            )
+        return _split(qkv)
 
     @staticmethod
     def _split_qkv_on_save(module, state_dict, prefix, local_metadata) -> None:
-        """Split fused ``wqkv`` into stock ``wq.weight``/``wk.weight``/``wv.weight``."""
+        """Split fused ``wqkv`` into stock ``wq``/``wk``/``wv`` (weight and bias)."""
         hd, hpk, r = module.head_dim, module.heads_per_kv, module.r_dim
 
         for param, ndim in (("weight", 4), ("bias", 3)):
@@ -790,7 +817,7 @@ class FusedQKVLinear(BaseQKVLinear):
 
     @staticmethod
     def _merge_qkv_on_load(module, state_dict, prefix, *args) -> None:
-        """Merge stock ``wq.weight``/``wk.weight``/``wv.weight`` back into ``wqkv``."""
+        """Merge stock ``wq``/``wk``/``wv`` back into fused ``wqkv`` (weight and bias)."""
         hd, hpk = module.head_dim, module.heads_per_kv
 
         for param, ndim in (("weight", 4), ("bias", 3)):

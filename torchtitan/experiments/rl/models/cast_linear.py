@@ -89,7 +89,7 @@ class LMHeadCastConverter(ModelConfigConverter):
     def __init__(self, config: Config):
         self.config = config
 
-    def convert(self, model_config) -> None:
+    def convert(self, model_config):
         found = False
         for fqn, linear_config, parent, attr in model_config.traverse(Linear.Config):
             if fqn.rsplit(".", 1)[-1] != self._TARGET:
@@ -111,3 +111,4 @@ class LMHeadCastConverter(ModelConfigConverter):
                 "model config. The torchtitan decoder names its output projection "
                 f"{self._TARGET!r} (see torchtitan/models/common/decoder.py)."
             )
+        return model_config

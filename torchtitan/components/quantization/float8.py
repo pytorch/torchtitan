@@ -143,9 +143,9 @@ class Float8LinearConverter(QuantizationConverter):
 
         self.enabled = True
 
-    def convert(self, model_config) -> None:
+    def convert(self, model_config):
         if not self.enabled:
-            return
+            return model_config
 
         assert Float8Linear is not None
         for fqn, linear_config, parent, attr in model_config.traverse(Linear.Config):
@@ -157,12 +157,15 @@ class Float8LinearConverter(QuantizationConverter):
                     param_init=linear_config.param_init,
                     _torchao_config=self.torchao_config,
                 )
-                if isinstance(parent, list):
+                if parent is None:
+                    model_config = new_config
+                elif isinstance(parent, list):
                     parent[attr] = new_config
                 else:
                     setattr(parent, attr, new_config)
 
         logger.info("Swapped to Float8Linear layers")
+        return model_config
 
 
 _float8_experts_cache: dict[type, type] = {}
@@ -228,7 +231,7 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
                 "enable it with --compile.enable"
             )
 
-    def convert(self, model_config) -> None:
+    def convert(self, model_config):
         for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
             swap_token_dispatcher(config, self.PAD_MULTIPLE)
             base_module_cls = type(config)._owner
@@ -237,7 +240,9 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
             new_config = config_cls(
                 **{f.name: getattr(config, f.name) for f in fields(config)},
             )
-            if isinstance(parent, list):
+            if parent is None:
+                model_config = new_config
+            elif isinstance(parent, list):
                 parent[attr] = new_config
             else:
                 setattr(parent, attr, new_config)
@@ -246,3 +251,4 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
             "Converted GroupedExperts to use dynamic float8 rowwise quantization "
             "with scaled grouped GEMMs"
         )
+        return model_config

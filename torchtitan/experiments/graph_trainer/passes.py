@@ -125,12 +125,15 @@ def compile_time_passes(
     the new PGs). Disable with
     ``--compile.disable_passes reassign_collective_pgs_pass``.
     """
+    from torchtitan.components.loss import ChunkedCELoss
     from torchtitan.experiments.graph_trainer.common_utils import (
         get_default_transformer_block_buckets,
     )
     from torchtitan.models.common.attention import FlexAttention
 
     n_layers = len(config.model_spec.model.layers)
+    loss_config = getattr(config, "loss", None)
+    uses_chunked_loss = isinstance(loss_config, ChunkedCELoss.Config)
     passes: list[Callable] = [
         eliminate_dead_code_pass,
         canonicalize_graph_pass,
@@ -148,7 +151,10 @@ def compile_time_passes(
         reassign_collective_pgs_pass,
         functools.partial(
             joint_transformer_block_bucketing_reordering_pass,
-            module_bucket_plans=get_default_transformer_block_buckets(n_layers),
+            module_bucket_plans=get_default_transformer_block_buckets(
+                n_layers,
+                chunked_loss_enabled=uses_chunked_loss,
+            ),
             # FSDP2 packs buckets in managed parameter order. The traced state
             # FQNs preserve that registration order, unlike graph execution order.
             fsdp_param_module_order=get_fsdp_param_module_order(
