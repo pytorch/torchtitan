@@ -74,6 +74,7 @@ def set_gpt_oss_sharding_config(
     for layer_cfg in config.layers:
         _set_gpt_oss_layer_sharding(layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep)
 
+
 def _set_gpt_oss_layer_sharding(
     layer_cfg: "GptOssTransformerBlock.Config",
     *,
