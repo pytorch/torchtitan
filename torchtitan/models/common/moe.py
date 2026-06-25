@@ -350,11 +350,15 @@ class MoE(Module):
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None
+        # TODO(pianpwk): Remove this once MoE combine can derive the local
+        # sequence shape directly from the input layout.
+        seq_dim_tp_sharded: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
 
         num_experts = config.num_experts
+        self.seq_dim_tp_sharded = config.seq_dim_tp_sharded
         self.experts = config.experts.build()
         self.router = config.router.build()
         self.shared_experts = (
@@ -397,40 +401,40 @@ class MoE(Module):
         operates on DTensors — the DTensor→local conversion happens at
         the GroupedExperts boundary.
         """
-        B, L, D = x_BLD.shape
-        sp_size = getattr(self.experts.token_dispatcher, "sp_size", 1)
         # ---------------------------------------------------------------------
         # TODO: Temporary workaround for #3622. Remove it once short-sequence
         # routing counts can remain Partial.
         # Real padding when seq_len < sp_size: EP routes over sequence-parallel
         # token shards. A sequence shorter than ``sp_size`` cannot shard across
         # all SP ranks, so physically pad to ``sp_size`` and trim before returning.
-        seq_pad = sp_size - L if L < sp_size else 0
-        if seq_pad:
-            if self.training:
-                raise ValueError(
-                    "MoE short-sequence padding for L < sp_size: "
-                    f"got L={L}, sp_size={sp_size} while the module is in training mode."
-                )
-            x_BLD = F.pad(x_BLD, (0, 0, 0, seq_pad))
-            L = L + seq_pad
+        # Virtual padding then pads each batch's sequence length up to a multiple
+        # of ``sp_size`` without materializing padded tokens.
+        B, L, D = x_BLD.shape
+        sp_size = getattr(self.experts.token_dispatcher, "sp_size", 1)
+        if not isinstance(x_BLD, DTensor) and self.seq_dim_tp_sharded:
+            # Local dense activation with SP enabled guarantees even CP*TP
+            # sequence sharding, so L is already the local TP sequence length
+            # to use for combine indexing.
+            seq_pad = 0
+            seq_dim_pad_tokens = 0
+            num_local_tokens_after_seq_dim_padding = B * L
+        else:
+            # This covers default/full_dtensor, plus spmd_types inference
+            # where CP/SP are off and local sequence length equals global
+            # sequence length. Compute the local TP stride from the unsplit
+            # MoE-region sequence length.
+            seq_pad = sp_size - L if L < sp_size else 0
+            if seq_pad:
+                x_BLD = F.pad(x_BLD, (0, 0, 0, seq_pad))
+                L = L + seq_pad
+            seq_dim_pad_tokens = (-L) % sp_size
+            local_batch_size = (
+                x_BLD._local_tensor.shape[0] if isinstance(x_BLD, DTensor) else B
+            )
+            num_local_tokens_after_seq_dim_padding = (
+                local_batch_size * (L + seq_dim_pad_tokens) // sp_size
+            )
         # ---------------------------------------------------------------------
-
-        # Virtual padding: pad each batch's (post real-pad) sequence length up to
-        # a multiple of ``sp_size`` so combine() can infer per-rank offsets from a
-        # uniform shard length.
-        seq_dim_pad_tokens = (-L) % sp_size
-        # Padding is logically appended to the sequence tail of each batch,
-        # not to a specific SP rank. This lets combine() infer each SP rank's
-        # start/end offsets from the uniform padded shard length; for example,
-        # if L < sp_size, only the first L ranks have real tokens. No padded
-        # token is materialized or routed.
-        local_batch_size = (
-            x_BLD._local_tensor.shape[0] if isinstance(x_BLD, DTensor) else B
-        )
-        num_local_tokens_after_seq_dim_padding = (
-            local_batch_size * (L + seq_dim_pad_tokens) // sp_size
-        )
 
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # scores_BLE shape (B, L, E)
@@ -464,7 +468,9 @@ class MoE(Module):
             topk_scores_BLK,
             topk_expert_ids_BLK,
             num_local_tokens_per_expert_E,
-            num_local_tokens_after_seq_dim_padding=num_local_tokens_after_seq_dim_padding,
+            num_local_tokens_after_seq_dim_padding=(
+                num_local_tokens_after_seq_dim_padding
+            ),
         )
 
         # shared_experts runs in parallel with deepep combine communication.
