@@ -72,6 +72,7 @@ def apply_attention_sink_rescale(
     sink_scale = torch.sigmoid(lse - sinks).unsqueeze(-1)
     return out * sink_scale.to(out.dtype)
 
+
 class Attention(BaseAttention):
     """
     Multi-head attention (MLA) module with sink attention.
