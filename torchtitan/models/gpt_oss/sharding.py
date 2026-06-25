@@ -74,27 +74,6 @@ def set_gpt_oss_sharding_config(
     for layer_cfg in config.layers:
         _set_gpt_oss_layer_sharding(layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep)
 
-
-def scaled_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
-    input_layout = dense_activation_placement(tp=spmd.S(-1))
-    out_dst = (
-        dense_sequence_parallel_placement()
-        if output_sp
-        else dense_activation_placement(tp=spmd.I)
-    )
-    return ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(1)),
-            "bias": dense_param_placement(tp=spmd.R),
-        },
-        in_src_shardings={"input": input_layout},
-        in_dst_shardings={"input": input_layout},
-        out_src_shardings=dense_activation_placement(tp=spmd.P),
-        out_dst_shardings=out_dst,
-        local_map=LocalMapConfig(in_grad_placements=(input_layout,)),
-    )
-
-
 def _set_gpt_oss_layer_sharding(
     layer_cfg: "GptOssTransformerBlock.Config",
     *,
