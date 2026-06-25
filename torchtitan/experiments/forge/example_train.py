@@ -243,7 +243,7 @@ class Trainer(ForgeEngine):
                 assert len(model_parts) == 1
                 pred = model_parts[0](inputs, **extra_kwargs)
                 # Compute loss sum (reduction='sum')
-                loss_sum, _ = self.loss_fn(pred, labels)
+                loss_sum = self.loss_fn(pred, labels)
 
                 # Scale the loss by the inverse of the total weight denominator before backward
                 # This ensures gradients are properly normalized across all microbatches
