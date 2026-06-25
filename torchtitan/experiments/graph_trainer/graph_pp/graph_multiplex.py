@@ -229,6 +229,8 @@ def _copy_prefixed_get_attrs(
 def multiplex_fw_bw_graph(
     fw_gm: fx.GraphModule,
     bw_gm: fx.GraphModule,
+    *,
+    overlap: bool = False,
 ) -> fx.GraphModule:
     """Concatenate backward and forward graphs into one boxed GraphPP callable.
 
@@ -245,6 +247,9 @@ def multiplex_fw_bw_graph(
       copy backward get_attr targets with a prefix to avoid attr collisions
       copy backward compute nodes before the forward compute nodes
       replace the output tuple with backward outputs followed by forward outputs
+
+    ``overlap`` is reserved for future DualPipeV scheduling work; the current
+    placeholder does not change graph construction.
 
     The forward graph remains the destination module because its ShapeEnv owns
     the dynamic collective-size constraints needed by full Inductor for MoE
