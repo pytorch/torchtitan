@@ -28,6 +28,29 @@ class ChunkedCELossWithParamGrads(ChunkedCELoss):
     class Config(ChunkedCELoss.Config):
         pass
 
+    def _stash_lm_head_param_grads(
+        self,
+        lm_head: nn.Module,
+        requires_grad: bool,
+    ) -> tuple[torch.Tensor | None, ...] | None:
+        if not requires_grad:
+            return None
+        stashed_grads = tuple(p.grad for p in lm_head.parameters())
+        for p in lm_head.parameters():
+            p.grad = None
+        return stashed_grads
+
+    def _restore_lm_head_param_grads(
+        self,
+        lm_head: nn.Module,
+        stashed_grads: object,
+    ) -> None:
+        if stashed_grads is None:
+            return
+        assert isinstance(stashed_grads, tuple)
+        for param, grad in zip(lm_head.parameters(), stashed_grads, strict=True):
+            param.grad = grad
+
     @staticmethod
     def _gradient_backprop(
         hidden_states: torch.Tensor,

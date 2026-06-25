@@ -146,6 +146,7 @@ def to_graph_trainer_config(
     d["model_spec"] = replace(
         base_config.model_spec,
         parallelize_fn=graph_spec.parallelize_fn,
+        pipelining_fn=graph_spec.pipelining_fn,
         model=graph_model,
     )
     d.pop("compile")

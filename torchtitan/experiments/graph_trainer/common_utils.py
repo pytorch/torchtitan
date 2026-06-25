@@ -5,8 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -65,6 +66,36 @@ def build_decoder_config_for_backend(
 
 _MODULE_FQN = "module_fqn"
 _NOT_IN_LAYERS = -1
+
+
+def compute_annotated_loss(
+    loss_fn: Callable[..., torch.Tensor],
+    pred: Any,
+    labels: Any,
+    loss_kwargs: dict[str, Any] | None = None,
+) -> torch.Tensor:
+    """Compute loss with the same FX metadata convention as GraphTrainer."""
+    loss_kwargs = loss_kwargs or {}
+    annotated_loss_fn = annotate_fn({_MODULE_FQN: "loss"})(loss_fn)
+    if set(loss_kwargs) == {"global_valid_tokens"}:
+        return annotated_loss_fn(pred, labels, loss_kwargs["global_valid_tokens"])
+    return annotated_loss_fn(pred, labels, **loss_kwargs)
+
+
+def accumulate_param_grads_(
+    params: Iterable[torch.Tensor],
+    grads: Iterable[torch.Tensor | None],
+    *,
+    strict: bool = True,
+) -> None:
+    """Accumulate explicit graph-produced gradients into live parameters."""
+    for param, grad in zip(params, grads, strict=strict):
+        if grad is None:
+            continue
+        if param.grad is None:
+            param.grad = grad
+        else:
+            param.grad += grad
 
 
 def _is_backward_node(node: torch.fx.Node) -> bool:

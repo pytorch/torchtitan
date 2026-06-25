@@ -194,6 +194,62 @@ def _run_deepseek_v3_loss_compare(test_options_extra: str = "") -> bool:
     )
 
 
+GRAPH_PP_DSV3_PP_OPTIONS = (
+    "--parallelism.pipeline_parallel_degree=2"
+    " --parallelism.data_parallel_shard_degree=4"
+    " --parallelism.expert_parallel_degree=2"
+    " --training.local_batch_size=8"
+    " --training.global_batch_size=32"
+)
+
+
+GRAPH_PP_DSV3_TEST_PARALLELISM = (
+    "--compile.mode aot_fx_trace"
+    " --compile.inductor_compilation regional"
+    f" {GRAPH_PP_DSV3_PP_OPTIONS}"
+)
+
+
+def _graph_pp_deepseek_v3_configs(schedule: str) -> tuple[str, str]:
+    if schedule == "Interleaved1F1B":
+        return (
+            "graph_trainer_deepseek_v3_debugmodel_eager_pp",
+            "graph_trainer_deepseek_v3_debugmodel",
+        )
+    if schedule == "ZBVZeroBubble":
+        # ZBV currently does not work with torch.compile. The default
+        # FlexAttention config compiles FlexAttention and the loss, so compare
+        # GraphPP numerics against the SDPA eager-PP baseline instead.
+        return (
+            "graph_trainer_deepseek_v3_debugmodel_sdpa_eager_pp",
+            "graph_trainer_deepseek_v3_debugmodel_sdpa",
+        )
+    raise ValueError(f"Unsupported GraphPP schedule for numerics: {schedule}")
+
+
+def _run_graph_pp_deepseek_v3_loss_compare(schedule: str) -> bool:
+    """Run bitwise loss_compare for eager PP vs GraphPP with matching backend."""
+    baseline_config, test_config = _graph_pp_deepseek_v3_configs(schedule)
+    baseline_options = (
+        f"{GRAPH_PP_DSV3_PP_OPTIONS}"
+        f" --parallelism.pipeline_parallel_schedule={schedule}"
+    )
+    test_options = (
+        f"{GRAPH_PP_DSV3_TEST_PARALLELISM}"
+        f" --parallelism.pipeline_parallel_schedule={schedule}"
+    )
+    return run_loss_compare(
+        baseline_module="graph_trainer.deepseek_v3",
+        baseline_config=baseline_config,
+        test_module="graph_trainer.deepseek_v3",
+        test_config=test_config,
+        baseline_options=baseline_options,
+        test_options=test_options,
+        baseline_ngpus=8,
+        test_ngpus=8,
+    )
+
+
 QWEN3_PARALLELISM = (
     "--parallelism.tensor_parallel_degree=2"
     " --parallelism.data_parallel_shard_degree=4"
@@ -350,6 +406,11 @@ class TestGraphTrainerNumerics(unittest.TestCase):
                 test_options_extra="--compile.mode aot_fx_trace"
             ),
         )
+
+    def test_graph_pp_moe_dsv3_aot_fx_trace_vs_eager(self):
+        for schedule in ("Interleaved1F1B", "ZBVZeroBubble"):
+            with self.subTest(schedule=schedule):
+                self.assertTrue(_run_graph_pp_deepseek_v3_loss_compare(schedule))
 
     def test_dense_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(

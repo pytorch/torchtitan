@@ -523,6 +523,20 @@ class ChunkedCELoss(BaseLoss):
         """Set the lm_head module. Must be called before the first __call__."""
         self.lm_head = lm_head
 
+    def _stash_lm_head_param_grads(
+        self,
+        lm_head: nn.Module,
+        requires_grad: bool,
+    ) -> object:
+        return None
+
+    def _restore_lm_head_param_grads(
+        self,
+        lm_head: nn.Module,
+        stashed_grads: object,
+    ) -> None:
+        return None
+
     def __call__(
         self,
         pred: torch.Tensor,
@@ -603,6 +617,10 @@ class ChunkedCELoss(BaseLoss):
                         total_loss, axis_name, src=spmd.R, dst=dst
                     )
 
+            stashed_param_grads = self._stash_lm_head_param_grads(
+                lm_head,
+                requires_grad,
+            )
             # Disable FSDP reshard on lm_head to keep weight unsharded across
             # all chunks, avoiding repeated all-gathers. Coalesce per-chunk
             # grad sync into a single reduce-scatter at the last chunk by
@@ -654,9 +672,11 @@ class ChunkedCELoss(BaseLoss):
             accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
         with spmd.no_typecheck():
-            return self._gradient_backprop(
+            loss = self._gradient_backprop(
                 hidden_states, accumulated_grad, total_loss, lm_head, fsdp_enabled
             )
+            self._restore_lm_head_param_grads(lm_head, stashed_param_grads)
+            return loss
 
     @staticmethod
     def _gradient_backprop(

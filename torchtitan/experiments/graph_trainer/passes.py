@@ -110,6 +110,7 @@ def compile_time_passes(
     config: "GraphTrainer.Config",
     *,
     use_cudagraph: bool = False,
+    include_inductor: bool = True,
 ) -> list[Callable]:
     """Cleanup, FlexAttention annotation, and regional_inductor passes.
 
@@ -124,6 +125,10 @@ def compile_time_passes(
     collectives on dedicated process groups / streams (bucketing then inherits
     the new PGs). Disable with
     ``--compile.disable_passes reassign_collective_pgs_pass``.
+
+    ``include_inductor=False`` leaves the graph in FX form after the
+    metadata-preserving passes. GraphPP uses that mode before it calls its
+    standalone partitioner and compiles the extracted graphs.
     """
     from torchtitan.components.loss import ChunkedCELoss
     from torchtitan.experiments.graph_trainer.common_utils import (
@@ -164,6 +169,9 @@ def compile_time_passes(
     ]
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
+
+    if not include_inductor:
+        return passes
 
     inductor_compilation = config.compile.inductor_compilation
     if inductor_compilation == "full":
