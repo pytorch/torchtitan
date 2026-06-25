@@ -9,7 +9,7 @@ from __future__ import annotations
 import fnmatch
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 
 import torch
 import torch.nn as nn
@@ -32,17 +32,42 @@ PlacementFn = Callable[
     dict[str, tuple["Placement", ...]],
 ]
 
+GradientReduceOp = Literal["avg", "sum"]
+
+
+def validate_gradient_reduce_op(op: str) -> GradientReduceOp:
+    if op not in ("avg", "sum"):
+        raise ValueError(
+            "FlexShard gradient_reduce_op must be either 'avg' or 'sum', "
+            f"but got {op!r}."
+        )
+    return cast(GradientReduceOp, op)
+
+
+def gradient_reduce_op_from_infos(infos: list[ParamInfo]) -> GradientReduceOp:
+    if not infos:
+        raise AssertionError("Expected at least one ParamInfo.")
+    op = infos[0].gradient_reduce_op
+    for info in infos[1:]:
+        if info.gradient_reduce_op != op:
+            raise ValueError(
+                "FlexShard requires one gradient_reduce_op per communication "
+                f"bucket, but {infos[0].fqn!r} uses {op!r} and {info.fqn!r} "
+                f"uses {info.gradient_reduce_op!r}."
+            )
+    return validate_gradient_reduce_op(op)
+
 
 @dataclass(frozen=True)
 class MixedPrecisionPolicy:
     """Mixed precision policy for FlexShard buckets.
 
     Args:
-        param_dtype: Dtype for forward compute. Parameters are all-gathered
-            in storage dtype, then cast to param_dtype. If None, no cast.
-        reduce_dtype: Dtype for gradient reduction. Gradients are cast to
-            this dtype before reduce-scatter. If None, uses param_dtype
-            (or storage dtype if param_dtype is also None).
+        param_dtype: Dtype for forward compute. Placements should materialize
+            unsharded parameters in this dtype. If None, use storage dtype.
+        reduce_dtype: Dtype for gradient reduction. Placements should pack
+            bucket gradient reduction buffers in this dtype. If None, use
+            param_dtype (or storage dtype if param_dtype is also None).
     """
 
     param_dtype: torch.dtype | None = None
@@ -91,6 +116,10 @@ class BucketSpec:
             behavior when multiple buckets share the same hooked module.
         offload_policy: CPU offload policy for this bucket. TODO: implement
             and test CPU offload before allowing this in flex_shard().
+        gradient_reduce_op: Gradient reduction semantics. ``"avg"`` preserves
+            FlexShard's historical average-gradient behavior. ``"sum"``
+            matches FSDP2's no-gradient-division mode, where the training loop
+            owns global gradient scaling.
         reshard_after_forward: Whether to free this bucket's unsharded
             parameters after forward and recompute them in backward. This
             defaults to True. Buckets that reshard after forward must have
@@ -103,6 +132,7 @@ class BucketSpec:
     mesh: DeviceMesh
     mp_policy: MixedPrecisionPolicy | None = None
     offload_policy: OffloadPolicy | None = None
+    gradient_reduce_op: GradientReduceOp = "avg"
     reshard_after_forward: bool = True
 
 
@@ -135,6 +165,9 @@ class ParamInfo:
     dtype: torch.dtype
     requires_grad: bool
     placements: tuple[Placement, ...]
+    param_dtype: torch.dtype | None = None
+    reduce_dtype: torch.dtype | None = None
+    gradient_reduce_op: GradientReduceOp = "avg"
     local_shape: torch.Size = field(default_factory=lambda: torch.Size([]))
     local_numel: int = 0
     byte_offset: int = 0  # byte offset into the sharded storage
@@ -146,6 +179,16 @@ class ParamInfo:
     def placement(self) -> Placement:
         """The single placement supported by the minimal eager path."""
         return _get_single_placement(self.placements)
+
+    @property
+    def unsharded_dtype(self) -> torch.dtype:
+        """Dtype exposed to module forward for the full parameter."""
+        return self.param_dtype or self.dtype
+
+    @property
+    def grad_reduce_dtype(self) -> torch.dtype:
+        """Dtype used to communicate this parameter's gradient."""
+        return self.reduce_dtype or self.param_dtype or self.dtype
 
 
 class ShardedBucketStorage:
@@ -169,6 +212,7 @@ class ShardedBucketStorage:
         total_bytes: int,
         module: nn.Module,
         reshard_after_forward: bool = True,
+        gradient_reduce_op: GradientReduceOp = "avg",
     ) -> None:
         if byte_storage.dtype != torch.uint8:
             raise ValueError(f"Expected uint8 storage, got {byte_storage.dtype}")
@@ -178,6 +222,9 @@ class ShardedBucketStorage:
         self._total_bytes = total_bytes
         self._module = module
         self._reshard_after_forward = reshard_after_forward
+        self._gradient_reduce_op = validate_gradient_reduce_op(gradient_reduce_op)
+        for info in self._param_infos.values():
+            info.gradient_reduce_op = self._gradient_reduce_op
         self._reshard_after_forward_recompute_state: (
             _ReshardAfterForwardRecomputeState | None
         ) = None
@@ -197,6 +244,8 @@ class ShardedBucketStorage:
             named_params,
             mesh,
             param_placements,
+            bucket_spec.mp_policy,
+            bucket_spec.gradient_reduce_op,
         )
 
         if bucket_spec.offload_policy is not None:
@@ -218,6 +267,7 @@ class ShardedBucketStorage:
             total_bytes,
             module,
             reshard_after_forward=bucket_spec.reshard_after_forward,
+            gradient_reduce_op=bucket_spec.gradient_reduce_op,
         )
         bucket_storage.copy_params_from(named_params)
         bucket_storage.install_sharded_params(expected_param_device)
@@ -229,6 +279,8 @@ class ShardedBucketStorage:
         named_params: list[tuple[str, nn.Parameter]],
         mesh: DeviceMesh,
         param_placements: dict[str, tuple[Placement, ...]],
+        mp_policy: MixedPrecisionPolicy | None = None,
+        gradient_reduce_op: GradientReduceOp = "avg",
     ) -> tuple[dict[str, ParamInfo], int]:
         """
         Create ParamInfo for each parameter, computing local layout and byte offsets.
@@ -252,11 +304,15 @@ class ShardedBucketStorage:
                 named_params,
                 param_placements,
                 bucket_layout,
+                mp_policy,
+                gradient_reduce_op,
             )
         return cls._create_param_infos_from_local_layouts(
             named_params,
             mesh,
             param_placements,
+            mp_policy,
+            gradient_reduce_op,
         )
 
     @classmethod
@@ -265,6 +321,8 @@ class ShardedBucketStorage:
         named_params: list[tuple[str, nn.Parameter]],
         mesh: DeviceMesh,
         param_placements: dict[str, tuple[Placement, ...]],
+        mp_policy: MixedPrecisionPolicy | None,
+        gradient_reduce_op: GradientReduceOp,
     ) -> tuple[dict[str, ParamInfo], int]:
         rank = mesh.get_local_rank()
         world_size = mesh.size()
@@ -294,6 +352,8 @@ class ShardedBucketStorage:
                 local_numel=local_storage_layout.local_numel,
                 byte_offset=byte_offset,
                 storage_nbytes=local_storage_layout.storage_nbytes,
+                mp_policy=mp_policy,
+                gradient_reduce_op=gradient_reduce_op,
             )
 
         return param_infos, current_byte_offset
@@ -342,6 +402,8 @@ class ShardedBucketStorage:
         named_params: list[tuple[str, nn.Parameter]],
         param_placements: dict[str, tuple[Placement, ...]],
         bucket_layout: BucketStorageLayout,
+        mp_policy: MixedPrecisionPolicy | None,
+        gradient_reduce_op: GradientReduceOp,
     ) -> tuple[dict[str, ParamInfo], int]:
         expected_fqns = {fqn for fqn, _ in named_params}
         actual_fqns = set(bucket_layout.param_layouts)
@@ -400,6 +462,8 @@ class ShardedBucketStorage:
                 byte_offset=layout.byte_offset,
                 storage_nbytes=layout.storage_nbytes,
                 bucket_layout=layout.bucket_layout,
+                mp_policy=mp_policy,
+                gradient_reduce_op=gradient_reduce_op,
             )
 
         return param_infos, bucket_layout.total_bytes
@@ -415,12 +479,17 @@ class ShardedBucketStorage:
         byte_offset: int,
         storage_nbytes: int,
         bucket_layout: BucketLayout | None = None,
+        mp_policy: MixedPrecisionPolicy | None = None,
+        gradient_reduce_op: GradientReduceOp = "avg",
     ) -> ParamInfo:
         return ParamInfo(
             fqn=fqn,
             global_shape=param.shape,
             global_stride=tuple(make_contiguous_strides_for(param.shape)),
             dtype=param.dtype,
+            param_dtype=mp_policy.param_dtype if mp_policy is not None else None,
+            reduce_dtype=mp_policy.reduce_dtype if mp_policy is not None else None,
+            gradient_reduce_op=validate_gradient_reduce_op(gradient_reduce_op),
             requires_grad=param.requires_grad,
             placements=placements,
             local_shape=local_shape,
@@ -498,6 +567,18 @@ class ShardedBucketStorage:
     def param_infos(self) -> dict[str, ParamInfo]:
         """Metadata for each parameter."""
         return self._param_infos
+
+    @property
+    def gradient_reduce_op(self) -> GradientReduceOp:
+        """Gradient reduction semantics for this bucket."""
+        return self._gradient_reduce_op
+
+    def set_gradient_reduce_op(self, op: str) -> None:
+        """Set gradient reduction semantics for this bucket and its params."""
+        validated_op = validate_gradient_reduce_op(op)
+        self._gradient_reduce_op = validated_op
+        for info in self._param_infos.values():
+            info.gradient_reduce_op = validated_op
 
     @property
     def world_size(self) -> int:

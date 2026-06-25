@@ -9,15 +9,139 @@ import torch.nn as nn
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard import is_flex_shard_param
+from torchtitan.experiments.flex_shard.flex_shard.bucket_runtime import (
+    _accumulate_sharded_grads,
+    _BucketUnshard,
+    BucketCommContext,
+    ParamOwnerRef,
+)
+from torchtitan.experiments.flex_shard.flex_shard.unsharded_param_getters import (
+    _RafSavedTensorContext,
+)
 from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_cuda,
     flex_shard_transformer_model,
+    make_transformer_model,
     single_rank_cuda_mesh,
     transformer_inputs,
 )
 
 
+class TestRafSavedTensorContext(TestCase):
+    def test_raf_saved_tensor_context_packs_view_of_registered_base(self):
+        class _BaseHandle:
+            def __init__(self, tensor: torch.Tensor) -> None:
+                self.tensor = tensor
+
+            def unpack_raf_saved_tensor(self) -> torch.Tensor:
+                return self.tensor
+
+        class _ParamHandle:
+            def __init__(
+                self,
+                param: torch.Tensor,
+                base: torch.Tensor,
+            ) -> None:
+                self.param = param
+                self.base = base
+
+            def unpack_raf_saved_tensor(self) -> torch.Tensor:
+                return self.param
+
+            def base_handle_for_raf_saved_tensor(
+                self,
+                tensor: torch.Tensor,
+                base: torch.Tensor,
+            ) -> _BaseHandle:
+                self.registered_tensor = tensor
+                self.registered_base = base
+                return _BaseHandle(self.base)
+
+        gathered = torch.arange(4 * 4 * 4, dtype=torch.float32)
+        param = gathered.as_strided(
+            (2, 4, 4),
+            (16, 4, 1),
+            storage_offset=0,
+        )
+        saved_transpose = param.transpose(-2, -1)
+        self.assertIs(saved_transpose._base, gathered)
+        self.assertIsNot(saved_transpose._base, param)
+
+        recomputed_gathered = gathered + 1000
+        recomputed_param = recomputed_gathered.as_strided(
+            param.size(),
+            param.stride(),
+            storage_offset=param.storage_offset(),
+        )
+        handle = _ParamHandle(recomputed_param, recomputed_gathered)
+
+        context = _RafSavedTensorContext()
+        context.register(param, handle)
+
+        packed = context.pack(saved_transpose)
+        self.assertIsNot(packed, saved_transpose)
+        unpacked = context.unpack(packed)
+        expected = recomputed_param.transpose(-2, -1)
+        self.assertEqual(unpacked, expected)
+        self.assertEqual(unpacked.stride(), expected.stride())
+        self.assertIs(handle.registered_tensor, param)
+        self.assertIs(handle.registered_base, gathered)
+
+
 class TestFlexShardEagerRuntime(TestCase):
+    def test_bucket_unshard_backward_releases_raf_saved_unshard_cache(self):
+        class _BucketStorage:
+            _reshard_after_forward = True
+
+        bucket_storage = _BucketStorage()
+        bucket_id = id(bucket_storage)
+
+        class _Context:
+            release_raf_saved_unshard_cache = (
+                BucketCommContext.release_raf_saved_unshard_cache
+            )
+
+            def __init__(self) -> None:
+                self.raf_saved_unshard_cache = {bucket_id: [torch.ones(1)]}
+
+        class _Bucket:
+            pass
+
+        bucket = _Bucket()
+        bucket.context = _Context()
+        bucket.bucket_storage = bucket_storage
+        bucket.bucket_params = []
+
+        ctx = type("_Ctx", (), {})()
+        ctx.runtime = type("_Runtime", (), {"bucket": bucket})()
+        ctx.num_inputs = 0
+        ctx.local_shard_dtypes = ()
+
+        self.assertIn(bucket_id, ctx.runtime.bucket.context.raf_saved_unshard_cache)
+        result = _BucketUnshard.backward(ctx)
+        self.assertEqual(result, (None,))
+        self.assertNotIn(bucket_id, ctx.runtime.bucket.context.raf_saved_unshard_cache)
+
+    def test_accumulate_sharded_grads_matches_param_layout_for_fused_optimizer(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required for fused AdamW.")
+        module = nn.Module().cuda()
+        module.weight = nn.Parameter(torch.randn(4, 3, 2, device="cuda"))
+        base = torch.randn(4, 9, 2, device="cuda")
+        strided_grad = base.as_strided((4, 3, 2), (18, 2, 1))
+
+        stored_grads = _accumulate_sharded_grads(
+            [ParamOwnerRef(module, "weight")],
+            [strided_grad],
+        )
+
+        self.assertIs(module.weight.grad, stored_grads[0])
+        self.assertEqual(module.weight.grad.dtype, module.weight.dtype)
+        self.assertEqual(module.weight.grad.stride(), module.weight.stride())
+
+        optim = torch.optim.AdamW(module.parameters(), lr=1e-3, fused=True)
+        optim.step()
+
     def test_eager_forward_backward_on_cuda_mesh(self):
         with single_rank_cuda_mesh() as mesh:
             args, model = flex_shard_transformer_model(mesh)
@@ -50,6 +174,28 @@ class TestFlexShardEagerRuntime(TestCase):
             self.assertEqual(out, ref_out)
             out.sum().backward()
             self.assertIsNotNone(next(model.parameters()).grad)
+
+    def test_meta_to_empty_materializes_bucket_storage_and_runtime(self):
+        with single_rank_cuda_mesh() as mesh:
+            with torch.device("meta"):
+                args, model = make_transformer_model()
+
+            flex_shard_cuda(model, mesh)
+            for storage in model.sharded_bucket_storages:
+                self.assertEqual(storage.byte_storage.device.type, "meta")
+
+            model.to_empty(device="cuda")
+            for storage in model.sharded_bucket_storages:
+                self.assertEqual(storage.byte_storage.device.type, "cuda")
+            for param in model.parameters():
+                self.assertTrue(is_flex_shard_param(param))
+                nn.init.uniform_(param, -0.1, 0.1)
+
+            loss = model(transformer_inputs(args, device="cuda")).sum()
+            loss.backward()
+
+            for param in model.parameters():
+                self.assertIsNotNone(param.grad)
 
     def test_param_access_outside_forward_raises(self):
         with single_rank_cuda_mesh() as mesh:

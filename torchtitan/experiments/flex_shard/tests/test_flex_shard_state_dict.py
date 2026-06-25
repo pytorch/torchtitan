@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
+from torch.distributed.checkpoint.state_dict import get_model_state_dict
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard.tests.common import (
@@ -31,6 +32,14 @@ def _make_flex_sharded_transformer(mesh, **kwargs):
 
 
 class TestFlexShardStateDict(TestCase):
+    def test_dcp_state_dict_introspection_reads_sharded_params(self):
+        with single_rank_cuda_mesh() as mesh:
+            _, model = _make_flex_sharded_transformer(mesh)
+
+            state_dict = get_model_state_dict(model)
+
+            self.assertIn("tok_embeddings.weight", state_dict)
+
     def test_state_dict_load_round_trip_into_flex_sharded_model(self):
         with single_rank_cuda_mesh() as mesh:
             torch.manual_seed(0)
