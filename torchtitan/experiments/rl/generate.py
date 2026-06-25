@@ -95,6 +95,7 @@ def generate() -> None:
             initial_load_in_hf=True,
             initial_load_path=model_path,
         ),
+        override=config.generator.override,
     )
     logger.info("Registered TorchTitan model with vLLM")
 

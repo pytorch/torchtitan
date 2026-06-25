@@ -65,7 +65,10 @@ def flux_debugmodel() -> FluxTrainer.Config:
                 denoising_steps=4,
             ),
             dataloader=FluxDataLoader.Config(
-                dataset="coco-validation",
+                # Validate on the local cc12m-test asset (no HF download) so CI
+                # does not flake on the network. Production flux_dev/flux_schnell
+                # still validate on the real coco-validation set.
+                dataset="cc12m-test",
                 prompt_dropout_prob=0.0,
                 img_size=256,
                 generate_timesteps=True,
