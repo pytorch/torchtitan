@@ -129,7 +129,9 @@ def _model_config(flavor: str, *, mup: bool, qk_norm: bool = True) -> PlanViT.Co
         patch_size=PATCH_SIZE,
         in_channels=IN_CHANNELS,
         n_embd=n_embd,
-        output_mult=1.0,  # no readout multiplier: the 1/m mult broke output width-stability (coord check)
+        output_mult=(BASE_WIDTH / n_embd)
+        if mup
+        else 1.0,  # muP readout fwd mult 1/m (init output slopes ~1/sqrt(m))
         patch_embed=PatchEmbed.Config(
             proj=_lin(
                 patch_dim, n_embd, std=patch_dim**-0.5
@@ -149,7 +151,9 @@ def _model_config(flavor: str, *, mup: bool, qk_norm: bool = True) -> PlanViT.Co
         norm=_ln(n_embd),
         plan_head=PlanHead.Config(
             norm=_ln(n_embd),
-            head=_lin(n_embd, PLAN_SIZE, std=_hidden_std(n_embd, mup=mup)),
+            head=_lin(
+                n_embd, PLAN_SIZE, std=BASE_WIDTH**-0.5
+            ),  # muP readout: base-width init
         ),
     )
 
@@ -169,10 +173,11 @@ def model_registry(flavor: str, *, mup: bool) -> ModelSpec:
 STEPS = 512  # per-run step budget; override with training.steps=N on the CLI
 # learning rate is the muTransfer sweep axis: one run per (flavor, lr); set with `-e PLAN_VIT_LR=...`
 SWEEP_LR = float(os.getenv("PLAN_VIT_LR", "3e-4"))
-# hidden + output matrix weights get muP lr eta/m; input embed, norms, biases get eta
+# hidden matrix weights get muP lr eta/m; input embed, readout, norms, biases get base eta
+# (readout is fan_in-infinite only, so Adam treats it vector-like -> base lr, not eta/m)
 MUP_PATTERN = (
     r"^(blocks\.\d+\.attention\.c_attn|blocks\.\d+\.attention\.c_proj"
-    r"|blocks\.\d+\.mlp\.c_fc|blocks\.\d+\.mlp\.c_proj|plan_head\.head)\.weight$"
+    r"|blocks\.\d+\.mlp\.c_fc|blocks\.\d+\.mlp\.c_proj)\.weight$"
 )
 
 
