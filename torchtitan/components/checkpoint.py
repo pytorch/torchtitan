@@ -559,6 +559,13 @@ class CheckpointManager(Configurable):
             state_dict = self.sd_adapter.to_hf(state_dict)
             fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping
 
+            # Guard against the discrepancy between the model's actual exported state dict
+            # and the loaded hf configuration.
+            if self.sd_adapter.model_config is not None:
+                if getattr(self.sd_adapter.model_config, "enable_weight_tying", False):
+                    if self.sd_adapter.fqn_to_index_mapping is not None:
+                        self.sd_adapter.fqn_to_index_mapping.pop("lm_head.weight", None)
+
             # If sharded, we save to a subdir then consolidate
             save_path = (
                 os.path.join(checkpoint_id, "sharded")

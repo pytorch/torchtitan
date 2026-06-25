@@ -909,5 +909,110 @@ class TestModelWrapper(unittest.TestCase):
         self.assertTrue(torch.all(sd2["a"] == 1.0))
 
 
+import json
+
+from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+
+
+# Mapping from torchtitan keys to HF keys used by the test adapter.
+_TO_HF_MAP = {
+    "tok_embeddings.weight": "model.embed_tokens.weight",
+    "lm_head.weight": "lm_head.weight",
+    "norm.weight": "model.norm.weight",
+}
+
+
+class _TestStateDictAdapterWithWeightTying(StateDictAdapter):
+    """Minimal adapter that exercises weight-tying skip logic in to_hf()."""
+
+    def to_hf(self, state_dict: dict[str, object]) -> dict[str, object]:
+        hf_state_dict: dict[str, object] = {}
+        for key, value in state_dict.items():
+            if (
+                getattr(self.model_config, "enable_weight_tying", False)
+                and key == "lm_head.weight"
+            ):
+                continue
+            new_key = _TO_HF_MAP[key]
+            hf_state_dict[new_key] = value
+        return hf_state_dict
+
+    def from_hf(self, hf_state_dict: dict[str, object]) -> dict[str, object]:
+        raise NotImplementedError
+
+
+_INDEX_JSON_CONTENT = json.dumps(
+    {
+        "metadata": {"total_size": 1000},
+        "weight_map": {
+            "lm_head.weight": "model-00002-of-00002.safetensors",
+            "model.embed_tokens.weight": "model-00001-of-00002.safetensors",
+            "model.norm.weight": "model-00001-of-00002.safetensors",
+        },
+    }
+)
+
+
+class TestCheckpointFQNMapping(unittest.TestCase):
+    """Test that the checkpoint manager filters the unneeded "lm_head" key
+    from fqn_to_index_mapping when weight tying is enabled."""
+
+    def _make_manager(
+        self, enable_weight_tying: bool, **kwargs: object
+    ) -> CheckpointManager:
+        model_config = SimpleNamespace(enable_weight_tying=enable_weight_tying)
+        with mock.patch("builtins.open", mock.mock_open(read_data=_INDEX_JSON_CONTENT)):
+            adapter = _TestStateDictAdapterWithWeightTying(
+                model_config, hf_assets_path="/fake"
+            )
+
+        config = CheckpointManager.Config(enable=True, folder="/tmp/test_ckpt")
+        return CheckpointManager(
+            dataloader=FakeDataLoader(),
+            model_parts=[],
+            optimizers=FakeOptimizersContainer(),
+            lr_schedulers=FakeLRSchedulersContainer(),
+            states={},
+            config=config,
+            sd_adapter=adapter,
+            base_folder="/tmp",
+            **kwargs,
+        )
+
+    def _make_state_dict(self) -> dict[str, torch.Tensor]:
+        return {
+            "tok_embeddings.weight": torch.randn(4, 8),
+            "lm_head.weight": torch.randn(4, 8),
+            "norm.weight": torch.randn(8),
+        }
+
+    @mock.patch("torch.distributed.new_group", return_value="pg")
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    @mock.patch(
+        "torchtitan.components.checkpoint.consolidate_safetensors_files_on_every_rank"
+    )
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    def test_weight_tying_pops_lm_head_from_mapping(
+        self, mock_rank, mock_consolidate, mock_save, mock_new_group
+    ):
+        manager = self._make_manager(enable_weight_tying=True)
+
+        manager.dcp_save(
+            self._make_state_dict(),
+            checkpoint_id="/tmp/step-1",
+            async_mode=manager.async_mode,
+            to_hf=True,
+        )
+
+        mapping = manager.sd_adapter.fqn_to_index_mapping
+        self.assertNotIn(
+            "lm_head.weight",
+            mapping,
+            "lm_head.weight should have been popped from the mapping",
+        )
+        self.assertIn("model.embed_tokens.weight", mapping)
+        self.assertIn("model.norm.weight", mapping)
+
+
 if __name__ == "__main__":
     unittest.main()

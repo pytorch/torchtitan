@@ -124,12 +124,6 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                 new_key = to_hf_map[key]
                 hf_state_dict[new_key] = value
 
-        if self.fqn_to_index_mapping is not None:
-            self.fqn_to_index_mapping = {
-                k: v for k, v in self.fqn_to_index_mapping.items()
-                if k in hf_state_dict
-            }
-
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
