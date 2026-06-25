@@ -17,8 +17,8 @@ from torchtitan.models.common.nn_modules import Linear
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.logging import init_logger, logger
 
-from torchtitan.experiments.worldmodel.config_registry import model_registry
-from torchtitan.experiments.worldmodel.inference import WorldModelForInference
+from torchtitan.experiments.worldmodel.model_config import model_registry
+from torchtitan.experiments.worldmodel.model_for_inference import WorldModelForInference
 from torchtitan.experiments.worldmodel.model import WorldModel
 
 
@@ -31,7 +31,7 @@ INFERENCE_STEPS = 1
 
 TORCH_EXPORT_INTERN_MODULES = [
     "torchtitan.config.**",
-    "torchtitan.experiments.worldmodel.inference",
+    "torchtitan.experiments.worldmodel.model_for_inference",
     "torchtitan.experiments.worldmodel.model",
     "torchtitan.experiments.worldmodel.schedulers",
     "torchtitan.models.common.attention",

@@ -480,7 +480,9 @@ def _set_single_process_env() -> None:
 def _stock_trainer_mock_config() -> WorldModelTrainer.Config:
     from torchtitan.components.optimizer import default_adamw
 
-    from .config_registry import _dataloader_config, model_registry, worldmodel
+    from .config_registry import worldmodel
+    from .dataset_config import _dataloader_config
+    from .model_config import model_registry
 
     config = worldmodel()
     model_spec = model_registry("debugmodel")

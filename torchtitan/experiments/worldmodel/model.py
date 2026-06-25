@@ -1051,7 +1051,7 @@ def main() -> None:
     from torchtitan.components.checkpoint import CheckpointManager
     from torchtitan.tools.logging import init_logger
 
-    from torchtitan.experiments.worldmodel.config_registry import model_registry
+    from torchtitan.experiments.worldmodel.model_config import model_registry
 
     parser = argparse.ArgumentParser(description="Create a tiny worldmodel checkpoint.")
     parser.add_argument("--output-dir", default="./outputs/worldmodel_debug_checkpoint")

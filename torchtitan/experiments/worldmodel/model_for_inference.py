@@ -10,7 +10,6 @@ from torch.nn.attention.flex_attention import create_block_mask
 from torchtitan.experiments.worldmodel.model import (
     SelfAttention,
     TensorOrMask,
-    TransformerConfig,
     WorldModel,
     _cast_if_autocast_enabled,
     _dense_mask,
@@ -540,7 +539,8 @@ class WorldModelForInference(WorldModel):
 
 def main() -> None:
     import argparse
-    import importlib
+
+    from torchtitan.experiments.worldmodel.model_config import model_registry
 
     parser = argparse.ArgumentParser(description="Run a small worldmodel inference smoke test.")
     parser.add_argument("--flavor", default="debugmodel")
@@ -548,7 +548,6 @@ def main() -> None:
 
     torch.manual_seed(0)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model_registry = importlib.import_module("torchtitan.experiments.worldmodel.config_registry").model_registry
     config = model_registry(args.flavor).model
     model = WorldModelForInference(config).to(device=device, dtype=torch.bfloat16).eval()
     inputs = WorldModelForInference.example_inputs(

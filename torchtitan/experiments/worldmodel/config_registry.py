@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import default_adamw, register_float8_precompute_scale_hook
-from torchtitan.components.quantization import Float8LinearConverter
+from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -15,55 +13,35 @@ from torchtitan.config import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.models.utils import validate_converter_order
-from torchtitan.protocols.model import ModelConfigConverter
-from torchtitan.protocols.model_spec import ModelSpec
-from xx.common.compressor_helpers import COMPRESSOR_STATS
-from xx.datasets.helpers import BASE_DIR_GT_10M, DEFAULT_10M_TRAIN_LIST
 
-from .dataset import WorldModelDataLoader
+from .dataset_config import BASE_DIR_GT_10M, DEFAULT_10M_TRAIN_LIST, FEATURE_DIR, IMAGE_SIZE, _dataloader_config
 from .loss import WorldModelLoss
-from .model import TransformerConfig, WorldModel, parallelize_worldmodel
+from .model_config import (
+    COMPRESSOR_MODEL,
+    LATENT_CHANNELS,
+    LATENT_SIZE,
+    WORLD_MODEL_FLOAT8_FILTER_FQNS,
+    _blocks_only_float8,
+    model_registry,
+)
 from .tokenizer import WorldModelTokenizer
 from .trainer import WorldModelTrainer, WorldModelValidator
 
 
-COMPRESSOR_MODEL = "c04337f8-b83f-4e34-b07a-5f7396978d67"
-FEATURE_DIR = "http://data-ssd.comma.life/vae_model_features"
-LATENT_CHANNELS = 32
-LATENT_SIZE = (16, 32)
-IMAGE_SIZE = (128, 256)
-
-WORLD_MODEL_FLOAT8_FILTER_FQNS = [
-    "x_embedder",
-    "augments_pos_ref_augment_embedder",
-    "ref_augment_from_augments_euler_embedder",
-    "pose_mask_embedder",
-    "t_embedder",
-    "fidx_embedder",
-    "final_layer",
-    "plan_head",
+__all__ = [
+    "BASE_DIR_GT_10M",
+    "COMPRESSOR_MODEL",
+    "DEFAULT_10M_TRAIN_LIST",
+    "FEATURE_DIR",
+    "IMAGE_SIZE",
+    "LATENT_CHANNELS",
+    "LATENT_SIZE",
+    "WORLD_MODEL_FLOAT8_FILTER_FQNS",
+    "_blocks_only_float8",
+    "_dataloader_config",
+    "model_registry",
+    "worldmodel",
 ]
-
-
-def model_registry(
-    flavor: str,
-    converters: list[ModelConfigConverter.Config] | None = None,
-) -> ModelSpec:
-    config = _worldmodel_configs()[flavor]()
-    if converters is not None:
-        validate_converter_order(converters)
-        for converter in converters:
-            converter.build().convert(config)
-    return ModelSpec(
-        name="worldmodel",
-        flavor=flavor,
-        model=config,
-        parallelize_fn=parallelize_worldmodel,
-        pipelining_fn=None,
-        post_optimizer_build_fn=register_float8_precompute_scale_hook,
-        state_dict_adapter=None,
-    )
 
 
 def worldmodel() -> WorldModelTrainer.Config:
@@ -159,152 +137,6 @@ def worldmodel() -> WorldModelTrainer.Config:
         no_noise_conditioning_frames_prob=0.5,
         fake_timesteps_prob=0.5,
         debug=DebugConfig(seed=0),
-    )
-
-
-def _worldmodel_configs() -> dict[str, Callable[[], WorldModel.Config]]:
-    return {
-        "base": _model_config,
-        "debugmodel": _debug_model_config,
-    }
-
-
-def _debug_model_config() -> WorldModel.Config:
-    return _model_config(
-        input_size=(15, 4, 4),
-        patch_size=(1, 2, 2),
-        hidden=64,
-        heads=4,
-        layers=1,
-        plan_layers=1,
-        mlp_multiple_of=16,
-        attention_impl="FLEX",
-    )
-
-
-def _model_config(
-    *,
-    input_size: tuple[int, int, int] = (15, *LATENT_SIZE),
-    patch_size: tuple[int, int, int] = (1, 2, 2),
-    hidden: int = 2304,
-    heads: int = 36,
-    layers: int = 56,
-    plan_layers: int = 4,
-    mlp_multiple_of: int = 256,
-    attention_impl: str = "FLEX",
-    attention_mask: str = "LAST_FRAME_CAUSAL",
-    norm: str = "RMSNorm",
-) -> WorldModel.Config:
-    stats = COMPRESSOR_STATS[COMPRESSOR_MODEL]
-    return WorldModel.Config(
-        input_size=input_size,
-        patch_size=patch_size,
-        in_channels=LATENT_CHANNELS,
-        out_channels=LATENT_CHANNELS,
-        pose_size=6,
-        time_factor=1.0,
-        compressor_mean=stats["mean"],
-        compressor_std=stats["std"],
-        transformer=TransformerConfig(
-            n_layer=layers,
-            n_embd=hidden,
-            n_head=heads,
-            act="GELU",
-            attn_pdrop=0.0,
-            resid_pdrop=0.0,
-            biased_linears=True,
-            prenorm=False,
-            qk_norm=True,
-            mlp_mult=4,
-            mlp_multiple_of=mlp_multiple_of,
-            attention_mask=attention_mask,
-            norm=norm,
-            attention_impl=attention_impl,
-        ),
-        plan_head=TransformerConfig(
-            n_layer=plan_layers,
-            n_embd=hidden,
-            n_head=heads,
-            act="GELU",
-            attn_pdrop=0.0,
-            resid_pdrop=0.0,
-            biased_linears=True,
-            prenorm=True,
-            qk_norm=False,
-            mlp_mult=2,
-            mlp_multiple_of=1,
-            attention_mask="LAST_FRAME_CAUSAL",
-            norm="LayerNorm",
-            attention_impl=attention_impl,
-        ),
-    )
-
-
-def _dataloader_config(
-    *,
-    split: str,
-    dataset: str = DEFAULT_10M_TRAIN_LIST,
-    dataset_path: str | None = None,
-    shuffle_size: int = 50_000,
-    min_mixing: float = 0.5,
-    num_writers: int = 2,
-    num_readers: int = 4,
-    fill_once: bool = False,
-    base_dir: str = BASE_DIR_GT_10M,
-    feature_dir: str | None = None,
-    compressor_model: str = COMPRESSOR_MODEL,
-    in_channels: int = LATENT_CHANNELS,
-    latent_size: tuple[int, int] = LATENT_SIZE,
-    image_size: tuple[int, int] = IMAGE_SIZE,
-    context_size_frames: int = 10,
-    future_size_frames: int = 5,
-    max_future_frames: int = 50,
-    inference_conditioning_frames: int = 14,
-    fps: int = 5,
-    train_skip: int = 40,
-    val_skip: int = 800,
-    nan_engaged_plans: bool = False,
-    limit: int | None = None,
-    mock_data: bool = False,
-    mock_segment_batch_size: int = 8,
-) -> WorldModelDataLoader.Config:
-    return WorldModelDataLoader.Config(
-        dataset=dataset,
-        dataset_path=dataset_path,
-        split=split,
-        shuffle_size=shuffle_size,
-        min_mixing=min_mixing,
-        num_writers=num_writers,
-        num_readers=num_readers,
-        fill_once=fill_once,
-        base_dir=base_dir,
-        feature_dir=feature_dir,
-        compressor_model=compressor_model,
-        in_channels=in_channels,
-        latent_size=latent_size,
-        image_size=image_size,
-        context_size_frames=context_size_frames,
-        future_size_frames=future_size_frames,
-        max_future_frames=max_future_frames,
-        inference_conditioning_frames=inference_conditioning_frames,
-        fps=fps,
-        train_skip=train_skip,
-        val_skip=val_skip,
-        nan_engaged_plans=nan_engaged_plans,
-        limit=limit,
-        mock_data=mock_data,
-        mock_segment_batch_size=mock_segment_batch_size,
-    )
-
-
-def _blocks_only_float8(*, model_compile_enabled: bool, emulate: bool = False) -> Float8LinearConverter.Config:
-    return Float8LinearConverter.Config(
-        recipe_name="tensorwise",
-        filter_fqns=WORLD_MODEL_FLOAT8_FILTER_FQNS,
-        emulate=emulate,
-        enable_fsdp_float8_all_gather=True,
-        precompute_float8_dynamic_scale_for_fsdp=True,
-        model_compile_enabled=model_compile_enabled,
     )
 
 
