@@ -21,8 +21,10 @@ from vllm.sampling_params import RequestOutputKind
 
 from torchtitan.config import DebugConfig
 from torchtitan.experiments.rl.actors.generator import (
+    _extract_request_metrics_inputs,
     _prepare_generation_request_metrics,
     GenerationFuture,
+    IntraGeneratorDispatcher,
     SamplingConfig,
     VLLMCudagraphConfig,
     VLLMGenerator,
@@ -79,17 +81,12 @@ def _request_output(*, request_id="r0", outputs=None, num_generation_tokens=4):
 
 
 def _generator():
-    """A bare generator (no __init__ / engine build) with just the CB state set.
-
-    DP=1: rank 0 is the single group's master, so it builds and resolves locally.
-    """
+    """A bare generator (no __init__ / engine build) with just the state the
+    per-request helpers (`_build_sampling_params`) read."""
     generator = VLLMGenerator.__new__(VLLMGenerator)
     generator._engine = _FakeEngine()
     generator._rank = 0
-    generator._is_dp_master = True
     generator.policy_version = 7
-    generator._generation_futures = {}
-    generator._request_metrics_prefix = {}
     generator.config = SimpleNamespace(
         sampling=SamplingConfig(temperature=0.0, top_p=1.0, max_tokens=4),
         debug=SimpleNamespace(seed=None),
@@ -97,25 +94,47 @@ def _generator():
     return generator
 
 
+def _dispatcher(*, rank=0, dp_degree=1, tp_degree=1):
+    """A bare IntraGeneratorDispatcher; broadcast_group is unused unless ``setup`` runs.
+
+    Passes a vLLM parallel config that matches the layout so the construction-time
+    assert holds.
+    """
+    parallelism = SimpleNamespace(
+        data_parallel_degree=dp_degree, tensor_parallel_degree=tp_degree
+    )
+    vllm_parallel_config = SimpleNamespace(
+        tensor_parallel_size=tp_degree,
+        data_parallel_size=dp_degree,
+        data_parallel_rank=rank // tp_degree,
+    )
+    return IntraGeneratorDispatcher(
+        rank=rank,
+        parallelism=parallelism,
+        broadcast_group=None,
+        vllm_parallel_config=vllm_parallel_config,
+    )
+
+
 # --- completion (token-out) ---
 
 
-def test_dispatch_finished_requests_resolves_future_with_completion():
+def test_process_finished_requests_resolves_future_with_completion():
     async def main():
-        generator = _generator()
+        # DP=1: rank 0 is the single replica's leader, so it builds and resolves locally.
+        dispatcher = _dispatcher()
         future = asyncio.get_running_loop().create_future()
-        generator._generation_futures = {
+        dispatcher._rank0_generation_futures = {
             "r0": GenerationFuture(future=future, metrics_prefix="generator")
         }
-        # The admitting master records the request's metrics prefix; _build_completions pops it.
-        generator._request_metrics_prefix = {"r0": "generator"}
 
-        generator._dispatch_finished_requests(
+        dispatcher.process_finished_requests(
             [
                 _request_output(
                     outputs=[_sample(token_ids=(10, 11), finish_reason="length")]
                 )
-            ]
+            ],
+            policy_version=7,
         )
 
         completion = await future
@@ -125,8 +144,8 @@ def test_dispatch_finished_requests_resolves_future_with_completion():
         assert completion.finish_reason == "length"
         assert completion.policy_version == 7
         # The request is popped from the in-flight map.
-        assert generator._generation_futures == {}
-        # The per-generation metrics ride on the completion.
+        assert dispatcher._rank0_generation_futures == {}
+        # The per-generation metrics ride on the completion (built on rank 0).
         assert (
             m.MetricsProcessor._aggregate_metrics(completion.metrics)[
                 "generator/inflight_requests_at_completion/max"
@@ -137,13 +156,14 @@ def test_dispatch_finished_requests_resolves_future_with_completion():
     asyncio.run(main())
 
 
-def test_dispatch_finished_requests_noop_on_non_master():
-    # Non-DP-master ranks hold no finished outputs, so dispatch returns before building.
-    generator = _generator()
-    generator._rank = 1
-    generator._is_dp_master = False
-    generator._dispatch_finished_requests([_request_output(request_id="r0")])
-    assert generator._generation_futures == {}
+def test_process_finished_requests_noop_on_nonzero_tp_rank():
+    # tp_rank != 0 hold no finished outputs, so processing returns before building or sending.
+    dispatcher = _dispatcher(rank=1, dp_degree=1, tp_degree=2)
+    assert dispatcher._tp_rank != 0
+    dispatcher.process_finished_requests(
+        [_request_output(request_id="r0")], policy_version=7
+    )
+    assert dispatcher._rank0_generation_futures == {}
 
 
 # --- SamplingParams contract (must match the batched path exactly) ---
@@ -185,7 +205,8 @@ def test_build_sampling_params_seed_and_stop_default_to_none():
 
 def test_metric_timing_math_and_prefix_override():
     metrics = _prepare_generation_request_metrics(
-        _request_output(), prefix="validation_generator"
+        _extract_request_metrics_inputs(_request_output()),
+        prefix="validation_generator",
     )
     aggregate = m.MetricsProcessor._aggregate_metrics(metrics)
     assert all(key.startswith("validation_generator/") for key in aggregate)
@@ -200,7 +221,8 @@ def test_metric_timing_math_and_prefix_override():
 
 def test_decode_metrics_absent_for_single_generated_token():
     metrics = _prepare_generation_request_metrics(
-        _request_output(num_generation_tokens=1), prefix="generator"
+        _extract_request_metrics_inputs(_request_output(num_generation_tokens=1)),
+        prefix="generator",
     )
     keys = {metric.key for metric in metrics}
     assert "generator/prefill_time_ms" in keys

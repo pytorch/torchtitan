@@ -13,10 +13,12 @@ admit/pull/shutdown branching is tested without a GPU.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 from torchtitan.experiments.rl.actors.generator import (
     CloseRequest,
     GenerationRequest,
+    IntraGeneratorDispatcher,
     LoopAction,
     ModelStateDictPullRequest,
     SamplingConfig,
@@ -33,16 +35,28 @@ def _bare_generator(
     dp_size: int = 1,
 ) -> VLLMGenerator:
     # Bypass __init__ (which builds the vLLM engine); set only the loop's state.
-    # _decide_next_action keys on rank 0's own _generation_futures (no engine), so
-    # no fake engine is needed here.
+    # _decide_next_action delegates the in-flight check and routing to the
+    # dispatcher, so wire up a bare one (no engine / GPU needed here).
     generator = object.__new__(VLLMGenerator)
     generator._engine_loop_condition = asyncio.Condition()
     generator._close_request = CloseRequest() if close_requested else None
     generator._model_state_dict_pull_request = model_state_dict_pull_request
     generator._queued_generation_requests = pending or []
+    generator._dispatcher = IntraGeneratorDispatcher(
+        rank=0,
+        parallelism=SimpleNamespace(
+            data_parallel_degree=dp_size, tensor_parallel_degree=1
+        ),
+        broadcast_group=None,
+        vllm_parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            data_parallel_size=dp_size,
+            data_parallel_rank=0,
+        ),
+    )
     # A registered-but-unresolved future models in-flight work (possibly in a peer DP rank).
-    generator._generation_futures = {"inflight": object()} if inflight else {}
-    generator._dp_degree = dp_size
+    if inflight:
+        generator._dispatcher._rank0_generation_futures = {"inflight": object()}
     return generator
 
 
