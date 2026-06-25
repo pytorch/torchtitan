@@ -14,6 +14,7 @@ Each function returns a complete ``Controller.Config``, discoverable by
 import dataclasses
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import (
@@ -113,7 +114,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
                 interval=10,
                 last_save_model_only=False,
             ),
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -167,7 +168,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
                 interval=10,
                 last_save_model_only=False,
             ),
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -258,7 +259,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
                 interval=10,
                 last_save_model_only=False,
             ),
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -310,7 +311,7 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
                 tensor_parallel_degree=2,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -365,7 +366,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             debug=batch_invariant_config,
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -423,7 +424,7 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
                 interval=10,
                 last_save_model_only=False,
             ),
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -477,7 +478,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
                 interval=10,
                 last_save_model_only=False,
             ),
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -539,7 +540,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
                 interval=10,
                 last_save_model_only=False,
             ),
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             # Disable torch.compile + CUDA graph capture: the EP all-to-all
@@ -616,7 +617,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
                 last_save_model_only=False,
             ),
             debug=_BATCH_INVARIANT_DEBUG,
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -680,7 +681,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
                 interval=10,
                 last_save_model_only=False,
             ),
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -777,7 +778,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
                 last_save_model_only=False,
             ),
             debug=batch_invariant_config,
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",

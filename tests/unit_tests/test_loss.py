@@ -27,8 +27,9 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.components.loss import (
     _LossParallelCrossEntropy,
-    ChunkedCELoss,
+    ChunkedLossWrapper,
     cross_entropy_loss,
+    CrossEntropyLoss,
     GradAccumulator,
     IGNORE_INDEX,
 )
@@ -382,6 +383,7 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                             local_labels,
                             tp_group,
                             vocab_size,
+                            "sum",
                         )
                     self.assertIs(
                         spmd.get_axis_local_type(local_loss, tp_group), spmd.I
@@ -411,12 +413,12 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
 
 
 class _FakeDecoder(nn.Module):
-    """Minimal Decoder-like model for testing ChunkedCELoss."""
+    """Minimal Decoder-like model for testing ChunkedLossWrapper."""
 
     def __init__(self, dim: int, vocab_size: int):
         super().__init__()
         self.output = nn.Linear(dim, vocab_size, bias=False)
-        # Make it look like a Decoder to ChunkedCELoss
+        # Make it look like a Decoder to ChunkedLossWrapper
         self.layers = nn.ModuleDict()
         self.tok_embeddings = None
         self.norm = None
@@ -427,11 +429,13 @@ class _FakeDecoder(nn.Module):
         return self.output(tokens)
 
 
-class TestChunkedCELoss(unittest.TestCase):
+class TestChunkedLossWrapper(unittest.TestCase):
     def _make_model_and_loss(self, dim=32, vocab_size=64, num_chunks=4):
-        """Create a fake Decoder and ChunkedCELoss for testing."""
+        """Create a fake Decoder and ChunkedLossWrapper for testing."""
         model = _FakeDecoder(dim, vocab_size)
-        chunked_loss = ChunkedCELoss(ChunkedCELoss.Config(num_chunks=num_chunks))
+        chunked_loss = ChunkedLossWrapper(
+            ChunkedLossWrapper.Config(num_chunks=num_chunks)
+        )
         # Bypass isinstance(model, Decoder) check for unit testing
         chunked_loss.lm_head = model.output
         return model, chunked_loss
@@ -471,7 +475,7 @@ class TestChunkedCELoss(unittest.TestCase):
             labels,
             num_chunks,
         )
-        loss = chunked_loss(hidden_states, labels)
+        loss, _ = chunked_loss(hidden_states, labels)
 
         torch.testing.assert_close(loss, expected_loss)
 
@@ -502,7 +506,7 @@ class TestChunkedCELoss(unittest.TestCase):
         chunk_hidden = hidden.detach().clone().requires_grad_(True)
 
         ref_loss = torch_chunk_loss(ref_hidden)
-        chunk_loss = chunked_loss(chunk_hidden, labels, global_valid_tokens)
+        chunk_loss, _ = chunked_loss(chunk_hidden, labels, global_valid_tokens)
 
         ref_loss.backward()
         chunk_loss.backward()
@@ -514,7 +518,7 @@ class TestChunkedCELoss(unittest.TestCase):
         )
 
     def test_numerical_equivalence(self):
-        """ChunkedCELoss must produce the same loss and gradients as the standard path."""
+        """ChunkedLossWrapper must produce the same loss and gradients as the standard path."""
         torch.manual_seed(42)
         B, L, D, V = 2, 8, 32, 64
         num_chunks = 4
@@ -543,7 +547,7 @@ class TestChunkedCELoss(unittest.TestCase):
         # Chunked path
         hidden_chunked = hidden_states.detach().requires_grad_(True)
 
-        loss_chunked = chunked_loss(hidden_chunked, labels, global_valid_tokens)
+        loss_chunked, _ = chunked_loss(hidden_chunked, labels, global_valid_tokens)
         loss_chunked.backward()
         grad_chunked = hidden_chunked.grad.clone()
         lm_head_grad_chunked = model_chunked.output.weight.grad.clone()
@@ -584,17 +588,18 @@ class TestChunkedCELoss(unittest.TestCase):
         hidden_states = torch.randn(B, L, D)
 
         losses = []
+        ref_state_dict = None
         for num_chunks in [1, 2, 4, 8]:
             model, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
             # Use same lm_head weights
-            if losses:
-                model.output.load_state_dict(ref_state_dict)
-            else:
+            if ref_state_dict is None:
                 ref_state_dict = model.output.state_dict()
+            else:
+                model.output.load_state_dict(ref_state_dict)
 
             h = hidden_states.detach().requires_grad_(True)
 
-            loss = chunked_loss(h, labels, global_valid_tokens)
+            loss, _ = chunked_loss(h, labels, global_valid_tokens)
             loss.backward()
             losses.append(loss.item())
 
@@ -636,7 +641,8 @@ class TestChunkedCELoss(unittest.TestCase):
             labels,
             num_chunks,
         )
-        torch.testing.assert_close(traced(hidden_states, labels), expected_loss)
+        traced_loss, _ = traced(hidden_states, labels)
+        torch.testing.assert_close(traced_loss, expected_loss)
 
         split_nodes = [
             node
@@ -670,12 +676,12 @@ class TestChunkedCELoss(unittest.TestCase):
             num_chunks,
             global_valid_tokens,
         )
-        loss = chunked_loss(hidden_states, labels, global_valid_tokens)
+        loss, _ = chunked_loss(hidden_states, labels, global_valid_tokens)
 
         torch.testing.assert_close(loss, expected_loss)
 
 
-class TestChunkedCELossSPMD(DTensorTestBase):
+class TestChunkedLossWrapperSPMD(DTensorTestBase):
     def init_pg(self, eager_init, backend=None):
         super().init_pg(eager_init, backend)
         set_spmd_backend("spmd_types")
@@ -698,10 +704,16 @@ class TestChunkedCELossSPMD(DTensorTestBase):
         *,
         num_chunks=4,
     ):
-        """Create the ChunkedCELoss variant under SPMD typecheck."""
-        chunked_loss = ChunkedCELoss(ChunkedCELoss.Config(num_chunks=num_chunks))
+        """Create the ChunkedLossWrapper variant under SPMD typecheck."""
+        chunked_loss = ChunkedLossWrapper(
+            ChunkedLossWrapper.Config(
+                num_chunks=num_chunks,
+                loss_fn=CrossEntropyLoss.Config(
+                    global_vocab_size=lm_head.out_features,
+                ),
+            )
+        )
         chunked_loss.set_lm_head(lm_head)
-        chunked_loss.global_vocab_size = lm_head.out_features
         return chunked_loss
 
     def _make_vocab_parallel_lm_head(
@@ -710,9 +722,9 @@ class TestChunkedCELossSPMD(DTensorTestBase):
         global_vocab_size: int,
         tp_group: dist.ProcessGroup,
     ):
-        """Mimic TorchTitan's TP-vocab-parallel lm_head for ChunkedCELoss.
+        """Mimic TorchTitan's TP-vocab-parallel lm_head for ChunkedLossWrapper.
 
-        Each rank owns only its local vocab rows. ChunkedCELoss consumes those
+        Each rank owns only its local vocab rows. ChunkedLossWrapper consumes those
         sharded logits directly through loss-parallel CE.
         """
         tp_degree = dist.get_world_size(tp_group)
@@ -726,7 +738,7 @@ class TestChunkedCELossSPMD(DTensorTestBase):
 
     @with_comms
     def test_spmd_matches_eager_and_types(self):
-        """Check ChunkedCELoss numerics and SPMD types with a TP lm_head.
+        """Check ChunkedLossWrapper numerics and SPMD types with a TP lm_head.
 
         The reference path runs a full-vocab ``lm_head`` followed by ordinary
         ``cross_entropy_loss``. The SPMD path uses a TP-vocab-sharded
@@ -751,7 +763,7 @@ class TestChunkedCELossSPMD(DTensorTestBase):
         labels[1, 3] = IGNORE_INDEX
 
         tp_group = mesh.get_group("tp")
-        # create full-weight ref lm_head, sharded lm_head & ChunkedCELoss
+        # create full-weight ref lm_head, sharded lm_head & ChunkedLossWrapper
         lm_head_ref = nn.Linear(D, V, bias=False).to(self.device_type)
         lm_head_spmd = self._make_vocab_parallel_lm_head(D, V, tp_group).to(
             self.device_type
@@ -777,8 +789,8 @@ class TestChunkedCELossSPMD(DTensorTestBase):
             spmd.assert_type(labels, {tp_group: spmd.I})
             spmd.assert_type(lm_head_spmd.weight, {tp_group: spmd.S(0)})
             with typecheck(strict_mode="strict", local=False):
-                loss_spmd = loss_spmd_fn(h_spmd, labels)
-            # ChunkedCELoss returns through an autograd bridge under
+                loss_spmd, _ = loss_spmd_fn(h_spmd, labels)
+            # ChunkedLossWrapper returns through an autograd bridge under
             # no_typecheck, so the returned scalar is intentionally untyped.
 
         # numerics check
