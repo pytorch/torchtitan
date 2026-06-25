@@ -476,18 +476,6 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_32b() -> RLTrainer.Config:
-    """GRPO config for Qwen3-32B (16 GPUs: 8 gen + 8 train).
-
-    Mirrors :func:`rl_grpo_qwen3_14b` at 32B (both use generator/trainer TP=8);
-    used for the inference-performance benchmark (``generate.py --benchmark``).
-    """
-    config = rl_grpo_qwen3_14b()
-    config.model_spec = _qwen3_rl_model_registry("32B", attn_backend="varlen")
-    config.hf_assets_path = "torchtitan/experiments/rl/example_checkpoint/Qwen3-32B"
-    return config
-
-
 def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
     """Debug MoE config with EP+TP on generator (8 GPUs: 4 gen + 4 train).
 
