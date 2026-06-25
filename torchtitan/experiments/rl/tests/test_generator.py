@@ -24,7 +24,7 @@ from torchtitan.experiments.rl.actors.generator import (
     _extract_request_metrics_inputs,
     _prepare_generation_request_metrics,
     GenerationFuture,
-    IntraGeneratorDispatcher,
+    RequestDispatcher,
     SamplingConfig,
     VLLMCudagraphConfig,
     VLLMGenerator,
@@ -95,7 +95,7 @@ def _generator():
 
 
 def _dispatcher(*, rank=0, dp_degree=1, tp_degree=1):
-    """A bare IntraGeneratorDispatcher; broadcast_group is unused unless ``setup`` runs.
+    """A bare RequestDispatcher; broadcast_group is unused unless ``setup`` runs.
 
     Passes a vLLM parallel config that matches the layout so the construction-time
     assert holds.
@@ -108,7 +108,7 @@ def _dispatcher(*, rank=0, dp_degree=1, tp_degree=1):
         data_parallel_size=dp_degree,
         data_parallel_rank=rank // tp_degree,
     )
-    return IntraGeneratorDispatcher(
+    return RequestDispatcher(
         rank=rank,
         parallelism=parallelism,
         broadcast_group=None,

@@ -18,9 +18,9 @@ from types import SimpleNamespace
 from torchtitan.experiments.rl.actors.generator import (
     CloseRequest,
     GenerationRequest,
-    IntraGeneratorDispatcher,
     LoopAction,
     ModelStateDictPullRequest,
+    RequestDispatcher,
     SamplingConfig,
     VLLMGenerator,
 )
@@ -42,7 +42,7 @@ def _bare_generator(
     generator._close_request = CloseRequest() if close_requested else None
     generator._model_state_dict_pull_request = model_state_dict_pull_request
     generator._queued_generation_requests = pending or []
-    generator._dispatcher = IntraGeneratorDispatcher(
+    generator._request_dispatcher = RequestDispatcher(
         rank=0,
         parallelism=SimpleNamespace(
             data_parallel_degree=dp_size, tensor_parallel_degree=1
@@ -56,7 +56,7 @@ def _bare_generator(
     )
     # A registered-but-unresolved future models in-flight work (possibly in a peer DP rank).
     if inflight:
-        generator._dispatcher._rank0_generation_futures = {"inflight": object()}
+        generator._request_dispatcher._rank0_generation_futures = {"inflight": object()}
     return generator
 
 
