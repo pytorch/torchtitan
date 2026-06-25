@@ -18,12 +18,12 @@ from torchtitan.trainer import Trainer
 from . import model_registry
 
 
-def gpt_oss_debugmodel() -> Trainer.Config:
+def _gpt_oss_debugmodel(attn_backend: str = "varlen") -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel"),
+        model_spec=model_registry("debugmodel", attn_backend=attn_backend),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4_test",
         ),
@@ -52,6 +52,16 @@ def gpt_oss_debugmodel() -> Trainer.Config:
             steps=10,
         ),
     )
+
+
+def gpt_oss_debugmodel() -> Trainer.Config:
+    return _gpt_oss_debugmodel()
+
+
+def gpt_oss_debugmodel_flex() -> Trainer.Config:
+    # FlexAttention variant. Pipeline Parallel is incompatible with
+    # VarlenAttention, so PP integration tests use this flex config.
+    return _gpt_oss_debugmodel(attn_backend="flex")
 
 
 def gpt_oss_20b() -> Trainer.Config:
