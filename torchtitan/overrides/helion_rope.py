@@ -38,8 +38,9 @@ from dataclasses import dataclass
 from functools import cache
 from typing import Any, TYPE_CHECKING
 
-import torch
 import spmd_types as spmd
+
+import torch
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import derive, override
