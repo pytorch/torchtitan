@@ -85,12 +85,11 @@ def generate() -> None:
     max_num_seqs = args.max_num_seqs
     is_rank0 = os.environ.get("RANK", "0") == "0"
 
-    # Breakable cudagraph modes (PIECEWISE / FULL_AND_PIECEWISE) read
-    # VLLM_USE_BREAKABLE_CUDAGRAPH at import time (the @eager_break_during_capture
-    # decorator in models/attention.py).
-    if gen_config.cudagraph.enable and gen_config.cudagraph.mode in (
-        "PIECEWISE",
-        "FULL_AND_PIECEWISE",
+    # FULL_AND_PIECEWISE reads VLLM_USE_BREAKABLE_CUDAGRAPH at import time (the
+    # @eager_break_during_capture decorator in rl/models/attention.py).
+    if (
+        gen_config.cudagraph.enable
+        and gen_config.cudagraph.mode == "FULL_AND_PIECEWISE"
     ):
         os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
 

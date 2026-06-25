@@ -328,7 +328,7 @@ class Controller(Configurable):
                         "cudagraph mode 'FULL' is only supported with the flex "
                         "attention backend; the varlen backend corrupts FULL capture "
                         "of mixed prefill+decode batches (#3709). Use FULL_DECODE_ONLY "
-                        "/ PIECEWISE / FULL_AND_PIECEWISE."
+                        "or FULL_AND_PIECEWISE."
                     )
 
     def __init__(self, config: Config):
