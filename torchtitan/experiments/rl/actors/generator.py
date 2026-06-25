@@ -21,7 +21,7 @@ import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
 from monarch.rdma import is_rdma_available
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config import CompileConfig, Configurable, DebugConfig
+from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
@@ -267,6 +267,11 @@ class VLLMGenerator(Actor, Configurable):
         sampling: SamplingConfig = field(default_factory=SamplingConfig)
         """Default sampling parameters for generation."""
 
+        override: OverrideConfig = field(default_factory=OverrideConfig)
+        """Config overrides (e.g. ``torchtitan.overrides.fused_swiglu``) applied to
+        this generator's model spec after ``update_from_config`` and before build.
+        Separate from the trainer's override so the two can differ."""
+
         model_dtype: str = "bfloat16"
         """Data type for model weights, passed directly to vLLM (auto, float16, bfloat16, float32)."""
 
@@ -366,6 +371,7 @@ class VLLMGenerator(Actor, Configurable):
             parallelism=config.parallelism,
             compile_config=compile_config,
             checkpoint_config=config.checkpoint,
+            override=config.override,
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
