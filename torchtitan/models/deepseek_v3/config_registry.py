@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import ChunkedCELoss
+from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
@@ -29,7 +29,7 @@ def enable_fused_swiglu(config: Trainer.Config) -> None:
 
 def deepseek_v3_debugmodel() -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel"),
@@ -88,7 +88,7 @@ def deepseek_v3_debugmodel_minimal_async_ep() -> Trainer.Config:
 
 def deepseek_v3_16b() -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(),
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
         model_spec=model_registry("16B", attn_backend="flex"),
         dataloader=HuggingFaceTextDataLoader.Config(
@@ -152,7 +152,7 @@ def deepseek_v3_671b() -> Trainer.Config:
         compile_config.enable and "model" in compile_config.components
     )
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(),
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
         model_spec=model_registry(
             "671B",
