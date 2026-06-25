@@ -79,7 +79,7 @@ def _make_gptoss_attn_config(
     n_kv_heads: int = 8,
     head_dim: int = 64,
     sliding_window_size: int | None = None,
-    fuse_qkv: bool = False,
+    fuse_qkv: bool = True,
     rope: RoPE.Config,
 ) -> Attention.Config:
     """Build a fully-specified GPT-OSS Attention.Config for a single layer.
@@ -191,7 +191,7 @@ def _build_gptoss_layers(
     top_k: int,
     load_balance_coeff: float,
     attn_backend: str = "varlen",
-    fuse_qkv: bool = False,
+    fuse_qkv: bool = True,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     rope: RoPE.Config,
@@ -267,6 +267,7 @@ def _debugmodel(
             param_init=_output_linear_init(dim),
         ),
         layers=_build_gptoss_layers(
+            fuse_qkv=True,
             dim=dim,
             n_layers=n_layers,
             hidden_dim=hidden_dim,
@@ -309,6 +310,7 @@ def _20b(
             param_init=_output_linear_init(dim),
         ),
         layers=_build_gptoss_layers(
+            fuse_qkv=True,
             dim=dim,
             n_layers=n_layers,
             hidden_dim=hidden_dim,
@@ -351,6 +353,7 @@ def _120b(
             param_init=_output_linear_init(dim),
         ),
         layers=_build_gptoss_layers(
+            fuse_qkv=True,
             dim=dim,
             n_layers=n_layers,
             hidden_dim=hidden_dim,
@@ -393,7 +396,7 @@ def model_registry(
     if converters is not None:
         validate_converter_order(converters)
         for c in converters:
-            c.build().convert(config)
+            config = c.build().convert(config)
     return ModelSpec(
         name="gpt_oss",
         flavor=flavor,

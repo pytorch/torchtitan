@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import ChunkedCELoss
+from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
@@ -18,12 +18,12 @@ from torchtitan.trainer import Trainer
 from . import model_registry
 
 
-def gpt_oss_debugmodel() -> Trainer.Config:
+def _gpt_oss_debugmodel(attn_backend: str = "varlen") -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel"),
+        model_spec=model_registry("debugmodel", attn_backend=attn_backend),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4_test",
         ),
@@ -54,9 +54,19 @@ def gpt_oss_debugmodel() -> Trainer.Config:
     )
 
 
+def gpt_oss_debugmodel() -> Trainer.Config:
+    return _gpt_oss_debugmodel()
+
+
+def gpt_oss_debugmodel_flex() -> Trainer.Config:
+    # FlexAttention variant. Pipeline Parallel is incompatible with
+    # VarlenAttention, so PP integration tests use this flex config.
+    return _gpt_oss_debugmodel(attn_backend="flex")
+
+
 def gpt_oss_20b() -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(),
         hf_assets_path="./assets/hf/gpt-oss-20b",
         model_spec=model_registry("20b"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
@@ -82,7 +92,7 @@ def gpt_oss_20b() -> Trainer.Config:
 
 def gpt_oss_120b() -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(),
         hf_assets_path="./assets/hf/gpt-oss-120b",
         model_spec=model_registry("120b"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),

@@ -41,6 +41,15 @@ def test_converter_swaps_only_lm_head():
     assert sum(1 for _ in cfg.traverse(Linear.Config)) == num_linears_before
 
 
+def test_converter_returns_model_config():
+    cfg = _qwen3_config()
+
+    converted = LMHeadCastConverter.Config().build().convert(cfg)
+
+    assert converted is cfg
+    assert isinstance(converted.lm_head, CastLinear.Config)
+
+
 def test_converter_preserves_linear_fields():
     cfg = _qwen3_config()
     before = cfg.lm_head

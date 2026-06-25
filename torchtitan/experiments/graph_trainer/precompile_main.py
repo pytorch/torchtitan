@@ -26,7 +26,7 @@ from typing import Any, cast
 import torch
 import torch.distributed as dist
 
-from torchtitan.components.loss import ChunkedCELoss
+from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
@@ -167,12 +167,12 @@ def _common_setup(config):
 
 def _prepare_loss_for_precompile(model, loss_fn) -> None:
     """Match Trainer's post-parallelization loss setup for precompile tracing."""
-    if not isinstance(loss_fn, ChunkedCELoss):
+    if not isinstance(loss_fn, ChunkedLossWrapper):
         return
 
     lm_head = getattr(model, "lm_head", None)
     if lm_head is None:
-        raise ValueError("Model must have lm_head for ChunkedCELoss precompile")
+        raise ValueError("Model must have lm_head for ChunkedLossWrapper precompile")
 
     loss_fn.set_lm_head(lm_head)
     model._skip_lm_head = True
