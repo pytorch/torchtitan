@@ -119,7 +119,7 @@ def _model_config(
             qk_norm=False,
             mlp_mult=2,
             mlp_multiple_of=1,
-            attention_mask="LAST_FRAME_CAUSAL",
+            attention_mask=attention_mask,
             norm="LayerNorm",
             attention_impl=attention_impl,
         ),
