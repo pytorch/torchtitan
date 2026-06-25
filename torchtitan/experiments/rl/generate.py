@@ -137,6 +137,17 @@ def _resolve_sampling(gen_config, args: argparse.Namespace):
     return temperature, top_p, max_tokens
 
 
+def _effective_allreduce_backend(gen_config) -> str:
+    """Report the all-reduce backend actually used. ``"vllm"`` is disabled under
+    batch-invariant mode (vLLM's custom AR is size-dependent), so the wrapper
+    keeps DTensor's NCCL path; reflect that here instead of the configured value.
+    """
+    backend = gen_config.parallelism.allreduce_backend
+    if backend == "vllm" and gen_config.debug.batch_invariant:
+        return "nccl (vllm disabled under batch_invariant)"
+    return backend
+
+
 def _build_torchtitan_engine(
     config, model_path: str, max_num_seqs: int, *, benchmark: bool
 ) -> LLMEngine:
@@ -303,7 +314,7 @@ def benchmark(config, args: argparse.Namespace) -> None:
     std_tps = statistics.pstdev(throughputs) if len(throughputs) > 1 else 0.0
     compile_tag = "off" if not config.compile.enable else config.compile.backend
     cg_tag = f"{gen_config.cudagraph.mode}" if gen_config.cudagraph.enable else "off"
-    ar_tag = gen_config.parallelism.allreduce_backend
+    ar_tag = _effective_allreduce_backend(gen_config)
 
     print("\n" + "=" * 72, flush=True)
     print(f"BENCHMARK  config={args.config}  model=torchtitan", flush=True)
@@ -332,6 +343,12 @@ def generate(config, args: argparse.Namespace) -> None:
     max_num_seqs = args.max_num_seqs
 
     engine = _build_torchtitan_engine(config, model_path, max_num_seqs, benchmark=False)
+    if _is_rank0():
+        print(
+            f"TP={gen_config.parallelism.tensor_parallel_degree} "
+            f"allreduce={_effective_allreduce_backend(gen_config)}",
+            flush=True,
+        )
 
     renderer = config.renderer.build(tokenizer_path=model_path)
     stop_token_ids = list(renderer.get_stop_token_ids())

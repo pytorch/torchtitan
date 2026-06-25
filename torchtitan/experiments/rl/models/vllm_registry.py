@@ -76,7 +76,8 @@ class InferenceParallelismConfig:
     those reductions through vLLM's custom one-shot/multimem all-reduce (lower
     latency for decode-size messages). Only takes effect when
     ``tensor_parallel_degree > 1``. See
-    :mod:`torchtitan.experiments.rl.models.vllm_allreduce`."""
+    ``_patch_vllm_all_reduce`` in
+    :mod:`torchtitan.experiments.rl.models.vllm_wrapper`."""
 
     def to_training(self) -> ParallelismConfig:
         """Translate to the training ``ParallelismConfig`` for utils that need

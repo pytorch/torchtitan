@@ -28,12 +28,14 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.logger import init_logger
 from vllm.utils import torch_utils as _torch_utils
 
@@ -57,6 +59,54 @@ def _dtensor_safe_weak_ref_tensor(tensor):
 
 
 _torch_utils.weak_ref_tensor = _dtensor_safe_weak_ref_tensor
+
+
+# Process-global: install the op swap at most once even if the generator is
+# re-initialized in the same process (re-wrapping would chain shims).
+_tp_all_reduce_patched = False
+
+
+def _patch_vllm_all_reduce() -> None:
+    """Opt-in (allreduce_backend="vllm"): route the generator's tensor-parallel
+    all-reduce through vLLM's custom one-shot/multimem AR instead of DTensor's
+    NCCL ring redistribute. Idempotent.
+
+    Swapping torch.ops._c10d_functional.all_reduce for
+    tensor_model_parallel_all_reduce reuses vLLM's TP group -- the same ranks,
+    but the GroupCoordinator that owns the custom-AR shared buffers. DTensor
+    wraps the synchronous result in an AsyncCollectiveTensor whose wait_tensor
+    is a no-op.
+
+    Only all_reduce is intercepted, and vLLM's custom AR is sum-only, so any
+    non-sum reduction falls through to the original op. Eager +
+    CompilationMode.NONE cudagraph only (an inductor/dynamo path would capture
+    the original op and bypass this); no-op at world_size 1.
+    """
+    global _tp_all_reduce_patched
+    if _tp_all_reduce_patched:
+        return
+
+    c10d = torch.ops._c10d_functional
+    # Op schema: all_reduce(Tensor input, str reduce_op, Any group_name) -> Tensor.
+    original_all_reduce = c10d.all_reduce
+
+    def all_reduce(input, reduce_op, group_name):
+        if reduce_op == "sum":
+            # Use vLLM's helper rather than the incoming group_name: the custom-AR
+            # kernel is bound to vLLM's TP GroupCoordinator and the shared buffers
+            # it registered, so the reduction must run on vLLM's TP group, not
+            # DTensor's TP mesh PG (a different PG over the same ranks -> rank-for-
+            # rank equivalent). The helper resolves that group, guards
+            # world_size==1, and on CUDA dispatches to torch.ops.vllm.all_reduce.
+            return tensor_model_parallel_all_reduce(input)
+        return original_all_reduce(input, reduce_op, group_name)
+
+    c10d.all_reduce = all_reduce
+    _tp_all_reduce_patched = True
+    logger.info(
+        "vllm_allreduce: routed _c10d_functional.all_reduce (TP sum reductions) "
+        "through vLLM custom all-reduce"
+    )
 
 
 @support_torch_compile(
@@ -212,13 +262,20 @@ class VLLMModelWrapper(Module):
 
         # Optionally route the row-parallel wo/w2 TP all-reduce through vLLM's
         # custom all-reduce instead of DTensor's NCCL ring redistribute. Only
-        # meaningful with TP; bound per-instance so shared classes are untouched.
+        # meaningful with TP; a process-global swap of the functional all-reduce
+        # op, so the shared model classes are untouched.
         if parallelism.allreduce_backend == "vllm" and self.parallel_dims.tp_enabled:
-            from torchtitan.experiments.rl.models.vllm_allreduce import (
-                apply_vllm_allreduce,
-            )
-
-            apply_vllm_allreduce(self.model)
+            # vLLM's custom AR selects its algorithm by message size (one-shot vs
+            # NCCL fallback), so the FP reduction order and numerics
+            # becomes batch/message-size dependent. That defeats batch-invariant
+            # mode.
+            if is_in_batch_invariant_mode():
+                logger.warning(
+                    "allreduce_backend='vllm' ignored under batch-invariant mode "
+                    "(vLLM custom all-reduce is size-dependent); using NCCL."
+                )
+            else:
+                _patch_vllm_all_reduce()
         elif parallelism.allreduce_backend not in ("nccl", "vllm"):
             raise ValueError(
                 f"Unknown allreduce_backend {parallelism.allreduce_backend!r}; "
