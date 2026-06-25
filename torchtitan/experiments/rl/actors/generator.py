@@ -880,6 +880,7 @@ class VLLMGenerator(Actor, Configurable):
         # state_dict() returns hook-produced copies for fused modules (e.g.
         # FusedQKVLinear's wqkv -> wq/wk/wv), so the in-place fill above never
         # reaches the real param. Re-apply via load_state_dict to run the merge hook.
+        # TODO: scope this to fused wq/wk/wv entries to drop the redundant full-model copy.
         self._get_model().model.load_state_dict(model_sd, strict=False)
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:
