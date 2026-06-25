@@ -42,6 +42,7 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
 from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
 from torchtitan.experiments.graph_trainer.memory_policy import (
+    _default_memory_policy_pass,
     _make_default_memory_policy,
     _make_full_memory_policy,
     tag_sac_policy,
@@ -554,6 +555,38 @@ class TestApplySACPass(TestCase):
         wait_node = nodes[1]
         self.assertEqual(rs_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
         self.assertEqual(wait_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+
+    def test_default_policy_saves_fsdp_unshard_when_not_resharding(self):
+        """Saves the FSDP unshard output, not every all-gather."""
+        graph = torch.fx.Graph()
+        param = graph.placeholder("param")
+        x = graph.placeholder("x")
+        all_gather = graph.call_function(
+            torch.ops._c10d_functional.all_gather_into_tensor.default,
+            args=(param, 1, "0"),
+        )
+        wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default,
+            args=(all_gather,),
+        )
+        view = graph.call_function(torch.ops.aten.view.default, args=(wait, [4]))
+        out = graph.call_function(torch.ops.aten.add.Tensor, args=(view, x))
+        graph.output(out)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        config = SimpleNamespace(
+            parallelism=SimpleNamespace(
+                fsdp_reshard_after_forward="never",
+                pipeline_parallel_degree=1,
+            )
+        )
+
+        _default_memory_policy_pass(gm, config=config)
+
+        self.assertEqual(
+            all_gather.meta["recompute"], CheckpointPolicy.PREFER_RECOMPUTE
+        )
+        self.assertEqual(wait.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(view.meta["recompute"], CheckpointPolicy.PREFER_RECOMPUTE)
 
     def test_boundary_nodes_forced_to_must_save(self):
         """Nodes at AC region boundaries should be forced to MUST_SAVE."""
