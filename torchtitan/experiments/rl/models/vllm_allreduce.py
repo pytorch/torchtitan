@@ -17,13 +17,16 @@ all-reduce, which is markedly lower latency for the small messages decode emits.
 Profiling the generator put that NCCL redistribute at a large fraction of TP
 inference GPU time, and it is also a cross-rank arrival-spin source.
 
-This module replaces the ``Partial -> Replicate`` step on every ``wo`` and
-``w2`` instance with ``vllm.distributed.tensor_model_parallel_all_reduce`` while
-leaving the rest of the model on DTensor. It binds the replacement forward
-per-instance (``module.forward = MethodType(...)``); it does NOT monkeypatch the
-shared ``GQAttention`` / ``FeedForward`` / ``Linear`` classes, so training and
-other model paths are unaffected. Generator-only and inference-only (no autograd,
-so ``to_local`` needs no ``grad_placements``).
+This module replaces the ``Partial -> Replicate`` step on every attention
+``wo`` and dense feed-forward ``w2`` instance with
+``vllm.distributed.tensor_model_parallel_all_reduce`` while leaving the rest of
+the model on DTensor. MoE routed experts (EP all-to-all combine) and MoE
+``shared_experts`` (whose ``w2`` keeps a deferred ``Partial`` reduced at the MoE
+boundary) are left untouched. It binds the replacement forward per-instance
+(``module.forward = MethodType(...)``); it does NOT monkeypatch the shared
+``BaseAttention`` / ``FeedForward`` / ``Linear`` classes, so training and other
+model paths are unaffected. Generator-only and inference-only (no autograd, so
+``to_local`` needs no ``grad_placements``).
 """
 
 import types
@@ -65,9 +68,27 @@ def _vllm_allreduce_linear_forward(self: nn.Linear, x: torch.Tensor) -> torch.Te
 
 
 def apply_vllm_allreduce(model: nn.Module) -> int:
-    """Route every attention ``wo`` and FFN ``w2`` output projection through
-    vLLM's custom all-reduce instead of DTensor's NCCL ``Partial -> Replicate``
-    redistribute.
+    """Route every attention ``wo`` and dense feed-forward ``w2`` output
+    projection through vLLM's custom all-reduce instead of DTensor's NCCL
+    ``Partial -> Replicate`` redistribute.
+
+    Attention is matched on the shared :class:`BaseAttention` base, so it covers
+    every decoder model -- ``GQAttention`` (qwen3) plus the per-model
+    ``Attention`` subclasses (deepseek_v3 / gpt_oss / qwen3_5). All route their
+    ``wo`` / dense ``w2`` through the shared ``rowwise_config`` (weight
+    contraction-sharded, output reduced to ``Replicate`` at the projection), so
+    the per-instance swap preserves that reduction contract.
+
+    Correct under the generator's attention-DP + expert-EP layout
+    (``ep == dp * tp``): ``wo`` / ``w2`` are sharded only on the TP axis, so the
+    swap reduces over vLLM's TP group exactly as the NCCL path did. The EP-folded
+    routed experts use a separate all-to-all combine and are never matched here.
+
+    MoE ``shared_experts`` are also ``FeedForward`` instances, but their rowwise
+    ``w2`` output is intentionally kept ``Partial`` and reduced together with the
+    routed-expert output at the MoE boundary (see ``_shared_expert_rowwise_config``).
+    All-reducing it here would break that deferred-reduction contract, so they
+    are excluded.
 
     Binds :func:`_vllm_allreduce_linear_forward` on each target instance; the
     shared module classes are left untouched. Returns the number of projections
@@ -75,14 +96,23 @@ def apply_vllm_allreduce(model: nn.Module) -> int:
     """
     # Imported here (not at module top) to avoid importing core model classes
     # before the generator has selected/replaced its layers.
-    from torchtitan.models.common.attention import GQAttention
+    from torchtitan.models.common.attention import BaseAttention
     from torchtitan.models.common.feed_forward import FeedForward
+    from torchtitan.models.common.moe import MoE
+
+    # MoE shared experts are dense FeedForwards whose rowwise w2 output stays
+    # Partial (reduced at the MoE boundary); exclude them from the swap.
+    shared_expert_ids = {
+        id(module.shared_experts)
+        for module in model.modules()
+        if isinstance(module, MoE) and module.shared_experts is not None
+    }
 
     patched = 0
     for module in model.modules():
-        if isinstance(module, GQAttention):
+        if isinstance(module, BaseAttention):
             target = module.wo
-        elif isinstance(module, FeedForward):
+        elif isinstance(module, FeedForward) and id(module) not in shared_expert_ids:
             target = module.w2
         else:
             continue
@@ -90,8 +120,8 @@ def apply_vllm_allreduce(model: nn.Module) -> int:
         patched += 1
 
     logger.info(
-        "vllm_allreduce: routed %d output projections (attention wo + FFN w2) "
-        "through vLLM custom all-reduce",
+        "vllm_allreduce: routed %d output projections (attention wo + dense FFN "
+        "w2) through vLLM custom all-reduce",
         patched,
     )
     return patched
