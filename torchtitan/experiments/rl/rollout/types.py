@@ -13,7 +13,7 @@ from typing import Protocol, TYPE_CHECKING
 from renderers import Message
 
 from torchtitan.experiments.rl.observability import metrics as m
-from torchtitan.experiments.rl.types import Completion, RolloutID
+from torchtitan.experiments.rl.types import Completion, RolloutTurnID
 
 if TYPE_CHECKING:
     # Type-only: importing the generator module here would pull in vLLM at import time.
@@ -88,7 +88,7 @@ class RolloutTurn:
     # TODO: add a `logs` field (raw prompt/response text, finish_reason, timings)
     # so a turn can be dumped and inspected without re-deriving from tokens.
 
-    rollout_id: RolloutID
+    rollout_id: RolloutTurnID
     """Identifies this turn (group, sibling index, turn index)."""
 
     # Fields needed for training
@@ -103,12 +103,10 @@ class RolloutTurn:
 
     # Filtering
     min_policy_version: int | None = None
-    """Min policy version this turn was sampled under (= the admission version); `None` for a
-    prompt-only turn (no generation happened, e.g. the prompt was too long)."""
+    """Oldest policy version this turn was sampled under; `None` if no generation happened."""
 
     max_policy_version: int | None = None
-    """Max policy version this turn was sampled under (= the version live at finish); `None` for a
-    prompt-only turn. Equals min_policy_version unless a weight pull landed mid-generation (hotswap)."""
+    """Newest policy version this turn was sampled under; `None` if no generation happened."""
 
     # Logging
     prompt_messages: list[Message] = field(

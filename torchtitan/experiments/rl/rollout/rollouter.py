@@ -24,7 +24,7 @@ from torchtitan.experiments.rl.rollout.types import (
     RolloutTurn,
 )
 from torchtitan.experiments.rl.rubrics import Rubric, RubricOutput
-from torchtitan.experiments.rl.types import RolloutID
+from torchtitan.experiments.rl.types import RolloutTurnID
 
 if TYPE_CHECKING:
     # Type-only: importing the generator module here would pull in vLLM at import time.
@@ -189,6 +189,8 @@ class Rollouter(Configurable):
             sample=sample, group_size=group_size, renderer=renderer
         )
 
+        # TODO(perf): siblings in a group share the first-turn prompt; tokenize it once per group and
+        # reuse across the group_size rollouts (truest spot is the rollouter's first-turn render).
         try:
             # produce the rollouts
             rollouts = await asyncio.gather(
@@ -248,7 +250,7 @@ class Rollouter(Configurable):
             sampling: Sampling config for every generate call.
             group_id: The GRPO group id.
             rollout_id: Sibling index within the group; combined with the turn index into the
-                per-turn `RolloutID`, and stored as `Rollout.rollout_id`.
+                per-turn `RolloutTurnID`, and stored as `Rollout.rollout_id`.
 
         Returns:
             One unscored `Rollout` (reward filled later by the controller).
@@ -258,7 +260,7 @@ class Rollouter(Configurable):
         try:
             env_step = await env.init()
             while not env_step.status.is_terminal():
-                turn_rollout_id = RolloutID(
+                turn_rollout_id = RolloutTurnID(
                     group_id=group_id, rollout_id=rollout_id, turn_id=len(turns)
                 )
 

@@ -7,8 +7,6 @@
 """Converts one generated rollout group into trainable training_samples.
 
 RolloutGroup -> data-validity filters -> rollout_to_training_samples -> TrainingSampleGroup
-
-Policy-version staleness is handled later by `Batcher`.
 """
 
 import statistics
@@ -18,20 +16,18 @@ from torchtitan.config import Configurable
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.rollout import Rollout, RolloutGroup
 from torchtitan.experiments.rl.types import (
-    RolloutID,
+    RolloutTurnID,
     TrainingSample,
     TrainingSampleGroup,
 )
 
 
 class TrainingSampleBuilder(Configurable):
-    """Build trainable training_samples and rollout-origin metrics from one group.
+    """Build trainable samples and metrics the trainer consumes from rollout groups.
 
     Example:
-        builder = config.training_sample_builder.build()
-        output = builder.build_from_group(rollout_group=group)
-        # output.training_samples is empty for failed, untrainable, or zero-std groups.
-        # output.metrics still carries the counters for that group.
+        builder = config.async_loop.training_sample_builder.build()
+        output: TrainingSampleGroup = builder.build_from_group(rollout_group=rollout_group)
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -54,6 +50,8 @@ class TrainingSampleBuilder(Configurable):
         """
         metrics: list[m.Metric] = list(rollout_group.metrics)
 
+        # TODO(async-rl): generalize these group-level filters into an ordered, user-pluggable filter
+        # list (e.g. drop groups with all-0 / all-1 advantage), run in sequence on each RolloutGroup.
         # Failed generation: empty group carrying its failure metric.
         if not rollout_group.rollouts:
             return TrainingSampleGroup(
@@ -104,6 +102,9 @@ class TrainingSampleBuilder(Configurable):
         min_policy_versions = [
             training_sample.min_policy_version for training_sample in training_samples
         ]
+        max_policy_versions = [
+            training_sample.max_policy_version for training_sample in training_samples
+        ]
         advantages = [rollout.advantage for rollout in rollout_group.rollouts]
         metrics += [
             m.Metric(
@@ -121,7 +122,7 @@ class TrainingSampleBuilder(Configurable):
                 "rollout/min_policy_version", m.Min.from_list(min_policy_versions)
             ),
             m.Metric(
-                "rollout/min_policy_version", m.Max.from_list(min_policy_versions)
+                "rollout/max_policy_version", m.Max.from_list(max_policy_versions)
             ),
         ]
         return TrainingSampleGroup(
@@ -130,8 +131,6 @@ class TrainingSampleBuilder(Configurable):
             metrics=metrics,
         )
 
-    # TODO(async-rl): evaluate renaming TrainingSample -> RolloutSegment once we align the overloaded
-    # "sample" names (the dataset/input side also uses "sample").
     def rollout_to_training_samples(self, rollout: Rollout) -> list[TrainingSample]:
         """Pack a scored `Rollout` into training training_samples — usually one, or several where its turns branch.
 
@@ -175,16 +174,20 @@ class TrainingSampleBuilder(Configurable):
         # Used to check if [P1, C1] is prefix of [P1,C1,E1] in the docstring example
         prev_prompt_and_completion: list[int] = []
 
-        # Skip if no completion (nothing to train on). This happens when the prompt is too long.
-        # TODO: This seems to happen on the very first turn. Check if we can prefilter it.
+        # Skip if no completion (nothing to train on). This happens when the prompt is too
+        # long in the first turn, before any generation. We keep these rollouts for debugging.
+        # TODO(async-rl): confirm this signal actually reaches the rollout_recorder.
         for turn_idx, rollout_turn in enumerate(rollout.turns):
             if not rollout_turn.completion_token_ids:
-                if turn_idx != len(rollout.turns) - 1:
-                    raise ValueError(
-                        f"rollout {rollout.group_id}/rollout={rollout.rollout_id}: "
-                        f"non-final turn {turn_idx} has no completion"
-                    )
-                continue
+                if len(rollout.turns) == 1:
+
+                    continue
+
+                # empty rollouts should only happen when initial prompt is too long
+                raise ValueError(
+                    f"rollout {rollout.group_id}/rollout={rollout.rollout_id}: "
+                    f"non-final turn {turn_idx} has no completion"
+                )
 
             prompt = rollout_turn.prompt_token_ids
             # True when this prompt continues the previous one (prefix-preserving);
@@ -193,12 +196,12 @@ class TrainingSampleBuilder(Configurable):
                 prompt[: len(prev_prompt_and_completion)] == prev_prompt_and_completion
             )
             if not training_samples or not extends_prev:
-                # Start a new training_sample; its rollout_id.turn_id marks the turn the segment begins at.
+                # Start a new training_sample; its RolloutTurnID marks the turn the segment begins at.
                 training_samples.append(
                     TrainingSample(
                         min_policy_version=rollout_turn.min_policy_version,
                         max_policy_version=rollout_turn.max_policy_version,
-                        rollout_id=RolloutID(
+                        rollout_id=RolloutTurnID(
                             group_id=rollout.group_id,
                             rollout_id=rollout.rollout_id,
                             turn_id=turn_idx,
@@ -209,13 +212,12 @@ class TrainingSampleBuilder(Configurable):
                         advantage=[],
                     )
                 )
-                # The whole prompt opens this training_sample.
+                # New branch (first turn or a branch): no shared prefix.
                 prefix_len = 0
             else:
-                # Only the env-reply suffix is new.
                 prefix_len = len(prev_prompt_and_completion)
 
-            # Untrained prefix delta (the prompt or the new env reply), then the trained completion.
+            # Append this turn's new info to `training_sample`: prefix delta (untrained) + completion (trained).
             training_sample = training_samples[-1]
             prompt_delta = prompt[prefix_len:]
             num_delta = len(prompt_delta)

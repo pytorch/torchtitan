@@ -6,7 +6,7 @@
 
 """Config entry points for the alphabet-sort example.
 
-Each function returns a complete ``RLController.Config``, discoverable by
+Each function returns a complete ``Controller.Config``, discoverable by
 ``ConfigManager`` via
 ``--module alphabet_sort --config rl_grpo_qwen3_*``.
 """
@@ -42,8 +42,8 @@ from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismC
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.trainer import (
-    AsyncControlConfig,
-    RLController,
+    AsyncLoopConfig,
+    Controller,
     ValidationConfig,
 )
 from torchtitan.models.gpt_oss import model_registry as gpt_oss_model_registry
@@ -70,13 +70,13 @@ def _qwen3_rl_model_registry(
     return model_registry(flavor, attn_backend=attn_backend, converters=converters)
 
 
-def rl_grpo_qwen3_0_6b_varlen() -> RLController.Config:
+def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
     """GRPO training config for Qwen3-0.6B (6 GPUs: 4 gen + 2 train)."""
     group_size = 8
-    return RLController.Config(
+    return Controller.Config(
         model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
-        async_control=AsyncControlConfig(
+        async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_groups_per_train_step=8,
             group_size=group_size,
@@ -129,13 +129,13 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLController.Config:
     )
 
 
-def rl_grpo_qwen3_0_6b_flex() -> RLController.Config:
+def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
     """GRPO training config for Qwen3-0.6B with flex attention (4 GPUs: 2 gen + 2 train)."""
     group_size = 8
-    return RLController.Config(
+    return Controller.Config(
         model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="flex"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
-        async_control=AsyncControlConfig(
+        async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_groups_per_train_step=8,
             group_size=group_size,
@@ -183,7 +183,7 @@ def rl_grpo_qwen3_0_6b_flex() -> RLController.Config:
     )
 
 
-def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLController.Config:
+def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     """GRPO training config for Qwen3-0.6B with flex attention and batch invariance
     for bitwise-identical numerics between trainer and generator (4 GPUs: 2 gen + 2 train).
     """
@@ -194,8 +194,8 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLController.Config:
         converters=[BatchInvariantFlexConverter.Config()],
     )
     block_size = config.model_spec.model.layers[0].attention.inner_attention.block_size
-    config.async_control.batcher = dataclasses.replace(
-        config.async_control.batcher, per_sample_pad_multiple=block_size
+    config.async_loop.batcher = dataclasses.replace(
+        config.async_loop.batcher, per_sample_pad_multiple=block_size
     )
     config.trainer = dataclasses.replace(
         config.trainer,
@@ -210,7 +210,7 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLController.Config:
     return config
 
 
-def rl_grpo_gpt_oss_20b_varlen() -> RLController.Config:
+def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
     """GRPO training config for GPT-OSS-20B with varlen attention.
 
     GPT-OSS uses alternating attention: even layers apply a sliding window, odd
@@ -218,10 +218,10 @@ def rl_grpo_gpt_oss_20b_varlen() -> RLController.Config:
     ``VarlenAttention.window_size``.
     """
     group_size = 8
-    return RLController.Config(
+    return Controller.Config(
         model_spec=gpt_oss_model_registry("20b", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/gpt-oss-20b",
-        async_control=AsyncControlConfig(
+        async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_groups_per_train_step=5,
             group_size=group_size,
@@ -274,16 +274,16 @@ def rl_grpo_gpt_oss_20b_varlen() -> RLController.Config:
     )
 
 
-def rl_grpo_gpt_oss_debug_varlen() -> RLController.Config:
+def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
     """Small GPT-OSS debug config (random init) to exercise the full RL loop."""
     group_size = 8
-    return RLController.Config(
+    return Controller.Config(
         model_spec=gpt_oss_model_registry("debugmodel", attn_backend="varlen"),
         # Debug tokenizer (vocab 2048, matches debugmodel); the gpt_oss renderer
         # needs gpt-oss special tokens absent here, so use the qwen3 renderer
         # like the other debug configs.
         hf_assets_path="tests/assets/tokenizer",
-        async_control=AsyncControlConfig(
+        async_loop=AsyncLoopConfig(
             num_training_steps=3,
             num_groups_per_train_step=5,
             group_size=group_size,
@@ -326,14 +326,14 @@ def rl_grpo_gpt_oss_debug_varlen() -> RLController.Config:
     )
 
 
-def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> RLController.Config:
+def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
     """Small GPT-OSS debug config in deterministic + batch-invariant mode."""
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     group_size = 8
-    return RLController.Config(
+    return Controller.Config(
         model_spec=gpt_oss_model_registry("debugmodel", attn_backend="varlen"),
         hf_assets_path="tests/assets/tokenizer",
-        async_control=AsyncControlConfig(
+        async_loop=AsyncLoopConfig(
             num_training_steps=3,
             num_groups_per_train_step=5,
             group_size=group_size,
@@ -382,13 +382,13 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> RLController.Config:
     )
 
 
-def rl_grpo_qwen3_1_7b() -> RLController.Config:
+def rl_grpo_qwen3_1_7b() -> Controller.Config:
     """GRPO training config for Qwen3-1.7B (6 GPUs: 4 gen + 2 train)."""
     group_size = 8
-    return RLController.Config(
+    return Controller.Config(
         model_spec=_qwen3_rl_model_registry("1.7B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
-        async_control=AsyncControlConfig(
+        async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_groups_per_train_step=8,
             group_size=group_size,
@@ -436,13 +436,13 @@ def rl_grpo_qwen3_1_7b() -> RLController.Config:
     )
 
 
-def rl_grpo_qwen3_14b() -> RLController.Config:
+def rl_grpo_qwen3_14b() -> Controller.Config:
     """GRPO training config for Qwen3-14B (16 GPUs: 8 gen + 8 train)."""
     group_size = 8
-    return RLController.Config(
+    return Controller.Config(
         model_spec=_qwen3_rl_model_registry("14B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-14B",
-        async_control=AsyncControlConfig(
+        async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_groups_per_train_step=8,
             group_size=group_size,
@@ -490,7 +490,7 @@ def rl_grpo_qwen3_14b() -> RLController.Config:
     )
 
 
-def rl_grpo_qwen3_moe_debug_varlen() -> RLController.Config:
+def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
     """Debug MoE config with EP+TP on generator (8 GPUs: 4 gen + 4 train).
 
     Trainer uses data_parallel_shard_degree=2 as FSDP degree and TP=2.
@@ -498,10 +498,10 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLController.Config:
     MoE layers use EP=4.
     """
     group_size = 8
-    return RLController.Config(
+    return Controller.Config(
         model_spec=model_registry("debugmodel_moe", attn_backend="varlen"),
         hf_assets_path="tests/assets/tokenizer",
-        async_control=AsyncControlConfig(
+        async_loop=AsyncLoopConfig(
             num_training_steps=5,
             num_groups_per_train_step=8,
             group_size=group_size,
@@ -556,7 +556,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLController.Config:
     )
 
 
-def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLController.Config:
+def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
     """Batch-invariant MoE EP config for bitwise parity testing (8 GPUs).
 
     Trainer uses data_parallel_shard_degree=2 as FSDP degree and TP=2.
@@ -571,12 +571,12 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLController.Config:
 
     """
     group_size = 8
-    return RLController.Config(
+    return Controller.Config(
         model_spec=model_registry(
             "debugmodel_moe", attn_backend="varlen", moe_comm_backend="standard"
         ),
         hf_assets_path="tests/assets/tokenizer",
-        async_control=AsyncControlConfig(
+        async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_groups_per_train_step=8,
             group_size=group_size,
@@ -632,7 +632,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLController.Config:
     )
 
 
-def rl_grpo_qwen3_30b_a3b_varlen() -> RLController.Config:
+def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
     """GRPO training config for Qwen3-30B-A3B MoE (8 GPUs: 4 gen + 4 train).
 
     Trainer and generator uses TP=2 for dense layers and EP=4 for MoE experts.
@@ -640,10 +640,10 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLController.Config:
     Note: Qwen3-30B-A3B has 4 KV heads, so TP degree cannot exceed 4.
     """
     group_size = 8
-    return RLController.Config(
+    return Controller.Config(
         model_spec=model_registry("30B-A3B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-30B-A3B",
-        async_control=AsyncControlConfig(
+        async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_groups_per_train_step=8,
             group_size=group_size,
@@ -695,17 +695,17 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLController.Config:
     )
 
 
-def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLController.Config:
+def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
     """On-policy GRPO config for Qwen3-0.6B (4 GPUs: 2 gen + 2 train).
 
     Enables deterministic + batch-invariant mode for true on-policy RL training.
     """
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     group_size = 8
-    return RLController.Config(
+    return Controller.Config(
         model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
-        async_control=AsyncControlConfig(
+        async_loop=AsyncLoopConfig(
             num_training_steps=10,
             num_groups_per_train_step=8,
             group_size=group_size,

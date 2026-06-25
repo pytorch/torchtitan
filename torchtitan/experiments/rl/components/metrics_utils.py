@@ -4,8 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Metric helpers for the async RL controller: a generic duration timer, microbatch-metric
-combination, the trainer goodput panel, trainer-consumed policy age, and rollout-derived metrics."""
+"""Metric helpers for the async RL loop to keep the loop functions free of metric computations."""
+
+# TODO(async-rl): revisit this module's path/name — not observability/metrics (that is public API),
+# but components/ may not be the right home either.
 
 import contextlib
 import time
@@ -16,42 +18,43 @@ from torchtitan.experiments.rl.rollout.types import Rollout
 
 
 class MetricsTimer:
-    """Collect named durations; the caller decides the log step + namespace and flushes them.
-
-    Generic and loop-agnostic. The caller records spans and passes `metrics()` to
-    `metrics_processor.log(step=...)` once per step (trainer) or per pass (validation). `metrics()`
-    drains the timer, so snapshot `durations` first if a derived panel needs the raw timings. Name the
-    variable for its lifetime (e.g. `step_timer`, `validation_timer`).
+    """Times named code spans; flush() drains them into Mean metrics, then resets.
 
     Example:
-        timer = MetricsTimer()
-        with timer.record("timing/step/train"):
-            ...
-        metrics = timer.metrics()   # [Metric("timing/step/train", Mean(...)), ...]
+        metric_timer = MetricsTimer()
+        with metric_timer.record("timing/step/total"):
+            for _ in range(num_microbatches):
+                with metric_timer.record("timing/step/forward_backward"):
+                    ...
+        time_metrics = metric_timer.flush()
+        # -> [Metric("timing/step/total", Mean(...)),
+        #     Metric("timing/step/forward_backward", Mean(...))]   # mean over num_microbatches
     """
 
     def __init__(self) -> None:
-        self.durations: dict[str, float] = {}
+        self.durations: dict[str, list[float]] = defaultdict(list)
 
     @contextlib.contextmanager
     def record(self, key: str):
-        if key in self.durations:
-            raise ValueError(f"duplicate timing key {key!r} in one timer")
+        # TODO(async-rl): consider asynccontextmanager if span entry/exit ever needs async work; this
+        # sync manager still measures awaited blocks correctly.
         start = time.perf_counter()
         try:
             yield
         finally:
-            self.durations[key] = time.perf_counter() - start
+            self.durations[key].append(time.perf_counter() - start)
 
-    def metrics(self) -> list[m.Metric]:
+    def flush(self) -> list[m.Metric]:
         """Return one Mean metric per recorded span, then reset so the timer can be reused.
 
-        Callers that also need the raw durations (e.g. the goodput panel) must snapshot
+        Callers that also need the raw durations (e.g. the perf panel) must snapshot
         `self.durations` BEFORE calling this, since it drains them.
         """
         durations = self.durations
-        self.durations = {}
-        return [m.Metric(key, m.Mean(value)) for key, value in durations.items()]
+        self.durations = defaultdict(list)
+        return [
+            m.Metric(key, m.Mean.from_list(values)) for key, values in durations.items()
+        ]
 
 
 def combine_microbatch_metrics(
@@ -81,31 +84,31 @@ def combine_microbatch_metrics(
 
 
 def compute_perf_ratio_metrics(
-    *, num_global_valid_tokens: int, durations: dict[str, float]
+    *, num_global_valid_tokens: int, durations: dict[str, list[float]]
 ) -> list[m.Metric]:
-    """Trainer-side goodput panel derived from one step's timings.
-
-    The gap between goodput (`/ step total`) and active (`/ train`) IS the trainer-idle + sync bubble.
-
-    Example:
-        # step total=10, wait=8, train=1, weight_sync=0.5, num_global_valid_tokens=100
-        # -> perf/trainer_idle_ratio=0.8, perf/weight_sync_overhead_ratio=0.05,
-        #    perf/goodput_tokens_per_second=10, perf/active_tokens_per_second=100
-    """
-    step_s = sum(durations.values())
-    wait_s = durations.get("timing/step/wait_for_training_batch", 0.0)
-    train_s = durations.get("timing/step/train", 0.0)
-    sync_s = durations.get("timing/step/weight_sync/push", 0.0) + durations.get(
-        "timing/step/weight_sync/pull", 0.0
+    """Trainer-side timing metrics derived from one step's timings."""
+    step_s = sum(durations.get("timing/step/total", [0.0]))
+    wait_s = sum(durations.get("timing/step/wait_for_training_batch", []))
+    forward_backward_s = sum(durations.get("timing/step/forward_backward", []))
+    optim_s = sum(durations.get("timing/step/optim", []))
+    sync_s = sum(durations.get("timing/step/weight_sync/push", [])) + sum(
+        durations.get("timing/step/weight_sync/pull", [])
     )
+    trainer_compute_s = forward_backward_s + optim_s
+    accounted_s = wait_s + trainer_compute_s + sync_s
+    timing_gap_ratio = (step_s - accounted_s) / step_s if step_s else 0.0
     ratios = {
-        "perf/trainer_idle_ratio": wait_s / step_s if step_s else 0.0,
-        "perf/weight_sync_overhead_ratio": sync_s / step_s if step_s else 0.0,
-        "perf/goodput_tokens_per_second": (
+        "perf/trainer/fwd_bwd_step_time_ratio": (
+            trainer_compute_s / step_s if step_s else 0.0
+        ),
+        "perf/trainer/weight_sync_step_time_ratio": sync_s / step_s if step_s else 0.0,
+        "perf/trainer/batch_step_time_ratio": wait_s / step_s if step_s else 0.0,
+        "perf/trainer/unaccounted_step_time_ratio": timing_gap_ratio,
+        "perf/trainer/tokens_per_second_full_step": (
             num_global_valid_tokens / step_s if step_s else 0.0
         ),
-        "perf/active_tokens_per_second": (
-            num_global_valid_tokens / train_s if train_s else 0.0
+        "perf/trainer/tokens_per_second_fwd_bwd": (
+            num_global_valid_tokens / trainer_compute_s if trainer_compute_s else 0.0
         ),
     }
     return [m.Metric(key, m.NoReduce(value)) for key, value in ratios.items()]
@@ -156,10 +159,9 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
 
     Args:
         prefix: Metric namespace (e.g. `"rollout"` or `"validation"`).
-        rollouts: Rollouts to summarize.
+        rollouts: Rollouts to compute metrics for.
     """
     # Lengths, truncation, reward
-    # TODO: adapt for multi-turn rollouts
     completion_lens = [
         len(rollout_turn.completion_token_ids)
         for rollout in rollouts

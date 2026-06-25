@@ -36,7 +36,7 @@ from monarch.actor import HostMesh, ProcMesh, this_host
 
 from torchtitan.config import ConfigManager, ParallelismConfig
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
-from torchtitan.experiments.rl.trainer import RLController
+from torchtitan.experiments.rl.trainer import Controller
 from torchtitan.observability import structured_logger as sl
 
 
@@ -198,7 +198,7 @@ def spawn_proc_mesh(
 
 async def main():
     config = ConfigManager().parse_args()
-    assert isinstance(config, RLController.Config)
+    assert isinstance(config, Controller.Config)
     sl.init_structured_logger(
         source="rl_controller",
         output_dir=config.dump_folder,
@@ -207,7 +207,7 @@ async def main():
     )
     sl.log_trace_instant("structured_logger_started")
 
-    rl_trainer: RLController = config.build()
+    rl_trainer: Controller = config.build()
     try:
         trainer_world_size = _compute_trainer_world_size(config.trainer.parallelism)
         per_generator_world_size = _compute_generator_world_size(

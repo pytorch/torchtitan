@@ -534,23 +534,18 @@ class PolicyTrainer(Actor, Configurable):
 
     @endpoint
     @sl.log_trace_span("push_model_state_dict")
-    async def push_model_state_dict(self, version: int) -> None:
+    async def push_model_state_dict(self) -> None:
         """Stage model weights to a CPU StorageVolume for the generators to pull (TorchStore).
 
-        `direct_rdma=False` copies the state dict GPU->CPU into a StorageVolume colocated on the
-        trainer mesh, so the trainer's live GPU weights are free the moment this returns (the async
-        weight-sync overlap) and any number of generators can read the staged copy independently
-        (fanout-safe). Writes under `model_state_dict_{version % 2}` — a 2-slot double-buffer so a
-        deferred pull of the previous version is never overwritten by this push (one pull in flight).
-
-        Args:
-            version: Policy version being published; selects the double-buffer slot.
+        `direct_rdma=False` copies the state dict GPU->CPU, so the trainer's GPU weights are free once
+        this returns and any number of generators can read the staged copy (fanout-safe).
         """
         state_dict = self.model.state_dict()
         if self._transfer_dtype is not None:
             # torchstore only applies `transfer_dtype` on the RDMA path, so under direct_rdma=False
             # cast to the generator dtype here (else the generator reads fp32 into its bf16 state dict).
-            # TODO(async-rl): push this cast into torchstore's CPU-staged path so callers don't cast manually.
+            # TODO(async-rl): remove this manual cast once torchstore applies transfer_dtype on the
+            #   CPU-staged path.
             state_dict = {
                 name: tensor.to(self._transfer_dtype)
                 for name, tensor in state_dict.items()
@@ -558,6 +553,6 @@ class PolicyTrainer(Actor, Configurable):
 
         await ts.put_state_dict(
             state_dict,
-            f"model_state_dict_{version % 2}",
+            "model_state_dict",
             direct_rdma=False,
         )

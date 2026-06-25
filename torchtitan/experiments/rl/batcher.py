@@ -5,12 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """Collects trainable `TrainingSample`s until a group-count training batch is ready, then packs it.
-
-`Batcher` accumulates `TrainingSampleGroup`s. When enough trainable groups have accumulated, it packs a
-`TrainingBatch` of `[num_microbatches][dp_degree]` `TrainingMicrobatch`es; surplus training samples carry
-to the next batch. Staleness policy lives in the buffer/trainer, not here.
-
-TODO: move this module to components/
+`Batcher` packs a `TrainingBatch` of `[num_microbatches][dp_degree]` `TrainingMicrobatch`es;
 """
 
 import logging
@@ -53,10 +48,14 @@ class BatchConfig:
 
     TODO: Refactor the pre-training trainer to use an owned batch config
     instead of keeping batch shape fields directly on TrainingConfig.
+    NOTE: in pretraining we would have global_batch_size. But now we have
+    num_groups_per_train_step. This will need to be addressed.
     """
 
     local_batch_size: int = 8
-    """Per-DP-rank batch size (rows per forward pass)."""
+    """Per-DP-rank microbatch size (rows per forward pass). If the number of tokens in the
+    rollouts exceed the number of rows*seq_len, a new microbatch is started.
+    If it is less, the remaining rows are padded to this size."""
 
     seq_len: int = 2048
     """Tokens per row (packed sequence length)."""
@@ -65,9 +64,7 @@ class BatchConfig:
 class Batcher(Configurable):
     """Accumulate training-sample groups and pack group-count training batches.
 
-    Example (target = 2 groups; g1, g2 are TrainingSampleGroups of one rollout each):
-        batcher.add_training_samples(training_sample_group=g1)  # -> None (1 < target)
-        batcher.add_training_samples(training_sample_group=g2)  # -> TrainingBatch (2 == target)
+    Packs `[num_microbatches][dp_degree]` `TrainingMicrobatch`es of `[local_batch_size, seq_len]`.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -108,17 +105,12 @@ class Batcher(Configurable):
             batcher.add_training_samples(training_sample_group=group1)  # -> TrainingBatch
         """
         self._groups_for_next_batch.append(training_sample_group)
-        if self._num_trainable_groups() < self._num_groups_per_train_step:
-            return None  # accumulate until one full batch is ready
-        return self._pack_one_training_batch()
-
-    def _num_trainable_groups(self) -> int:
-        """Number of accumulated rollout groups with at least one training sample."""
-        return sum(
+        num_trainable_groups = sum(
             bool(group.training_samples) for group in self._groups_for_next_batch
         )
-
-    # --- batch formation (count-triggered) + packing ---
+        if num_trainable_groups < self._num_groups_per_train_step:
+            return None  # accumulate until one full batch is ready
+        return self._pack_one_training_batch()
 
     def _pack_one_training_batch(self) -> TrainingBatch:
         """Pack the oldest accumulated groups (up to `num_groups_per_train_step` trainable groups) into one batch."""
@@ -129,7 +121,7 @@ class Batcher(Configurable):
             num_metric_only_groups,
         ) = self._take_groups_for_train_step()
         # Next-fit all taken training_samples into rows.
-        rows = self._pack_training_samples_into_rows(training_samples)
+        rows = self._assign_training_samples_to_rows(training_samples)
         packed_rows = [self._pack_training_sample_row(row) for row in rows]
         return TrainingBatch(
             microbatches=self._build_microbatch_grid(packed_rows),
@@ -156,31 +148,79 @@ class Batcher(Configurable):
     def _take_groups_for_train_step(
         self,
     ) -> tuple[list[TrainingSample], list[m.Metric], int, int]:
-        """Pop accumulated groups oldest-first until `num_groups_per_train_step` trainable groups are taken.
-
-        Metric-only groups encountered along the way are taken too (their metrics ride along) but do not
-        count toward the target; the surplus is carried over.
-        """
+        """Pop accumulated groups oldest-first until `num_groups_per_train_step` are taken."""
         taken_training_samples: list[TrainingSample] = []
         taken_metrics: list[m.Metric] = []
-        num_rollout_groups = 0
-        num_metric_only_groups = 0
-        remaining = list(self._groups_for_next_batch)
-        while remaining and num_rollout_groups < self._num_groups_per_train_step:
-            group = remaining.pop(0)
-            taken_training_samples.extend(group.training_samples)
+        num_trainable_groups = 0
+        cut = 0
+        for group in self._groups_for_next_batch:
+            if num_trainable_groups >= self._num_groups_per_train_step:
+                break
+            cut += 1
+
             taken_metrics.extend(group.metrics)
             if group.training_samples:
-                num_rollout_groups += 1
-            else:
-                num_metric_only_groups += 1
-        self._groups_for_next_batch = remaining  # surplus carried over
+                num_trainable_groups += 1
+                taken_training_samples.extend(group.training_samples)
+
+        # surplus carried over
+        self._groups_for_next_batch = self._groups_for_next_batch[cut:]
+        num_metric_only_groups: int = cut - num_trainable_groups
+
         return (
             taken_training_samples,
             taken_metrics,
-            num_rollout_groups,
+            num_trainable_groups,
             num_metric_only_groups,
         )
+
+    def _assign_training_samples_to_rows(
+        self, training_samples: list[TrainingSample]
+    ) -> list[list[TrainingSample]]:
+        """Next-fit training_samples into rows of <= ``seq_len`` tokens (the caller already capped the count).
+
+        Example:
+
+            # seq_len=10, training_sample effective lengths [5, 5, 5]
+            _assign_training_samples_to_rows([e5, e5, e5])  # -> [[e5, e5], [e5]]
+        """
+        # TODO(async-rl): assignment is greedy next-fit. Swap in smarter algorithms here -- e.g. best-fit,
+        #   DP/CP/PP load balancing, or balancing tokens across DP rows on a seq_len**2 budget.
+        rows: list[list[TrainingSample]] = []
+        current_row: list[TrainingSample] = []
+        current_len = 0
+        for training_sample in training_samples:
+            num_tokens_to_pack = self.num_tokens_to_pack(training_sample)
+
+            # doesn't fit, close the row
+            if current_row and current_len + num_tokens_to_pack > self.seq_len:
+                rows.append(current_row)
+                current_row, current_len = [], 0
+
+            current_row.append(training_sample)
+            current_len += num_tokens_to_pack
+
+        if current_row:
+            rows.append(current_row)
+
+        return rows
+
+    def num_tokens_to_pack(self, training_sample: TrainingSample) -> int:
+        """Tokens this training_sample contributes to a packed row.
+
+        The loss-target split drops the last token (``input_ids = raw[:-1]``), and batch-invariant
+        mode rounds the length up to ``per_sample_pad_multiple``.
+
+        Example:
+
+            # token_ids of length 6, per_sample_pad_multiple=None  -> 5
+            # token_ids of length 6, per_sample_pad_multiple=8     -> 8
+        """
+        num_tokens = len(training_sample.token_ids) - 1
+        if self._per_sample_pad_multiple:
+            multiple = self._per_sample_pad_multiple
+            num_tokens = ((num_tokens + multiple - 1) // multiple) * multiple
+        return num_tokens
 
     def _build_microbatch_grid(
         self, packed_rows: list[dict]
@@ -192,8 +232,12 @@ class Batcher(Configurable):
         """
         rows_per_microbatch = self.local_batch_size * self._dp_degree
         num_microbatches = max(1, math.ceil(len(packed_rows) / rows_per_microbatch))
+
+        # Pad up to a full grid
         while len(packed_rows) < num_microbatches * rows_per_microbatch:
             packed_rows.append(self._pack_training_sample_row([]))  # pad-only row
+
+        # [num_rows] -> [num_microbatches][dp_degree]
         grid: list[list[TrainingMicrobatch]] = []
         for microbatch in range(num_microbatches):
             ranks: list[TrainingMicrobatch] = []
@@ -205,64 +249,30 @@ class Batcher(Configurable):
             grid.append(ranks)
         return grid
 
-    def num_packed_tokens(self, training_sample: TrainingSample) -> int:
-        """Tokens this training_sample contributes to a packed row.
-
-        The loss-target split drops the last token (``input_ids = raw[:-1]``), and batch-invariant
-        mode rounds the length up to ``per_sample_pad_multiple``.
-
-        Example:
-
-            # token_ids of length 6, per_sample_pad_multiple=None  -> 5
-            # token_ids of length 6, per_sample_pad_multiple=8      -> 8
-        """
-        length = len(training_sample.token_ids) - 1
-        if self._per_sample_pad_multiple:
-            align = self._per_sample_pad_multiple
-            length = ((length + align - 1) // align) * align
-        return length
-
-    def _pack_training_samples_into_rows(
-        self, training_samples: list[TrainingSample]
-    ) -> list[list[TrainingSample]]:
-        """Next-fit training_samples into rows of <= ``seq_len`` tokens (the caller already capped the count).
-
-        Example:
-
-            # seq_len=10, training_sample effective lengths [5, 5, 5]
-            _pack_training_samples_into_rows([e5, e5, e5])  # -> [[e5, e5], [e5]]
-        """
-        # TODO(async-rl): packing is greedy next-fit; the seam for alternative algorithms (e.g. best-fit,
-        # each training_sample scanning earlier rows' remaining slots) lives here.
-        rows: list[list[TrainingSample]] = []
-        current_row: list[TrainingSample] = []
-        current_len = 0
-        for training_sample in training_samples:
-            length = self.num_packed_tokens(training_sample)
-            if (
-                current_row and current_len + length > self.seq_len
-            ):  # doesn't fit -> close the row
-                rows.append(current_row)
-                current_row, current_len = [], 0
-            current_row.append(training_sample)
-            current_len += length
-        if current_row:
-            rows.append(current_row)
-        return rows
-
+    # TODO(async-rl): make packing pluggable -- a `Packer` protocol on `Batcher.Config` (e.g. `TextPacker`)
+    #   so callers swap logic per modality (images, ...).
     def _pack_training_sample_row(self, training_samples: list[TrainingSample]) -> dict:
-        """Concatenate one row's training_samples into a single ``[1, seq_len]`` padded row.
+        """Concatenate one row's samples into a `[1, seq_len]` padded row.
+        - Labels and logits are shifted
+        -`positions` restart at 0 per sample
+        -`seq_lens` keeps per-sample lengths
 
-        Each training_sample's raw tokens (length N) split into ``input_ids = raw[:-1]`` and
-        ``labels = raw[1:]`` (length N-1); each sample is padded to ``per_sample_pad_multiple``; then
-        the row is padded up to ``seq_len``. ``positions`` restart at 0 per sample; ``seq_lens`` keeps
-        the per-sample lengths (for the pad-fraction metric and packed-attention).
+        Example:
+
+            # two 3-token samples [10, 11, 12] and [20, 21, 22], seq_len=8, pad_id=0
+            # each sample drops one token via the raw[:-1]/raw[1:] split (3 -> 2), then the row pads to 8:
+            input_ids = [10, 11, 20, 21, 0, 0, 0, 0]
+            labels    = [11, 12, 21, 22, 0, 0, 0, 0]
+            positions = [ 0,  1,  0,  1, 0, 0, 0, 0]   # restart at 0 per sample, then pad
+            seq_lens  = [2, 2]                         # per-sample lengths after the split (4 real tokens, 4 pad)
         """
         pad_values = {**_PAD_VALUES, "input_ids": self.pad_id, "labels": self.pad_id}
         keys = list(pad_values)
         row: dict[str, list] = {key: [] for key in keys}
         positions: list[int] = []
         seq_lens: list[int] = []
+
+        # Shift labals/logits + pad to per_sample_pad_multiple.
         for training_sample in training_samples:
             sample = {
                 "input_ids": training_sample.token_ids[:-1],
@@ -272,6 +282,8 @@ class Batcher(Configurable):
                 "advantages": training_sample.advantage[1:],
             }
             sample_len = len(sample["input_ids"])
+
+            # pad to multiple
             if self._per_sample_pad_multiple:
                 align = self._per_sample_pad_multiple
                 padded_len = ((sample_len + align - 1) // align) * align
@@ -280,17 +292,21 @@ class Batcher(Configurable):
                         padded_len - sample_len
                     )
                 sample_len = padded_len
+
+            # extend row
             for key in keys:
                 row[key].extend(sample[key])
             positions.extend(range(sample_len))
             seq_lens.append(sample_len)
 
+        # Pad the row up to seq_len.
         pad_len = self.seq_len - len(positions)
         if pad_len > 0:
             for key in keys:
                 row[key].extend([pad_values[key]] * pad_len)
             positions.extend(range(pad_len))
 
+        # Stack lists into [1, L] tensors.
         packed = {
             key: torch.tensor(row[key], dtype=_DTYPES[key]).unsqueeze(0) for key in keys
         }
@@ -326,9 +342,7 @@ class Batcher(Configurable):
         return [
             m.Metric(
                 "train_batch/padding_frac",
-                m.NoReduce(
-                    (total_slots - non_padded) / total_slots if total_slots else 0.0
-                ),
+                m.NoReduce((total_slots - non_padded) / total_slots),
             ),
             m.Metric(
                 "train_batch/num_microbatches",

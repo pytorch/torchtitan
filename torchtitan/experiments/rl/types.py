@@ -12,20 +12,24 @@ from torchtitan.experiments.rl.observability import metrics as m
 
 
 @dataclass(frozen=True, slots=True)
-class RolloutID:
-    """Identifies a rollout/turn end-to-end.
+class RolloutTurnID:
+    """A turn's id: (group, sibling rollout, turn index); renders to the generator request_id.
 
     Example:
 
-        RolloutID(group_id=5, rollout_id=2, turn_id=0).to_string()
+        RolloutTurnID(group_id=5, rollout_id=2, turn_id=0).to_string()
         # -> "group=5/rollout=2/turn=0"
-        RolloutID(group_id=5, rollout_id=2, turn_id=0).to_string(include_turn=False)
+        RolloutTurnID(group_id=5, rollout_id=2, turn_id=0).to_string(include_turn=False)
         # -> "group=5/rollout=2"
     """
 
-    group_id: int  # globally unique per GRPO group (e.g. group_id=5)
-    rollout_id: int  # sibling index within the group (0..group_size-1)
-    turn_id: int  # turn index within the rollout
+    group_id: int
+    """Globally-unique GRPO group id; siblings share it (the sticky-routing key, sans turn)."""
+    rollout_id: int
+    """Sibling index within the group (0..group_size-1)."""
+    turn_id: int
+    """Turn index within the rollout; for a TrainingSample, the turn where begins.
+    This is not 0 when a single rollout is split into multiple training samples."""
 
     def to_string(self, *, include_turn: bool = True) -> str:
         base = f"group={self.group_id}/rollout={self.rollout_id}"
@@ -44,11 +48,9 @@ class Completion:
     """
 
     min_policy_version: int
-    """Min policy version this turn was sampled under = the version at admission (a request only swaps
-    to NEWER weights mid-decode, so admission is the min)."""
+    """Oldest policy version among this turn's decode."""
     max_policy_version: int
-    """Max policy version this turn was sampled under = the version live when it finished. Equals
-    min_policy_version unless a weight pull landed mid-generation (hotswap)."""
+    """Newest policy version among this turn's decode."""
     # TODO(async-rl): for exact per-token version attribution, switch the engine to
     #   RequestOutputKind.CUMULATIVE and record (start_token, version) boundaries; today we keep only
     #   the per-turn min (min_policy_version) / max (max_policy_version).
@@ -68,20 +70,23 @@ class Completion:
 @dataclass(kw_only=True, slots=True)
 class TrainingSample:
     """A single processed multi-turn rollout, ready for training.
-
     Example (single-turn): token_ids=[P, P, a, a], loss_mask=[0, 0, 1, 1],
-                           logprobs=[0, 0, l, l], advantage=[0, 0, A, A]
-    """
+                           logprobs=[0, 0, l, l], advantage=[0, 0, A, A]"""
 
     min_policy_version: int
-    """Min policy version across this packed segment's turns (the oldest; the off-policy filter reads it)."""
+    """Oldest policy version among this branch's trained turns."""
     max_policy_version: int
-    """Max policy version across this packed segment's turns (newest weights any of its tokens saw)."""
-    rollout_id: RolloutID  # turn_id = the turn this training_sample's segment begins at
-    token_ids: list[int]  # [L] packed prompt + completions + env replies
-    loss_mask: list[bool]  # [L] True on assistant tokens to train
-    logprobs: list[float]  # [L] generator logprobs; 0.0 where loss_mask is False
-    advantage: list[float]  # [L] advantage on assistant tokens, 0.0 elsewhere
+    """Newest policy version among this branch's trained turns."""
+    rollout_id: RolloutTurnID
+    """This sample identifier."""
+    token_ids: list[int]
+    """[L] packed prompt + completions + env replies."""
+    loss_mask: list[bool]
+    """[L] True on assistant tokens to train."""
+    logprobs: list[float]
+    """[L] generator logprobs; 0.0 where loss_mask is False."""
+    advantage: list[float]
+    """[L] advantage on assistant tokens, 0.0 elsewhere."""
 
 
 @dataclass(frozen=True, slots=True)

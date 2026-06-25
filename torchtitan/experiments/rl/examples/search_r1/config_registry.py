@@ -36,24 +36,24 @@ from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.experiments.rl.trainer import (
-    AsyncControlConfig,
-    RLController,
+    AsyncLoopConfig,
+    Controller,
     ValidationConfig,
 )
 from torchtitan.models.qwen3 import model_registry
 
 
-def rl_grpo_qwen3_1_7b_search_r1() -> RLController.Config:
+def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
     """GRPO Search-R1 (multi-turn retrieval QA) for Qwen3-1.7B.
 
     Runs on 8 GPUs: 4 generator (TP=4) + 1 trainer (TP=1), with a dense retrieval
     server on the spare GPUs. Requires a running retrieval server and the QA parquet
     data; see ``README.md``.
     """
-    return RLController.Config(
+    return Controller.Config(
         model_spec=model_registry("1.7B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
-        async_control=AsyncControlConfig(
+        async_loop=AsyncLoopConfig(
             num_training_steps=500,
             num_groups_per_train_step=8,
             group_size=8,
@@ -109,7 +109,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> RLController.Config:
     )
 
 
-def rl_grpo_qwen3_8b_search_r1() -> RLController.Config:
+def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
     """GRPO Search-R1 for Qwen3-8B — same recipe as the 1.7B config.
 
     Only the model and GPU split differ. 8 GPUs: 2 generator (TP=2) + 4 trainer
