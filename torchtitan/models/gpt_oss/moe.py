@@ -13,8 +13,7 @@ import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_size
-from torchtitan.distributed.utils import get_spmd_backend
+from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh
 from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.protocols.module import Module
 
