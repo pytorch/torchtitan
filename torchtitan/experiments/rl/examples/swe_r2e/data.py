@@ -6,8 +6,7 @@
 
 """R2E-Gym (SWE) dataset for the coding-agent RL example.
 
-Reads a JSONL produced from R2E-Gym (see THUDM/slime
-``examples/coding_agent_rl/local_smoke/r2e_to_slime.py``). Each row::
+Reads a JSONL produced from R2E-Gym. Each row::
 
     {
       "prompt": <problem_statement>,

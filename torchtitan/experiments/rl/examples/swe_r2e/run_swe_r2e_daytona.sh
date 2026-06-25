@@ -9,8 +9,9 @@
 #   CONFIG=rl_grpo_qwen3_1_7b_swe_r2e  bash run_swe_r2e_daytona.sh   # fast smoke (2 GPUs)
 #   CONFIG=rl_grpo_qwen3_8b_swe_r2e    bash run_swe_r2e_daytona.sh   # target  (6 GPUs)
 #
-# Prereqs: DAYTONA_API_KEY exported; toolchain tarballs under .toolchain (reused
-# from the slime example by default); HF weights on disk at the config's hf_assets_path.
+# Prereqs: DAYTONA_API_KEY exported; HF weights on disk at the config's
+# hf_assets_path. The Claude Code binary is downloaded inside the sandbox from its
+# CDN (override via SWE_CLAUDE_CDN), so no host toolchain tarballs are needed.
 # NOTE: no `set -u` -- .venv_rl_env.sh appends to possibly-unset LD_LIBRARY_PATH.
 set -ex
 export PYTHONUNBUFFERED=1
@@ -40,13 +41,6 @@ export TT_DAYTONA_CPU="${TT_DAYTONA_CPU:-2}"
 export TT_DAYTONA_MEM_GB="${TT_DAYTONA_MEM_GB:-2}"
 export TT_DAYTONA_DISK_GB="${TT_DAYTONA_DISK_GB:-5}"
 export TT_DAYTONA_CREATE_TIMEOUT="${TT_DAYTONA_CREATE_TIMEOUT:-900}"
-
-# ---- Claude Code toolchain: host tarballs installed into each sandbox at boot.
-# Point SWE_HOST_{NODE,CC}_TARBALL at a Node 22 tarball + a Claude Code tarball
-# (the slime coding_agent_rl example ships compatible ones; override as needed).
-SWE_TOOLCHAIN_DIR="${SWE_TOOLCHAIN_DIR:-${HOME}/slime/examples/coding_agent_rl/.toolchain}"
-export SWE_HOST_NODE_TARBALL="${SWE_HOST_NODE_TARBALL:-${SWE_TOOLCHAIN_DIR}/node-v22.20.0-linux-x64.tar.xz}"
-export SWE_HOST_CC_TARBALL="${SWE_HOST_CC_TARBALL:-${SWE_TOOLCHAIN_DIR}/claude-code-linux-x64.tgz}"
 
 # ---- R2E dataset (JSONL); read by config_registry as SWE_PROMPT_DATA ----
 export SWE_PROMPT_DATA="${PROMPT_DATA:-${SWE_PROMPT_DATA:-}}"

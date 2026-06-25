@@ -11,8 +11,6 @@ starts CLEAN (the agent never touched it), so only the model-produced diff affec
 reward. We apply the diff, inject the dataset's hidden tests, run pytest with
 junit-xml, and compare each test's status to ``expected_output_json`` -- the exact
 per-test match that r2egym's ``_calculate_reward_r2e`` uses.
-
-Ported from THUDM/slime ``examples/coding_agent_rl/sandbox.py`` (R2E paths only).
 """
 
 from __future__ import annotations
@@ -99,25 +97,9 @@ def _parse_junit(xml_text: str) -> dict[str, str]:
     return out
 
 
-def _r2e_match(parsed: dict[str, str], expected: dict[str, str]) -> bool:
-    """All expected ``(test -> status)`` must be reproduced. Falls back to substring
-    matching (like r2egym) when keys don't line up exactly."""
-    if not expected:
-        return False
-    for tname, estatus in expected.items():
-        key = (
-            tname
-            if tname in parsed
-            else next((k for k in parsed if tname in k or k in tname), None)
-        )
-        if key is None or parsed[key] != estatus:
-            return False
-    return True
-
-
 def _r2e_fraction(parsed: dict[str, str], expected: dict[str, str]) -> float:
-    """Fraction of expected ``(test -> status)`` reproduced (0.0..1.0). Same
-    key-matching as ``_r2e_match`` (exact, then substring); 1.0 == fully solved."""
+    """Fraction of expected ``(test -> status)`` reproduced (0.0..1.0). Keys are
+    matched exactly, then by substring (like r2egym); 1.0 == fully solved."""
     if not expected:
         return 0.0
     n_match = 0

@@ -62,10 +62,10 @@ module); a new sandbox provider = a new `sandbox/` backend.
 ## Run
 
 Prereqs: `DAYTONA_API_KEY` exported; `daytona` installed (`uv pip install daytona`);
-the TorchTitan RL dev env active (`TT_VENV_ENV` -> your venv setup script); a Node 22
-tarball + a Claude Code tarball (`SWE_HOST_NODE_TARBALL` / `SWE_HOST_CC_TARBALL`, or
-drop them under `SWE_TOOLCHAIN_DIR`); an R2E JSONL (`PROMPT_DATA`, built with
-`local_smoke/r2e_to_slime.py`); and the model's HF weights (`HF_ASSETS_PATH`).
+the TorchTitan RL dev env active (`TT_VENV_ENV` -> your venv setup script); an R2E
+JSONL (`PROMPT_DATA`, built with `local_smoke/r2e_to_slime.py`); and the model's HF
+weights (`HF_ASSETS_PATH`). The Claude Code binary is downloaded inside the sandbox
+from its CDN (override via `SWE_CLAUDE_CDN`), so no host toolchain tarball is needed.
 
 Fastest full-pipeline smoke (2 GPUs, 1 task x 2 samples -> backward):
 

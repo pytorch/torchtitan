@@ -72,13 +72,10 @@ def make_sandbox(image: str, **kwargs) -> Sandbox:
     """Factory: pick a sandbox backend by ``TT_SANDBOX_BACKEND``.
 
     ``daytona`` -> ``DaytonaSandbox``; ``docker``/``podman`` -> ``DockerSandbox``.
-    ``SLIME_AGENT_SANDBOX_BACKEND`` is accepted as an alias. Default ``daytona``.
-    Backends are imported lazily so a missing optional SDK (e.g. ``daytona``) only
-    errors when that backend is actually selected.
+    Default ``daytona``. Backends are imported lazily so a missing optional SDK
+    (e.g. ``daytona``) only errors when that backend is actually selected.
     """
-    backend = _getenv(
-        "TT_SANDBOX_BACKEND", "SLIME_AGENT_SANDBOX_BACKEND", default="daytona"
-    ).lower()
+    backend = _getenv("TT_SANDBOX_BACKEND", default="daytona").lower()
     if backend in ("docker", "podman"):
         from torchtitan.experiments.rl.harness.sandbox.docker import DockerSandbox
 

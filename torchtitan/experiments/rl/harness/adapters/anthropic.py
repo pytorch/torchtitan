@@ -6,35 +6,12 @@
 
 """Anthropic Messages adapter that turns an external CLI agent into on-policy RL data.
 
-This is the seam that makes an *arbitrary* agentic harness (Claude Code first)
-trainable with TorchTitan's RL loop. The adapter exposes an Anthropic
-``/v1/messages`` HTTP endpoint; the unmodified agent (running in a sandbox, see
-``claude_code.py``) is pointed at it via ``ANTHROPIC_BASE_URL``. For each turn the
-adapter:
-
-  1. renders the agent's message history into prompt token ids with the *same*
-     ``renderers.Renderer`` the trainer uses, reusing the exact tokens of prior
-     turns via ``bridge_to_next_turn`` (Token-In-Token-Out -- no retokenization
-     drift, so a multi-turn trajectory packs into ONE training episode);
-  2. samples from the policy by calling the controller's ``generate_fn`` (the same
-     callable the env-driven rollouter uses, so the adapter is fully decoupled from
-     vLLM / Monarch);
-  3. records the exact (prompt ids, completion ids, completion logprobs) as a
-     ``CapturedTurn``;
-  4. parses the completion back into Anthropic content blocks and replies.
-
-After the agent process exits, ``finish_session`` drains the recorded
-``CapturedTurn``s. The example's rollouter converts them into TorchTitan
-``RolloutTurn``s, and the standard ``rollout_to_episodes`` packs them: each turn's
-prompt extends ``prev_prompt + prev_completion``, so prompt / tool-result tokens
-are masked out (loss_mask False) and assistant completions are trained
-(loss_mask True). A history rewrite (Claude Code auto-compaction) breaks the
-prefix and opens a new episode branch, exactly as the framework expects.
-
-The design mirrors THUDM/slime's ``AnthropicAdapter`` and Meta msl/rl's
-"virtual actor + reverse-proxy" pattern, but the generation backend is TorchTitan's
-``generate_fn`` and rendering uses ``renderers`` (with TITO bridging) rather than a
-raw chat template.
+The adapter exposes an Anthropic ``/v1/messages`` endpoint that the unmodified
+agent is pointed at. Per turn it renders the agent's message history into prompt
+token ids (Token-In-Token-Out via ``renderer.bridge_to_next_turn``, reusing prior
+turns' exact tokens so a multi-turn trajectory packs into ONE episode), samples via
+``generate_fn``, and records a ``CapturedTurn`` (prompt/completion ids + logprobs).
+``finish_session`` drains the recorded turns for ``rollout_to_episodes``.
 
 Token legend (this module): ``ids`` = token id lists; a *turn* is one
 agent<->model HTTP round trip; a *session* is one agent run (one rollout sibling).
@@ -495,14 +472,10 @@ async def _handle_messages(request: web.Request) -> web.StreamResponse:
             if remaining < sampling.max_tokens:
                 sampling = dataclasses.replace(sampling, max_tokens=remaining)
 
-        # Unique per generate call (not just per turn): a slow one-shot response can
-        # make the agent's HTTP client time out and re-issue the SAME turn while the
-        # first generation is still in flight; with handler_cancellation the first
-        # handler is cancelled (lock released) before it appends, so the retry would
-        # resubmit an identical request_id and the generator rejects it as "already
-        # in flight" -> 500 -> the agent gives up (captured=0). A nonce makes every
-        # submission distinct; the cancelled handler never appends, so no double
-        # capture. routing_session_id (sticky generator routing) stays stable.
+        # Per-call nonce: a slow one-shot reply can make the client retry the same
+        # turn; with handler_cancellation the first handler is cancelled before it
+        # appends, so a stable id would collide as "already in flight". The nonce
+        # makes each submission distinct.
         request_id = (
             f"{session.routing_session_id}/turn={len(session.turns)}"
             f"/{secrets.token_hex(4)}"

@@ -22,7 +22,7 @@ The R2E-Gym datasets are sorted by repo, so a contiguous ``offset`` slice is a
 single project. To get a DIVERSE multi-repo training set we sample evenly across
 the whole split (``--num-points`` batches of ``--per-point`` rows spread by a
 stride), dedup by instance_id, and drop rows missing a problem_statement or the
-grading payload. Ported/extended from slime's ``r2e_to_slime.py``.
+grading payload.
 
 Host egress (the HF datasets-server REST API) required -- on a fwdproxy box run
 with ``HTTPS_PROXY=http://fwdproxy:8080``. Example::

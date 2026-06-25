@@ -31,6 +31,11 @@ from torchtitan.experiments.rl.environment import (
 )
 from torchtitan.experiments.rl.examples.swe_r2e.data import SWER2ESample
 
+_NOT_DRIVEN_MSG = (
+    "SWER2EEnv is not driven via the env loop; SWER2ERollouter runs Claude "
+    "Code in the sandbox. See examples/swe_r2e/rollouter.py."
+)
+
 
 class SWER2EEnv(MessageEnv):
     """Carries one R2E task spec. The agent loop runs in-sandbox (see module doc)."""
@@ -43,13 +48,7 @@ class SWER2EEnv(MessageEnv):
         self.sample = env_input
 
     async def init(self) -> MessageEnvInitOutput:
-        raise NotImplementedError(
-            "SWER2EEnv is not driven via the env loop; SWER2ERollouter runs Claude "
-            "Code in the sandbox. See examples/swe_r2e/rollouter.py."
-        )
+        raise NotImplementedError(_NOT_DRIVEN_MSG)
 
     async def step(self, completion_message: Message) -> MessageEnvStepOutput:
-        raise NotImplementedError(
-            "SWER2EEnv is not driven via the env loop; SWER2ERollouter runs Claude "
-            "Code in the sandbox. See examples/swe_r2e/rollouter.py."
-        )
+        raise NotImplementedError(_NOT_DRIVEN_MSG)

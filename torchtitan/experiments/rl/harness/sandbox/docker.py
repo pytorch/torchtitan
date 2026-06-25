@@ -42,9 +42,9 @@ class DockerSandbox:
       ``TT_DOCKER_RUN_ARGS`` -- extra args appended to ``run`` (shlex-split).
     """
 
-    runtime_env = ("TT_DOCKER_RUNTIME", "SLIME_AGENT_DOCKER_RUNTIME")
-    network_env = ("TT_DOCKER_NETWORK", "SLIME_AGENT_DOCKER_NETWORK")
-    run_args_env = ("TT_DOCKER_RUN_ARGS", "SLIME_AGENT_DOCKER_RUN_ARGS")
+    runtime_env = ("TT_DOCKER_RUNTIME",)
+    network_env = ("TT_DOCKER_NETWORK",)
+    run_args_env = ("TT_DOCKER_RUN_ARGS",)
 
     def __init__(self, image: str, *, timeout: int | None = None, **_ignored) -> None:
         self.image = image

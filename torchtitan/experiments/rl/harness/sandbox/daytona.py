@@ -69,7 +69,7 @@ class DaytonaSandbox:
     drops to an unprivileged user via ``runuser`` when asked. ``fs`` writes as
     root, so ``write_file`` uploads then chowns.
 
-    Env knobs (``SLIME_AGENT_DAYTONA_*`` accepted as aliases):
+    Env knobs:
       ``DAYTONA_API_KEY``                  -- API key (required).
       ``DAYTONA_API_URL`` / ``DAYTONA_TARGET`` -- override cloud endpoint/region.
       ``TT_DAYTONA_CPU``                   -- vCPUs per sandbox (default 2).
@@ -105,20 +105,10 @@ class DaytonaSandbox:
             api_url=_getenv(*self.api_url_env) or None,
             target=_getenv(*self.target_env) or None,
         )
-        cpu = int(_getenv("TT_DAYTONA_CPU", "SLIME_AGENT_DAYTONA_CPU", default="2"))
-        mem = int(
-            _getenv("TT_DAYTONA_MEM_GB", "SLIME_AGENT_DAYTONA_MEM_GB", default="4")
-        )
-        disk = int(
-            _getenv("TT_DAYTONA_DISK_GB", "SLIME_AGENT_DAYTONA_DISK_GB", default="10")
-        )
-        create_timeout = float(
-            _getenv(
-                "TT_DAYTONA_CREATE_TIMEOUT",
-                "SLIME_AGENT_DAYTONA_CREATE_TIMEOUT",
-                default="900",
-            )
-        )
+        cpu = int(_getenv("TT_DAYTONA_CPU", default="2"))
+        mem = int(_getenv("TT_DAYTONA_MEM_GB", default="4"))
+        disk = int(_getenv("TT_DAYTONA_DISK_GB", default="10"))
+        create_timeout = float(_getenv("TT_DAYTONA_CREATE_TIMEOUT", default="900"))
         # Cloud-side TTL so an orphan (left by a SIGKILL'd run that never reached
         # __aexit__, e.g. MAST preemption) self-reaps: once it goes idle it
         # auto-stops after auto_stop minutes, then auto-deletes immediately
@@ -201,16 +191,10 @@ class DaytonaSandbox:
         return rc, out, ""
 
     async def _session_exec(self, full: str, *, timeout: int) -> tuple[int, str]:
-        """Run ``full`` via Daytona's async session API (create_session +
-        execute_session_command(run_async=True) + poll get_session_command)
-        instead of the one-shot ``process.exec``. Polling is decoupled from
-        command execution, so a slow, high-latency host->daytona link (e.g.
-        cross-region MAST -> daytona-US) does not trip the SDK's
-        "request timeout: command execution timeout" on the exec call (which
-        one-shot ``process.exec`` does -- it holds one HTTP request open for the
-        whole command). Retries transient connection drops. The session is NOT
-        deleted (Daytona kills a session's child processes on delete, which would
-        kill the backgrounded claude). Mirrors genai/msl/rl daytona_environment.
+        """Run ``full`` via the session API (create_session +
+        execute_session_command(run_async) + poll) so a slow host->daytona link
+        does not trip the exec-call timeout. Do NOT delete the session -- Daytona
+        kills its child processes, which would kill the backgrounded claude.
         """
         import asyncio
         import os

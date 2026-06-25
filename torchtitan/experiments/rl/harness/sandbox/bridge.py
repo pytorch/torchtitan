@@ -4,25 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""File-relay bridge: an agent (e.g. Claude Code) inside a Daytona cloud sandbox
-talks to the Anthropic adapter running on this (inbound-firewalled) trainer box.
+"""File-relay bridge: Claude Code in a Daytona sandbox <-> the inbound-firewalled
+adapter on this trainer box.
 
-Daytona's SSH gateway refuses ``ssh -R`` remote forwarding, and an internal dev
-box cannot expose an inbound port to the cloud, so we relay HTTP over the Daytona
-``fs`` control plane (download/upload, ~50-150ms each):
-
-    agent --HTTP--> in-sandbox proxy (127.0.0.1:PORT)
-        proxy writes  /tmp/cagent_bridge/req/<id>.json (+ .ready)
-        host poller (this file) lists/downloads via Daytona fs,
-            replays the request to the on-box adapter (127.0.0.1:SHIM_PORT),
-            uploads /tmp/cagent_bridge/resp/<id>.json (+ .done)
-        proxy reads the response and returns it to the agent
-
-The adapter only emits its body after a full generation, so delivering the
-response in one shot (rather than incrementally) is behaviourally identical to a
-direct dial-back -- token capture happens host-side in the adapter regardless.
-
-Ported from THUDM/slime ``examples/coding_agent_rl/daytona_bridge.py``.
+Daytona refuses ``ssh -R``, so we relay HTTP over the Daytona ``fs`` control
+plane: the agent hits an in-sandbox proxy that writes a req file; the host poller
+downloads it and replays to the adapter, then uploads a resp file the proxy reads
+back. One-shot delivery is equivalent to a dial-back since token capture happens
+host-side in the adapter regardless.
 """
 
 from __future__ import annotations
@@ -50,9 +39,9 @@ _DROP_REQ_HEADERS = {
     "transfer-encoding",
 }
 
-# In-sandbox proxy. Pure stdlib, kept 3.6+ compatible (R2E images ship the repo
-# venv python, often 3.7). Threaded so the agent's concurrent connections and
-# the long-poll for each response don't head-of-line block each other.
+# In-sandbox proxy. Pure stdlib, kept 3.6+ compatible for old sandbox pythons.
+# Threaded so concurrent agent connections and per-response long-polls don't
+# head-of-line block each other.
 _PROXY_SRC = r"""
 import sys, os, json, time, base64, uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -195,8 +184,7 @@ class DaytonaBridge:
         # Round-trip a real /healthz through proxy -> relay -> adapter so the
         # agent never starts before the full path is live.
         deadline = asyncio.get_event_loop().time() + timeout
-        # urllib, not curl: python3 is guaranteed in-sandbox (the proxy needs it)
-        # whereas curl is not present in every image.
+        # urllib, not curl: python3 is guaranteed in-sandbox; curl is not.
         probe = (
             'python3 -c "import urllib.request as u,sys;'
             f"sys.stdout.write(str(u.urlopen('{self.local_url}/healthz',timeout=8).status))\" "

@@ -18,9 +18,7 @@ the CLI flag above or the launcher's ``HF_ASSETS_PATH``. The R2E JSONL path come
 from ``SWE_PROMPT_DATA`` (set by the launcher's ``PROMPT_DATA``).
 
 Models: 1.7B (fast full-pipeline smoke) and 8B (the documented target) are
-TorchTitan-registered dense models. 30B-A3B (MoE) is the scale-up path. NOTE the
-slime recipe's Qwen3.6-35B-A3B is a different (Megatron-only) model not in
-TorchTitan's qwen3 registry -- 30B-A3B is the closest TorchTitan MoE.
+TorchTitan-registered dense models; 30B-A3B (MoE) is the scale-up path.
 """
 
 from __future__ import annotations
@@ -54,12 +52,8 @@ from torchtitan.protocols.model_spec import ModelSpec
 # Empty by default; SWER2EDataset raises a clear error if it is not set.
 _DEFAULT_DATA = os.environ.get("SWE_PROMPT_DATA", "")
 _CKPT_DIR = "torchtitan/experiments/rl/example_checkpoint"
-# A coding-agent harness (Claude Code) sends a large prompt: its system prompt +
-# ~20 tool schemas + read file contents quickly reach 10k+ tokens. The TorchTitan
-# qwen3 specs default max_seq_len to 4096 (search_r1's short QA budget), which
-# truncates the agent's first prompt to an empty generation. Raise the model
-# context (RoPE max_seq_len, == vLLM max_model_len) and size seq_len to match so a
-# full multi-turn episode packs without being dropped by the Batcher.
+# qwen3 specs default max_seq_len to 4096; _set_max_seq_len raises every layer's
+# RoPE max_seq_len (== vLLM max_model_len) so a full coding-agent episode fits.
 _SWE_MAX_MODEL_LEN = 24576
 _SMOKE_SEQ_LEN = 24576
 
@@ -148,7 +142,8 @@ def rl_grpo_qwen3_8b_swe_r2e() -> RLTrainer.Config:
     """Target smoke: Qwen3-8B, 1 R2E task x 2 samples -> backward.
 
     6 GPUs: trainer TP=4 (fp32 master) + generator TP=2. Same recipe as the 1.7B
-    config; only the model and GPU split differ. Pairs with ``run_swe_r2e_8b.sh``.
+    config; only the model and GPU split differ. Pairs with
+    ``run_swe_r2e_daytona.sh`` (SWE_CONFIG=rl_grpo_qwen3_8b_swe_r2e).
     """
     config = rl_grpo_qwen3_1_7b_swe_r2e()
     config.model_spec = model_registry("8B", attn_backend="varlen")

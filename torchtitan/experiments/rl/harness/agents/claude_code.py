@@ -21,17 +21,6 @@ Responsibilities:
     file-relay bridge, spawn ``claude -p`` pointed at the adapter, poll a done
     marker, and dump the agent trajectory.
   - ``git_diff``: capture the agent's patch for grading.
-
-Env knobs (set by the launcher):
-  ``SWE_CLAUDE_CDN``         Claude Code binary CDN base (default Anthropic GCS)
-  ``SWE_BOOT_CONCURRENCY``   max simultaneous sandbox boots (default 8)
-  ``SWE_BOOT_RETRIES``       retries for a transient boot/install failure (default 2)
-  ``SWE_CLAUDE_EXTRA_ARGS``  extra args appended to ``claude -p`` (settings, disallowed tools)
-  ``SWE_TRAJECTORY_DUMP_DIR``host dir to copy each claude_code_trajectory.jsonl into
-  ``SWE_CC_PROMPT``          the agent's task instruction
-
-Ported from THUDM/slime ``examples/coding_agent_rl/sandbox.py`` (claude runner +
-diff capture; R2E grading lives in the example's ``grading.py``).
 """
 
 from __future__ import annotations
@@ -75,11 +64,8 @@ CC_PROMPT = os.environ.get(
     "summary and exit.",
 )
 
-# Claude Code's stream-json trajectory: write it under the agent's HOME, OUTSIDE
-# the repo workdir, so the agent can't Read its own (huge) trajectory mid-run and
-# blow its context. It's untracked either way (git_diff is tracked-only), but the
-# read-leak was real (a rollout Read /testbed/claude_code_trajectory.jsonl -> +10k
-# tokens -> context overflow).
+# Trajectory lives under HOME, outside the repo workdir, so the agent cannot Read
+# its own huge trajectory mid-run and blow its context.
 _TRAJ_PATH = "/home/agent/claude_code_trajectory.jsonl"
 
 # Anthropic model name the adapter answers to; arbitrary (the adapter ignores it).
@@ -136,17 +122,9 @@ async def boot_agent_sandbox(image: str) -> AsyncIterator[Sandbox]:
 
 
 async def install_toolchain(sb: Sandbox) -> None:
-    """Install the Claude Code CLI by downloading the self-contained binary from
-    its CDN INSIDE the sandbox (the sandbox's own fast egress), in ONE exec.
-
-    This is the key latency fix for high-latency controller->sandbox links (e.g.
-    cross-region MAST -> daytona-US, ~10x slower than a local box): uploading the
-    ~76MB Claude tarball + a Node tarball from the controller and running ~6 install
-    execs each cost a slow round-trip and time out ("command execution timeout").
-    Instead the sandbox curls the binary from the CDN at datacenter speed (~1s),
-    in a single exec. The binary is a self-contained Node SEA, so no separate Node
-    install is needed (matches genai/msl/rl claude_code_download.sh). No-op if the
-    image already ships a working ``claude``.
+    """Install Claude Code by downloading the self-contained CDN binary INSIDE the
+    sandbox in one exec (sandbox egress is fast; avoids uploading a ~76MB tarball
+    over a slow link). No-op if claude already present.
     """
     ec, _, _ = await sb.exec("claude --version", user="root", timeout=60, check=False)
     if ec == 0:
@@ -327,18 +305,9 @@ async def _spawn_claude_code(
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
         "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
-        # The adapter relays the model reply in ONE shot only after the full
-        # generation (file-relay bridge cannot stream incrementally). A long
-        # generation (big model + up to max_tokens) can exceed the client's
-        # timeouts, making it retry mid-generation -- wasteful and, under high
-        # fanout, a source of duplicate in-flight requests. Three knobs make the
-        # client wait for the one-shot reply on the first attempt:
-        #   API_TIMEOUT_MS                 -- overall per-request timeout (default 10m).
-        #   API_FORCE_IDLE_TIMEOUT=0       -- disable the 5m "no bytes arrived" abort
-        #                                     that a non-Anthropic gateway trips when
-        #                                     nothing streams until generation ends.
-        #   ..DISABLE_NONSTREAMING_FALLBACK -- don't fall back to non-streaming on a
-        #                                     stalled stream (which itself retries).
+        # The file-relay delivers the reply in one shot after full generation;
+        # these three knobs stop the client from timing out / retrying while it
+        # waits (no incremental bytes until gen ends).
         "API_TIMEOUT_MS": os.environ.get("SWE_API_TIMEOUT_MS", "900000"),
         "API_FORCE_IDLE_TIMEOUT": "0",
         "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
