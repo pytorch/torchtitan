@@ -31,16 +31,42 @@ if TYPE_CHECKING:
 __all__ = [
     "annotate_input_spmd_types",
     "current_spmd_mesh",
+    "spmd_dense_mesh",
+    "spmd_sparse_mesh",
     "spmd_mesh_size",
     "spmd_distribute_tensor",
     "spmd_redistribute_per_axis",
     "spmd_validate_redistributions",
     "set_current_spmd_mesh",
+    "set_spmd_meshes",
+    "maybe_set_sparse_mesh",
     "spmd_layout_to_dtensor_placements",
 ]
 
 
 _MESH_TLS = local()
+
+
+def set_spmd_meshes(
+    *,
+    dense_mesh: DeviceMesh,
+    sparse_mesh: DeviceMesh | None,
+) -> None:
+    """Register the SPMD meshes for dense and sparse runtime regions."""
+    _MESH_TLS.dense_mesh = dense_mesh
+    _MESH_TLS.sparse_mesh = sparse_mesh
+
+
+def spmd_dense_mesh() -> DeviceMesh:
+    """Return the registered dense SPMD mesh."""
+    mesh = getattr(_MESH_TLS, "dense_mesh", None)
+    assert mesh is not None, "SPMD dense mesh has not been registered"
+    return mesh
+
+
+def spmd_sparse_mesh() -> DeviceMesh | None:
+    """Return the registered sparse SPMD mesh, if EP is enabled."""
+    return getattr(_MESH_TLS, "sparse_mesh", None)
 
 
 def _spmd_mesh_stack() -> list[DeviceMesh | None]:
@@ -97,6 +123,17 @@ def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
             assert popped is mesh
 
 
+@contextlib.contextmanager
+def maybe_set_sparse_mesh() -> Iterator[None]:
+    """Activate the registered sparse mesh under spmd_types, otherwise no-op."""
+    if get_spmd_backend() != "spmd_types" or (mesh := spmd_sparse_mesh()) is None:
+        yield
+        return
+
+    with set_current_spmd_mesh(mesh):
+        yield
+
+
 def spmd_layout_to_dtensor_placements(
     layout: "SpmdLayout",
 ) -> dict["MeshAxisName", Placement]:
@@ -147,7 +184,7 @@ def annotate_input_spmd_types(
         MeshAxisName.TP: spmd.I,
     }
 
-    mesh = parallel_dims._global_meshes["spmd_dense_for_fwdbwd"]
+    mesh = parallel_dims.spmd_dense_mesh()
     with set_current_spmd_mesh(mesh):
         spmd.assert_type(inputs, token_type)
         spmd.assert_type(labels, label_type)
