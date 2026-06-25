@@ -11,6 +11,8 @@ slice metadata for values that cross PP boundaries; internal saved values,
 FSDP params, and raw grad leaves stay in the flat tracer calling convention.
 """
 
+import copy
+import inspect
 import operator
 from collections.abc import Iterable
 from contextlib import contextmanager
@@ -22,6 +24,13 @@ import torch.fx as fx
 import torch.fx.node
 import torch.utils._pytree as pytree
 from torch._logging import trace_structured
+from torch.distributed.pipelining.schedules import (
+    _Action,
+    BACKWARD_INPUT,
+    FORWARD,
+    FULL_BACKWARD,
+)
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _unwrap_subclasses,
@@ -206,6 +215,26 @@ def allow_fx_graph_extraction_of_side_effectful_ops(exclude_vals: set[object]):
         torch.fx.node._side_effectful_functions.update(original_val)
 
 
+def overlap_fw_bw_sub_actions(action: _Action) -> tuple[_Action, _Action]:
+    """Validate an ``OVERLAP_F_B`` action and return ``(fw_action, bw_action)``."""
+
+    if action.sub_actions is None or len(action.sub_actions) != 2:
+        raise ValueError(f"GraphPP OVERLAP_F_B action is malformed: {action}")
+    fw_action, bw_action = action.sub_actions
+    if fw_action.computation_type != FORWARD:
+        raise ValueError(f"GraphPP OVERLAP_F_B first sub-action must be F: {action}")
+    if bw_action.computation_type == BACKWARD_INPUT:
+        raise NotImplementedError(
+            "GraphPP OVERLAP_F_B with BACKWARD_INPUT is not implemented. "
+            "Current multiplexed graphs support FORWARD + FULL_BACKWARD only."
+        )
+    if bw_action.computation_type != FULL_BACKWARD:
+        raise ValueError(
+            "GraphPP OVERLAP_F_B second sub-action must be FULL_BACKWARD: " f"{action}"
+        )
+    return fw_action, bw_action
+
+
 def _subclass_layout_slice(
     layouts: dict[int, SubclassLayout],
     *,
@@ -293,3 +322,92 @@ def _wrap_unwrapped_values(
             f"got {len(values)}"
         )
     return _wrap_subclasses(values, num_values, layouts)
+
+
+def _graphable_split_block_mask(
+    block_mask: BlockMask,
+) -> BlockMask:
+    """Make a PyTorch PP-split BlockMask replayable by one traced graph.
+
+    ``_split_block_mask`` correctly creates per-microbatch tensor metadata, but
+    its ``mask_mod`` closure captures the batch offset as a Python int. ``make_fx``
+    specializes that int, so a graph traced on microbatch 0 would replay every
+    later microbatch with offset 0. Rebuild only the closure so the offset is a
+    scalar tensor leaf while preserving PyTorch PP's split tensor metadata.
+
+    TODO(sanketpurandare): Delete this shim once upstream PP ``_split_block_mask``
+    captures the microbatch batch offset as a scalar tensor closure leaf instead
+    of a Python int. Then normal ``BlockMask._flatten`` will expose all
+    replay-varying state to GraphPP tracing. See
+    https://github.com/pytorch/pytorch/issues/188727.
+    """
+    mask_mod = block_mask.mask_mod
+    if not inspect.isfunction(mask_mod) or mask_mod.__closure__ is None:
+        return block_mask
+
+    closure_values = {
+        name: cell.cell_contents
+        for name, cell in zip(mask_mod.__code__.co_freevars, mask_mod.__closure__)
+    }
+    base_block_mask = closure_values.get("block_mask")
+    batch_offset_index = closure_values.get("idx")
+    if not isinstance(base_block_mask, BlockMask) or not isinstance(
+        batch_offset_index, int
+    ):
+        return block_mask
+    base_batch_size = base_block_mask.kv_num_blocks.size(0)
+    if batch_offset_index < 0 or batch_offset_index >= base_batch_size:
+        raise ValueError(
+            "Split BlockMask batch offset is outside the base BlockMask: "
+            f"offset={batch_offset_index}, batch_size={base_batch_size}"
+        )
+    batch_offset = torch.tensor(
+        batch_offset_index,
+        device=block_mask.kv_num_blocks.device,
+        dtype=torch.int64,
+    )
+    base_mask_mod = base_block_mask.mask_mod
+
+    def graphable_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        offset = batch_offset.to(device=b.device, dtype=b.dtype)
+        return base_mask_mod(b + offset, h, q_idx, kv_idx)
+
+    # Do not mutate the upstream split object in place: trace-time and runtime
+    # normalization intentionally create distinct closure tensor objects.
+    graphable_block_mask = copy.copy(block_mask)
+    graphable_block_mask.mask_mod = graphable_mask_mod
+    return graphable_block_mask
+
+
+def normalize_graph_pp_microbatch_inputs(
+    args_split: list[Any],
+    kwargs_split: list[Any],
+) -> tuple[list[Any], list[Any]]:
+    """Normalize PP-split inputs so one GraphPP trace can replay all microbatches."""
+    if len(args_split) != len(kwargs_split):
+        raise ValueError(
+            "GraphPP expected args_split and kwargs_split to have the same "
+            f"microbatch count, got {len(args_split)} and {len(kwargs_split)}"
+        )
+
+    def normalize_leaf(value: Any) -> Any:
+        if isinstance(value, BlockMask):
+            return _graphable_split_block_mask(value)
+        return value
+
+    def normalize_tree(value: Any) -> Any:
+        return pytree.tree_map(
+            normalize_leaf,
+            value,
+            is_leaf=lambda leaf: isinstance(leaf, BlockMask),
+        )
+
+    return (
+        [normalize_tree(args) for args in args_split],
+        [normalize_tree(kwargs) for kwargs in kwargs_split],
+    )
