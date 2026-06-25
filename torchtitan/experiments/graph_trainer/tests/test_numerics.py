@@ -216,10 +216,10 @@ def _graph_pp_deepseek_v3_configs(schedule: str) -> tuple[str, str]:
             "graph_trainer_deepseek_v3_debugmodel_eager_pp",
             "graph_trainer_deepseek_v3_debugmodel",
         )
-    if schedule == "ZBVZeroBubble":
-        # ZBV currently does not work with torch.compile. The default
+    if schedule in {"ZBVZeroBubble", "DualPipeV"}:
+        # These schedules currently do not work with torch.compile. The default
         # FlexAttention config compiles FlexAttention and the loss, so compare
-        # GraphPP numerics against the SDPA eager-PP baseline instead.
+        # their GraphPP numerics against the SDPA eager-PP baseline instead.
         return (
             "graph_trainer_deepseek_v3_debugmodel_sdpa_eager_pp",
             "graph_trainer_deepseek_v3_debugmodel_sdpa",
@@ -408,7 +408,7 @@ class TestGraphTrainerNumerics(unittest.TestCase):
         )
 
     def test_graph_pp_moe_dsv3_aot_fx_trace_vs_eager(self):
-        for schedule in ("Interleaved1F1B", "ZBVZeroBubble"):
+        for schedule in ("Interleaved1F1B", "ZBVZeroBubble", "DualPipeV"):
             with self.subTest(schedule=schedule):
                 self.assertTrue(_run_graph_pp_deepseek_v3_loss_compare(schedule))
 

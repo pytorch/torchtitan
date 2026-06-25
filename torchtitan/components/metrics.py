@@ -207,8 +207,8 @@ def ensure_pp_loss_visible(
     variable and warns if it's not.
     """
 
-    # V Block Schedules return loss on rank 0
-    if pp_schedule == "ZBVZeroBubble":
+    # V schedules place the last stage on pp rank 0.
+    if pp_schedule in {"ZBVZeroBubble", "DualPipeV"}:
         return
 
     # Calculate the rank where loss is visible (first rank of the last pipeline stage)
@@ -247,8 +247,8 @@ def _get_metrics_rank(
     if not parallel_dims.pp_enabled:
         return 0
 
-    # V Block Schedules return loss on rank 0
-    if pp_schedule == "ZBVZeroBubble":
+    # V schedules place the last stage on pp rank 0.
+    if pp_schedule in {"ZBVZeroBubble", "DualPipeV"}:
         return 0
 
     # Calculate first rank of the last pipeline stage

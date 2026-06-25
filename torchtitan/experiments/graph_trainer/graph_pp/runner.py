@@ -14,7 +14,7 @@ ABI and wrapping contract:
    before assigning to live ``param.grad``.
 3. Internal graph ABI values stay flat because they never escape GraphPP graph
    execution: saved-for-backward values, unsharded FSDP params, raw grad leaves,
-   and reduce-grad inputs.
+   reduce-grad inputs, and multiplexed intermediate outputs.
 4. DTensor and other traceable tensor subclasses use the existing tracer layout
    metadata. GraphPP must not add a separate DTensor-specific wrapping path.
 """
@@ -57,6 +57,9 @@ from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConf
 from torchtitan.experiments.graph_trainer.graph_pp.fsdp import (
     split_backward_fsdp_collectives,
     split_forward_fsdp_collectives,
+)
+from torchtitan.experiments.graph_trainer.graph_pp.graph_multiplex import (
+    multiplex_fw_bw_graph,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.partition import (
     GraphMeta as PartitionGraphMeta,
@@ -158,6 +161,10 @@ class _GraphPPPassConfig:
     compile: GraphTrainerCompileConfig
     parallelism: Any
     model_spec: _GraphPPPassModelSpec
+
+
+MultiplexFwBwGraphPass = Callable[[fx.GraphModule, fx.GraphModule], fx.GraphModule]
+
 
 def _execute_graph(graph: fx.GraphModule, args: list[Any]) -> tuple[Any, ...]:
     with torch.no_grad():
@@ -1237,6 +1244,22 @@ def stage_reduce_grad(action: _Action, ctx: _PipelineContext) -> None:
     _scale_graph_pp_sharded_grads(stage, schedule)
 
 
+def get_multiplexed_graph_callables(
+    stage_graphs: dict[int, GraphCallables],
+    multiplex_fw_bw_graph_pass: MultiplexFwBwGraphPass,
+) -> dict[tuple[int, int], fx.GraphModule]:
+    multiplexed = {}
+    for bw_stage_idx, bw_graphs in stage_graphs.items():
+        for fw_stage_idx, fw_graphs in stage_graphs.items():
+            if bw_stage_idx == fw_stage_idx:
+                continue
+            multiplexed[(fw_stage_idx, bw_stage_idx)] = multiplex_fw_bw_graph_pass(
+                fw_graphs.fw,
+                bw_graphs.full_bw,
+            )
+    return multiplexed
+
+
 def _example_args_from_stage_metadata(stage: GraphPipelineStage) -> tuple[Any, ...]:
     # NOTE: See _example_output_grads_from_stage_metadata for the private
     # PipelineStage metadata dependency.
@@ -1246,6 +1269,92 @@ def _example_args_from_stage_metadata(stage: GraphPipelineStage) -> tuple[Any, .
             f"stage {stage.stage_index}"
         )
     return tuple(stage._to_tensor(meta) for meta in stage._stage_meta.inputs)
+
+
+def _overlap_fw_bw_sub_actions(action: _Action) -> tuple[_Action, _Action]:
+    if action.sub_actions is None or len(action.sub_actions) != 2:
+        raise ValueError(f"GraphPP OVERLAP_F_B action is malformed: {action}")
+    fw_action, bw_action = action.sub_actions
+    if fw_action.computation_type != FORWARD:
+        raise ValueError(f"GraphPP OVERLAP_F_B first sub-action must be F: {action}")
+    if bw_action.computation_type == BACKWARD_INPUT:
+        raise NotImplementedError(
+            "GraphPP OVERLAP_F_B with BACKWARD_INPUT is not implemented. "
+            "Current multiplexed graphs support FORWARD + FULL_BACKWARD only."
+        )
+    if bw_action.computation_type != FULL_BACKWARD:
+        raise ValueError(
+            "GraphPP OVERLAP_F_B second sub-action must be FULL_BACKWARD: " f"{action}"
+        )
+    return fw_action, bw_action
+
+
+def _required_multiplex_pairs(
+    schedule: _PipelineScheduleRuntime,
+) -> set[tuple[int, int]]:
+    pipeline_order = getattr(schedule, "pipeline_order_with_comms", None)
+    if pipeline_order is None:
+        return set()
+    required_pairs: set[tuple[int, int]] = set()
+    for action in pipeline_order.get(schedule.rank, []):
+        if action.computation_type != OVERLAP_F_B:
+            continue
+        fw_action, bw_action = _overlap_fw_bw_sub_actions(action)
+        required_pairs.add((fw_action.stage_index, bw_action.stage_index))
+    return required_pairs
+
+
+def _build_graph_pp_multiplexed_graph_bundles(
+    schedule: _PipelineScheduleRuntime,
+) -> None:
+    stage_index_to_stage = {
+        stage.stage_index: cast(GraphPipelineStage, stage) for stage in schedule._stages
+    }
+    # The upstream runtime schedule has no typed extension slot for custom
+    # callable caches, so GraphPP keeps multiplexed graphs on a private field.
+    multiplexed_graphs = getattr(schedule, "_graph_pp_multiplexed_graphs", {})
+    for fw_stage_idx, bw_stage_idx in _required_multiplex_pairs(schedule):
+        pair = (fw_stage_idx, bw_stage_idx)
+        if pair in multiplexed_graphs:
+            continue
+        fw_stage = stage_index_to_stage[fw_stage_idx]
+        bw_stage = stage_index_to_stage[bw_stage_idx]
+        _require_graph_bundle(fw_stage, "OVERLAP_F_B")
+        _require_graph_bundle(bw_stage, "OVERLAP_F_B")
+        if fw_stage.compile_config != bw_stage.compile_config:
+            raise ValueError(
+                "GraphPP multiplexed graph requires matching compile configs for "
+                f"forward stage {fw_stage_idx} and backward stage {bw_stage_idx}."
+            )
+        if (
+            fw_stage._graph_pp_callables_compiled
+            or bw_stage._graph_pp_callables_compiled
+        ):
+            raise ValueError(
+                "GraphPP multiplexed graphs must be built before stage callables "
+                "are compiled."
+            )
+        fw_graphs = fw_stage.graph_callables
+        bw_graphs = bw_stage.graph_callables
+        assert fw_graphs is not None and bw_graphs is not None
+        multiplexed_graph = multiplex_fw_bw_graph(
+            fw_graphs.fw,
+            bw_graphs.full_bw,
+        )
+        _annotate_graph_pp_graph(
+            multiplexed_graph,
+            stage_index=fw_stage_idx,
+            callable_name="multiplex",
+            action_name="OVERLAP_F_B",
+        )
+        compiled_graph = _compile_graph_pp_module(
+            multiplexed_graph,
+            compile_config=fw_stage.compile_config,
+            graph_name=f"stage_{fw_stage_idx}_fw_stage_{bw_stage_idx}_bw_multiplex",
+        )
+        assert compiled_graph is not None
+        multiplexed_graphs[pair] = compiled_graph
+    schedule._graph_pp_multiplexed_graphs = multiplexed_graphs
 
 
 def build_graph_pp_graph_bundles(
@@ -1267,9 +1376,11 @@ def build_graph_pp_graph_bundles(
       normalize trace-reused BlockMask inputs
       run eager PP metadata inference on representative microbatch 0
       build missing stage graph bundles
+      build required multiplexed graphs for OVERLAP_F_B actions
     """
     graph_stages = [cast(GraphPipelineStage, stage) for stage in schedule._stages]
     if all(stage.graph_callables is not None for stage in graph_stages):
+        _build_graph_pp_multiplexed_graph_bundles(schedule)
         for stage in graph_stages:
             _compile_stage_graph_bundle(stage)
         return
@@ -1325,6 +1436,7 @@ def build_graph_pp_graph_bundles(
             loss_kwargs,
             compile_callables=False,
         )
+    _build_graph_pp_multiplexed_graph_bundles(schedule)
     for stage in graph_stages:
         _compile_stage_graph_bundle(stage)
 
@@ -1333,9 +1445,79 @@ def overlap_fw_bw(
     action: _Action,
     ctx: _PipelineContext,
 ) -> None:
-    raise NotImplementedError(
-        "GraphPP OVERLAP_F_B requires multiplexed graph support, which is "
-        "introduced in the follow-up DualPipeV commit."
+    fw_action, bw_action = _overlap_fw_bw_sub_actions(action)
+
+    (
+        schedule,
+        stage_index_to_stage,
+        fw_stage,
+        fw_mb_index,
+        fw_is_next_stage_on_this_rank,
+    ) = _prepare_fwd_common(fw_action, ctx)
+    (
+        _,
+        _,
+        bw_stage,
+        bw_mb_index,
+        bw_is_prev_stage_on_this_rank,
+    ) = _prepare_backward_common(bw_action, ctx)
+    if not bw_stage.has_backward:
+        return
+
+    args, kwargs, target = _prepare_fwd_user_args(fw_stage, fw_mb_index, ctx)
+    loss_kwargs = getattr(schedule, "_graph_pp_loss_kwargs", {})
+    _require_graph_bundle(fw_stage, "OVERLAP_F_B")
+    _require_graph_bundle(bw_stage, "OVERLAP_F_B")
+    assert fw_stage.graph_callables is not None and fw_stage.graph_meta is not None
+    assert bw_stage.graph_callables is not None and bw_stage.graph_meta is not None
+
+    multiplexed_graphs = getattr(schedule, "_graph_pp_multiplexed_graphs", None)
+    pair = (fw_action.stage_index, bw_action.stage_index)
+    bw_args = _prepare_backward_args(bw_stage, bw_mb_index)
+    fw_args = _prepare_fwd_graph_args(fw_stage, args, kwargs, target, loss_kwargs)
+    if multiplexed_graphs is None or pair not in multiplexed_graphs:
+        raise ValueError(
+            "GraphPP multiplexed graph must be built before OVERLAP_F_B runtime "
+            f"execution for pair {pair}."
+        )
+
+    multiplexed_outputs = _execute_graph(
+        multiplexed_graphs[pair],
+        [*bw_args, *fw_args],
+    )
+
+    num_param_grads = bw_stage.graph_meta.num_param_grad_values
+    num_bw_outputs = num_param_grads + bw_stage.graph_meta.num_input_grad_values
+    bw_outputs = multiplexed_outputs[:num_bw_outputs]
+    param_grads = list(bw_outputs[:num_param_grads])
+    input_grads = bw_stage.graph_meta.input_grad_values.wrap_flat_values(
+        bw_outputs[num_param_grads:]
+    )
+    fw_outputs = multiplexed_outputs[num_bw_outputs:]
+    output = fw_stage.graph_meta.fwd_output_values.unflatten(
+        fw_outputs[: fw_stage.graph_meta.num_user_outputs],
+    )
+    saved_start = fw_stage.graph_meta.num_user_outputs
+    saved_end = saved_start + fw_stage.graph_meta.num_saved_for_backward
+    saved_intermediates = tuple(fw_outputs[saved_start:saved_end])
+
+    bw_stage._accumulate_stage_unsharded_grads(param_grads)
+    _post_fwd_common(
+        fw_stage,
+        fw_mb_index,
+        output,
+        saved_intermediates,
+        schedule,
+        stage_index_to_stage,
+        ctx,
+        fw_is_next_stage_on_this_rank,
+    )
+    _post_backward_common(
+        bw_stage,
+        bw_mb_index,
+        input_grads,
+        stage_index_to_stage,
+        bw_is_prev_stage_on_this_rank,
     )
 
 
