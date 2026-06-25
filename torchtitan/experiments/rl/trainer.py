@@ -536,13 +536,16 @@ class Controller(Configurable):
 
         # Resume: __init__ ran CheckpointManager.load(); read back the restored policy_version
         # (0 if fresh) so the loop resumes at the right step and generators pull at that version.
+        # TODO(resume): only model/optimizer/policy_version are restored. The active-slot rollout
+        #   buffer (in-flight rollouts) and the dataset stream position are NOT restored -- a resumed
+        #   run refills the buffer and re-reads data from the start. Persist both for exact resume.
         self.start_step = self._get_rank_0_value(
             await self.trainer.get_policy_version.call()
         )
         if self.start_step > 0:
             logger.info(f"Resuming RL training from step {self.start_step}")
 
-        # Initial weight sync: only the trainer loads weights (HF/DCP); generators pull at start_step.
+        # Initial weight sync: only the trainer loads weights; generators pull at start_step.
         with sl.log_trace_span("trainer_push_model_state_dict"):
             await self.trainer.push_model_state_dict.call()
         with sl.log_trace_span("generator_pull_model_state_dict"):

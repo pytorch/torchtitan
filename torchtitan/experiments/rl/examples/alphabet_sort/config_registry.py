@@ -12,6 +12,7 @@ Each function returns a complete ``Controller.Config``, discoverable by
 """
 
 import dataclasses
+import logging
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -47,10 +48,14 @@ from torchtitan.experiments.rl.trainer import (
     Controller,
     ValidationConfig,
 )
+from torchtitan.models.common.attention import FusedQKVLinear, QKVLinear
+from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.gpt_oss import model_registry as gpt_oss_model_registry
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
+
+logger = logging.getLogger(__name__)
 
 _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
 
@@ -68,7 +73,42 @@ def _qwen3_rl_model_registry(
     """
     converters = list(converters or [])
     converters.append(LMHeadCastConverter.Config())
-    return model_registry(flavor, attn_backend=attn_backend, converters=converters)
+    spec = model_registry(flavor, attn_backend=attn_backend, converters=converters)
+    _force_non_fused_qkv(spec.model)
+    return spec
+
+
+def _force_non_fused_qkv(model_config) -> None:
+    """In place: rebuild every fused qkv as separate wq/wk/wv projections.
+
+    TODO(fuse_qkv): #3714 enabled fused qkv by default, but loading the non-fused HF Qwen3
+    checkpoint into the fused wqkv yields garbage (repetition -> 0 reward -> training stalls).
+    Drop this (and its call above) once the HF->titan fused-qkv weight load is fixed.
+    """
+    swapped = 0
+    for _fqn, fused, parent, attr in model_config.traverse(FusedQKVLinear.Config):
+        dim = fused.wqkv.in_features
+        head_dim = fused.head_dim
+        setattr(
+            parent,
+            attr,
+            QKVLinear.Config(
+                head_dim=head_dim,
+                wq=Linear.Config(
+                    in_features=dim, out_features=fused.n_heads * head_dim
+                ),
+                wkv=Linear.Config(
+                    in_features=dim, out_features=fused.n_kv_heads * head_dim
+                ),
+            ),
+        )
+        swapped += 1
+    if swapped:
+        logger.warning(
+            "TODO(fuse_qkv): forced non-fused qkv on %d attention layer(s) -- workaround for "
+            "#3714 (fused-qkv HF load -> garbage/stall); revert once the fused HF load is fixed.",
+            swapped,
+        )
 
 
 def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
