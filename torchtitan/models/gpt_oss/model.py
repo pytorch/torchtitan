@@ -72,36 +72,6 @@ def apply_attention_sink_rescale(
     sink_scale = torch.sigmoid(lse - sinks).unsqueeze(-1)
     return out * sink_scale.to(out.dtype)
 
-
-class ScaledBiasRowwiseLinear(Linear):
-    """
-    Rowwise linear whose local bias contribution is scaled by TP degree.
-    TODO(pianpwk): this should work in decomposition in spmd_types. Today the
-    local SPMD typecheck errors on the TP-axis input:V, weight:V, bias:P case;
-    decomposing to input @ weight -> P, then P + P, should typecheck.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Linear.Config):
-        pass
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.tp_degree = 1
-
-    def parallelize(self, parallel_dims) -> None:
-        self.tp_degree = parallel_dims.tp
-        super().parallelize(parallel_dims)
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        weight = (
-            self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
-        )
-        bias = self.bias.to_local() if isinstance(self.bias, DTensor) else self.bias
-        bias = bias / self.tp_degree
-        return F.linear(input, weight, bias)
-
-
 class Attention(BaseAttention):
     """
     Multi-head attention (MLA) module with sink attention.
