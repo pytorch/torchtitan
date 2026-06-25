@@ -6,14 +6,13 @@
 
 """Pluggable coding-agent harness for TorchTitan RL.
 
-An external CLI agent (Claude Code first) runs unmodified inside a cloud/local
-sandbox and is pointed at an on-box wire-format adapter that serves the trained
-policy and captures every turn as on-policy training tokens. Three orthogonal
-axes, each its own subpackage (mirrors Meta msl/rl's container-resource /
-wire-proxy / per-agent split):
+An external CLI agent (Claude Code first) runs unmodified inside a cloud sandbox
+and is pointed at an on-box wire-format adapter that serves the trained policy and
+captures every turn as on-policy training tokens. Three orthogonal axes, each its
+own subpackage:
 
   - ``sandbox``: WHERE code runs -- provider-agnostic ``Sandbox`` contract +
-    Daytona/Docker backends + the Daytona fs-relay ``bridge``.
+    the Daytona backend + the Daytona fs-relay ``bridge``.
   - ``adapters``: HOW the model is served to the agent -- a token-capturing HTTP
     endpoint per wire format (``anthropic`` for Claude Code; add ``openai`` for
     Codex/OpenCode).
@@ -33,7 +32,6 @@ from torchtitan.experiments.rl.harness.agents import (
 )
 from torchtitan.experiments.rl.harness.sandbox import (
     DaytonaSandbox,
-    DockerSandbox,
     make_sandbox,
     Sandbox,
 )
@@ -42,7 +40,6 @@ __all__ = [
     "AnthropicAdapter",
     "CapturedTurn",
     "DaytonaSandbox",
-    "DockerSandbox",
     "Sandbox",
     "apply_pre_commands",
     "boot_agent_sandbox",

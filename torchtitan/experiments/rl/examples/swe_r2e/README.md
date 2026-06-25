@@ -46,7 +46,7 @@ code runs, HOW the model is served, WHICH agent runs -- mirroring Meta msl/rl's
 container-resource / wire-proxy / per-agent split:
 
 - `harness/sandbox/`: `base.py` (the `Sandbox` contract + `make_sandbox` factory),
-  `daytona.py` / `docker.py` (backends), `bridge.py` (Daytona fs file-relay).
+  `daytona.py` (backend), `bridge.py` (Daytona fs file-relay).
 - `harness/adapters/`: `anthropic.py` (token-capturing Anthropic Messages
   endpoint). Add an `openai.py` for Codex/OpenCode -- the token capture is shared.
 - `harness/agents/`: `claude_code.py` (install toolchain + run `claude -p` +
@@ -79,9 +79,9 @@ DAYTONA_API_KEY=dtn_... \
 
 Target model (6 GPUs): `CONFIG=rl_grpo_qwen3_8b_swe_r2e`, `HF_ASSETS_PATH=/path/to/Qwen3-8B`.
 
-The launcher clears orphaned Daytona sandboxes at startup and (via a trap) on exit;
-every sandbox also gets a cloud-side auto-delete TTL so orphans self-reap even if
-the job is SIGKILL'd (e.g. MAST preemption). See `daytona_cleanup.py`.
+Every sandbox gets a cloud-side auto-delete TTL (``TT_DAYTONA_AUTO_STOP_MIN`` /
+``AUTO_DELETE_MIN``) so an orphan self-reaps even if the job is SIGKILL'd (e.g.
+MAST preemption) and never runs its cleanup.
 
 Isolated harness debug (one sandbox, plain vLLM, no trainer):
 

@@ -9,7 +9,7 @@
 The contract is intentionally small: async context management, command execution,
 and file read/write. A coding-agent example builds its task-specific setup, agent
 runner, and grader on top of this without depending on one sandbox provider.
-Backends live in sibling modules (``daytona.py``, ``docker.py``).
+The backend lives in a sibling module (``daytona.py``).
 """
 
 from __future__ import annotations
@@ -69,21 +69,17 @@ def _getenv(*names: str, default: str = "") -> str:
 
 
 def make_sandbox(image: str, **kwargs) -> Sandbox:
-    """Factory: pick a sandbox backend by ``TT_SANDBOX_BACKEND``.
+    """Factory: build the sandbox backend selected by ``TT_SANDBOX_BACKEND``.
 
-    ``daytona`` -> ``DaytonaSandbox``; ``docker``/``podman`` -> ``DockerSandbox``.
-    Default ``daytona``. Backends are imported lazily so a missing optional SDK
-    (e.g. ``daytona``) only errors when that backend is actually selected.
+    Only ``daytona`` -> ``DaytonaSandbox`` is bundled; the factory is the seam for
+    adding another provider as a new ``sandbox`` backend. The backend is imported
+    lazily so a missing optional SDK (``daytona``) only errors when it is selected.
     """
     backend = _getenv("TT_SANDBOX_BACKEND", default="daytona").lower()
-    if backend in ("docker", "podman"):
-        from torchtitan.experiments.rl.harness.sandbox.docker import DockerSandbox
+    if backend != "daytona":
+        raise ValueError(
+            f"unknown sandbox backend {backend!r}; only 'daytona' is bundled"
+        )
+    from torchtitan.experiments.rl.harness.sandbox.daytona import DaytonaSandbox
 
-        return DockerSandbox(image, **kwargs)
-    if backend == "daytona":
-        from torchtitan.experiments.rl.harness.sandbox.daytona import DaytonaSandbox
-
-        return DaytonaSandbox(image, **kwargs)
-    raise ValueError(
-        f"unknown sandbox backend {backend!r}; use 'daytona' or 'docker'/'podman'"
-    )
+    return DaytonaSandbox(image, **kwargs)

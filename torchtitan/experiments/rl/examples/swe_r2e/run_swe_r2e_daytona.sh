@@ -82,15 +82,8 @@ export NO_PROXY="${no_proxy}"
 
 mkdir -p "${SWE_TRAJECTORY_DUMP_DIR}"
 
-# Orphaned-sandbox cleanup: a SIGKILL'd run leaves cloud sandboxes that eat the
-# account disk quota. Clear them at startup (orphans from a prior killed run) and
-# on exit (this run's leftovers + confirm 0 remain). A SIGKILL of THIS launcher
-# can't run the trap -- the next run's startup clears those.
-cleanup_daytona() {
-  python3 -m torchtitan.experiments.rl.examples.swe_r2e.daytona_cleanup || true
-}
-cleanup_daytona
-trap cleanup_daytona EXIT
+# Orphaned sandboxes self-reap via each sandbox's cloud-side auto-delete TTL
+# (TT_DAYTONA_AUTO_STOP_MIN / AUTO_DELETE_MIN), so no explicit cleanup is needed.
 
 # hf_assets_path defaults to example_checkpoint/Qwen3-<size>; override with the HF
 # weights on disk via HF_ASSETS_PATH (passed only when set).

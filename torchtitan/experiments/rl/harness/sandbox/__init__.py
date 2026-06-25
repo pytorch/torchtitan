@@ -7,8 +7,8 @@
 """Provider-agnostic sandbox/container resource for agent rollouts.
 
 ``base`` defines the ``Sandbox`` contract + ``make_sandbox`` factory; ``daytona``
-and ``docker`` are the backends; ``bridge`` is the Daytona-specific HTTP file-relay
-that lets an in-sandbox agent reach the on-box adapter.
+is the backend; ``bridge`` is the Daytona-specific HTTP file-relay that lets an
+in-sandbox agent reach the on-box adapter.
 """
 
 from torchtitan.experiments.rl.harness.sandbox.base import (
@@ -19,12 +19,10 @@ from torchtitan.experiments.rl.harness.sandbox.base import (
 )
 from torchtitan.experiments.rl.harness.sandbox.bridge import DaytonaBridge, start_bridge
 from torchtitan.experiments.rl.harness.sandbox.daytona import DaytonaSandbox
-from torchtitan.experiments.rl.harness.sandbox.docker import DockerSandbox
 
 __all__ = [
     "DaytonaBridge",
     "DaytonaSandbox",
-    "DockerSandbox",
     "ExecResult",
     "FileContent",
     "Sandbox",
