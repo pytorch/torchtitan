@@ -63,6 +63,7 @@ from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
     isolate_ep_process_group_pass,
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
+    deduplicate_fsdp_unshard_chains_pass,
     get_fsdp_param_module_order,
     get_transformer_block_bucket_counts,
     joint_transformer_block_bucketing_reordering_pass,
@@ -190,6 +191,7 @@ def compile_time_passes(
     passes: list[Callable] = [
         eliminate_dead_code_pass,
         canonicalize_graph_pass,
+        deduplicate_fsdp_unshard_chains_pass,
     ]
     ep_overlap_chunk_passes: list[Callable] = []
     ep_overlap_module_fqn: str | None = None
