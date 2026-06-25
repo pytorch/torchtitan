@@ -9,9 +9,15 @@ from torchtitan.experiments.graph_trainer.graph_pp.partition import (
     GraphPPInputSource,
     partition_joint_graph,
 )
+from torchtitan.experiments.graph_trainer.graph_pp.split_di_dw import (
+    GraphPPDiDwSplit,
+    split_di_dw_graph,
+)
 
 __all__ = [
+    "GraphPPDiDwSplit",
     "GraphPPInputSource",
     "GraphMeta",
     "partition_joint_graph",
+    "split_di_dw_graph",
 ]
