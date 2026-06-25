@@ -44,13 +44,14 @@ class BatchInvariantFlexConverter(ModelConfigConverter):
     def __init__(self, config: Config):
         pass
 
-    def convert(self, model_config) -> None:
+    def convert(self, model_config):
         for layer_cfg in model_config.layers:
             inner = layer_cfg.attention.inner_attention
             if isinstance(inner, FlexAttention.Config):
                 inner.kernel_options["BACKEND"] = "TRITON"
                 inner.kernel_options["BLOCK_M"] = self._BLOCK_M
                 inner.kernel_options["BLOCK_N"] = self._BLOCK_N
+        return model_config
 
 
 _batch_invariant_bmm_lib: torch.library.Library | None = None

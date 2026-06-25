@@ -143,6 +143,17 @@ class Decoder(BaseModel):
                     "Weight tying is not supported with Pipeline Parallel."
                 )
 
+            if parallelism.pipeline_parallel_degree > 1 and any(
+                layer.attention is not None
+                and isinstance(layer.attention.inner_attention, VarlenAttention.Config)
+                for layer in self.layers
+            ):
+                raise ValueError(
+                    "Pipeline Parallel is not compatible with VarlenAttention. "
+                    "Use a FlexAttention backend (attn_backend='flex' or "
+                    "'flex_flash') for pipelined models."
+                )
+
             loss_config = getattr(config, "loss", None)
             if isinstance(loss_config, (ChunkedCELoss.Config, CrossEntropyLoss.Config)):
                 # TODO(pianpwk): Move this into config_registry entries. This
