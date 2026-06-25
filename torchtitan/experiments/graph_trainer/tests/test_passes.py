@@ -6,6 +6,7 @@
 
 import operator
 import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -67,6 +68,40 @@ from torchtitan.experiments.graph_trainer.tests.test_performance_passes import (
 )
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module, ModuleList
+
+
+class TestDefaultTransformerBlockBuckets(TestCase):
+    def test_compile_time_passes_enable_chunked_loss_bucket_only_when_needed(self):
+        from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
+        from torchtitan.experiments.graph_trainer.configs import (
+            GraphTrainerCompileConfig,
+        )
+        from torchtitan.experiments.graph_trainer.passes import compile_time_passes
+
+        def make_config(loss):
+            return SimpleNamespace(
+                compile=GraphTrainerCompileConfig(inductor_compilation="full"),
+                loss=loss,
+                model_spec=SimpleNamespace(model=SimpleNamespace(layers=[0, 1])),
+                parallelism=SimpleNamespace(enable_async_tensor_parallel=False),
+            )
+
+        traced_result = SimpleNamespace(state_fqns=[])
+        with patch(
+            "torchtitan.experiments.graph_trainer.common_utils."
+            "get_default_transformer_block_buckets",
+            return_value=[],
+        ) as mock_bucket_plan:
+            compile_time_passes(traced_result, make_config(CrossEntropyLoss.Config()))
+            compile_time_passes(traced_result, make_config(ChunkedCELoss.Config()))
+
+        self.assertEqual(
+            [
+                call.kwargs["chunked_loss_enabled"]
+                for call in mock_bucket_plan.call_args_list
+            ],
+            [False, True],
+        )
 
 
 class ToyModel(Module):

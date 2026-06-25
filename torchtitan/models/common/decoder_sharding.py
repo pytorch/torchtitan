@@ -117,7 +117,7 @@ def pre_lm_head_norm_config(*, enable_sp: bool) -> ShardingConfig:
     Decoder blocks emit sequence-sharded hidden states when sequence
     parallelism is enabled. The root norm is the last clean module boundary to
     all-gather the TP sequence shard back to replicated hidden states before
-    either the model forward or ``ChunkedCELoss`` applies ``lm_head``.
+    either the model forward or ``ChunkedLossWrapper`` applies ``lm_head``.
     """
     activation = (
         dense_sequence_parallel_placement()
