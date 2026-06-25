@@ -390,9 +390,7 @@ def get_train_context(
                     sparse_mesh=parallel_dims.spmd_sparse_mesh(),
                 )
 
-                stack.enter_context(
-                    set_current_spmd_mesh(spmd_dense_mesh())
-                )
+                stack.enter_context(set_current_spmd_mesh(spmd_dense_mesh()))
             if spmd_typechecking:
                 stack.enter_context(spmd_typecheck(local=False))
 
