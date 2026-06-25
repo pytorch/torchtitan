@@ -5,7 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 from .bucket_storage import BucketSpec, MixedPrecisionPolicy, OffloadPolicy, PlacementFn
-from .flex_shard import flex_shard
+from .flex_shard import (
+    disable_flex_shard_gradient_division,
+    flex_shard,
+    set_flex_shard_gradient_reduce_op,
+)
 from .placement_contract import (
     BucketParamStorageLayout,
     BucketStorageLayout,
@@ -18,6 +22,7 @@ __all__ = [
     "BucketParamStorageLayout",
     "BucketSpec",
     "BucketStorageLayout",
+    "disable_flex_shard_gradient_division",
     "flex_shard",
     "get_global_shape",
     "get_placements",
@@ -27,4 +32,5 @@ __all__ = [
     "OffloadPolicy",
     "Placement",
     "PlacementFn",
+    "set_flex_shard_gradient_reduce_op",
 ]

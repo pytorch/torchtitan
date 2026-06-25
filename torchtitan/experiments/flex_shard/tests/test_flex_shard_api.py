@@ -28,6 +28,27 @@ from torchtitan.experiments.flex_shard.tests.common import (
 
 
 class TestFlexShardAPI(TestCase):
+    def test_reshard_after_forward_preserves_state_dict_keys(self):
+        with single_rank_cuda_mesh() as mesh:
+            args, model = make_transformer_model()
+
+            flex_shard_cuda(
+                model,
+                mesh,
+                buckets=transformer_bucket_specs(
+                    args.n_layers,
+                    mesh,
+                    reshard_after_forward=True,
+                ),
+            )
+
+            self.assertFalse(
+                any(
+                    "_checkpoint_wrapped_module" in key
+                    for key in model.state_dict()
+                )
+            )
+
     def test_reapplying_flex_shard_to_same_module_raises(self):
         with single_rank_cuda_mesh() as mesh:
             _, model = flex_shard_transformer_model(mesh)
