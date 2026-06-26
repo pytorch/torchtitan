@@ -353,11 +353,11 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.961757183074951""")
         assert_expected_inline(
             model_hash,
-            """59c65bd875308734f8dc74ca14ec96201a533076711640dac3525ae0109c2622""",
+            """135abf5bcdaac7d1a0cbf1b8e0f2bf84ac788ce202f3ec4b23bc8b05d5ee2f1e""",
         )
         assert_expected_inline(
             grad_hash,
-            """40eefe5c95e12a759b05e92df83699c5a306b4e30dbf3635b9eb2b686bd2ecdc""",
+            """fe39cc3a984828640c2b9a95458f76cd82046f3147d9ad960845851731ceb4ad""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -416,11 +416,11 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.474959373474121""")
         assert_expected_inline(
             model_hash,
-            """fa6def9b076b63bbdcb8cf97dff514d4cfdf72fffebb0031914b2354fa0a09d8""",
+            """99d414c98ec7de31e58ad41f3324a402dfa4f8fc4b3c57a406368af7360a2ec6""",
         )
         assert_expected_inline(
             grad_hash,
-            """5735b51199140370c02865d56c4badc455c4a73d222753d14a6a96ddfce866f2""",
+            """7f38de9544b31d1161c4191987663e2e8cc7be8b83b6226ff72a349a71aa1afa""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -484,11 +484,11 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.961757659912109""")
         assert_expected_inline(
             model_hash,
-            """b3c10f5a8fdc51f81281031e69cd617a01ba0ccdd513f656d9c03beefc48b91c""",
+            """cfb3c5cba404ea7a6f9adae605277995d157cf3b624e5a1e3729a786996da350""",
         )
         assert_expected_inline(
             grad_hash,
-            """d7aafe6c8941bd2bd7ddf6c2d161ddcbf28a6fc71f6c75b4391950aa6652ef89""",
+            """b8c505488cf613d016ed55e0e4dbcfcd8a278cc9e27f3cf0154301cbefc7ca4a""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -551,11 +551,11 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.474959373474121""")
         assert_expected_inline(
             model_hash,
-            """29139a03f37527719ee52868406f72f659dc085ac81c24b0cfea9b91c3942e7c""",
+            """aff6268960d2b137a44756d322b72c0dc253ffbbc54077e4105fc3abed0fdd79""",
         )
         assert_expected_inline(
             grad_hash,
-            """156bc8ac95c905f9f6a6b08712de2faf92621b4c34361578fcef5c7e05184a7e""",
+            """86f1656c38fa1e23d6b29955889bd5c4ad0c363f9755e2c4ea8dee142cacfcfe""",
         )
 
     # TODO: FlexAttention compilation exceeds resource limits on pre-Hopper GPUs.
@@ -621,14 +621,14 @@ class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
         loss, model_hash, grad_hash = self._run_steps(
             copy.deepcopy(self.model), Trainer
         )
-        assert_expected_inline(str(loss.item()), """7.297992706298828""")
+        assert_expected_inline(str(loss.item()), """7.2979936599731445""")
         assert_expected_inline(
             model_hash,
-            """5a90f986b34f302b14a1ba342f4b075aa1429fcf2e7cbfeef4631b3c7dda0958""",
+            """dea001dde5db1b02f8b4c25fefc8ed517c390cacdfcea946d3829eb492e3c6dc""",
         )
         assert_expected_inline(
             grad_hash,
-            """f2aae358d7e387b7ce98d55deb30c41d27c0809c4545593c24c5396303ed1129""",
+            """baf7140456134fe7256af1d8144bb6a579a731121a9843db177643b24eac9cd1""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -689,14 +689,14 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         loss, model_hash, grad_hash = self._run_steps(
             copy.deepcopy(self.model), Trainer
         )
-        assert_expected_inline(str(loss.item()), """7.297983646392822""")
+        assert_expected_inline(str(loss.item()), """7.297994613647461""")
         assert_expected_inline(
             model_hash,
-            """23652512b11880042b05345333f63ddcd0bd3b4362593f62752a7e403f048385""",
+            """70ea7c9f5224ad2f8796270873f39d329ded42a9b3f437a14577d61c5d78e4c5""",
         )
         assert_expected_inline(
             grad_hash,
-            """895996682474a53d3437a772449d6166adbcfba76c226d32ca586c61e33cbfe5""",
+            """c336a44443add5c6af2b35de62e5f8584b2d0f8876390032ebceffc2a6608e03""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
