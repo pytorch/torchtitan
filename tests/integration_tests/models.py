@@ -18,7 +18,22 @@ def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefini
         variant = tuple(
             arg.replace(f"{t.test_name}/", f"{test_name}/") for arg in variant
         )
-        new_args.append((f"--parallelism.spmd_backend {backend}",) + tuple(variant))
+        prefix = [f"--parallelism.spmd_backend {backend}"]
+        suffix = []
+        # Compile, PP, and explicit AC modes are not compatible with SPMD
+        # typechecking yet; keep those as backend-only coverage.
+        if backend == "spmd_types" and not any(
+            token in arg
+            for arg in variant
+            for token in (
+                "compile.enable",
+                "pipeline_parallel_degree",
+                "activation-checkpoint:",
+            )
+        ):
+            prefix.append("--debug.spmd_typechecking")
+            suffix.append("activation-checkpoint:none")
+        new_args.append(tuple(prefix) + tuple(variant) + tuple(suffix))
     return dataclasses.replace(
         t,
         override_args=tuple(new_args),
