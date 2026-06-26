@@ -20,6 +20,7 @@ from torchtitan.experiments.rl.examples.search_r1 import (
     SearchR1Sample,
 )
 from torchtitan.experiments.rl.rollout import Rollout, RolloutStatus, RolloutTurn
+from torchtitan.experiments.rl.types import RolloutTurnID
 
 
 def _build_env(monkeypatch, question="Who wrote Hamlet?"):
@@ -82,6 +83,7 @@ def _rollout(*, answer: str | None, tool_results: list[str] | None = None) -> Ro
     for res in tool_results or []:
         turns.append(
             RolloutTurn(
+                rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=len(turns)),
                 prompt_token_ids=[1],
                 completion_token_ids=[2],
                 completion_logprobs=[-0.1],
@@ -99,6 +101,7 @@ def _rollout(*, answer: str | None, tool_results: list[str] | None = None) -> Ro
     )
     turns.append(
         RolloutTurn(
+            rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=len(turns)),
             prompt_token_ids=[3],
             completion_token_ids=[4],
             completion_logprobs=[-0.1],
@@ -106,7 +109,7 @@ def _rollout(*, answer: str | None, tool_results: list[str] | None = None) -> Ro
         )
     )
     return Rollout(
-        group_id="g", sample_id="s", status=RolloutStatus.COMPLETED, turns=turns
+        group_id=0, rollout_id=0, status=RolloutStatus.COMPLETED, turns=turns
     )
 
 
