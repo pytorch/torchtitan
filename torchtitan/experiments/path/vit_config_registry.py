@@ -21,14 +21,12 @@ from .dataset import PathDataLoader
 from .loss import PathLoss
 from .trainer import PathTrainer
 from .validate import PathValidator
+from .model import PathMLP, PathSelfAttention, PathTransformerBlock
 from .vit import (
     parallelize_vit,
     PatchEmbed,
     PlanHead,
     PlanViT,
-    PlanViTAttention,
-    PlanViTBlock,
-    PlanViTMLP,
 )
 
 _LINEAR_INIT = {
@@ -77,9 +75,9 @@ def _hidden(dim: int, mult: float, multiple_of: int = 256) -> int:
 
 def _attention(
     dim: int, n_head: int, *, mup: bool, qk_norm: bool = True
-) -> PlanViTAttention.Config:
+) -> PathSelfAttention.Config:
     head_dim = dim // n_head
-    return PlanViTAttention.Config(
+    return PathSelfAttention.Config(
         norm=_ln(dim),
         q_norm=_ln(head_dim) if qk_norm else None,
         k_norm=_ln(head_dim) if qk_norm else None,
@@ -89,12 +87,13 @@ def _attention(
         n_head=n_head,
         head_dim=head_dim,
         dropout=0.0,
+        is_causal=False,
     )
 
 
-def _mlp(dim: int, *, mup: bool, mult: float = 4.0) -> PlanViTMLP.Config:
+def _mlp(dim: int, *, mup: bool, mult: float = 4.0) -> PathMLP.Config:
     hidden = _hidden(dim, mult)
-    return PlanViTMLP.Config(
+    return PathMLP.Config(
         norm=_ln(dim),
         c_fc=_lin(dim, hidden, std=_hidden_std(dim, mup=mup)),
         c_proj=_lin(
@@ -126,7 +125,7 @@ def _model_config(flavor: str, *, mup: bool, qk_norm: bool = True) -> PlanViT.Co
             num_embeddings=num_patches, embedding_dim=n_embd, param_init=_LINEAR_INIT
         ),
         blocks=[
-            PlanViTBlock.Config(
+            PathTransformerBlock.Config(
                 attention=_attention(n_embd, n_head, mup=mup, qk_norm=qk_norm),
                 mlp=_mlp(n_embd, mup=mup),
             )

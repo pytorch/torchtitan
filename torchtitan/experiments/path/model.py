@@ -90,11 +90,13 @@ class PathSelfAttention(Module):
         n_head: int
         head_dim: int
         dropout: float
+        is_causal: bool = True
 
     def __init__(self, config: Config):
         super().__init__()
         self.n_head = config.n_head
         self.head_dim = config.head_dim
+        self.is_causal = config.is_causal
         self.norm = config.norm.build()
         self.q_norm = config.q_norm.build() if config.q_norm is not None else nn.Identity()
         self.k_norm = config.k_norm.build() if config.k_norm is not None else nn.Identity()
@@ -108,7 +110,7 @@ class PathSelfAttention(Module):
         qkv = self.c_attn(self.norm(x)).view(b, t, 3, self.n_head, self.head_dim)
         q, k, v = qkv.unbind(2)
         q, k = self.q_norm(q), self.k_norm(k)
-        x = self.inner_attention(q, k, v, is_causal=True)
+        x = self.inner_attention(q, k, v, is_causal=self.is_causal)
         return self.dropout(self.c_proj(x.reshape(b, t, self.n_head * self.head_dim)))
 
 

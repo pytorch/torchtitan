@@ -18,87 +18,11 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.models.common import Embedding, LayerNorm, Linear, RMSNorm
-from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleList
 from torchtitan.tools.logging import logger
 
-
-class PlanViTMLP(Module):
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        norm: LayerNorm.Config | RMSNorm.Config
-        c_fc: Linear.Config
-        c_proj: Linear.Config
-        act: str
-        dropout: float
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.norm = config.norm.build()
-        self.c_fc = config.c_fc.build()
-        self.act = (
-            nn.GELU(approximate="tanh") if config.act == "gelu_tanh" else nn.GELU()
-        )
-        self.c_proj = config.c_proj.build()
-        self.dropout = nn.Dropout(config.dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.dropout(self.c_proj(self.act(self.c_fc(self.norm(x)))))
-
-
-class PlanViTAttention(Module):
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        norm: LayerNorm.Config | RMSNorm.Config
-        q_norm: LayerNorm.Config | RMSNorm.Config | None
-        k_norm: LayerNorm.Config | RMSNorm.Config | None
-        c_attn: Linear.Config
-        c_proj: Linear.Config
-        inner_attention: ScaledDotProductAttention.Config
-        n_head: int
-        head_dim: int
-        dropout: float
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.n_head = config.n_head
-        self.head_dim = config.head_dim
-        self.norm = config.norm.build()
-        self.q_norm = (
-            config.q_norm.build() if config.q_norm is not None else nn.Identity()
-        )
-        self.k_norm = (
-            config.k_norm.build() if config.k_norm is not None else nn.Identity()
-        )
-        self.c_attn = config.c_attn.build()
-        self.c_proj = config.c_proj.build()
-        self.inner_attention = config.inner_attention.build()
-        self.dropout = nn.Dropout(config.dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        b, t, _ = x.shape
-        qkv = self.c_attn(self.norm(x)).view(b, t, 3, self.n_head, self.head_dim)
-        q, k, v = qkv.unbind(2)
-        q, k = self.q_norm(q), self.k_norm(k)
-        x = self.inner_attention(q, k, v, is_causal=False)
-        return self.dropout(self.c_proj(x.reshape(b, t, self.n_head * self.head_dim)))
-
-
-class PlanViTBlock(Module):
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        attention: PlanViTAttention.Config
-        mlp: PlanViTMLP.Config
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.attention = config.attention.build()
-        self.mlp = config.mlp.build()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attention(x)
-        return x + self.mlp(x)
+from .model import PathMLP, PathSelfAttention, PathTransformerBlock
 
 
 class PatchEmbed(Module):
@@ -145,7 +69,7 @@ class PlanViT(BaseModel):
         output_mult: float
         patch_embed: PatchEmbed.Config
         pos_embedding: Embedding.Config
-        blocks: list[PlanViTBlock.Config]
+        blocks: list[PathTransformerBlock.Config]
         norm: LayerNorm.Config | RMSNorm.Config
         plan_head: PlanHead.Config
 
