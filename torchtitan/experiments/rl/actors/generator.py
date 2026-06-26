@@ -152,9 +152,10 @@ def _prepare_generation_request_metrics(
 # vLLM's chunked-prefill chunk size (max_num_batched_tokens). "FULL" /
 # "FULL_AND_PIECEWISE" also graph prefill, whose per-step token count is bounded
 # by this, so their capture sizes must reach it (else prefill falls back to
-# eager). Used as the capture cap when ``Config.max_num_batched_tokens`` is unset
-# (vLLM keeps its own default); when that field is set, its value drives both the
-# vLLM engine and the capture cap.
+# eager). Used as the capture cap when
+# ``Config.chunked_prefill_max_num_batched_tokens`` is unset (vLLM keeps its own
+# default); when that field is set, its value drives both the vLLM engine and the
+# capture cap.
 _VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 
 
@@ -683,7 +684,7 @@ class VLLMGenerator(Actor, Configurable):
         gpu_memory_limit: float = 0.9
         """Fraction of GPU memory to use for the vLLM engine (0.0 to 1.0)."""
 
-        max_num_batched_tokens: int | None = None
+        chunked_prefill_max_num_batched_tokens: int | None = None
         """vLLM chunked-prefill chunk size (max tokens scheduled per engine step).
         ``None`` (default) leaves vLLM's own default in place. When set, it is passed
         to the vLLM engine AND used as the ``FULL``/``FULL_AND_PIECEWISE`` cudagraph
@@ -850,8 +851,10 @@ class VLLMGenerator(Actor, Configurable):
         )
         engine_kwargs["max_model_len"] = model_spec.model.max_seq_len
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
-        if config.max_num_batched_tokens is not None:
-            engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens
+        if config.chunked_prefill_max_num_batched_tokens is not None:
+            engine_kwargs[
+                "max_num_batched_tokens"
+            ] = config.chunked_prefill_max_num_batched_tokens
         # Continuous batching requires FCFS scheduling: admission order must equal the
         # broadcast order on every rank
         engine_kwargs["scheduling_policy"] = "fcfs"
@@ -860,7 +863,7 @@ class VLLMGenerator(Actor, Configurable):
             engine_kwargs["block_size"] = 256
         vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
             max_num_seqs=self._max_num_seqs,
-            max_num_batched_tokens=config.max_num_batched_tokens,
+            max_num_batched_tokens=config.chunked_prefill_max_num_batched_tokens,
         )
         if vllm_compilation_config is not None:
             engine_kwargs["compilation_config"] = vllm_compilation_config
