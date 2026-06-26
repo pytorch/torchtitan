@@ -24,6 +24,7 @@ def build_minimal_trainer(
     activation_checkpoint_mode: str = "none",
     compile_enable_passes: bool = True,
     compile_passes: list[str] | None = None,
+    compile_disable_passes: list[str] | None = None,
     compile_numerics_changing_optim: bool = False,
     tokenizer=None,
     fsdp_reshard_after_forward: str = "default",
@@ -50,7 +51,11 @@ def build_minimal_trainer(
                 pass_pipeline="default",
                 inductor_compilation="regional",
                 numerics_changing_optim=compile_numerics_changing_optim,
-                disable_passes=[],
+                disable_passes=(
+                    []
+                    if compile_disable_passes is None
+                    else list(compile_disable_passes)
+                ),
                 debug_graph_passes=False,
                 cpu_offload_prefetch_n_layers=1,
                 cpu_offload_defer_n_layers=1,
