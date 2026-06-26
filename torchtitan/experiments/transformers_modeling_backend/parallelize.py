@@ -288,7 +288,11 @@ def apply_fsdp(
 
     if tie_word_embeddings:
         fully_shard(
-            [m for m in (model.tok_embeddings, model.norm, model.lm_head) if m is not None],
+            [
+                m
+                for m in (model.tok_embeddings, model.norm, model.lm_head)
+                if m is not None
+            ],
             **fsdp_config,
             reshard_after_forward=reshard_after_forward_policy == "always",
         )
