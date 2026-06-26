@@ -68,17 +68,6 @@ class InferenceParallelismConfig:
     expert_parallel_degree: int = 1
     """Expert parallelism degree for MoE layers. 1 means disabled."""
 
-    allreduce_backend: str = "nccl"
-    """Tensor-parallel all-reduce backend for the generator forward.
-
-    ``"nccl"`` (default): DTensor reduces the row-parallel ``wo``/``w2``
-    ``Partial -> Replicate`` with an NCCL ring all-reduce. ``"vllm"``: route
-    those reductions through vLLM's custom one-shot/multimem all-reduce (lower
-    latency for decode-size messages). Only takes effect when
-    ``tensor_parallel_degree > 1``. See
-    ``_patch_vllm_all_reduce`` in
-    :mod:`torchtitan.experiments.rl.models.vllm_wrapper`."""
-
     def to_training(self) -> ParallelismConfig:
         """Translate to the training ``ParallelismConfig`` for utils that need
         the full shape (``ParallelDims``, ``parallelize_fn``, world-size calc).

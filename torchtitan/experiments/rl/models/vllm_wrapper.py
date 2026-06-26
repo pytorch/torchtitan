@@ -67,9 +67,9 @@ _tp_all_reduce_patched = False
 
 
 def _patch_vllm_all_reduce() -> None:
-    """Opt-in (allreduce_backend="vllm"): route the generator's tensor-parallel
-    all-reduce through vLLM's custom one-shot/multimem AR instead of DTensor's
-    NCCL ring redistribute. Idempotent. Two changes:
+    """Route the generator's tensor-parallel all-reduce through vLLM's custom
+    one-shot/multimem AR instead of DTensor's NCCL ring redistribute (applied
+    when batch-invariant mode is off). Idempotent. Two changes:
 
     1. Swap torch.ops._c10d_functional.all_reduce (the op every DTensor
        Partial -> Replicate redistribute calls) for
@@ -85,6 +85,9 @@ def _patch_vllm_all_reduce() -> None:
        enables for Monarch RDMA. registered=False reduces via the init-time
        buffer_ptrs (raw cudaMalloc, IPC-able), records no graph buffers, at the
        cost of one staging copy per AR.
+
+    TODO: this is a stopgap to close the generator's TP all-reduce perf gap.
+    Improve our native (DTensor) all-reduce path and remove this patch.
     """
     global _tp_all_reduce_patched
     if _tp_all_reduce_patched:
@@ -280,27 +283,10 @@ class VLLMModelWrapper(Module):
         # TP-sharded.
         self._inject_attention_sinks()
 
-        # Optionally route the row-parallel wo/w2 TP all-reduce through vLLM's
-        # custom all-reduce instead of DTensor's NCCL ring redistribute. Only
-        # meaningful with TP; a process-global swap of the functional all-reduce
-        # op, so the shared model classes are untouched.
-        if parallelism.allreduce_backend == "vllm" and self.parallel_dims.tp_enabled:
-            # vLLM's custom AR selects its algorithm by message size (one-shot vs
-            # NCCL fallback), so the FP reduction order and numerics
-            # becomes batch/message-size dependent. That defeats batch-invariant
-            # mode.
-            if is_in_batch_invariant_mode():
-                logger.warning(
-                    "allreduce_backend='vllm' ignored under batch-invariant mode "
-                    "(vLLM custom all-reduce is size-dependent); using NCCL."
-                )
-            else:
-                _patch_vllm_all_reduce()
-        elif parallelism.allreduce_backend not in ("nccl", "vllm"):
-            raise ValueError(
-                f"Unknown allreduce_backend {parallelism.allreduce_backend!r}; "
-                "expected 'nccl' or 'vllm'."
-            )
+        # Route the TP all-reduce through vLLM's custom AR (off under
+        # batch-invariant mode, where its size-dependent algorithm breaks).
+        if self.parallel_dims.tp_enabled and not is_in_batch_invariant_mode():
+            _patch_vllm_all_reduce()
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:
