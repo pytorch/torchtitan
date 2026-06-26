@@ -727,7 +727,8 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
         config.trainer, override=OverrideConfig(imports=list(perf_imports))
     )
     config.generator = dataclasses.replace(
-        config.generator, override=OverrideConfig(imports=list(perf_imports))
+        config.generator,
+        override=OverrideConfig(imports=list(perf_imports)),
     )
     return config
 
