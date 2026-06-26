@@ -25,11 +25,12 @@ def _lora_adapter_sharding(
 ) -> tuple[ShardingConfig | None, ShardingConfig | None]:
     """Derive LoRA adapter sharding from the base linear's TP sharding.
 
-    ``lora_b`` mirrors the base weight's TP shard so its output matches
-    ``base_out``'s placement (Shard(-1) for colwise, Partial for rowwise).
+    For colwise base linears, ``lora_a`` is TP-replicated and ``lora_b``
+    mirrors the base output-dim shard.
 
-    ``lora_a`` weight is Replicate (small rank dim, no benefit from TP
-    sharding).
+    For rowwise base linears, ``lora_a`` mirrors the base input-dim shard and
+    ``lora_b`` is TP-replicated, producing the same partial-output shape as the
+    base linear.
     """
     base_weight_sharding = (
         base_sharding.state_shardings.get("weight") if base_sharding else None
@@ -37,14 +38,20 @@ def _lora_adapter_sharding(
     if base_weight_sharding is None:
         return None, None
 
-    replicate_weight = ShardingConfig(
+    replicated_weight = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
     )
-    # lora_b: same TP shard as base weight → output matches base_out
-    lora_b_sharding = ShardingConfig(
-        state_shardings={"weight": base_weight_sharding},
-    )
-    return replicate_weight, lora_b_sharding
+    if base_weight_sharding == dense_param_placement(tp=spmd.S(0)):
+        lora_b_sharding = ShardingConfig(
+            state_shardings={"weight": base_weight_sharding},
+        )
+        return replicated_weight, lora_b_sharding
+    else:
+        assert base_weight_sharding == dense_param_placement(tp=spmd.S(1))
+        lora_a_sharding = ShardingConfig(
+            state_shardings={"weight": dense_param_placement(tp=spmd.S(1))},
+        )
+        return lora_a_sharding, replicated_weight
 
 
 _lora_class_cache: dict[type, type] = {}
