@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import ChunkedCELoss
+from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import (
@@ -19,17 +19,23 @@ from torchtitan.hf_datasets.text_datasets import (
     ChatDataLoader,
     HuggingFaceTextDataLoader,
 )
+from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
 from . import model_registry
 
 
 def qwen3_debugmodel() -> Trainer.Config:
+    model_spec = model_registry("debugmodel")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel"),
+        model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -86,11 +92,16 @@ def qwen3_debugmodel_moe_param_groups() -> Trainer.Config:
 
 
 def qwen3_debugmodel_flex_flash() -> Trainer.Config:
+    model_spec = model_registry("debugmodel", attn_backend="flex_flash")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel", attn_backend="flex_flash"),
+        model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -113,11 +124,16 @@ def qwen3_debugmodel_flex_flash() -> Trainer.Config:
 
 
 def qwen3_0_6b() -> Trainer.Config:
+    model_spec = model_registry("0.6B")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./assets/hf/Qwen3-0.6B",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("0.6B"),
+        model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
@@ -138,10 +154,15 @@ def qwen3_0_6b() -> Trainer.Config:
 
 
 def qwen3_1_7b() -> Trainer.Config:
+    model_spec = model_registry("1.7B")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./assets/hf/Qwen3-1.7B",
-        model_spec=model_registry("1.7B"),
+        model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
@@ -162,10 +183,15 @@ def qwen3_1_7b() -> Trainer.Config:
 
 
 def qwen3_14b() -> Trainer.Config:
+    model_spec = model_registry("14B")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./assets/hf/Qwen3-14B",
-        model_spec=model_registry("14B"),
+        model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
@@ -192,10 +218,15 @@ def qwen3_14b() -> Trainer.Config:
 
 
 def qwen3_30b_a3b() -> Trainer.Config:
+    model_spec = model_registry("30B-A3B")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./assets/hf/Qwen3-30B-A3B",
-        model_spec=model_registry("30B-A3B"),
+        model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
@@ -222,10 +253,15 @@ def qwen3_30b_a3b() -> Trainer.Config:
 
 
 def qwen3_32b() -> Trainer.Config:
+    model_spec = model_registry("32B")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./assets/hf/Qwen3-32B",
-        model_spec=model_registry("32B"),
+        model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
@@ -260,11 +296,16 @@ def qwen3_debugmodel_non_fused_qkv() -> Trainer.Config:
 
 
 def qwen3_moe_debug() -> Trainer.Config:
+    model_spec = model_registry("debugmodel_moe")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel_moe"),
+        model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4_test",
         ),
@@ -304,7 +345,11 @@ def sft_qwen3_8b_math() -> Trainer.Config:
 
     model_spec = model_registry("8B", attn_backend="varlen")
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
         hf_assets_path="./assets/hf/Qwen3-8B",
         model_spec=model_spec,
         optimizer=default_adamw(lr=2e-5),

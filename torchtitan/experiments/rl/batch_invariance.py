@@ -92,7 +92,7 @@ def force_logprobs_fn_for_batch_invariance() -> None:
     """
     import vllm.v1.worker.gpu.sample.logprob as vllm_logprob
 
-    from torchtitan.experiments.rl.actors.trainer import compute_logprobs
+    from torchtitan.components.loss import compute_logprobs
 
     def generator_compute_token_logprobs(
         logits: torch.Tensor, token_ids: torch.Tensor
