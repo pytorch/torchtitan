@@ -254,6 +254,130 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
     def __init__(self, config: Config):
         super().__init__(config)
 
+    def _token_count_exchange(
+        self,
+        num_local_tokens_per_expert_E: torch.Tensor,
+        pg,
+        ep_size: int,
+    ) -> torch.Tensor:
+        """Exchange per-rank expert token counts before the data all-to-all.
+
+        This method is separate from ``dispatch`` so graph passes can annotate
+        the count exchange independently from the true token-exchange
+        scheduling markers.
+        """
+        if (
+            torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing()
+        ) and get_spmd_backend() != "spmd_types":
+            return all_to_all_single(
+                num_local_tokens_per_expert_E.view(ep_size, -1),
+                None,
+                None,
+                group=self.ep_mesh,
+            )
+
+        return spmd.all_to_all(
+            num_local_tokens_per_expert_E.view(ep_size, -1),
+            pg,
+            src=spmd.V,
+            dst=spmd.V,
+        )
+
+    def _sync_token_count_exchange(
+        self,
+        num_local_tokens_per_expert_E: torch.Tensor,
+        num_global_tokens_per_local_expert_EP_e: torch.Tensor,
+        ep_size: int,
+    ) -> tuple[torch.Tensor, list[int], list[int]]:
+        """Wait for token counts and materialize CPU split lists.
+
+        Local input splits can copy to CPU non-blocking; remote output splits
+        must be ready before launching the variable-size data all-to-all.
+        """
+        # Need to wait explicitly because it is used by a triton kernel later
+        # which doesn't realize that AsyncCollectiveTensor needs unwrapping
+        num_global_tokens_per_local_expert_EP_e = (
+            torch.ops._c10d_functional.wait_tensor(
+                num_global_tokens_per_local_expert_EP_e
+            )
+        )
+        num_global_tokens_per_local_expert_E = (
+            num_global_tokens_per_local_expert_EP_e.reshape(-1)
+        )
+        input_splits = (
+            num_local_tokens_per_expert_E.view(ep_size, -1)
+            .sum(dim=1)
+            .to(torch.device("cpu"), non_blocking=True)
+        )
+        # NOTE: this would incur a device-to-host sync
+        output_splits = (
+            num_global_tokens_per_local_expert_E.view(ep_size, -1)
+            .sum(dim=1)
+            .to(torch.device("cpu"), non_blocking=False)
+        )
+        input_splits_list = input_splits.tolist()
+        output_splits_list = output_splits.tolist()
+
+        return (
+            num_global_tokens_per_local_expert_E,
+            input_splits_list,
+            output_splits_list,
+        )
+
+    def _dispatch_token_exchange(
+        self,
+        routed_input_ND: torch.Tensor,
+        pg,
+        output_splits: list[int],
+        input_splits: list[int],
+    ) -> torch.Tensor:
+        """Launch the dispatch all-to-all that moves routed tokens to experts."""
+        if (
+            torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing()
+        ) and get_spmd_backend() != "spmd_types":
+            return all_to_all_single(
+                routed_input_ND,
+                output_splits,
+                input_splits,
+                self.ep_mesh,
+            )
+
+        return spmd.all_to_all(
+            routed_input_ND,
+            pg,
+            src=spmd.V,
+            dst=spmd.V,
+            output_split_sizes=output_splits,
+            input_split_sizes=input_splits,
+        )
+
+    def _combine_token_exchange(
+        self,
+        routed_output_RD: torch.Tensor,
+        pg,
+        input_splits: list[int],
+        output_splits: list[int],
+    ) -> torch.Tensor:
+        """Launch the combine all-to-all that returns expert outputs to tokens."""
+        if (
+            torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing()
+        ) and get_spmd_backend() != "spmd_types":
+            return all_to_all_single(
+                routed_output_RD,
+                input_splits,
+                output_splits,
+                self.ep_mesh,
+            )
+
+        return spmd.all_to_all(
+            routed_output_RD,
+            pg,
+            src=spmd.V,
+            dst=spmd.V,
+            output_split_sizes=input_splits,
+            input_split_sizes=output_splits,
+        )
+
     # pyrefly: ignore [bad-override]
     def dispatch(
         self,
@@ -330,60 +454,27 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 )
 
             with torch.no_grad():
-                if torch.compiler.is_compiling() and get_spmd_backend() != "spmd_types":
-                    num_global_tokens_per_local_expert_EP_e = all_to_all_single(
-                        num_local_tokens_per_expert_E.view(ep_size, -1),
-                        None,
-                        None,
-                        group=self.ep_mesh,
-                    )
-                else:
-                    num_global_tokens_per_local_expert_EP_e = spmd.all_to_all(
-                        num_local_tokens_per_expert_E.view(ep_size, -1),
-                        pg,
-                        src=spmd.V,
-                        dst=spmd.V,
-                    )
-                # Need to wait explicitly because it is used by a triton kernel later
-                # which doesn't realize that AsyncCollectiveTensor needs unwrapping
-                num_global_tokens_per_local_expert_EP_e = (
-                    torch.ops._c10d_functional.wait_tensor(
-                        num_global_tokens_per_local_expert_EP_e
-                    )
-                )
-                num_global_tokens_per_local_expert_E = (
-                    num_global_tokens_per_local_expert_EP_e.reshape(-1)
-                )
-                input_splits = (
-                    num_local_tokens_per_expert_E.view(ep_size, -1)
-                    .sum(dim=1)
-                    .to(torch.device("cpu"), non_blocking=True)
-                )
-                # NOTE: this would incur a device-to-host sync
-                output_splits = (
-                    num_global_tokens_per_local_expert_E.view(ep_size, -1)
-                    .sum(dim=1)
-                    .to(torch.device("cpu"), non_blocking=False)
-                )
-                input_splits_list = input_splits.tolist()
-                output_splits_list = output_splits.tolist()
-
-            if torch.compiler.is_compiling() and get_spmd_backend() != "spmd_types":
-                routed_input_RD = all_to_all_single(
-                    routed_input_ND,
-                    output_splits_list,
-                    input_splits_list,
-                    self.ep_mesh,
-                )
-            else:
-                routed_input_RD = spmd.all_to_all(
-                    routed_input_ND,
+                num_global_tokens_per_local_expert_EP_e = self._token_count_exchange(
+                    num_local_tokens_per_expert_E,
                     pg,
-                    src=spmd.V,
-                    dst=spmd.V,
-                    output_split_sizes=output_splits_list,
-                    input_split_sizes=input_splits_list,
+                    ep_size,
                 )
+                (
+                    num_global_tokens_per_local_expert_E,
+                    input_splits_list,
+                    output_splits_list,
+                ) = self._sync_token_count_exchange(
+                    num_local_tokens_per_expert_E,
+                    num_global_tokens_per_local_expert_EP_e,
+                    ep_size,
+                )
+
+            routed_input_RD = self._dispatch_token_exchange(
+                routed_input_ND,
+                pg,
+                output_splits_list,
+                input_splits_list,
+            )
             # Reorder from rank-major to expert-major via _permute.
             #
             # num_global_tokens_per_local_expert_E layout after all-to-all
@@ -530,22 +621,12 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             )
             # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
             # on the NCCL stream and won't block until the tensor is accessed.
-            if torch.compiler.is_compiling() and get_spmd_backend() != "spmd_types":
-                routed_output_RD = all_to_all_single(
-                    routed_output_RD,
-                    metadata.input_splits,
-                    metadata.output_splits,
-                    self.ep_mesh,
-                )
-            else:
-                routed_output_RD = spmd.all_to_all(
-                    routed_output_RD,
-                    pg,
-                    src=spmd.V,
-                    dst=spmd.V,
-                    output_split_sizes=metadata.input_splits,
-                    input_split_sizes=metadata.output_splits,
-                )
+            routed_output_RD = self._combine_token_exchange(
+                routed_output_RD,
+                pg,
+                metadata.input_splits,
+                metadata.output_splits,
+            )
 
         if get_spmd_backend() == "spmd_types":
             if spmd.is_type_checking():  # dense mesh reinterpret

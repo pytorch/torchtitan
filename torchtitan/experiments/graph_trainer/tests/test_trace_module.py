@@ -17,6 +17,7 @@ from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedCELossWithParamGrads,
 )
 from torchtitan.experiments.graph_trainer.common_utils import (
+    _maybe_materialize_grad_for_param_layout,
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
@@ -28,9 +29,6 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 )
 from torchtitan.experiments.graph_trainer.passes import (
     annotate_flex_attention_for_regional_inductor_pass,
-)
-from torchtitan.experiments.graph_trainer.trainer import (
-    _materialize_grad_for_param_layout,
 )
 
 
@@ -356,16 +354,16 @@ class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
             )
         )
 
-    def test_materialize_grad_for_param_layout_restores_param_strides(self):
+    def test_maybe_materialize_grad_for_param_layout_restores_param_strides(self):
         param = torch.empty_strided((2, 3), (1, 2))
         grad = torch.arange(6.0).reshape(2, 3)
 
-        materialized = _materialize_grad_for_param_layout(param, grad)
+        materialized = _maybe_materialize_grad_for_param_layout(param, grad)
 
         self.assertEqual(materialized.stride(), param.stride())
         self.assertTrue(torch.equal(materialized, grad))
         self.assertIs(
-            _materialize_grad_for_param_layout(param, materialized),
+            _maybe_materialize_grad_for_param_layout(param, materialized),
             materialized,
         )
 
