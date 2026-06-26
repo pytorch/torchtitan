@@ -209,7 +209,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     # runtime utilities
     device: torch.device
     gc_handler: utils.GarbageCollection
-    train_context: dist_utils.TrainContext
+    train_context: dist_utils.SpmdContext
     gradient_accumulation_steps: int
     pp_has_first_stage: bool
     pp_has_last_stage: bool
@@ -521,7 +521,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             base_folder=config.dump_folder,
         )
 
-        self.train_context = dist_utils.get_train_context(
+        self.train_context = dist_utils.get_spmd_context(
             parallel_dims=parallel_dims,
             spmd_typechecking=(
                 config.parallelism.spmd_backend == "spmd_types"

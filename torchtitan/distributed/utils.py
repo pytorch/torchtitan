@@ -361,17 +361,17 @@ def set_batch_invariance(enable: bool) -> None:
     )
 
 
-class TrainContext(Protocol):
+class SpmdContext(Protocol):
     @abstractmethod
     def __call__(self) -> contextlib.AbstractContextManager[None]:
         pass
 
 
-def get_train_context(
+def get_spmd_context(
     *,
     parallel_dims: "ParallelDims | None" = None,
     spmd_typechecking: bool = False,
-) -> TrainContext:
+) -> SpmdContext:
     @contextlib.contextmanager
     def context():
         with contextlib.ExitStack() as stack:
