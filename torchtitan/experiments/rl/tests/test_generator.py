@@ -124,9 +124,10 @@ def test_process_finished_requests_resolves_future_with_completion():
         # DP=1: rank 0 is the single replica's leader, so it builds and resolves locally.
         dispatcher = _dispatcher()
         future = asyncio.get_running_loop().create_future()
-        dispatcher._rank0_generation_futures = {
-            "r0": GenerationFuture(future=future, metrics_prefix="generator")
-        }
+        # Admitted (sampled) under v7 (the min); a weight pull then advanced the live version to 8 (the max).
+        generation_future = GenerationFuture(future=future, metrics_prefix="generator")
+        generation_future.min_policy_version = 7
+        dispatcher._rank0_generation_futures = {"r0": generation_future}
 
         dispatcher.process_finished_requests(
             [
@@ -134,7 +135,7 @@ def test_process_finished_requests_resolves_future_with_completion():
                     outputs=[_sample(token_ids=(10, 11), finish_reason="length")]
                 )
             ],
-            policy_version=7,
+            policy_version=8,
         )
 
         completion = await future
@@ -142,7 +143,8 @@ def test_process_finished_requests_resolves_future_with_completion():
         assert completion.token_ids == [10, 11]
         assert completion.token_logprobs == [-0.1, -0.1]
         assert completion.finish_reason == "length"
-        assert completion.policy_version == 7
+        assert completion.min_policy_version == 7  # min = version it was admitted under
+        assert completion.max_policy_version == 8  # max = live version at finish
         # The request is popped from the in-flight map.
         assert dispatcher._rank0_generation_futures == {}
         # The per-generation metrics ride on the completion (built on rank 0).
@@ -263,12 +265,13 @@ def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
     )
 
     config = rl_grpo_qwen3_0_6b_varlen()
-    assert (
-        not config.generator_router.hot_swap
-    )  # default; guard fires only when both are off
+    # hot_swap defaults True; the guard fires only in drain mode (hot_swap=False) with reset also off.
     with pytest.raises(ValueError, match="reset_prefix_cache_on_weight_sync"):
         dataclasses.replace(
             config,
+            generator_router=dataclasses.replace(
+                config.generator_router, hot_swap=False
+            ),
             generator=dataclasses.replace(
                 config.generator, reset_prefix_cache_on_weight_sync=False
             ),
