@@ -134,6 +134,11 @@ class PolicyTrainer(Actor, Configurable):
             )
 
         self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
+        dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
+        self.train_context = dist_utils.get_spmd_context(
+            parallel_dims=self.parallel_dims,
+            spmd_typechecking=False,
+        )
 
         # Set determinism flags and seed via core torchtitan utility
         dist_utils.set_determinism(
@@ -388,23 +393,24 @@ class PolicyTrainer(Actor, Configurable):
 
         attention_masks = model.get_attention_masks(positions)
 
-        with sl.log_trace_span("model_forward"):
-            pred = model(
-                token_ids, attention_masks=attention_masks, positions=positions
-            )
+        with self.train_context():
+            with sl.log_trace_span("model_forward"):
+                pred = model(
+                    token_ids, attention_masks=attention_masks, positions=positions
+                )
 
-        with sl.log_trace_span("loss_fn"):
-            loss, loss_metrics = self.loss_fn(
-                pred,
-                labels,
-                num_global_valid_tokens,
-                generator_logprobs=generator_logprobs,
-                advantages=advantages,
-                loss_mask=loss_mask,
-            )
+            with sl.log_trace_span("loss_fn"):
+                loss, loss_metrics = self.loss_fn(
+                    pred,
+                    labels,
+                    num_global_valid_tokens,
+                    generator_logprobs=generator_logprobs,
+                    advantages=advantages,
+                    loss_mask=loss_mask,
+                )
 
-        with sl.log_trace_span("model_backward"):
-            loss.backward()
+            with sl.log_trace_span("model_backward"):
+                loss.backward()
 
         sum_reduced_metrics = {
             key: value
