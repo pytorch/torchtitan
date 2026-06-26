@@ -186,6 +186,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                 if tt_key == "lm_head.weight" and getattr(
                     self.model_config, "enable_weight_tying", False
                 ):
+                    self.fqn_to_index_mapping.pop("lm_head.weight", None)
                     continue
                 hf_value = value
                 # Linear weight (out, C*T*H*W) → Conv3d weight (out, C, T, H, W)
