@@ -215,6 +215,11 @@ class PolicyTrainer(Actor, Configurable):
             )
 
         self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
+        dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
+        self.train_context = dist_utils.get_spmd_context(
+            parallel_dims=self.parallel_dims,
+            spmd_typechecking=False,
+        )
 
         # Set determinism flags and seed via core torchtitan utility
         dist_utils.set_determinism(
@@ -331,7 +336,7 @@ class PolicyTrainer(Actor, Configurable):
 
         inner_attn = model_spec.model.layers[0].attention.inner_attention
         assert isinstance(
-            model_spec.model.layers[0].attention.inner_attention,
+            inner_attn,
             (VarlenAttention.Config, FlexAttention.Config),
         ), "Only varlen and flex attention backends are allowed."
 
@@ -467,23 +472,24 @@ class PolicyTrainer(Actor, Configurable):
 
         attention_masks = model.get_attention_masks(positions)
 
-        with sl.log_trace_span("model_forward"):
-            logits = model(
-                token_ids, attention_masks=attention_masks, positions=positions
-            )
-        trainer_logprobs = compute_logprobs(logits, labels)
+        with self.train_context():
+            with sl.log_trace_span("model_forward"):
+                logits = model(
+                    token_ids, attention_masks=attention_masks, positions=positions
+                )
+            trainer_logprobs = compute_logprobs(logits, labels)
 
-        with sl.log_trace_span("loss_fn"):
-            loss, loss_metrics = self.loss_fn(
-                trainer_logprobs=trainer_logprobs,
-                generator_logprobs=generator_logprobs,
-                loss_mask=loss_mask,
-                advantages=advantages,
-                num_global_valid_tokens=num_global_valid_tokens,
-            )
+            with sl.log_trace_span("loss_fn"):
+                loss, loss_metrics = self.loss_fn(
+                    trainer_logprobs=trainer_logprobs,
+                    generator_logprobs=generator_logprobs,
+                    loss_mask=loss_mask,
+                    advantages=advantages,
+                    num_global_valid_tokens=num_global_valid_tokens,
+                )
 
-        with sl.log_trace_span("model_backward"):
-            loss.backward()
+            with sl.log_trace_span("model_backward"):
+                loss.backward()
 
         # Metrics for bitwise verification of policy logprobs.
         verification: PartialLogprobDrift = verify_logprob_identity(

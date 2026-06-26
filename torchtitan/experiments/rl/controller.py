@@ -94,11 +94,13 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from typing import Annotated
 
 # PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/experiments/rl/__init__.py (before torch is imported)
 # and in train.py; see the note there.
 import torch  # noqa: F401
 import torchstore as ts
+import tyro
 from monarch.actor import ProcMesh
 from monarch.spmd import setup_torch_elastic_env_async
 
@@ -195,7 +197,7 @@ class Controller(Configurable):
     class Config(Configurable.Config):
         """Top-level config for RL training."""
 
-        model_spec: ModelSpec | None = None
+        model_spec: Annotated[ModelSpec | None, tyro.conf.Suppress] = None
         """Model specification shared by trainer and generator.
         Set programmatically via config_registry (not from CLI)."""
 

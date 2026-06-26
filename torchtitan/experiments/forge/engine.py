@@ -283,7 +283,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             base_folder=config.dump_folder,
         )
 
-        self.train_context = dist_utils.get_train_context(
+        self.train_context = dist_utils.get_spmd_context(
             parallel_dims=parallel_dims,
         )
 

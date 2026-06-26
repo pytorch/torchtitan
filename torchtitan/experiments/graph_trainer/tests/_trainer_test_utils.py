@@ -11,7 +11,7 @@ import torch.nn as nn
 
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.distributed.utils import get_train_context
+from torchtitan.distributed.utils import get_spmd_context
 from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
@@ -44,7 +44,7 @@ def build_minimal_trainer(
     trainer.model_parts = [model]
     trainer.loss_fn = CrossEntropyLoss.Config().build()
     trainer.parallel_dims = SimpleNamespace(pp_enabled=False, cp_enabled=False)
-    trainer.train_context = get_train_context()
+    trainer.train_context = get_spmd_context()
     trainer.model_config = model_config
     trainer.device = torch.device("cuda")
     trainer.tokenizer = tokenizer
