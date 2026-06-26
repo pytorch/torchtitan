@@ -56,8 +56,6 @@ from .onnx_checkpoint import PathOnnxCheckpointManager
 from .trainer import PathTrainer
 from .validate import PathValidator
 
-# Path ViT flavors ride PathTrainer too; re-exported so `--module path --config vit_*` resolves
-# here, the same way convnext_* do (the config manager looks the name up on this module).
 from .vit_config_registry import (  # noqa: F401
     vit_mup_w256,
     vit_mup_w512,

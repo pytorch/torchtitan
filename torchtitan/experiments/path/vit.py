@@ -1,10 +1,3 @@
-"""Plan ViT for the path experiment: raw camera frames -> patches -> transformer -> plan. NO VAE.
-
-Rides PathTrainer via config. A self-contained planning model for the muP + scaling study, built
-from torchtitan.models.common blocks the same way path/model.py is. Scales cleanly by width
-(n_embd / n_head) for muTransfer.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -88,9 +81,7 @@ class PlanViTAttention(Module):
         qkv = self.c_attn(self.norm(x)).view(b, t, 3, self.n_head, self.head_dim)
         q, k, v = qkv.unbind(2)
         q, k = self.q_norm(q), self.k_norm(k)
-        x = self.inner_attention(
-            q, k, v, is_causal=False
-        )  # ViT: bidirectional over patches
+        x = self.inner_attention(q, k, v, is_causal=False)
         return self.dropout(self.c_proj(x.reshape(b, t, self.n_head * self.head_dim)))
 
 
@@ -114,7 +105,7 @@ class PatchEmbed(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         proj: Linear.Config
-        patch_size: tuple[int, int, int]  # (pt, ph, pw)
+        patch_size: tuple[int, int, int]
 
     def __init__(self, config: Config):
         super().__init__()
@@ -122,14 +113,11 @@ class PatchEmbed(Module):
         self.proj = config.proj.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, T, C, H, W) raw frames -> (B, num_patches, patch_dim) -> (B, num_patches, n_embd)
         pt, ph, pw = self.patch_size
         x = rearrange(
             x, "b (t pt) c (h ph) (w pw) -> b (t h w) (pt c ph pw)", pt=pt, ph=ph, pw=pw
         )
-        return self.proj(
-            x.to(self.proj.weight.dtype)
-        )  # match the bf16 (mp) weights, like path's vision
+        return self.proj(x.to(self.proj.weight.dtype))
 
 
 class PlanHead(Module):
@@ -150,11 +138,11 @@ class PlanHead(Module):
 class PlanViT(BaseModel):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
-        input_size: tuple[int, int, int]  # (n_frames, H, W)
+        input_size: tuple[int, int, int]
         patch_size: tuple[int, int, int]
         in_channels: int
         n_embd: int
-        output_mult: float  # muP readout multiplier 1/m (m = n_embd / base); 1.0 for standard param
+        output_mult: float
         patch_embed: PatchEmbed.Config
         pos_embedding: Embedding.Config
         blocks: list[PlanViTBlock.Config]
@@ -192,18 +180,14 @@ class PlanViT(BaseModel):
         self.plan_head = config.plan_head.build()
 
     def verify_module_protocol(self) -> None:
-        pass  # nn.Dropout/GELU/Identity are plain nn.Module, like path
+        pass
 
     def _frames(self, inputs: dict[str, torch.Tensor] | torch.Tensor) -> torch.Tensor:
-        # production input: two cameras IMG, BIG_IMG, each (B, T, 12, H, W) YUV. Take the current frame of each,
-        # channel-stack -> (B, 1, 24, H, W). NO VAE. A plain tensor (testing) is passed through unchanged.
         if isinstance(inputs, torch.Tensor):
             return inputs
         img, big = inputs[ModelInputs.IMG], inputs[ModelInputs.BIG_IMG]
         frame = torch.cat([img[:, -1], big[:, -1]], dim=1).unsqueeze(1)
-        return (
-            frame.float() - 127.5
-        ) / 63.75  # uint8 YUV -> normalized float (mean 255/2, std 255/4 like path)
+        return (frame.float() - 127.5) / 63.75
 
     def forward(
         self, inputs: dict[str, torch.Tensor] | torch.Tensor
@@ -214,7 +198,6 @@ class PlanViT(BaseModel):
         for block in self.blocks:
             x = block(x)
         x = self.norm(x)
-        # global-pool the patches -> plan; the muP readout multiplier keeps the output width-stable
         return {"plan": self.plan_head(x.mean(dim=1)) * self.config.output_mult}
 
 

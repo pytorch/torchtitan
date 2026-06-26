@@ -27,15 +27,8 @@ class PathTrainer(Trainer):
         checkpoint: PathOnnxCheckpointManager.Config
         miniray: dict[str, Any] = field(default_factory=dict)
         fps: int
-        # single-frame plan supervision: slice the dense plan target to the last frame before the
-        # loss. off by default (dense; convnext/worldmodel unchanged); on for the single-frame path vit.
         plan_target_last_frame: bool = False
-        # muP base lr, the muTransfer sweep axis. tyro-overridable scalar (--mup_base_lr=X) so run.sh's
-        # native sweep can drive it; the eta/m split lives in optimizer.param_groups and is re-derived
-        # post-tyro by rescaling every group's lr by mup_base_lr/built_base_lr (see __post_init__).
         mup_base_lr: float | None = None
-        # the base lr the optimizer param groups were built with, recorded by _optimizer_config so the
-        # post-tyro rescale knows the ratio. left None for non-vit flavors (no rescale).
         built_base_lr: float | None = None
 
         def __post_init__(self) -> None:
@@ -43,9 +36,6 @@ class PathTrainer(Trainer):
             if self.codedir:
                 self.miniray = {**self.miniray, "codedir": self.codedir}
                 self.validator.miniray = {**self.validator.miniray, "codedir": self.codedir}
-            # re-derive the muP eta/m split for a swept base lr after tyro overlays --mup_base_lr.
-            # one shared ratio scales every group, so hidden stays base/m and others stay base; a
-            # no-op when the swept lr equals the build-time lr (default, non-swept runs).
             if (
                 self.mup_base_lr is not None
                 and self.built_base_lr is not None
@@ -54,7 +44,7 @@ class PathTrainer(Trainer):
                 ratio = self.mup_base_lr / self.built_base_lr
                 for group in self.optimizer.param_groups:
                     group.optimizer_kwargs["lr"] *= ratio
-                self.built_base_lr = self.mup_base_lr  # idempotent: a re-run sees no ratio
+                self.built_base_lr = self.mup_base_lr
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -99,7 +89,6 @@ class PathTrainer(Trainer):
         with self.train_context():
             pred = self.model_parts[0](inputs)
             if self.config.plan_target_last_frame:
-                # single-frame plan models predict the last frame's plan; supervise that frame
                 labels = {**labels, "plan": labels["plan"][:, -1]}
             loss_vec, metrics = self.loss_fn(pred, labels)
             loss = loss_vec.sum() / local_samples

@@ -1,14 +1,3 @@
-"""Config assembly + flavors for the path ViT, riding PathTrainer.
-
-The muP recipe (readout init/mult, eta/m optimizer groups, qk-norm, scheduler, widths, training) is
-assembled here. These flavors return PathTrainer.Config with the path-specifics turned off in config
--- the driving validator is disabled and the checkpoint manager is the plain CheckpointManager with
-onnx export off.
-
-Width flavors scale n_head at fixed head_dim=64 (the clean muP axis); base = w256. Two cameras are
-channel-stacked into in_channels=24 (no VAE).
-"""
-
 from __future__ import annotations
 
 import math
@@ -54,10 +43,10 @@ INPUT_SIZE = (
     1,
     128,
     256,
-)  # current frame; spatial ViT (temporal history is a later variant)
+)
 PATCH_SIZE = (1, 16, 8)
-IN_CHANNELS = 24  # two cameras (IMG + BIG_IMG), 12 YUV channels each, channel-stacked
-PLAN_SIZE = 15 * 33 * 2  # 990, laplacian mu+log-sigma
+IN_CHANNELS = 24
+PLAN_SIZE = 15 * 33 * 2
 BASE_WIDTH = 256
 VIT_WIDTHS = {"w128": 128, "w256": 256, "w512": 512, "w1024": 1024, "w2048": 2048}
 
@@ -75,8 +64,6 @@ def _lin(in_f: int, out_f: int, *, std: float, bias: bool = True) -> Linear.Conf
 
 
 def _hidden_std(fan_in: int, *, mup: bool) -> float:
-    # muP shrinks hidden/output init to 1/sqrt(fan_in) so pre-activations stay O(1) as width grows;
-    # standard param holds the base-width variance 1/sqrt(BASE_WIDTH), so it fans out with width.
     return fan_in**-0.5 if mup else BASE_WIDTH**-0.5
 
 
@@ -130,13 +117,9 @@ def _model_config(flavor: str, *, mup: bool, qk_norm: bool = True) -> PlanViT.Co
         patch_size=PATCH_SIZE,
         in_channels=IN_CHANNELS,
         n_embd=n_embd,
-        output_mult=(BASE_WIDTH / n_embd)
-        if mup
-        else 1.0,  # muP readout fwd mult 1/m (init output slopes ~1/sqrt(m))
+        output_mult=(BASE_WIDTH / n_embd) if mup else 1.0,
         patch_embed=PatchEmbed.Config(
-            proj=_lin(
-                patch_dim, n_embd, std=patch_dim**-0.5
-            ),  # input embed: width-independent
+            proj=_lin(patch_dim, n_embd, std=patch_dim**-0.5),
             patch_size=PATCH_SIZE,
         ),
         pos_embedding=Embedding.Config(
@@ -152,9 +135,7 @@ def _model_config(flavor: str, *, mup: bool, qk_norm: bool = True) -> PlanViT.Co
         norm=_ln(n_embd),
         plan_head=PlanHead.Config(
             norm=_ln(n_embd),
-            head=_lin(
-                n_embd, PLAN_SIZE, std=BASE_WIDTH**-0.5
-            ),  # muP readout: base-width init
+            head=_lin(n_embd, PLAN_SIZE, std=BASE_WIDTH**-0.5),
         ),
     )
 
@@ -171,11 +152,8 @@ def vit_model_registry(flavor: str, *, mup: bool) -> ModelSpec:
     )
 
 
-STEPS = 512  # per-run step budget; override with training.steps=N on the CLI
-# learning rate is the muTransfer sweep axis: one run per (flavor, lr); set with `-e VIT_LR=...`
+STEPS = 512
 SWEEP_LR = float(os.getenv("VIT_LR", "3e-4"))
-# hidden matrix weights get muP lr eta/m; input embed, readout, norms, biases get base eta
-# (readout is fan_in-infinite only, so Adam treats it vector-like -> base lr, not eta/m)
 MUP_PATTERN = (
     r"^(blocks\.\d+\.attention\.c_attn|blocks\.\d+\.attention\.c_proj"
     r"|blocks\.\d+\.mlp\.c_fc|blocks\.\d+\.mlp\.c_proj)\.weight$"
@@ -199,7 +177,6 @@ def _dataloader_config(*, split: str) -> PathDataLoader.Config:
 
     base = XXPathDatasetConfig(fps=SUPERCOMBO_FPS, plan_only=True)
     return PathDataLoader.Config(
-        # prune-10M study data: a seeded random 10k sample of the 10M store (training_2026_02)
         dataset=os.path.join(XX_BASEDIR, "datasets/lists/prune10m_random10k_seed0.txt"),
         split=split,
         shuffle_size=_si_int(base.shuffle_size),
@@ -207,7 +184,7 @@ def _dataloader_config(*, split: str) -> PathDataLoader.Config:
         num_writers=base.num_writers,
         num_readers=base.num_readers,
         fps=base.fps,
-        pipeline_dir=BASE_DIR_GT_10M,  # the 10M store, not the 2.5M big-train list
+        pipeline_dir=BASE_DIR_GT_10M,
         plan_only=base.plan_only,
         limit=base.limit,
         n_frames=base.n_frames,
@@ -250,7 +227,6 @@ def _optimizer_config(
 def _vit(
     flavor: str, *, mup: bool, lr: float = SWEEP_LR, wd: float = 3e-2
 ) -> PathTrainer.Config:
-    # derive data parallelism from the launch (like path), so any N nodes x GPUs validate
     local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
     world_size = int(os.environ.get("WORLD_SIZE", str(local_world_size)))
     num_nodes = int(
@@ -264,7 +240,7 @@ def _vit(
         optimizer=_optimizer_config(flavor, mup=mup, lr=lr, wd=wd),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=round(STEPS * 0.1),
-            total_steps=None,  # use the real training.steps; a fixed value wraps the cosine on longer runs
+            total_steps=None,
             decay_ratio=0.8,
             decay_type="cosine",
             min_lr_factor=0.0,
@@ -283,13 +259,10 @@ def _vit(
             data_parallel_replicate_degree=num_nodes,
             data_parallel_shard_degree=local_world_size,
         ),
-        # plain CheckpointManager with onnx export off (path-specific PathOnnxCheckpointManager disabled)
         checkpoint=CheckpointManager.Config(enable=False),
         metrics=MetricsProcessor.Config(
             log_freq=10, enable_reporterv2=True, save_freq=STEPS
         ),
-        # path-specific driving validator disabled; dataloader is required by the dataclass but never
-        # built while enable=False (Trainer builds the validator only when validator.enable is True)
         validator=PathValidator.Config(
             enable=False,
             steps=-1,
@@ -297,10 +270,8 @@ def _vit(
             mixed_precision_param="bfloat16",
         ),
         fps=SUPERCOMBO_FPS,
-        plan_target_last_frame=True,  # ViT predicts a single-frame plan; supervise the last frame
+        plan_target_last_frame=True,
         debug=DebugConfig(seed=0),
-        # record the build-time base lr so a swept --mup_base_lr can re-derive the eta/m split
-        # post-tyro (PathTrainer.Config.__post_init__). seeded equal -> default runs are a no-op.
         built_base_lr=lr,
         mup_base_lr=lr,
     )
