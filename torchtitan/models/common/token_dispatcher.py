@@ -9,6 +9,7 @@ from typing import cast, ClassVar
 
 import spmd_types as spmd
 import torch
+from torch.distributed._functional_collectives import all_to_all_single
 from torch.distributed.tensor import DeviceMesh
 
 from torchtitan.config import Configurable
@@ -329,12 +330,23 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 )
 
             with torch.no_grad():
-                num_global_tokens_per_local_expert_EP_e = spmd.all_to_all(
-                    num_local_tokens_per_expert_E.view(ep_size, -1),
-                    pg,
-                    src=spmd.V,
-                    dst=spmd.V,
-                )
+                if (
+                    torch.compiler.is_compiling()
+                    and get_spmd_backend() != "spmd_types"
+                ):
+                    num_global_tokens_per_local_expert_EP_e = all_to_all_single(
+                        num_local_tokens_per_expert_E.view(ep_size, -1),
+                        None,
+                        None,
+                        group=self.ep_mesh,
+                    )
+                else:
+                    num_global_tokens_per_local_expert_EP_e = spmd.all_to_all(
+                        num_local_tokens_per_expert_E.view(ep_size, -1),
+                        pg,
+                        src=spmd.V,
+                        dst=spmd.V,
+                    )
                 # Need to wait explicitly because it is used by a triton kernel later
                 # which doesn't realize that AsyncCollectiveTensor needs unwrapping
                 num_global_tokens_per_local_expert_EP_e = (
@@ -359,14 +371,22 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 input_splits_list = input_splits.tolist()
                 output_splits_list = output_splits.tolist()
 
-            routed_input_RD = spmd.all_to_all(
-                routed_input_ND,
-                pg,
-                src=spmd.V,
-                dst=spmd.V,
-                output_split_sizes=output_splits_list,
-                input_split_sizes=input_splits_list,
-            )
+            if torch.compiler.is_compiling() and get_spmd_backend() != "spmd_types":
+                routed_input_RD = all_to_all_single(
+                    routed_input_ND,
+                    output_splits_list,
+                    input_splits_list,
+                    self.ep_mesh,
+                )
+            else:
+                routed_input_RD = spmd.all_to_all(
+                    routed_input_ND,
+                    pg,
+                    src=spmd.V,
+                    dst=spmd.V,
+                    output_split_sizes=output_splits_list,
+                    input_split_sizes=input_splits_list,
+                )
             # Reorder from rank-major to expert-major via _permute.
             #
             # num_global_tokens_per_local_expert_E layout after all-to-all
@@ -513,14 +533,22 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             )
             # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
             # on the NCCL stream and won't block until the tensor is accessed.
-            routed_output_RD = spmd.all_to_all(
-                routed_output_RD,
-                pg,
-                src=spmd.V,
-                dst=spmd.V,
-                output_split_sizes=metadata.input_splits,
-                input_split_sizes=metadata.output_splits,
-            )
+            if torch.compiler.is_compiling() and get_spmd_backend() != "spmd_types":
+                routed_output_RD = all_to_all_single(
+                    routed_output_RD,
+                    metadata.input_splits,
+                    metadata.output_splits,
+                    self.ep_mesh,
+                )
+            else:
+                routed_output_RD = spmd.all_to_all(
+                    routed_output_RD,
+                    pg,
+                    src=spmd.V,
+                    dst=spmd.V,
+                    output_split_sizes=metadata.input_splits,
+                    input_split_sizes=metadata.output_splits,
+                )
 
         if get_spmd_backend() == "spmd_types":
             if spmd.is_type_checking():  # dense mesh reinterpret
