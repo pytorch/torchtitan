@@ -274,7 +274,7 @@ def _0_6b(attn_backend: str) -> Qwen3Model.Config:
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
                 dim=head_dim,
-                max_seq_len=4096,
+                max_seq_len=40960,
                 theta=1000000.0,
             ),
         ),
@@ -312,7 +312,7 @@ def _1_7b(attn_backend: str) -> Qwen3Model.Config:
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
                 dim=head_dim,
-                max_seq_len=4096,
+                max_seq_len=40960,
                 theta=1000000.0,
             ),
         ),
@@ -350,7 +350,7 @@ def _4b(attn_backend: str) -> Qwen3Model.Config:
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
                 dim=head_dim,
-                max_seq_len=4096,
+                max_seq_len=40960,
                 theta=1000000.0,
             ),
         ),
@@ -385,7 +385,7 @@ def _8b(attn_backend: str) -> Qwen3Model.Config:
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
                 dim=head_dim,
-                max_seq_len=4096,
+                max_seq_len=40960,
                 theta=1000000.0,
             ),
         ),
@@ -420,7 +420,7 @@ def _14b(attn_backend: str) -> Qwen3Model.Config:
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
                 dim=head_dim,
-                max_seq_len=4096,
+                max_seq_len=40960,
                 theta=1000000.0,
             ),
         ),
@@ -455,7 +455,7 @@ def _32b(attn_backend: str) -> Qwen3Model.Config:
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
                 dim=head_dim,
-                max_seq_len=4096,
+                max_seq_len=40960,
                 theta=1000000.0,
             ),
         ),
@@ -539,7 +539,7 @@ def _30b_a3b(
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
                 dim=head_dim,
-                max_seq_len=262144,
+                max_seq_len=40960,
                 theta=1000000.0,
             ),
             moe_comm_backend=moe_comm_backend,
@@ -580,7 +580,7 @@ def _235b_a22b(
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
                 dim=head_dim,
-                max_seq_len=4096,
+                max_seq_len=40960,
                 theta=5000000.0,
             ),
             moe_comm_backend=moe_comm_backend,
