@@ -285,12 +285,12 @@ class CosSinRoPE(RoPE):
             d_half = dim / 2
             low = (
                 d_half
-                * math.log(cfg.original_seq_len / (cfg.beta_slow * 2 * math.pi))
+                * math.log(cfg.original_seq_len / (cfg.beta_fast * 2 * math.pi))
                 / math.log(base)
             )
             high = (
                 d_half
-                * math.log(cfg.original_seq_len / (cfg.beta_fast * 2 * math.pi))
+                * math.log(cfg.original_seq_len / (cfg.beta_slow * 2 * math.pi))
                 / math.log(base)
             )
             assert (
