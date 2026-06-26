@@ -271,6 +271,9 @@ class Controller(Configurable):
                         f"by sequence parallel degree ({sp_degree})."
                     )
 
+            # Mirror the batcher width into trainer.training.seq_len for the model build.
+            self.trainer.training.seq_len = self.async_loop.batcher.batch.seq_len
+
             # TODO: add a check so that all seq_len related variables make sense
             # e.g. rollout max length cannot be larger than the model max_seq_len
             # or the packing len, etc.
@@ -312,6 +315,24 @@ class Controller(Configurable):
                     "generator.reset_prefix_cache_on_weight_sync=True, else requests admitted after a "
                     "pull reuse KV cached under the old weights."
                 )
+
+            # FULL cudagraph is only correct with the flex attention backend
+            cudagraph = self.generator.cudagraph
+            if (
+                cudagraph.enable
+                and cudagraph.mode == "FULL"
+                and self.model_spec is not None
+            ):
+                from torchtitan.models.common.attention import FlexAttention
+
+                inner_attn = self.model_spec.model.layers[0].attention.inner_attention
+                if not isinstance(inner_attn, FlexAttention.Config):
+                    raise ValueError(
+                        "cudagraph mode 'FULL' is only supported with the flex "
+                        "attention backend; the varlen backend corrupts FULL capture "
+                        "of mixed prefill+decode batches (#3709). Use FULL_DECODE_ONLY "
+                        "or FULL_AND_PIECEWISE."
+                    )
 
     def __init__(self, config: Config):
         self.config = config
