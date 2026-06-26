@@ -157,7 +157,7 @@ def _make_dsv3_attn_config(
     )
 
 
-def _build_dsv3_layers(
+def _build_dsv3_layers_impl(
     *,
     n_layers: int,
     n_dense_layers: int,
@@ -183,18 +183,17 @@ def _build_dsv3_layers(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
     rope: RoPE.Config,
+    attn_fn,
+    **attn_fn_kwargs,
 ) -> list[TransformerBlock.Config]:
-    """Build the list of per-layer TransformerBlock configs.
+    """Generic per-layer TransformerBlock config builder.
 
-    Layers with layer_id < n_dense_layers get a dense FeedForward and no MoE.
-    Layers with layer_id >= n_dense_layers get a MoE and no FeedForward.
-
-    Router and expert inits are constructed per-layer so depth-scaled
-    initializers are correct for each layer's position.
+    ``attn_fn(layer_id=layer_id, dim=dim, n_heads=n_heads, q_lora_rank=..., ...,
+              rope=rope, **attn_fn_kwargs)`` produces the attention config.
     """
     layers = []
     for layer_id in range(n_layers):
-        attn_cfg = _make_dsv3_attn_config(
+        attn_cfg = attn_fn(
             layer_id=layer_id,
             dim=dim,
             n_heads=n_heads,
@@ -206,6 +205,7 @@ def _build_dsv3_layers(
             mscale=mscale,
             attn_backend=attn_backend,
             rope=rope,
+            **attn_fn_kwargs,
         )
 
         if layer_id < n_dense_layers:
@@ -260,6 +260,14 @@ def _build_dsv3_layers(
             )
         )
     return layers
+
+
+def _build_dsv3_layers(**kwargs):
+    """V3-specific thin wrapper around ``_build_dsv3_layers_impl``."""
+    return _build_dsv3_layers_impl(
+        attn_fn=_make_dsv3_attn_config,
+        **kwargs,
+    )
 
 
 def _debugmodel(
