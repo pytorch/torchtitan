@@ -64,6 +64,7 @@ _TT_TO_HF_MAPPINGS = {
         "n_layers": "num_hidden_layers",
         "n_heads": "num_attention_heads",
         "n_kv_heads": "num_key_value_heads",
+        "vocab_size": "vocab_size",
         "norm_eps": "rms_norm_eps",
         "max_seq_len": "max_position_embeddings",
         "eos_id": "eos_token_id",

@@ -36,6 +36,9 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     TORCHTITAN_CONFIG_FORMAT,
 )
 from torchtitan.experiments.rl.observability import metrics as m
+from torchtitan.experiments.rl.routing.intra_generator_router import (
+    IntraGeneratorRouter,
+)
 from torchtitan.experiments.rl.types import Completion
 from torchtitan.models.common.attention import (
     FlexAttention,
@@ -343,6 +346,7 @@ class RequestDispatcher:
         parallelism: InferenceParallelismConfig,
         broadcast_group: dist.ProcessGroup,
         vllm_parallel_config: ParallelConfig,
+        intra_generator_router: IntraGeneratorRouter.Config,
     ):
         self._rank = rank
         # Only DP and TP are supported, so ``tp_degree`` ranks make up one DP
@@ -383,6 +387,15 @@ class RequestDispatcher:
         self._rank0_result_receiver: PortReceiver | None = None
         self._rank0_drain_task: asyncio.Task | None = None
 
+        # --- DP routing ---
+        # RANK-0 DP routing: pick a DP rank per request, reserving its load until
+        # the completion resolves.
+        self._rank0_dp_router: IntraGeneratorRouter | None = (
+            intra_generator_router.build(dp_degree=self._dp_degree)
+            if self._rank == 0 and self._dp_degree > 1
+            else None
+        )
+
     def rank0_register_future(
         self, request_id: str, metrics_prefix: str
     ) -> asyncio.Future[Completion]:
@@ -409,16 +422,26 @@ class RequestDispatcher:
         """RANK 0: pick which DP rank serves each queued request.
 
         Returns a fixed-length (``dp_degree``) list; index == DP rank. Each rank
-        later admits only its own slice.
-
-        TODO: route across DP ranks via a real routing strategy (#3768). For now
-        all requests go to the highest DP rank, which exercises the result
-        fan-in when DP>1 (its TP rank 0 sends completions back to rank 0).
+        later admits only its own slice. With a single DP rank, everything goes
+        to DP rank 0; otherwise ``IntraGeneratorRouter`` reserves a DP rank per
+        request and that reservation is released when the request's completion
+        resolves.
         """
         requests_per_dp_rank: list[list[GenerationRequest]] = [
             [] for _ in range(self._dp_degree)
         ]
-        requests_per_dp_rank[-1] = requests
+        for request in requests:
+            if self._rank0_dp_router is None:
+                dp_rank = 0
+            else:
+                # Pick a DP rank for this request, and increment this DP rank's
+                # load by 1 (i.e. measured by request count).
+                dp_rank = self._rank0_dp_router.reserve(
+                    request.request_id,
+                    routing_session_id=request.routing_session_id,
+                )
+            requests_per_dp_rank[dp_rank].append(request)
+
         return requests_per_dp_rank
 
     def rank0_stamp_min_policy_version(
@@ -563,6 +586,10 @@ class RequestDispatcher:
             completion.metrics = metrics
 
             generation_future.future.set_result(completion)
+            # Free the request's reserved load on its DP rank so load-aware
+            # routing sees the accurate loads on DPs.
+            if self._rank0_dp_router is not None:
+                self._rank0_dp_router.release(request_id)
 
     async def _rank0_drain_results(self) -> None:
         """RANK 0 background task which receives and resolves completions pushed
@@ -648,6 +675,13 @@ class VLLMGenerator(Actor, Configurable):
             default_factory=InferenceParallelismConfig
         )
         """Parallelism configuration for the vLLM engine."""
+
+        intra_generator_router: IntraGeneratorRouter.Config = field(
+            default_factory=IntraGeneratorRouter.Config
+        )
+        """In-mesh DP routing config: how rank 0 partitions requests across the
+        engine's data-parallel ranks (no effect when data_parallel_degree == 1,
+        where there is a single DP rank)."""
 
         sampling: SamplingConfig = field(default_factory=SamplingConfig)
         """Default sampling parameters for generation."""
@@ -863,6 +897,7 @@ class VLLMGenerator(Actor, Configurable):
             parallelism=config.parallelism,
             broadcast_group=self._broadcast_group,
             vllm_parallel_config=self._engine.vllm_config.parallel_config,
+            intra_generator_router=config.intra_generator_router,
         )
 
         # Engine-loop INBOX (rank 0): requests the controller submits; the loop reads them to decide.
@@ -913,6 +948,7 @@ class VLLMGenerator(Actor, Configurable):
         prompt_token_ids: list[int],
         *,
         request_id: str,
+        routing_session_id: str,
         sampling_config: SamplingConfig | None = None,
         metrics_prefix: str = "generator",
     ) -> Completion | None:
@@ -925,6 +961,7 @@ class VLLMGenerator(Actor, Configurable):
         Args:
             prompt_token_ids: One tokenized prompt `[token_ids]`.
             request_id: Unique id for this request, echoed on the `Completion`.
+            routing_session_id: Stable session key for in-mesh DP routing.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig.
             metrics_prefix: Namespace prepended to every metric key on the returned
@@ -965,6 +1002,7 @@ class VLLMGenerator(Actor, Configurable):
                     request_id=request_id,
                     prompt_token_ids=prompt_token_ids,
                     sampling=sampling,
+                    routing_session_id=routing_session_id,
                 )
             )
             # Wakes the engine loop only if it is idle in `_decide_next_action`.
@@ -1355,6 +1393,7 @@ class GenerationRequest:
     request_id: str
     prompt_token_ids: list[int]  # [prompt_tokens]
     sampling: SamplingConfig
+    routing_session_id: str
 
 
 @dataclass(kw_only=True, slots=True)
