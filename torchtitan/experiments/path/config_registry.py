@@ -21,6 +21,8 @@ from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.common import Embedding, LayerNorm, Linear
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.protocols.model_spec import ModelSpec
+from xx.common.basedir import XX_BASEDIR
+from xx.datasets.constants import BASE_DIR_GT_10M
 from xx.datasets.helpers import DEFAULT_BIG_TRAIN_LIST
 from xx.ml_tools.constants.model import (
     SUPERCOMBO_FPS,
@@ -61,11 +63,27 @@ from .vit import (
     PatchEmbed,
     PlanHead,
     PlanViT,
+    PlanViTLoss,
 )
 
 
 _LINEAR_INIT = {"weight": partial(nn.init.normal_, mean=0.0, std=0.02), "bias": nn.init.zeros_}
 _NORM_INIT = {"weight": nn.init.ones_, "bias": nn.init.zeros_}
+
+# PlanViT (single-frame plan ViT) architecture and muP constants
+HEAD_DIM = 64
+NUM_LAYERS = 8
+INPUT_SIZE = (1, 128, 256)
+PATCH_SIZE = (1, 16, 8)
+IN_CHANNELS = 24
+PLAN_SIZE = 15 * 33 * 2
+BASE_WIDTH = 256
+VIT_WIDTHS = {"w128": 128, "w256": 256, "w512": 512, "w1024": 1024, "w2048": 2048}
+STEPS = 512
+MUP_PATTERN = (
+    r"^(blocks\.\d+\.attention\.c_attn|blocks\.\d+\.attention\.c_proj"
+    r"|blocks\.\d+\.mlp\.c_fc|blocks\.\d+\.mlp\.c_proj)\.weight$"
+)
 
 
 def model_registry(flavor: str) -> ModelSpec:
@@ -375,26 +393,6 @@ def _hydra(heads: tuple[PathHead, ...], *, in_features: int, mlp_mult: float) ->
     )
 
 
-HEAD_DIM = 64
-N_LAYER = 8
-INPUT_SIZE = (
-    1,
-    128,
-    256,
-)
-PATCH_SIZE = (1, 16, 8)
-IN_CHANNELS = 24
-PLAN_SIZE = 15 * 33 * 2
-BASE_WIDTH = 256
-VIT_WIDTHS = {"w128": 128, "w256": 256, "w512": 512, "w1024": 1024, "w2048": 2048}
-STEPS = 512
-SWEEP_LR = float(os.getenv("VIT_LR", "3e-4"))
-MUP_PATTERN = (
-    r"^(blocks\.\d+\.attention\.c_attn|blocks\.\d+\.attention\.c_proj"
-    r"|blocks\.\d+\.mlp\.c_fc|blocks\.\d+\.mlp\.c_proj)\.weight$"
-)
-
-
 def _lin(in_f: int, out_f: int, *, std: float, bias: bool = True) -> Linear.Config:
     return Linear.Config(
         in_features=in_f,
@@ -411,24 +409,16 @@ def _hidden_std(fan_in: int, *, mup: bool) -> float:
     return fan_in**-0.5 if mup else BASE_WIDTH**-0.5
 
 
-def _ln(dim: int) -> LayerNorm.Config:
-    return LayerNorm.Config(normalized_shape=dim, param_init=_NORM_INIT)
-
-
-def _hidden(dim: int, mult: float, multiple_of: int = 256) -> int:
-    return multiple_of * math.ceil(int(dim * mult) / multiple_of)
-
-
 def _vit_attention(
-    dim: int, n_head: int, *, mup: bool, qk_norm: bool = True
+    dim: int, *, n_head: int, mup: bool, qk_norm: bool = True
 ) -> PathSelfAttention.Config:
     head_dim = dim // n_head
     return PathSelfAttention.Config(
-        norm=_ln(dim),
-        q_norm=_ln(head_dim) if qk_norm else None,
-        k_norm=_ln(head_dim) if qk_norm else None,
+        norm=LayerNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        q_norm=LayerNorm.Config(normalized_shape=head_dim, param_init=_NORM_INIT) if qk_norm else None,
+        k_norm=LayerNorm.Config(normalized_shape=head_dim, param_init=_NORM_INIT) if qk_norm else None,
         c_attn=_lin(dim, 3 * dim, std=_hidden_std(dim, mup=mup)),
-        c_proj=_lin(dim, dim, std=_hidden_std(dim, mup=mup) / math.sqrt(2 * N_LAYER)),
+        c_proj=_lin(dim, dim, std=_hidden_std(dim, mup=mup) / math.sqrt(2 * NUM_LAYERS)),
         inner_attention=ScaledDotProductAttention.Config(),
         n_head=n_head,
         head_dim=head_dim,
@@ -438,12 +428,12 @@ def _vit_attention(
 
 
 def _vit_mlp(dim: int, *, mup: bool, mult: float = 4.0) -> PathMLP.Config:
-    hidden = _hidden(dim, mult)
+    hidden = _hidden_dim(dim, mult)
     return PathMLP.Config(
-        norm=_ln(dim),
+        norm=LayerNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
         c_fc=_lin(dim, hidden, std=_hidden_std(dim, mup=mup)),
         c_proj=_lin(
-            hidden, dim, std=_hidden_std(hidden, mup=mup) / math.sqrt(2 * N_LAYER)
+            hidden, dim, std=_hidden_std(hidden, mup=mup) / math.sqrt(2 * NUM_LAYERS)
         ),
         act="gelu_tanh",
         dropout=0.0,
@@ -451,36 +441,35 @@ def _vit_mlp(dim: int, *, mup: bool, mult: float = 4.0) -> PathMLP.Config:
 
 
 def _vit_model_config(flavor: str, *, mup: bool, qk_norm: bool = True) -> PlanViT.Config:
-    n_embd = VIT_WIDTHS[flavor]
-    n_head = n_embd // HEAD_DIM
+    dim = VIT_WIDTHS[flavor]
+    n_head = dim // HEAD_DIM
     pt, ph, pw = PATCH_SIZE
     patch_dim = pt * IN_CHANNELS * ph * pw
     t, h, w = INPUT_SIZE
     num_patches = (t // pt) * (h // ph) * (w // pw)
     return PlanViT.Config(
-        input_size=INPUT_SIZE,
-        patch_size=PATCH_SIZE,
-        in_channels=IN_CHANNELS,
-        n_embd=n_embd,
-        output_mult=(BASE_WIDTH / n_embd) if mup else 1.0,
+        dim=dim,
+        output_mult=(BASE_WIDTH / dim) if mup else 1.0,
+        mean=255 / 2,
+        std=255 / 4,
         patch_embed=PatchEmbed.Config(
-            proj=_lin(patch_dim, n_embd, std=patch_dim**-0.5),
+            proj=_lin(patch_dim, dim, std=patch_dim**-0.5),
             patch_size=PATCH_SIZE,
         ),
         pos_embedding=Embedding.Config(
-            num_embeddings=num_patches, embedding_dim=n_embd, param_init=_LINEAR_INIT
+            num_embeddings=num_patches, embedding_dim=dim, param_init=_LINEAR_INIT
         ),
         blocks=[
             PathTransformerBlock.Config(
-                attention=_vit_attention(n_embd, n_head, mup=mup, qk_norm=qk_norm),
-                mlp=_vit_mlp(n_embd, mup=mup),
+                attention=_vit_attention(dim, n_head=n_head, mup=mup, qk_norm=qk_norm),
+                mlp=_vit_mlp(dim, mup=mup),
             )
-            for _ in range(N_LAYER)
+            for _ in range(NUM_LAYERS)
         ],
-        norm=_ln(n_embd),
+        norm=LayerNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
         plan_head=PlanHead.Config(
-            norm=_ln(n_embd),
-            head=_lin(n_embd, PLAN_SIZE, std=BASE_WIDTH**-0.5),
+            norm=LayerNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+            head=_lin(dim, PLAN_SIZE, std=BASE_WIDTH**-0.5),
         ),
     )
 
@@ -498,10 +487,6 @@ def vit_model_registry(flavor: str, *, mup: bool) -> ModelSpec:
 
 
 def _vit_dataloader_config(*, split: str) -> PathDataLoader.Config:
-    from xx.common.basedir import XX_BASEDIR
-    from xx.datasets.constants import BASE_DIR_GT_10M
-    from xx.training.path.config import DatasetConfig as XXPathDatasetConfig
-
     base = XXPathDatasetConfig(fps=SUPERCOMBO_FPS, plan_only=True)
     return PathDataLoader.Config(
         dataset=os.path.join(XX_BASEDIR, "datasets/lists/prune10m_random10k_seed0.txt"),
@@ -523,6 +508,8 @@ def _vit_dataloader_config(*, split: str) -> PathDataLoader.Config:
 def _vit_optimizer_config(
     flavor: str, *, mup: bool, lr: float, wd: float
 ) -> OptimizersContainer.Config:
+    # base lr is carried on the container so --optimizer.lr can sweep every group
+    # at once; muP scales the hidden matmuls down by lr_mult = 1/m (m = width ratio).
     m = VIT_WIDTHS[flavor] / BASE_WIDTH
     common = {"betas": (0.9, 0.95), "eps": 1e-8, "weight_decay": wd}
     if mup:
@@ -530,12 +517,13 @@ def _vit_optimizer_config(
             ParamGroupConfig(
                 pattern=MUP_PATTERN,
                 optimizer_name="AdamW",
-                optimizer_kwargs={**common, "lr": lr / m},
+                lr_mult=1.0 / m,
+                optimizer_kwargs={**common},
             ),
             ParamGroupConfig(
                 pattern=r".*",
                 optimizer_name="AdamW",
-                optimizer_kwargs={**common, "lr": lr},
+                optimizer_kwargs={**common},
             ),
         ]
     else:
@@ -543,16 +531,16 @@ def _vit_optimizer_config(
             ParamGroupConfig(
                 pattern=r".*",
                 optimizer_name="AdamW",
-                optimizer_kwargs={**common, "lr": lr},
+                optimizer_kwargs={**common},
             )
         ]
     return OptimizersContainer.Config(
-        implementation="fused_opt_states_bf16", param_groups=groups
+        implementation="fused_opt_states_bf16", lr=lr, param_groups=groups
     )
 
 
 def _vit(
-    flavor: str, *, mup: bool, lr: float = SWEEP_LR, wd: float = 3e-2
+    flavor: str, *, mup: bool, lr: float = 3e-4, wd: float = 3e-2
 ) -> PathTrainer.Config:
     local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
     world_size = int(os.environ.get("WORLD_SIZE", str(local_world_size)))
@@ -560,7 +548,7 @@ def _vit(
         os.environ.get("GROUP_WORLD_SIZE", str(world_size // local_world_size))
     )
     return PathTrainer.Config(
-        loss=PathLoss.Config(),
+        loss=PlanViTLoss.Config(),
         model_spec=vit_model_registry(flavor, mup=mup),
         tokenizer=NoOpTokenizer.Config(),
         dataloader=_vit_dataloader_config(split="train"),
@@ -597,10 +585,7 @@ def _vit(
             mixed_precision_param="bfloat16",
         ),
         fps=SUPERCOMBO_FPS,
-        plan_target_last_frame=True,
         debug=DebugConfig(seed=0),
-        built_base_lr=lr,
-        mup_base_lr=lr,
     )
 
 

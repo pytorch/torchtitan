@@ -27,24 +27,12 @@ class PathTrainer(Trainer):
         checkpoint: PathOnnxCheckpointManager.Config
         miniray: dict[str, Any] = field(default_factory=dict)
         fps: int
-        plan_target_last_frame: bool = False
-        mup_base_lr: float | None = None
-        built_base_lr: float | None = None
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)
             if self.codedir:
                 self.miniray = {**self.miniray, "codedir": self.codedir}
                 self.validator.miniray = {**self.validator.miniray, "codedir": self.codedir}
-            if (
-                self.mup_base_lr is not None
-                and self.built_base_lr is not None
-                and self.mup_base_lr != self.built_base_lr
-            ):
-                ratio = self.mup_base_lr / self.built_base_lr
-                for group in self.optimizer.param_groups:
-                    group.optimizer_kwargs["lr"] *= ratio
-                self.built_base_lr = self.mup_base_lr
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -88,8 +76,6 @@ class PathTrainer(Trainer):
         assert len(self.model_parts) == 1
         with self.train_context():
             pred = self.model_parts[0](inputs)
-            if self.config.plan_target_last_frame:
-                labels = {**labels, "plan": labels["plan"][:, -1]}
             loss_vec, metrics = self.loss_fn(pred, labels)
             loss = loss_vec.sum() / local_samples
             del pred

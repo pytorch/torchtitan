@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from xx.ml_tools.constants.model import ModelInputs
 
 import torch
-import torch.nn as nn
 from einops import rearrange
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
@@ -21,8 +19,10 @@ from torchtitan.models.common import Embedding, LayerNorm, Linear, RMSNorm
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleList
 from torchtitan.tools.logging import logger
+from xx.ml_tools.constants.model import ModelInputs
 
-from .model import PathMLP, PathSelfAttention, PathTransformerBlock
+from .loss import PathLoss
+from .model import PathTransformerBlock
 
 
 class PatchEmbed(Module):
@@ -62,22 +62,15 @@ class PlanHead(Module):
 class PlanViT(BaseModel):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
-        input_size: tuple[int, int, int]
-        patch_size: tuple[int, int, int]
-        in_channels: int
-        n_embd: int
+        dim: int
         output_mult: float
+        mean: float
+        std: float
         patch_embed: PatchEmbed.Config
         pos_embedding: Embedding.Config
         blocks: list[PathTransformerBlock.Config]
         norm: LayerNorm.Config | RMSNorm.Config
         plan_head: PlanHead.Config
-
-        @property
-        def num_patches(self) -> int:
-            t, h, w = self.input_size
-            pt, ph, pw = self.patch_size
-            return (t // pt) * (h // ph) * (w // pw)
 
         def update_from_config(self, *, config, **kwargs) -> None:
             parallelism = config.parallelism
@@ -106,23 +99,43 @@ class PlanViT(BaseModel):
     def verify_module_protocol(self) -> None:
         pass
 
-    def _frames(self, inputs: dict[str, torch.Tensor] | torch.Tensor) -> torch.Tensor:
-        if isinstance(inputs, torch.Tensor):
-            return inputs
-        img, big = inputs[ModelInputs.IMG], inputs[ModelInputs.BIG_IMG]
-        frame = torch.cat([img[:, -1], big[:, -1]], dim=1).unsqueeze(1)
-        return (frame.float() - 127.5) / 63.75
-
     def forward(
         self, inputs: dict[str, torch.Tensor] | torch.Tensor
     ) -> dict[str, torch.Tensor]:
-        x = self.patch_embed(self._frames(inputs))
+        if isinstance(inputs, torch.Tensor):
+            frame = inputs
+        else:
+            img, big = inputs[ModelInputs.IMG], inputs[ModelInputs.BIG_IMG]
+            frame = torch.cat([img[:, -1], big[:, -1]], dim=1).unsqueeze(1)
+            frame = (frame.float() - self.config.mean) / self.config.std
+        x = self.patch_embed(frame)
         pos = self.pos_embedding(torch.arange(x.shape[1], device=x.device))
         x = x + rearrange(pos, "t c -> () t c")
         for block in self.blocks:
             x = block(x)
         x = self.norm(x)
         return {"plan": self.plan_head(x.mean(dim=1)) * self.config.output_mult}
+
+
+class PlanViTLoss(PathLoss):
+    """PathLoss for the single-frame plan ViT.
+
+    PlanViT predicts one frame, so the temporal plan target is reduced to its
+    last frame before scoring. Everything else matches PathLoss.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(PathLoss.Config):
+        pass
+
+    def __call__(
+        self,
+        pred: dict[str, torch.Tensor],
+        targets: dict[str, torch.Tensor],
+        global_valid_tokens: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        targets = {**targets, "plan": targets["plan"][:, -1]}
+        return super().__call__(pred, targets, global_valid_tokens)
 
 
 def parallelize_vit(
