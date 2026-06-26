@@ -87,8 +87,8 @@ class TokenEnv(Configurable):
         """Limits enforced by the wrapper"""
 
         max_rollout_tokens: int | None = None
-        """Hard cap on prompt length for the next turn. If the number of tokens meets/exceeds
-        it, the turn is terminal; `None` disables the check."""
+        """Max prompt tokens before the next turn; multi-turn envs use it to stop before the
+        prompt outgrows context (`None` disables)."""
 
         # TODO: its unclear if timeout should be on this layer or handled by the messageEnv
         step_timeout_s: float | None = 1800.0

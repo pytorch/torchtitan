@@ -35,8 +35,8 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 from monarch.actor import HostMesh, ProcMesh, this_host
 
 from torchtitan.config import ConfigManager, ParallelismConfig
+from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
-from torchtitan.experiments.rl.trainer import RLTrainer
 from torchtitan.observability import structured_logger as sl
 
 
@@ -198,7 +198,7 @@ def spawn_proc_mesh(
 
 async def main():
     config = ConfigManager().parse_args()
-    assert isinstance(config, RLTrainer.Config)
+    assert isinstance(config, Controller.Config)
     sl.init_structured_logger(
         source="rl_controller",
         output_dir=config.dump_folder,
@@ -207,7 +207,7 @@ async def main():
     )
     sl.log_trace_instant("structured_logger_started")
 
-    rl_trainer: RLTrainer = config.build()
+    rl_trainer: Controller = config.build()
     try:
         trainer_world_size = _compute_trainer_world_size(config.trainer.parallelism)
         per_generator_world_size = _compute_generator_world_size(
@@ -223,7 +223,7 @@ async def main():
             trainer_mesh=trainer_mesh,
             generator_meshes=generator_meshes,
         )
-        await rl_trainer.train()
+        await rl_trainer.run()
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Interrupted; attempting graceful shutdown...")
     finally:
