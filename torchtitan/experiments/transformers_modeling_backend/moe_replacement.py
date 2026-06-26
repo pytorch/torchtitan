@@ -270,11 +270,6 @@ def _probe_hf_moe_block(moe_block: nn.Module, config) -> dict:
     # Shared experts
     shared_expert_info = _probe_shared_experts(moe_block, config)
 
-    # Score-before-experts: Llama4 multiplies routing weights into the
-    # input before expert computation.  Detect by inspecting the MoE
-    # block's forward source for the ``score * input`` pattern.
-    score_before_experts = _resolve_score_before_experts(moe_block)
-
     return {
         "num_experts": num_experts,
         "dim": dim,
@@ -288,7 +283,6 @@ def _probe_hf_moe_block(moe_block: nn.Module, config) -> dict:
         "load_balance_coeff": load_balance_coeff,
         "comm_backend": comm_backend,
         "shared_expert_info": shared_expert_info,
-        "score_before_experts": score_before_experts,
     }
 
 
@@ -356,27 +350,6 @@ def _resolve_score_func(gate: nn.Module | None, config) -> str:
             pass
 
     return "softmax"
-
-
-def _resolve_score_before_experts(moe_block: nn.Module) -> bool:
-    """Detect whether routing scores are applied before expert computation.
-
-    Llama4 multiplies ``routing_weights * hidden_states`` before calling
-    ``self.experts(...)``.  Most other HF MoE models apply scores after.
-    Detect by inspecting the MoE block's forward source.
-    """
-    import inspect
-
-    try:
-        src = inspect.getsource(type(moe_block).forward)
-    except (OSError, TypeError):
-        return False
-
-    # Llama4 pattern: ``routed_in = ... * router_scores...`` before experts
-    if "routed_in" in src and "router_scores" in src:
-        return True
-
-    return False
 
 
 def _probe_shared_experts(moe_block: nn.Module, config) -> dict | None:
@@ -492,7 +465,6 @@ def _probe_layer_level_moe(layer: nn.Module, config) -> dict:
         "load_balance_coeff": load_balance_coeff,
         "comm_backend": comm_backend,
         "shared_expert_info": shared_expert_info,
-        "score_before_experts": False,
     }
 
 
@@ -596,7 +568,6 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         num_experts=params["num_experts"],
         top_k=params["top_k"],
         param_init=expert_init,
-        score_before_experts=params.get("score_before_experts", False),
         comm_backend=params["comm_backend"],
     )
 

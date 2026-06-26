@@ -19,7 +19,6 @@ titan's native MoE output is compared against unmodified HF forward.
 | DeepSeek-V2-Lite | deepseek_v2 | PASS | 2.64e-07 | 7.81e-03 | 0.999999 | PASS |
 | GLM-4.7 | glm4_moe | WARN | 5.06e-05 | 6.25e-02 | 0.999996 | PASS |
 | GLM-5 (DSA) | glm_moe_dsa | WARN | 2.67e-04 | 1.25e-01 | 0.999996 | PASS |
-| Llama-4-Scout | llama4_text | WARN | 2.29e-04 | 1.25e-01 | 0.999991 | PASS |
 | Gemma-4-26B | gemma4_text | FAIL | 4.19e-03 | 7.46e-01 | 0.946 | PASS |
 
 **Thresholds:** PASS (KL < 1e-6), WARN (KL < 1e-3), FAIL (KL >= 1e-3).
@@ -34,13 +33,6 @@ HF accumulates in f32 via `reshape+sum`. Additionally, titan uses
 `topk(sorted=False)` while HF defaults to `sorted=True`, causing
 different f32 rounding in the normalization sum. With all three
 dispatcher fixes applied, all PASS/WARN models produce max_diff=0.00.
-
-### Expert kernel (Llama4)
-
-Llama4 does not support `grouped_mm` expert implementation. HF uses
-`torch.bmm` while titan uses `torch._grouped_mm`. These kernels
-produce different floating-point results. Verified experimentally:
-running titan weights through bmm gives max_diff=0.00.
 
 ### Activation function (Gemma4)
 
@@ -106,15 +98,6 @@ diff.
   execution of the indexer). Runs under FSDP/EP without TP.
 - **Differences from titan native:** dispatcher precision only
 
-### Llama-4-Scout (llama4_text)
-- **Router:** sigmoid without e_score_correction_bias — supported (detected via source inspection)
-- **Experts:** transposed layout (E, H, 2*I) — supported (transpose in state dict adapter)
-- **Shared experts:** additive, singular form (`shared_expert`) — supported
-- **MoE attribute:** `feed_forward` instead of `mlp` — supported
-- **Expert kernel:** no settable experts implementation — requires `experts_implementation="native"` (uses the model's built-in `bmm`); any other value raises. Causes kernel-level numerical diff vs grouped_mm
-- **score_before_experts:** True (top_k=1) — supported
-- **Differences from titan native:** dispatcher precision + expert kernel (bmm vs grouped_mm)
-
 ### Gemma-4-26B (gemma4_text)
 - **Router:** softmax with input RMSNorm, learned scale, per_expert_scale — **NOT FULLY SUPPORTED** (titan router lacks these components, causing different routing decisions)
 - **Experts:** standard layout, but uses `gelu_pytorch_tanh` activation — **NOT SUPPORTED** (titan hardcodes `F.silu`)
@@ -134,7 +117,6 @@ diff.
 | DeepSeek-V2 | PASS | PASS |
 | GLM-4.7 | PASS | PASS |
 | GLM-5 DSA | PASS | PASS |
-| Llama4 | PASS | PASS |
 | Gemma4 | PASS | PASS |
 
 ## Core Changes Needed for Full Support

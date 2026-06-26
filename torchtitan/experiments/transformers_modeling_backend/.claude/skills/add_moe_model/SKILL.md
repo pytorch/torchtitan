@@ -362,9 +362,10 @@ code that proves it.
   use bmm temporarily, or manually compute the expert forward with the
   same kernel as HF using titan's weights).
 - **Adapt patches to the model's code path.** The known patches target
-  specific code paths (e.g. `score_before_experts=False`). If the model
-  uses a different path, write an equivalent patch for that path. The
-  principle is the same — align titan's operations with HF's.
+  specific code paths (e.g. f32 accumulation in
+  `LocalTokenDispatcher.combine()`). If the model uses a different path,
+  write an equivalent patch for that path. The principle is the same --
+  align titan's operations with HF's.
 - **Keep going until max_diff=0.00.** If the known patches don't get
   there, trace the forward step by step to find additional differences.
 
@@ -434,11 +435,6 @@ scores in f32 but casts back to bf16 before `deterministic_scatter_add`,
 so the accumulation happens in bf16. **Fix principle:** remove the cast
 to bf16, keep everything in f32 through the scatter_add, allocate an
 f32 output buffer, cast to the input dtype only at the very end.
-When `score_before_experts=True`, the same issue occurs in
-`_local_reorder()` — the score multiplication casts back to the input
-dtype before expert computation. Fix the same way: remove the cast,
-keep in f32. If this causes downstream dtype mismatches (e.g. scatter
-expects matching dtypes), fix those too — extend the patch as needed.
 
 Example (illustrative, may not match current code):
 ```python

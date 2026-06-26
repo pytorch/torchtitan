@@ -254,8 +254,8 @@ fi
 if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
     SWEEP_STEPS=${3:-2}
     # Supported MoE models, kept in sync with MODEL_COMPATIBILITY.md
-    # (model_type in comments). Llama4/Gemma4 are gated on HF Hub — set
-    # HF_TOKEN and uncomment to include them (verify the Gemma4 repo id).
+    # (model_type in comments). Gemma4 is gated on HF Hub — set HF_TOKEN
+    # and uncomment to include it (verify the Gemma4 repo id).
     SWEEP_MODELS=(
         "Qwen/Qwen3-30B-A3B"                          # qwen3_moe
         "mistralai/Mixtral-8x7B-Instruct-v0.1"        # mixtral
@@ -264,7 +264,6 @@ if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
         "deepseek-ai/DeepSeek-V2-Lite"                # deepseek_v2
         "zai-org/GLM-4.7"                             # glm4_moe
         "zai-org/GLM-5"                               # glm_moe_dsa
-        # "meta-llama/Llama-4-Scout-17B-16E-Instruct" # llama4_text (gated: needs HF_TOKEN)
         # "google/gemma-4-..."                        # gemma4_text (gated: needs HF_TOKEN; set correct id)
     )
 
