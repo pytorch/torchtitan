@@ -20,7 +20,6 @@ import torch
 import torch.distributed as dist
 import torchstore as ts
 from monarch.actor import Actor, Channel, current_rank, endpoint, Port, PortReceiver
-from monarch.rdma import is_rdma_available
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
 from torchtitan.distributed.utils import set_batch_invariance
@@ -48,6 +47,8 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
+
+# TODO(async-rl): this file is large. Split a backend-agnostic BaseGenerator.
 
 
 @dataclass(kw_only=True, slots=True)
@@ -159,7 +160,7 @@ class VLLMCudagraphConfig:
     """CUDA graph capture settings for the vLLM inference engine.
 
     torch.compile is configured separately via ``CompileConfig`` at the
-    ``RLTrainer`` level, shared by both trainer and generator.  Only CUDA
+    ``Controller`` level, shared by both trainer and generator.  Only CUDA
     graph capture, which is vLLM-specific, is controlled here.
 
     ``mode`` selects which vLLM cudagraph mode to capture; see that field and
@@ -374,6 +375,20 @@ class RequestDispatcher:
         requests_per_dp_rank[-1] = requests
         return requests_per_dp_rank
 
+    def rank0_stamp_min_policy_version(
+        self,
+        requests_per_dp_rank: list[list[GenerationRequest]],
+        policy_version: int,
+    ) -> None:
+        """RANK 0: stamp the admitted (sampling) version on every future in this STEP
+        decision, across all DP ranks. Rank 0 owns the futures regardless of which DP
+        rank serves the request, so it stamps them all here."""
+        for dp_requests in requests_per_dp_rank:
+            for request in dp_requests:
+                self._rank0_generation_futures[
+                    request.request_id
+                ].min_policy_version = policy_version
+
     def setup(self) -> None:
         """One-time setup before the engine loop starts (DP>1): distribute rank 0's
         result-fan-in port and start rank 0's drain task.
@@ -450,7 +465,12 @@ class RequestDispatcher:
                 (
                     request_output.request_id,
                     Completion(
-                        policy_version=policy_version,
+                        # NOTE: min_policy_version is a PLACEHOLDER here, set equal to max (the finish
+                        # version). The serving rank has no access to the future that holds the true
+                        # admitted version, so rank 0 REPLACES this with the real value in
+                        # _rank0_resolve_futures. min == max here ONLY until that replacement.
+                        min_policy_version=policy_version,
+                        max_policy_version=policy_version,
                         request_id=request_output.request_id,
                         token_ids=list(completion_output.token_ids),
                         token_logprobs=token_logprobs,
@@ -478,6 +498,10 @@ class RequestDispatcher:
             # in flight when this one finished (includes itself; counted before the pop)
             inflight_requests_at_completion = float(len(self._rank0_generation_futures))
             generation_future = self._rank0_generation_futures.pop(request_id)
+
+            # Replace the placeholder min (the builder set min == max) with the true admitted
+            # version stamped on the future at admission.
+            completion.min_policy_version = generation_future.min_policy_version
             metrics_prefix = generation_future.metrics_prefix
 
             metrics = _prepare_generation_request_metrics(
@@ -564,7 +588,8 @@ class VLLMGenerator(Actor, Configurable):
         model_path: Path to the HF model checkpoint.
         compile_config: Per-layer torch.compile config shared with the
             trainer so both sides compile identically.
-        max_num_seqs: vLLM's max concurrent sequences (KV budget + CUDA-graph sizes).
+        max_num_seqs: vLLM's upper bound on concurrently scheduled sequences (vLLM admits fewer if KV
+            is tight); also sets the CUDA-graph capture sizes.
         output_dir: Structured-logger output directory.
     """
 
@@ -616,9 +641,10 @@ class VLLMGenerator(Actor, Configurable):
         """Drop the prefix cache when weights change so new requests don't reuse KV computed under the old
         weights. vLLM only clears it while the engine is idle (true under sync training)."""
 
-        reset_running_requests_on_weight_sync: bool = False
+        reset_running_requests_on_weight_sync: bool = True
         """Affects requests ALREADY running at the pull: preempts them and recomputes their KV under
-        the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only."""
+        the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only.
+        Default True to avoid reusing stale-weight KV."""
 
         def __post_init__(self):
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
@@ -672,11 +698,6 @@ class VLLMGenerator(Actor, Configurable):
         self.config = config
         self.model_spec = model_spec
 
-        # max_num_seqs controls vLLM's maximum batch dimension: it sets
-        # the upper bound for concurrent sequences, determines KV-cache
-        # block allocation (and therefore GPU memory usage), and bounds
-        # the CUDA graph capture sizes.  Always computed by the caller
-        # (RLTrainer) as num_groups_per_rollout_batch * group_size.
         self._max_num_seqs = max_num_seqs
 
         # Register TorchTitan model + parser with vLLM
@@ -767,6 +788,8 @@ class VLLMGenerator(Actor, Configurable):
 
         with sl.log_trace_span("vllm_init"):
             logger.info("Initializing LLMEngine from EngineArgs...")
+            # TODO(async-rl): capture engine-aggregate stats (KV-cache util, queue depth, preemptions,
+            #   prefix-cache hit rate) via a `StatLoggerBase` in `from_engine_args`;
             self._engine = LLMEngine.from_engine_args(engine_args)
             logger.info("vLLM rollout engine initialized")
 
@@ -953,6 +976,13 @@ class VLLMGenerator(Actor, Configurable):
                     continue  # back to the start for the next decision
 
                 if decision.action is LoopAction.STEP:
+                    # Rank 0 owns all futures, so it stamps the admitted (min) version for the whole decision.
+                    # TODO: move under the engine_step call (register at generation_start, not admission).
+                    # The way to do it is probably to change to RequestOutputKind.CUMULATIVE and mark per token.
+                    if self._rank == 0:
+                        self._request_dispatcher.rank0_stamp_min_policy_version(
+                            decision.requests_per_dp_rank, self.policy_version
+                        )
                     # Admit only this rank's DP replica slice. TP ranks in the same
                     # replica compute the same _dp_rank, so they add the identical
                     # set in the same FCFS order.
@@ -1060,6 +1090,8 @@ class VLLMGenerator(Actor, Configurable):
             logprobs=0,  # return only the sampled token's logprob (for the GRPO ratio)
             # Return each request's result once, when it is fully done, instead of streaming partial
             # outputs as tokens arrive.
+            # TODO(async-rl): use RequestOutputKind.CUMULATIVE for exact per-token
+            #   (start_token, version) boundaries; today we keep only the per-turn min/max.
             output_kind=RequestOutputKind.FINAL_ONLY,
         )
 
@@ -1106,14 +1138,16 @@ class VLLMGenerator(Actor, Configurable):
         """ALL RANKS: collectively copy the latest weights from TorchStore, optionally drop the
         prefix cache (so no new request reuses an old-weight prefix), and bump the policy version.
         """
-        # TODO: with >1 generator, trainer should probably use direct_rdma=False (CPU-staged, fanout-safe)
-        # is_rdma_available() is a hardware probe, not a fanout signal.
+        # Async RL uses a StorageVolume snapshot so generators do not read
+        # live trainer GPU tensors while optimizer steps may be mutating them.
+        # TODO(async-rl): use 2 version keys so trainer can push a new version
+        # without being blocked by a generator's ongoing pull.
         model_sd = self._get_model().model.state_dict()
         await ts.get_state_dict(
             "model_state_dict",
             user_state_dict=model_sd,
             strict=False,
-            direct_rdma=is_rdma_available(),
+            direct_rdma=False,
         )
         # state_dict() returns hook-produced copies for fused modules (e.g.
         # FusedQKVLinear's wqkv -> wq/wk/wv), so the in-place fill above never
@@ -1124,8 +1158,10 @@ class VLLMGenerator(Actor, Configurable):
         self._get_model().model.load_state_dict(model_sd, strict=False)
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:
-            # TODO(async): under hot-swap, prefer per-token weight-version tracking over a full
-            # cache drop (see the version_intervals TODO in rollout/utils.py:rollout_to_episodes).
+            # TODO(async-rl): consider a `flush_kv_cache_every_n_steps` flag to force-flush every N steps
+            #   (helps long generations that span many steps).
+            # TODO(async-rl): salt the prefix cache per NEW rollout so a new rollout can't reuse stale-weight
+            #   KV, while an in-flight rollout keeps reusing its own KV (avoids the full drop).
             self._engine.reset_prefix_cache(
                 reset_running_requests=self.config.reset_running_requests_on_weight_sync,
             )
@@ -1214,12 +1250,13 @@ class CloseRequest:
 
 @dataclass(kw_only=True, slots=True)
 class GenerationFuture:
-    """A generation request's future the loop resolves with its `Completion`. `metrics_prefix`
-    namespaces the per-generation metrics built at completion (e.g. "generator" vs
-    "validation_generator")."""
+    """A generation request's future the loop resolves with its `Completion`."""
 
     future: asyncio.Future[Completion]
     metrics_prefix: str
+    """Namespaces this generation's metrics (e.g. `generator` vs `validation_generator`)."""
+    min_policy_version: int = field(init=False)
+    """Policy version the request was admitted (sampled) under; the max is read at finish (see `Completion`)."""
 
 
 class LoopAction(enum.Enum):

@@ -10,13 +10,13 @@ from types import SimpleNamespace
 import pytest
 
 from torchtitan.experiments.rl import train
-from torchtitan.experiments.rl.actors.generator import VLLMGenerator
-from torchtitan.experiments.rl.batcher import Batcher
+from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
+from torchtitan.experiments.rl.controller import AsyncLoopConfig
 from torchtitan.experiments.rl.generator_router import GeneratorRouter
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
 
 
-class _FakeRLTrainer:
+class _FakeController:
     instances = []
 
     def __init__(self, config=None):
@@ -33,7 +33,7 @@ class _FakeRLTrainer:
         if getattr(self.config, "fail_setup", False):
             raise RuntimeError("setup failed")
 
-    async def train(self):
+    async def run(self):
         self.events.append("train")
         if getattr(self.config, "fail_train", False):
             raise RuntimeError("train failed")
@@ -57,7 +57,7 @@ class _FakeTrainerConfig:
 
 
 class _FakeConfig:
-    """Fake config whose build() returns a _FakeRLTrainer."""
+    """Fake config whose build() returns a _FakeController."""
 
     dump_folder = "/tmp/test_rl"
     trainer = _FakeTrainerConfig()
@@ -67,17 +67,17 @@ class _FakeConfig:
 
     @property
     def __class__(self):
-        # main() does `assert isinstance(config, RLTrainer.Config)`. Reporting
+        # main() does `assert isinstance(config, Controller.Config)`. Reporting
         # that type lets this lightweight stand-in pass the check (the
         # unittest.mock `spec` idiom) without constructing a real Config.
-        return train.RLTrainer.Config
+        return train.Controller.Config
 
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
             setattr(self, k, v)
 
     def build(self):
-        return _FakeRLTrainer(config=self)
+        return _FakeController(config=self)
 
 
 class _FakeConfigManager:
@@ -88,11 +88,11 @@ class _FakeConfigManager:
 
 
 def _make_stub_rl_trainer():
-    """Create an RLTrainer with a minimal stub config (no VLLMGenerator validation)."""
+    """Create an Controller with a minimal stub config (no VLLMGenerator validation)."""
     from torchtitan.experiments.rl.observability import metrics as m
 
     class _StubConfig:
-        batcher = Batcher.Config()
+        async_loop = AsyncLoopConfig()
         metrics = m.MetricsProcessor.Config()
         dump_folder = "/tmp/test_rl"
         rollout_recorder = RolloutSampleRecorder.Config()
@@ -104,13 +104,16 @@ def _make_stub_rl_trainer():
                 _tokenizer=SimpleNamespace(eos_token_id=0),
             )
         )
-        generator = SimpleNamespace(sampling=SimpleNamespace())
+        # __init__ reads generator.sampling (a dataclass, for replace) + generator.debug.seed.
+        generator = SimpleNamespace(
+            sampling=SamplingConfig(), debug=SimpleNamespace(seed=None)
+        )
         rollouter = SimpleNamespace(build=lambda: SimpleNamespace())
 
         def to_dict(self):
             return {}
 
-    return train.RLTrainer(_StubConfig())
+    return train.Controller(_StubConfig())
 
 
 @pytest.fixture
@@ -120,7 +123,7 @@ def stub_mesh_provisioning(monkeypatch):
     ``spawn_proc_mesh`` spawns real GPU proc meshes and the
     ``_compute_*_world_size`` helpers read parallelism degrees; neither matters
     to shutdown behavior, so stub both and let the test intercept at the
-    ``_FakeRLTrainer`` boundary.
+    ``_FakeController`` boundary.
     """
     monkeypatch.setattr(train, "_compute_trainer_world_size", lambda p: 1)
     monkeypatch.setattr(train, "_compute_generator_world_size", lambda p: 1)
@@ -135,12 +138,12 @@ def stub_mesh_provisioning(monkeypatch):
 
 def test_main_shuts_down_after_success(monkeypatch, stub_mesh_provisioning):
     _FakeConfigManager.config = _FakeConfig()
-    _FakeRLTrainer.instances = []
+    _FakeController.instances = []
     monkeypatch.setattr(train, "ConfigManager", _FakeConfigManager)
 
     asyncio.run(train.main())
 
-    trainer = _FakeRLTrainer.instances[0]
+    trainer = _FakeController.instances[0]
     assert trainer.events == ["setup", "train", "close"]
     assert trainer.setup_trainer_mesh == "trainer_mesh"
     assert trainer.setup_generator_meshes == ["generator_mesh_0"]
@@ -148,12 +151,12 @@ def test_main_shuts_down_after_success(monkeypatch, stub_mesh_provisioning):
 
 def test_main_passes_configured_num_generators(monkeypatch, stub_mesh_provisioning):
     _FakeConfigManager.config = _FakeConfig(num_generators=2)
-    _FakeRLTrainer.instances = []
+    _FakeController.instances = []
     monkeypatch.setattr(train, "ConfigManager", _FakeConfigManager)
 
     asyncio.run(train.main())
 
-    trainer = _FakeRLTrainer.instances[0]
+    trainer = _FakeController.instances[0]
     assert trainer.events == ["setup", "train", "close"]
     assert trainer.setup_generator_meshes == [
         "generator_mesh_0",
@@ -163,24 +166,24 @@ def test_main_passes_configured_num_generators(monkeypatch, stub_mesh_provisioni
 
 def test_main_shuts_down_after_train_failure(monkeypatch, stub_mesh_provisioning):
     _FakeConfigManager.config = _FakeConfig(fail_train=True)
-    _FakeRLTrainer.instances = []
+    _FakeController.instances = []
     monkeypatch.setattr(train, "ConfigManager", _FakeConfigManager)
 
     with pytest.raises(RuntimeError, match="train failed"):
         asyncio.run(train.main())
 
-    assert _FakeRLTrainer.instances[0].events == ["setup", "train", "close"]
+    assert _FakeController.instances[0].events == ["setup", "train", "close"]
 
 
 def test_main_shuts_down_after_setup_failure(monkeypatch, stub_mesh_provisioning):
     _FakeConfigManager.config = _FakeConfig(fail_setup=True)
-    _FakeRLTrainer.instances = []
+    _FakeController.instances = []
     monkeypatch.setattr(train, "ConfigManager", _FakeConfigManager)
 
     with pytest.raises(RuntimeError, match="setup failed"):
         asyncio.run(train.main())
 
-    assert _FakeRLTrainer.instances[0].events == ["setup", "close"]
+    assert _FakeController.instances[0].events == ["setup", "close"]
 
 
 def test_rl_trainer_shutdown_is_noop_before_meshes_spawn():
@@ -199,13 +202,13 @@ def test_main_swallows_cancellation_after_shutdown(monkeypatch, stub_mesh_provis
     ``except`` clause swallows the interrupt so the process exits 0
     without a traceback."""
     _FakeConfigManager.config = _FakeConfig(cancel_train=True)
-    _FakeRLTrainer.instances = []
+    _FakeController.instances = []
     monkeypatch.setattr(train, "ConfigManager", _FakeConfigManager)
 
     # No exception escapes; close still ran.
     asyncio.run(train.main())
 
-    assert _FakeRLTrainer.instances[0].events == ["setup", "train", "close"]
+    assert _FakeController.instances[0].events == ["setup", "train", "close"]
 
 
 def test_vllm_generator_does_not_touch_cuda_from_finalizer():
