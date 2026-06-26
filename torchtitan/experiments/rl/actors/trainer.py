@@ -62,9 +62,11 @@ def compute_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
         # contract explicit (see .claude/rules/distributed.md).
         # Gather vocab-sharded TP logits before computing per-token logprobs.
         placements = tuple(
-            Replicate()
-            if isinstance(p, Shard) and p.dim in (-1, logits.ndim - 1)
-            else p
+            (
+                Replicate()
+                if isinstance(p, Shard) and p.dim in (-1, logits.ndim - 1)
+                else p
+            )
             for p in logits.placements
         )
         logits = logits.redistribute(placements=placements).to_local()
@@ -557,7 +559,7 @@ class PolicyTrainer(Actor, Configurable):
         """Stage model weights to a CPU StorageVolume for the generators to pull (TorchStore).
 
         `direct_rdma=False` copies the state dict GPU->CPU, so the trainer's GPU weights are free once
-        this returns and any number of generators can read the staged copy (fanout-safe).
+        this returns and any number of generators can read the staged copy.
         """
         state_dict = self.model.state_dict()
         if self._transfer_dtype is not None:

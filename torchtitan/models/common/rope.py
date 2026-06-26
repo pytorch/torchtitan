@@ -21,6 +21,7 @@ __all__ = [
 ]
 
 
+@spmd.no_typecheck()
 def _maybe_check_max_pos(positions: torch.Tensor, *, max_valid_pos: int) -> None:
     """Async bounds check: verify all position values <= max_valid_pos.
 
