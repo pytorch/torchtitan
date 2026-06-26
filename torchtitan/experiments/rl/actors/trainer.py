@@ -305,10 +305,7 @@ class PolicyTrainer(Actor, Configurable):
 
         model.to_empty(device=device_type)
         with torch.no_grad():
-            # spmd_types parameter init needs the current mesh to materialize
-            # local shards for fused parameters.
-            with self.train_context():
-                model.init_weights(buffer_device=None)
+            model.init_weights(buffer_device=None)
 
         return model
 
