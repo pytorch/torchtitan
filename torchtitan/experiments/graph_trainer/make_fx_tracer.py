@@ -336,6 +336,12 @@ def minimal_fx_tracer(
     module: nn.Module | None = None,
     optimizer: "torch.optim.Optimizer | None" = None,
     *,
+    prepare_inputs: Callable[[tuple[Any, ...], dict[str, Any]], None] | None = None,
+    prepare_call_inputs: Callable[
+        [tuple[Any, ...], dict[str, Any]],
+        tuple[tuple[Any, ...], dict[str, Any]] | None,
+    ]
+    | None = None,
     _insert_runtime_asserts: bool = False,
 ) -> Callable[..., TracedResult]:
     """Return a tracer that captures ``fn`` with implicit module/optimizer state.
@@ -377,6 +383,9 @@ def minimal_fx_tracer(
     _check_optimizer_has_module(module, optimizer)
 
     def _trace_with_args(*args: Any, **kwargs: Any) -> TracedResult:
+        if prepare_inputs is not None:
+            prepare_inputs(args, kwargs)
+
         model_state, optim_state = extract_train_state(module, optimizer)
         state_fqns = list(model_state.keys())
 

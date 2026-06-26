@@ -17,6 +17,44 @@ from torchtitan.experiments.graph_trainer.chunked_loss import (
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
+EpOverlapChunkDim = Literal["batch", "seq"]
+EpOverlapChunkStrategy = Literal["eager", "graph"]
+
+TRANSFORMER_BLOCK_FQN = "layers.*"
+MOE_BLOCK_FQN = "layers.*.moe"
+SUPPORTED_EP_OVERLAP_MODULE_FQNS = frozenset({TRANSFORMER_BLOCK_FQN, MOE_BLOCK_FQN})
+
+
+@dataclass(kw_only=True, slots=True)
+class EpOverlapConfig:
+    enabled: bool = False
+    """Enable EP-overlap support for the selected chunking and scheduling mode."""
+
+    chunk_dim: EpOverlapChunkDim = "batch"
+    """Logical input dimension to split for EP-overlap chunking.
+
+    Sequence chunking is only supported for MoE block roots because attention
+    requires full K/V context.
+    """
+
+    strategy: EpOverlapChunkStrategy = "graph"
+    """How selected EP-overlap regions are chunked before scheduling.
+
+    ``eager`` wraps module forwards before tracing. ``graph`` traces the
+    unmodified model and chunks selected regions with an FX graph pass.
+    """
+
+    module_fqn: str = TRANSFORMER_BLOCK_FQN
+    """Single module FQN pattern chunked for EP overlap.
+
+    v1 supports all transformer blocks (``layers.*``) or all MoE blocks
+    (``layers.*.moe``). The overlap scheduler consumes the common chunk metadata
+    produced by either eager or graph chunking.
+    """
+
+    disable_early_grad_accumulation: bool = False
+    """Disable the scheduler optimization that accumulates chunk gradients early."""
+
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerCompileConfig(CompileConfig):
@@ -31,7 +69,7 @@ class GraphTrainerCompileConfig(CompileConfig):
 
     passes: list[str] = field(default_factory=list)
     """
-    Compiler pass names to apply.
+    Additional compiler pass names to apply.
     In JIT mode: applied as graph passes (e.g., auto_bucketing, transformer_block_bucketing)
     """
 
@@ -95,6 +133,9 @@ class GraphTrainerCompileConfig(CompileConfig):
     two collectives can overlap. It is a no-op when the graph contains no
     FSDP all-gathers."""
 
+    ep_overlap: EpOverlapConfig = field(default_factory=EpOverlapConfig)
+    """Configuration for EP-overlap chunking and scheduling."""
+
     precompile_artifact_dir: str = ""
     """
     Directory for precompiled artifacts. Setting this enables precompile:
@@ -116,6 +157,53 @@ def validate_autoparallel_config(
             "AutoParallel graph_trainer integration only supports "
             "--compile.mode aot_fx_trace"
         )
+
+
+def validate_ep_overlap_config(
+    ep_overlap_config: EpOverlapConfig,
+) -> tuple[EpOverlapChunkDim, EpOverlapChunkStrategy, str]:
+    chunk_dim = ep_overlap_config.chunk_dim
+    if chunk_dim not in ("batch", "seq"):
+        raise ValueError(
+            "--compile.ep_overlap.chunk_dim must be 'batch' or 'seq' when "
+            "--compile.ep_overlap.enabled is set"
+        )
+
+    chunk_strategy = ep_overlap_config.strategy
+    if chunk_strategy not in ("eager", "graph"):
+        raise ValueError(
+            "--compile.ep_overlap.strategy must be 'eager' or 'graph' when "
+            "--compile.ep_overlap.enabled is set"
+        )
+
+    module_fqn = ep_overlap_config.module_fqn
+    if module_fqn not in SUPPORTED_EP_OVERLAP_MODULE_FQNS:
+        raise ValueError(
+            "--compile.ep_overlap.module_fqn must be either 'layers.*' "
+            "or 'layers.*.moe' for ep_overlap"
+        )
+    if chunk_dim == "seq" and module_fqn != MOE_BLOCK_FQN:
+        raise ValueError(
+            "--compile.ep_overlap.chunk_dim seq is only supported with "
+            "--compile.ep_overlap.module_fqn layers.*.moe"
+        )
+
+    return chunk_dim, chunk_strategy, module_fqn
+
+
+def trace_input_preparer_keys(
+    compile_config: GraphTrainerCompileConfig,
+) -> list[str]:
+    """Return feature names whose trace-input hooks should run.
+
+    ``compile.passes`` remains the escape hatch for standalone graph passes.
+    EP overlap has structured config because enabling it also controls eager
+    module wrapping and later scheduling behavior.
+    """
+    names = list(compile_config.passes)
+    if compile_config.ep_overlap.enabled:
+        names.append("ep_overlap")
+    return list(dict.fromkeys(names))
 
 
 def to_graph_trainer_config(
