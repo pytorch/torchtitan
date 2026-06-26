@@ -12,6 +12,7 @@ from typing import TypeAlias
 import spmd_types as spmd
 import torch
 import torch.distributed as dist
+import torch.distributed._functional_collectives as funcol
 import torch.nn as nn
 from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
@@ -137,12 +138,16 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
 
         # All-reduce max for numerically stable distributed log-softmax.
         local_max = torch.amax(logits_2d, dim=-1, keepdim=True)
-        dist.all_reduce(local_max, op=dist.ReduceOp.MAX, group=tp_group)
+        local_max = funcol.all_reduce(
+            local_max, reduceOp=dist.ReduceOp.MAX.name, group=tp_group
+        )
 
         # All-reduce sum over shifted logits for the global softmax denominator.
         shifted = logits_2d - local_max
         shifted_sumexp = torch.sum(torch.exp(shifted), dim=-1, keepdim=True)
-        dist.all_reduce(shifted_sumexp, op=dist.ReduceOp.SUM, group=tp_group)
+        shifted_sumexp = funcol.all_reduce(
+            shifted_sumexp, reduceOp=dist.ReduceOp.SUM.name, group=tp_group
+        )
         log_probs = shifted - torch.log(shifted_sumexp)
 
         # Mask labels outside this vocab shard; the TP all-reduce below selects
@@ -156,7 +161,9 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
 
         local_result = torch.gather(log_probs, -1, local_labels.unsqueeze(-1))
         local_result[out_of_range.unsqueeze(-1)] = 0
-        dist.all_reduce(local_result, op=dist.ReduceOp.SUM, group=tp_group)
+        local_result = funcol.all_reduce(
+            local_result, reduceOp=dist.ReduceOp.SUM.name, group=tp_group
+        )
 
         # Compute summed NLL loss, dropping ignored labels.
         result = -local_result.squeeze(-1)
