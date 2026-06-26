@@ -273,6 +273,7 @@ class FlexAttention(Module):
                 k_BNLH,
                 v_BNLH,
                 block_mask=attention_masks,
+                score_mod=score_mod,
                 scale=scale,
                 enable_gqa=enable_gqa,
                 return_aux=AuxRequest(lse=out_transform is not None),

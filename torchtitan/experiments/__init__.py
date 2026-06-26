@@ -14,6 +14,7 @@ _supported_experiments = frozenset(
         "autoparallel.local_map_deepseek_v3",
         "path",
         "plan_vit",
+        "worldmodel",
         "torchft.llama3",
         "rl",
         # RL examples own a per-example config_registry under rl/examples/<name>;
