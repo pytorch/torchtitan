@@ -371,6 +371,109 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             model_dtype="bfloat16",
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=1,
+                tensor_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=50,
+            ),
+            debug=batch_invariant_config,
+        ),
+    )
+
+
+def rl_grpo_gpt_oss_debug_flex() -> RLTrainer.Config:
+    """Small GPT-OSS debug config with flex attention (random init)."""
+    group_size = 8
+    return RLTrainer.Config(
+        model_spec=gpt_oss_model_registry("debugmodel", attn_backend="flex"),
+        hf_assets_path="tests/assets/tokenizer",
+        num_steps=3,
+        num_groups_per_rollout_batch=5,
+        num_validation_samples=20,
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        rollouter=AlphabetSortRollouter.Config(),
+        group_size=group_size,
+        renderer=RendererConfig(name="gpt_oss", enable_thinking=False),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        batcher=Batcher.Config(
+            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
+        ),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=2e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
+                tensor_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=50,
+            ),
+        ),
+    )
+
+
+def rl_grpo_gpt_oss_debug_flex_batch_invariant() -> RLTrainer.Config:
+    """GPT-OSS debug config with flex attention, deterministic + batch-invariant."""
+    batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
+    group_size = 8
+    config = RLTrainer.Config(
+        model_spec=gpt_oss_model_registry(
+            "debugmodel",
+            attn_backend="flex",
+            converters=[BatchInvariantFlexConverter.Config()],
+        ),
+        hf_assets_path="tests/assets/tokenizer",
+        num_steps=3,
+        num_groups_per_rollout_batch=5,
+        num_validation_samples=20,
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        rollouter=AlphabetSortRollouter.Config(),
+        group_size=group_size,
+        renderer=RendererConfig(name="gpt_oss", enable_thinking=False),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        batcher=Batcher.Config(
+            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
+        ),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=2e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=2,
+                enable_sequence_parallel=False,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            debug=batch_invariant_config,
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            cudagraph=VLLMCudagraphConfig(enable=False),
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
                 # Must match the trainer's TP for bitwise parity: a different TP
                 # degree changes reduction order / sharding in the parallel
                 # matmuls and attention, which batch-invariant ops do not undo.
@@ -385,6 +488,11 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             debug=batch_invariant_config,
         ),
     )
+    block_size = config.model_spec.model.layers[0].attention.inner_attention.block_size
+    config.batcher = dataclasses.replace(
+        config.batcher, per_sample_pad_multiple=block_size
+    )
+    return config
 
 
 def rl_grpo_qwen3_1_7b() -> Controller.Config:

@@ -62,6 +62,7 @@ from torchtitan.distributed.utils import (
 from torchtitan.experiments.rl.actors.trainer import compute_logprobs
 from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
+    rl_grpo_gpt_oss_debug_flex_batch_invariant,
     rl_grpo_gpt_oss_debug_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
@@ -77,6 +78,7 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
+    get_sliding_window_mask_mod,
     VarlenMetadata,
 )
 from torchtitan.tools import utils
@@ -206,20 +208,17 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         backend_enum = AttentionBackendEnum.FLEX_ATTENTION
     else:
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
-        if gen_config.debug.batch_invariant:
-            set_batch_invariance(True)
-            # batch_invariant_ops covers mm/addmm/_log_softmax/mean but not bmm
-            # (the MoE router gate lowers to bmm in the vLLM inference graph), and
-            # the v2 logprob Triton kernel bypasses the aten overrides. Apply the
-            # same generator-side patches the production VLLMGenerator does.
-            from torchtitan.experiments.rl.batch_invariance import (
-                force_logprobs_fn_for_batch_invariance,
-                patch_bmm_for_batch_invariance,
-            )
-
-            patch_bmm_for_batch_invariance()
-            force_logprobs_fn_for_batch_invariance()
         backend_enum = AttentionBackendEnum.CUSTOM
+
+    if gen_config.debug.batch_invariant:
+        set_batch_invariance(True)
+        from torchtitan.experiments.rl.batch_invariance import (
+            force_logprobs_fn_for_batch_invariance,
+            patch_bmm_for_batch_invariance,
+        )
+
+        patch_bmm_for_batch_invariance()
+        force_logprobs_fn_for_batch_invariance()
 
     _set_generator_determinism(gen_config.debug)
 
@@ -246,6 +245,10 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
 
     if not has_cuda_capability(9, 0) and not use_flex:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
+
+    attn_param_init = config.model_spec.model.layers[0].attention.param_init or {}
+    if gen_config.debug.batch_invariant and "sinks" in attn_param_init:
+        engine_kwargs["enable_prefix_caching"] = False
 
     engine_kwargs["max_model_len"] = config.model_spec.model.max_seq_len
     # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency
@@ -355,19 +358,37 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
     packed_ids = torch.cat(parts).unsqueeze(0)
     positions = torch.cat(pos_parts).unsqueeze(0)
 
-    mask_mods = [get_causal_mask_mod(), get_document_mask_mod(positions)]
+    seq_len = positions.shape[1]
+    basic_mask_mods = [get_causal_mask_mod(), get_document_mask_mod(positions)]
 
-    if inner_attn.mask_mod is not None:
-        mask_mods.append(inner_attn.mask_mod.build().get_mask_mod())
-    attention_masks = create_attention_mask(
-        and_masks(*mask_mods),
-        1,
+    def _mask(mods):
+        return create_attention_mask(
+            and_masks(*mods),
+            1,
+            None,
+            seq_len,
+            seq_len,
+            BLOCK_SIZE=block_size,
+            separate_full_blocks=not batch_invariant,
+        )
+
+    window = next(
+        (
+            sw
+            for layer in model.config.layers
+            if (sw := getattr(layer.attention, "sliding_window_size", None)) is not None
+        ),
         None,
-        positions.shape[1],
-        positions.shape[1],
-        BLOCK_SIZE=block_size,
-        separate_full_blocks=not batch_invariant,
     )
+    if window is not None:
+        attention_masks = {
+            "basic_mask": _mask(basic_mask_mods),
+            "sliding_window_mask": _mask(
+                [*basic_mask_mods, get_sliding_window_mask_mod(window)]
+            ),
+        }
+    else:
+        attention_masks = _mask(basic_mask_mods)
 
     logits = model(packed_ids, attention_masks=attention_masks, positions=positions)
 
@@ -833,6 +854,16 @@ class TestBitwiseParityGptOssVarlen(BitwiseParityTestBase):
     __test__ = True
     config_fn = staticmethod(rl_grpo_gpt_oss_debug_varlen_batch_invariant)
     attn_backend = "varlen"
+    sync_weights_from_trainer = True
+
+
+class TestBitwiseParityGptOssFlex(BitwiseParityTestBase):
+    """Bitwise parity for GPT-OSS flex attention.
+    """
+
+    __test__ = True
+    config_fn = staticmethod(rl_grpo_gpt_oss_debug_flex_batch_invariant)
+    attn_backend = "flex"
     sync_weights_from_trainer = True
 
 
