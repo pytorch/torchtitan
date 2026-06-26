@@ -9,6 +9,7 @@ import os
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+import spmd_types as spmd
 import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
@@ -35,6 +36,7 @@ from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
     SelectiveAC,
 )
+from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingMicrobatch
 from torchtitan.models.common.attention import FlexAttention
@@ -70,6 +72,18 @@ def compute_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
             for p in logits.placements
         )
         logits = logits.redistribute(placements=placements).to_local()
+    elif spmd_mesh_size("tp") > 1:
+        # spmd_types returns a plain local vocab shard. Labels are global token
+        # ids, so cross_entropy needs full-vocab logits.
+        mesh = current_spmd_mesh()
+        assert mesh is not None
+        logits = spmd.redistribute(
+            logits,
+            mesh.get_group("tp"),
+            src=spmd.S(-1),
+            dst=spmd.R,
+            backward_options={"op_dtype": logits.dtype},
+        )
 
     B, S, V = logits.shape
     return -F.cross_entropy(
@@ -381,7 +395,10 @@ class PolicyTrainer(Actor, Configurable):
 
         model.to_empty(device=device_type)
         with torch.no_grad():
-            model.init_weights(buffer_device=None)
+            # spmd_types parameter init needs the current mesh to materialize
+            # local shards for fused parameters.
+            with self.train_context():
+                model.init_weights(buffer_device=None)
 
         return model
 

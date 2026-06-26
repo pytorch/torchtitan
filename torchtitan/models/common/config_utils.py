@@ -15,7 +15,9 @@ from collections.abc import Callable
 from typing import Literal
 
 import torch
+from torch.distributed.tensor import DTensor
 
+from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.models.common.attention import (
     FlexAttention,
     FusedQKVLinear,
@@ -100,7 +102,6 @@ def _fused_qkv_param_init(
     module and keeps RNG independent of the parallelism.
     """
     heads_per_kv = n_heads // n_kv_heads
-    r_dim = heads_per_kv + 2
 
     def _make_init(base_init: Callable) -> Callable:
         # ``tail`` is the per-row shape: () for bias, (in_features,) for weight.
@@ -124,11 +125,16 @@ def _fused_qkv_param_init(
                     v.view(n_kv_heads, 1, head_dim, *tail),
                 ],
                 dim=1,
-            )
+            ).flatten(0, 2)
             with torch.no_grad():
-                # fused is Replicate (cat of Replicates); copy_ scatters it into
-                # t, so each rank writes only its own shard of the fused param.
-                t.view(n_kv_heads, r_dim, head_dim, *tail).copy_(fused)
+                if not isinstance(t, DTensor) and (tp_size := spmd_mesh_size("tp")) > 1:
+                    # spmd_types passes the local shard as a plain tensor, so
+                    # copy only this rank's TP slice of the fused global init.
+                    mesh = current_spmd_mesh()
+                    assert mesh is not None
+                    tp_rank = mesh.get_local_rank("tp")
+                    fused = fused.chunk(tp_size, dim=0)[tp_rank]
+                t.copy_(fused)
 
         return _init
 
