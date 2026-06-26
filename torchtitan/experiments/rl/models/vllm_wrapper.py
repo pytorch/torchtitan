@@ -15,11 +15,11 @@ import dataclasses
 from dataclasses import dataclass
 from functools import partial
 
+import spmd_types as spmd
+
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor, Replicate, Shard
-
-import spmd_types as spmd
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import (
     apply_overrides,
@@ -368,9 +368,11 @@ class VLLMModelWrapper(Module):
                 h = layer(h, attention_masks=None, positions=positions)
 
             h = self.model.norm(h)
-        # When parallelism is applied, get full tensor before return to vLLM Engine
+        # Inference disables sequence parallelism, so final hidden states should
+        # already be replicated before returning to vLLM.
         if isinstance(h, DTensor):
-            h = h.full_tensor()
+            assert all(isinstance(p, Replicate) for p in h.placements)
+            h = h._local_tensor
 
         # Convert to vLLM format: [total_tokens, hidden_size]
         if h.dim() == 3:
@@ -425,9 +427,6 @@ class VLLMModelWrapper(Module):
                         for p in logits.placements
                     )
                     logits = logits.redistribute(placements=placements).to_local()
-
-        if isinstance(logits, DTensor):
-            logits = logits.to_local()
 
         return logits
 
