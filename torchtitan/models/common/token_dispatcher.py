@@ -330,10 +330,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 )
 
             with torch.no_grad():
-                if (
-                    torch.compiler.is_compiling()
-                    and get_spmd_backend() != "spmd_types"
-                ):
+                if torch.compiler.is_compiling() and get_spmd_backend() != "spmd_types":
                     num_global_tokens_per_local_expert_EP_e = all_to_all_single(
                         num_local_tokens_per_expert_E.view(ep_size, -1),
                         None,
