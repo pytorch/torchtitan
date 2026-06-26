@@ -11,9 +11,9 @@ import pytest
 
 from torchtitan.experiments.rl import train
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
+from torchtitan.experiments.rl.controller import AsyncLoopConfig
 from torchtitan.experiments.rl.generator_router import GeneratorRouter
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
-from torchtitan.experiments.rl.trainer import AsyncLoopConfig
 
 
 class _FakeController:

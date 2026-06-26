@@ -28,18 +28,18 @@ from torchtitan.experiments.rl.actors.generator import (
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
+from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
+from torchtitan.experiments.rl.controller import (
+    AsyncLoopConfig,
+    Controller,
+    ValidationConfig,
+)
 from torchtitan.experiments.rl.examples.search_r1.rollouter import SearchR1Rollouter
 from torchtitan.experiments.rl.losses import DAPOLoss
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
-from torchtitan.experiments.rl.trainer import (
-    AsyncLoopConfig,
-    Controller,
-    ValidationConfig,
-)
 from torchtitan.models.qwen3 import model_registry
 
 

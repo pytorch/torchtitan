@@ -89,7 +89,7 @@ class RolloutGroupWorkBuffer(Configurable):
     def __init__(self, config: Config, *, max_active_rollout_groups: int) -> None:
         self._max_active_rollout_groups = max_active_rollout_groups
         self._active_rollout_groups = 0
-        # metric: Per-flush peak active slots; reset on flush.
+        # metric: Per-flush peak active slots; reset on `.metrics()` call.
         self._active_rollout_groups_peak_since_flush = 0
         self._work_by_group_id: collections.OrderedDict[
             int, RolloutGroupWork

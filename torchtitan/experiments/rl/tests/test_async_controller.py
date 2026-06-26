@@ -11,15 +11,15 @@ import asyncio
 
 import pytest
 
-from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
-from torchtitan.experiments.rl.components.metrics_utils import (
-    compute_perf_ratio_metrics,
-    compute_policy_age_metrics,
-    MetricsTimer,
-)
+from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.components.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
+)
+from torchtitan.experiments.rl.controller_metrics import (
+    compute_perf_ratio_metrics,
+    compute_policy_age_metrics,
+    MetricsTimer,
 )
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.rollout import RolloutGroup

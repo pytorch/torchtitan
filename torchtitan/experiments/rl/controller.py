@@ -105,20 +105,20 @@ from monarch.spmd import setup_torch_elastic_env_async
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.batcher import Batcher
-from torchtitan.experiments.rl.components.metrics_utils import (
-    combine_microbatch_metrics,
-    compute_perf_ratio_metrics,
-    compute_policy_age_metrics,
-    compute_rollout_metrics,
-    MetricsTimer,
-)
+from torchtitan.experiments.rl.components.batcher import Batcher
 from torchtitan.experiments.rl.components.training_sample_builder import (
     TrainingSampleBuilder,
 )
 from torchtitan.experiments.rl.components.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
+)
+from torchtitan.experiments.rl.controller_metrics import (
+    combine_microbatch_metrics,
+    compute_perf_ratio_metrics,
+    compute_policy_age_metrics,
+    compute_rollout_metrics,
+    MetricsTimer,
 )
 from torchtitan.experiments.rl.generator_router import GeneratorRouter, RoutingContext
 from torchtitan.experiments.rl.losses import GRPOLoss
@@ -338,7 +338,6 @@ class Controller(Configurable):
         # once `renderers` supports bring-your-own-tokenizer
         # (https://github.com/PrimeIntellect-ai/renderers/pull/70).
         # Until then, reach into the renderer's tokenizer for the pad id (eos doubles as pad).
-        self._pad_id = self.renderer._tokenizer.eos_token_id
         self._rollouter: Rollouter = config.rollouter.build()
         self.rollout_recorder = config.rollout_recorder.build(
             dump_dir=config.dump_folder
@@ -538,7 +537,7 @@ class Controller(Configurable):
         # (0 if fresh) so the loop resumes at the right step and generators pull at that version.
         # TODO(resume): only model/optimizer/policy_version are restored. The active-slot rollout
         #   buffer (in-flight rollouts) and the dataset stream position are NOT restored -- a resumed
-        #   run refills the buffer and re-reads data from the start. Persist both for exact resume.
+        #   run refills the buffer and re-reads data from the start. Need to recycle prompts.
         self.start_step = self._get_rank_0_value(
             await self.trainer.get_policy_version.call()
         )
@@ -678,7 +677,7 @@ class Controller(Configurable):
         batcher = async_loop.batcher.build(
             num_groups_per_train_step=async_loop.num_groups_per_train_step,
             dp_degree=self.trainer_dp_degree,
-            pad_id=self._pad_id,
+            pad_id=self.renderer._tokenizer.eos_token_id,
         )
 
         # training_batch_queue

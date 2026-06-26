@@ -60,6 +60,7 @@ from torchtitan.distributed.utils import (
     set_batch_invariance,
 )
 from torchtitan.experiments.rl.actors.trainer import compute_logprobs
+from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_gpt_oss_debug_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
@@ -71,7 +72,6 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     TORCHTITAN_CONFIG_FORMAT,
     VLLM_MODEL_NAME,
 )
-from torchtitan.experiments.rl.trainer import Controller
 from torchtitan.models.common.attention import (
     create_attention_mask,
     FlexAttention,

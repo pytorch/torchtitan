@@ -35,8 +35,8 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 from monarch.actor import HostMesh, ProcMesh, this_host
 
 from torchtitan.config import ConfigManager, ParallelismConfig
+from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
-from torchtitan.experiments.rl.trainer import Controller
 from torchtitan.observability import structured_logger as sl
 
 
