@@ -1447,7 +1447,9 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.gpt_oss import gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        config = gptoss_configs["debugmodel"](moe_comm_backend="standard")
+        config = gptoss_configs["debugmodel"](
+            moe_comm_backend="standard", attn_backend="flex"
+        )
         vocab_size = config.vocab_size
         model_ref = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         model_test = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
@@ -1496,7 +1498,9 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.gpt_oss import gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        config = gptoss_configs["debugmodel"](moe_comm_backend="standard")
+        config = gptoss_configs["debugmodel"](
+            moe_comm_backend="standard", attn_backend="flex"
+        )
         model = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         annotate_module_fqns(model)
 
@@ -1713,7 +1717,9 @@ class TestTraceFSDP(FSDPTest):
         from torchtitan.models.gpt_oss import gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        config = gptoss_configs["debugmodel"](moe_comm_backend="standard")
+        config = gptoss_configs["debugmodel"](
+            moe_comm_backend="standard", attn_backend="flex"
+        )
         seq_len = 128
         causal = get_causal_mask_mod()
         sw_size = config.layers[0].attention.sliding_window_size
