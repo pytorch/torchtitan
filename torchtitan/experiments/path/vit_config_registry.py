@@ -299,6 +299,10 @@ def _vit(
         fps=SUPERCOMBO_FPS,
         plan_target_last_frame=True,  # ViT predicts a single-frame plan; supervise the last frame
         debug=DebugConfig(seed=0),
+        # record the build-time base lr so a swept --mup_base_lr can re-derive the eta/m split
+        # post-tyro (PathTrainer.Config.__post_init__). seeded equal -> default runs are a no-op.
+        built_base_lr=lr,
+        mup_base_lr=lr,
     )
 
 
