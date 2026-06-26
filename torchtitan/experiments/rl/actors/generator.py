@@ -1280,10 +1280,6 @@ class VLLMGenerator(Actor, Configurable):
         stored_mapping = await ts.get(f"model_state_dict{DELIM}{MAPPING}")
         layouts = _fqn_to_spmd_layout(model.model)
 
-        tp_mesh = model.parallel_dims.get_mesh("tp")
-        tp_size = tp_mesh.size()
-        tp_rank = tp_mesh.get_local_rank()
-
         for name in stored_mapping:
             target = flat_model_sd.get(name)
             if target is None:
@@ -1297,17 +1293,18 @@ class VLLMGenerator(Actor, Configurable):
             if layout is None:
                 raise KeyError(f"{name} is missing SPMD layout metadata")
 
-            tp_spmd_type = layout.per_axis_spmd_types().get("tp")
-            if not isinstance(tp_spmd_type, spmd.Shard):
+            if not any(
+                isinstance(axis_type, spmd.Shard)
+                for axis_type in layout.per_axis_spmd_types().values()
+            ):
                 await ts.get(key, inplace_tensor=target)
                 continue
 
             await self._get_tensor_slice(
                 key=key,
                 target=target,
-                dim=tp_spmd_type.dim,
-                tp_size=tp_size,
-                tp_rank=tp_rank,
+                layout=layout,
+                model=model,
             )
 
     @staticmethod
@@ -1315,15 +1312,31 @@ class VLLMGenerator(Actor, Configurable):
         *,
         key: str,
         target: torch.Tensor,
-        dim: int,
-        tp_size: int,
-        tp_rank: int,
+        layout: SpmdLayout,
+        model,
     ) -> None:
-        """Read this rank's TP shard from a globally stored TorchStore tensor."""
+        """Read this rank's local state shard from a globally stored tensor."""
         global_shape = list(target.shape)
-        global_shape[dim] *= tp_size
         offsets = [0] * target.ndim
-        offsets[dim] = tp_rank * target.shape[dim]
+        mesh = model.parallel_dims.resolve_mesh(layout.axes())
+        if mesh is not None:
+            assert mesh.mesh_dim_names is not None
+            # This does not reconstruct shard order when multiple mesh axes
+            # shard the same tensor dim. Model params today are only EP- or
+            # TP-sharded, so each tensor dim has at most one active shard axis.
+            for axis_name, axis_type in layout.per_axis_spmd_types().items():
+                if not isinstance(axis_type, spmd.Shard):
+                    continue
+                axis = axis_name.value if hasattr(axis_name, "value") else axis_name
+                if axis not in mesh.mesh_dim_names:
+                    continue
+                axis_size = mesh.size(mesh.mesh_dim_names.index(axis))
+                if axis_size <= 1:
+                    continue
+                axis_rank = mesh.get_local_rank(axis)
+                dim = axis_type.dim
+                global_shape[dim] *= axis_size
+                offsets[dim] += axis_rank * target.shape[dim]
         await ts.get(
             key,
             inplace_tensor=target,
