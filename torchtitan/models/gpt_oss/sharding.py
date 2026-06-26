@@ -95,7 +95,7 @@ def _set_gpt_oss_layer_sharding(
     attn_x_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.R)
+        else dense_activation_placement(tp=spmd.I)
     )
 
     # Attention: input x gathered to Replicate.
