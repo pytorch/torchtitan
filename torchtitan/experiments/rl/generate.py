@@ -158,10 +158,13 @@ def generate() -> None:
     )
     engine_kwargs["max_model_len"] = config.model_spec.model.max_seq_len
     engine_kwargs["max_num_seqs"] = max_num_seqs
+    if gen_config.max_num_batched_tokens is not None:
+        engine_kwargs["max_num_batched_tokens"] = gen_config.max_num_batched_tokens
     if not has_cuda_capability(9, 0):
         engine_kwargs["block_size"] = 256
     vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=gen_config.max_num_batched_tokens,
     )
     if vllm_compilation_config is not None:
         engine_kwargs["compilation_config"] = vllm_compilation_config

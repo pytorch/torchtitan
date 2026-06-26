@@ -152,10 +152,9 @@ def _prepare_generation_request_metrics(
 # vLLM's chunked-prefill chunk size (max_num_batched_tokens). "FULL" /
 # "FULL_AND_PIECEWISE" also graph prefill, whose per-step token count is bounded
 # by this, so their capture sizes must reach it (else prefill falls back to
-# eager). The generator does not override max_num_batched_tokens, so this is
-# vLLM's default.
-# TODO: this value still needs discussion -- ideally read the engine's actual
-# max_num_batched_tokens rather than hardcoding the default.
+# eager). Used as the capture cap when ``Config.max_num_batched_tokens`` is unset
+# (vLLM keeps its own default); when that field is set, its value drives both the
+# vLLM engine and the capture cap.
 _VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 
 
@@ -193,6 +192,12 @@ class VLLMCudagraphConfig:
       capture of mixed prefill+decode batches
     """
 
+    cudagraph_capture_sizes: list[int] | None = None
+    """Explicit cudagraph capture batch sizes. When ``None`` (default), sizes are
+    auto-derived: powers of 2 up to the cap, plus ``max_num_seqs`` and the cap as
+    exact sizes. When set, exactly these sizes are captured (deduped and sorted) --
+    use this to pin specific decode batch sizes and skip the power-of-2 ladder."""
+
     # TODO: Validate CUDA graph capture with MoE / Expert Parallelism.
     # MoE routing produces dynamic shapes that may conflict with full
     # CUDA graph capture despite being torch.compile-compatible
@@ -203,19 +208,20 @@ class VLLMCudagraphConfig:
     # https://github.com/pytorch/torchtitan/issues/3175
 
     def get_vllm_compilation_config(
-        self, *, max_num_seqs: int
+        self, *, max_num_seqs: int, max_num_batched_tokens: int | None = None
     ) -> CompilationConfig | None:
         """Build a vLLM ``CompilationConfig`` for ``mode``, or return ``None``
         when CUDA graphs are disabled.
 
-        Capture sizes are powers of 2 up to the cap, plus ``max_num_seqs`` and the
-        cap itself as exact sizes so the largest capture size is always the cap
+        When ``cudagraph_capture_sizes`` is set, those exact sizes are captured. Otherwise
+        sizes are auto-derived: powers of 2 up to the cap, plus ``max_num_seqs`` and
+        the cap itself as exact sizes so the largest capture size is always the cap
         (even when it is not a power of 2). The cap is ``max_num_seqs`` for
         ``FULL_DECODE_ONLY`` (decode batch == num_seqs). ``FULL`` and
         ``FULL_AND_PIECEWISE`` also graph prefill, whose per-step token count is
-        bounded by vLLM's default ``max_num_batched_tokens``, so the cap extends to
-        ``_VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS`` -- otherwise prefill chunks larger
-        than the cap fall back to eager.
+        bounded by ``max_num_batched_tokens`` (the configured value, else vLLM's
+        default ``_VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS``), so the cap extends to it
+        -- otherwise prefill chunks larger than the cap fall back to eager.
 
         All modes capture with ``mode=CompilationMode.NONE`` (no inductor compile).
         ``FULL_AND_PIECEWISE`` runs attention eager via vLLM's BREAKABLE
@@ -226,18 +232,30 @@ class VLLMCudagraphConfig:
             return None
         if max_num_seqs <= 0:
             raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}")
+        if max_num_batched_tokens is None:
+            max_num_batched_tokens = _VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS
         cap = max_num_seqs
         if self.mode in ("FULL", "FULL_AND_PIECEWISE"):
-            cap = max(cap, _VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS)
-        sizes = [1 << i for i in range(int(math.log2(cap)) + 1)]
-        # Always include max_num_seqs (decode batch) and the cap (largest prefill
-        # chunk) as exact sizes so the largest capture size is the cap even when it
-        # is not a power of 2
-        if max_num_seqs not in sizes:
-            sizes.append(max_num_seqs)
-        if cap not in sizes:
-            sizes.append(cap)
-        sizes = sorted(sizes)
+            cap = max(cap, max_num_batched_tokens)
+        if self.cudagraph_capture_sizes is not None:
+            if not self.cudagraph_capture_sizes or any(
+                s <= 0 for s in self.cudagraph_capture_sizes
+            ):
+                raise ValueError(
+                    "cudagraph.cudagraph_capture_sizes must be a non-empty list of "
+                    f"positive ints, got {self.cudagraph_capture_sizes}"
+                )
+            sizes = sorted(set(self.cudagraph_capture_sizes))
+        else:
+            sizes = [1 << i for i in range(int(math.log2(cap)) + 1)]
+            # Always include max_num_seqs (decode batch) and the cap (largest
+            # prefill chunk) as exact sizes so the largest capture size is the cap
+            # even when it is not a power of 2
+            if max_num_seqs not in sizes:
+                sizes.append(max_num_seqs)
+            if cap not in sizes:
+                sizes.append(cap)
+            sizes = sorted(sizes)
 
         return CompilationConfig(
             cudagraph_mode=self.mode,
@@ -665,6 +683,12 @@ class VLLMGenerator(Actor, Configurable):
         gpu_memory_limit: float = 0.9
         """Fraction of GPU memory to use for the vLLM engine (0.0 to 1.0)."""
 
+        max_num_batched_tokens: int | None = None
+        """vLLM chunked-prefill chunk size (max tokens scheduled per engine step).
+        ``None`` (default) leaves vLLM's own default in place. When set, it is passed
+        to the vLLM engine AND used as the ``FULL``/``FULL_AND_PIECEWISE`` cudagraph
+        capture cap, so graphed prefill chunks reach the configured size."""
+
         cudagraph: VLLMCudagraphConfig = field(default_factory=VLLMCudagraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
@@ -826,6 +850,8 @@ class VLLMGenerator(Actor, Configurable):
         )
         engine_kwargs["max_model_len"] = model_spec.model.max_seq_len
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
+        if config.max_num_batched_tokens is not None:
+            engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens
         # Continuous batching requires FCFS scheduling: admission order must equal the
         # broadcast order on every rank
         engine_kwargs["scheduling_policy"] = "fcfs"
@@ -834,6 +860,7 @@ class VLLMGenerator(Actor, Configurable):
             engine_kwargs["block_size"] = 256
         vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
             max_num_seqs=self._max_num_seqs,
+            max_num_batched_tokens=config.max_num_batched_tokens,
         )
         if vllm_compilation_config is not None:
             engine_kwargs["compilation_config"] = vllm_compilation_config
