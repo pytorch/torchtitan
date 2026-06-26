@@ -104,11 +104,7 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
     # https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/flash_attn.py
     #
     # @eager_break_during_capture makes this forward a break point for vLLM's
-    # breakable cudagraph (VLLM_USE_BREAKABLE_CUDAGRAPH=1, cudagraph_mode=PIECEWISE):
-    # the varlen kernel runs eager outside the captured graph because it reads
-    # input-dependent cu_seqlens / max_query_len that cannot be baked into a graph
-    # (issue #3709). The decorator is a no-op when breakable is disabled, so the
-    # FULL / FULL_DECODE_ONLY paths are unaffected.
+    # breakable cudagraph (VLLM_USE_BREAKABLE_CUDAGRAPH=1, cudagraph_mode=PIECEWISE)
     @eager_break_during_capture
     def forward(
         self,
