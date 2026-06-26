@@ -120,7 +120,6 @@ from torchtitan.experiments.rl.controller_metrics import (
     compute_rollout_metrics,
     MetricsTimer,
 )
-from torchtitan.experiments.rl.generator_router import GeneratorRouter, RoutingContext
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.renderer import RendererConfig
@@ -128,6 +127,10 @@ from torchtitan.experiments.rl.rollout import RolloutGroup
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
 from torchtitan.experiments.rl.rollout.types import GenerateFn
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
+from torchtitan.experiments.rl.routing.inter_generator_router import (
+    InterGeneratorRouter,
+)
+from torchtitan.experiments.rl.routing.types import RoutingContext
 from torchtitan.experiments.rl.types import Completion, TrainingBatch
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
@@ -240,8 +243,8 @@ class Controller(Configurable):
         ``num_generators * generator_world_size``.
         """
 
-        generator_router: GeneratorRouter.Config = field(
-            default_factory=GeneratorRouter.Config
+        generator_router: InterGeneratorRouter.Config = field(
+            default_factory=InterGeneratorRouter.Config
         )
         """Generator routing strategy configuration."""
 
@@ -337,7 +340,7 @@ class Controller(Configurable):
     def __init__(self, config: Config):
         self.config = config
         self.trainer: PolicyTrainer | None = None
-        self.generator_router: GeneratorRouter | None = None
+        self.generator_router: InterGeneratorRouter | None = None
         # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.
         self.start_step = 0
         self._proc_meshes = []
@@ -428,10 +431,14 @@ class Controller(Configurable):
                 "generate",
                 prompt_token_ids,
                 request_id=request_id,
+                # VLLMGenerator.generate also requires this field for its
+                # intra-mesh DP routing.
+                routing_session_id=routing_session_id,
                 sampling_config=sampling_config,
                 metrics_prefix=metrics_prefix,
+                # Load is measured as in-flight request count (one unit per call).
                 routing_ctx=RoutingContext(
-                    estimated_cost=len(prompt_token_ids),
+                    estimated_cost=1,
                     session_id=routing_session_id,
                 ),
             )

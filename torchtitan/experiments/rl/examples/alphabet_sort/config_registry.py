@@ -37,16 +37,18 @@ from torchtitan.experiments.rl.controller import (
     ValidationConfig,
 )
 from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
-from torchtitan.experiments.rl.generator_router import (
-    GeneratorRouter,
-    LeastLoadedRoutingStrategy,
-    StickySessionRoutingStrategy,
-)
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
+from torchtitan.experiments.rl.routing.inter_generator_router import (
+    InterGeneratorRouter,
+)
+from torchtitan.experiments.rl.routing.strategies import (
+    LeastLoadedRoutingStrategy,
+    StickySessionRoutingStrategy,
+)
 from torchtitan.models.gpt_oss import model_registry as gpt_oss_model_registry
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.protocols.model import ModelConfigConverter
@@ -90,7 +92,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
-        generator_router=GeneratorRouter.Config(
+        generator_router=InterGeneratorRouter.Config(
             strategy=StickySessionRoutingStrategy.Config(
                 fallback_strategy=LeastLoadedRoutingStrategy.Config()
             )
@@ -235,7 +237,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
         renderer=RendererConfig(name="gpt_oss", enable_thinking=False),
-        generator_router=GeneratorRouter.Config(
+        generator_router=InterGeneratorRouter.Config(
             strategy=StickySessionRoutingStrategy.Config(
                 fallback_strategy=LeastLoadedRoutingStrategy.Config()
             )
