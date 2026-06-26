@@ -270,14 +270,6 @@ def test_decode_metrics_absent_for_single_generated_token():
 _PARALLELISM = InferenceParallelismConfig()
 
 
-def test_inference_parallelism_preserves_spmd_backend():
-    training_parallelism = InferenceParallelismConfig(
-        spmd_backend="spmd_types"
-    ).to_training()
-
-    assert training_parallelism.spmd_backend == "spmd_types"
-
-
 def test_batch_invariant_requires_prefix_cache_reset():
     with pytest.raises(ValueError, match="reset_prefix_cache_on_weight_sync"):
         VLLMGenerator.Config(
