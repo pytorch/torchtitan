@@ -75,12 +75,12 @@ def parallelize_autoparallel_llama(
             0,
             model.config.vocab_size,
             (global_batch_size, training.seq_len),
-            device=torch.device("cuda"),
+            device=torch.accelerator.current_accelerator(),
         )
         positions = torch.arange(
             training.seq_len,
             dtype=torch.int32,
-            device=torch.device("cuda"),
+            device=torch.accelerator.current_accelerator(),
         ).repeat(global_batch_size, 1)
         return tokens, positions
 

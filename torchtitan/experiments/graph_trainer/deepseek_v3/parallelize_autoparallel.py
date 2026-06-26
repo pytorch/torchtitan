@@ -168,7 +168,7 @@ def parallelize_autoparallel_deepseekv3(
             0,
             ap_model.model_args.vocab_size,
             (global_batch_size, training.seq_len),
-            device=torch.device("cuda"),
+            device=torch.accelerator.current_accelerator(),
         )
         return tokens
 
