@@ -81,15 +81,6 @@ def _supports_spmd_typechecking(test_name: str, variant: tuple[str, ...]) -> boo
     )
 
 
-def _supports_spmd_backend(test_name: str, backend: str) -> bool:
-    """List of tests/variants to skip for an SPMD backend entirely."""
-    unsupported_tests = [
-        # deepseekv3 not enabled yet.
-        ("override_fused_grouped_experts", "spmd_types"),
-    ]
-    return (test_name, backend) not in unsupported_tests
-
-
 def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
     """Inject ``--parallelism.spmd_backend`` into every variant.
 
@@ -681,9 +672,5 @@ def build_features_test_list() -> list[OverrideDefinitions]:
 
     return [
         *[_enable_spmd_backend(t, "full_dtensor") for t in integration_tests_flavors],
-        *[
-            _enable_spmd_backend(t, "spmd_types")
-            for t in integration_tests_flavors
-            if _supports_spmd_backend(t.test_name, "spmd_types")
-        ],
+        *[_enable_spmd_backend(t, "spmd_types") for t in integration_tests_flavors],
     ]
