@@ -601,23 +601,57 @@ class DeepEPDispatchMetadata:
 
 
 class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
-    """Token dispatcher using DeepEP for efficient token dispatch/combine.
+    """Token dispatcher using DeepEP kernels, in high-throughput (HT) or low-latency (LL) mode.
 
-    Uses DeepEP library kernels (H100/NVLink Switch) instead of standard
-    all-to-all collectives. Combine is asynchronous — callers must call
-    sync_combine() before using the result.
+    HT (``low_latency=False``, default): ``buffer.dispatch``/``combine`` with dynamic shapes,
+    full autograd (training), SAC-integrated custom ops, async combine (caller syncs via
+    ``sync_combine()``). NOT cudagraph-able (host CPU sync inside the comm).
+
+    LL (``low_latency=True``): ``buffer.low_latency_dispatch``/``combine`` with a static masked
+    layout (``[num_local_experts, num_max_tokens * num_ranks, hidden]``) and a device-side
+    receive hook, so vLLM FULL_DECODE_ONLY can capture the whole MoE forward. Inference-only
+    (no autograd). Requires IBGDA; on RoCE set ``NVSHMEM_IB_GID_INDEX=3``.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseEPTokenDispatcher.Config):
-        pass
+        # False = high-throughput (training + inference, not cudagraph-able);
+        # True = low-latency masked kernels (inference-only, cudagraph-able).
+        low_latency: bool = False
+        # LL only: static per-rank dispatch capacity (MUST be >= the most tokens any rank
+        # routes in one forward) and the model hidden dim (threaded so the LL buffer is
+        # created eagerly at wire_meshes, before any cudagraph capture). Ignored under HT.
+        num_max_dispatch_tokens_per_rank: int = 128
+        ll_buffer_hidden_size: int = 0
 
     def __init__(self, config: Config):
         super().__init__(config)
-
-        # Import to register custom ops so SAC saves communication outputs
-        # instead of recomputing them. This must happen before apply_ac.
+        self.low_latency = config.low_latency
+        self.num_max_dispatch_tokens_per_rank = config.num_max_dispatch_tokens_per_rank
+        self.ll_buffer_hidden_size = config.ll_buffer_hidden_size
+        # Import the DeepEP primitives module (HT + LL live here). This also registers the HT
+        # custom ops so SAC saves communication outputs instead of recomputing them (must
+        # happen before apply_ac).
         from torchtitan.distributed.deepep import deepep  # noqa: F401
+
+    def wire_meshes(self, *, ep_mesh=None, tp_mesh=None) -> None:
+        """Wire EP/SP meshes. In LL mode, also EAGERLY create the LL buffer so its host-side
+        nvshmem_barrier_all (deep_ep ``Buffer.__init__`` -> ``runtime.sync``) runs at
+        parallelize time, never inside a CUDA graph capture. The per-call LL kernels are pure
+        device IBGDA (capturable), so capture is then clean; lazy creation could land the
+        barrier inside capture -> "team_internal.cpp: cuda failed with invalid argument".
+        """
+        super().wire_meshes(ep_mesh=ep_mesh, tp_mesh=tp_mesh)
+        if self.low_latency and ep_mesh is not None and self.ll_buffer_hidden_size > 0:
+            from torchtitan.distributed.deepep.deepep import get_buffer
+
+            get_buffer(
+                ep_mesh.get_group(),
+                low_latency=True,
+                num_max_dispatch_tokens_per_rank=self.num_max_dispatch_tokens_per_rank,
+                ll_buffer_hidden_size=self.ll_buffer_hidden_size,
+                num_experts=self.num_experts,
+            )
 
     # pyrefly: ignore [bad-override]
     def dispatch(
@@ -635,21 +669,25 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             "ExpertParallel._partition_fn() should set it."
         )
         ep_group = self.ep_mesh.get_group()
-        num_local_experts = self.num_experts // ep_group.size()
 
         from torchtitan.distributed.deepep.deepep import dispatch_tokens
 
-        hidden_states_RD, num_global_tokens_per_local_expert_e, state = dispatch_tokens(
+        routed_input_RD, num_tokens_per_expert_E, state = dispatch_tokens(
             x_TD,
             topk_expert_ids_TK,
             topk_scores_TK,
-            num_local_experts,
+            self.num_experts // ep_group.size(),
             self.num_experts,
             ep_group,
+            low_latency=self.low_latency,
+            num_max_dispatch_tokens_per_rank=self.num_max_dispatch_tokens_per_rank,
         )
 
-        metadata = DeepEPDispatchMetadata(state=state)
-        return hidden_states_RD, num_global_tokens_per_local_expert_e, metadata
+        return (
+            routed_input_RD,
+            num_tokens_per_expert_E,
+            DeepEPDispatchMetadata(state=state),
+        )
 
     # pyrefly: ignore [bad-override]
     def combine(
@@ -661,20 +699,33 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         num_local_tokens_after_padding: int,
         local_seq_len_after_padding: int,
     ) -> torch.Tensor:
-        """Combine tokens via DeepEP.
+        """Combine expert outputs back to tokens.
 
-        When sp_size == 1, combine is async — sync_combine() is deferred
-        to MoE.forward, enabling overlap with shared_experts.
-        When sp_size > 1, there is no overlap: sync is forced here because
-        the SP expansion must read the combine result before returning.
+        HT: combine is async; when sp_size == 1 the sync is DEFERRED to MoE.forward (overlap
+        with shared_experts), and when sp_size > 1 sync_combine() is forced here because the SP
+        expansion must read the result. LL: combine is synchronous, so no sync_combine().
         """
-        from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
+        assert self.ep_mesh is not None
+        ep_group = self.ep_mesh.get_group()
+
+        from torchtitan.distributed.deepep.deepep import combine_tokens
 
         # pyrefly: ignore [bad-argument-type]
-        combined_TD = combine_tokens(routed_output_RD, metadata.state)
-
+        combined_TD = combine_tokens(
+            routed_output_RD,
+            metadata.state,
+            low_latency=self.low_latency,
+            num_experts=self.num_experts,
+            num_max_dispatch_tokens_per_rank=self.num_max_dispatch_tokens_per_rank,
+            group=ep_group,
+        )
         if self.sp_size > 1:
-            sync_combine()
+            if not self.low_latency:
+                # HT combine is async; complete it before the SP read. (LL is synchronous.)
+                from torchtitan.distributed.deepep.deepep import sync_combine
+
+                sync_combine()
+            # Scatter this SP rank's local tokens to their global sequence positions (TP>1).
             out_TD = torch.zeros(
                 num_local_tokens_after_padding * self.sp_size,
                 combined_TD.shape[-1],
@@ -685,12 +736,11 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
                 combined_TD.shape[0], device=combined_TD.device
             )
             global_indices = self._sp_global_token_indices(
-                local_indices,
-                local_seq_len_after_padding,
+                local_indices, local_seq_len_after_padding
             )
             out_TD[global_indices] = combined_TD
             return out_TD
-
+        # HT sp_size==1: sync_combine() is deferred to MoE.forward. LL: already synchronous.
         return combined_TD
 
 

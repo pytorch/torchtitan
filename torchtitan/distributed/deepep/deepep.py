@@ -5,10 +5,21 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-DeepEP primitives for MoE Expert Parallel.
+DeepEP primitives for MoE Expert Parallel, in two modes (selected by
+``DeepEPTokenDispatcher.Config.low_latency`` in token_dispatcher.py):
 
-Provides low-level functions and autograd wrappers for DeepEP communication.
-Used by DeepEPTokenDispatcher in token_dispatcher.py.
+``dispatch_tokens``/``combine_tokens`` are the single entry points; their ``low_latency``
+argument selects the mode:
+
+- High-throughput (HT, ``low_latency=False``): dynamic-shape ``buffer.dispatch``/``combine``
+  with full autograd (training) and SAC-integrated custom ops. Has a CPU-waits-for-GPU
+  handoff, so it is NOT cudagraph-able.
+- Low-latency (LL, ``low_latency=True``): masked, static-shape
+  ``buffer.low_latency_dispatch``/``combine`` (slab
+  ``[num_local_experts, num_max_tokens * num_ranks, hidden]``) with a device-side receive
+  hook, so the whole MoE forward can be captured in a CUDA graph (vLLM FULL_DECODE_ONLY).
+  Inference-only (no autograd). Requires IBGDA; on grandteton RoCE set
+  ``NVSHMEM_IB_GID_INDEX=3``.
 """
 
 from dataclasses import dataclass
@@ -18,12 +29,21 @@ from torch.distributed import ProcessGroup
 from torch.utils._python_dispatch import _disable_current_modes
 
 try:
-    from deep_ep import Buffer, EventHandle, EventOverlap
+    from deep_ep import Buffer
 except ImportError as e:
     raise ImportError(
         "DeepEP is required for this module. "
         "Install from: https://github.com/deepseek-ai/deepep"
     ) from e
+
+# EventHandle/EventOverlap are used ONLY by the high-throughput (HT) custom-op autograd path,
+# not by low-latency (LL). Some deep_ep builds omit them (e.g. EventHandle is absent on the
+# inference build), so import them tolerantly -- this keeps the LL path (which needs only
+# Buffer) working. HT functions that use them run only on builds that provide them.
+try:
+    from deep_ep import EventHandle, EventOverlap
+except ImportError:
+    EventHandle = EventOverlap = None
 
 
 # Global buffer (single buffer per process, recreated if group changes)
@@ -39,7 +59,7 @@ _handle_counter: int = 0
 # shared_experts computation with combine communication.
 # This is process-local state (each GPU process has its own Python interpreter),
 # and execution is single-threaded, so a simple module variable suffices.
-_pending_combine_event: EventOverlap | None = None
+_pending_combine_event: "EventOverlap | None" = None
 
 
 def _get_next_handle_id() -> torch.Tensor:
@@ -291,29 +311,80 @@ def get_hidden_bytes(x: torch.Tensor) -> int:
     return x.size(1) * max(x.element_size(), 2)
 
 
-def get_buffer(group: ProcessGroup, hidden_bytes: int) -> Buffer:
-    """Get or create a buffer for all-to-all communication."""
+def get_buffer(
+    group: ProcessGroup,
+    *,
+    low_latency: bool = False,
+    hidden_bytes: int = 0,
+    num_max_dispatch_tokens_per_rank: int = 0,
+    ll_buffer_hidden_size: int = 0,
+    num_experts: int = 0,
+) -> Buffer:
+    """Get or create the process-global DeepEP buffer, in HT or LL mode.
+
+    HT and LL use DIFFERENT deep_ep ``Buffer`` modes, fixed at construction, so a process uses
+    one or the other; this single global holds whichever the model's dispatcher requested.
+
+    HT (``low_latency=False``): normal-mode buffer (NVL+RDMA) sized by the dispatch/combine
+    config hints from ``hidden_bytes``; recreated if the group changes or a larger size is
+    needed.
+
+    LL (``low_latency=True``): low-latency-mode buffer (RDMA-only, ``num_qps_per_rank ==
+    num_local_experts``) sized by ``get_low_latency_rdma_size_hint`` from
+    ``num_max_dispatch_tokens_per_rank``/``ll_buffer_hidden_size``/``num_experts``. CREATE-ONCE with
+    ``explicitly_destroy=True`` so ``deep_ep::Buffer::~Buffer()`` does NOT auto-run
+    ``destroy()`` (-> ``cudaDeviceSynchronize`` + host ``nvshmem_barrier_all``) on GC: that
+    barrier inside a CUDA graph capture aborts with "team_internal.cpp ... cuda failed with
+    invalid argument". We never call ``destroy()`` (leaking at process exit is fine). Matches
+    vLLM's DeepEP buffer usage.
+    """
     global _buffer
-    num_nvl_bytes, num_rdma_bytes = 0, 0
-    for config in (
-        Buffer.get_dispatch_config(group.size()),
-        Buffer.get_combine_config(group.size()),
-    ):
-        num_nvl_bytes = max(
-            config.get_nvl_buffer_size_hint(hidden_bytes, group.size()), num_nvl_bytes
+    if low_latency:
+        # LL buffer is fixed-size for the whole run -> create once and reuse.
+        if _buffer is not None:
+            return _buffer
+        num_nvl_bytes = 0
+        num_rdma_bytes = Buffer.get_low_latency_rdma_size_hint(
+            num_max_dispatch_tokens_per_rank,
+            ll_buffer_hidden_size,
+            group.size(),
+            num_experts,
         )
-        num_rdma_bytes = max(
-            config.get_rdma_buffer_size_hint(hidden_bytes, group.size()), num_rdma_bytes
+        extra_kwargs = dict(
+            low_latency_mode=True,
+            num_qps_per_rank=num_experts // group.size(),
+            explicitly_destroy=True,
         )
+    else:
+        # HT -> recreate only if the group changed or a larger buffer is needed.
+        num_nvl_bytes, num_rdma_bytes = 0, 0
+        for config in (
+            Buffer.get_dispatch_config(group.size()),
+            Buffer.get_combine_config(group.size()),
+        ):
+            num_nvl_bytes = max(
+                config.get_nvl_buffer_size_hint(hidden_bytes, group.size()),
+                num_nvl_bytes,
+            )
+            num_rdma_bytes = max(
+                config.get_rdma_buffer_size_hint(hidden_bytes, group.size()),
+                num_rdma_bytes,
+            )
+        if (
+            _buffer is not None
+            and _buffer.group == group
+            and _buffer.num_nvl_bytes >= num_nvl_bytes
+            and _buffer.num_rdma_bytes >= num_rdma_bytes
+        ):
+            return _buffer
+        extra_kwargs = {}
 
-    if (
-        _buffer is None
-        or _buffer.group != group
-        or _buffer.num_nvl_bytes < num_nvl_bytes
-        or _buffer.num_rdma_bytes < num_rdma_bytes
-    ):
-        _buffer = Buffer(group, num_nvl_bytes, num_rdma_bytes)
-
+    _buffer = Buffer(
+        group,
+        num_nvl_bytes=num_nvl_bytes,
+        num_rdma_bytes=num_rdma_bytes,
+        **extra_kwargs,
+    )
     return _buffer
 
 
@@ -390,6 +461,17 @@ class DispatchState:
     permuted_scores: torch.Tensor | None = None
 
 
+@dataclass
+class LLDispatchState:
+    """State from low-latency (LL) dispatch needed for combine."""
+
+    handle: object  # opaque DeepEP LL handle (encodes routing for combine)
+    topk_idx: torch.Tensor  # [T, K] expert ids per token
+    topk_weights: torch.Tensor  # [T, K] routing scores (applied in combine)
+    num_local_experts: int  # E (dim 0 of the masked slab)
+    tokens_per_slab: int  # M = num_max_dispatch_tokens_per_rank * num_ranks
+
+
 def dispatch_tokens(
     hidden_states: torch.Tensor,
     selected_experts_indices: torch.Tensor,
@@ -397,23 +479,78 @@ def dispatch_tokens(
     num_local_experts: int,
     num_experts: int,
     group: ProcessGroup,
-) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
-    """Dispatch tokens to experts via DeepEP.
+    *,
+    low_latency: bool = False,
+    num_max_dispatch_tokens_per_rank: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor, "DispatchState | LLDispatchState"]:
+    """Dispatch tokens to experts via DeepEP (HT by default; LL when ``low_latency=True``).
 
-    Routing scores are applied to the expert outputs in ``combine_tokens``,
-    after expert computation.
+    Routing scores are applied to the expert outputs in ``combine_tokens``, after expert
+    computation. The returned ``state`` is opaque: pass it back to ``combine_tokens`` with the
+    same ``low_latency``. The LL branch ignores ``num_local_experts``; the HT branch ignores
+    ``num_max_dispatch_tokens_per_rank``.
 
     Args:
         hidden_states: Input tokens [num_tokens, hidden_dim]
         selected_experts_indices: Expert indices for each token [num_tokens, top_k]
         top_scores: Routing scores for each token [num_tokens, top_k]
-        num_local_experts: Number of experts on this rank
+        num_local_experts: Number of experts on this rank (HT only)
         num_experts: Total number of experts across all ranks
         group: EP process group
+        low_latency: Use the masked, cudagraph-able LL kernels (inference-only)
+        num_max_dispatch_tokens_per_rank: LL static per-rank dispatch capacity
 
     Returns:
-        (permuted_tokens, tokens_per_expert, state_for_combine)
+        (routed_tokens, tokens_per_expert, state_for_combine)
     """
+    if low_latency:
+        # --- Low-latency (LL): masked, static-shape, cudagraph-able (inference-only). ---
+        # The masked slab is flattened to [E*M, hidden] with a uniform num_tokens_per_expert
+        # = [M, M, ...] so the grouped-mm expert path computes every slot statically; padding
+        # slots produce garbage that low_latency_combine discards via the handle.
+        with _disable_current_modes():
+            buffer = get_buffer(
+                group,
+                low_latency=True,
+                num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
+                ll_buffer_hidden_size=hidden_states.shape[1],
+                num_experts=num_experts,
+            )
+        # return_recv_hook=True only ISSUES the RDMA (device-side, capturable); hook() does the
+        # device-side receive. Synchronous mode would "ensure arrival" via a host NVSHMEM team
+        # barrier (cudaStreamSynchronize) that is illegal mid-capture. recv_x: [E, M, H];
+        # recv_count [E] unused (all M slots computed statically; combine masks via the handle).
+        recv_x, _recv_count, handle, _event, hook = buffer.low_latency_dispatch(
+            hidden_states,
+            selected_experts_indices,
+            num_max_dispatch_tokens_per_rank,
+            num_experts,
+            use_fp8=False,
+            async_finish=False,
+            return_recv_hook=True,
+        )
+        hook()  # device-side receive; keeps the whole comm inside the CUDA graph
+        # recv_x is a masked, static slab [num_local_experts, num_max_tokens * num_ranks,
+        # hidden] = [E, M, H]. Dim 0 IS the local-expert axis -- the kernel writes each
+        # expert's received tokens directly into that expert's own fixed [M, H] slot, so the
+        # output is ALREADY expert-grouped by construction. That is why LL needs no permute
+        # (unlike the HT path): flattening to [E*M, H] with a uniform num_tokens_per_expert
+        # = [M, M, ...] feeds the grouped-mm expert path directly. Unused padding slots hold
+        # garbage that low_latency_combine discards via the handle.
+        E, M, H = recv_x.shape
+        routed_input_RD = recv_x.reshape(E * M, H)
+        num_tokens_per_expert_E = torch.full(
+            (E,), M, dtype=torch.int32, device=hidden_states.device
+        )
+        state = LLDispatchState(
+            handle=handle,
+            topk_idx=selected_experts_indices,
+            topk_weights=top_scores,
+            num_local_experts=E,
+            tokens_per_slab=M,
+        )
+        return routed_input_RD, num_tokens_per_expert_E, state
+
     selected_experts_indices = selected_experts_indices.contiguous()
     top_scores = top_scores.contiguous()
 
@@ -429,7 +566,7 @@ def dispatch_tokens(
     # (CUDA→CPU), a MUST_SAVE op in our SAC policy. These are infrastructure
     # ops, not model compute, and must not enter SAC's FIFO cache.
     with _disable_current_modes():
-        buffer = get_buffer(group, get_hidden_bytes(hidden_states))
+        buffer = get_buffer(group, hidden_bytes=get_hidden_bytes(hidden_states))
 
         # Calculate dispatch layout before actual dispatch
         (
@@ -481,9 +618,52 @@ def dispatch_tokens(
 
 def combine_tokens(
     hidden_states: torch.Tensor,
-    state: DispatchState,
+    state: "DispatchState | LLDispatchState",
+    *,
+    low_latency: bool = False,
+    num_experts: int = 0,
+    num_max_dispatch_tokens_per_rank: int = 0,
+    group: ProcessGroup | None = None,
 ) -> torch.Tensor:
-    """Combine tokens from experts via DeepEP."""
+    """Combine expert outputs back to tokens via DeepEP (HT by default; LL when low_latency).
+
+    HT combine is async (the caller syncs via ``sync_combine()``); LL combine is synchronous.
+    ``state`` must be the object returned by ``dispatch_tokens`` with the same ``low_latency``.
+    The LL path needs ``num_experts``/``num_max_dispatch_tokens_per_rank``/``group``; HT ignores
+    them.
+
+    Args:
+        hidden_states: Expert outputs to combine.
+        state: Dispatch state from ``dispatch_tokens``.
+        low_latency: Use the LL combine kernel (inference-only).
+        num_experts: Total experts across ranks (LL only).
+        num_max_dispatch_tokens_per_rank: LL static per-rank dispatch capacity.
+        group: EP process group (LL only).
+
+    Returns:
+        Combined tokens [num_tokens, hidden_dim].
+    """
+    if low_latency:
+        assert group is not None, "group is required for low-latency combine"
+        # --- Low-latency (LL) combine: scatter expert outputs back to tokens. ---
+        # low_latency_combine applies topk_weights and gathers only the valid slots (via the
+        # handle), so the expert output passed in must be the RAW (unweighted) expert(x).
+        E, M = state.num_local_experts, state.tokens_per_slab
+        H = hidden_states.shape[-1]
+        expert_out = hidden_states.reshape(E, M, H)
+        with _disable_current_modes():
+            buffer = get_buffer(
+                group,
+                low_latency=True,
+                num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
+                ll_buffer_hidden_size=H,
+                num_experts=num_experts,
+            )
+        combined, _event, _hook = buffer.low_latency_combine(
+            expert_out, state.topk_idx, state.topk_weights.float(), state.handle
+        )
+        return combined
+
     if state.permuted_scores is not None:
         # In-place multiplication to save memory
         hidden_states = hidden_states * state.permuted_scores.to(

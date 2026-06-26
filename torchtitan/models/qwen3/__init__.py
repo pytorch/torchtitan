@@ -556,6 +556,26 @@ def _30b_a3b(
     )
 
 
+def _30b_a3b_deepep_ll(attn_backend: str) -> Qwen3Model.Config:
+    """Qwen3-30B-A3B wired for DeepEP low-latency (LL) MoE module.
+
+    Same architecture as ``_30b_a3b`` on the DeepEP backend, with each MoE token dispatcher
+    put in DeepEP LL mode (masked, static-shape, cudagraph-able). ``low_latency`` and
+    ``num_max_dispatch_tokens_per_rank`` are DeepEP-only settings (fields on
+    ``DeepEPTokenDispatcher.Config``; other backends do not have them), so they are configured
+    directly on the DeepEP dispatchers here rather than threaded through the backend-agnostic
+    model builders. ``num_max_dispatch_tokens_per_rank`` is the static per-rank dispatch
+    capacity (>= the largest per-rank token count in any forward). LL needs IBGDA; on
+    grandteton RoCE set ``NVSHMEM_IB_GID_INDEX=3``.
+    """
+    config = _30b_a3b(attn_backend, moe_comm_backend="deepep")
+    for block in config.layers:
+        token_dispatcher = block.moe.experts.token_dispatcher
+        token_dispatcher.low_latency = True
+        token_dispatcher.num_max_dispatch_tokens_per_rank = 512
+    return config
+
+
 def _235b_a22b(
     attn_backend: str,
     moe_comm_backend: str = "standard",
@@ -607,6 +627,7 @@ qwen3_configs = {
     "32B": _32b,
     "debugmodel_moe": _debugmodel_moe,
     "30B-A3B": _30b_a3b,
+    "30B-A3B-deepep-ll": _30b_a3b_deepep_ll,
     "235B-A22B": _235b_a22b,
 }
 
