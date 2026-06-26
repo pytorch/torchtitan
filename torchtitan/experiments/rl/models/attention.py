@@ -144,18 +144,11 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
                 "fused output quantization is not yet supported for FlashAttentionImpl"
             )
 
-        # Breakable cudagraph (#3709): under VLLM_USE_BREAKABLE_CUDAGRAPH,
-        # @eager_break_during_capture records this forward to replay eagerly
-        # outside the captured graph. The recorded closure pins the CAPTURE-TIME
-        # arguments, and the PIECEWISE capture is a dummy run where attn_metadata
-        # is None and the per-layer varlen metadata (cu_seqlens / block_table /
-        # max_query_len) is absent. Re-read the live per-layer metadata and
-        # kv_cache from the forward context, which vLLM refreshes before every
-        # replay, BEFORE the None/profiling check -- otherwise the recorded closure
-        # would short-circuit to output.fill_(0) on every replay (zeroed attention
-        # -> garbage). Outside breakable capture (the FULL_DECODE_ONLY path and
-        # normal eager) this returns the same objects already passed in, so it is a
-        # no-op.
+        # Breakable cudagraph: under VLLM_USE_BREAKABLE_CUDAGRAPH the recorded
+        # forward closure pins capture-time args (attn_metadata None, varlen metadata
+        # absent). Re-read live per-layer metadata + kv_cache from the forward context
+        # (vLLM refreshes them before each replay) BEFORE the None check, else replay
+        # short-circuits to output.fill_(0) (zeroed attention). No-op outside capture.
         attn_metadata, _, kv_cache, _ = get_attention_context(layer.layer_name)
 
         if attn_metadata is None:
