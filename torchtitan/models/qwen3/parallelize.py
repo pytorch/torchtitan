@@ -42,7 +42,7 @@ def parallelize_qwen3(
         compile_config.enable and "model" in compile_config.components
     )
 
-    if parallelism.spmd_backend == "full_dtensor":
+    if parallelism.spmd_backend in ("full_dtensor", "spmd_types"):
         validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)
     else:
@@ -73,7 +73,7 @@ def parallelize_qwen3(
     if skip_dp:
         return model
 
-    if parallelism.spmd_backend == "full_dtensor":
+    if parallelism.spmd_backend in ("full_dtensor", "spmd_types"):
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
         edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
     else:

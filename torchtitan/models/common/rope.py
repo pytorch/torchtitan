@@ -336,8 +336,8 @@ class CosSinRoPE(RoPE):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply cos/sin RoPE using the rotate-half convention."""
         head_dim = query.shape[-1]
-        cos = rope_cache[..., :head_dim].to(device=query.device)
-        sin = rope_cache[..., head_dim:].to(device=query.device)
+        cos = rope_cache[..., :head_dim]
+        sin = rope_cache[..., head_dim:]
         query_f = query.float()
         key_f = key.float()
         xq_out = (query_f * cos) + (CosSinRoPE._rotate_half(query_f) * sin)
