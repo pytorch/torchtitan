@@ -305,8 +305,7 @@ class PolicyTrainer(Actor, Configurable):
 
         model.to_empty(device=device_type)
         with torch.no_grad():
-            with self.train_context():
-                model.init_weights(buffer_device=None)
+            model.init_weights(buffer_device=None)
 
         return model
 
