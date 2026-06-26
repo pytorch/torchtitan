@@ -160,7 +160,7 @@ def compile_time_passes(
     the new PGs). Disable with
     ``--compile.disable_passes reassign_collective_pgs_pass``.
     """
-    from torchtitan.components.loss import ChunkedCELoss
+    from torchtitan.components.loss import ChunkedLossWrapper
     from torchtitan.experiments.graph_trainer.common_utils import (
         get_default_transformer_block_buckets,
     )
@@ -168,7 +168,7 @@ def compile_time_passes(
 
     n_layers = len(config.model_spec.model.layers)
     loss_config = getattr(config, "loss", None)
-    uses_chunked_loss = isinstance(loss_config, ChunkedCELoss.Config)
+    uses_chunked_loss = isinstance(loss_config, ChunkedLossWrapper.Config)
     moe_layer_ids = frozenset(
         i
         for i, layer_cfg in enumerate(config.model_spec.model.layers)

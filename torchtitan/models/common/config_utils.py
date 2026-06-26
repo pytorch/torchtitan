@@ -23,6 +23,7 @@ from torchtitan.models.common.attention import (
     QKVLinear,
     VarlenAttention,
 )
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
@@ -34,7 +35,15 @@ from torchtitan.models.common.token_dispatcher import (
     LocalTokenDispatcher,
     MinimalAsyncEPTokenDispatcher,
 )
+from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
+
+
+def decoder_vocab_size(model_spec: ModelSpec) -> int:
+    """Assert Decoder.Config type so lint is not annoyed."""
+    model_config = model_spec.model
+    assert isinstance(model_config, Decoder.Config)
+    return model_config.vocab_size
 
 
 def get_attention_config(
