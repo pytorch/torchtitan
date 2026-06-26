@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -20,7 +21,13 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.models.common import Conv1d, FeedForward, Linear
-from torchtitan.models.common.attention import AttentionMasksType, BaseAttention
+from torchtitan.models.common.attention import (
+    AttentionMasksType,
+    BaseAttention,
+    create_varlen_metadata_for_document,
+    VarlenAttention,
+    VarlenMetadata,
+)
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
@@ -33,6 +40,28 @@ from .vision_encoder import Qwen35VisionEncoder
 def _l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
     """L2 norm using rsqrt(sum(x²) + eps), not x/max(norm, eps) like F.normalize, to match FLA kernel."""
     return x * torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
+
+
+def _cu_seqlens_host_to_cpu_tensor(
+    cu_seqlens: torch.Tensor,
+    cu_seqlens_host: tuple[int, ...],
+) -> torch.Tensor:
+    return torch.tensor(cu_seqlens_host, dtype=cu_seqlens.dtype, device="cpu")
+
+
+def _cu_seqlens_to_list(cu_seqlens_host: tuple[int, ...]) -> list[int]:
+    return list(cu_seqlens_host)
+
+
+def _require_cu_seqlens_host(
+    cu_seqlens_host: tuple[int, ...] | None,
+) -> tuple[int, ...]:
+    if cu_seqlens_host is None:
+        raise ValueError(
+            "Qwen3.5 GatedDeltaNet varlen requires host-side cu_seqlens "
+            "metadata. Build VarlenMetadata with include_host_offsets=True."
+        )
+    return cu_seqlens_host
 
 
 def _torch_native_gated_delta(
@@ -81,6 +110,88 @@ def _torch_native_gated_delta(
         output[:, t] = torch.einsum("bhkv,bhk->bhv", state, q_t)
 
     return output.to(dtype)
+
+
+def _torch_native_gated_delta_varlen(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    cu_seqlens_host: tuple[int, ...],
+) -> torch.Tensor:
+    outputs: list[torch.Tensor] = []
+    cu_seqlens_list = _cu_seqlens_to_list(cu_seqlens_host)
+    for start, end in zip(cu_seqlens_list[:-1], cu_seqlens_list[1:], strict=False):
+        outputs.append(
+            _torch_native_gated_delta(
+                q[:, start:end],
+                k[:, start:end],
+                v[:, start:end],
+                g[:, start:end],
+                beta[:, start:end],
+            )
+        )
+    return torch.cat(outputs, dim=1)
+
+
+def _torch_native_causal_conv1d_varlen(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    conv_kernel_size: int,
+    cu_seqlens_host: tuple[int, ...],
+) -> torch.Tensor:
+    outputs: list[torch.Tensor] = []
+    cu_seqlens_list = _cu_seqlens_to_list(cu_seqlens_host)
+    for start, end in zip(cu_seqlens_list[:-1], cu_seqlens_list[1:], strict=False):
+        x_segment = F.pad(
+            x[:, start:end].transpose(1, 2),
+            [conv_kernel_size - 1, 0],
+        )
+        output = F.conv1d(
+            x_segment,
+            weight,
+            None,
+            groups=weight.size(0),
+        ).transpose(1, 2)
+        outputs.append(output)
+    return F.silu(torch.cat(outputs, dim=1))
+
+
+def _causal_conv1d_varlen(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    conv_kernel_size: int,
+    cu_seqlens_host: tuple[int, ...],
+    cu_seqlens_cpu: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if x.is_cuda:
+        from fla.modules.conv.causal_conv1d import causal_conv1d as _fla_causal_conv1d
+
+        if cu_seqlens_cpu is None:
+            raise ValueError(
+                "Qwen3.5 FLA varlen conv requires a CPU cu_seqlens tensor."
+            )
+        output, _ = _fla_causal_conv1d(
+            x=x,
+            weight=weight.squeeze(1),
+            bias=None,
+            activation="silu",
+            backend="triton",
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+        )
+        return output
+    return _torch_native_causal_conv1d_varlen(
+        x,
+        weight,
+        cu_seqlens,
+        conv_kernel_size,
+        cu_seqlens_host,
+    )
 
 
 class SharedExperts(FeedForward):
@@ -185,6 +296,10 @@ class GatedDeltaKernel(Module):
         v: torch.Tensor,
         g: torch.Tensor,
         beta: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor | None = None,
+        cu_seqlens_host: tuple[int, ...] | None = None,
+        cu_seqlens_cpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Expand Q/K heads to match V when n_value_heads > n_key_heads
         if q.shape[2] != v.shape[2]:
@@ -194,9 +309,30 @@ class GatedDeltaKernel(Module):
             k = k.repeat_interleave(repeat, dim=2)
 
         if self.backend == "torch_native":
-            return _torch_native_gated_delta(q, k, v, g, beta)
+            if cu_seqlens is None:
+                return _torch_native_gated_delta(q, k, v, g, beta)
+            cu_seqlens_host = _require_cu_seqlens_host(cu_seqlens_host)
+            return _torch_native_gated_delta_varlen(
+                q,
+                k,
+                v,
+                g,
+                beta,
+                cu_seqlens,
+                cu_seqlens_host,
+            )
+
+        if cu_seqlens is not None and q.shape[0] != 1:
+            raise ValueError(
+                f"Gated DeltaNet varlen kernels require flattened inputs with "
+                f"batch size 1, got batch size {q.shape[0]}."
+            )
 
         if self.backend == "fla_chunked":
+            if cu_seqlens is not None and cu_seqlens_cpu is None:
+                raise ValueError(
+                    "Qwen3.5 FLA varlen DeltaNet requires a CPU cu_seqlens tensor."
+                )
             result = _fla_chunk_gated_delta_rule(
                 q,
                 k,
@@ -204,6 +340,8 @@ class GatedDeltaKernel(Module):
                 g,
                 beta,
                 use_qk_l2norm_in_kernel=True,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_cpu=cu_seqlens_cpu,
             )
         elif self.backend == "fla_fused_recurrent":
             result = _fla_fused_recurrent_gated_delta_rule(
@@ -213,6 +351,7 @@ class GatedDeltaKernel(Module):
                 g,
                 beta=beta,
                 use_qk_l2norm_in_kernel=True,
+                cu_seqlens=cu_seqlens,
             )
         else:
             raise ValueError(
@@ -228,8 +367,12 @@ class GatedDeltaNet(Module):
     """Gated DeltaNet linear attention.
 
     Uses recurrent state + gated delta rule instead of softmax attention.
-    No RoPE, no attention masks, different head structure from standard
-    attention.
+    No RoPE, different head structure from standard attention. When varlen
+    metadata (``VarlenMetadata``) is provided — i.e. under the ``varlen``
+    attention backend — conv and recurrent state are reset at document
+    boundaries. Under other backends (e.g. ``flex``, which passes a
+    ``BlockMask``) no reset occurs and the packed sequence is processed as a
+    single continuous stream.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -279,20 +422,78 @@ class GatedDeltaNet(Module):
         self.norm = config.norm.build()
         self.out_proj = config.out_proj.build()
 
-    def _causal_conv(self, x: torch.Tensor, conv: nn.Module) -> torch.Tensor:
+    @staticmethod
+    def _local_map_conv(
+        x: DTensor,
+        conv: Conv1d,
+        conv_fn: Callable[..., torch.Tensor],
+        *extra_args: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run a depthwise, channel-sharded conv on local shards via local_map.
+
+        ``conv_fn`` receives the local (x, weight, *extra_args) tensors. Trailing
+        ``extra_args`` (e.g. ``cu_seqlens``) are plain replicated tensors passed
+        through with a ``None`` placement (unmapped). Input is channel-sharded
+        and the weight is ``Shard(0)``; DTensor-ness and gradient placements are
+        restored explicitly.
+
+        TODO: Remove once the DTensor Conv1d dispatch fix for sharded groups
+        lands in a released torch.
+        """
+        x_plc = x.placements
+        w = conv.weight
+        w_plc = w.placements  # pyrefly: ignore [missing-attribute]
+        extra_plc = (None,) * len(extra_args)
+        conv_dt = local_map(
+            conv_fn,
+            out_placements=(x_plc,),
+            in_placements=(x_plc, w_plc, *extra_plc),
+            in_grad_placements=(x_plc, w_plc, *extra_plc),
+            device_mesh=x.device_mesh,
+        )
+        return conv_dt(x, w, *extra_args)  # pyrefly: ignore
+
+    def _causal_conv(
+        self,
+        x: torch.Tensor,
+        conv: Conv1d,
+        cu_seqlens: torch.Tensor | None = None,
+        cu_seqlens_host: tuple[int, ...] | None = None,
+        cu_seqlens_cpu: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if cu_seqlens is not None:
+            cu_seqlens_host = _require_cu_seqlens_host(cu_seqlens_host)
+            if isinstance(x, DTensor):
+
+                def _conv_varlen(
+                    x_local: torch.Tensor,
+                    w_local: torch.Tensor,
+                    cu_seqlens_local: torch.Tensor,
+                ) -> torch.Tensor:
+                    return _causal_conv1d_varlen(
+                        x_local,
+                        w_local,
+                        cu_seqlens_local,
+                        self.conv_kernel_size,
+                        cu_seqlens_host,
+                        cu_seqlens_cpu,
+                    )
+
+                return self._local_map_conv(x, conv, _conv_varlen, cu_seqlens)
+            return _causal_conv1d_varlen(
+                x,
+                conv.weight,
+                cu_seqlens,
+                self.conv_kernel_size,
+                cu_seqlens_host,
+                cu_seqlens_cpu,
+            )
+
         x = F.pad(x.transpose(1, 2), [self.conv_kernel_size - 1, 0])
         if isinstance(x, DTensor):
-            # TODO: Remove once the DTensor Conv1d dispatch fix for sharded
-            # groups lands in a released torch. local_map runs the conv on
-            # local shards (channel-sharded input + Shard(0) weight) and
-            # restores DTensor-ness, with explicit gradient placements.
-            x_plc = x.placements
-            w = conv.weight
-            w_plc = w.placements  # pyrefly: ignore [missing-attribute]
 
             def _conv(x_local: torch.Tensor, w_local: torch.Tensor) -> torch.Tensor:
                 # groups == local out-channels (depthwise, channel-sharded)
-                # pyrefly: ignore [no-matching-overload]
                 return F.conv1d(
                     x_local,
                     w_local,
@@ -303,35 +504,71 @@ class GatedDeltaNet(Module):
                     w_local.size(0),
                 )
 
-            conv_dt = local_map(
-                _conv,
-                out_placements=(x_plc,),
-                in_placements=(x_plc, w_plc),
-                in_grad_placements=(x_plc, w_plc),
-                device_mesh=x.device_mesh,
-            )
-            x = conv_dt(x, w)  # pyrefly: ignore
+            x = self._local_map_conv(x, conv, _conv)
         else:
             x = conv(x)
         return F.silu(x).transpose(1, 2)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        attention_masks: AttentionMasksType | None = None,
+    ) -> torch.Tensor:
         bs, seqlen, _ = x.shape
+        cu_seqlens = None
+        cu_seqlens_host = None
+        cu_seqlens_cpu = None
+        if isinstance(attention_masks, VarlenMetadata):
+            cu_seqlens = attention_masks.cu_seq_q
+            cu_seqlens_host = _require_cu_seqlens_host(attention_masks.cu_seq_q_host)
+            if x.is_cuda:
+                cu_seqlens_cpu = _cu_seqlens_host_to_cpu_tensor(
+                    cu_seqlens,
+                    cu_seqlens_host,
+                )
+
+        if cu_seqlens is None:
+            kernel_bs, kernel_seqlen = bs, seqlen
+        else:
+            kernel_bs, kernel_seqlen = 1, bs * seqlen
+
+        def _maybe_flatten(tensor: torch.Tensor) -> torch.Tensor:
+            if cu_seqlens is None:
+                return tensor
+            return tensor.reshape(1, bs * seqlen, *tensor.shape[2:])
 
         # Shapes:
         #   xq, xk: (bs, seqlen, n_key_heads * key_head_dim)
         #   xv, xz: (bs, seqlen, n_value_heads * value_head_dim)
         #   xa, xb: (bs, seqlen, n_value_heads)
-        xq = self._causal_conv(self.in_proj_q(x), self.conv_q)
-        xk = self._causal_conv(self.in_proj_k(x), self.conv_k)
-        xv = self._causal_conv(self.in_proj_v(x), self.conv_v)
-        xz = self.in_proj_z(x)
-        xa = self.in_proj_a(x)
-        xb = self.in_proj_b(x)
+        xq = self._causal_conv(
+            _maybe_flatten(self.in_proj_q(x)),
+            self.conv_q,
+            cu_seqlens,
+            cu_seqlens_host,
+            cu_seqlens_cpu,
+        )
+        xk = self._causal_conv(
+            _maybe_flatten(self.in_proj_k(x)),
+            self.conv_k,
+            cu_seqlens,
+            cu_seqlens_host,
+            cu_seqlens_cpu,
+        )
+        xv = self._causal_conv(
+            _maybe_flatten(self.in_proj_v(x)),
+            self.conv_v,
+            cu_seqlens,
+            cu_seqlens_host,
+            cu_seqlens_cpu,
+        )
+        xz = _maybe_flatten(self.in_proj_z(x))
+        xa = _maybe_flatten(self.in_proj_a(x))
+        xb = _maybe_flatten(self.in_proj_b(x))
 
-        xq = xq.view(bs, seqlen, -1, self.key_head_dim)
-        xk = xk.view(bs, seqlen, -1, self.key_head_dim)
-        xv = xv.view(bs, seqlen, -1, self.value_head_dim)
+        xq = xq.view(kernel_bs, kernel_seqlen, -1, self.key_head_dim)
+        xk = xk.view(kernel_bs, kernel_seqlen, -1, self.key_head_dim)
+        xv = xv.view(kernel_bs, kernel_seqlen, -1, self.value_head_dim)
 
         # Gating signals, shape (bs, seqlen, n_value_heads):
         #   g:    decay rate per head, always negative
@@ -339,11 +576,22 @@ class GatedDeltaNet(Module):
         g = -torch.exp(self.A_log.float()) * F.softplus(xa.float() + self.dt_bias)
         beta = torch.sigmoid(xb)
 
-        output = self.kernel(xq, xk, xv, g, beta)
+        output = self.kernel(
+            xq,
+            xk,
+            xv,
+            g,
+            beta,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_host=cu_seqlens_host,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+        )
 
-        xz = xz.view(bs, seqlen, -1, self.value_head_dim)
+        xz = xz.view(kernel_bs, kernel_seqlen, -1, self.value_head_dim)
         output = self.norm(output, xz)
 
+        # Merge value heads and restore (bs, seqlen); under varlen the kernel ran
+        # on a flattened (1, bs*seqlen) layout, so this also unpacks the batch.
         output = output.reshape(bs, seqlen, -1)
         return self.out_proj(output)
 
@@ -488,7 +736,7 @@ class Qwen35TransformerBlock(Module):
         if self.full_attn:
             h = self.attn(h, attention_masks, positions)
         else:
-            h = self.attn(h)
+            h = self.attn(h, attention_masks)
         x = x + h
 
         h = self.ffn_norm(x)
@@ -555,7 +803,11 @@ class Qwen35Model(Decoder):
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
                 dn_cfg = next(
-                    (l.delta_net for l in self.layers if l.delta_net is not None),
+                    (
+                        layer_cfg.delta_net
+                        for layer_cfg in self.layers
+                        if layer_cfg.delta_net is not None
+                    ),
                     None,
                 )
                 if dn_cfg is not None:
@@ -596,6 +848,20 @@ class Qwen35Model(Decoder):
 
         self.vision_encoder = config.vision_encoder.build()
         self.spatial_merge_size = config.vision_encoder.spatial_merge_size
+
+    def get_attention_masks(
+        self,
+        positions: torch.Tensor,
+    ) -> AttentionMasksType | None:
+        attn_config = self.config.first_attention
+        if attn_config is not None and isinstance(
+            attn_config.inner_attention, VarlenAttention.Config
+        ):
+            return create_varlen_metadata_for_document(
+                positions,
+                include_host_offsets=True,
+            )
+        return super().get_attention_masks(positions)
 
     def _get_vision_positions(
         self,

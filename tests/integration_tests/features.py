@@ -81,6 +81,13 @@ def _supports_spmd_typechecking(test_name: str, variant: tuple[str, ...]) -> boo
     )
 
 
+def _is_qwen3_5_flavor(t: OverrideDefinitions) -> bool:
+    """True if any variant runs the qwen3_5 module (see _enable_spmd_backend)."""
+    return any(
+        any("--module qwen3_5" in arg for arg in variant) for variant in t.override_args
+    )
+
+
 def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
     """Inject ``--parallelism.spmd_backend`` into every variant.
 
@@ -96,7 +103,17 @@ def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefini
         has_cp = any("context_parallel_degree" in arg for arg in variant)
         has_compile = any("compile.enable" in arg for arg in variant)
         has_ac_mode = any("activation-checkpoint:" in arg for arg in variant)
-        if not _is_pp_only(variant, t.ngpu) and not (has_cp and has_compile):
+        # Qwen3.5 only runs on the default SPMD backend: qwen3_5/parallelize.py
+        # raises NotImplementedError under full_dtensor, and the GatedDeltaNet
+        # varlen path is not yet validated under spmd_types. The flavor is also
+        # excluded from the spmd_types pass below so it is not duplicated.
+        # TODO: drop this once qwen3_5 supports the full_dtensor backend.
+        has_qwen3_5 = any("--module qwen3_5" in arg for arg in variant)
+        if (
+            not has_qwen3_5
+            and not _is_pp_only(variant, t.ngpu)
+            and not (has_cp and has_compile)
+        ):
             prefix.append(f"--parallelism.spmd_backend {backend}")
             if (
                 backend == "spmd_types"
@@ -668,9 +685,44 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=1,
             timeout=30,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module qwen3_5 --config qwen35_debugmodel_varlen_attn",
+                    "--parallelism.data_parallel_shard_degree=4",
+                    "--training.steps 10",
+                    "--comm.train_timeout_seconds 600",
+                    "activation-checkpoint:selective",
+                ]
+            ],
+            "Qwen3.5 FSDP+VARLEN_ATTN + per op SAC",
+            "qwen3_5_fsdp+varlen_attn+per_op_sac",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module qwen3_5 --config qwen35_debugmodel_varlen_attn",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.data_parallel_shard_degree 1",
+                    "--training.steps 10",
+                    "--comm.train_timeout_seconds 600",
+                    "activation-checkpoint:selective",
+                ]
+            ],
+            "Qwen3.5 TP+VARLEN_ATTN + per op SAC",
+            "qwen3_5_tp+varlen_attn+per_op_sac",
+            ngpu=2,
+            skip_rocm_test=True,
+        ),
     ]
 
     return [
         *[_enable_spmd_backend(t, "full_dtensor") for t in integration_tests_flavors],
-        *[_enable_spmd_backend(t, "spmd_types") for t in integration_tests_flavors],
+        *[
+            _enable_spmd_backend(t, "spmd_types")
+            for t in integration_tests_flavors
+            if not _is_qwen3_5_flavor(t)
+        ],
     ]

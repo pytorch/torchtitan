@@ -77,6 +77,7 @@ class VarlenMetadata(NamedTuple):
     cu_seq_k: torch.Tensor
     max_q: int
     max_k: int
+    cu_seq_q_host: tuple[int, ...] | None = None
 
 
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
@@ -586,6 +587,8 @@ def create_attention_mask(*args, **kwargs):
 
 def create_varlen_metadata_for_document(
     positions: torch.Tensor,
+    *,
+    include_host_offsets: bool = False,
 ) -> VarlenMetadata:
     """Creates cumulative sequence length indices needed for variable length attention.
 
@@ -595,9 +598,12 @@ def create_varlen_metadata_for_document(
     Args:
         positions: Per-token position tensor with shape ``[b, s]``. Positions
             reset to 0 at each document start.
+        include_host_offsets: Also materialize host-side cumulative sequence
+            offsets for kernels that need CPU metadata.
 
     Returns:
-        VarlenMetadata containing cumulative sequence length indices for q, k, and max_seq_len
+        VarlenMetadata containing cumulative sequence length indices for q, k,
+        and max_seq_len.
     """
     batch_size, seq_len = positions.shape
     device = positions.device
@@ -629,11 +635,16 @@ def create_varlen_metadata_for_document(
         # pyrefly: ignore[bad-assignment]
         max_seqlen = all_seq_lengths.max().item()
 
+    packed_cu_seqlens_host = (
+        tuple(packed_cu_seqlens.tolist()) if include_host_offsets else None
+    )
+
     return VarlenMetadata(
         cu_seq_q=packed_cu_seqlens,
         cu_seq_k=packed_cu_seqlens,
         max_q=max_seqlen,
         max_k=max_seqlen,
+        cu_seq_q_host=packed_cu_seqlens_host,
     )
 
 
