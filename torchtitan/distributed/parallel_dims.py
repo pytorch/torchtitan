@@ -342,6 +342,10 @@ class ParallelDims:
         }
         if spmd_dense_mesh_for_fwdbwd is not None:
             self._global_meshes["spmd_dense_for_fwdbwd"] = spmd_dense_mesh_for_fwdbwd
+        if self.spmd_backend == "spmd_types" and self.ep > 1:
+            self._global_meshes["spmd_sparse_for_fwdbwd"] = full_sparse_mesh[
+                "dp_replicate", "efsdp", "ep"
+            ]
         self._single_axis_meshes = {
             "pp": dataloading_mesh["pp"],
             "batch": dataloading_mesh["batch"],
@@ -508,6 +512,18 @@ class ParallelDims:
         if not self._spmd_meshes:
             self.build_mesh()
         return self._spmd_meshes
+
+    def spmd_dense_mesh(self) -> DeviceMesh:
+        """Dense SPMD mesh used for forward/backward typechecking."""
+        if not self._single_axis_meshes:
+            self.build_mesh()
+        return self._global_meshes["spmd_dense_for_fwdbwd"]
+
+    def spmd_sparse_mesh(self) -> DeviceMesh | None:
+        """Sparse SPMD mesh used inside expert dispatch."""
+        if not self._single_axis_meshes:
+            self.build_mesh()
+        return self._global_meshes.get("spmd_sparse_for_fwdbwd")
 
     def get_activated_mesh(self, axes: list[str]) -> DeviceMesh | None:
         """Submesh of ``axes`` filtered to those actually enabled in this run.

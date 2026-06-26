@@ -564,11 +564,13 @@ class Module(nn.Module, Configurable):
 
                 # SPMD source placements are part of the config contract: assert
                 # before redistributing so typechecking catches placement mismatch.
-                spmd.assert_type(
-                    value,
-                    src_spmd_layout.axis_types,
-                    src_spmd_layout.partition_spec,
-                )
+                # Gate assertion so compile doesn't error.
+                if spmd.is_type_checking():
+                    spmd.assert_type(
+                        value,
+                        src_spmd_layout.axis_types,
+                        src_spmd_layout.partition_spec,
+                    )
 
                 if dst_spmd_layout is None:
                     new_kwargs[name] = value
@@ -658,11 +660,13 @@ class Module(nn.Module, Configurable):
                 )
             # SPMD source placements are part of the config contract: assert
             # before redistributing so typechecking catches placement mismatch.
-            spmd.assert_type(
-                outputs,
-                out_src.axis_types,
-                out_src.partition_spec,
-            )
+            # Gate assertion so compile doesn't error.
+            if spmd.is_type_checking():
+                spmd.assert_type(
+                    outputs,
+                    out_src.axis_types,
+                    out_src.partition_spec,
+                )
 
             if out_dst is None:
                 return outputs

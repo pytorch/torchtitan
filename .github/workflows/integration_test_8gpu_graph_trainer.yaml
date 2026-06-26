@@ -69,14 +69,11 @@ jobs:
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
         python -m torchtitan.experiments.graph_trainer.tests.integration_tests --test_suite graph_trainer_default --gpu_arch_type cuda $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
-        python -m torchtitan.experiments.graph_trainer.tests.integration_tests --test_suite graph_trainer_autoparallel --gpu_arch_type cuda $RUNNER_TEMP/artifacts-to-be-uploaded/autoparallel --ngpu 4
 
 
-        # Run the numerics unit tests. Standard MoE and DeepSeek V3 AutoParallel
-        # tests run in the H100 workflow.
+        # Run the numerics unit tests. Standard MoE tests run in the H100 workflow.
         pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestSimpleFSDP -v
         pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics -v -k "dense"
-        pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerAutoParallelNumerics::test_llama3_aot_fx_trace_autoparallel_vs_eager -v
 
         # Run the graph passes unit tests
         pytest torchtitan/experiments/graph_trainer/tests/test_passes.py -v
@@ -96,5 +93,11 @@ jobs:
         # Run bitwise deterministic and SAC peak-memory guardrail tests
         pytest torchtitan/experiments/graph_trainer/tests/test_bitwise_deterministic.py -v
         pytest torchtitan/experiments/graph_trainer/tests/test_sac_peak_memory.py -v
+
+        # AutoParallel depends on a separately installed package that can break
+        # on PyTorch internal API movement. Keep it last so the graph_trainer
+        # tests above still produce signal when that dependency is stale.
+        python -m torchtitan.experiments.graph_trainer.tests.integration_tests --test_suite graph_trainer_autoparallel --gpu_arch_type cuda $RUNNER_TEMP/artifacts-to-be-uploaded/autoparallel --ngpu 4
+        pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerAutoParallelNumerics::test_llama3_aot_fx_trace_autoparallel_vs_eager -v
 
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint

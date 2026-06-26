@@ -13,11 +13,15 @@ import torch.nn as nn
 from torch.fx.traceback import annotate_fn
 
 from torchtitan.experiments.graph_trainer.common_utils import (
+    _maybe_materialize_grad_for_param_layout,
     _MODULE_FQN,
     log_timer,
     maybe_register_blockmask_pytree_node,
 )
-from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.configs import (
+    GraphTrainerCompileConfig,
+    trace_input_preparer_keys,
+)
 from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
@@ -32,6 +36,8 @@ from torchtitan.experiments.graph_trainer.registry import (
     PASS_PIPELINE_REGISTRY,
     POST_INIT_HOOKS,
     PRE_TRAIN_STEP_HOOKS,
+    TRACE_CALL_INPUT_PREPARERS,
+    TRACE_INPUT_PREPARERS,
 )
 from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
@@ -201,7 +207,12 @@ class GraphTrainer(Trainer):
             else:
                 fwd_bwd_fn = make_fwd_bwd_step(model, self.loss_fn)
                 with self.train_context(), log_timer("minimal_fx_tracer"):
-                    self._traced_step = minimal_fx_tracer(fwd_bwd_fn, module=model)(
+                    self._traced_step = minimal_fx_tracer(
+                        fwd_bwd_fn,
+                        module=model,
+                        prepare_inputs=self._prepare_trace_inputs,
+                        prepare_call_inputs=self._prepare_trace_call_inputs,
+                    )(
                         inputs,
                         labels,
                         global_valid_tokens,
@@ -213,7 +224,11 @@ class GraphTrainer(Trainer):
                     self.config.compile.pass_pipeline,
                     construct_default_graph_passes,
                 )
-                passes = pipeline_fn(self._traced_step, self.config)
+                passes = pipeline_fn(
+                    self._traced_step,
+                    self.config,
+                    parallel_dims=self.parallel_dims,
+                )
 
                 self._traced_step.gm = apply_graph_passes(
                     self._traced_step.gm,
@@ -232,12 +247,36 @@ class GraphTrainer(Trainer):
         grads = outputs[1:]
 
         for param, grad in zip(params, grads, strict=True):
+            grad = _maybe_materialize_grad_for_param_layout(param, grad)
             if param.grad is None:
                 param.grad = grad
             else:
                 param.grad += grad
 
         return loss
+
+    def _prepare_trace_inputs(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> None:
+        for pass_name in trace_input_preparer_keys(self.config.compile):
+            prepare = TRACE_INPUT_PREPARERS.get(pass_name)
+            if prepare is not None:
+                prepare(self.config.compile, args, kwargs)
+
+    def _prepare_trace_call_inputs(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        for pass_name in trace_input_preparer_keys(self.config.compile):
+            prepare = TRACE_CALL_INPUT_PREPARERS.get(pass_name)
+            if prepare is not None:
+                prepared = prepare(self.config.compile, args, kwargs)
+                if prepared is not None:
+                    args, kwargs = prepared
+        return args, kwargs
 
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
