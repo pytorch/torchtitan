@@ -1,16 +1,9 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """Config assembly + flavors for the path ViT, riding PathTrainer.
 
 The muP recipe (readout init/mult, eta/m optimizer groups, qk-norm, scheduler, widths, training) is
-carried over verbatim from experiments/plan_vit/config_registry.py so it stays identical to the proven
-config. The only change is the trainer wiring: these flavors return PathTrainer.Config (not the standalone
-PlanViTTrainer.Config) with the path-specifics turned off in config -- the driving validator is disabled
-and the checkpoint manager is the plain CheckpointManager with onnx export off.
+assembled here. These flavors return PathTrainer.Config with the path-specifics turned off in config
+-- the driving validator is disabled and the checkpoint manager is the plain CheckpointManager with
+onnx export off.
 
 Width flavors scale n_head at fixed head_dim=64 (the clean muP axis); base = w256. Two cameras are
 channel-stacked into in_channels=24 (no VAE).
@@ -66,7 +59,7 @@ PATCH_SIZE = (1, 16, 8)
 IN_CHANNELS = 24  # two cameras (IMG + BIG_IMG), 12 YUV channels each, channel-stacked
 PLAN_SIZE = 15 * 33 * 2  # 990, laplacian mu+log-sigma
 BASE_WIDTH = 256
-PLAN_VIT_WIDTHS = {"w128": 128, "w256": 256, "w512": 512, "w1024": 1024, "w2048": 2048}
+VIT_WIDTHS = {"w128": 128, "w256": 256, "w512": 512, "w1024": 1024, "w2048": 2048}
 
 
 def _lin(in_f: int, out_f: int, *, std: float, bias: bool = True) -> Linear.Config:
@@ -126,7 +119,7 @@ def _mlp(dim: int, *, mup: bool, mult: float = 4.0) -> PlanViTMLP.Config:
 
 
 def _model_config(flavor: str, *, mup: bool, qk_norm: bool = True) -> PlanViT.Config:
-    n_embd = PLAN_VIT_WIDTHS[flavor]
+    n_embd = VIT_WIDTHS[flavor]
     n_head = n_embd // HEAD_DIM
     pt, ph, pw = PATCH_SIZE
     patch_dim = pt * IN_CHANNELS * ph * pw
@@ -179,8 +172,8 @@ def vit_model_registry(flavor: str, *, mup: bool) -> ModelSpec:
 
 
 STEPS = 512  # per-run step budget; override with training.steps=N on the CLI
-# learning rate is the muTransfer sweep axis: one run per (flavor, lr); set with `-e PLAN_VIT_LR=...`
-SWEEP_LR = float(os.getenv("PLAN_VIT_LR", "3e-4"))
+# learning rate is the muTransfer sweep axis: one run per (flavor, lr); set with `-e VIT_LR=...`
+SWEEP_LR = float(os.getenv("VIT_LR", "3e-4"))
 # hidden matrix weights get muP lr eta/m; input embed, readout, norms, biases get base eta
 # (readout is fan_in-infinite only, so Adam treats it vector-like -> base lr, not eta/m)
 MUP_PATTERN = (
@@ -226,7 +219,7 @@ def _dataloader_config(*, split: str) -> PathDataLoader.Config:
 def _optimizer_config(
     flavor: str, *, mup: bool, lr: float, wd: float
 ) -> OptimizersContainer.Config:
-    m = PLAN_VIT_WIDTHS[flavor] / BASE_WIDTH
+    m = VIT_WIDTHS[flavor] / BASE_WIDTH
     common = {"betas": (0.9, 0.95), "eps": 1e-8, "weight_decay": wd}
     if mup:
         groups = [

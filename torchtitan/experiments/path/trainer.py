@@ -28,31 +28,24 @@ class PathTrainer(Trainer):
         miniray: dict[str, Any] = field(default_factory=dict)
         fps: int
         # single-frame plan supervision: slice the dense plan target to the last frame before the
-        # loss. off by default (dense; convnext/worldmodel unchanged); on for the single-frame plan_vit.
+        # loss. off by default (dense; convnext/worldmodel unchanged); on for the single-frame path vit.
         plan_target_last_frame: bool = False
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)
             if self.codedir:
                 self.miniray = {**self.miniray, "codedir": self.codedir}
-                self.validator.miniray = {
-                    **self.validator.miniray,
-                    "codedir": self.codedir,
-                }
+                self.validator.miniray = {**self.validator.miniray, "codedir": self.codedir}
 
     def __init__(self, config: Config):
         super().__init__(config)
         training_id = os.getenv("REPORTERV2_TRAINING_ID") or "local"
-        self.unique_segment_counter = StringUniqueCounter(
-            f"unique_ids:{training_id}:path:train"
-        )
+        self.unique_segment_counter = StringUniqueCounter(f"unique_ids:{training_id}:path:train")
         self.loss_fn.to(self.device)
 
     def batch_generator(
         self,
-        data_iterable: Iterable[
-            tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
-        ],
+        data_iterable: Iterable[tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]],
     ) -> Iterator[tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]]:
         data_iterator = iter(data_iterable)
         while True:
@@ -61,12 +54,8 @@ class PathTrainer(Trainer):
                 input_dict, targets = next(data_iterator)
             except StopIteration as ex:
                 raise DataloaderExhaustedError() from ex
-            self.metrics_processor.ntokens_since_last_log += next(
-                iter(input_dict.values())
-            ).shape[0]
-            self.metrics_processor.data_loading_times.append(
-                time.perf_counter() - data_load_start
-            )
+            self.metrics_processor.ntokens_since_last_log += next(iter(input_dict.values())).shape[0]
+            self.metrics_processor.data_loading_times.append(time.perf_counter() - data_load_start)
             yield input_dict, targets
 
     @sl.log_trace_span("post_dataloading_process")
@@ -91,7 +80,7 @@ class PathTrainer(Trainer):
         with self.train_context():
             pred = self.model_parts[0](inputs)
             if self.config.plan_target_last_frame:
-                # single-frame plan models (plan_vit) predict the last frame's plan; supervise that frame
+                # single-frame plan models predict the last frame's plan; supervise that frame
                 labels = {**labels, "plan": labels["plan"][:, -1]}
             loss_vec, metrics = self.loss_fn(pred, labels)
             loss = loss_vec.sum() / local_samples
@@ -101,9 +90,7 @@ class PathTrainer(Trainer):
 
     def train_step(
         self,
-        data_iterator: Iterator[
-            tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
-        ],
+        data_iterator: Iterator[tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]],
     ) -> None:
         self.optimizers.zero_grad()
         lr_metrics = self.lr_schedulers.get_metrics()
@@ -118,9 +105,7 @@ class PathTrainer(Trainer):
                 input_dict, targets = next(data_iterator)
                 local_samples += next(iter(input_dict.values())).shape[0]
                 if "info" in input_dict:
-                    step_segment_names.update(
-                        segment_names_from_info(input_dict["info"])
-                    )
+                    step_segment_names.update(segment_names_from_info(input_dict["info"]))
                 microbatches.append((input_dict, targets))
         sl.log_trace_scalar({"local_samples": int(local_samples)})
 
@@ -129,9 +114,7 @@ class PathTrainer(Trainer):
             global_samples = dist_utils.dist_sum(local_samples, batch_mesh)
         else:
             global_samples = local_samples.float()
-        global_samples = torch.as_tensor(
-            global_samples, dtype=torch.float32, device=self.device
-        )
+        global_samples = torch.as_tensor(global_samples, dtype=torch.float32, device=self.device)
         global_samples_value = float(global_samples.item())
 
         accumulated_losses = []
@@ -148,10 +131,7 @@ class PathTrainer(Trainer):
             for name, value in metrics.items():
                 if name == "loss":
                     continue
-                metric_sums[name] = (
-                    metric_sums.get(name, torch.zeros((), device=self.device))
-                    + value.float().sum()
-                )
+                metric_sums[name] = metric_sums.get(name, torch.zeros((), device=self.device)) + value.float().sum()
 
         with sl.log_trace_span("optim"):
             grad_norm = dist_utils.clip_grad_norm_(
@@ -175,30 +155,17 @@ class PathTrainer(Trainer):
             loss_mesh = parallel_dims.get_optional_mesh("loss")
             local_loss_sum = loss * local_samples
             global_avg_loss, global_max_loss, global_samples_seen = (
-                dist_utils.dist_sum(local_loss_sum.detach(), loss_mesh)
-                / global_samples_value,
+                dist_utils.dist_sum(local_loss_sum.detach(), loss_mesh) / global_samples_value,
                 dist_utils.dist_max(loss.detach(), loss_mesh),
-                dist_utils.dist_sum(
-                    torch.tensor(
-                        self.ntokens_seen, dtype=torch.int64, device=self.device
-                    ),
-                    loss_mesh,
-                ),
+                dist_utils.dist_sum(torch.tensor(self.ntokens_seen, dtype=torch.int64, device=self.device), loss_mesh),
             )
-            metric_sums = {
-                k: dist_utils.dist_sum(v, loss_mesh) for k, v in metric_sums.items()
-            }
+            metric_sums = {k: dist_utils.dist_sum(v, loss_mesh) for k, v in metric_sums.items()}
         else:
             global_avg_loss = global_max_loss = float(loss.detach().item())
             global_samples_seen = self.ntokens_seen
 
         path_metrics = {
-            f"path/{k}": float(
-                (
-                    torch.as_tensor(v, dtype=torch.float32, device=self.device)
-                    / global_samples
-                ).item()
-            )
+            f"path/{k}": float((torch.as_tensor(v, dtype=torch.float32, device=self.device) / global_samples).item())
             for k, v in metric_sums.items()
         }
         unique_segments_seen = (
@@ -209,12 +176,7 @@ class PathTrainer(Trainer):
         dataset_metrics = {
             "dataset/unique_segments_seen": unique_segments_seen,
         }
-        extra_metrics = {
-            "n_samples_seen": global_samples_seen,
-            **lr_metrics,
-            **path_metrics,
-            **dataset_metrics,
-        }
+        extra_metrics = {"n_samples_seen": global_samples_seen, **lr_metrics, **path_metrics, **dataset_metrics}
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
@@ -232,28 +194,15 @@ class PathTrainer(Trainer):
     def state_dict(self) -> dict[str, Any]:
         state = super().state_dict()
         state["unique_segment_counter"] = self.unique_segment_counter.state_dict()
-        validator_unique_segment_counter = getattr(
-            getattr(self, "validator", None), "unique_segment_counter", None
-        )
+        validator_unique_segment_counter = getattr(getattr(self, "validator", None), "unique_segment_counter", None)
         if validator_unique_segment_counter is not None:
-            state[
-                "validation_unique_segment_counter"
-            ] = validator_unique_segment_counter.state_dict()
+            state["validation_unique_segment_counter"] = validator_unique_segment_counter.state_dict()
         return state
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         super().load_state_dict(state_dict)
         if "unique_segment_counter" in state_dict:
-            self.unique_segment_counter.load_state_dict(
-                state_dict["unique_segment_counter"]
-            )
-        validator_unique_segment_counter = getattr(
-            getattr(self, "validator", None), "unique_segment_counter", None
-        )
-        if (
-            validator_unique_segment_counter is not None
-            and "validation_unique_segment_counter" in state_dict
-        ):
-            validator_unique_segment_counter.load_state_dict(
-                state_dict["validation_unique_segment_counter"]
-            )
+            self.unique_segment_counter.load_state_dict(state_dict["unique_segment_counter"])
+        validator_unique_segment_counter = getattr(getattr(self, "validator", None), "unique_segment_counter", None)
+        if validator_unique_segment_counter is not None and "validation_unique_segment_counter" in state_dict:
+            validator_unique_segment_counter.load_state_dict(state_dict["validation_unique_segment_counter"])

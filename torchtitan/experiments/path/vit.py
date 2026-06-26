@@ -1,15 +1,8 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """Plan ViT for the path experiment: raw camera frames -> patches -> transformer -> plan. NO VAE.
 
-Ported verbatim (behavior-identical) from experiments/plan_vit/model.py so the ViT can ride
-PathTrainer via config instead of the standalone PlanViTTrainer. A self-contained planning model
-for the muP + scaling study, built from torchtitan.models.common blocks the same way path/model.py
-is. Scales cleanly by width (n_embd / n_head) for muTransfer.
+Rides PathTrainer via config. A self-contained planning model for the muP + scaling study, built
+from torchtitan.models.common blocks the same way path/model.py is. Scales cleanly by width
+(n_embd / n_head) for muTransfer.
 """
 
 from __future__ import annotations
@@ -183,7 +176,7 @@ class PlanViT(BaseModel):
                 "expert parallel": parallelism.expert_parallel_degree,
             }.items():
                 if degree > 1:
-                    raise ValueError(f"plan_vit does not support {name}")
+                    raise ValueError(f"PlanViT does not support {name}")
 
         def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
             nparams = sum(p.numel() for p in model.parameters())
@@ -241,7 +234,7 @@ def parallelize_vit(
         or parallel_dims.pp_enabled
         or parallel_dims.ep_enabled
     ):
-        raise ValueError("plan_vit supports data parallelism only")
+        raise ValueError("PlanViT supports data parallelism only")
     names = ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
     dp_mesh: DeviceMesh = parallel_dims.get_mesh(names)
     mp_policy = MixedPrecisionPolicy(
@@ -255,5 +248,5 @@ def parallelize_vit(
             block, **fsdp_config, reshard_after_forward=(idx < len(model.blocks) - 1)
         )
     fully_shard(model, **fsdp_config)
-    logger.info("Applied FSDP to plan_vit")
+    logger.info("Applied FSDP to PlanViT")
     return model
