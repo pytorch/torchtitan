@@ -18,6 +18,7 @@ from enum import auto, Enum
 from typing import Any
 
 from torchtitan.config import Configurable
+from torchtitan.observability import structured_logger as sl
 
 
 class _GeneratorState(Enum):
@@ -207,7 +208,7 @@ class GeneratorRouter(Configurable):
         ``RoundRobinRoutingStrategy.Config()`` or
         ``LeastLoadedRoutingStrategy.Config()``."""
 
-        hot_swap: bool = False
+        hot_swap: bool = True
         """When True, pulls model's state dict concurrently with in-flight
         generation (no draining). When False, each generator is drained before
         its pull.
@@ -338,7 +339,8 @@ class GeneratorRouter(Configurable):
                 # work to finish before pulling, then re-admit it.
                 self._set_state(h, _GeneratorState.SYNCING)
                 try:
-                    await h.idle.wait()
+                    with sl.log_trace_span("router_drain_wait"):
+                        await h.idle.wait()
                     await h.actor.pull_model_state_dict.call(policy_version)
                 finally:
                     self._set_state(h, _GeneratorState.SERVING)

@@ -22,6 +22,7 @@ from torchtitan.experiments.rl.examples.alphabet_sort import (
 from torchtitan.experiments.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.experiments.rl.examples.alphabet_sort.rubric import score_sorted_list
 from torchtitan.experiments.rl.rollout import Rollout, RolloutStatus, RolloutTurn
+from torchtitan.experiments.rl.types import RolloutTurnID
 
 
 _Author = alphabet_data._Author
@@ -44,18 +45,19 @@ def _patch_names(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _assistant_turn(content: str) -> RolloutTurn:
     return RolloutTurn(
+        rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=0),
         prompt_token_ids=[],
         completion_token_ids=[],
         completion_logprobs=[],
-        policy_version=0,
+        min_policy_version=0,
         completion_message={"role": "assistant", "content": content},
     )
 
 
 def _rollout(turns: list[RolloutTurn]) -> Rollout:
     return Rollout(
-        group_id="step=1/group=0",
-        sample_id="step=1/group=0/sample=0",
+        group_id=0,
+        rollout_id=0,
         status=RolloutStatus.COMPLETED,
         turns=turns,
     )
