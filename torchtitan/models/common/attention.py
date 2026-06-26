@@ -757,7 +757,14 @@ class FusedQKVLinear(BaseQKVLinear):
         # Fused QKV: single matmul, then reshape and split along R dim.
         # [B, L, n_kv_heads * R * head_dim] -> [B, L, n_kv_heads, R, head_dim]
         # Use -1 for n_kv_heads so TP sharding is handled automatically.
-        qkv = self.wqkv(x).view(bs, seqlen, -1, self.r_dim, self.head_dim)
+        qkv = self.wqkv(x)
+        with spmd.local():  # TODO(pianpwk): same QKV:S(2) unflatten case handled by even sharding
+            qkv = qkv.view(bs, seqlen, -1, self.r_dim, self.head_dim)
+            if get_spmd_backend() == "spmd_types":
+                spmd.assert_type(
+                    qkv, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None, None)
+                )
+
         hpk, hd = self.heads_per_kv, self.head_dim
 
         def _split(t):
