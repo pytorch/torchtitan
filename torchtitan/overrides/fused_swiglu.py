@@ -405,9 +405,22 @@ def _fused_silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
 
 
 def _silu_and_mul_2d(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    hidden = gate.shape[-1]
-    out = silu_and_mul_op(gate.reshape(-1, hidden), up.reshape(-1, hidden))
-    return out.reshape(gate.shape)
+    # TODO(pianpwk): Migrate this local_map workaround to a custom op SPMD
+    # propagation rule registration system.
+    return spmd.local_map(
+        in_types=(
+            {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},  # gate_BLF
+            {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},  # up_BLF
+        ),
+        out_types={"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},
+    )(
+        lambda gate, up: silu_and_mul_op(
+            gate.reshape(-1, gate.shape[-1]),
+            up.reshape(-1, up.shape[-1]),
+        ).reshape(gate.shape)
+    )(
+        gate, up
+    )
 
 
 class FusedSwiGLU(FeedForward):

@@ -66,8 +66,6 @@ def _supports_spmd_typechecking(test_name: str, variant: tuple[str, ...]) -> boo
         "pp_dp_tp_spmd_types",
         "validation_tp_cp_pp_spmd_types",
         "float8_emulate_lora_spmd_types",
-        # fused_swiglu override typechecking is enabled in a later stack commit.
-        "override_fused_swiglu_spmd_types",
         # non-chunked CE loss isn't happy yet.
         (
             "2d_eager_spmd_types",
