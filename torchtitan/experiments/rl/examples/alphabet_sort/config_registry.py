@@ -6,7 +6,7 @@
 
 """Config entry points for the alphabet-sort example.
 
-Each function returns a complete ``RLTrainer.Config``, discoverable by
+Each function returns a complete ``Controller.Config``, discoverable by
 ``ConfigManager`` via
 ``--module alphabet_sort --config rl_grpo_qwen3_*``.
 """
@@ -19,6 +19,7 @@ from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import (
     CompileConfig,
     DebugConfig,
+    OverrideConfig,
     ParallelismConfig,
     TrainingConfig,
 )
@@ -29,7 +30,12 @@ from torchtitan.experiments.rl.actors.generator import (
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batch_invariance import BatchInvariantFlexConverter
-from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
+from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
+from torchtitan.experiments.rl.controller import (
+    AsyncLoopConfig,
+    Controller,
+    ValidationConfig,
+)
 from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
 from torchtitan.experiments.rl.generator_router import (
     GeneratorRouter,
@@ -41,7 +47,6 @@ from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
-from torchtitan.experiments.rl.trainer import RLTrainer
 from torchtitan.models.gpt_oss import model_registry as gpt_oss_model_registry
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.protocols.model import ModelConfigConverter
@@ -63,21 +68,27 @@ def _qwen3_rl_model_registry(
     """
     converters = list(converters or [])
     converters.append(LMHeadCastConverter.Config())
-    return model_registry(flavor, attn_backend=attn_backend, converters=converters)
+    spec = model_registry(flavor, attn_backend=attn_backend, converters=converters)
+    return spec
 
 
-def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
+def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
     """GRPO training config for Qwen3-0.6B (6 GPUs: 4 gen + 2 train)."""
     group_size = 8
-    return RLTrainer.Config(
+    return Controller.Config(
         model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
-        num_steps=10,
-        num_groups_per_rollout_batch=5,
-        num_validation_samples=20,
+        async_loop=AsyncLoopConfig(
+            num_training_steps=10,
+            num_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         generator_router=GeneratorRouter.Config(
             strategy=StickySessionRoutingStrategy.Config(
@@ -85,9 +96,6 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
             )
         ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -123,23 +131,25 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
+def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
     """GRPO training config for Qwen3-0.6B with flex attention (4 GPUs: 2 gen + 2 train)."""
     group_size = 8
-    return RLTrainer.Config(
+    return Controller.Config(
         model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="flex"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
-        num_steps=10,
-        num_groups_per_rollout_batch=5,
-        num_validation_samples=20,
+        async_loop=AsyncLoopConfig(
+            num_training_steps=10,
+            num_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -175,7 +185,7 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLTrainer.Config:
+def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     """GRPO training config for Qwen3-0.6B with flex attention and batch invariance
     for bitwise-identical numerics between trainer and generator (4 GPUs: 2 gen + 2 train).
     """
@@ -186,8 +196,8 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLTrainer.Config:
         converters=[BatchInvariantFlexConverter.Config()],
     )
     block_size = config.model_spec.model.layers[0].attention.inner_attention.block_size
-    config.batcher = dataclasses.replace(
-        config.batcher, per_sample_pad_multiple=block_size
+    config.async_loop.batcher = dataclasses.replace(
+        config.async_loop.batcher, per_sample_pad_multiple=block_size
     )
     config.trainer = dataclasses.replace(
         config.trainer,
@@ -202,7 +212,7 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLTrainer.Config:
     return config
 
 
-def rl_grpo_gpt_oss_20b_varlen() -> RLTrainer.Config:
+def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
     """GRPO training config for GPT-OSS-20B with varlen attention.
 
     GPT-OSS uses alternating attention: even layers apply a sliding window, odd
@@ -210,15 +220,20 @@ def rl_grpo_gpt_oss_20b_varlen() -> RLTrainer.Config:
     ``VarlenAttention.window_size``.
     """
     group_size = 8
-    return RLTrainer.Config(
+    return Controller.Config(
         model_spec=gpt_oss_model_registry("20b", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/gpt-oss-20b",
-        num_steps=10,
-        num_groups_per_rollout_batch=5,
-        num_validation_samples=20,
+        async_loop=AsyncLoopConfig(
+            num_training_steps=10,
+            num_groups_per_train_step=5,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
         renderer=RendererConfig(name="gpt_oss", enable_thinking=False),
         generator_router=GeneratorRouter.Config(
             strategy=StickySessionRoutingStrategy.Config(
@@ -226,9 +241,6 @@ def rl_grpo_gpt_oss_20b_varlen() -> RLTrainer.Config:
             )
         ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -264,26 +276,28 @@ def rl_grpo_gpt_oss_20b_varlen() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_gpt_oss_debug_varlen() -> RLTrainer.Config:
+def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
     """Small GPT-OSS debug config (random init) to exercise the full RL loop."""
     group_size = 8
-    return RLTrainer.Config(
+    return Controller.Config(
         model_spec=gpt_oss_model_registry("debugmodel", attn_backend="varlen"),
+        hf_assets_path="tests/assets/tokenizer",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=3,
+            num_groups_per_train_step=5,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        rollouter=AlphabetSortRollouter.Config(),
         # Debug tokenizer (vocab 2048, matches debugmodel); the gpt_oss renderer
         # needs gpt-oss special tokens absent here, so use the qwen3 renderer
         # like the other debug configs.
-        hf_assets_path="tests/assets/tokenizer",
-        num_steps=3,
-        num_groups_per_rollout_batch=5,
-        num_validation_samples=20,
-        compile=CompileConfig(enable=True, backend="aot_eager"),
-        rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
-        renderer=RendererConfig(name="gpt_oss", enable_thinking=False),
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -314,24 +328,29 @@ def rl_grpo_gpt_oss_debug_varlen() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> RLTrainer.Config:
+def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
     """Small GPT-OSS debug config in deterministic + batch-invariant mode."""
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     group_size = 8
-    return RLTrainer.Config(
+    return Controller.Config(
         model_spec=gpt_oss_model_registry("debugmodel", attn_backend="varlen"),
         hf_assets_path="tests/assets/tokenizer",
-        num_steps=3,
-        num_groups_per_rollout_batch=5,
-        num_validation_samples=20,
+        async_loop=AsyncLoopConfig(
+            num_training_steps=3,
+            num_groups_per_train_step=5,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
-        renderer=RendererConfig(name="gpt-oss", enable_thinking=False),
+        # Debug tokenizer (vocab 2048, matches debugmodel); the gpt_oss renderer
+        # needs gpt-oss special tokens absent here, so use the qwen3 renderer
+        # like the other debug configs.
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -368,23 +387,25 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
+def rl_grpo_qwen3_1_7b() -> Controller.Config:
     """GRPO training config for Qwen3-1.7B (6 GPUs: 4 gen + 2 train)."""
     group_size = 8
-    return RLTrainer.Config(
+    return Controller.Config(
         model_spec=_qwen3_rl_model_registry("1.7B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
-        num_steps=10,
-        num_groups_per_rollout_batch=5,
-        num_validation_samples=20,
+        async_loop=AsyncLoopConfig(
+            num_training_steps=10,
+            num_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -420,23 +441,25 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_14b() -> RLTrainer.Config:
+def rl_grpo_qwen3_14b() -> Controller.Config:
     """GRPO training config for Qwen3-14B (16 GPUs: 8 gen + 8 train)."""
     group_size = 8
-    return RLTrainer.Config(
+    return Controller.Config(
         model_spec=_qwen3_rl_model_registry("14B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-14B",
-        num_steps=10,
-        num_groups_per_rollout_batch=5,
-        num_validation_samples=20,
+        async_loop=AsyncLoopConfig(
+            num_training_steps=10,
+            num_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -472,7 +495,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
+def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
     """Debug MoE config with EP+TP on generator (8 GPUs: 4 gen + 4 train).
 
     Trainer uses data_parallel_shard_degree=2 as FSDP degree and TP=2.
@@ -480,22 +503,24 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
     MoE layers use EP=4.
     """
     group_size = 8
-    return RLTrainer.Config(
+    return Controller.Config(
         model_spec=model_registry("debugmodel_moe", attn_backend="varlen"),
         hf_assets_path="tests/assets/tokenizer",
-        num_steps=5,
-        num_groups_per_rollout_batch=5,
-        num_validation_samples=20,
+        async_loop=AsyncLoopConfig(
+            num_training_steps=5,
+            num_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
         # MoE EP all-to-all path issues unpinned D2H copies that block
         # torch.compile and CUDA graph capture; disable both.
         compile=CompileConfig(enable=False),
         rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=8e-4),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -536,7 +561,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
+def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
     """Batch-invariant MoE EP config for bitwise parity testing (8 GPUs).
 
     Trainer uses data_parallel_shard_degree=2 as FSDP degree and TP=2.
@@ -551,24 +576,26 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
 
     """
     group_size = 8
-    return RLTrainer.Config(
+    return Controller.Config(
         model_spec=model_registry(
             "debugmodel_moe", attn_backend="varlen", moe_comm_backend="standard"
         ),
         hf_assets_path="tests/assets/tokenizer",
-        num_steps=10,
-        num_groups_per_rollout_batch=5,
-        num_validation_samples=20,
+        async_loop=AsyncLoopConfig(
+            num_training_steps=10,
+            num_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
         # MoE EP all-to-all path issues unpinned D2H copies that block
         # torch.compile and CUDA graph capture; disable both.
         compile=CompileConfig(enable=False),
         rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=8e-4),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -610,7 +637,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
+def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
     """GRPO training config for Qwen3-30B-A3B MoE (8 GPUs: 4 gen + 4 train).
 
     Trainer and generator uses TP=2 for dense layers and EP=4 for MoE experts.
@@ -618,20 +645,22 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
     Note: Qwen3-30B-A3B has 4 KV heads, so TP degree cannot exceed 4.
     """
     group_size = 8
-    return RLTrainer.Config(
+    return Controller.Config(
         model_spec=model_registry("30B-A3B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-30B-A3B",
-        num_steps=10,
-        num_groups_per_rollout_batch=5,
-        num_validation_samples=20,
+        async_loop=AsyncLoopConfig(
+            num_training_steps=10,
+            num_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
         compile=CompileConfig(enable=False),
         rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -671,27 +700,62 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
+def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
+    """Qwen3-30B-A3B GRPO with throughput overrides (8 GPUs: 4 gen + 4 train).
+
+    Same model/parallelism/data as ``rl_grpo_qwen3_30b_a3b_varlen``, but applies
+    two opt-in overrides (per-actor) to both the trainer and generator:
+
+    * ``fused_swiglu`` fuses the dense and grouped-experts gate+up projections
+      into a single weight (one GEMM; fused SiLU-and-mul Triton kernel).
+    * ``helion_rope`` applies cos/sin RoPE with a fused Helion kernel (qwen3 uses
+      ``CosSinRoPE``, which the override targets).
+
+    Both are CUDA-only; ``helion_rope`` additionally needs the optional ``helion``
+    package. Checkpoints stay interchangeable with the non-fused/stock-RoPE 30B
+    config.
+    """
+    config = rl_grpo_qwen3_30b_a3b_varlen()
+    # Applied after each actor's update_from_config and before build; separate
+    # OverrideConfig instances keep the trainer and generator overrides
+    # independent (they run in different actors).
+    perf_imports = [
+        "torchtitan.overrides.fused_swiglu",
+        "torchtitan.overrides.helion_rope",
+    ]
+    config.trainer = dataclasses.replace(
+        config.trainer, override=OverrideConfig(imports=list(perf_imports))
+    )
+    config.generator = dataclasses.replace(
+        config.generator,
+        override=OverrideConfig(imports=list(perf_imports)),
+    )
+    return config
+
+
+def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
     """On-policy GRPO config for Qwen3-0.6B (4 GPUs: 2 gen + 2 train).
 
     Enables deterministic + batch-invariant mode for true on-policy RL training.
     """
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     group_size = 8
-    return RLTrainer.Config(
+    return Controller.Config(
         model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
-        num_steps=5,
-        num_groups_per_rollout_batch=5,
-        num_validation_samples=20,
+        async_loop=AsyncLoopConfig(
+            num_training_steps=10,
+            num_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        group_size=group_size,
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
-        batcher=Batcher.Config(
-            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
-        ),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(

@@ -6,7 +6,7 @@
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import torch
@@ -20,10 +20,12 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
+    apply_overrides,
     CommConfig,
     CompileConfig,
     Configurable,
     DebugConfig,
+    OverrideConfig,
     ParallelismConfig,
     TORCH_DTYPE_MAP,
     TrainingConfig,
@@ -34,7 +36,7 @@ from torchtitan.distributed.activation_checkpoint import (
     SelectiveAC,
 )
 from torchtitan.distributed.utils import set_batch_invariance
-from torchtitan.experiments.rl.types import OptimStepOutput, TrainingBatch
+from torchtitan.experiments.rl.types import OptimStepOutput, TrainingMicrobatch
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
@@ -48,7 +50,7 @@ logger = logging.getLogger(__name__)
 def compute_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Compute per-position logprobs from logits and pre-shifted labels.
 
-    ``labels`` is pre-shifted per episode in the batcher
+    ``labels`` is pre-shifted per training_sample in the batcher
     (``labels[i] = raw_token_ids[i+1]``), matching the pre-training
     dataloader convention.  No internal shift is needed.
     Output shape matches input: ``[batch, seq_len]``.
@@ -60,9 +62,11 @@ def compute_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
         # contract explicit (see .claude/rules/distributed.md).
         # Gather vocab-sharded TP logits before computing per-token logprobs.
         placements = tuple(
-            Replicate()
-            if isinstance(p, Shard) and p.dim in (-1, logits.ndim - 1)
-            else p
+            (
+                Replicate()
+                if isinstance(p, Shard) and p.dim in (-1, logits.ndim - 1)
+                else p
+            )
             for p in logits.placements
         )
         logits = logits.redistribute(placements=placements).to_local()
@@ -97,7 +101,7 @@ def verify_logprob_identity(
     """Compute per-rank drift between generator and trainer logprobs.
 
     Args:
-        generator_logprobs: [B, L] generator logprobs from TrainingBatch.
+        generator_logprobs: [B, L] generator logprobs from TrainingMicrobatch.
         trainer_logprobs: [B, L] trainer-computed logprobs.
         loss_mask: [B, L] bool mask; True for response tokens.
         num_global_valid_tokens: Total response tokens across all DP ranks.
@@ -122,7 +126,7 @@ def verify_logprob_identity(
 
 
 class PolicyTrainer(Actor, Configurable):
-    """Updates policy based on collected Episode using TorchTitan components.
+    """Updates policy based on collected TrainingSample using TorchTitan components.
 
     Exposes separate `forward_backward` and `optim_step` endpoints, called
     explicitly by the controller.
@@ -157,6 +161,10 @@ class PolicyTrainer(Actor, Configurable):
         checkpoint: CheckpointManager.Config = field(
             default_factory=CheckpointManager.Config
         )
+        override: OverrideConfig = field(default_factory=OverrideConfig)
+        """Config overrides (e.g. ``torchtitan.overrides.fused_swiglu``) applied to
+        this trainer's model spec after ``update_from_config`` and before build.
+        Separate from the generator's override so the two can differ."""
         dump_folder: str = ""
         """Folder for AC debug dumps when using memory_budget mode."""
 
@@ -184,6 +192,7 @@ class PolicyTrainer(Actor, Configurable):
         self.config = config
         self.compile_config = compile_config
         self.loss_fn = config.loss.build()
+        # TODO: add support to compile the loss.
 
         # Only cast if generator dtype differs from training dtype, otherwise
         # staging buffers would be allocated for a no-op cast.
@@ -273,10 +282,18 @@ class PolicyTrainer(Actor, Configurable):
         )
 
     def state_dict(self) -> dict[str, Any]:
+        # Checkpoint "train_state": policy_version == completed optim steps, so it
+        # doubles as the resume step counter.
         return {"policy_version": self.policy_version}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         self.policy_version = state_dict["policy_version"]
+
+    @endpoint
+    async def get_policy_version(self) -> int:
+        """Current policy version: after load(), the step a resume restored from
+        (0 if fresh). The controller uses it to resume and re-sync generators."""
+        return self.policy_version
 
     @endpoint
     async def close(self) -> None:
@@ -322,6 +339,26 @@ class PolicyTrainer(Actor, Configurable):
         # model-agnostic `update_from_config` hook (RL's trainer bypasses
         # `torchtitan.Trainer's` call, so we invoke it directly).
         model_spec.model.update_from_config(config=config)
+
+        # Check if seq_length passed the max_seq_len
+        max_seq_len = model_spec.model.max_seq_len
+        seq_len = config.training.seq_len
+        if seq_len > max_seq_len:
+            raise ValueError(
+                f"Training sequence length {seq_len} exceeds "
+                f"attention RoPE maximum supported sequence "
+                f"length {max_seq_len}."
+            )
+
+        for layer_cfg in model_spec.model.layers:
+            attention_cfg = getattr(layer_cfg, "attention", None)
+            if attention_cfg is not None:
+                attention_cfg.rope = replace(attention_cfg.rope, max_seq_len=seq_len)
+
+        # Apply this trainer's config overrides after update_from_config (which
+        # sets the sharding configs the override factories read) and before build
+        if config.override.imports:
+            apply_overrides(config.override, model_spec.model)
 
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
@@ -389,17 +426,17 @@ class PolicyTrainer(Actor, Configurable):
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        training_data: list[TrainingBatch],
+        training_data: list[TrainingMicrobatch],
         num_global_valid_tokens: int,
     ) -> dict[str, float]:
         """Run forward pass, compute loss, call backward, and reduce metrics.
 
         Args:
-            training_data: List of TrainingBatch, one per DP rank. Local rank
+            training_data: List of TrainingMicrobatch, one per DP rank. Local rank
                 picks training_data[self.dp_rank].
             num_global_valid_tokens: Total response tokens across all DP
                 ranks for this step. The controller computes this before
-                sharding episodes.
+                sharding training_samples.
 
         Returns:
             dict[str, float]: Globally-reduced metrics.
@@ -534,25 +571,24 @@ class PolicyTrainer(Actor, Configurable):
     @endpoint
     @sl.log_trace_span("push_model_state_dict")
     async def push_model_state_dict(self) -> None:
-        """Publish model weights for generator consumption via TorchStore.
+        """Stage model weights to a CPU StorageVolume for the generators to pull (TorchStore).
 
-        When `direct_rdma=True`, weights are transferred directly from
-        GPU to GPU via one-sided RDMA reads, bypassing StorageVolumes
-        entirely. When `False`, data goes through StorageVolumes
-        (which may themselves use RDMA as a transport internally).
-
-        Note: we couple `is_rdma_available()` with `direct_rdma` here,
-        but the two concepts are not identical -- StorageVolumes can also
-        use RDMA as their transport layer. `direct_rdma` specifically
-        means "skip StorageVolumes and let the destination read directly
-        from the source's GPU memory".
-
+        `direct_rdma=False` copies the state dict GPU->CPU, so the trainer's GPU weights are free once
+        this returns and any number of generators can read the staged copy.
         """
-        from monarch.rdma import is_rdma_available
+        state_dict = self.model.state_dict()
+        if self._transfer_dtype is not None:
+            # torchstore only applies `transfer_dtype` on the RDMA path, so under direct_rdma=False
+            # cast to the generator dtype here (else the generator reads fp32 into its bf16 state dict).
+            # TODO(async-rl): remove this manual cast once torchstore applies transfer_dtype on the
+            #   CPU-staged path.
+            state_dict = {
+                name: tensor.to(self._transfer_dtype)
+                for name, tensor in state_dict.items()
+            }
 
         await ts.put_state_dict(
-            self.model.state_dict(),
+            state_dict,
             "model_state_dict",
-            direct_rdma=is_rdma_available(),
-            transfer_dtype=self._transfer_dtype,
+            direct_rdma=False,
         )

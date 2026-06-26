@@ -16,7 +16,7 @@ from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import has_cuda_capability
+from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
 
 from .utils import module_filter_fn, swap_token_dispatcher
 
@@ -82,11 +82,16 @@ class Float8LinearConverter(QuantizationConverter):
         cfg = self.config
         filter_fqns = cfg.filter_fqns
 
-        if has_cuda_capability(8, 9) or (cfg.emulate and not cfg.model_compile_enabled):
+        if (
+            has_cuda_capability(8, 9)
+            or has_rocm_capability(9, 4)
+            or (cfg.emulate and not cfg.model_compile_enabled)
+        ):
             pass
         else:
             raise ValueError(
-                "Failed to swap to Float8Linear because float8 is only supported on SM89 or later. "
+                "Failed to swap to Float8Linear because float8 is only supported on "
+                "NVIDIA SM89 or later, or AMD gfx942 (MI300) or later. "
                 "To enable testing on older hardware, set `float8.emulate` to True in eager mode.",
             )
 
@@ -143,9 +148,9 @@ class Float8LinearConverter(QuantizationConverter):
 
         self.enabled = True
 
-    def convert(self, model_config) -> None:
+    def convert(self, model_config):
         if not self.enabled:
-            return
+            return model_config
 
         assert Float8Linear is not None
         for fqn, linear_config, parent, attr in model_config.traverse(Linear.Config):
@@ -157,12 +162,15 @@ class Float8LinearConverter(QuantizationConverter):
                     param_init=linear_config.param_init,
                     _torchao_config=self.torchao_config,
                 )
-                if isinstance(parent, list):
+                if parent is None:
+                    model_config = new_config
+                elif isinstance(parent, list):
                     parent[attr] = new_config
                 else:
                     setattr(parent, attr, new_config)
 
         logger.info("Swapped to Float8Linear layers")
+        return model_config
 
 
 _float8_experts_cache: dict[type, type] = {}
@@ -219,8 +227,11 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
                 "torchao is not installed. Please install it to use float8 MoE training."
             )
 
-        if not has_cuda_capability(8, 9):
-            raise ValueError("Float8 MoE training only supported on SM89 or later.")
+        if not (has_cuda_capability(8, 9) or has_rocm_capability(9, 4)):
+            raise ValueError(
+                "Float8 MoE training only supported on NVIDIA SM89 or later, "
+                "or AMD gfx942 (MI300) or later."
+            )
 
         if not self.config.model_compile_enabled:
             logger.warning(
@@ -228,7 +239,7 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
                 "enable it with --compile.enable"
             )
 
-    def convert(self, model_config) -> None:
+    def convert(self, model_config):
         for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
             swap_token_dispatcher(config, self.PAD_MULTIPLE)
             base_module_cls = type(config)._owner
@@ -237,7 +248,9 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
             new_config = config_cls(
                 **{f.name: getattr(config, f.name) for f in fields(config)},
             )
-            if isinstance(parent, list):
+            if parent is None:
+                model_config = new_config
+            elif isinstance(parent, list):
                 parent[attr] = new_config
             else:
                 setattr(parent, attr, new_config)
@@ -246,3 +259,4 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
             "Converted GroupedExperts to use dynamic float8 rowwise quantization "
             "with scaled grouped GEMMs"
         )
+        return model_config
