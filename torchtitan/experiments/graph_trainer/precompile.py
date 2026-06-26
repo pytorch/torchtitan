@@ -71,7 +71,6 @@ def compute_config_fingerprint(
         "compile:ep_overlap:disable_early_grad_accumulation:"
         f"{compile_config.ep_overlap.disable_early_grad_accumulation}\n".encode()
     )
-
     h.update(f"torch_version:{torch.__version__}\n".encode())
 
     if torch.cuda.is_available():

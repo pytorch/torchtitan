@@ -177,20 +177,98 @@ DSV3_PARALLELISM = (
     " --parallelism.tensor_parallel_degree=2"
     " --parallelism.expert_parallel_degree=2"
 )
+DSV3_EP_OVERLAP_GRAPH_PARALLELISM = (
+    "--parallelism.data_parallel_shard_degree=8"
+    " --parallelism.tensor_parallel_degree=1"
+    " --parallelism.expert_parallel_degree=2"
+)
+DSV3_EP_OVERLAP_OPTIONS = (
+    "--compile.mode aot_fx_trace"
+    " --compile.ep_overlap.enabled"
+    " --compile.ep_overlap.chunk_dim batch"
+    " --compile.ep_overlap.module_fqn layers.*"
+)
+DSV3_EP_OVERLAP_MOE_SEQ_OPTIONS = (
+    "--compile.mode aot_fx_trace"
+    " --compile.ep_overlap.enabled"
+    " --compile.ep_overlap.chunk_dim seq"
+    " --compile.ep_overlap.module_fqn layers.*.moe"
+)
+DSV3_EP_OVERLAP_MOE_BATCH_OPTIONS = (
+    "--compile.mode aot_fx_trace"
+    " --compile.ep_overlap.enabled"
+    " --compile.ep_overlap.chunk_dim batch"
+    " --compile.ep_overlap.module_fqn layers.*.moe"
+)
+DSV3_EP_OVERLAP_EAGER = " --compile.ep_overlap.strategy eager"
+DSV3_EP_OVERLAP_GRAPH = " --compile.ep_overlap.strategy graph"
+DSV3_EP_OVERLAP_GRAPH_BITWISE = (
+    DSV3_EP_OVERLAP_GRAPH + " --compile.ep_overlap.disable_early_grad_accumulation"
+)
 
 
-def _run_deepseek_v3_loss_compare(test_options_extra: str = "") -> bool:
+def _run_deepseek_v3_loss_compare(
+    test_options_extra: str = "",
+    *,
+    baseline_module: str = "deepseek_v3",
+    baseline_config: str = "deepseek_v3_debugmodel",
+    test_config: str = "graph_trainer_deepseek_v3_debugmodel",
+    parallelism: str = DSV3_PARALLELISM,
+    baseline_options_extra: str = "",
+) -> bool:
     """Run loss_compare for deepseek_v3 vs graph_trainer.deepseek_v3."""
-    test_options = DSV3_PARALLELISM
+    baseline_options = parallelism
+    if baseline_options_extra:
+        baseline_options += f" {baseline_options_extra}"
+    test_options = parallelism
     if test_options_extra:
         test_options += f" {test_options_extra}"
     return run_loss_compare(
-        baseline_module="deepseek_v3",
-        baseline_config="deepseek_v3_debugmodel",
+        baseline_module=baseline_module,
+        baseline_config=baseline_config,
         test_module="graph_trainer.deepseek_v3",
-        test_config="graph_trainer_deepseek_v3_debugmodel",
-        baseline_options=DSV3_PARALLELISM,
+        test_config=test_config,
+        baseline_options=baseline_options,
         test_options=test_options,
+    )
+
+
+def _run_deepseek_v3_ep_overlap_loss_compare() -> bool:
+    """Run distributed DeepSeek-v3 EP overlap against eager chunking."""
+    return _run_deepseek_v3_loss_compare(
+        baseline_module="graph_trainer.deepseek_v3",
+        baseline_config="graph_trainer_deepseek_v3_debugmodel",
+        test_config="graph_trainer_deepseek_v3_debugmodel",
+        parallelism=DSV3_EP_OVERLAP_GRAPH_PARALLELISM,
+        baseline_options_extra=DSV3_EP_OVERLAP_OPTIONS + DSV3_EP_OVERLAP_EAGER,
+        test_options_extra=DSV3_EP_OVERLAP_OPTIONS + DSV3_EP_OVERLAP_GRAPH_BITWISE,
+    )
+
+
+def _run_deepseek_v3_ep_overlap_moe_seq_loss_compare() -> bool:
+    """Run distributed DeepSeek-v3 MoE seq overlap against eager chunking."""
+    return _run_deepseek_v3_loss_compare(
+        baseline_module="graph_trainer.deepseek_v3",
+        baseline_config="graph_trainer_deepseek_v3_debugmodel",
+        test_config="graph_trainer_deepseek_v3_debugmodel",
+        parallelism=DSV3_EP_OVERLAP_GRAPH_PARALLELISM,
+        baseline_options_extra=DSV3_EP_OVERLAP_MOE_SEQ_OPTIONS + DSV3_EP_OVERLAP_EAGER,
+        test_options_extra=DSV3_EP_OVERLAP_MOE_SEQ_OPTIONS
+        + DSV3_EP_OVERLAP_GRAPH_BITWISE,
+    )
+
+
+def _run_deepseek_v3_ep_overlap_moe_batch_loss_compare() -> bool:
+    """Run distributed DeepSeek-v3 MoE batch overlap against eager chunking."""
+    return _run_deepseek_v3_loss_compare(
+        baseline_module="graph_trainer.deepseek_v3",
+        baseline_config="graph_trainer_deepseek_v3_debugmodel",
+        test_config="graph_trainer_deepseek_v3_debugmodel",
+        parallelism=DSV3_EP_OVERLAP_GRAPH_PARALLELISM,
+        baseline_options_extra=DSV3_EP_OVERLAP_MOE_BATCH_OPTIONS
+        + DSV3_EP_OVERLAP_EAGER,
+        test_options_extra=DSV3_EP_OVERLAP_MOE_BATCH_OPTIONS
+        + DSV3_EP_OVERLAP_GRAPH_BITWISE,
     )
 
 
@@ -350,6 +428,15 @@ class TestGraphTrainerNumerics(unittest.TestCase):
                 test_options_extra="--compile.mode aot_fx_trace"
             ),
         )
+
+    def test_moe_dsv3_ep_overlap_aot_fx_trace_vs_eager_chunked(self):
+        self.assertTrue(_run_deepseek_v3_ep_overlap_loss_compare())
+
+    def test_moe_dsv3_ep_overlap_moe_seq_aot_fx_trace_vs_eager_chunked(self):
+        self.assertTrue(_run_deepseek_v3_ep_overlap_moe_seq_loss_compare())
+
+    def test_moe_dsv3_ep_overlap_moe_batch_aot_fx_trace_vs_eager_chunked(self):
+        self.assertTrue(_run_deepseek_v3_ep_overlap_moe_batch_loss_compare())
 
     def test_dense_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(

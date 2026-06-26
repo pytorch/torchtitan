@@ -454,6 +454,10 @@ def minimal_fx_tracer(
             user_args, user_kwargs = pytree.tree_unflatten(
                 list(user_flat), user_inputs_spec
             )
+            if prepare_call_inputs is not None:
+                prepared = prepare_call_inputs(user_args, user_kwargs)
+                if prepared is not None:
+                    user_args, user_kwargs = prepared
 
             with _reparametrize_train_state(
                 module, optimizer, model_state_t, optim_state_t
