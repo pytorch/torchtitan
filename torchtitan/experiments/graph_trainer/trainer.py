@@ -90,6 +90,32 @@ def make_fwd_bwd_step(model, loss_fn):
     return fwd_bwd_step
 
 
+def _materialize_grad_for_param_layout(
+    param: torch.Tensor, grad: torch.Tensor
+) -> torch.Tensor:
+    """Return ``grad`` with the same layout contract as ``param`` when needed.
+
+    ``aot_fx_trace`` computes gradients with ``torch.autograd.grad`` and then
+    assigns them to ``param.grad`` manually. That bypasses AccumulateGrad's
+    normal layout-contract handling. Full Inductor may return dense gradients
+    with padded local strides, which are legal graph outputs but can violate
+    fused optimizer requirements that params, grads, and optimizer states share
+    matching strides. Materializing through ``empty_like(param).copy_(grad)``
+    restores the same layout eager autograd would expose at the ``.grad``
+    boundary while preserving DTensor placements.
+    """
+
+    if grad.stride() == param.stride():
+        grad_local = grad.to_local() if hasattr(grad, "to_local") else grad
+        param_local = param.to_local() if hasattr(param, "to_local") else param
+        if grad_local.stride() == param_local.stride():
+            return grad
+
+    materialized_grad = torch.empty_like(param)
+    materialized_grad.copy_(grad)
+    return materialized_grad
+
+
 class GraphTrainer(Trainer):
     @dataclass(kw_only=True, slots=True)
     class Config(Trainer.Config):
@@ -232,6 +258,7 @@ class GraphTrainer(Trainer):
         grads = outputs[1:]
 
         for param, grad in zip(params, grads, strict=True):
+            grad = _materialize_grad_for_param_layout(param, grad)
             if param.grad is None:
                 param.grad = grad
             else:
