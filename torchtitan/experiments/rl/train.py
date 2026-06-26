@@ -32,6 +32,7 @@ from dataclasses import dataclass
 # imports transitively importing torch.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+import monarch
 from monarch.actor import HostMesh, ProcMesh, this_host
 
 from torchtitan.config import ConfigManager, ParallelismConfig
@@ -41,6 +42,47 @@ from torchtitan.observability import structured_logger as sl
 
 
 logger = logging.getLogger(__name__)
+
+
+# Opt-in escape hatch when ibverbs RDMA is detected but unstable on the node
+# (e.g. RDMABuffer create fails despite is_ibverbs_available() being True).
+# RL_RDMA_DISABLE_IBVERBS=1 forces Monarch to use its TCP fallback transport.
+# The TCP fallback's per-chunk default timeout (3s) is also too short for full
+# state-dict transfers, so we also monkey-patch read_into/write_from to pass a
+# much larger timeout. torchstore calls these without a timeout kwarg.
+#
+# Must be installed in every process that calls RDMABuffer.read_into /
+# write_from -- not just the controller. The actual RDMA ops run in the
+# worker subprocesses spawned by SlurmJob, which boot from
+# `run_worker_loop_forever` and never import this module's top-level code.
+# So _bootstrap calls this helper again per-subprocess.
+def _install_rdma_tcp_fallback() -> None:
+    if os.environ.get("RL_RDMA_DISABLE_IBVERBS") != "1":
+        return
+
+    monarch.configure(rdma_disable_ibverbs=True)
+
+    from monarch._src.rdma.rdma import RDMABuffer
+
+    if getattr(RDMABuffer, "_titan_rl_tcp_timeout_patched", False):
+        return
+
+    tcp_timeout_s = int(os.environ.get("RL_RDMA_TCP_TIMEOUT_S", "300"))
+    orig_read_into = RDMABuffer.read_into
+    orig_write_from = RDMABuffer.write_from
+
+    def read_into_with_timeout(self, dst, *, timeout=tcp_timeout_s):
+        return orig_read_into(self, dst, timeout=timeout)
+
+    def write_from_with_timeout(self, src, *, timeout=tcp_timeout_s):
+        return orig_write_from(self, src, timeout=timeout)
+
+    RDMABuffer.read_into = read_into_with_timeout
+    RDMABuffer.write_from = write_from_with_timeout
+    RDMABuffer._titan_rl_tcp_timeout_patched = True
+
+
+_install_rdma_tcp_fallback()
 
 
 class PerHostProvisioner:
@@ -75,6 +117,11 @@ class PerHostProvisioner:
             os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
             # TODO: Remove once Monarch/PyTorch fixes concurrent import during unpickling.
             import torch  # noqa: F401
+
+            # RDMA TCP fallback patch must be installed in every worker subprocess.
+            # Workers boot from `run_worker_loop_forever` and don't import this
+            # module's top-level code, so do it here before any actor RPC runs.
+            _install_rdma_tcp_fallback()
 
         return _bootstrap
 
@@ -196,9 +243,17 @@ def spawn_proc_mesh(
     return trainer_mesh, generator_meshes
 
 
-async def main():
-    config = ConfigManager().parse_args()
-    assert isinstance(config, RLTrainer.Config)
+async def run(
+    config: RLTrainer.Config,
+    *,
+    trainer_world_size: int,
+    per_generator_world_size: int,
+    host_meshes: HostMeshes | None,
+) -> None:
+    """Run training given an already-resolved ``HostMeshes`` (or ``None`` for
+    single-node ``this_host()``). Launcher-agnostic: SLURM, MAST, and direct
+    local runs all funnel through here.
+    """
     sl.init_structured_logger(
         source="rl_controller",
         output_dir=config.dump_folder,
@@ -209,14 +264,10 @@ async def main():
 
     rl_trainer: RLTrainer = config.build()
     try:
-        trainer_world_size = _compute_trainer_world_size(config.trainer.parallelism)
-        per_generator_world_size = _compute_generator_world_size(
-            config.generator.parallelism
-        )
         trainer_mesh, generator_meshes = spawn_proc_mesh(
             trainer_world_size,
             per_generator_world_size,
-            host_meshes=None,
+            host_meshes=host_meshes,
             num_generators=config.num_generators,
         )
         await rl_trainer.setup_async(
@@ -228,6 +279,21 @@ async def main():
         logger.info("Interrupted; attempting graceful shutdown...")
     finally:
         await rl_trainer.close()
+
+
+async def main():
+    config = ConfigManager().parse_args()
+    assert isinstance(config, RLTrainer.Config)
+    trainer_world_size = _compute_trainer_world_size(config.trainer.parallelism)
+    per_generator_world_size = _compute_generator_world_size(
+        config.generator.parallelism
+    )
+    await run(
+        config,
+        trainer_world_size=trainer_world_size,
+        per_generator_world_size=per_generator_world_size,
+        host_meshes=None,
+    )
 
 
 if __name__ == "__main__":
