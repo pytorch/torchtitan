@@ -6,6 +6,7 @@ from functools import partial
 
 import torch.nn as nn
 
+from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
@@ -55,16 +56,11 @@ from .loss import PathLoss
 from .onnx_checkpoint import PathOnnxCheckpointManager
 from .trainer import PathTrainer
 from .validate import PathValidator
-
-from .vit_config_registry import (  # noqa: F401
-    vit_mup_w256,
-    vit_mup_w512,
-    vit_mup_w1024,
-    vit_mup_w2048,
-    vit_standard_w256,
-    vit_standard_w512,
-    vit_standard_w1024,
-    vit_standard_w2048,
+from .vit import (
+    parallelize_vit,
+    PatchEmbed,
+    PlanHead,
+    PlanViT,
 )
 
 
@@ -377,3 +373,264 @@ def _hydra(heads: tuple[PathHead, ...], *, in_features: int, mlp_mult: float) ->
         },
         scale_layers={head.name: ScaleLayer.Config(n_features=head.output_size) for head in heads if head.scale},
     )
+
+
+HEAD_DIM = 64
+N_LAYER = 8
+INPUT_SIZE = (
+    1,
+    128,
+    256,
+)
+PATCH_SIZE = (1, 16, 8)
+IN_CHANNELS = 24
+PLAN_SIZE = 15 * 33 * 2
+BASE_WIDTH = 256
+VIT_WIDTHS = {"w128": 128, "w256": 256, "w512": 512, "w1024": 1024, "w2048": 2048}
+STEPS = 512
+SWEEP_LR = float(os.getenv("VIT_LR", "3e-4"))
+MUP_PATTERN = (
+    r"^(blocks\.\d+\.attention\.c_attn|blocks\.\d+\.attention\.c_proj"
+    r"|blocks\.\d+\.mlp\.c_fc|blocks\.\d+\.mlp\.c_proj)\.weight$"
+)
+
+
+def _lin(in_f: int, out_f: int, *, std: float, bias: bool = True) -> Linear.Config:
+    return Linear.Config(
+        in_features=in_f,
+        out_features=out_f,
+        bias=bias,
+        param_init={
+            "weight": partial(nn.init.normal_, mean=0.0, std=std),
+            "bias": nn.init.zeros_,
+        },
+    )
+
+
+def _hidden_std(fan_in: int, *, mup: bool) -> float:
+    return fan_in**-0.5 if mup else BASE_WIDTH**-0.5
+
+
+def _ln(dim: int) -> LayerNorm.Config:
+    return LayerNorm.Config(normalized_shape=dim, param_init=_NORM_INIT)
+
+
+def _hidden(dim: int, mult: float, multiple_of: int = 256) -> int:
+    return multiple_of * math.ceil(int(dim * mult) / multiple_of)
+
+
+def _vit_attention(
+    dim: int, n_head: int, *, mup: bool, qk_norm: bool = True
+) -> PathSelfAttention.Config:
+    head_dim = dim // n_head
+    return PathSelfAttention.Config(
+        norm=_ln(dim),
+        q_norm=_ln(head_dim) if qk_norm else None,
+        k_norm=_ln(head_dim) if qk_norm else None,
+        c_attn=_lin(dim, 3 * dim, std=_hidden_std(dim, mup=mup)),
+        c_proj=_lin(dim, dim, std=_hidden_std(dim, mup=mup) / math.sqrt(2 * N_LAYER)),
+        inner_attention=ScaledDotProductAttention.Config(),
+        n_head=n_head,
+        head_dim=head_dim,
+        dropout=0.0,
+        is_causal=False,
+    )
+
+
+def _vit_mlp(dim: int, *, mup: bool, mult: float = 4.0) -> PathMLP.Config:
+    hidden = _hidden(dim, mult)
+    return PathMLP.Config(
+        norm=_ln(dim),
+        c_fc=_lin(dim, hidden, std=_hidden_std(dim, mup=mup)),
+        c_proj=_lin(
+            hidden, dim, std=_hidden_std(hidden, mup=mup) / math.sqrt(2 * N_LAYER)
+        ),
+        act="gelu_tanh",
+        dropout=0.0,
+    )
+
+
+def _vit_model_config(flavor: str, *, mup: bool, qk_norm: bool = True) -> PlanViT.Config:
+    n_embd = VIT_WIDTHS[flavor]
+    n_head = n_embd // HEAD_DIM
+    pt, ph, pw = PATCH_SIZE
+    patch_dim = pt * IN_CHANNELS * ph * pw
+    t, h, w = INPUT_SIZE
+    num_patches = (t // pt) * (h // ph) * (w // pw)
+    return PlanViT.Config(
+        input_size=INPUT_SIZE,
+        patch_size=PATCH_SIZE,
+        in_channels=IN_CHANNELS,
+        n_embd=n_embd,
+        output_mult=(BASE_WIDTH / n_embd) if mup else 1.0,
+        patch_embed=PatchEmbed.Config(
+            proj=_lin(patch_dim, n_embd, std=patch_dim**-0.5),
+            patch_size=PATCH_SIZE,
+        ),
+        pos_embedding=Embedding.Config(
+            num_embeddings=num_patches, embedding_dim=n_embd, param_init=_LINEAR_INIT
+        ),
+        blocks=[
+            PathTransformerBlock.Config(
+                attention=_vit_attention(n_embd, n_head, mup=mup, qk_norm=qk_norm),
+                mlp=_vit_mlp(n_embd, mup=mup),
+            )
+            for _ in range(N_LAYER)
+        ],
+        norm=_ln(n_embd),
+        plan_head=PlanHead.Config(
+            norm=_ln(n_embd),
+            head=_lin(n_embd, PLAN_SIZE, std=BASE_WIDTH**-0.5),
+        ),
+    )
+
+
+def vit_model_registry(flavor: str, *, mup: bool) -> ModelSpec:
+    return ModelSpec(
+        name="path",
+        flavor=flavor,
+        model=_vit_model_config(flavor, mup=mup),
+        parallelize_fn=parallelize_vit,
+        pipelining_fn=None,
+        post_optimizer_build_fn=None,
+        state_dict_adapter=None,
+    )
+
+
+def _vit_dataloader_config(*, split: str) -> PathDataLoader.Config:
+    from xx.common.basedir import XX_BASEDIR
+    from xx.datasets.constants import BASE_DIR_GT_10M
+    from xx.training.path.config import DatasetConfig as XXPathDatasetConfig
+
+    base = XXPathDatasetConfig(fps=SUPERCOMBO_FPS, plan_only=True)
+    return PathDataLoader.Config(
+        dataset=os.path.join(XX_BASEDIR, "datasets/lists/prune10m_random10k_seed0.txt"),
+        split=split,
+        shuffle_size=_si_int(base.shuffle_size),
+        min_mixing=base.min_mixing,
+        num_writers=base.num_writers,
+        num_readers=base.num_readers,
+        fps=base.fps,
+        pipeline_dir=BASE_DIR_GT_10M,
+        plan_only=base.plan_only,
+        limit=base.limit,
+        n_frames=base.n_frames,
+        rgb=base.rgb,
+        unvision=base.unvision,
+    )
+
+
+def _vit_optimizer_config(
+    flavor: str, *, mup: bool, lr: float, wd: float
+) -> OptimizersContainer.Config:
+    m = VIT_WIDTHS[flavor] / BASE_WIDTH
+    common = {"betas": (0.9, 0.95), "eps": 1e-8, "weight_decay": wd}
+    if mup:
+        groups = [
+            ParamGroupConfig(
+                pattern=MUP_PATTERN,
+                optimizer_name="AdamW",
+                optimizer_kwargs={**common, "lr": lr / m},
+            ),
+            ParamGroupConfig(
+                pattern=r".*",
+                optimizer_name="AdamW",
+                optimizer_kwargs={**common, "lr": lr},
+            ),
+        ]
+    else:
+        groups = [
+            ParamGroupConfig(
+                pattern=r".*",
+                optimizer_name="AdamW",
+                optimizer_kwargs={**common, "lr": lr},
+            )
+        ]
+    return OptimizersContainer.Config(
+        implementation="fused_opt_states_bf16", param_groups=groups
+    )
+
+
+def _vit(
+    flavor: str, *, mup: bool, lr: float = SWEEP_LR, wd: float = 3e-2
+) -> PathTrainer.Config:
+    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
+    world_size = int(os.environ.get("WORLD_SIZE", str(local_world_size)))
+    num_nodes = int(
+        os.environ.get("GROUP_WORLD_SIZE", str(world_size // local_world_size))
+    )
+    return PathTrainer.Config(
+        loss=PathLoss.Config(),
+        model_spec=vit_model_registry(flavor, mup=mup),
+        tokenizer=NoOpTokenizer.Config(),
+        dataloader=_vit_dataloader_config(split="train"),
+        optimizer=_vit_optimizer_config(flavor, mup=mup, lr=lr, wd=wd),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=round(STEPS * 0.1),
+            total_steps=None,
+            decay_ratio=0.8,
+            decay_type="cosine",
+            min_lr_factor=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=16,
+            global_batch_size=-1,
+            seq_len=1,
+            steps=STEPS,
+            max_norm=1.0,
+            dtype="float32",
+            mixed_precision_param="bfloat16",
+            mixed_precision_reduce="float32",
+        ),
+        parallelism=ParallelismConfig(
+            data_parallel_replicate_degree=num_nodes,
+            data_parallel_shard_degree=local_world_size,
+        ),
+        checkpoint=CheckpointManager.Config(enable=False),
+        metrics=MetricsProcessor.Config(
+            log_freq=10, enable_reporterv2=True, save_freq=STEPS
+        ),
+        validator=PathValidator.Config(
+            enable=False,
+            steps=-1,
+            dataloader=_vit_dataloader_config(split="val"),
+            mixed_precision_param="bfloat16",
+        ),
+        fps=SUPERCOMBO_FPS,
+        plan_target_last_frame=True,
+        debug=DebugConfig(seed=0),
+        built_base_lr=lr,
+        mup_base_lr=lr,
+    )
+
+
+def vit_standard_w256() -> PathTrainer.Config:
+    return _vit("w256", mup=False)
+
+
+def vit_standard_w512() -> PathTrainer.Config:
+    return _vit("w512", mup=False)
+
+
+def vit_standard_w1024() -> PathTrainer.Config:
+    return _vit("w1024", mup=False)
+
+
+def vit_standard_w2048() -> PathTrainer.Config:
+    return _vit("w2048", mup=False)
+
+
+def vit_mup_w256() -> PathTrainer.Config:
+    return _vit("w256", mup=True)
+
+
+def vit_mup_w512() -> PathTrainer.Config:
+    return _vit("w512", mup=True)
+
+
+def vit_mup_w1024() -> PathTrainer.Config:
+    return _vit("w1024", mup=True)
+
+
+def vit_mup_w2048() -> PathTrainer.Config:
+    return _vit("w2048", mup=True)
