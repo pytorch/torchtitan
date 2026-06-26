@@ -264,8 +264,11 @@ class PolicyTrainer(Actor, Configurable):
 
         self.generator: Any | None = None
 
-        # Data parallelism: mesh is available after _build_model triggers build_mesh
-        self.dp_enabled = self.parallel_dims.dp_enabled
+        # Data parallelism: mesh is available after _build_model triggers
+        # build_mesh. Underscore-prefixed so the public ``dp_rank`` endpoint name
+        # does not collide with the instance attribute (Monarch dispatches
+        # endpoints via getattr on the instance).
+        self._dp_enabled = self.parallel_dims.dp_enabled
         batch_mesh = self.parallel_dims.get_optional_mesh("batch")
         if batch_mesh is not None:
             self.dp_size = batch_mesh.size()
@@ -367,6 +370,11 @@ class PolicyTrainer(Actor, Configurable):
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
 
+    @endpoint
+    async def get_dp_rank(self) -> int:
+        """Return this actor's DP rank."""
+        return self.dp_rank
+
     def reduce_forward_backward_metrics(
         self,
         *,
@@ -408,14 +416,13 @@ class PolicyTrainer(Actor, Configurable):
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        training_data: list[TrainingBatch],
+        local_batch: TrainingBatch,
         num_global_valid_tokens: int,
     ) -> dict[str, float]:
         """Run forward pass, compute loss, call backward, and reduce metrics.
 
         Args:
-            training_data: List of TrainingBatch, one per DP rank. Local rank
-                picks training_data[self.dp_rank].
+            local_batch: This rank's TrainingBatch.
             num_global_valid_tokens: Total response tokens across all DP
                 ranks for this step. The controller computes this before
                 sharding episodes.
@@ -438,7 +445,6 @@ class PolicyTrainer(Actor, Configurable):
             )
         model = self.model_parts[0]
 
-        local_batch = training_data[self.dp_rank]
         device = self.device
         token_ids = local_batch.token_ids.to(device)
         labels = local_batch.labels.to(device)
