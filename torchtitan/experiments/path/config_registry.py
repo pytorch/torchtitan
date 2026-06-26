@@ -78,7 +78,7 @@ PATCH_SIZE = (1, 16, 8)
 IN_CHANNELS = 24
 PLAN_SIZE = 15 * 33 * 2
 BASE_WIDTH = 256
-VIT_WIDTHS = {"w128": 128, "w256": 256, "w512": 512, "w1024": 1024, "w2048": 2048}
+VIT_WIDTHS = {"w256": 256, "w512": 512, "w1024": 1024, "w2048": 2048}
 STEPS = 512
 MUP_PATTERN = (
     r"^(blocks\.\d+\.attention\.c_attn|blocks\.\d+\.attention\.c_proj"
@@ -448,7 +448,6 @@ def _vit_model_config(flavor: str, *, mup: bool, qk_norm: bool = True) -> PlanVi
     t, h, w = INPUT_SIZE
     num_patches = (t // pt) * (h // ph) * (w // pw)
     return PlanViT.Config(
-        dim=dim,
         output_mult=(BASE_WIDTH / dim) if mup else 1.0,
         mean=255 / 2,
         std=255 / 4,
@@ -512,28 +511,24 @@ def _vit_optimizer_config(
     # at once; muP scales the hidden matmuls down by lr_mult = 1/m (m = width ratio).
     m = VIT_WIDTHS[flavor] / BASE_WIDTH
     common = {"betas": (0.9, 0.95), "eps": 1e-8, "weight_decay": wd}
+    groups = [
+        ParamGroupConfig(
+            pattern=r".*",
+            optimizer_name="AdamW",
+            optimizer_kwargs={**common},
+        )
+    ]
     if mup:
-        groups = [
+        # first-match-wins: scale hidden matmuls by lr_mult = 1/m before the catch-all
+        groups.insert(
+            0,
             ParamGroupConfig(
                 pattern=MUP_PATTERN,
                 optimizer_name="AdamW",
                 lr_mult=1.0 / m,
                 optimizer_kwargs={**common},
             ),
-            ParamGroupConfig(
-                pattern=r".*",
-                optimizer_name="AdamW",
-                optimizer_kwargs={**common},
-            ),
-        ]
-    else:
-        groups = [
-            ParamGroupConfig(
-                pattern=r".*",
-                optimizer_name="AdamW",
-                optimizer_kwargs={**common},
-            )
-        ]
+        )
     return OptimizersContainer.Config(
         implementation="fused_opt_states_bf16", lr=lr, param_groups=groups
     )

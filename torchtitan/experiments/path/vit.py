@@ -62,7 +62,6 @@ class PlanHead(Module):
 class PlanViT(BaseModel):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
-        dim: int
         output_mult: float
         mean: float
         std: float
@@ -71,17 +70,6 @@ class PlanViT(BaseModel):
         blocks: list[PathTransformerBlock.Config]
         norm: LayerNorm.Config | RMSNorm.Config
         plan_head: PlanHead.Config
-
-        def update_from_config(self, *, config, **kwargs) -> None:
-            parallelism = config.parallelism
-            for name, degree in {
-                "tensor parallel": parallelism.tensor_parallel_degree,
-                "context parallel": parallelism.context_parallel_degree,
-                "pipeline parallel": parallelism.pipeline_parallel_degree,
-                "expert parallel": parallelism.expert_parallel_degree,
-            }.items():
-                if degree > 1:
-                    raise ValueError(f"PlanViT does not support {name}")
 
         def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
             nparams = sum(p.numel() for p in model.parameters())
