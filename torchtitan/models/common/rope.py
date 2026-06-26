@@ -39,6 +39,49 @@ def _maybe_check_max_pos(positions: torch.Tensor, *, max_valid_pos: int) -> None
     )
 
 
+def _yarn_inv_freq(
+    dim: int,
+    base: float,
+    rope_factor: float,
+    beta_fast: float,
+    beta_slow: float,
+    original_seq_len: int,
+    truncate: bool,
+) -> torch.Tensor:
+    """Shared YaRN ("NTK-by-parts") inverse-frequency computation.
+
+    Single source of truth for both ``ComplexRoPE`` and ``CosSinRoPE`` so the
+    two cache formats are guaranteed to agree. Follows the YaRN paper / HF
+    convention: ``low <- beta_fast`` (extrapolation boundary), ``high <-
+    beta_slow`` (interpolation boundary). ``truncate`` floors/ceils the cutoffs
+    (DeepSeek style); ``truncate=False`` keeps fractional cutoffs (gpt-oss
+    style). The range is always clamped to ``[0, dim/2 - 1]``. The YaRN
+    attention "mscale" is intentionally NOT applied here -- the rope stays a
+    pure rotation and the model folds mscale into its softmax scale.
+    """
+    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+
+    def find_correction_dim(num_rotations: float) -> float:
+        return (dim * math.log(original_seq_len / (num_rotations * 2 * math.pi))) / (
+            2 * math.log(base)
+        )
+
+    low = find_correction_dim(beta_fast)
+    high = find_correction_dim(beta_slow)
+    if truncate:
+        low = math.floor(low)
+        high = math.ceil(high)
+    low, high = max(low, 0), min(high, dim - 1)
+    assert (
+        0 < low < high < dim - 1
+    ), f"Invalid YaRN params: 0 < {low} < {high} < {dim - 1}"
+
+    ramp = ((torch.arange(dim // 2, dtype=torch.float32) - low) / (high - low)).clamp(
+        0, 1
+    )
+    return inv_freq / rope_factor * ramp + inv_freq * (1 - ramp)
+
+
 class RoPE(Module):
     """Shared Rotary Position Embedding module.
 
@@ -64,6 +107,7 @@ class RoPE(Module):
         beta_slow: float = 1.0
         original_seq_len: int = 4096
         mscale: float = 0.0
+        truncate: bool = True
 
     def __init__(self, config: Config):
         super().__init__()
@@ -175,47 +219,15 @@ class ComplexRoPE(RoPE):
             freqs = torch.where(is_medium_freqs, smoothed_freqs, freqs)
         elif cfg.scaling == "yarn" and end > cfg.original_seq_len:
             # YaRN (DeepSeek V3 style)
-            beta_fast = cfg.beta_fast
-            beta_slow = cfg.beta_slow
-            base = theta
-            original_seq_len = cfg.original_seq_len
-            factor = cfg.rope_factor
-
-            def find_correction_dim(
-                num_rotations: float, dim: int, base: float, max_seq_len: int
-            ) -> float:
-                return (
-                    dim
-                    * math.log(max_seq_len / (num_rotations * 2 * math.pi))
-                    / (2 * math.log(base))
-                )
-
-            def find_correction_range(
-                low_rot: float,
-                high_rot: float,
-                dim: int,
-                base: float,
-                max_seq_len: int,
-            ) -> tuple[int, int]:
-                low = math.floor(find_correction_dim(low_rot, dim, base, max_seq_len))
-                high = math.ceil(find_correction_dim(high_rot, dim, base, max_seq_len))
-                return max(low, 0), min(high, dim - 1)
-
-            def linear_ramp_factor(
-                min_val: float, max_val: float, dim: int
-            ) -> torch.Tensor:
-                if min_val == max_val:
-                    max_val += 0.001
-                linear_func = (torch.arange(dim, dtype=torch.float32) - min_val) / (
-                    max_val - min_val
-                )
-                return torch.clamp(linear_func, 0, 1)
-
-            low, high = find_correction_range(
-                beta_fast, beta_slow, dim, base, original_seq_len
+            freqs = _yarn_inv_freq(
+                dim,
+                theta,
+                cfg.rope_factor,
+                cfg.beta_fast,
+                cfg.beta_slow,
+                cfg.original_seq_len,
+                cfg.truncate,
             )
-            smooth = 1 - linear_ramp_factor(low, high, dim // 2)
-            freqs = freqs / factor * (1 - smooth) + freqs * smooth
 
         t = torch.arange(end, device=freqs.device)
         freqs = torch.outer(t, freqs).float()
@@ -270,41 +282,26 @@ class CosSinRoPE(RoPE):
         max_seq_len = cfg.max_seq_len
         base = cfg.theta
 
-        freq = base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
         mscale = 1.0
 
         if cfg.scaling == "llama":
             raise NotImplementedError("Cos/sin RoPE does not support Llama scaling.")
 
         if cfg.scaling == "yarn" and cfg.rope_factor > 1.0:
-            rope_factor = cfg.rope_factor
-            # YaRN mscale for attention magnitude preservation
-            mscale = 0.1 * math.log(rope_factor) + 1.0
-
-            # Compute correction range (NTK by parts)
-            d_half = dim / 2
-            low = (
-                d_half
-                * math.log(cfg.original_seq_len / (cfg.beta_fast * 2 * math.pi))
-                / math.log(base)
+            mscale = 0.1 * math.log(cfg.rope_factor) + 1.0
+            inv_freq = _yarn_inv_freq(
+                dim,
+                base,
+                cfg.rope_factor,
+                cfg.beta_fast,
+                cfg.beta_slow,
+                cfg.original_seq_len,
+                cfg.truncate,
             )
-            high = (
-                d_half
-                * math.log(cfg.original_seq_len / (cfg.beta_slow * 2 * math.pi))
-                / math.log(base)
-            )
-            assert (
-                0 < low < high < d_half - 1
-            ), f"Invalid YaRN params: 0 < {low} < {high} < {d_half - 1}"
-
-            ramp = (torch.arange(d_half, dtype=torch.float32) - low) / (high - low)
-            mask = 1 - ramp.clamp(0, 1)
-
-            interpolation = 1.0 / (rope_factor * freq)
-            extrapolation = 1.0 / freq
-            inv_freq = interpolation * (1 - mask) + extrapolation * mask
         else:
-            inv_freq = 1.0 / freq
+            inv_freq = 1.0 / (
+                base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
+            )
 
         t = torch.arange(max_seq_len, dtype=inv_freq.dtype, device=inv_freq.device)
         freqs = torch.outer(t, inv_freq).float()
