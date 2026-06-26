@@ -611,7 +611,7 @@ def mark_chunk_dynamic_dims(tensor: torch.Tensor, *, mode: ChunkMode) -> None:
         # Graph chunking splits the selected dimension into two equal pieces.
         # Use the original half-size as the lower bound so downstream shape
         # checks can still prove non-singleton subchunks after further local
-        # chunking (for example ChunkedCELoss over sequence).
+        # chunking (for example ChunkedLossWrapper over sequence).
         min=chunk_dim_shape // 2,
         max=chunk_dim_shape,
         specialize_on=[

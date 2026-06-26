@@ -31,6 +31,10 @@ from torchtitan.experiments.rl.actors.generator import (
 )
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability import metrics as m
+from torchtitan.experiments.rl.routing.intra_generator_router import (
+    IntraGeneratorRouter,
+)
+from torchtitan.experiments.rl.routing.strategies import LeastLoadedRoutingStrategy
 
 
 class _FakeRenderer:
@@ -94,7 +98,7 @@ def _generator():
     return generator
 
 
-def _dispatcher(*, rank=0, dp_degree=1, tp_degree=1):
+def _dispatcher(*, rank=0, dp_degree=1, tp_degree=1, dp_routing_strategy=None):
     """A bare RequestDispatcher; broadcast_group is unused unless ``setup`` runs.
 
     Passes a vLLM parallel config that matches the layout so the construction-time
@@ -113,6 +117,9 @@ def _dispatcher(*, rank=0, dp_degree=1, tp_degree=1):
         parallelism=parallelism,
         broadcast_group=None,
         vllm_parallel_config=vllm_parallel_config,
+        intra_generator_router=IntraGeneratorRouter.Config(
+            strategy=dp_routing_strategy or LeastLoadedRoutingStrategy.Config()
+        ),
     )
 
 
@@ -166,6 +173,31 @@ def test_process_finished_requests_noop_on_nonzero_tp_rank():
         [_request_output(request_id="r0")], policy_version=7
     )
     assert dispatcher._rank0_generation_futures == {}
+
+
+def test_process_finished_requests_releases_dp_router_load():
+    async def main():
+        dispatcher = _dispatcher(dp_degree=2)
+        assert dispatcher._rank0_dp_router is not None
+        future = asyncio.get_running_loop().create_future()
+        generation_future = GenerationFuture(future=future, metrics_prefix="generator")
+        generation_future.min_policy_version = 7
+        dispatcher._rank0_generation_futures = {"r0": generation_future}
+        dispatcher._rank0_dp_router.reserve("r0", routing_session_id=None)
+        # The reservation is recorded (least-loaded picks DP rank 0) and loads it.
+        assert dispatcher._rank0_dp_router._reservations == {"r0": 0}
+        assert [h.reserved_load for h in dispatcher._rank0_dp_router._handles] == [1, 0]
+
+        dispatcher.process_finished_requests(
+            [_request_output(request_id="r0")], policy_version=7
+        )
+
+        await future
+        # Resolving the completion releases the reservation and its load.
+        assert dispatcher._rank0_dp_router._reservations == {}
+        assert [h.reserved_load for h in dispatcher._rank0_dp_router._handles] == [0, 0]
+
+    asyncio.run(main())
 
 
 # --- SamplingParams contract (must match the batched path exactly) ---
