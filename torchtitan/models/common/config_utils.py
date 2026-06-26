@@ -30,6 +30,7 @@ from torchtitan.models.common.token_dispatcher import (
     DeepEPTokenDispatcher,
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
+    MinimalAsyncEPTokenDispatcher,
 )
 from torchtitan.protocols.module import Module
 
@@ -204,7 +205,6 @@ def make_token_dispatcher_config(
     *,
     num_experts: int,
     top_k: int,
-    score_before_experts: bool = True,
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> LocalTokenDispatcher.Config:
@@ -215,6 +215,7 @@ def make_token_dispatcher_config(
       dispatch when EP=1, i.e. ep_mesh is None at runtime)
     - "deepep": Uses DeepEP custom kernels for H100/NVLink Switch
     - "hybridep": Uses HybridEP with TMA optimization for GB200/NVLink72
+    - "minimal_async_ep": Uses MinimalAsyncEP for constrained DP>=EP
 
     DeepEP/HybridEP requires installation:
     https://github.com/deepseek-ai/DeepEP
@@ -227,25 +228,27 @@ def make_token_dispatcher_config(
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
-            score_before_experts=score_before_experts,
         )
     elif comm_backend == "hybridep":
         return HybridEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
-            score_before_experts=score_before_experts,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
+        )
+    elif comm_backend == "minimal_async_ep":
+        return MinimalAsyncEPTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
         )
     elif comm_backend == "standard":
         return AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
-            score_before_experts=score_before_experts,
         )
     else:
         raise ValueError(
             f"Unknown comm_backend: '{comm_backend}'. "
-            "Must be one of 'standard', 'deepep', 'hybridep'."
+            "Must be one of 'standard', 'deepep', 'hybridep', 'minimal_async_ep'."
         )
 
 
@@ -256,7 +259,6 @@ def make_experts_config(
     num_experts: int,
     top_k: int,
     param_init: dict[str, Callable],
-    score_before_experts: bool = True,
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> GroupedExperts.Config:
@@ -269,7 +271,6 @@ def make_experts_config(
         token_dispatcher=make_token_dispatcher_config(
             num_experts=num_experts,
             top_k=top_k,
-            score_before_experts=score_before_experts,
             comm_backend=comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         ),

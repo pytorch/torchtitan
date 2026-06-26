@@ -108,7 +108,7 @@ def set_hf_sharding_configs(
     # plain-Tensor / DTensor ops in apply_rotary_pos_emb.
     if hasattr(model, "rotary_emb") and not isinstance(model.rotary_emb, nn.Identity):
         rope = model.rotary_emb
-        rope._sharding_config = _replicate_config(rope, wrap_inputs=True)
+        rope._sharding_config = _rope_config(rope, enable_sp=enable_sp)
 
     # Per-layer modules
     for transformer_block in model.layers:
@@ -296,18 +296,34 @@ def _hf_norm_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def _replicate_config(
-    module: nn.Module, *, wrap_inputs: bool = False
-) -> ShardingConfig:
+def _replicate_config(module: nn.Module) -> ShardingConfig:
     """Replicate all params and buffers — ShardingConfig equivalent of NoParallel.
 
     Dynamically enumerates the module's own parameters and buffers to avoid
-    ``_shard_states`` raising on undeclared entries.
+    ``_distribute_states`` raising on undeclared entries.
+    """
+    state_shardings: dict = {}
+    for name, _ in module.named_parameters(recurse=False):
+        state_shardings[name] = dense_param_placement(tp=spmd.R)
+    for name, _ in module.named_buffers(recurse=False):
+        state_shardings[name] = dense_param_placement(tp=spmd.R)
+    return ShardingConfig(state_shardings=state_shardings)
 
-    When ``wrap_inputs=True``, also wraps all positional forward args as
-    DTensor(Replicate). This is needed for modules (like rotary embedding)
-    whose forward receives plain tensors that must be DTensors to avoid
-    mixed-type errors in downstream ops.
+
+def _rope_config(module: nn.Module, *, enable_sp: bool) -> ShardingConfig:
+    """Sharding config for a rotary embedding module.
+
+    The rotary embedding's forward receives the hidden-states activation (first
+    positional arg) plus plain tensors (e.g. ``position_ids``). Its inv_freq
+    buffer is replicated so the computed cos/sin come out as DTensors, avoiding
+    mixed plain-Tensor / DTensor ops in ``apply_rotary_pos_emb``.
+
+    Core's input redistribution requires ``in_src_shardings`` to match the
+    incoming placement exactly. Under SP the hidden-states arg arrives sharded
+    on the sequence dim (the embedding output layout), so declare the first arg
+    with the SP activation placement; the remaining (plain) args are wrapped as
+    Replicate. ``in_dst`` mirrors ``in_src`` -- the rotary embedding only reads
+    hidden_states for dtype/device, so there is no need to redistribute it.
     """
     state_shardings: dict = {}
     for name, _ in module.named_parameters(recurse=False):
@@ -315,12 +331,15 @@ def _replicate_config(
     for name, _ in module.named_buffers(recurse=False):
         state_shardings[name] = dense_param_placement(tp=spmd.R)
 
-    if not wrap_inputs:
-        return ShardingConfig(state_shardings=state_shardings)
-
     sig = inspect.signature(type(module).forward)
     arg_names = [p.name for p in sig.parameters.values() if p.name != "self"]
-    in_shardings = {name: dense_activation_placement(tp=spmd.R) for name in arg_names}
+    in_shardings = {}
+    for i, name in enumerate(arg_names):
+        in_shardings[name] = (
+            _sp_activation(enable_sp=enable_sp)
+            if i == 0
+            else dense_activation_placement(tp=spmd.R)
+        )
     return ShardingConfig(
         state_shardings=state_shardings,
         in_src_shardings=in_shardings,

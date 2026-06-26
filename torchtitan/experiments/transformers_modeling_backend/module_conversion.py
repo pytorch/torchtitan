@@ -8,7 +8,7 @@
 
 Dynamically creates classes that inherit from both the original HF class
 and ``Module``, then swaps ``__class__`` on existing instances. This gives
-every HF module the ``parallelize()``, ``_shard_states()``, and
+every HF module the ``parallelize()``, ``_distribute_states()``, and
 ``_sharding_config`` capabilities without changing any module state,
 forward behavior, or state_dict keys. After conversion,
 ``set_hf_sharding_configs`` sets ``_sharding_config`` on each module and

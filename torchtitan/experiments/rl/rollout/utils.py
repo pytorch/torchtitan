@@ -13,39 +13,95 @@ from torchtitan.experiments.rl.rollout.types import Rollout
 from torchtitan.experiments.rl.types import Episode
 
 
-def last_completion_text(rollout: Rollout) -> str:
-    """Return the completion message text from the last turn, or `""`."""
-    if not rollout.turns:
-        return ""
-    msg = rollout.turns[-1].completion_message
-    return (msg.get("content") or "") if msg else ""
+# TODO: evaluate renaming Episode -> TrainingSample once we align overloaded "sample" names. E.g. Dataset also uses it.
+def rollout_to_episodes(rollout: Rollout) -> list[Episode]:
+    """Pack a scored `Rollout` into training episodes — usually one, or several where its turns branch.
 
+    Turns that share a growing prefix (each prompt continues the previous prompt + completion) are
+    packed into ONE episode: prompts and env replies are masked out, completions are trained. A new
+    episode (branch) opens wherever that prefix breaks (history was edited).
 
-def rollout_to_episode(rollout: Rollout) -> Episode:
-    """Flatten a scored single-turn `Rollout` into an `Episode`, a class
-    that holds only the information needed for training.
+    This branching has three common causes:
+    1) The rollout loop purposely edits the history: For example, when compacting a long conversation;
+    2) Thinking is removed from history: This is a flag in the `renderer` used in the `Rollouter`. Choose
+        `preserve_all_thinking=True` to avoid stripping thinking (default=True);
+    3) Some error or change from retokenization: Those can be avoided by doing token-in-token-out (TITO),
+        i.e. you give tokens to the generators, and you append (bridge) the tokens received, leaving no room for changes.
+        TITO is our default;
+
+    Example (5 turns; the env compacts history before turn 3, so the prefix breaks -> 2 episodes).
+    P = prompt; C = completion; E = env reply
+        turn0: prompt=[P1]              completion=[C1]
+        turn1: prompt=[P1,C1,E1]        completion=[C2]
+        turn2: prompt=[P1,C1,E1,C2,E2]  completion=[C3]
+        turn3: prompt=[P2]              completion=[C4]   # history compacted -> prefix breaks
+        turn4: prompt=[P2,C4,E4]        completion=[C5]
+        # -> episode 0: token_ids=[P1,C1,E1,C2,E2,C3], loss_mask=[0,1,0,1,0,1]   sample_id=<rollout id>
+        #    episode 1: token_ids=[P2,C4,E4,C5],        loss_mask=[0,1,0,1]       sample_id=".../branch=1"
     """
-    # TODO: support multi-turn rollout flattening.
-    # TODO(branching): when a turn's prompt history diverges from the previous turn's
-    #       (e.g. the env edited/compacted history), the turns no longer share a prefix
-    #       and must be split into separate training sequences instead of one flat episode.
-    # TODO: rename Episode -> TrainingSample / rollout_to_episode ->
-    #       rollout_to_training_sample (consistent with TrainingBatch).
-    if len(rollout.turns) != 1:
+    rollout_advantage = rollout.advantage
+    if rollout_advantage is None:
         raise ValueError(
-            f"rollout_to_episode expects exactly one turn; got {len(rollout.turns)}."
+            f"rollout {rollout.sample_id!r} has no advantage; the Rollouter must fill it "
+            "(via its advantage estimator) before episodes are built."
         )
-    turn = rollout.turns[0]
-    return Episode(
-        policy_version=turn.policy_version,
-        sample_id=rollout.sample_id,
-        prompt_token_ids=turn.prompt_token_ids,
-        completion_text=last_completion_text(rollout),
-        completion_token_ids=turn.completion_token_ids,
-        completion_logprobs=turn.completion_logprobs,
-        reward=rollout.reward,
-        advantage=rollout.advantage if rollout.advantage is not None else 0.0,
-    )
+    episodes: list[Episode] = []
+
+    # Used to check if [P1, C1] is prefix of [P1,C1,E1] in the docstring example
+    prev_prompt_and_completion: list[int] = []
+
+    # Skip if no completion (nothing to train on). This happens when the prompt is too long.
+    # TODO: This seems to happen on the very first turn. Check if we can prefilter it.
+    for turn_idx, rollout_turn in enumerate(rollout.turns):
+        if not rollout_turn.completion_token_ids:
+            if turn_idx != len(rollout.turns) - 1:
+                raise ValueError(
+                    f"rollout {rollout.sample_id!r}: non-final turn {turn_idx} has no completion"
+                )
+            continue
+
+        prompt = rollout_turn.prompt_token_ids
+        # True when this prompt continues the previous one (prefix-preserving);
+        # False when the env edited history -> open a new episode (branch).
+        extends_prev = (
+            prompt[: len(prev_prompt_and_completion)] == prev_prompt_and_completion
+        )
+        if not episodes or not extends_prev:
+            # start a new episode
+            episodes.append(
+                Episode(
+                    # TODO(async): carry per-token version_intervals in episode
+                    policy_version=rollout_turn.policy_version,
+                    sample_id=(
+                        rollout.sample_id
+                        if not episodes
+                        else f"{rollout.sample_id}/branch={len(episodes)}"
+                    ),
+                    token_ids=[],
+                    loss_mask=[],
+                    logprobs=[],
+                    advantage=[],
+                )
+            )
+            # The whole prompt opens this episode.
+            prefix_len = 0
+        else:
+            # Only the env-reply suffix is new.
+            prefix_len = len(prev_prompt_and_completion)
+
+        # Untrained prefix delta (the prompt or the new env reply), then the trained completion.
+        episode = episodes[-1]
+        prompt_delta = prompt[prefix_len:]
+        num_delta = len(prompt_delta)
+        num_completion = len(rollout_turn.completion_token_ids)
+        episode.token_ids += prompt_delta + rollout_turn.completion_token_ids
+        episode.loss_mask += [False] * num_delta + [True] * num_completion
+        episode.logprobs += [0.0] * num_delta + rollout_turn.completion_logprobs
+        episode.advantage += [0.0] * num_delta + [rollout_advantage] * num_completion
+
+        prev_prompt_and_completion = prompt + rollout_turn.completion_token_ids
+
+    return episodes
 
 
 def prepare_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metric]:
@@ -67,14 +123,20 @@ def prepare_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
 
     truncated = [float(r.status.is_truncated()) for r in rollouts]
     rewards = [r.reward for r in rollouts if r.reward is not None]
+    num_turns = [float(len(rollout.turns)) for rollout in rollouts]
 
     out: list[m.Metric] = [
+        m.Metric(f"{prefix}/output_tokens", m.Mean.from_list(completion_lens)),
+        m.Metric(f"{prefix}/output_tokens", m.Std.from_list(completion_lens)),
+        m.Metric(f"{prefix}/output_tokens", m.Max.from_list(completion_lens)),
         m.Metric(f"{prefix}/response_length", m.Mean.from_list(completion_lens)),
         m.Metric(f"{prefix}/response_length", m.Max.from_list(completion_lens)),
         m.Metric(f"{prefix}/prompt_length", m.Mean.from_list(prompt_lens)),
         m.Metric(f"{prefix}/prompt_length", m.Max.from_list(prompt_lens)),
         m.Metric(f"{prefix}/total_length", m.Mean.from_list(total_lens)),
         m.Metric(f"{prefix}/total_length", m.Max.from_list(total_lens)),
+        m.Metric(f"{prefix}/num_turns", m.Mean.from_list(num_turns)),
+        m.Metric(f"{prefix}/num_turns", m.Max.from_list(num_turns)),
         m.Metric(f"{prefix}/truncation_rate", m.Mean.from_list(truncated)),
         m.Metric(f"{prefix}_reward", m.SummaryStats.from_list(rewards)),
     ]

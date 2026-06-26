@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import enum
-import functools
 import os
 import queue
 import re
@@ -27,16 +26,12 @@ from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
-from torch.distributed.checkpoint.state_dict import (
-    get_model_state_dict,
-    set_model_state_dict,
-    StateDictOptions,
-)
 from torch.distributed.checkpoint.state_dict_saver import (
     AsyncCheckpointerType,
     AsyncSaveResponse,
 )
 from torch.distributed.checkpoint.stateful import Stateful
+from torch.distributed.tensor import DTensor
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
@@ -59,6 +54,20 @@ class AsyncMode(str, enum.Enum):
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
 
 
+def _shares_storage(a: torch.Tensor, b: torch.Tensor) -> bool:
+    """Whether ``a`` and ``b`` are backed by the same storage.
+
+    For ``DTensor`` the local shard's storage is compared via ``_local_tensor``
+    rather than ``to_local()``, which is autograd-aware; this is a read-only
+    identity check on the local storage.
+    """
+    if isinstance(a, DTensor):
+        a = a._local_tensor
+    if isinstance(b, DTensor):
+        b = b._local_tensor
+    return a.untyped_storage().data_ptr() == b.untyped_storage().data_ptr()
+
+
 class ModelWrapper(Stateful):
     """
     A wrapper for `nn.Module` (or a list of modules) that provides a unified `Stateful`
@@ -69,11 +78,16 @@ class ModelWrapper(Stateful):
            different modules (like individual chunks in Pipeline Parallelism)
            into a single flat view so checkpointing code can interact
            with them through a unified interface.
-        2. State Dict Caching: It caches the flattened state dict and returns
-           the same dictionary object on subsequent `state_dict()` calls.
-           This avoids repeatedly reconstructing the aggregated state dict and
-           allows downstream checkpointing implementations to reuse the cached
-           mapping when stable object references are beneficial.
+        2. Stable-storage caching: It caches the flattened state dict and, on
+           every `state_dict()` call, returns tensors backed by the same
+           storage. Async DCP staging may cache pinned host buffers keyed by the
+           source storage, so keeping the storage stable lets it reuse those
+           buffers across saves (the fast checkpoint path). Parameter tensors
+           already satisfy this because the cached view shares the parameter
+           storage; tensors produced by module `state_dict` hooks (e.g. one that
+           splits a fused parameter) may be freshly allocated each call, so they
+           are refreshed in place to keep their storage stable while their values
+           track the current parameters.
 
     Notes:
         - Calling `load_state_dict` updates the underlying modules and
@@ -88,23 +102,30 @@ class ModelWrapper(Stateful):
         self.cached_state_dict = self._get_state_dict()
 
     def _get_state_dict(self) -> dict[str, Any]:
-        state_dict = {
-            k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
-        }
-        return state_dict
+        # TorchTitan already makes model state_dict keys canonical.
+        return {k: v for model in self.model for k, v in model.state_dict().items()}
 
     def state_dict(self) -> dict[str, Any]:
+        # Recompute the state dict so hook-produced tensors reflect the current
+        # parameters, then merge into the cache without changing storage objects.
+        for key, value in self._get_state_dict().items():
+            cached = self.cached_state_dict.get(key)
+            if (
+                cached is None
+                or cached.shape != value.shape
+                or cached.dtype != value.dtype
+            ):
+                self.cached_state_dict[key] = value
+            elif not _shares_storage(cached, value):
+                cached.copy_(value)
         return self.cached_state_dict
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        func = functools.partial(
-            set_model_state_dict,
-            model_state_dict=state_dict,
-            options=StateDictOptions(strict=False),
-        )
-        list(map(func, self.model))
-        # `set_model_state_dict()` does change the keys of the input state_dict,
-        # we will need to reinitialize the cache_state_dict.
+        # strict=False because state_dict is the flattened checkpoint dict, which
+        # mixes model FQN keys with non-model keys (optimizer, lr_scheduler, ...).
+        for model in self.model:
+            model.load_state_dict(state_dict, strict=False)
+        # Refresh the cache so state_dict() reflects the freshly loaded values.
         self.cached_state_dict = self._get_state_dict()
 
 
@@ -156,11 +177,9 @@ class CheckpointManager(Configurable):
     Then when reloading, only one stage can restore its optimizer states, others will
     error.
 
-        The solution to this problem is optimizer flattening: it landed in #127071 and
-        is enabled in TorchTitan by passing the 'flatten_optimizer_state_dict' kwarg to
-        DCP functions called in the OptimizerContainer. See PR #127071
-        (https://github.com/pytorch/pytorch/pull/127071) for the example of a flattening
-        state_dict.
+        The solution to this problem is optimizer flattening.
+        TorchTitan's OptimizersContainer flattens optimizer state dicts to FQN-keyed
+        flat dicts using the utilities in torchtitan/components/checkpoint_utils.py.
 
     2. With complex PP schedules, we have multiple model chunks per pp rank. This
     compounds challenge (1) by also requiring us to reason about multiple 'optim'

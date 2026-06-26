@@ -10,6 +10,7 @@ from functools import partial
 
 import torch.nn as nn
 
+from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     CosSinRoPE,
@@ -175,7 +176,6 @@ def _build_qwen3_moe_layers(
                         num_experts=num_experts,
                         top_k=top_k,
                         param_init=_depth_experts_init(layer_id),
-                        score_before_experts=False,
                         comm_backend=moe_comm_backend,
                         non_blocking_capacity_factor=non_blocking_capacity_factor,
                     ),
@@ -631,6 +631,6 @@ def model_registry(
         model=config,
         parallelize_fn=parallelize_qwen3,
         pipelining_fn=pipeline_llm,
-        post_optimizer_build_fn=None,
+        post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=Qwen3StateDictAdapter,
     )

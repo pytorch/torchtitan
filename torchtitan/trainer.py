@@ -13,11 +13,11 @@ from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any, cast
 
+import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
-from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
@@ -30,7 +30,6 @@ from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import (
-    ActivationCheckpointConfig,
     CommConfig,
     CompileConfig,
     DebugConfig,
@@ -39,8 +38,13 @@ from torchtitan.config.configs import (
 )
 from torchtitan.config.override import apply_overrides, OverrideConfig
 from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
+from torchtitan.distributed.activation_checkpoint import (
+    ActivationCheckpointingConfig,
+    MemoryBudgetAC,
+    SelectiveAC,
+)
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
-
+from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
@@ -91,8 +95,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         checkpoint: CheckpointManager.Config = field(
             default_factory=CheckpointManager.Config
         )
-        activation_checkpoint: ActivationCheckpointConfig = field(
-            default_factory=ActivationCheckpointConfig
+        activation_checkpoint: ActivationCheckpointingConfig = field(
+            default_factory=SelectiveAC.Config
         )
         compile: CompileConfig = field(default_factory=CompileConfig)
         comm: CommConfig = field(default_factory=CommConfig)
@@ -106,6 +110,52 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise ValueError(
                     "Batch-invariant mode is not supported in pre-training."
                 )
+
+            if (
+                self.parallelism.spmd_backend == "spmd_types"
+                and self.debug.spmd_typechecking
+                and self.parallelism.pipeline_parallel_degree > 1
+            ):
+                # TODO(sanketpurandare): Enable SPMD typechecking under PP.
+                raise ValueError(
+                    "SPMD typechecking is not supported with pipeline parallelism. "
+                    "Validate the same config without PP "
+                    "(--parallelism.pipeline_parallel_degree 1)."
+                )
+
+            if (
+                self.parallelism.spmd_backend == "spmd_types"
+                and self.debug.spmd_typechecking
+                and isinstance(self.activation_checkpoint, SelectiveAC.Config)
+                and self.model_spec is not None
+                and any(self.model_spec.model.traverse(FlexAttention.Config))
+            ):
+                # TODO(pianpwk): Enable SAC with FlexAttention under SPMD typechecking.
+                raise ValueError(
+                    "Selective activation checkpointing (SAC) is not supported "
+                    "with FlexAttention while SPMD typechecking is enabled. "
+                    "Use full activation checkpointing, disable activation "
+                    "checkpointing, or switch to a non-Flex attention backend."
+                )
+
+            if isinstance(self.activation_checkpoint, MemoryBudgetAC.Config) and not (
+                self.compile.enable and "model" in self.compile.components
+            ):
+                raise ValueError(
+                    "Memory budget activation checkpointing requires the model to be "
+                    "compiled: set --compile.enable and include 'model' in "
+                    "--compile.components."
+                )
+
+            # Pretraining inputs are shaped by TrainingConfig.seq_len when
+            # sequence_parallel is applied
+            if self.parallelism.enable_sequence_parallel:
+                sp_degree = self.parallelism.tensor_parallel_degree
+                if sp_degree > 1 and self.training.seq_len % sp_degree != 0:
+                    raise ValueError(
+                        f"Training sequence length ({self.training.seq_len}) must be "
+                        f"divisible by sequence parallel degree ({sp_degree})."
+                    )
 
         def to_dict(self) -> dict[str, Any]:
             d = {}
@@ -197,6 +247,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
+        # TODO(pianpwk): Transitional until the local-SPMD and full-DTensor
+        # backends share one runtime mesh/type mechanism.
+        dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
 
         # Logging needs to happen after distributed initialized
         config.maybe_log()
@@ -466,10 +519,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             base_folder=config.dump_folder,
         )
 
-        loss_parallel_enabled = (
-            parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
+        self.train_context = dist_utils.get_train_context(
+            parallel_dims=parallel_dims,
+            spmd_typechecking=(
+                config.parallelism.spmd_backend == "spmd_types"
+                and config.debug.spmd_typechecking
+            ),
         )
-        self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -631,6 +687,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
                 self.parallel_dims, inputs, labels, extra_kwargs
             )
+        elif self.config.parallelism.spmd_backend == "spmd_types":
+            inputs, labels, extra_kwargs = annotate_input_spmd_types(
+                self.parallel_dims,
+                inputs,
+                labels,
+                extra_kwargs,
+            )
 
         return inputs, labels, extra_kwargs
 
@@ -685,18 +748,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             assert len(model_parts) == 1
             with self.train_context():
                 pred = model_parts[0](inputs, **extra_kwargs)
-                # Under non-full_dtensor, labels stay as plain tensors. See
-                # ``cross_entropy_loss`` for why pred must also be plain.
-                # Remove once non-full_dtensor is no longer supported.
-                if (
-                    isinstance(pred, DTensor)
-                    and self.config.parallelism.spmd_backend != "full_dtensor"
-                    and self.config.parallelism.disable_loss_parallel
-                ):
-                    pred = pred.to_local()
                 loss = self.loss_fn(pred, labels, global_valid_tokens)
                 del pred
-                loss.backward()
+                with spmd.no_typecheck():
+                    # this propagates types through BWD, causing unnecessary conflicts
+                    # between torch_function and internals (e.g. AC). FWD is sufficient.
+                    loss.backward()
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss

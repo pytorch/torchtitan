@@ -47,14 +47,16 @@ class LocalMapConfig:
     (already aligned by ``_redistribute_inputs``); output placements from
     ``ShardingConfig.out_src_shardings``. ``LocalMapConfig`` only carries
     ``in_grad_placements`` since there's no equivalent slot on
-    ``ShardingConfig`` today.
+    ``ShardingConfig`` today. Set it to ``None`` to omit the local_map
+    argument when input gradients are irrelevant.
 
     Attributes:
         in_grad_placements: Per-input-gradient SpmdLayouts (positional,
-            ordered by ``forward`` args). Use ``None`` for non-tensor args.
+            ordered by ``forward`` args). Use ``None`` to omit
+            input-gradient placements or for non-tensor args.
     """
 
-    in_grad_placements: tuple[SpmdLayout | None, ...]
+    in_grad_placements: tuple[SpmdLayout | None, ...] | None
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}
@@ -96,7 +98,7 @@ class ShardingConfig:
             DTensor. When ``local_map`` is set this also tells ``local_map``
             what to wrap the local output back to. Accepts a single
             ``SpmdLayout`` (single-output case) or a tuple (multi-
-            output case, e.g. attention with ``return_lse=True``). ``None``
+            output case). ``None``
             means "infer from the output" (it's already a DTensor at the
             right placement, or there's no local_map to drive).
             e.g. ``{TP: Partial()}`` for the MoE wrapper.

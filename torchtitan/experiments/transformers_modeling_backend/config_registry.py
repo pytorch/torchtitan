@@ -9,12 +9,8 @@ from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    DebugConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.transformers_modeling_backend.configs import (
     TransformersBackendConfig,
 )
@@ -50,9 +46,7 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
 
 
@@ -89,9 +83,7 @@ def transformers_modeling_backend_debugmodel_flex() -> TransformersBackendConfig
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
 
 
@@ -122,9 +114,7 @@ def transformers_modeling_backend_debugmodel_moe() -> TransformersBackendConfig:
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
 
 
@@ -153,9 +143,7 @@ def transformers_modeling_backend_full_moe() -> TransformersBackendConfig:
             interval=500,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
 
 
@@ -185,7 +173,5 @@ def transformers_modeling_backend_full() -> TransformersBackendConfig:
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )

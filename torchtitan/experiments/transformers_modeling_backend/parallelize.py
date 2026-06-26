@@ -11,14 +11,13 @@ from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecision
 from torch.distributed.tensor import Shard
 
 from torchtitan.config import (
-    ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
@@ -41,7 +40,7 @@ def parallelize_hf_transformers(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
+    ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
     """Apply parallelism to the HF model using the titan Module protocol.
@@ -116,7 +115,13 @@ def parallelize_hf_transformers(
         set_hf_sharding_configs(
             model,
             enable_sp=parallel_dims.tp_enabled,
-            enable_loss_parallel=not parallelism.disable_loss_parallel,
+            # Loss parallelism shards the lm_head output on the vocab dim (S(-1)).
+            # Main removed the ParallelismConfig.disable_loss_parallel field and
+            # the loss_parallel() train-context; core cross_entropy_loss now
+            # detects a vocab-sharded DTensor pred and runs vocab-parallel CE
+            # directly. Enable it exactly when TP is active (matches core TP
+            # models, which shard the lm_head output S(-1) under TP).
+            enable_loss_parallel=parallel_dims.tp_enabled,
         )
 
         # 4. Single parallelize call — handles TP, EP, MoE, everything
@@ -131,8 +136,8 @@ def parallelize_hf_transformers(
         compile_config.enable and "model" in compile_config.components
     )
 
-    if ac_config.mode != "none":
-        apply_ac(model, ac_config)
+    if ac_config is not None:
+        ac_config.build(dump_folder=dump_folder).apply(model)
 
     # Compile after AC wrapping and before FSDP. Compile the whole transformer
     # block (including native MoE) via the shared core helper — the previous

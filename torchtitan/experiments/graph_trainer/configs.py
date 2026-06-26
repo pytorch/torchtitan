@@ -8,9 +8,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
 from typing import Literal
 
-from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
-from torchtitan.config import ActivationCheckpointConfig
+from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.config.configs import CompileConfig
+from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.experiments.graph_trainer.chunked_loss import (
+    ChunkedCELossWithParamGrads,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
@@ -86,6 +89,12 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Maximum CPU memory budget (in GB per rank) for offloaded activations.
     Tensors are selected largest-first until the budget is exhausted."""
 
+    enable_fsdp_ag_rs_overlap: bool = False
+    """When True, run ``overlap_fsdp_ag_rs_pass``. The pass moves backward
+    FSDP all-gathers onto a separate CUDA stream from reduce-scatters so the
+    two collectives can overlap. It is a no-op when the graph contains no
+    FSDP all-gathers."""
+
     precompile_artifact_dir: str = ""
     """
     Directory for precompiled artifacts. Setting this enables precompile:
@@ -142,14 +151,19 @@ def to_graph_trainer_config(
     d.pop("compile")
 
     # graph_trainer uses graph-based SAC instead of eager AC. Override any
-    # non-"none" AC mode to "selective" so callers don't need per-config fixups.
+    # enabled AC policy with the default selective one so callers don't need
+    # per-config fixups.
     ac = d.get("activation_checkpoint")
-    if ac is not None and ac.mode != "none":
-        d["activation_checkpoint"] = ActivationCheckpointConfig(mode="selective")
+    if ac is not None:
+        d["activation_checkpoint"] = SelectiveAC.Config()
 
-    # TODO: graph_trainer doesn't yet support ChunkedCELoss
-    if isinstance(d.get("loss"), ChunkedCELoss.Config):
-        d["loss"] = CrossEntropyLoss.Config()
+    # graph_trainer's tracer requires explicit autograd outputs for lm_head
+    # params instead of relying on .grad side effects from chunk_loss.backward().
+    loss_cfg = d.get("loss")
+    if isinstance(loss_cfg, ChunkedCELoss.Config):
+        d["loss"] = ChunkedCELossWithParamGrads.Config(
+            **{f.name: getattr(loss_cfg, f.name) for f in fields(loss_cfg)}
+        )
 
     # Merge CUDA graph kernel annotations into profiler traces when profiling
     # is active.  No-op otherwise (and no-op when requirements aren't met).

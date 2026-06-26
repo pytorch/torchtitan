@@ -10,6 +10,10 @@ from dataclasses import dataclass
 import torch
 from torch.nn.attention.flex_attention import and_masks
 
+from torchtitan.distributed.minimal_async_ep.api import (
+    maybe_update_minimal_async_ep_config,
+)
+
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -21,11 +25,13 @@ from torchtitan.models.common.attention import (
     get_efficient_causal_mask_mod_for_packed_document,
     VarlenAttention,
 )
+from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.nn_modules import Embedding, Linear, RMSNorm
+from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
+
 
 __all__ = ["Decoder", "TransformerBlock"]
 
@@ -118,6 +124,7 @@ class Decoder(BaseModel):
             object with a ``ParallelismConfig`` in its ``parallelism``
             field; in that case the training/debug setup is skipped.
             """
+            from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
             from torchtitan.config import ParallelismConfig
             from torchtitan.trainer import Trainer
 
@@ -135,6 +142,12 @@ class Decoder(BaseModel):
                 raise NotImplementedError(
                     "Weight tying is not supported with Pipeline Parallel."
                 )
+
+            loss_config = getattr(config, "loss", None)
+            if isinstance(loss_config, (ChunkedCELoss.Config, CrossEntropyLoss.Config)):
+                # TODO(pianpwk): Move this into config_registry entries. This
+                # hook is for CLI overrides, while vocab size is model-defined.
+                loss_config.global_vocab_size = self.vocab_size
 
             tp = parallelism.tensor_parallel_degree
             attention = self.first_attention
@@ -175,6 +188,8 @@ class Decoder(BaseModel):
                             "requires expert parallelism "
                             "(expert_parallel_degree > 1)."
                         )
+
+            maybe_update_minimal_async_ep_config(self, config)
 
             # NOTE: Inference-only callers such as the RL generator skip
             # training.seq_len sync. Generated sequence length is not known
@@ -269,13 +284,13 @@ class Decoder(BaseModel):
         positions: torch.Tensor,
         attn_config: BaseAttention.Config,
     ) -> AttentionMasksType:
+        assert isinstance(attn_config.inner_attention, FlexAttention.Config)
         mask_mods = [
             get_causal_mask_mod(),
             get_efficient_causal_mask_mod_for_packed_document(positions),
         ]
         B = positions.shape[0]
         seq_len = positions.shape[1]
-        assert isinstance(attn_config.inner_attention, FlexAttention.Config)
         return create_attention_mask(
             and_masks(*mask_mods),
             B,

@@ -132,12 +132,13 @@ def test_autoparallel_graph_pass_selection_uses_regular_memory_policy():
     from torchtitan.experiments.graph_trainer import passes
 
     traced_result = SimpleNamespace(
-        gm=torch.fx.GraphModule(torch.nn.Module(), torch.fx.Graph())
+        gm=torch.fx.GraphModule(torch.nn.Module(), torch.fx.Graph()),
+        state_fqns=[],
     )
     config = SimpleNamespace(
         compile=GraphTrainerCompileConfig(
             enable_autoparallel=True,
-            enable_cudagraph=False,
+            disable_passes=["cudagraph_pass"],
         ),
         model_spec=SimpleNamespace(model=SimpleNamespace(layers=[object()])),
         parallelism=SimpleNamespace(
