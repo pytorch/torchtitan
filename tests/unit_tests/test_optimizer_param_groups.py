@@ -263,6 +263,67 @@ class TestParamGroupConfig(unittest.TestCase):
         # Default group
         self.assertEqual(groups[1]["lr"], 1e-3)
 
+    def test_base_lr_with_lr_mult(self):
+        """A base lr scales each group by its lr_mult."""
+        model = SimpleModel()
+        config = OptimizersContainer.Config(
+            implementation="for-loop",
+            lr=1e-3,
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r"embed_tokens\.",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"weight_decay": 0.1},
+                    lr_mult=0.25,
+                ),
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"weight_decay": 0.1},
+                    lr_mult=1.0,
+                ),
+            ],
+        )
+        opt = config.build(model_parts=[model]).optimizers[0]
+
+        self.assertAlmostEqual(opt.param_groups[0]["lr"], 1e-3 * 0.25)
+        self.assertAlmostEqual(opt.param_groups[1]["lr"], 1e-3 * 1.0)
+
+    def test_base_lr_default_lr_mult_unscaled(self):
+        """lr_mult defaults to 1.0 so a single base lr applies unscaled."""
+        model = SimpleModel()
+        config = OptimizersContainer.Config(
+            implementation="for-loop",
+            lr=5e-4,
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"weight_decay": 0.1},
+                ),
+            ],
+        )
+        opt = config.build(model_parts=[model]).optimizers[0]
+
+        self.assertAlmostEqual(opt.param_groups[0]["lr"], 5e-4)
+
+    def test_base_lr_rejects_group_lr(self):
+        """Setting lr in optimizer_kwargs while a base lr is set raises ValueError."""
+        model = SimpleModel()
+        config = OptimizersContainer.Config(
+            implementation="for-loop",
+            lr=1e-3,
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"lr": 1e-4, "weight_decay": 0.1},
+                ),
+            ],
+        )
+        with self.assertRaises(ValueError):
+            config.build(model_parts=[model])
+
     def test_first_match_wins(self):
         """When patterns overlap, the first match wins."""
         model = SimpleModel()
