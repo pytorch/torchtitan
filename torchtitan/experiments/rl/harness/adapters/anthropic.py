@@ -11,7 +11,7 @@ agent is pointed at. Per turn it renders the agent's message history into prompt
 token ids (Token-In-Token-Out via ``renderer.bridge_to_next_turn``, reusing prior
 turns' exact tokens so a multi-turn trajectory packs into ONE episode), samples via
 ``generate_fn``, and records a ``CapturedTurn`` (prompt/completion ids + logprobs).
-``finish_session`` drains the recorded turns for ``rollout_to_episodes``.
+``finish_session`` drains the recorded turns for ``rollout_to_training_samples``.
 
 Token legend (this module): ``ids`` = token id lists; a *turn* is one
 agent<->model HTTP round trip; a *session* is one agent run (one rollout sibling).
@@ -29,7 +29,6 @@ from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
 from aiohttp import web
-
 from renderers import Message, Renderer, ToolSpec
 from renderers.base import ToolCallParseStatus
 
@@ -49,7 +48,10 @@ class CapturedTurn:
     prompt_token_ids: list[int]
     completion_token_ids: list[int]
     completion_logprobs: list[float]
-    policy_version: int | None
+    # Async RL splits a turn's policy version into a (min, max) span (weights can
+    # update mid-decode); a single-shot completion sets both to the same value.
+    min_policy_version: int | None
+    max_policy_version: int | None
     finish_reason: str | None
     # Whether this turn's prompt continues the previous turn's prompt+completion
     # (TITO-bridged). False marks a history rewrite (compaction) -> episode branch.
@@ -375,7 +377,7 @@ def _plan_prompt(
     ``last_prompt_ids + last_completion_ids`` with only the new tool/user messages.
     new/wipe (full render): first turn or a history rewrite (compaction); render
     the whole conversation -- a wipe deliberately breaks the prefix so
-    ``rollout_to_episodes`` opens a new episode branch.
+    ``rollout_to_training_samples`` opens a new training-sample branch.
     """
     anth_messages = body.get("messages") or []
     system = body.get("system")
@@ -450,7 +452,8 @@ async def _handle_messages(request: web.Request) -> web.StreamResponse:
                         prompt_token_ids=list(prompt_ids),
                         completion_token_ids=[],
                         completion_logprobs=[],
-                        policy_version=None,
+                        min_policy_version=None,
+                        max_policy_version=None,
                         finish_reason="length",
                         extends_previous=extends_previous,
                     )
@@ -494,7 +497,8 @@ async def _handle_messages(request: web.Request) -> web.StreamResponse:
                 prompt_token_ids=list(prompt_ids),
                 completion_token_ids=list(completion.token_ids),
                 completion_logprobs=list(completion.token_logprobs),
-                policy_version=completion.policy_version,
+                min_policy_version=completion.min_policy_version,
+                max_policy_version=completion.max_policy_version,
                 finish_reason=completion.finish_reason,
                 extends_previous=extends_previous,
             )

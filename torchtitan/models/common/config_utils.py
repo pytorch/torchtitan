@@ -14,6 +14,8 @@ import dataclasses
 from collections.abc import Callable
 from typing import Literal
 
+import torch
+
 from torchtitan.models.common.attention import (
     FlexAttention,
     FusedQKVLinear,
@@ -21,6 +23,7 @@ from torchtitan.models.common.attention import (
     QKVLinear,
     VarlenAttention,
 )
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
@@ -32,7 +35,15 @@ from torchtitan.models.common.token_dispatcher import (
     LocalTokenDispatcher,
     MinimalAsyncEPTokenDispatcher,
 )
+from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
+
+
+def decoder_vocab_size(model_spec: ModelSpec) -> int:
+    """Assert Decoder.Config type so lint is not annoyed."""
+    model_config = model_spec.model
+    assert isinstance(model_config, Decoder.Config)
+    return model_config.vocab_size
 
 
 def get_attention_config(
@@ -70,6 +81,74 @@ def get_attention_config(
         raise ValueError(f"Unknown backend: {backend}")
 
 
+def _fused_qkv_param_init(
+    base_param_init: dict[str, Callable],
+    *,
+    n_heads: int,
+    n_kv_heads: int,
+    head_dim: int,
+) -> dict[str, Callable]:
+    """Init for the fused ``wqkv`` that is bit-identical to the stock separate
+    ``wq``/``wk``/``wv`` and independent of the sharding degree.
+
+    The non-fused module initializes ``wq``/``wk``/``wv`` as three separate
+    contiguous parameters. This reproduces those exact draws: it initializes q,
+    k, v as three contiguous tensors of the stock-weight shapes (in
+    ``QKVLinear``'s ``wq``/``wk``/``wv`` build order), then assembles them into
+    the fused ``(n_kv_heads, R, head_dim, dim)`` layout (``R = heads_per_kv + 2``)
+    -- the same concatenation ``_merge_qkv_on_load`` uses -- and copies into the
+    buffer.
+
+    Parallelism-agnostic RNG: at init ``t`` is the (possibly sharded) param --
+    e.g. a ``Shard(0)`` DTensor for the colwise wqkv. ``t.new_empty(...)``
+    returns ``Replicate`` DTensors, so each ``base_init`` runs on the full tensor
+    and draws the same values on every rank (the weights do not depend on the
+    TP/FSDP degree). ``cat`` of ``Replicate`` stays ``Replicate``, and the final
+    ``copy_`` scatters it into the sharded ``t`` (each rank keeps its shard). So
+    the path is "init replicated, then shard," which both matches the non-fused
+    module and keeps RNG independent of the parallelism.
+    """
+    heads_per_kv = n_heads // n_kv_heads
+    r_dim = heads_per_kv + 2
+
+    def _make_init(base_init: Callable) -> Callable:
+        # ``tail`` is the per-row shape: () for bias, (in_features,) for weight.
+        # Building q/k/v with the exact stock shapes and drawing them in
+        # wq/wk/wv order keeps the RNG sequence identical to the non-fused module.
+        def _init(t):
+            tail = t.shape[1:]
+            # If t is a sharded DTensor, new_empty (with the full stock shape)
+            # returns Replicate DTensors, so base_init runs replicated and draws
+            # the same values on every rank (parallelism-agnostic RNG).
+            q = t.new_empty(n_heads * head_dim, *tail)
+            k = t.new_empty(n_kv_heads * head_dim, *tail)
+            v = t.new_empty(n_kv_heads * head_dim, *tail)
+            base_init(q)
+            base_init(k)
+            base_init(v)
+            fused = torch.cat(
+                [
+                    q.view(n_kv_heads, heads_per_kv, head_dim, *tail),
+                    k.view(n_kv_heads, 1, head_dim, *tail),
+                    v.view(n_kv_heads, 1, head_dim, *tail),
+                ],
+                dim=1,
+            )
+            with torch.no_grad():
+                # fused is Replicate (cat of Replicates); copy_ scatters it into
+                # t, so each rank writes only its own shard of the fused param.
+                t.view(n_kv_heads, r_dim, head_dim, *tail).copy_(fused)
+
+        return _init
+
+    out: dict[str, Callable] = {}
+    for param in ("weight", "bias"):
+        base_init = base_param_init.get(param)
+        if base_init is not None:
+            out[param] = _make_init(base_init)
+    return out
+
+
 def make_gqa_config(
     *,
     dim: int,
@@ -96,7 +175,14 @@ def make_gqa_config(
             wqkv=Linear.Config(
                 in_features=dim,
                 out_features=(n_heads + 2 * n_kv) * per_head_dim,
-                param_init=wqkv_param_init,
+                # Per-slice init so the fused wqkv is bit-identical to the stock
+                # separate wq/wk/wv (see _fused_qkv_param_init).
+                param_init=_fused_qkv_param_init(
+                    wqkv_param_init,
+                    n_heads=n_heads,
+                    n_kv_heads=n_kv,
+                    head_dim=per_head_dim,
+                ),
             ),
         )
     else:

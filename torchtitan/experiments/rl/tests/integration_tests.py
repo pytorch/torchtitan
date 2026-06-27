@@ -35,12 +35,12 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                 [
                     "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen",
-                    "--num_steps 5",
+                    "--async-loop.num-training-steps 5",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
                     "--num_generators 3",
-                    "--group_size 2",
-                    "--batcher.batch.seq_len 1024",
+                    "--async-loop.group-size 2",
+                    "--async-loop.batcher.batch.seq-len 1024",
                     "--renderer.enable-thinking False",
                     "--generator.sampling.max_tokens 256",
                     "--trainer.debug.no_batch_invariant",
@@ -59,11 +59,11 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                 [
                     "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen",
-                    "--num_steps 5",
+                    "--async-loop.num-training-steps 5",
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
-                    "--group_size 2",
-                    "--batcher.batch.seq_len 1024",
+                    "--async-loop.group-size 2",
+                    "--async-loop.batcher.batch.seq-len 1024",
                     "--renderer.enable-thinking False",
                     "--generator.sampling.max_tokens 256",
                     "--trainer.debug.no_batch_invariant",
@@ -79,8 +79,8 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_moe_debug_varlen",
-                    "--num_steps 5",
+                    "--config rl_grpo_gpt_oss_debug_varlen",
+                    "--async-loop.num-training-steps 5",
                     "--hf_assets_path tests/assets/tokenizer",
                     "--trainer.parallelism.tensor_parallel_degree 4",
                     "--trainer.parallelism.expert_parallel_degree 4",
@@ -88,8 +88,8 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--generator.parallelism.tensor_parallel_degree 4",
                     "--generator.parallelism.expert_parallel_degree 4",
                     "--generator.parallelism.data_parallel_degree 1",
-                    "--group_size 2",
-                    "--batcher.batch.seq_len 1024",
+                    "--async-loop.group-size 2",
+                    "--async-loop.batcher.batch.seq-len 1024",
                     "--renderer.enable-thinking False",
                     "--generator.sampling.max_tokens 256",
                     "--trainer.debug.no_batch_invariant",
@@ -101,8 +101,62 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO MoE TP=4 EP=4",
+            "RL GRPO GPT-OSS MoE varlen TP=4 EP=4",
             "rl_grpo_moe_debug_tp4_ep4",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            # Two runs sharing the same dump_folder, with different parallelism
+            # to exercise resharding on resume:
+            #   run 1: trainer DP=2 (TP=1) + 2 generators (TP=2); train 2 steps,
+            #          write a full checkpoint at step 2.
+            #   run 2: trainer TP=2 (DP=1) + 1 generator (TP=4); resume from the
+            #          step-2 checkpoint and train through step 4.
+            # This covers (1) trainer DCP checkpoint resharding (DP->TP),
+            # (2) trainer->generator TorchStore resharding, and (3) the
+            # multi-generator vs single-generator paths. The second run errors
+            # if resume is broken. lr_scheduler.total_steps is pinned so the LR
+            # is identical across save/load.
+            [
+                [
+                    "--module alphabet_sort",
+                    "--config rl_grpo_qwen3_0_6b_varlen",
+                    "--async-loop.num-training-steps 2",
+                    "--num_generators 2",
+                    "--trainer.parallelism.data_parallel_shard_degree 2",
+                    "--trainer.parallelism.tensor_parallel_degree 1",
+                    "--generator.parallelism.tensor_parallel_degree 2",
+                    "--async-loop.group-size 2",
+                    "--async-loop.batcher.batch.seq-len 1024",
+                    "--renderer.enable-thinking False",
+                    "--generator.sampling.max_tokens 256",
+                    "--trainer.debug.no_batch_invariant",
+                    "--generator.debug.no_batch_invariant",
+                    "--metrics.no-enable-wandb",
+                    "--trainer.checkpoint.interval 2",
+                    "--trainer.lr_scheduler.total_steps 4",
+                ],
+                [
+                    "--module alphabet_sort",
+                    "--config rl_grpo_qwen3_0_6b_varlen",
+                    "--async-loop.num-training-steps 4",
+                    "--num_generators 1",
+                    "--trainer.parallelism.data_parallel_shard_degree 1",
+                    "--trainer.parallelism.tensor_parallel_degree 2",
+                    "--generator.parallelism.tensor_parallel_degree 4",
+                    "--async-loop.group-size 2",
+                    "--async-loop.batcher.batch.seq-len 1024",
+                    "--renderer.enable-thinking False",
+                    "--generator.sampling.max_tokens 256",
+                    "--trainer.debug.no_batch_invariant",
+                    "--generator.debug.no_batch_invariant",
+                    "--metrics.no-enable-wandb",
+                    "--trainer.checkpoint.interval 2",
+                    "--trainer.lr_scheduler.total_steps 4",
+                ],
+            ],
+            "RL GRPO checkpoint save + resume (resharding)",
+            "rl_grpo_checkpoint_resume",
             ngpu=8,
         ),
     ]
@@ -115,9 +169,9 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
                 [
                     "--module alphabet_sort",
                     "--config rl_grpo_qwen3_0_6b_varlen_batch_invariant",
-                    "--num_steps 5",
-                    "--group_size 2",
-                    "--batcher.batch.seq_len 1024",
+                    "--async-loop.num-training-steps 5",
+                    "--async-loop.group-size 2",
+                    "--async-loop.batcher.batch.seq-len 1024",
                     "--renderer.enable-thinking False",
                     "--generator.sampling.max_tokens 256",
                     "--metrics.no-enable-wandb",
@@ -132,10 +186,10 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
                 [
                     "--module alphabet_sort",
                     "--config rl_grpo_qwen3_moe_debug_varlen_batch_invariant",
-                    "--num_steps 5",
+                    "--async-loop.num-training-steps 5",
                     "--hf_assets_path tests/assets/tokenizer",
-                    "--group_size 2",
-                    "--batcher.batch.seq_len 1024",
+                    "--async-loop.group-size 2",
+                    "--async-loop.batcher.batch.seq-len 1024",
                     "--renderer.enable-thinking False",
                     "--generator.sampling.max_tokens 256",
                     "--trainer.checkpoint.no-enable",  # use random-init weights

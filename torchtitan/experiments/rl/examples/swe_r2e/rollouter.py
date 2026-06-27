@@ -18,9 +18,9 @@ to the on-box Anthropic adapter for each model turn. So this rollouter overrides
     5. drain the adapter's captured turns into ``RolloutTurn``s and stamp the
        grade onto the last turn's ``env_rewards`` (read back by ``RewardR2E``).
 
-The standard rubric + advantage + ``rollout_to_episodes`` path then applies: each
-turn's prompt exactly extends ``prev_prompt + prev_completion`` (the adapter uses
-Token-In-Token-Out bridging), so a whole trajectory packs into one episode with
+The standard rubric + advantage + ``rollout_to_training_samples`` path then applies:
+each turn's prompt exactly extends ``prev_prompt + prev_completion`` (the adapter uses
+Token-In-Token-Out bridging), so a whole trajectory packs into one training sample with
 assistant tokens trained and prompt / tool-result tokens masked out.
 
 Knobs read from env (the launcher sets these; see ``run_swe_r2e_*.sh``):
@@ -62,6 +62,7 @@ from torchtitan.experiments.rl.rollout.types import (
     RolloutTurn,
 )
 from torchtitan.experiments.rl.rubrics import Rubric
+from torchtitan.experiments.rl.types import RolloutTurnID
 
 if TYPE_CHECKING:
     # Type-only: importing the generator module pulls in vLLM at import time.
@@ -145,7 +146,7 @@ class SWER2ERollouter(Rollouter):
         *,
         generate_fn: GenerateFn,
         sample: SWER2ESample,
-        group_id: str,
+        group_id: int,
         group_size: int,
         sampling: "SamplingConfig",
         renderer: Renderer,
@@ -160,7 +161,7 @@ class SWER2ERollouter(Rollouter):
                     generate_fn=generate_fn,
                     sample=sample,
                     group_id=group_id,
-                    rollout_id=f"{group_id}/sample={i}",
+                    rollout_idx=i,
                     sampling=sampling,
                     renderer=renderer,
                 )
@@ -186,8 +187,8 @@ class SWER2ERollouter(Rollouter):
         adapter: AnthropicAdapter,
         generate_fn: GenerateFn,
         sample: SWER2ESample,
-        group_id: str,
-        rollout_id: str,
+        group_id: int,
+        rollout_idx: int,
         sampling: "SamplingConfig",
         renderer: Renderer,
     ) -> Rollout:
@@ -196,6 +197,12 @@ class SWER2ERollouter(Rollouter):
         Always returns a ``Rollout`` (errors are caught and marked terminal) so one
         bad sibling never fails the whole group.
         """
+        # Stable per-sibling string key ("group=G/rollout=R") for the adapter
+        # session, sticky generator routing, the in-sandbox session id, and the
+        # dump filename; the int sibling index goes on the Rollout/RolloutTurn ids.
+        rollout_id = RolloutTurnID(
+            group_id=group_id, rollout_id=rollout_idx, turn_id=0
+        ).to_string(include_turn=False)
         adapter.open_session(
             rollout_id,
             generate_fn=generate_fn,
@@ -249,17 +256,22 @@ class SWER2ERollouter(Rollouter):
             sem.release()
             captured = await adapter.finish_session(rollout_id)
 
-        # Drop empty-completion turns so rollout_to_episodes only sees trainable
-        # turns (a non-final empty completion would otherwise raise).
+        # Drop empty-completion turns so rollout_to_training_samples only sees
+        # trainable turns (a non-final empty completion would otherwise raise).
         turns: list[RolloutTurn] = [
             RolloutTurn(
+                rollout_id=RolloutTurnID(
+                    group_id=group_id, rollout_id=rollout_idx, turn_id=turn_idx
+                ),
                 prompt_token_ids=ct.prompt_token_ids,
                 completion_token_ids=ct.completion_token_ids,
                 completion_logprobs=ct.completion_logprobs,
-                policy_version=ct.policy_version,
+                min_policy_version=ct.min_policy_version,
+                max_policy_version=ct.max_policy_version,
             )
-            for ct in captured
-            if ct.completion_token_ids
+            for turn_idx, ct in enumerate(
+                ct for ct in captured if ct.completion_token_ids
+            )
         ]
 
         if not turns:
@@ -304,7 +316,7 @@ class SWER2ERollouter(Rollouter):
         )
         return Rollout(
             group_id=group_id,
-            sample_id=rollout_id,
+            rollout_id=rollout_idx,
             status=status,
             turns=turns,
         )

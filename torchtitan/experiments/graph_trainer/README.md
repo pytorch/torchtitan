@@ -84,6 +84,49 @@ MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --comp
 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.no-enable_passes
 ```
 
+### Expert Parallel Overlap
+
+EP overlap is an experimental graph-trainer optimization for MoE models with
+real expert-parallel collectives. Enable it only with `aot_fx_trace` and
+`expert_parallel_degree > 1`:
+
+```bash
+NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel \
+    ./run_train.sh \
+    --compile.mode aot_fx_trace \
+    --compile.ep_overlap.enabled \
+    --compile.ep_overlap.strategy graph \
+    --compile.ep_overlap.chunk_dim batch \
+    --compile.ep_overlap.module_fqn layers.* \
+    --parallelism.data_parallel_shard_degree 4 \
+    --parallelism.expert_parallel_degree 2
+```
+
+Supported graph-chunking selections are:
+
+- `--compile.ep_overlap.chunk_dim batch --compile.ep_overlap.module_fqn layers.*`
+  for transformer-block chunking.
+- `--compile.ep_overlap.chunk_dim batch --compile.ep_overlap.module_fqn layers.*.moe`
+  for MoE-only batch chunking.
+- `--compile.ep_overlap.chunk_dim seq --compile.ep_overlap.module_fqn layers.*.moe`
+  for MoE-only sequence chunking.
+
+Graph chunking intentionally couples the tracer and EP-overlap passes through
+the `ep_overlap` trace-input preparer: before `minimal_fx_tracer` fakeifies
+inputs, the preparer marks token-grid dimensions with Dynamo symbolic-shape
+metadata. The chunk pass later consumes those symbols as the source of truth for
+which live-ins and live-outs must be split. Keep this contract in sync when
+changing trace inputs, symbolic-shape handling, or EP-overlap pass behavior.
+
+Current limitations:
+
+- EP overlap is only meaningful when `expert_parallel_degree > 1`.
+- Sequence chunking is restricted to `layers.*.moe`; chunking attention over
+  sequence is not supported.
+- Graph chunking is validated against the tested DP/EP configurations in the
+  graph-trainer numerics and integration suites. Composability with additional
+  overlap or sharding modes should be validated with loss comparison before use.
+
 ### Experimental AutoParallel Sharding
 
 GraphTrainer can use AutoParallel to solve SPMD placement for supported models,
@@ -104,7 +147,7 @@ MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_debugmodel ./run_train.s
 DeepSeek V3 debug model:
 
 ```bash
-MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel_ep ./run_train.sh \
+MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel ./run_train.sh \
   --compile.mode aot_fx_trace \
   --compile.enable_autoparallel \
   --parallelism.data_parallel_shard_degree 4 \

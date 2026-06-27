@@ -20,12 +20,15 @@ from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import warn_once
 from torchtitan.tools.utils import has_cuda_capability
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.model_executor.layers.attention import Attention
-from vllm.v1.attention.backend import AttentionType
+from vllm.model_executor.layers.attention.attention import get_attention_context
+from vllm.v1.attention.backend import AttentionCGSupport, AttentionType
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
     FlashAttentionImpl,
     FlashAttentionMetadata,
+    FlashAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 
@@ -54,6 +57,20 @@ class PyTorchVarlenAttentionBackend(FlashAttentionBackend):
     @staticmethod
     def get_impl_cls():
         return PyTorchVarlenAttentionImpl
+
+    @staticmethod
+    def get_builder_cls():
+        # Report UNIFORM_SINGLE_TOKEN_DECODE cudagraph support instead of the FA3
+        # builder's ALWAYS. Our varlen forward bakes per-step cu_seqlens /
+        # max_query_len into the captured graph, so a FULL graph over a mixed
+        # prefill+decode batch replays stale offsets -> NaN (#3709); only
+        # query_len==1 decode is safe to capture. This keeps FULL_DECODE_ONLY
+        # valid, auto-downgrades FULL to FULL_DECODE_ONLY (instead of capturing the
+        # broken mixed graph), and allows PIECEWISE (attention runs eager).
+        class PyTorchVarlenAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
+            _cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+
+        return PyTorchVarlenAttentionMetadataBuilder
 
 
 class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
@@ -85,6 +102,10 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
 
     # Based on vLLM's FlashAttentionImpl.forward():
     # https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/flash_attn.py
+    #
+    # @eager_break_during_capture makes this forward a break point for vLLM's
+    # breakable cudagraph (VLLM_USE_BREAKABLE_CUDAGRAPH=1, cudagraph_mode=PIECEWISE)
+    @eager_break_during_capture
     def forward(
         self,
         layer: torch.nn.Module,
@@ -119,8 +140,15 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
                 "fused output quantization is not yet supported for FlashAttentionImpl"
             )
 
+        # Breakable cudagraph: under VLLM_USE_BREAKABLE_CUDAGRAPH the recorded
+        # forward closure pins capture-time args (attn_metadata None, varlen metadata
+        # absent). Re-read live per-layer metadata + kv_cache from the forward context
+        # (vLLM refreshes them before each replay) BEFORE the None check, else replay
+        # short-circuits to output.fill_(0) (zeroed attention). No-op outside capture.
+        attn_metadata, _, kv_cache, _ = get_attention_context(layer.layer_name)
+
         if attn_metadata is None:
-            # Profiling run.
+            # Profiling / cudagraph dummy-capture run (no real metadata yet).
             return output.fill_(0)
 
         attn_type = self.attn_type
@@ -317,10 +345,6 @@ class VLLMAttentionWrapper(Module):
         **kwargs,
     ) -> torch.Tensor:
         """Run vLLM paged attention on local (non-DTensor) tensors.
-
-        Positional arg names match the q_BLNH/k_BLNH/v_BLNH convention the GQA
-        attention sharding (``set_gqa_inner_attention_local_map``) keys its
-        ``in_dst_shardings`` by, so the local_map machinery aligns inputs.
 
         Args:
             q_BLNH: ``(batch, seq_len, num_heads, head_dim)``

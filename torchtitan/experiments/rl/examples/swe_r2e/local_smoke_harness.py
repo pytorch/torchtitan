@@ -86,7 +86,8 @@ async def main() -> None:
         else:
             lps = [0.0] * len(tok)
         return Completion(
-            policy_version=0,
+            min_policy_version=0,
+            max_policy_version=0,
             request_id=request_id,
             token_ids=tok,
             token_logprobs=lps,

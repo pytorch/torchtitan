@@ -16,20 +16,26 @@ from dataclasses import dataclass
 from functools import partial
 
 import torch
-import torch._dynamo
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import (
+    apply_overrides,
+    CompileConfig,
+    OverrideConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
-from vllm.compilation import codegen as _codegen
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.logger import init_logger
 from vllm.utils import torch_utils as _torch_utils
 
@@ -55,31 +61,75 @@ def _dtensor_safe_weak_ref_tensor(tensor):
 _torch_utils.weak_ref_tensor = _dtensor_safe_weak_ref_tensor
 
 
-# NOTE: Monkeypatch vLLM's _node_ref to handle DTensor placement types
-# whose repr() uses unqualified class names not available in the generated
-# code's exec namespace (which only has `import torch`).
-_original_node_ref = _codegen._node_ref
+# Process-global: install the op swap at most once even if the generator is
+# re-initialized in the same process (re-wrapping would chain shims).
+_tp_all_reduce_patched = False
 
 
-# TODO: Followup with core vLLM fix
-# https://github.com/pytorch/torchtitan/issues/3067
-def _patched_node_ref(arg):
-    try:
-        from torch.distributed.tensor.placement_types import Partial, Placement
+def _patch_vllm_all_reduce() -> None:
+    """Route the generator's tensor-parallel all-reduce through vLLM's custom
+    one-shot/multimem AR instead of DTensor's NCCL ring redistribute (applied
+    when batch-invariant mode is off). Idempotent. Two changes:
 
-        if isinstance(arg, Placement):
-            cls = type(arg)
-            # Partial.__repr__ leaves reduce_op unquoted (e.g. "Partial(sum)")
-            # which would resolve to the builtin sum, not the string "sum".
-            if isinstance(arg, Partial):
-                return f"{cls.__module__}.{cls.__name__}({arg.reduce_op!r})"
-            return f"{cls.__module__}.{repr(arg)}"
-    except ImportError:
-        pass
-    return _original_node_ref(arg)
+    1. Swap torch.ops._c10d_functional.all_reduce (the op every DTensor
+       Partial -> Replicate redistribute calls) for
+       tensor_model_parallel_all_reduce, which reuses vLLM's TP GroupCoordinator
+       -- the same ranks, but the group that owns the custom-AR shared buffers.
+       DTensor wraps the synchronous result in an AsyncCollectiveTensor whose
+       wait_tensor is a no-op. Only sum reductions are routed (the custom AR is
+       sum-only); others fall through to the original op. No-op at world_size 1.
 
+    2. Force the custom AR onto its registered=False path so cudagraph capture
+       works. registered=True records graph buffers and calls cudaIpcGetMemHandle
+       on them, which fails for the expandable_segments (VMM) memory the RL stack
+       enables for Monarch RDMA. registered=False reduces via the init-time
+       buffer_ptrs (raw cudaMalloc, IPC-able), records no graph buffers, at the
+       cost of one staging copy per AR.
 
-_codegen._node_ref = _patched_node_ref
+    TODO: this is a stopgap to close the generator's TP all-reduce perf gap.
+    Improve our native (DTensor) all-reduce path and remove this patch.
+    """
+    global _tp_all_reduce_patched
+    if _tp_all_reduce_patched:
+        return
+
+    from vllm.distributed import get_tp_group
+
+    c10d = torch.ops._c10d_functional
+    # Op schema: all_reduce(Tensor input, str reduce_op, Any group_name) -> Tensor.
+    original_all_reduce = c10d.all_reduce
+
+    def all_reduce(input, reduce_op, group_name):
+        if reduce_op == "sum":
+            # Use vLLM's helper rather than the incoming group_name: the custom-AR
+            # kernel is bound to vLLM's TP GroupCoordinator and the shared buffers
+            # it registered, so the reduction must run on vLLM's TP group, not
+            # DTensor's TP mesh PG (a different PG over the same ranks -> rank-for-
+            # rank equivalent). The helper resolves that group, guards
+            # world_size==1, and on CUDA dispatches to torch.ops.vllm.all_reduce.
+            return tensor_model_parallel_all_reduce(input)
+        return original_all_reduce(input, reduce_op, group_name)
+
+    c10d.all_reduce = all_reduce
+
+    # Force vLLM's TP custom AR onto its registered=False path (see point 2).
+    device_comm = get_tp_group().device_communicator
+    ca = getattr(device_comm, "ca_comm", None) if device_comm is not None else None
+    if ca is not None and not ca.disabled:
+
+        def custom_all_reduce(input):
+            # Mirrors CustomAllreduce.custom_all_reduce but always registered=False.
+            if ca.disabled or not ca.should_custom_ar(input):
+                return None
+            return ca.all_reduce(input, registered=False)
+
+        ca.custom_all_reduce = custom_all_reduce
+
+    _tp_all_reduce_patched = True
+    logger.info(
+        "vllm_allreduce: routed _c10d_functional.all_reduce (TP sum reductions) "
+        "through vLLM custom all-reduce (registered=False, cudagraph-safe)"
+    )
 
 
 @support_torch_compile(
@@ -116,6 +166,7 @@ class VLLMModelWrapper(Module):
         checkpoint_config: CheckpointManager.Config,
         vllm_config: VllmConfig,
         prefix: str = "",
+        override: OverrideConfig,
     ):
         super().__init__()
 
@@ -189,22 +240,15 @@ class VLLMModelWrapper(Module):
             config=_InferenceConfig(parallelism=training_parallelism)
         )
 
+        # Apply config overrides (e.g. the fused gate+up SwiGLU) after
+        # update_from_config (which fills the sharding the override factories
+        # read) and before build
+        if override.imports:
+            apply_overrides(override, self.config)
+
         # Build model on meta device to avoid allocating full model on every GPU
         with torch.device("meta"):
             self.model = self.config.build()
-
-        # With TP, collectives may return AsyncCollectiveTensor (overlap
-        # path) or plain Tensor (sync path) depending on timing.  Dynamo
-        # specializes on tensor type, so each switch triggers a
-        # recompile.  Because of this, the default recompile_limit (8) is
-        # too low; exceeding it fails under
-        # fullgraph=True so set to 10 for now and bump to 12 for sliding window
-        has_sliding_window = any(
-            getattr(layer_cfg.attention, "sliding_window_size", None) is not None
-            for layer_cfg in model_config.layers
-        )
-        if compile_config.enable:
-            torch._dynamo.config.recompile_limit = 12 if has_sliding_window else 10
 
         self.model = self.parallelize_fn(
             model=self.model,
@@ -238,6 +282,11 @@ class VLLMModelWrapper(Module):
         # Need to do it here after parallelize + weight load so sinks are
         # TP-sharded.
         self._inject_attention_sinks()
+
+        # Route the TP all-reduce through vLLM's custom AR (off under
+        # batch-invariant mode, where its size-dependent algorithm breaks).
+        if self.parallel_dims.tp_enabled and not is_in_batch_invariant_mode():
+            _patch_vllm_all_reduce()
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:

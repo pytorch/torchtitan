@@ -54,7 +54,23 @@ def compute_config_fingerprint(
     h.update(f"compile:mode:{compile_config.mode}\n".encode())
     h.update(f"compile:backend:{compile_config.backend}\n".encode())
     h.update(f"compile:passes:{list(compile_config.passes)}\n".encode())
-
+    h.update(
+        f"compile:ep_overlap:enabled:{compile_config.ep_overlap.enabled}\n".encode()
+    )
+    h.update(
+        f"compile:ep_overlap:chunk_dim:{compile_config.ep_overlap.chunk_dim}\n".encode()
+    )
+    h.update(
+        "compile:ep_overlap:strategy:"
+        f"{compile_config.ep_overlap.strategy}\n".encode()
+    )
+    h.update(
+        f"compile:ep_overlap:module_fqn:{compile_config.ep_overlap.module_fqn}\n".encode()
+    )
+    h.update(
+        "compile:ep_overlap:disable_early_grad_accumulation:"
+        f"{compile_config.ep_overlap.disable_early_grad_accumulation}\n".encode()
+    )
     h.update(f"torch_version:{torch.__version__}\n".encode())
 
     if torch.cuda.is_available():

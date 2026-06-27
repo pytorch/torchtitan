@@ -32,11 +32,18 @@ from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
+from torchtitan.experiments.graph_trainer.configs import (
+    EpOverlapConfig,
+    GraphTrainerCompileConfig,
+)
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     model_registry as dsv3_model_registry,
 )
 from torchtitan.experiments.graph_trainer.deepseek_v3.parallelize import (
     annotate_deepseekv3,
+)
+from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
+    maybe_apply_ep_overlap_eager_chunking,
 )
 from torchtitan.experiments.graph_trainer.llama3 import (
     model_registry as llama3_model_registry,
@@ -163,6 +170,13 @@ class BitwiseDeterministicBase(unittest.TestCase):
         trainer_cls: type,
         *,
         enable_passes: bool = True,
+        compile_passes: list[str] | None = None,
+        compile_ep_overlap_enabled: bool = False,
+        compile_ep_overlap_chunk_dim: str = "batch",
+        compile_ep_overlap_module_fqn: str = "layers.*",
+        compile_ep_overlap_disable_early_grad_accumulation: bool = False,
+        compile_inductor_compilation: str = "regional",
+        compile_disable_passes: list[str] | None = None,
         numerics_changing_optim: bool = False,
     ) -> tuple[torch.Tensor, str, str]:
         """Run forward-backward-optimizer steps using the given trainer class."""
@@ -174,6 +188,15 @@ class BitwiseDeterministicBase(unittest.TestCase):
             self.model_config,
             trainer_cls,
             compile_enable_passes=enable_passes,
+            compile_passes=compile_passes,
+            compile_ep_overlap_enabled=compile_ep_overlap_enabled,
+            compile_ep_overlap_chunk_dim=compile_ep_overlap_chunk_dim,
+            compile_ep_overlap_module_fqn=compile_ep_overlap_module_fqn,
+            compile_ep_overlap_disable_early_grad_accumulation=(
+                compile_ep_overlap_disable_early_grad_accumulation
+            ),
+            compile_inductor_compilation=compile_inductor_compilation,
+            compile_disable_passes=compile_disable_passes,
             compile_numerics_changing_optim=numerics_changing_optim,
             tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
         )
@@ -245,13 +268,9 @@ class BitwiseDeterministicBase(unittest.TestCase):
         if enable_passes:
             config = SimpleNamespace(
                 model_spec=SimpleNamespace(model=self.model_config),
-                compile=SimpleNamespace(
-                    memory_policy="default",
-                    inductor_compilation="regional",
-                    numerics_changing_optim=False,
-                    cpu_offload_prefetch_n_layers=1,
-                    cpu_offload_defer_n_layers=1,
-                    cpu_offload_budget_gb=100.0,
+                compile=GraphTrainerCompileConfig(
+                    enable=True,
+                    mode="aot_fx_trace",
                 ),
                 parallelism=SimpleNamespace(
                     pipeline_parallel_degree=1,
@@ -277,10 +296,10 @@ class BitwiseDeterministicBase(unittest.TestCase):
         if enable_passes:
             load_config = SimpleNamespace(
                 model_spec=SimpleNamespace(model=self.model_config),
-                compile=SimpleNamespace(
+                compile=GraphTrainerCompileConfig(
+                    enable=True,
+                    mode="aot_fx_trace",
                     precompile_artifact_dir="precompiled",
-                    inductor_compilation="regional",
-                    disable_passes=[],
                 ),
             )
             passes = construct_default_graph_passes(loaded_result, load_config)
@@ -350,14 +369,14 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
         loss, model_hash, grad_hash = self._run_steps(
             copy.deepcopy(self.model), Trainer
         )
-        assert_expected_inline(str(loss.item()), """7.961757659912109""")
+        assert_expected_inline(str(loss.item()), """7.961757183074951""")
         assert_expected_inline(
             model_hash,
-            """4cf2bed8281dfcdf4a5e5ced666ccd65681fab5fcaf404e14e91b583fe21bd4c""",
+            """135abf5bcdaac7d1a0cbf1b8e0f2bf84ac788ce202f3ec4b23bc8b05d5ee2f1e""",
         )
         assert_expected_inline(
             grad_hash,
-            """926c46345abe29f427f072fb747375009cac66c4ab4be4b41d09661356089016""",
+            """fe39cc3a984828640c2b9a95458f76cd82046f3147d9ad960845851731ceb4ad""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -481,14 +500,14 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         loss, model_hash, grad_hash = self._run_steps(
             copy.deepcopy(self.model), Trainer
         )
-        assert_expected_inline(str(loss.item()), """7.961757183074951""")
+        assert_expected_inline(str(loss.item()), """7.961757659912109""")
         assert_expected_inline(
             model_hash,
-            """6884b7b1013badc769666dc1acc75db5a09dbcf1170e3bea2c35ae77d20a3896""",
+            """cfb3c5cba404ea7a6f9adae605277995d157cf3b624e5a1e3729a786996da350""",
         )
         assert_expected_inline(
             grad_hash,
-            """9163c0f93a0a8dbf02208dae3ee0b427a97e3dd39e83b84847d2ed4b4e2bc495""",
+            """b8c505488cf613d016ed55e0e4dbcfcd8a278cc9e27f3cf0154301cbefc7ca4a""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -536,6 +555,28 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     model_flavor = "debugmodel"
     attn_backend = "flex"
     annotate_model = staticmethod(annotate_deepseekv3)
+
+    def _wrap_ep_chunk_eager_baseline(self, model: nn.Module, case: str) -> None:
+        if case == "transformer_batch":
+            mode, module_fqn = "batch", "layers.*"
+        elif case == "moe_batch":
+            mode, module_fqn = "batch", "layers.*.moe"
+        elif case == "moe_seq":
+            mode, module_fqn = "seq", "layers.*.moe"
+        else:
+            raise AssertionError(f"unknown EP chunk case {case}")
+        maybe_apply_ep_overlap_eager_chunking(
+            model,
+            GraphTrainerCompileConfig(
+                enable=True,
+                ep_overlap=EpOverlapConfig(
+                    enabled=True,
+                    strategy="eager",
+                    chunk_dim=mode,
+                    module_fqn=module_fqn,
+                ),
+            ),
+        )
 
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
@@ -602,6 +643,50 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
 
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
 
+    @unittest.skipUnless(
+        has_cuda_capability(9, 0),
+        "flex_attention compilation exceeds resource limits on pre-Hopper GPUs",
+    )
+    def test_ep_chunk_matches_eager_chunking_bitwise(self):
+        """Fast single-GPU prerequisite for FlexAttention EP chunking numerics.
+
+        This validates chunking logic, pass composability, and eager-chunked vs.
+        graph-chunked numerics with and without the post-schedule concretization
+        pass. It does not exercise real EP all-to-all communication,
+        distributed sharding, or overlap behavior; the distributed DSV3 numerics
+        tests provide that end-to-end coverage.
+        """
+        cases = [
+            ("transformer_batch", "batch", "layers.*"),
+            ("moe_batch", "batch", "layers.*.moe"),
+            ("moe_seq", "seq", "layers.*.moe"),
+        ]
+        for case, mode, modules in cases:
+            with self.subTest(case=case):
+                eager_model = copy.deepcopy(self.model)
+                self._wrap_ep_chunk_eager_baseline(eager_model, case)
+
+                run_eager = self._run_steps(eager_model, Trainer)
+                graph_model = copy.deepcopy(self.model)
+                # The eager FlexAttention baseline compiles with concrete dims.
+                # Reset Dynamo before tracing the graph-chunked production path,
+                # which starts symbolic and then concretizes before Inductor.
+                torch._dynamo.reset()
+                run_traced = self._run_steps(
+                    graph_model,
+                    GraphTrainer,
+                    compile_ep_overlap_enabled=True,
+                    compile_ep_overlap_chunk_dim=mode,
+                    compile_ep_overlap_module_fqn=modules,
+                    compile_ep_overlap_disable_early_grad_accumulation=True,
+                )
+
+                self._assert_runs_match(
+                    run_eager,
+                    run_traced,
+                    f"eager chunk vs ep_chunk {case}: ",
+                )
+
 
 class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Qwen3 MoE debug model."""
@@ -621,14 +706,14 @@ class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
         loss, model_hash, grad_hash = self._run_steps(
             copy.deepcopy(self.model), Trainer
         )
-        assert_expected_inline(str(loss.item()), """7.297995567321777""")
+        assert_expected_inline(str(loss.item()), """7.2979936599731445""")
         assert_expected_inline(
             model_hash,
-            """633e10071953205f68501138d4e7a907d42c8523320df205c737a30ee8aaa9d7""",
+            """dea001dde5db1b02f8b4c25fefc8ed517c390cacdfcea946d3829eb492e3c6dc""",
         )
         assert_expected_inline(
             grad_hash,
-            """b24c4d0201f11a825bbf49269592968ffd53d5b52bc0486bcacafae91e90eee3""",
+            """baf7140456134fe7256af1d8144bb6a579a731121a9843db177643b24eac9cd1""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -689,14 +774,14 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         loss, model_hash, grad_hash = self._run_steps(
             copy.deepcopy(self.model), Trainer
         )
-        assert_expected_inline(str(loss.item()), """7.297987461090088""")
+        assert_expected_inline(str(loss.item()), """7.297994613647461""")
         assert_expected_inline(
             model_hash,
-            """8f3524a4b2d4c6144abbb570ef7309a80ed87dc37025fa449ec332201f02aaed""",
+            """70ea7c9f5224ad2f8796270873f39d329ded42a9b3f437a14577d61c5d78e4c5""",
         )
         assert_expected_inline(
             grad_hash,
-            """74877b0fa386c66c3154e0371adb86c9255527f0d48fb623feb7ee70ee79d409""",
+            """c336a44443add5c6af2b35de62e5f8584b2d0f8876390032ebceffc2a6608e03""",
         )
 
     def test_aot_fx_trace_vs_eager(self):

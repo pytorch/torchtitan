@@ -308,7 +308,6 @@ def set_batch_invariance(enable: bool) -> None:
 
     # Register batch-invariant ATen overrides via upstream package
     # https://github.com/thinking-machines-lab/batch_invariant_ops
-    # pyrefly: ignore[missing-import]
     from batch_invariant_ops import enable_batch_invariant_mode as _upstream_enable
 
     _upstream_enable()
@@ -379,13 +378,18 @@ def get_train_context(
             if parallel_dims is not None and parallel_dims.spmd_backend == "spmd_types":
                 if not parallel_dims._single_axis_meshes:
                     parallel_dims.build_mesh()
-                from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-
-                stack.enter_context(
-                    set_current_spmd_mesh(
-                        parallel_dims._global_meshes["spmd_dense_for_fwdbwd"]
-                    )
+                from torchtitan.distributed.spmd_types import (
+                    set_current_spmd_mesh,
+                    set_spmd_meshes,
+                    spmd_dense_mesh,
                 )
+
+                set_spmd_meshes(
+                    dense_mesh=parallel_dims.spmd_dense_mesh(),
+                    sparse_mesh=parallel_dims.spmd_sparse_mesh(),
+                )
+
+                stack.enter_context(set_current_spmd_mesh(spmd_dense_mesh()))
             if spmd_typechecking:
                 stack.enter_context(spmd_typecheck(local=False))
 
@@ -494,7 +498,6 @@ def init_distributed(
     device_id: torch.device | None = None
     if comm_config.mode == "torchcomms":
         try:
-            # pyrefly: ignore[missing-import]
             import torchcomms  # noqa: F401
         except ImportError as err:
             raise ImportError(
@@ -543,7 +546,9 @@ def set_pg_timeouts(
         for mesh in parallel_dims.get_all_one_dimensional_meshes().values()
     ] + [None]
     for group in groups:
-        torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+        torch.distributed.distributed_c10d._set_pg_timeout(
+            timeout, group
+        )  # pyrefly: ignore[deprecated]
 
 
 @torch.no_grad()

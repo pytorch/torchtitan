@@ -142,6 +142,17 @@ class Decoder(BaseModel):
                     "Weight tying is not supported with Pipeline Parallel."
                 )
 
+            if parallelism.pipeline_parallel_degree > 1 and any(
+                layer.attention is not None
+                and isinstance(layer.attention.inner_attention, VarlenAttention.Config)
+                for layer in self.layers
+            ):
+                raise ValueError(
+                    "Pipeline Parallel is not compatible with VarlenAttention. "
+                    "Use a FlexAttention backend (attn_backend='flex' or "
+                    "'flex_flash') for pipelined models."
+                )
+
             tp = parallelism.tensor_parallel_degree
             attention = self.first_attention
             if tp > 1 and attention is not None:
@@ -209,7 +220,7 @@ class Decoder(BaseModel):
                             debug.moe_force_load_balance
                         )
 
-    # Set by the trainer when ChunkedCELoss is used, so lm_head is applied
+    # Set by the trainer when ChunkedLossWrapper is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().
     # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor
     # inputs (bool kwargs cause 'has no attribute requires_grad' errors).

@@ -73,33 +73,63 @@ class Configurable:
             }
 
         def traverse(
-            self, config_cls: type, *, _prefix: str = ""
-        ) -> Iterator[tuple[str, "Configurable.Config", object, str | int]]:
+            self, config_cls: type, *, recurse: bool = False, _prefix: str = ""
+        ) -> Iterator[
+            tuple[str, "Configurable.Config", object | None, str | int | None]
+        ]:
             """Yield ``(fqn, config, parent, field_name)`` for every nested config of *config_cls*.
 
             Recursively traverses dataclass fields, including items inside lists.
             The *fqn* mirrors the module FQN that ``build()`` would produce
             (e.g. ``"layers.0.feed_forward.w1"``).
 
-            *parent* and *field_name* allow replacing the config in the tree::
+            *parent* and *field_name* allow replacing the config in the tree.
+            They are ``None`` for the root config::
 
                 for fqn, cfg, parent, attr in model_config.traverse(Linear.Config):
-                    setattr(parent, attr, NewConfig(...))
+                    if parent is None:
+                        model_config = NewConfig(...)
+                    else:
+                        setattr(parent, attr, NewConfig(...))
+
+            When ``recurse`` is ``True``, traversal continues into matching
+            configs after yielding them.  The default preserves the historical
+            behavior where matching a config stops descent into that subtree.
             """
+            if isinstance(self, config_cls):
+                yield _prefix, self, None, None
+                if not recurse:
+                    return
+
+            def _traverse_child(val, prefix, parent, attr):
+                for child_fqn, child_config, child_parent, child_attr in val.traverse(
+                    config_cls, recurse=recurse, _prefix=prefix
+                ):
+                    if child_parent is None:
+                        yield child_fqn, child_config, parent, attr
+                    else:
+                        yield child_fqn, child_config, child_parent, child_attr
+
             for f in fields(self):
                 val = getattr(self, f.name)
                 fqn = f"{_prefix}.{f.name}" if _prefix else f.name
                 if isinstance(val, config_cls):
-                    yield fqn, val, self, f.name
+                    if recurse and hasattr(val, "traverse"):
+                        yield from _traverse_child(val, fqn, self, f.name)
+                    else:
+                        yield fqn, val, self, f.name
                 elif isinstance(val, list):
                     for i, item in enumerate(val):
                         item_fqn = f"{fqn}.{i}"
                         if isinstance(item, config_cls):
-                            yield item_fqn, item, val, i
+                            if recurse and hasattr(item, "traverse"):
+                                yield from _traverse_child(item, item_fqn, val, i)
+                            else:
+                                yield item_fqn, item, val, i
                         elif hasattr(item, "traverse"):
-                            yield from item.traverse(config_cls, _prefix=item_fqn)
+                            yield from _traverse_child(item, item_fqn, val, i)
                 elif hasattr(val, "traverse"):
-                    yield from val.traverse(config_cls, _prefix=fqn)
+                    yield from _traverse_child(val, fqn, self, f.name)
 
         def build(self, **kwargs):
             """Construct the owning class. Auto-wired by __init_subclass__.

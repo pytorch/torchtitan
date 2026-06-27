@@ -85,6 +85,14 @@ def generate() -> None:
     max_num_seqs = args.max_num_seqs
     is_rank0 = os.environ.get("RANK", "0") == "0"
 
+    # FULL_AND_PIECEWISE reads VLLM_USE_BREAKABLE_CUDAGRAPH at import time (the
+    # @eager_break_during_capture decorator in rl/models/attention.py).
+    if (
+        gen_config.cudagraph.enable
+        and gen_config.cudagraph.mode == "FULL_AND_PIECEWISE"
+    ):
+        os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+
     # Register TorchTitan model with vLLM before engine creation
     register_to_vllm(
         config.model_spec,
@@ -95,6 +103,7 @@ def generate() -> None:
             initial_load_in_hf=True,
             initial_load_path=model_path,
         ),
+        override=config.generator.override,
     )
     logger.info("Registered TorchTitan model with vLLM")
 
@@ -102,7 +111,7 @@ def generate() -> None:
     if not isinstance(inner_attn, (VarlenAttention.Config, FlexAttention.Config)):
         raise ValueError("Only varlen and flex attention backends are supported.")
 
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     set_batch_invariance(gen_config.debug.batch_invariant)
     if gen_config.debug.batch_invariant:
         # batch_invariant_ops doesn't cover bmm; the MoE router gate is a bmm in
