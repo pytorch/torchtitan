@@ -155,7 +155,7 @@ def _prepare_generation_request_metrics(
 # capture sizes must reach the per-step budget or those batches fall back to
 # eager) when ``Config.max_num_batched_tokens`` is unset; when that field is set,
 # its value is used instead (and also drives the vLLM engine).
-_VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
+_DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 
 
 @dataclass(kw_only=True, slots=True)
@@ -219,7 +219,7 @@ class VLLMCudagraphConfig:
         ``FULL_DECODE_ONLY`` (decode batch == num_seqs). ``FULL`` and
         ``FULL_AND_PIECEWISE`` also graph prefill, whose per-step token count is
         bounded by ``max_num_batched_tokens`` (the configured value, else
-        ``_VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS``), so the cap extends to it
+        ``_DEFAULT_MAX_NUM_BATCHED_TOKENS``), so the cap extends to it
         -- otherwise prefill chunks larger than the cap fall back to eager.
 
         All modes capture with ``mode=CompilationMode.NONE`` (no inductor compile).
@@ -234,7 +234,7 @@ class VLLMCudagraphConfig:
         if max_num_batched_tokens is not None:
             _max_cudagraph_capture_size = max_num_batched_tokens
         else:
-            _max_cudagraph_capture_size = _VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS
+            _max_cudagraph_capture_size = _DEFAULT_MAX_NUM_BATCHED_TOKENS
         cap = max_num_seqs
         if self.mode in ("FULL", "FULL_AND_PIECEWISE"):
             cap = max(cap, _max_cudagraph_capture_size)
