@@ -134,11 +134,9 @@ class Indexer(Module):
         self.register_buffer("hadamard_mat", torch.empty(0), persistent=False)
 
     def _init_self_buffers(self, *, buffer_device=None):
-        if buffer_device is not None:
-            with torch.device(buffer_device):
-                self.hadamard_mat = _make_hadamard_mat(self.head_dim, device=buffer_device)
-        else:
-            self.hadamard_mat = _make_hadamard_mat(self.head_dim)
+        if buffer_device is None:
+            buffer_device = self.hadamard_mat.device
+        self.hadamard_mat = _make_hadamard_mat(self.head_dim, device=buffer_device)
 
     @staticmethod
     def _rotate_activation(x, hadamard_mat):
