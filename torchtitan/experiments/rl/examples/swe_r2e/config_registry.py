@@ -252,13 +252,18 @@ def _scale_32b_multihost(
     num_training_steps: int,
     max_offpolicy_steps: int,
 ) -> Controller.Config:
-    """Turn the FSDP-8 32B baseline into a multi-host async run.
+    """Turn the FSDP-8 32B baseline into a multi-host async run with true FSDP.
 
-    The FSDP trainer spans ``trainer_dp_shard / 8`` hosts; ``num_generators`` TP-8
+    Widens the trainer to ``data_parallel_shard_degree=trainer_dp_shard`` (16 or
+    24, spanning trainer_dp_shard/8 hosts). Pure FSDP-16/24 of Qwen3-32B needs the
+    fused-QKV init fix in torchtitan/models/common/config_utils.py (the per-head
+    init scatter must not reshape the sharded tensor, else it cannot shard beyond
+    n_kv_heads=8). The wider shard halves/thirds per-GPU param+optimizer memory vs
+    FSDP-8, so we drop the bf16-master memory hack back to fp32 master + fp32 Adam
+    (better numerics). FullAC + chunked loss stay. ``num_generators`` TP-8
     generator hosts collect rollouts that overlap training by up to
-    ``max_offpolicy_steps`` steps (the off-policy window). The wider shard gives
-    enough memory headroom to drop bf16 master weights back to fp32 master + fp32
-    Adam (better numerics) while keeping FullAC + the chunked loss.
+    ``max_offpolicy_steps`` steps, so each train step is short instead of blocking
+    on the slow Claude Code rollouts; the wider FSDP shard also speeds up fwd/bwd.
     """
     config.async_loop = dataclasses.replace(
         config.async_loop,
@@ -276,7 +281,9 @@ def _scale_32b_multihost(
             warmup_steps=2, decay_type="linear", min_lr_factor=1.0
         ),
         parallelism=dataclasses.replace(
-            config.trainer.parallelism, data_parallel_shard_degree=trainer_dp_shard
+            config.trainer.parallelism,
+            data_parallel_shard_degree=trainer_dp_shard,
+            tensor_parallel_degree=1,
         ),
     )
     return config
@@ -285,13 +292,14 @@ def _scale_32b_multihost(
 def rl_grpo_qwen3_32b_swe_r2e_fsdp16() -> Controller.Config:
     """Qwen3-32B SWE-R2E, multi-host async: FSDP-16 trainer + 3 TP-8 generators.
 
-    6 MAST hosts: 1 controller + 2 trainer (data_parallel_shard_degree=16) + 3
-    generator (TP=8). fp32 master + FullAC + chunked loss. Rollout collection
-    overlaps training by up to ``max_offpolicy_steps=2`` (the trainer trains step
-    N's batch while the generators already collect step N+1's), so each train step
-    is short (fwd/bwd + CPU-staged weight sync) instead of blocking on the slow
-    Claude Code rollouts. ``num_groups_per_train_step=8`` x ``group_size=8`` = 64
-    rollouts per step.
+    6 MAST hosts: 1 controller + 2 trainer (data_parallel_shard_degree=16, TP=1) +
+    3 generator (TP=8). Uses the NON-fused QKV 32B spec so true FSDP-16 init works
+    (the fused-QKV default caps FSDP at n_kv_heads=8). fp32 master + FullAC +
+    chunked loss. Rollout collection overlaps training by up to
+    ``max_offpolicy_steps=2`` (the trainer trains step N's batch while the
+    generators already collect step N+1's), so each train step is short (fwd/bwd +
+    CPU-staged weight sync) instead of blocking on the slow Claude Code rollouts.
+    ``num_groups_per_train_step=8`` x ``group_size=8`` = 64 rollouts per step.
     """
     config = rl_grpo_qwen3_32b_swe_r2e()
     return _scale_32b_multihost(
@@ -306,9 +314,10 @@ def rl_grpo_qwen3_32b_swe_r2e_fsdp16() -> Controller.Config:
 def rl_grpo_qwen3_32b_swe_r2e_fsdp24() -> Controller.Config:
     """Qwen3-32B SWE-R2E, multi-host async: FSDP-24 trainer + 3 TP-8 generators.
 
-    7 MAST hosts: 1 controller + 3 trainer (data_parallel_shard_degree=24) + 3
-    generator (TP=8). Same async overlap as ``_fsdp16`` with a wider trainer shard
-    (more memory headroom / faster per-host fwd-bwd).
+    7 MAST hosts: 1 controller + 3 trainer (data_parallel_shard_degree=24, TP=1) +
+    3 generator (TP=8). Same non-fused-QKV + fp32-master + async overlap as
+    ``_fsdp16`` with a wider trainer shard (more memory headroom / faster
+    per-host fwd-bwd).
     """
     config = rl_grpo_qwen3_32b_swe_r2e()
     return _scale_32b_multihost(
