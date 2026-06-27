@@ -316,7 +316,7 @@ def rl_grpo_qwen3_32b_swe_r2e_fsdp16() -> Controller.Config:
         config,
         trainer_dp_shard=16,
         num_generators=5,
-        num_training_steps=40,
+        num_training_steps=100,
         max_offpolicy_steps=2,
     )
 
@@ -333,6 +333,6 @@ def rl_grpo_qwen3_32b_swe_r2e_fsdp24() -> Controller.Config:
         config,
         trainer_dp_shard=24,
         num_generators=5,
-        num_training_steps=40,
+        num_training_steps=100,
         max_offpolicy_steps=2,
     )
