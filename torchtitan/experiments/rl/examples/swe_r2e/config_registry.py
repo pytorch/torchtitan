@@ -273,7 +273,7 @@ def _scale_32b_multihost(
         # each of N groups graded, and grading the slow Claude rollouts dominates,
         # so a smaller per-step batch lands steps sooner. dp_degree=16 still gets
         # 4*group_size=32 rollouts to pack.
-        num_groups_per_train_step=2,
+        num_groups_per_train_step=8,
         max_offpolicy_steps=max_offpolicy_steps,
     )
     config.num_generators = num_generators
@@ -312,8 +312,8 @@ def rl_grpo_qwen3_32b_swe_r2e_fsdp16() -> Controller.Config:
         config,
         trainer_dp_shard=16,
         num_generators=5,
-        num_training_steps=10,
-        max_offpolicy_steps=1,
+        num_training_steps=40,
+        max_offpolicy_steps=2,
     )
 
 
@@ -329,6 +329,6 @@ def rl_grpo_qwen3_32b_swe_r2e_fsdp24() -> Controller.Config:
         config,
         trainer_dp_shard=24,
         num_generators=5,
-        num_training_steps=10,
-        max_offpolicy_steps=1,
+        num_training_steps=40,
+        max_offpolicy_steps=2,
     )
