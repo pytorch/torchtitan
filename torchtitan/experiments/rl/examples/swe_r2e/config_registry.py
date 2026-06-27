@@ -51,7 +51,7 @@ from torchtitan.experiments.rl.controller import (
 )
 from torchtitan.experiments.rl.examples.swe_r2e.data import SWER2EDataset
 from torchtitan.experiments.rl.examples.swe_r2e.rollouter import SWER2ERollouter
-from torchtitan.experiments.rl.losses import GRPOLoss
+from torchtitan.experiments.rl.losses import DAPOLoss
 from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
@@ -158,7 +158,10 @@ def rl_grpo_qwen3_1_7b_swe_r2e() -> Controller.Config:
             ),
             # Chunked loss splits [B, L, V] logits over the sequence dim so the
             # fp32 lm_head + GRPO loss fit at long context (no full-vocab OOM).
-            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
+            loss=ChunkedLossWrapper.Config(
+                num_chunks=8,
+                loss_fn=DAPOLoss.Config(ratio_clip_low=0.2, ratio_clip_high=0.28),
+            ),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -274,6 +277,7 @@ def _scale_32b_multihost(
         # so a smaller per-step batch lands steps sooner. dp_degree=16 still gets
         # 4*group_size=32 rollouts to pack.
         num_groups_per_train_step=8,
+        group_size=16,
         max_offpolicy_steps=max_offpolicy_steps,
     )
     config.num_generators = num_generators
