@@ -34,6 +34,13 @@ import torch.nn as nn
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
+from torchtitan.components.mup import (
+    hidden_std,
+    MuPSpec,
+    output_mult,
+    param_groups,
+    residual_std,
+)
 from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 from torchtitan.components.tokenizer import NoOpTokenizer
 from torchtitan.config import (
@@ -66,7 +73,6 @@ from .model import (
     TemporalSummarizer,
     Vision,
 )
-from .mup import hidden_std, MuPSpec, output_mult, param_groups, residual_std
 from .onnx_checkpoint import PathOnnxCheckpointManager
 from .trainer import PathTrainer
 from .validate import PathValidator
