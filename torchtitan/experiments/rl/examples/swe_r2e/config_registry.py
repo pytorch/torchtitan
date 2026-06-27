@@ -276,7 +276,7 @@ def _scale_32b_multihost(
         # each of N groups graded, and grading the slow Claude rollouts dominates,
         # so a smaller per-step batch lands steps sooner. dp_degree=16 still gets
         # 4*group_size=32 rollouts to pack.
-        num_groups_per_train_step=8,
+        num_groups_per_train_step=4,
         group_size=16,
         max_offpolicy_steps=max_offpolicy_steps,
     )
