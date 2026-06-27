@@ -6,7 +6,7 @@
 
 """Static peak-memory estimator for a joint fwd+loss+bwd FX graph.
 
-``estimate_peak_memory_modified`` sweeps the nodes of the joint graph produced by
+``estimate_peak_memory`` sweeps the nodes of the joint graph produced by
 ``minimal_fx_tracer``, tracks per-storage liveness (birth/death over the node
 schedule), and reports the peak as the maximum simultaneous live bytes -- plus a
 per-category breakdown (parameter / activation / gradient / temporary) of what is
@@ -23,15 +23,20 @@ accounted separately by ``optimizer_state_bytes``.
 import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING
 
 import torch
 import torch.utils._pytree as pytree
 from torch.fx.node import map_arg
+from torchtitan.experiments.graph_trainer.common_utils import _is_backward_node
+
+if TYPE_CHECKING:
+    from torchtitan.components.optimizer import OptimizersContainer
 
 ROUNDING = 512  # CUDA caching allocator rounds small allocations to 512B.
 
-# Optimizer states kept per parameter, by optimizer name (Adam/AdamW: m, v).
+# Base optimizer states kept per parameter, by optimizer name (Adam/AdamW keep
+# exp_avg + exp_avg_sq; amsgrad adds a third, max_exp_avg_sq -- handled below).
 STATES_PER_PARAM = {"Adam": 2, "AdamW": 2}
 
 # ---- storage categories ----
@@ -75,18 +80,10 @@ class EstimatorResult:
         return "\n".join(lines)
 
 
-def _is_backward_node(node: torch.fx.Node) -> bool:
-    return node.meta.get("autograd_backward", False)
-
-
-def _nbytes(numel: int, element_size: int) -> int:
-    return math.ceil(numel * element_size / ROUNDING) * ROUNDING
-
-
-def estimate_peak_memory_modified(
+def estimate_peak_memory(
     gm: torch.fx.GraphModule,
     *,
-    num_state_inputs: Optional[int] = None,
+    num_state_inputs: int,
     verbose: bool = False,
 ) -> EstimatorResult:
     """Estimate the peak memory of a joint fwd+loss+bwd FX graph.
@@ -102,9 +99,9 @@ def estimate_peak_memory_modified(
       - forward producer whose last use is backward     -> ``activation``
       - forward producer whose last use is forward      -> ``temporary``
 
-    ``num_state_inputs`` (``TracedResult.num_static_inputs``) marks how many
-    leading placeholders are persistent state (parameters/buffers). When omitted,
-    state placeholders are detected by dtype (floating-point/complex, non-tangent).
+    ``num_state_inputs`` (``TracedResult.num_static_inputs``) is how many leading
+    placeholders are persistent state (parameters/buffers); they are pinned live
+    for the whole step.
     """
     nodes = list(gm.graph.nodes)
     index = {n: i for i, n in enumerate(nodes)}
@@ -112,7 +109,10 @@ def estimate_peak_memory_modified(
     end = len(nodes)  # "live to the end" sentinel for resident/returned storages
 
     def get_size(t: torch.Tensor) -> int:
-        return _nbytes(int(t.numel()), t.element_size())
+        # Count the underlying STORAGE, not the (possibly view) tensor's logical
+        # size: a narrow/slice/as_strided view has small numel but can reference a
+        # much larger storage. untyped_storage().nbytes() is the real allocation.
+        return math.ceil(t.untyped_storage().nbytes() / ROUNDING) * ROUNDING
 
     # Tensors returned to the caller (loss, grads) must live to the end.
     output_inputs = set()
@@ -120,23 +120,11 @@ def estimate_peak_memory_modified(
         if node.op == "output":
             output_inputs.update(node.all_input_nodes)
 
-    # Parameters/buffers are the leading "state" placeholders; they stay resident
-    # on the GPU for the whole step even though the graph references each only
-    # once, so pin them live for the entire graph.
+    # Parameters/buffers are the leading num_state_inputs placeholders; they stay
+    # resident on the GPU for the whole step even though the graph references each
+    # only once, so pin them live for the entire graph.
     placeholders = [n for n in nodes if n.op == "placeholder"]
-    if num_state_inputs is not None:
-        persistent_state = set(placeholders[:num_state_inputs])
-    else:
-        # Fallback: params/buffers are the floating-point/complex placeholders;
-        # integer placeholders are user data (token ids, labels, masks) and
-        # "tangent" placeholders are gradient seeds -- neither is persistent.
-        persistent_state = {
-            n
-            for n in placeholders
-            if "tangent" not in n.name
-            and isinstance(n.meta.get("val"), torch.Tensor)
-            and (n.meta["val"].is_floating_point() or n.meta["val"].is_complex())
-        }
+    persistent_state = set(placeholders[:num_state_inputs])
 
     # ---- storage-keyed birth / death / size ----
     # Key by (storage_id, birth_index) so a storage id that is freed and later
@@ -144,6 +132,10 @@ def estimate_peak_memory_modified(
     birth, death, size, producer_of = {}, {}, {}, {}
     live_key = {}
     for i, node in enumerate(nodes):
+        # node.meta["val"] holds plain tensors -- minimal_fx_tracer unwraps tensor
+        # subclasses (e.g. DTensor) for tracing, so untyped_storage() is valid. For
+        # a subclass-carrying graph, use get_untyped_storages from
+        # torch.distributed._tools.common_utils instead.
         for t in pytree.tree_leaves(node.meta.get("val")):
             if not isinstance(t, torch.Tensor):
                 continue
@@ -238,22 +230,35 @@ def estimate_peak_memory_modified(
     return result
 
 
-def optimizer_state_bytes(opt_config, model) -> int:
+def optimizer_state_bytes(
+    opt_config: "OptimizersContainer.Config | None", model: torch.nn.Module
+) -> int:
     """Persistent optimizer-state bytes, analytically from the optimizer config
     (no optimizer instance / no training step needed). Adam/AdamW keep 2 state
     tensors per param; states are fp32 unless the config requests bf16.
     Returns 0 when there is no optimizer (e.g. the fwd/bwd-only test path)."""
-    if opt_config is None:
+    if opt_config is None or not opt_config.param_groups:
         return 0
 
-    name = opt_config.param_groups[0].optimizer_name
-    n_states = STATES_PER_PARAM.get(name, 0)
+    # States-per-param per group: 2 for Adam/AdamW, +1 if amsgrad keeps
+    # max_exp_avg_sq. Take the max across groups -- exact for a uniform config;
+    # a mix of different per-group state counts would need per-group param
+    # attribution (precise FQN->group matching), which we don't do here.
+    def _states_per_param(pg) -> int:
+        n = STATES_PER_PARAM.get(pg.optimizer_name, 0)
+        if n and (getattr(pg, "optimizer_kwargs", None) or {}).get("amsgrad", False):
+            n += 1
+        return n
+
+    n_states = max((_states_per_param(pg) for pg in opt_config.param_groups), default=0)
     if n_states == 0:
         return 0
 
+    # bf16 optimizer states only under the fused_opt_states_bf16 implementation
+    # (Adam/AdamW momentum+variance in bf16); otherwise states are fp32.
     state_dtype = (
         torch.bfloat16
-        if getattr(opt_config, "implementation", "") == "state_dtype"
+        if opt_config.implementation == "fused_opt_states_bf16"
         else torch.float32
     )
     elt_bytes = torch.finfo(state_dtype).bits // 8

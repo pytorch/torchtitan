@@ -11,11 +11,18 @@ from torchtitan.experiments.graph_trainer.configs import (
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.qwen3.config_registry import (
     qwen3_14b,
+    qwen3_1_7b,
     qwen3_debugmodel,
     qwen3_moe_debug,
 )
 
 from . import model_registry
+
+
+def graph_trainer_qwen3_1_7b() -> GraphTrainer.Config:
+    config = to_graph_trainer_config(qwen3_1_7b(), model_registry)
+    config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
 
 
 def graph_trainer_qwen3_debugmodel() -> GraphTrainer.Config:

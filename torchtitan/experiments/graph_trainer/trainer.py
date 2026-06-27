@@ -24,6 +24,10 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     run_traced,
     TracedResult,
 )
+from torchtitan.experiments.graph_trainer.memory_estimator import (
+    estimate_peak_memory,
+    optimizer_state_bytes,
+)
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     construct_default_graph_passes,
@@ -222,11 +226,42 @@ class GraphTrainer(Trainer):
                     compile_config=self.config.compile,
                 )
         with self.train_context():
+            # Estimator validation: measure the real fwd+bwd peak around the
+            # traced step and compare to the static estimate. cudagraph must be
+            # disabled (--compile.disable_passes cudagraph_pass) so
+            # max_memory_allocated is a stable comparison target.
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+
             outputs = run_traced(self._traced_step, module=model)(
                 inputs,
                 labels,
                 global_valid_tokens,
                 extra_kwargs,
+            )
+
+            torch.cuda.synchronize()  # backward is async; sync before reading
+            real_peak = torch.cuda.max_memory_allocated()
+            est = estimate_peak_memory(
+                self._traced_step.gm,
+                num_state_inputs=self._traced_step.num_static_inputs,
+            )
+            opt_bytes = optimizer_state_bytes(
+                getattr(self.config, "optimizer", None), self.model_parts[0]
+            )
+            # Estimated peak includes optimizer state (resident from step 2 on).
+            estimated = est.peak_bytes + opt_bytes
+            per_cat = "  ".join(
+                f"{k}={v / 1e9:.3f}" for k, v in est.per_category_at_peak.items()
+            )
+            logger.info(
+                "[mem-est] estimated(+opt)=%.3f GB | real max_alloc=%.3f GB | "
+                "ratio=%.3f | opt=%.3f GB | per-category(GB): %s",
+                estimated / 1e9,
+                real_peak / 1e9,
+                estimated / real_peak if real_peak else float("nan"),
+                opt_bytes / 1e9,
+                per_cat,
             )
         loss = outputs[0]
         grads = outputs[1:]
