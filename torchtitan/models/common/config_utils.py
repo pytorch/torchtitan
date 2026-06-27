@@ -298,6 +298,8 @@ def make_token_dispatcher_config(
     top_k: int,
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    hidden: int = 0,
+    num_max_tokens_per_rank: int = 128,
 ) -> LocalTokenDispatcher.Config:
     """Build the appropriate token dispatcher config.
 
@@ -316,9 +318,15 @@ def make_token_dispatcher_config(
     - HYBRIDEP_NUM_SMS_COMBINE (default: 16)
     """
     if comm_backend == "deepep":
+        # DeepEP v2: a single ElasticBuffer handles training and inference. ``hidden``
+        # (model dim) and ``num_max_tokens_per_rank`` size the buffer statically;
+        # wire_meshes creates it eagerly. ``num_max_tokens_per_rank`` MUST be >= the
+        # largest per-rank token count in any forward.
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
+            hidden=hidden,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
         )
     elif comm_backend == "hybridep":
         return HybridEPTokenDispatcher.Config(
@@ -352,6 +360,7 @@ def make_experts_config(
     param_init: dict[str, Callable],
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    num_max_tokens_per_rank: int = 128,
 ) -> GroupedExperts.Config:
     """Build a fully-specified GroupedExperts.Config."""
     return GroupedExperts.Config(
@@ -364,5 +373,7 @@ def make_experts_config(
             top_k=top_k,
             comm_backend=comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
+            hidden=dim,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
         ),
     )

@@ -751,23 +751,47 @@ class DeepEPDispatchMetadata:
 
 
 class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
-    """Token dispatcher using DeepEP for efficient token dispatch/combine.
+    """Token dispatcher using DeepEP v2's unified ``ElasticBuffer`` dispatch/combine.
 
-    Uses DeepEP library kernels (H100/NVLink Switch) instead of standard
-    all-to-all collectives. Combine is asynchronous — callers must call
-    sync_combine() before using the result.
+    DeepEP v2 (>= 2.0.0) collapses the v1 high-throughput (HT) and low-latency (LL)
+    paths into a single ``buffer.dispatch``/``combine``. The compact, expert-grouped
+    layout feeds the grouped-GEMM expert path directly (no permute). Combine is
+    asynchronous -- callers must call sync_combine() before using the result.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseEPTokenDispatcher.Config):
-        pass
+        # Max tokens any rank may dispatch in one forward. DeepEP v2 sizes the
+        # ElasticBuffer statically from this, so it MUST be >= the largest per-rank
+        # token count. The model hidden dim is threaded so the buffer is created
+        # eagerly at wire_meshes (before any cudagraph capture).
+        num_max_tokens_per_rank: int = 128
+        hidden: int = 0
 
     def __init__(self, config: Config):
         super().__init__(config)
+        self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
+        self.hidden = config.hidden
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
         from torchtitan.distributed.deepep import deepep  # noqa: F401
+
+    def wire_meshes(self, *, ep_mesh=None, tp_mesh=None) -> None:
+        """Wire EP/SP meshes and EAGERLY create the ElasticBuffer so its
+        construction-time barrier runs at parallelize time, never inside a CUDA
+        graph capture.
+        """
+        super().wire_meshes(ep_mesh=ep_mesh, tp_mesh=tp_mesh)
+        if ep_mesh is not None and self.hidden > 0:
+            from torchtitan.distributed.deepep.deepep import get_buffer
+
+            get_buffer(
+                ep_mesh.get_group(),
+                hidden=self.hidden,
+                num_max_tokens_per_rank=self.num_max_tokens_per_rank,
+                num_topk=self.top_k,
+            )
 
     # pyrefly: ignore [bad-override]
     def dispatch(
@@ -796,6 +820,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             num_local_experts,
             self.num_experts,
             ep_group,
+            num_max_tokens_per_rank=self.num_max_tokens_per_rank,
         )
 
         metadata = DeepEPDispatchMetadata(state=state)
