@@ -63,6 +63,16 @@ def graph_trainer_llama3_debugmodel_sdpa_eager() -> GraphTrainer.Config:
     return config
 
 
+def graph_trainer_llama3_1b() -> GraphTrainer.Config:
+    # No base llama3_1b config exists; reuse the 8b training config and swap in
+    # the "1B" model spec (same pattern as the sdpa debugmodel configs above).
+    base = llama3_8b()
+    base.model_spec = model_registry("1B")
+    config = to_graph_trainer_config(base, model_registry)
+    config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
+
+
 def graph_trainer_llama3_8b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_8b(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
