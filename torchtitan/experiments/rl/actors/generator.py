@@ -149,7 +149,7 @@ def _prepare_generation_request_metrics(
     ]
 
 
-# vLLM's default max_num_batched_tokens (its chunked-prefill per-step budget:
+# vLLM's default max_num_batched_tokens (vllm's per-step budget:
 # prefill + decode tokens summed over the batch). Used as the cudagraph capture
 # cap for "FULL" / "FULL_AND_PIECEWISE" (which graph prefill / mixed batches, so
 # capture sizes must reach the per-step budget or those batches fall back to
