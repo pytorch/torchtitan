@@ -1,13 +1,20 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 from __future__ import annotations
 
 from dataclasses import dataclass
+from xx.ml_tools.constants.model import ModelInputs
 
 import torch
 import torch.nn as nn
 from einops import rearrange
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-from torch.distributed.tensor import DTensor, distribute_tensor
+from torch.distributed.tensor import distribute_tensor, DTensor
 
 from torchtitan.config import (
     CompileConfig,
@@ -22,13 +29,15 @@ from torchtitan.distributed.activation_checkpoint import (
     FullAC,
     MemoryBudgetAC,
 )
-from torchtitan.distributed.fsdp import enable_fsdp_symm_mem, get_fsdp_reshard_after_forward_policy
+from torchtitan.distributed.fsdp import (
+    enable_fsdp_symm_mem,
+    get_fsdp_reshard_after_forward_policy,
+)
 from torchtitan.models.common import Embedding, LayerNorm, Linear, RMSNorm, SiLU
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList, Sequential
 from torchtitan.tools.logging import logger
-from xx.ml_tools.constants.model import ModelInputs
 
 from . import convnext
 
@@ -70,7 +79,9 @@ class PathMLP(Module):
         super().__init__()
         self.norm = config.norm.build()
         self.c_fc = config.c_fc.build()
-        self.act = nn.GELU(approximate="tanh") if config.act == "gelu_tanh" else nn.GELU()
+        self.act = (
+            nn.GELU(approximate="tanh") if config.act == "gelu_tanh" else nn.GELU()
+        )
         self.c_proj = config.c_proj.build()
         self.dropout = nn.Dropout(config.dropout)
 
@@ -98,8 +109,12 @@ class PathSelfAttention(Module):
         self.head_dim = config.head_dim
         self.is_causal = config.is_causal
         self.norm = config.norm.build()
-        self.q_norm = config.q_norm.build() if config.q_norm is not None else nn.Identity()
-        self.k_norm = config.k_norm.build() if config.k_norm is not None else nn.Identity()
+        self.q_norm = (
+            config.q_norm.build() if config.q_norm is not None else nn.Identity()
+        )
+        self.k_norm = (
+            config.k_norm.build() if config.k_norm is not None else nn.Identity()
+        )
         self.c_attn = config.c_attn.build()
         self.c_proj = config.c_proj.build()
         self.inner_attention = config.inner_attention.build()
@@ -177,7 +192,9 @@ class LinearEncoder(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.net = Sequential(config.in_layer.build(), SiLU.Config().build(), config.out_layer.build())
+        self.net = Sequential(
+            config.in_layer.build(), SiLU.Config().build(), config.out_layer.build()
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
@@ -218,10 +235,18 @@ class TemporalSummarizer(Module):
         feats = self.mlp1(feats) + feats
         feats = self.mlp2(feats) + feats
         desire = rearrange(self.desire_encoder(desire), "b c -> b () c")
-        traffic_convention = rearrange(self.traffic_encoder(traffic_convention), "b c -> b () c")
+        traffic_convention = rearrange(
+            self.traffic_encoder(traffic_convention), "b c -> b () c"
+        )
         action_t = rearrange(self.action_t_encoder(action_t), "b c -> b () c")
         pos = self.pos_embedding(torch.arange(self.block_size, device=feats.device))
-        x = feats + rearrange(pos, "t c -> () t c") + desire + traffic_convention + action_t
+        x = (
+            feats
+            + rearrange(pos, "t c -> () t c")
+            + desire
+            + traffic_convention
+            + action_t
+        )
         x = self.transformer(x)
         return x if self.dense_training_outputs else x[:, self.block_size - 1]
 
@@ -237,14 +262,24 @@ class Hydra(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.heads = config.heads
-        self.head_mlp = ModuleDict({name: cfg.build() for name, cfg in config.head_mlps.items()})
-        self.final_layer = ModuleDict({name: cfg.build() for name, cfg in config.final_layers.items()})
-        self.scale_layer = ModuleDict({name: cfg.build() for name, cfg in config.scale_layers.items()})
+        self.head_mlp = ModuleDict(
+            {name: cfg.build() for name, cfg in config.head_mlps.items()}
+        )
+        self.final_layer = ModuleDict(
+            {name: cfg.build() for name, cfg in config.final_layers.items()}
+        )
+        self.scale_layer = ModuleDict(
+            {name: cfg.build() for name, cfg in config.scale_layers.items()}
+        )
 
     def forward(self, in_feats: torch.Tensor) -> dict[str, torch.Tensor]:
         ret = {}
         for name, layer in self.final_layer.items():
-            feats = self.head_mlp[name](in_feats) + in_feats if name in self.head_mlp else in_feats
+            feats = (
+                self.head_mlp[name](in_feats) + in_feats
+                if name in self.head_mlp
+                else in_feats
+            )
             ret[name] = layer(feats)
         for name, layer in self.scale_layer.items():
             ret[name] = layer(ret[name])
@@ -278,11 +313,19 @@ class TemporalPolicy(Module):
         self.config = config
         self.temporal_summarizer = config.temporal_summarizer.build()
         self.temporal_hydra = config.temporal_hydra.build()
-        self.register_buffer("history_idxs", torch.tensor(config.history_idxs, dtype=torch.long), persistent=False)
+        self.register_buffer(
+            "history_idxs",
+            torch.tensor(config.history_idxs, dtype=torch.long),
+            persistent=False,
+        )
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
-        device = buffer_device if buffer_device is not None else self.history_idxs.device
-        self.history_idxs = torch.tensor(self.config.history_idxs, dtype=torch.long, device=device)
+        device = (
+            buffer_device if buffer_device is not None else self.history_idxs.device
+        )
+        self.history_idxs = torch.tensor(
+            self.config.history_idxs, dtype=torch.long, device=device
+        )
 
     def forward(
         self,
@@ -324,13 +367,21 @@ class Vision(Module):
             num_classes=config.vision_features,
             drop_path_rate=config.drop_path_rate,
         )
-        self.register_buffer("_mean", torch.empty(1, config.in_channels, 1, 1), persistent=True)
-        self.register_buffer("_std", torch.empty(1, config.in_channels, 1, 1), persistent=True)
+        self.register_buffer(
+            "_mean", torch.empty(1, config.in_channels, 1, 1), persistent=True
+        )
+        self.register_buffer(
+            "_std", torch.empty(1, config.in_channels, 1, 1), persistent=True
+        )
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         device = buffer_device if buffer_device is not None else self._mean.device
-        self._mean = torch.full((1, self.config.in_channels, 1, 1), self.config.mean, device=device)
-        self._std = torch.full((1, self.config.in_channels, 1, 1), self.config.std, device=device)
+        self._mean = torch.full(
+            (1, self.config.in_channels, 1, 1), self.config.mean, device=device
+        )
+        self._std = torch.full(
+            (1, self.config.in_channels, 1, 1), self.config.std, device=device
+        )
 
     def load_pretrained(self) -> None:
         if not self.config.pretrained:
@@ -366,13 +417,21 @@ class Vision(Module):
         )
         state_dict = convnext.checkpoint_filter_fn(state_dict, self.encoder)
         if self.config.in_channels != 3:
-            state_dict["stem.0.weight"] = adapt_input_conv(self.config.in_channels, state_dict["stem.0.weight"])
+            state_dict["stem.0.weight"] = adapt_input_conv(
+                self.config.in_channels, state_dict["stem.0.weight"]
+            )
         return state_dict
 
     @staticmethod
-    def _move_pretrained_value(value: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    def _move_pretrained_value(
+        value: torch.Tensor, target: torch.Tensor
+    ) -> torch.Tensor:
         if isinstance(target, DTensor):
-            return distribute_tensor(value.to(dtype=target.dtype), target.device_mesh, list(target.placements))
+            return distribute_tensor(
+                value.to(dtype=target.dtype),
+                target.device_mesh,
+                list(target.placements),
+            )
         return value.to(device=target.device, dtype=target.dtype)
 
     def forward(self, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -478,10 +537,17 @@ def parallelize_path(
 ) -> PathModel:
     if parallelism.spmd_backend == "full_dtensor":
         raise ValueError("path v1 does not support full DTensor")
-    if parallel_dims.tp_enabled or parallel_dims.cp_enabled or parallel_dims.pp_enabled or parallel_dims.ep_enabled:
+    if (
+        parallel_dims.tp_enabled
+        or parallel_dims.cp_enabled
+        or parallel_dims.pp_enabled
+        or parallel_dims.ep_enabled
+    ):
         raise ValueError("path v1 supports data parallelism only")
 
-    model_compile_enabled = compile_config.enable and "model" in compile_config.components
+    model_compile_enabled = (
+        compile_config.enable and "model" in compile_config.components
+    )
     if ac_config is not None:
         _apply_activation_checkpointing(model, ac_config, dump_folder=dump_folder)
 
@@ -500,7 +566,11 @@ def parallelize_path(
         enable_symm_mem=parallelism.enable_fsdp_symm_mem,
     )
 
-    logger.info("Applied HSDP to the path model" if parallel_dims.dp_replicate_enabled else "Applied FSDP to the path model")
+    logger.info(
+        "Applied HSDP to the path model"
+        if parallel_dims.dp_replicate_enabled
+        else "Applied FSDP to the path model"
+    )
     if training.enable_cpu_offload:
         logger.info("Applied CPU Offloading to the path model")
     return model

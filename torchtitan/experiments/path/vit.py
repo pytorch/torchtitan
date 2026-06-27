@@ -1,6 +1,13 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 from __future__ import annotations
 
 from dataclasses import dataclass
+from xx.ml_tools.constants.model import ModelInputs
 
 import torch
 from einops import rearrange
@@ -19,7 +26,6 @@ from torchtitan.models.common import Embedding, LayerNorm, Linear, RMSNorm
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleList
 from torchtitan.tools.logging import logger
-from xx.ml_tools.constants.model import ModelInputs
 
 from .loss import PathLoss
 from .model import PathTransformerBlock
