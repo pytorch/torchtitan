@@ -23,6 +23,7 @@ from torchtitan.models.common.attention import (
     QKVLinear,
     VarlenAttention,
 )
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import Linear, RMSNorm
@@ -34,7 +35,15 @@ from torchtitan.models.common.token_dispatcher import (
     LocalTokenDispatcher,
     MinimalAsyncEPTokenDispatcher,
 )
+from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
+
+
+def decoder_vocab_size(model_spec: ModelSpec) -> int:
+    """Assert Decoder.Config type so lint is not annoyed."""
+    model_config = model_spec.model
+    assert isinstance(model_config, Decoder.Config)
+    return model_config.vocab_size
 
 
 def get_attention_config(
@@ -126,9 +135,14 @@ def _fused_qkv_param_init(
                 dim=1,
             )
             with torch.no_grad():
-                # fused is Replicate (cat of Replicates); copy_ scatters it into
-                # t, so each rank writes only its own shard of the fused param.
-                t.view(n_kv_heads, r_dim, head_dim, *tail).copy_(fused)
+                # fused is Replicate (cat of Replicates). Flatten it to t's native
+                # 2D [(n_kv_heads*r_dim*head_dim), *tail] shape and copy_ into t,
+                # which scatters each rank's own shard. Reshaping the Replicate
+                # source (instead of t.view(n_kv_heads, ...) on the sharded t)
+                # avoids the "unflatten unevenly sharded" error when dp_shard*tp
+                # does not divide n_kv_heads (e.g. dp_shard=8, n_kv_heads=4); no
+                # gather, since fused is already replicated.
+                t.copy_(fused.view(-1, *tail))
 
         return _init
 

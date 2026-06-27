@@ -281,7 +281,7 @@ class FluxValidator(Validator):
                     timesteps=timesteps,
                 )
 
-                loss = self.loss_fn(latent_noise_pred, target)
+                loss, _ = self.loss_fn(latent_noise_pred, target)
 
             del noise, target, latent_noise_pred, latents
 

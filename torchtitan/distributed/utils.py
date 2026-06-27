@@ -361,17 +361,17 @@ def set_batch_invariance(enable: bool) -> None:
     )
 
 
-class TrainContext(Protocol):
+class SpmdContext(Protocol):
     @abstractmethod
     def __call__(self) -> contextlib.AbstractContextManager[None]:
         pass
 
 
-def get_train_context(
+def get_spmd_context(
     *,
     parallel_dims: "ParallelDims | None" = None,
     spmd_typechecking: bool = False,
-) -> TrainContext:
+) -> SpmdContext:
     @contextlib.contextmanager
     def context():
         with contextlib.ExitStack() as stack:
@@ -546,7 +546,7 @@ def set_pg_timeouts(
         for mesh in parallel_dims.get_all_one_dimensional_meshes().values()
     ] + [None]
     for group in groups:
-        torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+        torch.distributed.set_timeout(timeout, group)
 
 
 @torch.no_grad()

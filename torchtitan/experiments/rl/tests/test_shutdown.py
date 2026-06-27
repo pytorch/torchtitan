@@ -12,8 +12,10 @@ import pytest
 from torchtitan.experiments.rl import train
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.controller import AsyncLoopConfig
-from torchtitan.experiments.rl.generator_router import GeneratorRouter
 from torchtitan.experiments.rl.rollout_recorder import RolloutSampleRecorder
+from torchtitan.experiments.rl.routing.inter_generator_router import (
+    InterGeneratorRouter,
+)
 
 
 class _FakeController:
@@ -242,8 +244,8 @@ class _StubMesh:
 
 
 def _set_generator_router(rl_trainer, generators):
-    rl_trainer.generator_router = GeneratorRouter(
-        GeneratorRouter.Config(),
+    rl_trainer.generator_router = InterGeneratorRouter(
+        InterGeneratorRouter.Config(),
         generators=generators,
     )
 
