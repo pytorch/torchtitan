@@ -63,8 +63,7 @@ from torchtitan.experiments.rl.routing.strategies import (
     LeastLoadedRoutingStrategy,
     StickySessionRoutingStrategy,
 )
-from torchtitan.models.common import CosSinRoPE
-from torchtitan.models.qwen3 import _build_qwen3_layers, model_registry
+from torchtitan.models.qwen3 import model_registry
 from torchtitan.protocols.model_spec import ModelSpec
 
 # R2E JSONL path, supplied by the launcher (PROMPT_DATA -> SWE_PROMPT_DATA).
@@ -95,44 +94,6 @@ def _qwen3_rl_model_registry(flavor: str, *, attn_backend: str) -> ModelSpec:
     return model_registry(
         flavor, attn_backend=attn_backend, converters=[LMHeadCastConverter.Config()]
     )
-
-
-# Qwen3-32B architecture constants (must match ``_32b`` in
-# torchtitan/models/qwen3/__init__.py; fixed for the released model).
-_QWEN3_32B_ARCH = dict(
-    n_layers=64,
-    dim=5120,
-    n_heads=64,
-    n_kv_heads=8,
-    head_dim=128,
-    hidden_dim=25600,
-)
-
-
-def _qwen3_32b_non_fused_spec(attn_backend: str) -> ModelSpec:
-    """Qwen3-32B with NON-fused QKV (separate wq/wk/wv) + fp32 lm_head.
-
-    PR #3714 made qwen3 use FUSED QKV by default; the fused wqkv reshapes per
-    kv-head in init (``_fused_qkv_param_init``) AND in its checkpoint save hook
-    (``_split_qkv_on_save``), both needing the shard degree to divide
-    ``n_kv_heads`` -- so pure FSDP-16/24 of 32B (n_kv_heads=8) crashes ("Cannot
-    unflatten unevenly sharded tensor: 8 not divisible by 16"). Rebuilding the
-    layers with ``fuse_qkv=False`` restores the pre-#3714 separate wq/wk/wv: each
-    is a flat ``[out, in]`` param inited/saved/loaded with NO per-head reshape, so
-    it shards to any FSDP degree. The HF state-dict adapter maps q_proj/k_proj/
-    v_proj straight onto wq/wk/wv, so checkpoints load unchanged; non-fused is
-    numerically identical to fused (3 matmuls instead of 1).
-    """
-    spec = model_registry(
-        "32B", attn_backend=attn_backend, converters=[LMHeadCastConverter.Config()]
-    )
-    spec.model.layers = _build_qwen3_layers(
-        fuse_qkv=False,
-        attn_backend=attn_backend,
-        rope=CosSinRoPE.Config(dim=128, max_seq_len=40960, theta=1000000.0),
-        **_QWEN3_32B_ARCH,
-    )
-    return spec
 
 
 def _swe_rollouter() -> SWER2ERollouter.Config:
@@ -294,19 +255,17 @@ def _scale_32b_multihost(
     """Turn the FSDP-8 32B baseline into a multi-host async run with TRUE FSDP.
 
     Widens the trainer to ``data_parallel_shard_degree=trainer_dp_shard`` (16 or
-    24, over trainer_dp_shard/8 hosts) on the NON-fused QKV 32B spec. Pure FSDP-16/
-    24 only works with separate wq/wk/wv: PR #3714's fused-QKV default reshapes per
-    kv-head in init + the checkpoint save hook, which cannot shard beyond
-    n_kv_heads=8. Non-fused has no such reshape (see _qwen3_32b_non_fused_spec).
-    The wider shard halves/thirds per-GPU param+optimizer memory vs FSDP-8, so we
-    drop the bf16-master memory hack back to fp32 master + fp32 Adam (better
-    numerics, matching the pre-#3714 FSDP-16 runs). FullAC + chunked loss stay.
-    ``num_generators`` TP-8 generator hosts collect rollouts that overlap training
-    by up to ``max_offpolicy_steps`` steps, so each train step is short instead of
-    blocking on the slow Claude Code rollouts; the wider shard also speeds fwd/bwd.
+    24, over trainer_dp_shard/8 hosts) on the default FUSED-QKV 32B spec. PR #3807
+    made the fused wqkv init + checkpoint save/load hooks gather to Replicate before
+    the per-kv-head reshape, so FSDP > n_kv_heads (=8) no longer crashes ("unflatten
+    unevenly sharded"); before #3807 this needed non-fused QKV. The wider shard
+    halves/thirds per-GPU param+optimizer memory vs FSDP-8, so we drop the
+    bf16-master memory hack back to fp32 master + fp32 Adam (better numerics).
+    FullAC + chunked loss stay. ``num_generators`` TP-8 generator hosts collect
+    rollouts that overlap training by up to ``max_offpolicy_steps`` steps, so each
+    train step is short instead of blocking on the slow Claude Code rollouts; the
+    wider shard also speeds fwd/bwd.
     """
-    config.model_spec = _qwen3_32b_non_fused_spec(attn_backend="varlen")
-    _set_max_seq_len(config.model_spec, _SWE_MAX_MODEL_LEN)
     config.async_loop = dataclasses.replace(
         config.async_loop,
         num_training_steps=num_training_steps,
@@ -334,9 +293,10 @@ def rl_grpo_qwen3_32b_swe_r2e_fsdp16() -> Controller.Config:
     """Qwen3-32B SWE-R2E, multi-host async: TRUE FSDP-16 trainer + 3 TP-8 gens.
 
     6 MAST hosts: 1 controller + 2 trainer (data_parallel_shard_degree=16, TP=1) +
-    3 generator (TP=8). Non-fused QKV so true FSDP-16 shards cleanly (PR #3714's
-    fused-QKV default caps FSDP at n_kv_heads=8). fp32 master + FullAC + chunked
-    loss. Rollout collection overlaps training by up to ``max_offpolicy_steps=2``
+    3 generator (TP=8). Default fused QKV; PR #3807 made the fused init + checkpoint
+    hooks gather-to-Replicate before the per-kv-head reshape, so FSDP-16 (>
+    n_kv_heads=8) shards cleanly. fp32 master + FullAC + chunked loss. Rollout
+    collection overlaps training by up to ``max_offpolicy_steps=2``
     (the trainer trains step N's batch while the generators collect step N+1's), so
     each train step is short (fwd/bwd + CPU-staged weight sync) instead of blocking
     on the slow Claude Code rollouts. ``num_groups_per_train_step=8`` x
@@ -356,7 +316,7 @@ def rl_grpo_qwen3_32b_swe_r2e_fsdp24() -> Controller.Config:
     """Qwen3-32B SWE-R2E, multi-host async: TRUE FSDP-24 trainer + 3 TP-8 gens.
 
     7 MAST hosts: 1 controller + 3 trainer (data_parallel_shard_degree=24, TP=1) +
-    3 generator (TP=8). Same non-fused-QKV + fp32-master + async overlap as
+    3 generator (TP=8). Same fused-QKV (PR #3807) + fp32-master + async overlap as
     ``_fsdp16`` with a wider trainer shard (more memory headroom / faster fwd-bwd).
     """
     config = rl_grpo_qwen3_32b_swe_r2e()
