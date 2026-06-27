@@ -137,13 +137,7 @@ def _fused_qkv_param_init(
             with torch.no_grad():
                 # fused is Replicate (cat of Replicates); copy_ scatters it into
                 # t, so each rank writes only its own shard of the fused param.
-                # Flatten fused back to t's shape rather than reshaping t itself:
-                # reshaping a Shard(0) DTensor to (n_kv_heads, ...) requires the
-                # shard degree to divide n_kv_heads, which breaks FSDP > n_kv_heads
-                # (e.g. FSDP-16 on a model with n_kv_heads=8). copy_ from the
-                # Replicate full tensor scatters to any shard degree and is
-                # bit-identical (same row-major element order).
-                t.copy_(fused.reshape(t.shape))
+                t.view(n_kv_heads, r_dim, head_dim, *tail).copy_(fused)
 
         return _init
 
