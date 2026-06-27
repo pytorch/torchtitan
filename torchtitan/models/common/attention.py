@@ -20,7 +20,7 @@ import spmd_types as spmd
 
 import torch
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Replicate
 from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
     activate_flash_attention_impl,
@@ -808,6 +808,13 @@ class FusedQKVLinear(BaseQKVLinear):
             if key not in state_dict:
                 continue
             tensor = state_dict.pop(key)
+            # Gather to Replicate so the n_kv-leading reshape is local (dim 0
+            # unsharded) when a Shard(0) split would not divide n_kv_heads
+            # (e.g. dp_shard=8, n_kv_heads=4); stays a DTensor for the copy.
+            if isinstance(tensor, DTensor):
+                tensor = tensor.redistribute(
+                    tensor.device_mesh, [Replicate()] * tensor.device_mesh.ndim
+                )
             n_kv = tensor.shape[0] // (r * hd)
             tail = (tensor.shape[1],) if ndim == 4 else ()
             w = tensor.reshape(n_kv, r, hd, *tail)
@@ -831,6 +838,14 @@ class FusedQKVLinear(BaseQKVLinear):
             if not all(k in state_dict for k in keys):
                 continue
             wq, wk, wv = (state_dict.pop(k) for k in keys)
+            # TODO: check if we could avoid this All-gather
+            # Gather to Replicate so the n_kv reshape is local; stays a DTensor so the
+            # fused result can be copied into the sharded wqkv param.
+            if isinstance(wq, DTensor):
+                wq, wk, wv = (
+                    t.redistribute(t.device_mesh, [Replicate()] * t.device_mesh.ndim)
+                    for t in (wq, wk, wv)
+                )
             n_kv = wk.shape[0] // hd
             tail = (wq.shape[1],) if ndim == 4 else ()
             q = wq.reshape(n_kv, hpk, hd, *tail)
