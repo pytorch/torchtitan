@@ -201,16 +201,8 @@ class Controller(Configurable):
         """Top-level config for RL training."""
 
         model_spec: Annotated[ModelSpec | None, tyro.conf.Suppress] = None
-        """Model spec for the trainer (and the generator unless
-        ``generator_model_spec`` is set). Set programmatically via
+        """Model spec for the trainer and the generator. Set programmatically via
         config_registry (not from CLI)."""
-
-        generator_model_spec: Annotated[ModelSpec | None, tyro.conf.Suppress] = None
-        """Optional generator-specific model spec. Defaults to ``model_spec``.
-        Use to give the generator a different MoE comm backend than the trainer
-        (e.g. trainer DeepEP high-throughput, generator DeepEP low-latency or
-        HybridEP). The param structure is identical across backends so weight sync
-        is unaffected. Set programmatically via config_registry (not from CLI)."""
 
         hf_assets_path: str = "./tests/assets/tokenizer"
         """Path to HF assets folder (model weights, tokenizer, config files)."""
@@ -331,7 +323,7 @@ class Controller(Configurable):
 
             # FULL cudagraph is only correct with the flex attention backend
             cudagraph = self.generator.cudagraph
-            generator_spec = self.generator_model_spec or self.model_spec
+            generator_spec = self.model_spec
             if (
                 cudagraph.enable
                 and cudagraph.mode == "FULL"
@@ -532,13 +524,11 @@ class Controller(Configurable):
             for generator_mesh in generator_meshes:
                 await setup_torch_elastic_env_async(generator_mesh)
 
-            # Spawn the trainer first. The generators are spawned only AFTER the
-            # trainer's (heavy) init settles (see below): the generator's first MoE
-            # dispatch happens in its vLLM warm-up during __init__, and if it runs
-            # concurrently with the trainer's model build + weight load it can race the
-            # NVLink-IPC setup on a partial-NVLink-domain HybridEP generator (ep < node
-            # GPUs) and fault with cudaErrorIllegalAddress (hybrid_ep_backend.cuh:5693).
-            # Sequencing keeps the generator's first dispatch on a quiescent system.
+            # Spawn the trainer first; generators wait until it is ready (see below).
+            # A generator's first MoE dispatch (vLLM warm-up in __init__) can race the
+            # trainer's model build + weight load and fault a partial-NVLink-domain
+            # HybridEP generator (cudaErrorIllegalAddress, hybrid_ep_backend.cuh:5693),
+            # so sequencing keeps that first dispatch on a quiescent system.
             self.trainer = trainer_mesh.spawn(
                 "trainer",
                 PolicyTrainer,
@@ -559,13 +549,14 @@ class Controller(Configurable):
         with sl.log_trace_span("torchstore_init"):
             await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
 
-        # Barrier on trainer readiness BEFORE spawning the generators (see the spawn
-        # comment above). This call returns only after the trainer actor's __init__ (model
-        # build + checkpoint load) completes, so the generators then init on a quiescent
-        # system. It also reads the restored policy_version (0 if fresh) for resume.
-        # TODO(resume): only model/optimizer/policy_version are restored. The active-slot
-        #   rollout buffer (in-flight rollouts) and the dataset stream position are NOT
-        #   restored -- a resumed run refills the buffer and re-reads data from the start.
+        # Barrier on trainer readiness BEFORE spawning generators (see spawn comment):
+        # returns only after the trainer's __init__ (model build + checkpoint load), so
+        # generators init on a quiescent system. Also reads the restored policy_version
+        # (0 if fresh) for resume.
+        # TODO(resume): only model/optimizer/policy_version are restored; the rollout
+        #   buffer (in-flight rollouts) and dataset stream position are NOT -- a resumed
+        #   run refills the buffer and re-reads data from the start.
+        # TODO: investigate why we need to spawn generator later
         self.start_step = self._get_rank_0_value(
             await self.trainer.get_policy_version.call()
         )
@@ -583,7 +574,7 @@ class Controller(Configurable):
                     actor_name,
                     VLLMGenerator,
                     config.generator,
-                    model_spec=config.generator_model_spec or config.model_spec,
+                    model_spec=config.model_spec,
                     model_path=config.hf_assets_path,
                     compile_config=config.compile,
                     max_num_seqs=max_num_seqs,
