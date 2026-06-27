@@ -201,8 +201,16 @@ class Controller(Configurable):
         """Top-level config for RL training."""
 
         model_spec: Annotated[ModelSpec | None, tyro.conf.Suppress] = None
-        """Model specification shared by trainer and generator.
-        Set programmatically via config_registry (not from CLI)."""
+        """Model spec for the trainer (and the generator unless
+        ``generator_model_spec`` is set). Set programmatically via
+        config_registry (not from CLI)."""
+
+        generator_model_spec: Annotated[ModelSpec | None, tyro.conf.Suppress] = None
+        """Optional generator-specific model spec. Defaults to ``model_spec``.
+        Use to give the generator a different MoE comm backend than the trainer
+        (e.g. trainer DeepEP high-throughput, generator DeepEP low-latency or
+        HybridEP). The param structure is identical across backends so weight sync
+        is unaffected. Set programmatically via config_registry (not from CLI)."""
 
         hf_assets_path: str = "./tests/assets/tokenizer"
         """Path to HF assets folder (model weights, tokenizer, config files)."""
@@ -323,14 +331,15 @@ class Controller(Configurable):
 
             # FULL cudagraph is only correct with the flex attention backend
             cudagraph = self.generator.cudagraph
+            generator_spec = self.generator_model_spec or self.model_spec
             if (
                 cudagraph.enable
                 and cudagraph.mode == "FULL"
-                and self.model_spec is not None
+                and generator_spec is not None
             ):
                 from torchtitan.models.common.attention import FlexAttention
 
-                inner_attn = self.model_spec.model.layers[0].attention.inner_attention
+                inner_attn = generator_spec.model.layers[0].attention.inner_attention
                 if not isinstance(inner_attn, FlexAttention.Config):
                     raise ValueError(
                         "cudagraph mode 'FULL' is only supported with the flex "
@@ -523,7 +532,13 @@ class Controller(Configurable):
             for generator_mesh in generator_meshes:
                 await setup_torch_elastic_env_async(generator_mesh)
 
-            # Spawn actors on their respective meshes
+            # Spawn the trainer first. The generators are spawned only AFTER the
+            # trainer's (heavy) init settles (see below): the generator's first MoE
+            # dispatch happens in its vLLM warm-up during __init__, and if it runs
+            # concurrently with the trainer's model build + weight load it can race the
+            # NVLink-IPC setup on a partial-NVLink-domain HybridEP generator (ep < node
+            # GPUs) and fault with cudaErrorIllegalAddress (hybrid_ep_backend.cuh:5693).
+            # Sequencing keeps the generator's first dispatch on a quiescent system.
             self.trainer = trainer_mesh.spawn(
                 "trainer",
                 PolicyTrainer,
@@ -535,25 +550,6 @@ class Controller(Configurable):
                 output_dir=config.dump_folder,
             )
 
-            # TODO: torch.compile with aot_eager backend (inductor crashes the vLLM engine on the shared model path).
-            generators = []
-            for idx, generator_mesh in enumerate(generator_meshes):
-                actor_name = (
-                    "generator" if len(generator_meshes) == 1 else f"generator_{idx}"
-                )
-                generator = generator_mesh.spawn(
-                    actor_name,
-                    VLLMGenerator,
-                    config.generator,
-                    model_spec=config.model_spec,
-                    model_path=config.hf_assets_path,
-                    compile_config=config.compile,
-                    max_num_seqs=max_num_seqs,
-                    output_dir=config.dump_folder,
-                )
-                generators.append(generator)
-            self.generator_router = config.generator_router.build(generators=generators)
-
         # Initialize TorchStore for weight sync between trainer and generator.
         # StorageVolumes are spawned on the trainer mesh so they are colocated
         # with the weight source for faster data access in the non-RDMA path.
@@ -563,16 +559,38 @@ class Controller(Configurable):
         with sl.log_trace_span("torchstore_init"):
             await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
 
-        # Resume: __init__ ran CheckpointManager.load(); read back the restored policy_version
-        # (0 if fresh) so the loop resumes at the right step and generators pull at that version.
-        # TODO(resume): only model/optimizer/policy_version are restored. The active-slot rollout
-        #   buffer (in-flight rollouts) and the dataset stream position are NOT restored -- a resumed
-        #   run refills the buffer and re-reads data from the start. Need to recycle prompts.
+        # Barrier on trainer readiness BEFORE spawning the generators (see the spawn
+        # comment above). This call returns only after the trainer actor's __init__ (model
+        # build + checkpoint load) completes, so the generators then init on a quiescent
+        # system. It also reads the restored policy_version (0 if fresh) for resume.
+        # TODO(resume): only model/optimizer/policy_version are restored. The active-slot
+        #   rollout buffer (in-flight rollouts) and the dataset stream position are NOT
+        #   restored -- a resumed run refills the buffer and re-reads data from the start.
         self.start_step = self._get_rank_0_value(
             await self.trainer.get_policy_version.call()
         )
         if self.start_step > 0:
             logger.info(f"Resuming RL training from step {self.start_step}")
+
+        # TODO: torch.compile with aot_eager backend (inductor crashes the vLLM engine on the shared model path).
+        with sl.log_trace_span("mesh_spawn_generators"):
+            generators = []
+            for idx, generator_mesh in enumerate(generator_meshes):
+                actor_name = (
+                    "generator" if len(generator_meshes) == 1 else f"generator_{idx}"
+                )
+                generator = generator_mesh.spawn(
+                    actor_name,
+                    VLLMGenerator,
+                    config.generator,
+                    model_spec=config.generator_model_spec or config.model_spec,
+                    model_path=config.hf_assets_path,
+                    compile_config=config.compile,
+                    max_num_seqs=max_num_seqs,
+                    output_dir=config.dump_folder,
+                )
+                generators.append(generator)
+            self.generator_router = config.generator_router.build(generators=generators)
 
         # Initial weight sync: only the trainer loads weights; generators pull at start_step.
         with sl.log_trace_span("trainer_push_model_state_dict"):

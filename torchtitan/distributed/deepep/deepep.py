@@ -20,10 +20,19 @@ from torch.utils._python_dispatch import _disable_current_modes
 try:
     from deep_ep import Buffer, EventHandle, EventOverlap
 except ImportError as e:
-    raise ImportError(
-        "DeepEP is required for this module. "
-        "Install from: https://github.com/deepseek-ai/deepep"
-    ) from e
+    # The hybrid-ep deep_ep build does not re-export EventHandle at the top level (it is
+    # an inference build) but ships it in the deep_ep_cpp extension; Buffer/EventOverlap
+    # are always at the top level. The high-throughput dispatch needs EventHandle to build
+    # the previous_event deep_ep requires (it asserts previous_event.has_value() and async),
+    # so fall back to deep_ep_cpp before giving up.
+    try:
+        from deep_ep import Buffer, EventOverlap
+        from deep_ep_cpp import EventHandle
+    except ImportError:
+        raise ImportError(
+            "DeepEP is required for this module. "
+            "Install from: https://github.com/deepseek-ai/deepep"
+        ) from e
 
 
 # Global buffer (single buffer per process, recreated if group changes)
