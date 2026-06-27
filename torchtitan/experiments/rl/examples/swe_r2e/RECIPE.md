@@ -92,6 +92,29 @@ mast_rl/submit_swe.sh`.
 | steps | 40 | 500 | - | - |
 | warm start | none | **SFT on successful rollouts** | - | none |
 
+## CRITICAL empirical finding (2026-06-27): full R2E starves the trainer
+
+Running 32B on the **unfiltered** full R2E-Gym-Subset (4.5k) with binary reward,
+group_size 16, 12 generators: in 134 collected+scored+built groups, **0 train steps
+fired** -- fewer than `num_groups_per_train_step` (=4) groups were "mixed" (1..15 of
+16 solved). The 32B's pass profile on random R2E is bimodal: most tasks all-fail
+(0/16), the rare easy task all-solve (16/16); **both have zero reward std and are
+dropped by the soft filter**, so mixed (gradient-bearing) groups are <3% of groups.
+The batcher waits for `num_groups_per_train_step` *surviving* groups, so it never
+fills -> the trainer starves -> no learning. (~2% overall pass rate but clustered,
+not spread.) This is the concrete proof that **binary RL on unfiltered SWE data does
+not train** -- exactly why Tmax/msl/rl filter data to a learnable pass-rate band.
+
+Two fixes:
+- **Quick (online): `num_groups_per_train_step=1`** -- fire a step on each mixed
+  group the moment it appears. Unstarves the run on full data, but slow/noisy
+  (~one mixed group per ~30 groups collected) and a 1-task batch.
+- **Proper (offline): pass-rate curriculum** -- one-time rejection-sampling pass
+  (run the base 32B k=8-16x per task, keep ~10-70% solve-rate tasks), then train on
+  that subset where ~every group is mixed -> dense gradient, fast clean reward rise.
+  The current full-data run's per-task dumps (group_size siblings = a pass-rate
+  estimate per task) can be mined to build this without a separate sampling job.
+
 ## Recommendations, prioritized (fast AND good)
 
 **P0 -- data curriculum (the biggest lever for "reward rises").** Binary reward only
