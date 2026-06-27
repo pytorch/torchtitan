@@ -323,15 +323,14 @@ class Controller(Configurable):
 
             # FULL cudagraph is only correct with the flex attention backend
             cudagraph = self.generator.cudagraph
-            generator_spec = self.model_spec
             if (
                 cudagraph.enable
                 and cudagraph.mode == "FULL"
-                and generator_spec is not None
+                and self.model_spec is not None
             ):
                 from torchtitan.models.common.attention import FlexAttention
 
-                inner_attn = generator_spec.model.layers[0].attention.inner_attention
+                inner_attn = self.model_spec.model.layers[0].attention.inner_attention
                 if not isinstance(inner_attn, FlexAttention.Config):
                     raise ValueError(
                         "cudagraph mode 'FULL' is only supported with the flex "
