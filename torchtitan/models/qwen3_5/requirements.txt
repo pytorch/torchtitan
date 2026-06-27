@@ -1,1 +1,1 @@
--r ../../../.ci/docker/requirements-vlm.txt
+../../../.ci/docker/requirements-vlm.txt
