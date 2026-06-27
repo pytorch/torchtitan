@@ -767,11 +767,16 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         # eagerly at wire_meshes (before any cudagraph capture).
         num_max_tokens_per_rank: int = 128
         hidden: int = 0
+        # Select the dispatch layout. False (default): compact, host-synced, autograd
+        # path for training/prefill. True: static, no-host-sync expand layout so the MoE
+        # forward is cudagraph-capturable -- inference/decode only (no backward).
+        cudagraph: bool = False
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
         self.hidden = config.hidden
+        self.cudagraph = config.cudagraph
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
@@ -821,6 +826,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             self.num_experts,
             ep_group,
             num_max_tokens_per_rank=self.num_max_tokens_per_rank,
+            cudagraph=self.cudagraph,
         )
 
         metadata = DeepEPDispatchMetadata(state=state)
