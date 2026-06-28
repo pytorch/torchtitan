@@ -12,17 +12,14 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
-from torch.nn.attention.flex_attention import and_masks, BlockMask
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     BaseQKVLinear,
-    create_attention_mask,
     create_varlen_metadata_for_document,
     FlexAttention,
-    get_causal_mask_mod,
-    get_document_mask_mod,
     get_sliding_window_mask_mod,
     VarlenAttention,
 )
@@ -273,22 +270,11 @@ class GptOssModel(Decoder):
         if isinstance(inner_attn, VarlenAttention.Config):
             return create_varlen_metadata_for_document(positions)
         elif isinstance(inner_attn, FlexAttention.Config):
-            seq_len = positions.shape[1]
-            B = positions.shape[0]
-            basic_mask_mods = [
-                get_causal_mask_mod(),
-                get_document_mask_mod(positions),
-            ]
-
             # Full-attention (causal + document) mask, used by layers without a
             # sliding window.
             masks: dict[str, BlockMask] = {
-                "basic_mask": create_attention_mask(
-                    and_masks(*basic_mask_mods),
-                    B,
-                    None,
-                    seq_len,
-                    seq_len,
+                "basic_mask": self._create_flex_attention_mask_for_document(
+                    positions, attn_cfg
                 )
             }
 
@@ -302,12 +288,12 @@ class GptOssModel(Decoder):
                     window = layer.attention.sliding_window_size
                     break
             if window is not None:
-                masks["sliding_window_mask"] = create_attention_mask(
-                    and_masks(*basic_mask_mods, get_sliding_window_mask_mod(window)),
-                    B,
-                    None,
-                    seq_len,
-                    seq_len,
+                masks[
+                    "sliding_window_mask"
+                ] = self._create_flex_attention_mask_for_document(
+                    positions,
+                    attn_cfg,
+                    extra_mask_mods=[get_sliding_window_mask_mod(window)],
                 )
 
             return masks
