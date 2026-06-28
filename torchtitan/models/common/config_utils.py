@@ -15,7 +15,9 @@ from collections.abc import Callable
 from typing import Literal
 
 import torch
+from torch.distributed.tensor import DTensor
 
+from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.models.common.attention import (
     FlexAttention,
     FusedQKVLinear,
@@ -109,7 +111,6 @@ def _fused_qkv_param_init(
     module and keeps RNG independent of the parallelism.
     """
     heads_per_kv = n_heads // n_kv_heads
-    r_dim = heads_per_kv + 2
 
     def _make_init(base_init: Callable) -> Callable:
         # ``tail`` is the per-row shape: () for bias, (in_features,) for weight.
@@ -133,7 +134,7 @@ def _fused_qkv_param_init(
                     v.view(n_kv_heads, 1, head_dim, *tail),
                 ],
                 dim=1,
-            )
+            ).view(-1, *tail)
             with torch.no_grad():
                 # fused is Replicate (cat of Replicates). Flatten it to t's native
                 # 2D [(n_kv_heads*r_dim*head_dim), *tail] shape and copy_ into t,
@@ -142,7 +143,16 @@ def _fused_qkv_param_init(
                 # avoids the "unflatten unevenly sharded" error when dp_shard*tp
                 # does not divide n_kv_heads (e.g. dp_shard=8, n_kv_heads=4); no
                 # gather, since fused is already replicated.
-                t.copy_(fused.view(-1, *tail))
+                if not isinstance(t, DTensor) and (tp_size := spmd_mesh_size("tp")) > 1:
+                    # RL generator init_weights() only needs non-persistent
+                    # buffers; weights come from trainer state dict. Until it has
+                    # a DTensor static state dict path, copy this TP shard here.
+                    # TODO: Remove once RL can init buffers without weight init.
+                    mesh = current_spmd_mesh()
+                    assert mesh is not None
+                    tp_rank = mesh.get_local_rank("tp")
+                    fused = fused.chunk(tp_size, dim=0)[tp_rank]
+                t.copy_(fused)
 
         return _init
 
