@@ -7,20 +7,20 @@
 """Config-based sharding for Kimi K2.5 (MoonViT3d + DeepSeekV3).
 
 Sets ``ShardingConfig`` on every sub-config so ``model.parallelize()`` applies
-TP/EP uniformly via the Module protocol — the same approach as qwen3_5.
+TP/EP/SP uniformly via the Module protocol.
 
-- Decoder (MLA + MoE): delegates to ``set_deepseek_v3_sharding_config`` with
-  ``enable_sp=False``. Sequence parallelism is intentionally disabled so the
-  decoder hidden states stay ``Replicate`` (full sequence), which the
-  multimodal forward needs to scatter vision features at placeholder positions.
-- Vision encoder: activations flow ``Replicate``; only the linear layers are
-  Colwise/Rowwise sharded for memory. Norms and position embeddings stay
-  ``Replicate``.
+- Decoder (MLA + MoE): reuses ``set_deepseek_v3_sharding_config``. Multimodal
+  configs keep the token embedding ``Replicate`` for the vision scatter and
+  resume SP at layer 0 (see ``_shard_decoder_after_embedding_scatter``).
+- Vision encoder: activations flow ``Replicate`` (no SP -- the patch sequence is
+  short, so sequence-sharding would add gather/scatter around the block-diagonal
+  attention for little memory gain). Only the linear layers are Colwise/Rowwise
+  sharded for memory; norms and position embeddings stay ``Replicate``.
 """
 
 from typing import TYPE_CHECKING
 
-from torch.distributed.tensor import Replicate
+import spmd_types as spmd
 
 from torchtitan.models.common.decoder_sharding import (
     colwise_config,
@@ -30,15 +30,14 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_inner_attention_local_map,
 )
 from torchtitan.models.deepseek_v3.sharding import set_deepseek_v3_sharding_config
-from torchtitan.protocols.sharding import ShardingConfig
+from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.kimi_k2_5.model import KimiK25Model
 
-_REPLICATE_PARAM = dense_param_placement(tp=Replicate())
-_REPLICATE_ACT = dense_activation_placement(tp=Replicate())
+_REPLICATE_PARAM = dense_param_placement(tp=spmd.R)
+_REPLICATE_ACT = dense_activation_placement(tp=spmd.R)
 
-# Norm / module that receives and emits Replicate activations.
 _REPLICATE_NORM = ShardingConfig(
     state_shardings={"weight": _REPLICATE_PARAM, "bias": _REPLICATE_PARAM},
     in_src_shardings={"input": _REPLICATE_ACT},
@@ -50,31 +49,64 @@ _REPLICATE_NORM = ShardingConfig(
 def set_kimi_k2_5_sharding_config(
     config: "KimiK25Model.Config",
     *,
-    loss_parallel: bool,
+    enable_sp: bool,
     enable_ep: bool,
 ) -> None:
-    """Fill ``sharding_config`` on all Kimi K2.5 sub-configs.
-
-    The decoder reuses DeepSeek V3's sharding (with ``enable_sp=False``); the
-    vision encoder gets its own Replicate-activation TP plan.
-    """
     set_deepseek_v3_sharding_config(
         config,
-        loss_parallel=loss_parallel,
-        enable_sp=False,
+        enable_sp=enable_sp,
         enable_ep=enable_ep,
     )
-    _set_vision_encoder_sharding(config.vision_encoder)
+    if config.vision_encoder is not None:
+        if enable_sp:
+            _shard_decoder_after_embedding_scatter(config)
+        _set_vision_encoder_sharding(config.vision_encoder)
+
+
+def _shard_decoder_after_embedding_scatter(config: "KimiK25Model.Config") -> None:
+    """Keep ``tok_embeddings`` ``Replicate`` and resume SP at layer 0's output.
+
+    The vision scatter writes features at arbitrary sequence positions, so it
+    needs the full (``Replicate``) embedding -- a ``Shard(1)`` one cannot be
+    indexed by sequence position locally. Layer 0 then takes a ``Replicate``
+    input and its rowwise ``wo`` reduce-scatters back to ``Shard(1)``, so the
+    residual is sequence-parallel from layer 0's output and layers ``1..N-1``
+    are unchanged full SP.
+    """
+    config.tok_embeddings.sharding_config = ShardingConfig(
+        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
+        in_src_shardings={"input": _REPLICATE_ACT},
+        in_dst_shardings={"input": _REPLICATE_ACT},
+        out_src_shardings=dense_activation_placement(tp=spmd.P),
+        out_dst_shardings=_REPLICATE_ACT,
+        local_map=LocalMapConfig(in_grad_placements=None),
+    )
+
+    layer0 = config.layers[0]
+    layer0.attention_norm.sharding_config = ShardingConfig(
+        state_shardings={"weight": _REPLICATE_PARAM},
+        in_src_shardings={"input": _REPLICATE_ACT},
+        out_src_shardings=_REPLICATE_ACT,
+    )
+    layer0.attention.sharding_config = ShardingConfig(
+        in_src_shardings={"x": _REPLICATE_ACT},
+        in_dst_shardings={"x": _REPLICATE_ACT},
+    )
 
 
 def _set_vision_encoder_sharding(ve_cfg) -> None:
     """Replicate-activation TP plan for the MoonViT3d vision encoder.
 
-    Linear layers are Colwise/Rowwise sharded for memory; norms and position
-    embeddings are Replicate. ``patch_embed`` wraps the plain ``pixel_values``
-    input as ``DTensor(Replicate)`` so the rest of the encoder runs in DTensor
-    space.
+    Linear layers are Colwise/Rowwise sharded for memory; norms and the
+    learnable position table are Replicate. ``patch_embed`` wraps the plain
+    ``pixel_values`` input as ``DTensor(Replicate)`` so the rest of the encoder
+    runs in DTensor space.
     """
+    # The encoder's own ``pos_embed`` table is Replicate (F.interpolate runs on it).
+    ve_cfg.sharding_config = ShardingConfig(
+        state_shardings={"pos_embed": _REPLICATE_PARAM},
+    )
+
     # patch_embed (Linear): receives plain pixel_values -> wrap as Replicate.
     ve_cfg.patch_embed_proj.sharding_config = ShardingConfig(
         state_shardings={"weight": _REPLICATE_PARAM, "bias": _REPLICATE_PARAM},
@@ -83,24 +115,16 @@ def _set_vision_encoder_sharding(ve_cfg) -> None:
         out_dst_shardings=_REPLICATE_ACT,
     )
 
-    # Learnable position embedding: Replicate weight + temporal buffer.
-    # F.interpolate runs on the Replicate weight (same as qwen3_vl/qwen3_5).
-    ve_cfg.pos_emb.sharding_config = ShardingConfig(
-        state_shardings={
-            "weight": _REPLICATE_PARAM,
-            "time_weight": _REPLICATE_PARAM,
-        },
-    )
-
-    # Transformer block sub-modules.
+    # Transformer block sub-modules (shared VisionTransformerBlock: norm1/norm2).
     block = ve_cfg.block
-    block.norm0.sharding_config = _REPLICATE_NORM
     block.norm1.sharding_config = _REPLICATE_NORM
+    block.norm2.sharding_config = _REPLICATE_NORM
 
-    # rope_cos / rope_sin enter the attention as plain (Replicate) tensors.
+    # The stacked 2D rope_cache enters the attention as a plain (Replicate)
+    # tensor input so it is DTensor-wrapped before meeting head-sharded q/k.
     block.attn.sharding_config = ShardingConfig(
-        in_src_shardings={"rope_cos": _REPLICATE_ACT, "rope_sin": _REPLICATE_ACT},
-        in_dst_shardings={"rope_cos": _REPLICATE_ACT, "rope_sin": _REPLICATE_ACT},
+        in_src_shardings={"rope_cache": _REPLICATE_ACT},
+        in_dst_shardings={"rope_cache": _REPLICATE_ACT},
     )
     block.attn.wq.sharding_config = colwise_config()
     block.attn.wk.sharding_config = colwise_config()

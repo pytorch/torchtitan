@@ -87,17 +87,16 @@ def make_mla_attention_config(
     v_head_dim: int,
     mscale: float = 1.0,
     attn_backend: str,
+    linear_init: dict[str, Callable],
+    norm_init: dict[str, Callable],
+    depth_init: Callable[[int], dict[str, Callable]],
+    rope: RoPE.Config,
 ) -> Attention.Config:
     """Build a fully-specified DeepSeek V3 MLA ``Attention.Config``.
 
-    Shared by deepseek_v3 and kimi_k2_5 (whose text tower is DeepSeek V3). All
-    Linear and RMSNorm sub-configs have their dimensional fields set. When
+    All Linear and RMSNorm sub-configs have their dimensional fields set. When
     ``q_lora_rank == 0``, sets ``wq`` (not ``wq_a``/``wq_b``); when
     ``q_lora_rank > 0``, sets ``wq_a``/``wq_b`` (not ``wq``).
-
-    Initialization is passed in so callers keep full control:
-    ``linear_init`` for projections, ``norm_init`` for the low-rank norms, and
-    ``depth_init(layer_id)`` (depth-scaled) for the output projection ``wo``.
     """
     inner_attention = get_attention_config(attn_backend)
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
@@ -186,17 +185,19 @@ def build_mla_moe_layers(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
+    linear_init: dict[str, Callable],
+    norm_init: dict[str, Callable],
+    depth_init: Callable[[int], dict[str, Callable]],
+    depth_experts_init: Callable[[int], dict[str, Callable]],
+    rope: RoPE.Config,
 ) -> list[TransformerBlock.Config]:
     """Build the per-layer ``DeepSeekV3TransformerBlock`` configs (MLA + MoE).
 
-    Shared by deepseek_v3 and kimi_k2_5. Layers with ``layer_id <
-    n_dense_layers`` get a dense FeedForward and no MoE; the rest get a MoE and
-    no FeedForward.
+    Layers with layer_id < n_dense_layers get a dense FeedForward and no MoE.
+    Layers with layer_id >= n_dense_layers get a MoE and no FeedForward.
 
-    Initialization is passed in (not closed over) so callers keep full control:
-    ``linear_init``/``norm_init`` for projections/norms, and the per-layer
-    factories ``depth_init(layer_id)`` / ``depth_experts_init(layer_id)`` for
-    depth-scaled output and expert weights.
+    Router and expert inits are constructed per-layer so depth-scaled
+    initializers are correct for each layer's position.
     """
     layers = []
     for layer_id in range(n_layers):
@@ -211,6 +212,10 @@ def build_mla_moe_layers(
             v_head_dim=v_head_dim,
             mscale=mscale,
             attn_backend=attn_backend,
+            linear_init=linear_init,
+            norm_init=norm_init,
+            depth_init=depth_init,
+            rope=rope,
         )
 
         if layer_id < n_dense_layers:
@@ -241,8 +246,7 @@ def build_mla_moe_layers(
                     hidden_dim=moe_hidden_dim,
                     num_experts=num_experts,
                     top_k=router_top_k,
-                    param_init=_depth_experts_init(layer_id),
-                    score_before_experts=score_before_experts,
+                    param_init=depth_experts_init(layer_id),
                     comm_backend=moe_comm_backend,
                     non_blocking_capacity_factor=non_blocking_capacity_factor,
                 ),

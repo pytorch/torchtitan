@@ -482,9 +482,13 @@ def get_moe_model_nparams_and_flops(
     nparams_shared_experts = 0
     nparams_experts = 0
     nparams_dense = 0
+    # TODO: add a per-batch vision encoder FLOP term for accurate VLM MFU.
+    nparams_vision = 0
 
     for name, p in model.named_parameters():
-        if "embedding" in name:
+        if "vision_encoder" in name:
+            nparams_vision += p.numel()
+        elif "embedding" in name:
             nparams_embedding += p.numel()
             nparams_dense += p.numel()
         elif "moe.shared_experts" in name:
@@ -497,7 +501,7 @@ def get_moe_model_nparams_and_flops(
             nparams_dense += p.numel()
 
     nparams_sparse = nparams_moe_router + nparams_shared_experts + nparams_experts
-    nparams = nparams_dense + nparams_sparse
+    nparams = nparams_dense + nparams_sparse + nparams_vision
 
     moe_config = next((l.moe for l in model_config.layers if l.moe is not None), None)
     if moe_config is not None:
@@ -511,7 +515,8 @@ def get_moe_model_nparams_and_flops(
 
     logger.info(
         f"Total parameter count: dense {nparams_dense:,}, "
-        f"sparse {nparams_sparse:,}, active {nparams_dense + nparams_sparse_active:,}"
+        f"sparse {nparams_sparse:,}, vision {nparams_vision:,}, "
+        f"active {nparams_dense + nparams_sparse_active:,}"
     )
 
     # With tied embeddings, PyTorch's parameter iterator already counts the
