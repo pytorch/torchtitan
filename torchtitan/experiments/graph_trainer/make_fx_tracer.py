@@ -10,6 +10,7 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
+import packaging.version as version
 
 import torch
 import torch.nn as nn
@@ -31,7 +32,6 @@ from torchtitan.experiments.graph_trainer.dynamic_shapes import (
 # Everything else (callables, custom objects) should be registered as pytree
 # nodes/constants or captured in fn's closure.
 _ALLOWED_LEAF_TYPES = (torch.Tensor, int, float, bool, str, type(None))
-
 
 @contextmanager
 def _skip_nested_compile() -> Generator[None, None, None]:
@@ -459,9 +459,12 @@ def minimal_fx_tracer(
                 if prepared is not None:
                     user_args, user_kwargs = prepared
 
+            # _patch_autograd_grad is deprecated, use _patch_engine_backward if available
+            _patch_engine_backward = getattr(torch.compiler, "_patch_engine_backward",
+                                             torch.compiler._patch_autograd_grad)
             with _reparametrize_train_state(
                 module, optimizer, model_state_t, optim_state_t
-            ), torch.compiler._patch_engine_backward():
+            ), _patch_engine_backward():
                 result = fn(*user_args, **user_kwargs)
 
             flat_outs, output_spec = pytree.tree_flatten(result)
