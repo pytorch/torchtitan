@@ -81,11 +81,7 @@ def generate() -> None:
         raise ValueError(f"Unknown RL config {args.config!r}")
     config = config_factory()
     gen_config = config.generator
-    # Standalone inference builds a generator, so apply the generator-only model-config
-    # converters (e.g. DeepEPInferenceConverter) to the shared spec.
     model_spec = config.model_spec
-    for converter in gen_config.converters:
-        model_spec.model = converter.build().convert(model_spec.model)
     model_path = config.hf_assets_path
     max_num_seqs = args.max_num_seqs
     is_rank0 = os.environ.get("RANK", "0") == "0"

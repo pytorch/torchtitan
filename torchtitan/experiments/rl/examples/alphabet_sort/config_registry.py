@@ -40,7 +40,6 @@ from torchtitan.experiments.rl.controller import (
 from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
-from torchtitan.experiments.rl.models.deepep import DeepEPInferenceConverter
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
@@ -576,23 +575,24 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     EXPAND layout, so this generator enables CUDA graph capture.
 
     Per-role config from ONE shared model_spec: the trainer uses it as-is (compact,
-    host-synced, backward-able DeepEP path), while the generator applies a
-    ``DeepEPInferenceConverter`` (via ``generator.converters``) to its own copy, switching its
-    DeepEP dispatchers to the cudagraph-able EXPAND layout (``cudagraphable=True`` + a static
-    per-rank capacity). The converter touches only the generator's spec, so the trainer and
-    weight sync are unaffected.
+    host-synced, backward-able DeepEP path), while the generator applies the per-actor
+    ``deepep_inference`` override (``generator.override``) to its own copy, switching its
+    DeepEP dispatchers to the cudagraph-able EXPAND layout (``cudagraphable=True``). The
+    override touches only the generator's spec, so the trainer and weight sync are unaffected.
+    (This mirrors how converters are config-time/shared while overrides are per-actor.)
     """
     config = rl_grpo_qwen3_moe_debug_varlen()
     config.model_spec = model_registry(
         "debugmodel_moe", attn_backend="varlen", moe_comm_backend="deepep"
     )
-    # Generator per-step token budget. The static per-rank expand capacity is this divided by
-    # the SP degree (sp_size = TP = 2): SP shards the sequence across the TP group, so each
-    # rank dispatches at most max_num_batched_tokens / sp_size tokens.
-    config.generator.max_num_batched_tokens = 2048
-    config.generator.converters = [
-        DeepEPInferenceConverter.Config(num_max_tokens_per_rank=2048 // 2)
-    ]
+    # Generator-only override -> DeepEP expand (cudagraph-able) dispatch; trainer keeps compact.
+    config.generator.override = OverrideConfig(
+        imports=["torchtitan.overrides.deepep_inference"]
+    )
+    # Cap the per-step token budget so the worst-case per-rank expand count
+    # (max_num_batched_tokens / sp_size = 256 / 2 = 128) fits the dispatcher's default
+    # num_max_tokens_per_rank (128). Sizing that from the budget is a separate TODO.
+    config.generator.max_num_batched_tokens = 256
     # DeepEP v2 expand dispatch is cudagraph-capturable, so enable generator capture
     # (FULL_AND_PIECEWISE: decode captured FULL incl. the expand MoE; prefill breakable).
     config.generator.cudagraph = VLLMCudagraphConfig(

@@ -73,17 +73,6 @@ def deepseek_v3_debugmodel_hybridep() -> Trainer.Config:
     return config
 
 
-def deepseek_v3_debugmodel_deepep() -> Trainer.Config:
-    config = deepseek_v3_debugmodel()
-    # DeepEP v2 compact (training) path auto-sizes its buffer from the per-rank
-    # token count at dispatch, so no non_blocking_capacity_factor is needed.
-    config.model_spec = model_registry(
-        "debugmodel",
-        moe_comm_backend="deepep",
-    )
-    return config
-
-
 def deepseek_v3_debugmodel_minimal_async_ep() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
     config.model_spec = model_registry(

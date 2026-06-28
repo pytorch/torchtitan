@@ -5,19 +5,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# Install DeepEP v2 (the unified ElasticBuffer API) for MoE expert parallelism
-# integration tests. v2 lives on the `main` branch, which ships both
-# `deep_ep.Buffer` (legacy) and `deep_ep.ElasticBuffer` (the unified HT/LL
-# dispatch/combine used by moe_comm_backend="deepep"). Pinned to a known-good
-# commit to avoid breakage from upstream changes; update the hash when upgrading.
-#
-# NOTE: main does NOT include `hybrid_ep_buffer` (HybridEP) -- that is a separate
-# experimental branch. Tests that need the HybridEP backend are skipped here.
+# Install DeepEP (HybridEP) for MoE expert parallelism integration tests.
+# Pinned to a known-good commit on the hybrid-ep branch to avoid
+# breakage from upstream changes. Update the commit hash when
+# upgrading to a newer DeepEP version.
 
 set -eux
 
-# v2.0.0 (deepseek-ai/DeepEP main, ElasticBuffer). Override with DEEPEP_COMMIT.
-DEEPEP_COMMIT=${DEEPEP_COMMIT:-af9a040}
+DEEPEP_COMMIT=${DEEPEP_COMMIT:-1b8f467}
 
 # Dependencies for DeepEP compilation (NVSHMEM needs libcudacxx, IB headers).
 sudo apt-get update -qq && sudo apt-get install -y -qq rdma-core libibverbs1 libmlx5-1 libibverbs-dev
@@ -30,16 +25,10 @@ if [ -d /usr/local/cuda/include/cccl/cuda ] && [ ! -e /usr/local/cuda/include/cu
     sudo ln -sf /usr/local/cuda/include/cccl/cuda /usr/local/cuda/include/cuda
 fi
 
-# v2 links BOTH NVSHMEM and NCCL (csrc/kernels/backend/nccl.cu is new vs v1), but
-# DeepEP's setup.py finds the nvidia-nvshmem / nvidia-nccl pip wheels itself (via
-# deep_ep/utils/find_pkgs.py) and resolves their SONAME-only libs (libnvshmem_host.so.3,
-# libnccl.so.2), so no explicit NVSHMEM_DIR/EP_NCCL_ROOT_DIR/CPATH/LIBRARY_PATH or
-# unversioned-.so symlink is needed -- the wheels just have to be installed.
-
 # Non-fatal: DeepEP may fail to compile against newer PyTorch
-# nightlies (ABI changes). DeepEP tests are skipped when it is unavailable.
-git clone --branch main https://github.com/deepseek-ai/deepep.git /tmp/deepep
+# nightlies (ABI changes). HybridEP tests are skipped when
+# DeepEP is unavailable.
+git clone --branch hybrid-ep https://github.com/deepseek-ai/deepep.git /tmp/deepep
 cd /tmp/deepep && git checkout $DEEPEP_COMMIT
-CUDA_HOME=${CUDA_HOME:-/usr/local/cuda} TORCH_CUDA_ARCH_LIST="9.0" \
-    pip install --no-build-isolation . || echo "WARNING: DeepEP installation failed; DeepEP tests will be skipped"
+CUDA_HOME=${CUDA_HOME:-/usr/local/cuda} TORCH_CUDA_ARCH_LIST="9.0" pip install --no-build-isolation . || echo "WARNING: DeepEP installation failed; HybridEP tests will be skipped"
 cd / && rm -rf /tmp/deepep

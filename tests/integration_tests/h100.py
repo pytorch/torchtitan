@@ -96,21 +96,5 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             # deep_ep/NVSHMEM is CUDA-only, so skip on ROCm.
             skip_rocm_test=True,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel_deepep",
-                    "--parallelism.data_parallel_shard_degree 4",
-                    "--parallelism.expert_parallel_degree 2",
-                    "--compile.enable",
-                    "--compile.components model,loss",
-                ],
-            ],
-            "DeepSeek V3 FSDP+DeepEP+compile",
-            "deepseek_v3_fsdp+deepep+compile",
-            ngpu=4,
-            # deep_ep/NVSHMEM is CUDA-only, so skip on ROCm.
-            skip_rocm_test=True,
-        ),
     ]
     return integration_tests_flavors
