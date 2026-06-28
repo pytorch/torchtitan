@@ -11,6 +11,7 @@ Each function returns a complete ``Controller.Config``, discoverable by
 ``--module alphabet_sort --config rl_grpo_qwen3_*``.
 """
 
+import copy
 import dataclasses
 
 from torchtitan.components.checkpoint import CheckpointManager
@@ -562,6 +563,57 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             ),
         ),
     )
+
+
+def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
+    """Debug MoE config on the DeepEP v2 backend with a cudagraph-capturable generator
+    (8 GPUs: 4 gen + 4 train).
+
+    Same EP/TP/DP layout as ``rl_grpo_qwen3_moe_debug_varlen`` (trainer FSDP=2/TP=2/EP=4,
+    generator DP=2/TP=2/EP=4), but the MoE uses the DeepEP v2 comm backend. Unlike the
+    standard all-to-all -- whose unpinned D2H split-size copy blocks CUDA graph capture, so
+    that config disables it -- DeepEP v2's inference dispatch is a static, host-sync-free
+    EXPAND layout, so this generator enables CUDA graph capture.
+
+    Per-role DeepEP config via SEPARATE specs: the trainer keeps ``model_spec`` (DeepEP with
+    the default ``cudagraphable=False`` -> the compact, host-synced, backward-able training
+    path, and no eager inference buffer), while the generator uses ``generator_model_spec``
+    with ``cudagraphable=True`` and a static per-rank expand capacity. The two specs share
+    the same param structure, so trainer->generator weight sync is unaffected. (Even with a
+    shared spec the runtime path is grad-gated -- ``deepep.dispatch_tokens`` uses
+    ``cudagraphable and not torch.is_grad_enabled()`` -- but separate specs also keep the
+    inference-only settings off the trainer.)
+    """
+    config = rl_grpo_qwen3_moe_debug_varlen()
+    # Trainer spec: DeepEP compact path (cudagraphable defaults False).
+    config.model_spec = model_registry(
+        "debugmodel_moe", attn_backend="varlen", moe_comm_backend="deepep"
+    )
+    # Generator spec: a DEEP copy of the trainer spec, so the two are structurally identical
+    # (weight sync unaffected) and the expand/cudagraph overrides below mutate only the
+    # generator's dispatchers, never the trainer's (a shallow copy would share them).
+    generator_spec = copy.deepcopy(config.model_spec)
+    # Generator per-step token budget. The worst-case per-rank expand dispatch capacity is
+    # this divided by the SP degree (sp_size = TP = 2): SP shards the sequence across the TP
+    # group, so each rank dispatches at most max_num_batched_tokens / sp_size tokens.
+    config.generator.max_num_batched_tokens = 2048
+    for block in generator_spec.model.layers:
+        moe = getattr(block, "moe", None)
+        if moe is None:
+            continue
+        dispatcher = moe.experts.token_dispatcher
+        # Generator (no_grad) takes the static expand layout the CUDA graph captures.
+        dispatcher.cudagraphable = True
+        # TODO(deepep-autosize): the generator should compute this from
+        # max_num_batched_tokens / sp_size; set explicitly here until that lands.
+        dispatcher.num_max_tokens_per_rank = 2048 // 2
+    config.generator_model_spec = generator_spec
+    # DeepEP v2 expand dispatch is cudagraph-capturable, so enable generator capture
+    # (FULL_AND_PIECEWISE: decode captured FULL incl. the expand MoE; prefill breakable).
+    config.generator.cudagraph = VLLMCudagraphConfig(
+        enable=True, mode="FULL_AND_PIECEWISE"
+    )
+    return config
 
 
 def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
