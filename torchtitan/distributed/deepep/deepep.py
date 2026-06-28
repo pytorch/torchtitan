@@ -11,21 +11,24 @@ DeepEP v2 (>= 2.0.0) collapses the v1 two-path design -- high-throughput (HT,
 ``buffer.dispatch``/``combine``) and low-latency (LL,
 ``buffer.low_latency_dispatch``/``combine``) -- into a SINGLE ``dispatch``/``combine``
 on ``deep_ep.ElasticBuffer``. There is one buffer, one pair of custom ops, and one
-``DispatchState`` for both modes; only ``dispatch`` branches, selected by the
-``cudagraph`` flag (combine is handle-driven and mode-agnostic):
+``DispatchState`` for both modes; only ``dispatch`` branches. The branch is chosen at
+runtime by the GRAD context, not by prefill-vs-decode: ``dispatch_tokens`` forces the
+compact path whenever ``torch.is_grad_enabled()`` (training), so the expand path is taken
+only by an inference forward (no grad) that also set ``cudagraphable=True`` -- which covers
+BOTH prefill and decode. Combine is handle-driven and mode-agnostic.
 
-- training / prefill (``cudagraph=False``, default): ``do_expand=False`` +
+- training (``cudagraphable=False``, the default; also forced under autograd): ``do_expand=False`` +
   ``do_cpu_sync=True`` -- a compact layout ALREADY grouped by local expert
   (``handle.num_recv_tokens_per_expert_list`` gives the per-expert token counts for the
   grouped GEMM), so no manual permute is needed. Full autograd via the custom ops below
   (dispatch backward is a combine, combine backward is a dispatch). The total received
   count is data-dependent and needs a host sync, so this path is NOT cudagraph-able.
-- inference / decode (``cudagraph=True``): ``do_expand=True`` + ``do_cpu_sync=False`` --
-  the static "one-token-per-expert-slot" expanding layout, routing-independent (correct
-  even as gating changes between captured replays) and with no host sync, so the MoE
-  forward is cudagraph-capturable. Per-expert offsets come from the device-side
-  ``handle.psum_num_recv_tokens_per_expert`` (no CPU sync). Inference-only: the expanding
-  layout "must not be backward" per the DeepEP kernels.
+- inference -- BOTH prefill and decode (``cudagraphable=True``, under no_grad): ``do_expand=True`` +
+  ``do_cpu_sync=False`` -- the static "one-token-per-expert-slot" expanding layout,
+  routing-independent (correct even as gating changes between captured replays) and with no
+  host sync, so the MoE forward is cudagraph-capturable. Per-expert offsets come from the
+  device-side ``handle.psum_num_recv_tokens_per_expert`` (no CPU sync). Inference-only: the
+  expanding layout "must not be backward" per the DeepEP kernels.
 
 Routing scores are applied to expert outputs in plain PyTorch (in ``combine_tokens``,
 before the pure-reduction combine op), so autograd handles the score gradient, the custom
@@ -90,7 +93,7 @@ _lib = torch.library.Library("deepep", "DEF")
 # whose static layout is already expert-grouped).
 _lib.define(
     "dispatch(Tensor x, Tensor topk_idx, Tensor topk_weights, "
-    "int num_experts, int num_max_tokens_per_rank, bool cudagraph) "
+    "int num_experts, int num_max_tokens_per_rank, bool cudagraphable) "
     "-> (Tensor, Tensor, Tensor, Tensor, Tensor)"
 )
 # combine returns: combined_x. ``will_backward`` is the caller's outer grad state
@@ -101,6 +104,29 @@ _lib.define(
 _lib.define("combine(Tensor x, Tensor handle_id, bool will_backward) -> Tensor")
 
 
+# Fallback dispatch/combine SM count when deep_ep's bandwidth heuristic cannot run
+# (see _resolve_dispatch_num_sms). num_sms only affects performance, not correctness;
+# 20 matches vLLM's deep_ep integration (all2all.py uses num_sms=20).
+_DEEPEP_MULTINODE_NUM_SMS = 20
+
+
+def _resolve_dispatch_num_sms(buffer, num_experts: int, num_topk: int) -> int:
+    """SM count for the dispatch kernel (also reused by combine via the handle).
+
+    deep_ep's get_theoretical_num_sms() derives the count from link bandwidths,
+    but its RDMA-bandwidth auto-detect can report 0 GB/s on some multi-node
+    topologies, making the heuristic divide by zero. On that failure, fall back
+    to a fixed count (_DEEPEP_MULTINODE_NUM_SMS); num_sms only affects
+    performance, not correctness. dispatch() stores the value on the returned
+    handle and combine() reuses it.
+    """
+    try:
+        return buffer.get_theoretical_num_sms(num_experts, num_topk)
+    except ZeroDivisionError:
+        num_device_sms = torch.cuda.get_device_properties("cuda").multi_processor_count
+        return min(_DEEPEP_MULTINODE_NUM_SMS, num_device_sms)
+
+
 @torch.library.impl(_lib, "dispatch", "CUDA")
 def _dispatch_op_impl(
     x: torch.Tensor,
@@ -108,16 +134,17 @@ def _dispatch_op_impl(
     topk_weights: torch.Tensor,
     num_experts: int,
     num_max_tokens_per_rank: int,
-    cudagraph: bool,
+    cudagraphable: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Execute DeepEP v2 dispatch.
 
-    ``cudagraph=False`` (training/prefill): the COMPACT (non-expand) layout. ``recv_x`` is
+    ``cudagraphable=False`` (training / any grad-enabled forward): the COMPACT (non-expand)
+    layout. ``recv_x`` is
     DEDUPLICATED -- one row per unique received token -- while ``recv_topk_idx`` gives each
     token's local-expert assignments (-1 for picks not on this rank). ``dispatch_tokens``
     gathers this into expert-major order for the grouped GEMM (matching the v1 path). A host
     sync gives exact per-expert counts, so it is NOT cudagraph-able.
-    ``cudagraph=True`` (inference/decode): the static ``do_expand`` layout, already
+    ``cudagraphable=True`` (inference, both prefill and decode): the static ``do_expand`` layout, already
     expert-grouped (tokens packed in ``[0:sum(counts)]``, tail unused) with no host sync, so
     the forward is cudagraph-capturable; per-expert counts come from the device-side
     ``psum_num_recv_tokens_per_expert``.
@@ -126,21 +153,27 @@ def _dispatch_op_impl(
     buffer = _buffer
     assert buffer is not None, "Buffer must be initialized before dispatch"
 
+    # Resolve num_sms ourselves and pass it explicitly: the resolver calls deep_ep's
+    # bandwidth heuristic but catches its multi-node RDMA-bandwidth divide-by-zero, so
+    # dispatch() never falls into that heuristic internally with the default num_sms=0.
+    # See _resolve_dispatch_num_sms.
+    num_sms = _resolve_dispatch_num_sms(buffer, num_experts, topk_idx.shape[1])
     recv_x, recv_topk_idx, recv_scores, handle, _event = buffer.dispatch(
         x,
         topk_idx=topk_idx,
         topk_weights=topk_weights,
         num_experts=num_experts,
         num_max_tokens_per_rank=num_max_tokens_per_rank,
-        do_expand=cudagraph,
-        do_cpu_sync=not cudagraph,
+        num_sms=num_sms,
+        do_expand=cudagraphable,
+        do_cpu_sync=not cudagraphable,
     )
 
     handle_id = _get_next_handle_id()
     _handle_cache[handle_id.item()] = handle
 
     # Per-local-expert received-token counts for the grouped GEMM.
-    if cudagraph:
+    if cudagraphable:
         # Expand mode: no host sync allowed. Recover per-expert counts from the
         # device-side inclusive prefix sum (expert_alignment defaults to 1, so this is
         # a plain prefix sum). _experts_forward cumsums these back into grouped-mm offs.
@@ -198,8 +231,8 @@ def _dispatch_backward(
         grad_scores.to(ctx.input_dtype) if grad_scores is not None else None
     )
     # Order matches op inputs:
-    # x, topk_idx, topk_weights, num_experts, num_max_tokens_per_rank, cudagraph.
-    # Backward only runs on the compact (cudagraph=False) path; the expand layout is
+    # x, topk_idx, topk_weights, num_experts, num_max_tokens_per_rank, cudagraphable.
+    # Backward only runs on the compact (cudagraphable=False) path; the expand layout is
     # inference-only ("must not be backward").
     return grad_x, None, grad_topk_weights, None, None, None
 
@@ -401,11 +434,11 @@ class DispatchState:
 
     handle_id: torch.Tensor  # CPU tensor used to retrieve the cached EPHandle
     num_recv_tokens: int
-    cudagraph: bool = False
-    # Compact path (cudagraph=False): gather/scatter mapping for the grouped GEMM.
+    cudagraphable: bool = False
+    # Compact path (cudagraphable=False): gather/scatter mapping for the grouped GEMM.
     permuted_indices: torch.Tensor | None = None
     permuted_scores: torch.Tensor | None = None
-    # Expand path (cudagraph=True): per-received-row routing scores.
+    # Expand path (cudagraphable=True): per-received-row routing scores.
     recv_scores: torch.Tensor | None = None
 
 
@@ -418,13 +451,13 @@ def dispatch_tokens(
     group: ProcessGroup,
     *,
     num_max_tokens_per_rank: int,
-    cudagraph: bool = False,
+    cudagraphable: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via DeepEP v2 ``ElasticBuffer``.
 
     Returns tokens in expert-major order for the grouped-GEMM expert path. In compact mode
-    (``cudagraph=False``) the deduplicated dispatch output is gathered by ``_permute_tokens``
-    (matching the v1 path for identical numerics); in expand mode (``cudagraph=True``) the
+    (``cudagraphable=False``) the deduplicated dispatch output is gathered by ``_permute_tokens``
+    (matching the v1 path for identical numerics); in expand mode (``cudagraphable=True``) the
     static layout is already expert-grouped. Routing scores are applied to the expert outputs
     in ``combine_tokens``.
 
@@ -435,10 +468,15 @@ def dispatch_tokens(
         num_local_experts: Number of experts on this rank
         num_experts: Total number of experts across all ranks
         group: EP process group
-        num_max_tokens_per_rank: Max tokens any rank may dispatch (buffer sizing)
-        cudagraph: If True, use the static, no-host-sync expand layout so the forward is
-            cudagraph-capturable (inference/decode only, no backward). If False, use the
-            compact layout with a host sync and full autograd (training/prefill).
+        num_max_tokens_per_rank: Per-rank dispatch capacity. Used only in expand mode
+            (cudagraphable=True): it fixes the static slab shape, and it is a CAPACITY --
+            tokens a rank sends beyond it are DROPPED (masked layout), so set it >= the
+            max per-rank token count to stay dropless. Compact mode (cudagraphable=False)
+            ignores it and auto-sizes from the per-rank token count (always dropless).
+        cudagraphable: If True, use the static, no-host-sync expand layout so the forward is
+            cudagraph-capturable (inference only -- both prefill and decode -- no backward);
+            note it is forced False whenever grad is enabled. If False, use the compact
+            layout with a host sync and full autograd (training).
 
     Returns:
         (routed_tokens [num_recv, hidden], tokens_per_expert [num_local_experts], state)
@@ -449,9 +487,20 @@ def dispatch_tokens(
     # no-grad context. With a single model_spec shared by trainer and generator, this
     # auto-selects: the trainer (autograd enabled) takes the compact path, while the
     # generator -- which runs the forward under torch.no_grad()/inference_mode -- takes
-    # the cudagraph-able expand path. A cudagraph=True spec used in a grad context
+    # the cudagraph-able expand path. A cudagraphable=True spec used in a grad context
     # safely falls back to compact rather than hitting the no-backward kernel error.
-    cudagraph = cudagraph and not torch.is_grad_enabled()
+    cudagraphable = cudagraphable and not torch.is_grad_enabled()
+
+    # Compact (training) does NOT need a user-set num_max_tokens_per_rank: the per-rank
+    # dispatch count is exactly this forward's token count, so size the buffer from it
+    # (= local_batch * seq_len, already divided by the SP degree since hidden_states is
+    # the SP-local shard). get_buffer only grows the buffer when a larger size is needed,
+    # so a fixed seq_len allocates once. Expand (inference) keeps the configured value:
+    # there it is the per-rank capacity that fixes the static output-slab shape, and tokens
+    # beyond it are dropped, so it must be supplied (set >= the max per-rank count for
+    # dropless inference).
+    if not cudagraphable:
+        num_max_tokens_per_rank = hidden_states.shape[0]
 
     selected_experts_indices = selected_experts_indices.contiguous()
     top_scores = top_scores.contiguous()
@@ -482,17 +531,17 @@ def dispatch_tokens(
         top_scores,
         num_experts,
         num_max_tokens_per_rank,
-        cudagraph,
+        cudagraphable,
     )
 
     num_tokens_per_expert = num_recv_per_expert.to(recv_x.device)
 
-    if cudagraph:
+    if cudagraphable:
         # Expand layout is already expert-grouped; feed it straight to the grouped GEMM.
         state = DispatchState(
             handle_id=handle_id,
             num_recv_tokens=recv_x.shape[0],
-            cudagraph=True,
+            cudagraphable=True,
             recv_scores=recv_scores,
         )
         return recv_x, num_tokens_per_expert, state
@@ -506,7 +555,7 @@ def dispatch_tokens(
     state = DispatchState(
         handle_id=handle_id,
         num_recv_tokens=num_recv_tokens,
-        cudagraph=False,
+        cudagraphable=False,
         permuted_indices=permuted_indices,
         permuted_scores=permuted_scores,
     )
@@ -523,9 +572,9 @@ def combine_tokens(
     op, so autograd handles the score gradient. Combine is async; the caller MUST call
     ``sync_combine()`` before using the result.
 
-    Compact (``cudagraph=False``): weight each expert-major row, scatter-add back to the
+    Compact (``cudagraphable=False``): weight each expert-major row, scatter-add back to the
     deduplicated tokens (``_unpermute_tokens``), then combine -- matching the v1 path.
-    Expand (``cudagraph=True``): weight per received row, then combine over the static
+    Expand (``cudagraphable=True``): weight per received row, then combine over the static
     layout (the handle drives the expand reduction).
 
     Args:
@@ -539,7 +588,7 @@ def combine_tokens(
     # backward) or leaves it for combine-backward. Evaluated here, before the op.
     will_backward = torch.is_grad_enabled()
 
-    if not state.cudagraph:
+    if not state.cudagraphable:
         if state.permuted_scores is not None:
             hidden_states = hidden_states * state.permuted_scores.to(
                 hidden_states.dtype

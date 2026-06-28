@@ -761,34 +761,42 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseEPTokenDispatcher.Config):
-        # Max tokens any rank may dispatch in one forward. DeepEP v2 sizes the
-        # ElasticBuffer statically from this, so it MUST be >= the largest per-rank
-        # token count. The model hidden dim is threaded so the buffer is created
-        # eagerly at wire_meshes (before any cudagraph capture).
+        # Select the dispatch layout. False (default, also forced under autograd): compact,
+        # host-synced, backward-able path for training. True: static, no-host-sync expand
+        # layout so the MoE forward is cudagraph-capturable -- inference only (covers BOTH
+        # prefill and decode, since both run under no_grad), no backward. The deepep
+        # primitives gate on grad context, so a True spec falls back to compact in training.
+        cudagraphable: bool = False
+        # EXPAND (cudagraphable=True) ONLY: the per-rank dispatch CAPACITY. It fixes the
+        # static output-slab shape, and tokens a rank sends beyond it are DROPPED (masked
+        # layout), so set it >= the largest per-rank token count to keep inference dropless.
+        # IGNORED in compact (cudagraphable=False) mode: training auto-sizes the buffer from
+        # the actual per-rank token count at dispatch (always dropless), so it need not be set.
         num_max_tokens_per_rank: int = 128
+        # Model hidden dim, threaded so the expand buffer can be created eagerly at
+        # wire_meshes (before any cudagraph capture).
         hidden: int = 0
-        # Select the dispatch layout. False (default): compact, host-synced, autograd
-        # path for training/prefill. True: static, no-host-sync expand layout so the MoE
-        # forward is cudagraph-capturable -- inference/decode only (no backward).
-        cudagraph: bool = False
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
         self.hidden = config.hidden
-        self.cudagraph = config.cudagraph
+        self.cudagraphable = config.cudagraphable
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
         from torchtitan.distributed.deepep import deepep  # noqa: F401
 
     def wire_meshes(self, *, ep_mesh=None, tp_mesh=None) -> None:
-        """Wire EP/SP meshes and EAGERLY create the ElasticBuffer so its
-        construction-time barrier runs at parallelize time, never inside a CUDA
-        graph capture.
+        """Wire EP/SP meshes. For the cudagraph (inference) path, EAGERLY create the
+        ElasticBuffer so its construction-time barrier runs at parallelize time, never
+        inside a CUDA graph capture. The compact (training) path skips this: it sizes the
+        buffer from the actual per-rank token count at first dispatch (no capture, so the
+        one-time construction barrier there is fine), which frees the user from setting
+        num_max_tokens_per_rank for training.
         """
         super().wire_meshes(ep_mesh=ep_mesh, tp_mesh=tp_mesh)
-        if ep_mesh is not None and self.hidden > 0:
+        if self.cudagraphable and ep_mesh is not None and self.hidden > 0:
             from torchtitan.distributed.deepep.deepep import get_buffer
 
             get_buffer(
@@ -826,7 +834,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             self.num_experts,
             ep_group,
             num_max_tokens_per_rank=self.num_max_tokens_per_rank,
-            cudagraph=self.cudagraph,
+            cudagraphable=self.cudagraphable,
         )
 
         metadata = DeepEPDispatchMetadata(state=state)
