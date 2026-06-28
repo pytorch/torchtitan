@@ -162,22 +162,26 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
 
         # Mask labels outside this vocab shard; the TP all-reduce below selects
         # the owner rank's log probability for each target token.
-        safe_labels = torch.where(labels_1d != IGNORE_INDEX, labels_1d, 0)
+        # NOTE: use masked_fill/masked_fill_ (Scalar overload) rather than
+        # torch.where(cond, x, 0) / t[mask] = 0. The latter tensorize the
+        # Python 0 into a 0-d CPU constant under make_fx tracing, as
+        # lift_fresh_copy node into the fwd_bwd graph and gates whole-graph
+        # cudagraph capture. masked_fill.Scalar carries the value as a
+        # non-tensor Scalar, so no constant is materialized.
+        safe_labels = labels_1d.masked_fill(labels_1d == IGNORE_INDEX, 0)
         out_of_range = (safe_labels < vocab_start) | (
             safe_labels >= vocab_start + local_vocab_size
         )
         local_labels = safe_labels - vocab_start
-        local_labels[out_of_range] = 0
+        local_labels.masked_fill_(out_of_range, 0)
 
         local_result = torch.gather(log_probs, -1, local_labels.unsqueeze(-1))
-        local_result[out_of_range.unsqueeze(-1)] = 0
-        local_result = funcol.all_reduce(
-            local_result, reduceOp=dist.ReduceOp.SUM.name, group=tp_group
-        )
+        local_result.masked_fill_(out_of_range.unsqueeze(-1), 0)
+        dist.all_reduce(local_result, op=dist.ReduceOp.SUM, group=tp_group)
 
         # Per-token NLL, dropping ignored labels (logprob 0 for ignored).
         result = -local_result.squeeze(-1)
-        result = torch.where(labels_1d != IGNORE_INDEX, result, 0)
+        result = result.masked_fill(labels_1d == IGNORE_INDEX, 0)
 
         # Save local-shard log probabilities for the fused CE backward.
         ctx.save_for_backward(log_probs, labels_1d)
@@ -196,12 +200,12 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, None, None, None, None]:
         log_probs, labels_1d = ctx.saved_tensors
-        safe_labels = torch.where(labels_1d != IGNORE_INDEX, labels_1d, 0)
+        safe_labels = labels_1d.masked_fill(labels_1d == IGNORE_INDEX, 0)
         out_of_range = (safe_labels < ctx.vocab_start) | (
             safe_labels >= ctx.vocab_start + ctx.local_vocab_size
         )
         local_labels = safe_labels - ctx.vocab_start
-        local_labels[out_of_range] = 0
+        local_labels.masked_fill_(out_of_range, 0)
 
         grad_input = torch.zeros_like(log_probs)
         row_idx = torch.arange(local_labels.shape[0], device=local_labels.device)
@@ -213,8 +217,8 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         # loss grad, which broadcasts as-is.
         if ctx.reduction == "none":
             grad_output = grad_output.reshape(-1, 1)
-        grad_output = torch.where(
-            (labels_1d != IGNORE_INDEX).unsqueeze(-1), grad_output, 0
+        grad_output = grad_output.masked_fill(
+            (labels_1d == IGNORE_INDEX).unsqueeze(-1), 0
         )
         grad_logits = (grad_input + torch.exp(log_probs)) * grad_output
         grad_logits = grad_logits.reshape(ctx.logits_shape).to(ctx.logits_dtype)
