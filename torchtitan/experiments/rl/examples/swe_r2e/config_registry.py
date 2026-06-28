@@ -136,7 +136,7 @@ def rl_grpo_qwen3_1_7b_swe_r2e() -> Controller.Config:
                 fallback_strategy=LeastLoadedRoutingStrategy.Config()
             )
         ),
-        metrics=MetricsProcessor.Config(enable_wandb=False),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -159,7 +159,7 @@ def rl_grpo_qwen3_1_7b_swe_r2e() -> Controller.Config:
             # Chunked loss splits [B, L, V] logits over the sequence dim so the
             # fp32 lm_head + GRPO loss fit at long context (no full-vocab OOM).
             loss=ChunkedLossWrapper.Config(
-                num_chunks=8,
+                num_chunks=16,
                 loss_fn=DAPOLoss.Config(ratio_clip_low=0.2, ratio_clip_high=0.28),
             ),
         ),
@@ -261,13 +261,13 @@ def _scale_32b_multihost(
     24, over trainer_dp_shard/8 hosts) on the default FUSED-QKV 32B spec. PR #3807
     made the fused wqkv init + checkpoint save/load hooks gather to Replicate before
     the per-kv-head reshape, so FSDP > n_kv_heads (=8) no longer crashes ("unflatten
-    unevenly sharded"); before #3807 this needed non-fused QKV. The wider shard
-    halves/thirds per-GPU param+optimizer memory vs FSDP-8, so we drop the
-    bf16-master memory hack back to fp32 master + fp32 Adam (better numerics).
-    FullAC + chunked loss stay. ``num_generators`` TP-8 generator hosts collect
-    rollouts that overlap training by up to ``max_offpolicy_steps`` steps, so each
-    train step is short instead of blocking on the slow Claude Code rollouts; the
-    wider shard also speeds fwd/bwd.
+    unevenly sharded"); before #3807 this needed non-fused QKV. KEEPS the baseline's
+    bf16 master + bf16 Adam (fused_opt_states_bf16): fp32 master + fp32 Adam OOMs at
+    seq 24576 even on FSDP-16 (32B fp32 master+Adam+long-seq activations hit ~75GB,
+    a logits chunk then fails). FullAC + chunked loss stay. ``num_generators`` TP-8
+    generator hosts collect rollouts that overlap training by up to
+    ``max_offpolicy_steps`` steps, so each train step is short instead of blocking on
+    the slow Claude Code rollouts; the wider shard also speeds fwd/bwd.
     """
     config.async_loop = dataclasses.replace(
         config.async_loop,
@@ -281,11 +281,10 @@ def _scale_32b_multihost(
         max_offpolicy_steps=max_offpolicy_steps,
     )
     config.num_generators = num_generators
-    # fp32 master + fp32 Adam (default): the wider FSDP shard has the headroom.
+    # Keep the baseline's bf16 master + bf16 Adam (fused_opt_states_bf16); only widen
+    # the FSDP shard. fp32 master OOMs 32B at seq 24576 even on FSDP-16.
     config.trainer = dataclasses.replace(
         config.trainer,
-        optimizer=default_adamw(lr=1e-6),
-        training=dataclasses.replace(config.trainer.training, dtype="float32"),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2, decay_type="linear", min_lr_factor=1.0
         ),
