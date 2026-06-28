@@ -19,6 +19,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
+import packaging.version as version
 
 import torch
 import torch.fx as fx
@@ -220,6 +221,11 @@ class FSDPParamOrderBucketer(ManualOverlapPreservingBucketer):
     ) -> None:
         super().__init__(*args, **kwargs)
         self.fsdp_param_module_order = fsdp_param_module_order or {}
+        if version.parse(torch.__version__) < version.parse("2.13.0"):
+            self.bucketed_node_types = {
+                n: n.meta.get("manual_bucket_node_type", "")
+                for n in self.graph.nodes
+            }
 
     def _param_order_key(self, node: fx.Node) -> tuple[int, int]:
         module_fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
