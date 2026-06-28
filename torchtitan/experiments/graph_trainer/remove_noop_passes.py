@@ -331,6 +331,102 @@ def normalize_view_ops_as_reshape(
     return gm
 
 
+def _node_referenced_tensors(node: torch.fx.Node) -> list[torch.Tensor]:
+    """FakeTensors referenced by a node's output and its inputs (meta['val'])."""
+    # Lazy import avoids a load-time dependency on cudagraph (which itself is
+    # imported by passes.py alongside this module).
+    from torchtitan.experiments.graph_trainer.cudagraph import _iter_tensors
+
+    tensors = list(_iter_tensors(node.meta.get("val")))
+    for inp in node.all_input_nodes:
+        tensors += _iter_tensors(inp.meta.get("val"))
+    return tensors
+
+
+def _is_pure_cpu_op(node: torch.fx.Node) -> bool:
+    """True if ``node`` is a call_function whose every referenced tensor is CPU.
+
+    Mirrors the pure-CPU rule in ``cudagraph.is_cudagraphable``: a node whose
+    output and all inputs are CPU FakeTensors cannot be captured by a CUDA
+    graph. Used here to find the dead CPU clusters that gate whole-graph
+    cudagraph capture.
+    """
+    if node.op != "call_function":
+        return False
+    tensors = _node_referenced_tensors(node)
+    return bool(tensors) and all(t.device.type == "cpu" for t in tensors)
+
+
+def remove_dead_cpu_inplace_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Drop dead pure-CPU in-place ops whose mutation is never observed.
+
+    ``eliminate_dead_code_pass`` preserves in-place (impure) nodes, so a dead
+    in-place pure-CPU op -- e.g. the ``aten.add_.Tensor(empty_strided,
+    empty_strided_1)`` cluster left by DTensor loss-gradient redistribution
+    under make_fx (see ``docs/graph_trainer_design_notes.md`` 11.5.7) --
+    survives DCE and gates the all-or-nothing cudagraph capture even though
+    nothing reads its result.
+
+    Such a node is safe to erase when ALL hold:
+
+    * It is a pure-CPU ``call_function`` (output + inputs all on CPU).
+    * It has no users (its mutated result is never read).
+    * Its mutated ``self`` argument (``args[0]``) is a local ``call_function``
+      node -- NOT a graph ``placeholder`` -- whose only user is this node.
+      This guarantees the in-place mutation is unobserved: no other node reads
+      the buffer, and the buffer is not a graph input/accum_grads whose value
+      escapes the graph.
+
+    The orphaned allocation inputs (``empty_strided`` etc.) are then dropped by
+    a follow-up DCE. The pass is numerics-preserving: it only removes ops whose
+    effect is provably unobservable.
+
+    Args:
+        gm: The traced graph module.
+        example_inputs: Unused, accepted for pass interface compatibility.
+
+    Returns:
+        The graph module with dead pure-CPU in-place clusters removed.
+    """
+    removed: list[torch.fx.Node] = []
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function" or not node.is_impure():
+            continue
+        if not _is_pure_cpu_op(node):
+            continue
+        if len(node.users) != 0:
+            continue
+        # The mutated self must be the first positional arg.
+        if not node.args:
+            continue
+        self_arg = node.args[0]
+        if not isinstance(self_arg, torch.fx.Node):
+            continue
+        # Never touch mutations of graph inputs (placeholders) or of tensors
+        # read by any other node: the mutation could be observable.
+        if self_arg.op == "placeholder":
+            continue
+        if len(self_arg.users) != 1:
+            continue
+        # self_arg's only user is this node; safe to drop both after the
+        # in-place op is gone.
+        gm.graph.erase_node(node)
+        removed.append(node)
+
+    if removed:
+        # Drop the now-orphaned allocation chains (empty_strided, etc.).
+        gm.graph.eliminate_dead_code()
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(
+            f"Removed {len(removed)} dead pure-CPU in-place op(s) "
+            f"({[n.target.__name__ if hasattr(n.target, '__name__') else str(n.target) for n in removed]})"
+        )
+    return gm
+
+
 def canonicalize_graph_pass(
     gm: torch.fx.GraphModule, example_inputs=None
 ) -> torch.fx.GraphModule:
@@ -346,6 +442,8 @@ def canonicalize_graph_pass(
     4. ``remove_identity_slice_pass`` — drop full-dimension slices.
     5. ``normalize_view_ops_as_reshape`` — canonicalize remaining
        ``view``/``_unsafe_view`` nodes to ``reshape``.
+    6. ``remove_dead_cpu_inplace_pass`` — drop dead pure-CPU in-place clusters
+       that gate whole-graph cudagraph capture (see design notes 11.5.7).
 
     Each sub-pass lints and recompiles internally, so no extra work is
     needed here. The ordering is irrelevant for correctness (the sub-passes
@@ -357,4 +455,5 @@ def canonicalize_graph_pass(
     gm = remove_b2b_transpose_pass(gm, example_inputs)
     gm = remove_identity_slice_pass(gm, example_inputs)
     gm = normalize_view_ops_as_reshape(gm, example_inputs)
+    gm = remove_dead_cpu_inplace_pass(gm, example_inputs)
     return gm
