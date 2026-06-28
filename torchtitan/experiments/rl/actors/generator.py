@@ -39,6 +39,7 @@ from torchtitan.experiments.rl.routing.intra_generator_router import (
 from torchtitan.experiments.rl.types import Completion
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.observability import structured_logger as sl
+from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools.logging import init_logger
 from torchtitan.tools.utils import has_cuda_capability
@@ -676,6 +677,12 @@ class VLLMGenerator(Actor, Configurable):
         this generator's model spec after ``update_from_config`` and before build.
         Separate from the trainer's override so the two can differ."""
 
+        converters: list[ModelConfigConverter.Config] = field(default_factory=list)
+        """Generator-only ModelConfigConverters applied to this generator's copy of the
+        shared model spec before build (e.g. ``DeepEPInferenceConverter`` to switch the
+        DeepEP dispatch to the cudagraph-able expand layout). The trainer uses the spec
+        unchanged, so weight sync is unaffected."""
+
         model_dtype: str = "bfloat16"
         """Data type for model weights, passed directly to vLLM (auto, float16, bfloat16, float32)."""
 
@@ -767,6 +774,10 @@ class VLLMGenerator(Actor, Configurable):
 
         self.config = config
         self.model_spec = model_spec
+        # Apply generator-only model-config converters (e.g. DeepEPInferenceConverter) to this
+        # generator's process-local copy of the shared spec, so the trainer's spec is untouched.
+        for converter in config.converters:
+            model_spec.model = converter.build().convert(model_spec.model)
 
         self._max_num_seqs = max_num_seqs
 
