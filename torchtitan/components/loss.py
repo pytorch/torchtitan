@@ -386,6 +386,18 @@ def compute_logprobs(
             for p in logits.placements
         )
         logits = logits.redistribute(placements=placements).to_local()
+    elif get_spmd_backend() == "spmd_types" and spmd_mesh_size("tp") > 1:
+        # spmd_types returns a plain local vocab shard. Labels are global token
+        # ids, so cross_entropy needs full-vocab logits.
+        mesh = current_spmd_mesh()
+        assert mesh is not None
+        logits = spmd.redistribute(
+            logits,
+            mesh.get_group("tp"),
+            src=spmd.S(-1),
+            dst=spmd.R,
+            backward_options={"op_dtype": logits.dtype},
+        )
 
     B, L, V = logits.shape
     return -F.cross_entropy(
