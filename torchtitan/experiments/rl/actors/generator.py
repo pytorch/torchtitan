@@ -1230,8 +1230,6 @@ class VLLMGenerator(Actor, Configurable):
         """
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
-        # TODO(async-rl): use 2 version keys so trainer can push a new version
-        # without being blocked by a generator's ongoing pull.
         model = self._get_model()
         model_sd = model.model.state_dict()
         if get_spmd_backend() == "spmd_types":
@@ -1332,6 +1330,15 @@ class VLLMGenerator(Actor, Configurable):
 
                 mesh = model.parallel_dims.resolve_mesh(layout.axes())
                 if mesh is None:
+                    active_axes = [
+                        axis
+                        for axis in layout.axes()
+                        if model.parallel_dims.get_optional_mesh(axis) is not None
+                    ]
+                    if active_axes:
+                        raise RuntimeError(
+                            f"{name} has active SPMD layout axes but no resolved mesh"
+                        )
                     continue
 
                 dtensor_model_sd[name] = DTensor.from_local(
