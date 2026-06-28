@@ -176,7 +176,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "2D eager (ChunkedCELoss + standard CE loss with TP+loss_parallel)",
+            "2D eager (ChunkedLossWrapper + standard CE loss with TP+loss_parallel)",
             "2d_eager",
         ),
         OverrideDefinitions(

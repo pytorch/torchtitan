@@ -120,7 +120,7 @@ from torchtitan.protocols.module import Module, ModuleList
 
 class TestDefaultTransformerBlockBuckets(TestCase):
     def test_compile_time_passes_enable_chunked_loss_bucket_only_when_needed(self):
-        from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
+        from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
         from torchtitan.experiments.graph_trainer.configs import (
             GraphTrainerCompileConfig,
         )
@@ -141,7 +141,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
             return_value=[],
         ) as mock_bucket_plan:
             compile_time_passes(traced_result, make_config(CrossEntropyLoss.Config()))
-            compile_time_passes(traced_result, make_config(ChunkedCELoss.Config()))
+            compile_time_passes(traced_result, make_config(ChunkedLossWrapper.Config()))
 
         self.assertEqual(
             [
@@ -3481,12 +3481,12 @@ class TestChunkPasses(TestCase):
         self.assertEqual(labels._dynamo_unbacked_bounds[1], (16, 32))
 
     def test_seq_chunk_marker_traces_chunked_loss_backward(self):
-        from torchtitan.components.loss import ChunkedCELoss
+        from torchtitan.components.loss import ChunkedLossWrapper
 
         torch.manual_seed(42)
         batch, seq_len, dim, vocab_size = 2, 32, 4, 8
         lm_head = torch.nn.Linear(dim, vocab_size, bias=False)
-        loss_fn = ChunkedCELoss(ChunkedCELoss.Config(num_chunks=8))
+        loss_fn = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=8))
         loss_fn.lm_head = lm_head
 
         hidden_states = torch.randn(batch, seq_len, dim, requires_grad=True)

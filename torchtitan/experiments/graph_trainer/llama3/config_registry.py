@@ -10,6 +10,7 @@ from torchtitan.experiments.graph_trainer.configs import (
     to_graph_trainer_config,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.llama3.config_registry import (
     llama3_405b,
     llama3_70b,
@@ -45,7 +46,10 @@ def graph_trainer_llama3_debugmodel_sdpa() -> GraphTrainer.Config:
 def graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss() -> GraphTrainer.Config:
     """SDPA debug model with standard cross-entropy loss."""
     config = graph_trainer_llama3_debugmodel_sdpa()
-    config.loss = CrossEntropyLoss.Config()
+    assert config.model_spec is not None
+    config.loss = CrossEntropyLoss.Config(
+        global_vocab_size=decoder_vocab_size(config.model_spec),
+    )
     return config
 
 

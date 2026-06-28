@@ -207,7 +207,7 @@ class TestConfigFingerprint(unittest.TestCase):
 class TestPrecompileLossSetup(unittest.TestCase):
     def test_chunked_loss_setup_matches_trainer_boundary(self):
         from torchtitan.experiments.graph_trainer.chunked_loss import (
-            ChunkedCELossWithParamGrads,
+            ChunkedLossWrapperWithParamGrads,
         )
         from torchtitan.experiments.graph_trainer.precompile_main import (
             _prepare_loss_for_precompile,
@@ -215,7 +215,7 @@ class TestPrecompileLossSetup(unittest.TestCase):
 
         lm_head = torch.nn.Linear(2, 3)
         model = SimpleNamespace(lm_head=lm_head, _skip_lm_head=False)
-        loss_fn = ChunkedCELossWithParamGrads.Config().build()
+        loss_fn = ChunkedLossWrapperWithParamGrads.Config().build()
 
         _prepare_loss_for_precompile(model, loss_fn)
 
