@@ -10,8 +10,10 @@ import asyncio
 import time
 
 from torchtitan.experiments.rl.components.work_buffer import RolloutGroupWorkBuffer
-from torchtitan.experiments.rl.generator_router import GeneratorRouter
 from torchtitan.experiments.rl.observability import metrics as m
+from torchtitan.experiments.rl.routing.inter_generator_router import (
+    InterGeneratorRouter,
+)
 from torchtitan.observability import structured_logger as sl
 
 
@@ -42,7 +44,7 @@ class WeightSyncManager:
         self,
         *,
         trainer,  # PolicyTrainer actor handle
-        generator_router: GeneratorRouter,
+        generator_router: InterGeneratorRouter,
         group_buffer: RolloutGroupWorkBuffer,
         groups_per_train_step: int,
     ) -> None:
