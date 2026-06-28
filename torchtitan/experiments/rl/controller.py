@@ -111,6 +111,7 @@ from torchtitan.experiments.rl.components.batcher import Batcher
 from torchtitan.experiments.rl.components.training_sample_builder import (
     TrainingSampleBuilder,
 )
+from torchtitan.experiments.rl.components.weight_sync import WeightSyncManager
 from torchtitan.experiments.rl.components.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
@@ -694,10 +695,8 @@ class Controller(Configurable):
         pre_validation = await self._validate_and_log(step=self.start_step)
         sl.log_trace_instant("training_start")
 
-        # Two policy version pointers, seeded from the resumed step: the trainer advances at the
-        # optimizer step; the generator version advances when a weight pull completes.
+        # Trainer policy version, seeded from the resumed step; advances at each optimizer step.
         self._trainer_policy_version = self.start_step
-        self._generator_policy_version = self.start_step
 
         # Buffer capacity caps how far generation runs ahead of the trainer (bounds off-policy staleness).
         max_active_rollout_groups = (
@@ -706,6 +705,14 @@ class Controller(Configurable):
 
         self._group_buffer = async_loop.group_buffer.build(
             max_active_rollout_groups=max_active_rollout_groups,
+        )
+
+        # Overlaps each step's weight handoff (push -> pull -> buffer-slot release) with the next step's fwd/bwd
+        self._weight_sync = WeightSyncManager(
+            trainer=self.trainer,
+            generator_router=self.generator_router,
+            group_buffer=self._group_buffer,
+            num_groups_per_train_step=async_loop.num_groups_per_train_step,
         )
 
         # training_sample_builder
@@ -948,14 +955,26 @@ class Controller(Configurable):
         """Run num_training_steps optimizer steps: train one packed batch, publish trainer weights,
         then pull them into generators, log metrics.
 
+        NOTE: Weight sync is overlapped with the training step.
+        Trainer push:
+            - Called after optimizer.step()
+            - Awaited before next optimizer.step (weights changes then)
+        Generator pull:
+            - Called after push completes.
+            - Awaited before next push (weights changes then)
+
+        Impact on off-policiness: The buffer guarantees that no sample will be born stale,
+        as long as we call `self._group_buffer.release_active_groups` after the pull.
+
         consumes: a TrainingBatch (training_batch_queue.get)
             waits for:    a TrainingBatch in the queue
             unblocked by: _batcher_loop training_batch_queue.put()
         """
         for step in range(self.start_step + 1, num_training_steps + 1):
             sl.set_step(step)  # propagate the step counter to the actors
-            await self.trainer.sync_log_step.call(step)
-            await self.generator_router.fanout("sync_log_step", step)
+            with sl.log_trace_span("sync_log_step"):
+                await self.trainer.sync_log_step.call(step)
+                await self.generator_router.fanout("sync_log_step", step)
             step_timer = MetricsTimer()
 
             with sl.log_trace_span("train_step"), step_timer.record(
@@ -1001,6 +1020,14 @@ class Controller(Configurable):
                         logger.error("Loss is NaN/Inf; training diverged")
                         break
 
+                # Await trainer weight push to finish before optim step mutates the weights.
+                with sl.log_trace_span(
+                    "blocking_trainer_push_model_state_dict"
+                ), step_timer.record(
+                    "timing/step/blocking_trainer_push_model_state_dict"
+                ):
+                    push_metrics = await self._weight_sync.wait_prev_push()
+
                 with sl.log_trace_span("optim_step"), step_timer.record(
                     "timing/step/optim"
                 ):
@@ -1009,52 +1036,48 @@ class Controller(Configurable):
                     )
                 self._trainer_policy_version = optim_result.policy_version
 
-                # Weight sync: publish new weights before the next train step (push then pull, both awaited).
-                # TODO(perf): overlap weight sync (today both are awaited synchronously).
+                # Await generator weight pull to finish before the trainer's next push.
                 with sl.log_trace_span(
-                    "trainer_push_model_state_dict"
-                ), step_timer.record("timing/step/push_model_state_dict"):
-                    await self.trainer.push_model_state_dict.call()
-                with sl.log_trace_span(
-                    "generator_pull_model_state_dict"
-                ), step_timer.record("timing/step/pull_model_state_dict"):
-                    await self.generator_router.pull_model_state_dict(
-                        policy_version=optim_result.policy_version
-                    )
-                self._generator_policy_version = optim_result.policy_version
+                    "blocking_generator_pull_model_state_dict"
+                ), step_timer.record(
+                    "timing/step/blocking_generator_pull_model_state_dict"
+                ):
+                    pull_metrics = await self._weight_sync.wait_prev_pull()
 
-                # Release one train step's group slots after the pull; the batcher packs exactly
-                # num_groups_per_train_step trainable groups per batch.
-                await self._group_buffer.release_active_groups(
-                    self.config.async_loop.num_groups_per_train_step,
-                    reason="trained",
+                # Overlap this step's push -> pull -> buffer-slot release with the next step's fwd/bwd.
+                self._weight_sync.start_async_push_pull(
+                    version=optim_result.policy_version
                 )
 
             # TODO(metrics): See if metrics are being computed at the right place. E.g. should we put all
             # rollout related metrics here, or move all of them to the rollouter.
             time_metrics = step_timer.flush()
-            self.metrics_processor.log(
-                step=step,
-                is_validation=False,
-                metrics=[
-                    *packed.metrics,
-                    *[
-                        m.Metric(key, m.NoReduce(value))
-                        for key, value in fwd_bwd_metrics.items()
+            with sl.log_trace_span("metrics_log"):
+                self.metrics_processor.log(
+                    step=step,
+                    is_validation=False,
+                    metrics=[
+                        *packed.metrics,
+                        *[
+                            m.Metric(key, m.NoReduce(value))
+                            for key, value in fwd_bwd_metrics.items()
+                        ],
+                        *[
+                            m.Metric(key, m.NoReduce(value))
+                            for key, value in optim_result.metrics.items()
+                        ],
+                        *self._group_buffer.metrics(),
+                        *time_metrics,
+                        *policy_age_panel,
+                        # Background push/pull work time; the trainer's wait for it is timing/step/blocking_*.
+                        *push_metrics,
+                        *pull_metrics,
+                        *compute_perf_ratio_metrics(
+                            num_global_valid_tokens=packed.num_global_valid_tokens,
+                            time_metrics=time_metrics,
+                        ),
                     ],
-                    *[
-                        m.Metric(key, m.NoReduce(value))
-                        for key, value in optim_result.metrics.items()
-                    ],
-                    *self._group_buffer.metrics(),
-                    *time_metrics,
-                    *policy_age_panel,
-                    *compute_perf_ratio_metrics(
-                        num_global_valid_tokens=packed.num_global_valid_tokens,
-                        time_metrics=time_metrics,
-                    ),
-                ],
-            )
+                )
 
             # Save full training state for resume; CheckpointManager writes only on its interval
             # and the final step. After the divergence guard so a NaN step isn't checkpointed.
@@ -1062,3 +1085,6 @@ class Controller(Configurable):
                 await self.trainer.save_checkpoint.call(
                     step, last_step=(step == num_training_steps)
                 )
+
+        # Finish the last in-flight sync so generators hold the final weights for post-validation.
+        await self._weight_sync.wait_inflight_push_pull()

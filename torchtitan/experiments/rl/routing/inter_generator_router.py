@@ -209,4 +209,7 @@ class InterGeneratorRouter(Configurable):
         # Start the pulls in parallel. Technically we could do rolling sync to
         # maintain availability during weight sync, but that's not a priority
         # for now.
+        # TODO(perf): stagger the per-generator fetches when num_generators is large so they don't
+        #   all read the trainer's CPU-staged weights at once -- bounds trainer host RAM. Matters for
+        #   big models / many generators, not at small scale.
         await asyncio.gather(*[_pull_one(h) for h in self._generators])
