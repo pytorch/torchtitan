@@ -796,6 +796,8 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         num_max_tokens_per_rank for training.
         """
         super().wire_meshes(ep_mesh=ep_mesh, tp_mesh=tp_mesh)
+        # TODO(unify-ep-buffers): move this eager buffer creation into an init_buffer() like
+        # MinimalAsyncEPTokenDispatcher, and unify DeepEP / HybridEP / MinimalAsyncEP buffer setup.
         if self.cudagraphable and ep_mesh is not None and self.hidden > 0:
             from torchtitan.distributed.deepep.deepep import get_buffer
 

@@ -318,6 +318,8 @@ def make_token_dispatcher_config(
     - HYBRIDEP_NUM_SMS_DISPATCH (default: 16)
     - HYBRIDEP_NUM_SMS_COMBINE (default: 16)
     """
+    # TODO(unify-ep-dispatch-knobs): unify the per-backend static-shape/cudagraph knobs --
+    # HybridEP non_blocking_capacity_factor vs DeepEP cudagraphable + num_max_tokens_per_rank.
     if comm_backend == "deepep":
         # DeepEP v2: a single ElasticBuffer handles training and inference. ``hidden_dim``
         # (model dim) and ``num_max_tokens_per_rank`` size the buffer statically;
