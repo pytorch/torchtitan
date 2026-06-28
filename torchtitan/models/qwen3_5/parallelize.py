@@ -11,10 +11,7 @@ This module applies PT-D parallelisms and various training techniques
 (activation checkpointing, compile, FSDP) to the Qwen3.5 model.
 """
 
-import torch
 import torch.nn as nn
-from torch.distributed._composable.fsdp import fully_shard
-from torch.distributed.fsdp import MixedPrecisionPolicy
 
 from torchtitan.config import (
     CompileConfig,
@@ -28,35 +25,9 @@ from torchtitan.distributed.activation_checkpoint import ActivationCheckpointing
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
-    get_fsdp_reshard_after_forward_policy,
+    apply_fsdp_to_vision_encoder,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-
-
-def _apply_fsdp_to_vision_encoder(
-    vision_encoder: nn.Module,
-    dp_mesh,
-    param_dtype: torch.dtype,
-    reduce_dtype: torch.dtype,
-    reshard_after_forward_policy: str = "default",
-    pp_enabled: bool = False,
-):
-    """FSDP the vision encoder as a single unit.
-
-    One AllGather for all vision params is more efficient than per-layer
-    sharding — the vision encoder is small relative to the decoder.
-    Must be called before apply_fsdp on the decoder.
-    """
-    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    reshard_after_forward = get_fsdp_reshard_after_forward_policy(
-        reshard_after_forward_policy, pp_enabled=pp_enabled
-    )
-    fully_shard(
-        vision_encoder,
-        mesh=dp_mesh,
-        mp_policy=mp_policy,
-        reshard_after_forward=reshard_after_forward,
-    )
 
 
 def parallelize_qwen3_5(
@@ -94,7 +65,6 @@ def parallelize_qwen3_5(
         if parallelism.enable_async_tensor_parallel and not model_compile_enabled:
             raise RuntimeError("Async TP requires torch.compile")
 
-        # pyrefly: ignore [not-callable]
         model.parallelize(parallel_dims)
 
     if parallel_dims.tp_enabled:
@@ -109,7 +79,6 @@ def parallelize_qwen3_5(
     if model_compile_enabled:
         apply_compile(model, compile_config)
         if model.vision_encoder is not None:
-            # pyrefly: ignore [bad-argument-type]
             apply_compile(model.vision_encoder, compile_config)
 
     dp_mesh_names = (
@@ -118,8 +87,8 @@ def parallelize_qwen3_5(
     dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
     if model.vision_encoder is not None:
-        _apply_fsdp_to_vision_encoder(
-            model.vision_encoder,  # pyrefly: ignore [bad-argument-type]
+        apply_fsdp_to_vision_encoder(
+            model.vision_encoder,
             dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
@@ -149,54 +118,3 @@ def parallelize_qwen3_5(
     )
 
     return model
-
-
-def pipeline_qwen3_5(
-    model: nn.Module,
-    *,
-    parallel_dims: ParallelDims,
-    parallelism: ParallelismConfig,
-    model_config,
-    **kwargs,
-):
-    """PP wrapper that assigns vision_encoder to the first pipeline stage.
-
-    Delegates to ``pipeline_llm`` after injecting ``vision_encoder`` into
-    the first stage's FQN list (the auto-generated LLM split doesn't know
-    about vision encoder modules).
-    """
-    import dataclasses
-
-    from torchtitan.distributed.pipeline_parallel import (
-        _generate_llm_fqn_per_model_part,
-        _get_pipeline_metadata,
-        pipeline_llm,
-    )
-
-    if parallelism.module_fqns_per_model_part is None:
-        (
-            num_virtual_stages,
-            num_layers,
-            input_weight,
-            output_weight,
-        ) = _get_pipeline_metadata(parallel_dims, parallelism, model_config)
-        fqn_per_part = _generate_llm_fqn_per_model_part(
-            num_virtual_stages, num_layers, input_weight, output_weight
-        )
-        # Vision encoder lives on the first stage alongside tok_embeddings. This
-        # adds load to stage 0 that the auto split doesn't model (input_weight
-        # only accounts for tok_embeddings); for a heavy vision encoder, bump
-        # parallelism.pipeline_parallel_first_stage_less_layers to rebalance.
-        if hasattr(model, "vision_encoder") and model.vision_encoder is not None:
-            fqn_per_part[0].insert(0, "vision_encoder")
-        parallelism = dataclasses.replace(
-            parallelism, module_fqns_per_model_part=fqn_per_part
-        )
-
-    return pipeline_llm(
-        model,
-        parallel_dims=parallel_dims,
-        parallelism=parallelism,
-        model_config=model_config,
-        **kwargs,
-    )

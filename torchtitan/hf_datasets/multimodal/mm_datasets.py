@@ -79,7 +79,7 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 from .mm_collator import MultiModalCollator
-from .utils.image import calculate_vision_tokens, process_image
+from .utils.image import calculate_vision_tokens, process_image, resize_to_pixel_budget
 from .utils.packing import MMSamplePacker
 from .utils.text import insert_vision_placeholders
 
@@ -95,6 +95,9 @@ def _process_mm_sample(
     max_pixels: int,
     image_mean: tuple[float, ...],
     image_std: tuple[float, ...],
+    resize_fn: Callable[..., tuple[int, int, int, int]],
+    max_patches: int,
+    max_patches_per_side: int,
     **kwargs,
 ) -> dict[str, Any] | None:
     """Common processing logic for multimodal samples.
@@ -140,6 +143,9 @@ def _process_mm_sample(
                 max_pixels=max_pixels,
                 image_mean=image_mean,
                 image_std=image_std,
+                resize_fn=resize_fn,
+                max_patches=max_patches,
+                max_patches_per_side=max_patches_per_side,
             )
             if processed_img is not None:
                 num_tokens, _, _ = calculate_vision_tokens(
@@ -222,6 +228,7 @@ def _process_obelics_sample(
         max_pixels=max_pixels,
         image_mean=image_mean,
         image_std=image_std,
+        **kwargs,
     )
 
 
@@ -255,6 +262,7 @@ def _process_cc12_wd_sample(
         max_pixels=max_pixels,
         image_mean=image_mean,
         image_std=image_std,
+        **kwargs,
     )
 
 
@@ -313,6 +321,9 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
         image_mean: tuple[float, ...],
         image_std: tuple[float, ...],
         packing_buffer_size: int,
+        resize_fn: Callable[..., tuple[int, int, int, int]],
+        max_patches: int,
+        max_patches_per_side: int,
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
@@ -346,6 +357,9 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
         self.max_pixels = max_pixels
         self.image_mean = image_mean
         self.image_std = image_std
+        self.resize_fn = resize_fn
+        self.max_patches = max_patches
+        self.max_patches_per_side = max_patches_per_side
         self.video_dir = video_dir
         self.video_fps = video_fps
         self.video_min_frames = video_min_frames
@@ -376,6 +390,9 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
                     max_pixels=self.max_pixels,
                     image_mean=self.image_mean,
                     image_std=self.image_std,
+                    resize_fn=self.resize_fn,
+                    max_patches=self.max_patches,
+                    max_patches_per_side=self.max_patches_per_side,
                     video_dir=self.video_dir,
                     video_fps=self.video_fps,
                     video_min_frames=self.video_min_frames,
@@ -507,11 +524,29 @@ class MMDataLoader(ParallelAwareDataloader):
         spatial_merge_size: int
         """Spatially merge visual tokens after encoder. e.g. 2 means 2x2=4 patches merged."""
 
+        patch_order: str = "block"
+        """Patch sequence layout the collator emits: ``"block"`` (each
+        ``spatial_merge_size**2`` group contiguous, or ``"raster"`` (row-major).
+        Must be ``"block"`` when ``build_mrope_positions`` is set."""
+
+        resize_fn: Callable[..., tuple[int, int, int, int]] = resize_to_pixel_budget
+        """Image-resize strategy (a callable, like ``sample_processor``):
+        ``resize_to_pixel_budget`` or ``resize_to_patch_budget`` (cap patches at
+        ``max_patches``, pad to a ``patch_size * spatial_merge_size`` multiple).
+        Both share the signature ``(h, w, *, patch_size, merge_size,
+        **budget) -> (resize_h, resize_w, pad_h, pad_w)``."""
+
         min_pixels: int
-        """Minimum number of pixels for image resizing."""
+        """Minimum number of pixels for image resizing (pixel-budget strategy)."""
 
         max_pixels: int
-        """Maximum number of pixels for image resizing."""
+        """Maximum number of pixels for image resizing (pixel-budget strategy)."""
+
+        max_patches: int = 4096
+        """Max raw patches per image."""
+
+        max_patches_per_side: int = 512
+        """Per-side patch cap for the vision position-embedding grid (``navit``)."""
 
         image_mean: tuple[float, ...]
         """Per-channel mean for image normalization."""
@@ -561,6 +596,9 @@ class MMDataLoader(ParallelAwareDataloader):
             image_mean=config.image_mean,
             image_std=config.image_std,
             packing_buffer_size=config.packing_buffer_size,
+            resize_fn=config.resize_fn,
+            max_patches=config.max_patches,
+            max_patches_per_side=config.max_patches_per_side,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
             infinite=config.infinite,
@@ -580,6 +618,7 @@ class MMDataLoader(ParallelAwareDataloader):
             spatial_merge_size=config.spatial_merge_size,
             tokenizer=tokenizer,
             build_mrope_positions=config.build_mrope_positions,
+            patch_order=config.patch_order,
         )
 
         dataloader_kwargs = {

@@ -11,6 +11,7 @@ from typing import Literal
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
+from torchtitan.distributed.pipeline_parallel import pipeline_vlm
 
 from torchtitan.models.common import Conv1d, Embedding, Linear  # noqa: F401
 from torchtitan.models.common.config_utils import (
@@ -22,6 +23,11 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
+from torchtitan.models.common.vision_encoder import (
+    VisionAttention,
+    VisionMLP,
+    VisionTransformerBlock,
+)
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 
@@ -37,17 +43,12 @@ from .model import (
     RMSNormGated,
     SharedExperts,
 )
-from .parallelize import parallelize_qwen3_5, pipeline_qwen3_5
+
+from .parallelize import parallelize_qwen3_5
 from .rope import MRoPE
 from .state_dict_adapter import Qwen35StateDictAdapter
-from .vision_encoder import (
-    PatchMerger,
-    Qwen35VisionEncoder,
-    VisionAttention,
-    VisionMLP,
-    VisionRotaryEmbedding,
-    VisionTransformerBlock,
-)
+
+from .vision_encoder import PatchMerger, Qwen35VisionEncoder, VisionRotaryEmbedding
 
 __all__ = [
     "parallelize_qwen3_5",
@@ -1104,7 +1105,7 @@ def model_registry(
         flavor=flavor,
         model=config,
         parallelize_fn=parallelize_qwen3_5,
-        pipelining_fn=pipeline_qwen3_5,
+        pipelining_fn=pipeline_vlm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=Qwen35StateDictAdapter,
     )

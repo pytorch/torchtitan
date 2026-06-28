@@ -206,6 +206,22 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "gpt_oss_pp+fsdp+ep+sacop",
             ngpu=8,
         ),
+        # Integration Test Cases for Kimi K2.5
+        OverrideDefinitions(
+            [
+                [
+                    "--module kimi_k2_5 --config kimi_k2_5_debugmodel",
+                    "--training.local_batch_size 2",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                ],
+            ],
+            "Kimi K2.5 multimodal FSDP+TP+EP+PP",
+            "kimi_k2_5_mm_fsdp+tp+ep+pp",
+            ngpu=8,
+        ),
     ]
 
     return [

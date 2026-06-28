@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import copy
+import dataclasses
 import math
 import os
 from collections.abc import Callable
@@ -32,9 +33,9 @@ from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import ModuleDict, ModuleList
 from torchtitan.tools.logging import logger
 
-# pipeline_llm is the public entrypoint for model-specific PP setup. Helpers in
-# this module are implementation details and should stay private.
-__all__ = ["pipeline_llm"]
+# pipeline_llm and pipeline_vlm are the public entrypoints for model-specific PP
+# setup. Helpers in this module are implementation details and stay private.
+__all__ = ["pipeline_llm", "pipeline_vlm"]
 
 
 def _build_get_mesh_callback(
@@ -138,6 +139,56 @@ def pipeline_llm(
             has_last_stage = True
 
     return pp_schedule, model_parts, has_first_stage, has_last_stage
+
+
+def pipeline_vlm(
+    model: nn.Module,
+    *,
+    parallel_dims: ParallelDims,
+    parallelism: ParallelismConfig,
+    model_config: BaseModel.Config,
+    **kwargs,
+) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
+    """PP entrypoint for vision-language models: co-locate the vision encoder
+    with the first stage, then delegate to ``pipeline_llm``.
+
+    The auto-generated LLM stage split only knows about decoder modules
+    (``tok_embeddings``, ``layers.*``, ``norm``, ``lm_head``). For a VLM we inject
+    ``vision_encoder`` into the first stage's FQN list so it runs alongside
+    ``tok_embeddings`` (vision features are scattered into the embedding sequence
+    before the decoder layers). On stages other than the first, ``tok_embeddings``
+    and ``vision_encoder`` are pruned to ``None``; each model's ``forward`` must
+    guard on ``self.tok_embeddings is not None`` so the multimodal logic is
+    skipped there.
+
+    NOTE: This adds load to stage 0 that the auto split does not model
+    (``input_weight`` only accounts for ``tok_embeddings``); for a heavy vision
+    encoder, bump ``parallelism.pipeline_parallel_first_stage_less_layers`` to
+    rebalance.
+    """
+    if parallelism.module_fqns_per_model_part is None:
+        (
+            num_virtual_stages,
+            num_layers,
+            input_weight,
+            output_weight,
+        ) = _get_pipeline_metadata(parallel_dims, parallelism, model_config)
+        fqn_per_part = _generate_llm_fqn_per_model_part(
+            num_virtual_stages, num_layers, input_weight, output_weight
+        )
+        if model.vision_encoder is not None:
+            fqn_per_part[0].insert(0, "vision_encoder")
+        parallelism = dataclasses.replace(
+            parallelism, module_fqns_per_model_part=fqn_per_part
+        )
+
+    return pipeline_llm(
+        model,
+        parallel_dims=parallel_dims,
+        parallelism=parallelism,
+        model_config=model_config,
+        **kwargs,
+    )
 
 
 def _get_pipeline_metadata(
@@ -306,7 +357,6 @@ def _build_pipeline_schedule(
             "Only PipelineScheduleSingle (single stage), PipelineScheduleMulti (multistage), "
             "and _PipelineScheduleRuntime support csv schedules"
         )
-        # pyrefly: ignore [missing-attribute]
         schedule._load_csv(pp_schedule_csv)
 
     return schedule
