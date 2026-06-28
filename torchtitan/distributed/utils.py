@@ -546,7 +546,10 @@ def set_pg_timeouts(
         for mesh in parallel_dims.get_all_one_dimensional_meshes().values()
     ] + [None]
     for group in groups:
-        torch.distributed.set_timeout(timeout, group)
+        if hasattr(torch.distributed, "set_timeout"):
+            torch.distributed.set_timeout(timeout, group)
+        elif group and torch.distributed.get_backend(group) != "fake":
+            group.set_timeout(timeout)
 
 
 @torch.no_grad()
