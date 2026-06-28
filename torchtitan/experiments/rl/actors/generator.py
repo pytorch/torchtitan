@@ -84,18 +84,6 @@ def _fqn_to_spmd_layout(model: torch.nn.Module) -> dict[str, SpmdLayout]:
     return layouts
 
 
-def _is_fused_qkv_state_key(name: str) -> bool:
-    parts = name.split(".")
-    return "attention" in parts and any(proj in parts for proj in ("wq", "wk", "wv"))
-
-
-def _tensor_debug_sample(tensor: torch.Tensor) -> str:
-    if tensor.numel() == 0:
-        return "empty"
-    flat = tensor.detach().flatten()
-    return f"first={flat[0].item()} last={flat[-1].item()}"
-
-
 @dataclass(kw_only=True, slots=True)
 class _RequestMetricsInputs:
     """Raw inputs needed to build a request's vLLM metrics. Used to pass
@@ -1313,15 +1301,6 @@ class VLLMGenerator(Actor, Configurable):
         state-dict path, then put the local tensors back before load_state_dict.
         """
         layouts = _fqn_to_spmd_layout(model.model)
-        fused_layout_keys = sorted(
-            name for name in layouts if _is_fused_qkv_state_key(name)
-        )
-        print(
-            "[rl_weight_sync_debug] "
-            f"rank={self._rank} fused_qkv_layout_keys={len(fused_layout_keys)} "
-            f"sample={fused_layout_keys[:6]}",
-            flush=True,
-        )
 
         dtensor_model_sd = dict(model_sd)
         with torch.no_grad():
@@ -1340,55 +1319,24 @@ class VLLMGenerator(Actor, Configurable):
                 if mesh is None:
                     continue
 
-                placements = resolve_placements(layout, mesh)
-                if _is_fused_qkv_state_key(name):
-                    print(
-                        "[rl_weight_sync_debug] "
-                        f"rank={self._rank} wrap_fused_qkv name={name} "
-                        f"local_shape={tuple(target.shape)} "
-                        f"mesh_axes={mesh.mesh_dim_names} placements={placements} "
-                        f"{_tensor_debug_sample(target)}",
-                        flush=True,
-                    )
-
                 dtensor_model_sd[name] = DTensor.from_local(
                     target,
                     mesh,
-                    placements,
+                    resolve_placements(layout, mesh),
                     run_check=False,
                 )
 
-        fetched_model_sd = await ts.get_state_dict(
+        await ts.get_state_dict(
             "model_state_dict",
             user_state_dict=dtensor_model_sd,
             strict=False,
             direct_rdma=False,
         )
-        fetched_fused_qkv_keys = sorted(
-            name for name in fetched_model_sd if _is_fused_qkv_state_key(name)
-        )
-        print(
-            "[rl_weight_sync_debug] "
-            f"rank={self._rank} fetched_fused_qkv_keys="
-            f"{len(fetched_fused_qkv_keys)} sample={fetched_fused_qkv_keys[:6]}",
-            flush=True,
-        )
 
         with torch.no_grad():
             for name, value in dtensor_model_sd.items():
                 if isinstance(value, DTensor):
-                    local_value = value.to_local()
-                    if _is_fused_qkv_state_key(name):
-                        print(
-                            "[rl_weight_sync_debug] "
-                            f"rank={self._rank} loaded_fused_qkv name={name} "
-                            f"local_shape={tuple(local_value.shape)} "
-                            f"mesh_axes={value.device_mesh.mesh_dim_names} "
-                            f"placements={value.placements} "
-                            f"{_tensor_debug_sample(local_value)}",
-                            flush=True,
-                        )
-                    model_sd[name] = local_value
+                    model_sd[name] = value.to_local()
 
     @endpoint
     async def close(self) -> None:
