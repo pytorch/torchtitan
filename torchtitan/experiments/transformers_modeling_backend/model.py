@@ -204,6 +204,11 @@ class HFTransformerModel(BaseModel):
                 self._tt_to_hf_attribute_map.update(_TT_TO_HF_MAPPINGS["moe"])
 
             for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
+                # A self-mapped name (e.g. vocab_size -> vocab_size) is already
+                # stored under the correct name; creating an alias property would
+                # make its setter call setattr() on itself and recurse forever.
+                if titan_name == hf_name:
+                    continue
                 # Create getter/setter for attribute that don't already exist
                 if not hasattr(self.__class__, titan_name):
                     setattr(self.__class__, titan_name, _create_property(hf_name))
