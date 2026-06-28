@@ -272,10 +272,13 @@ def _scale_32b_multihost(
     config.async_loop = dataclasses.replace(
         config.async_loop,
         num_training_steps=num_training_steps,
-        # 4 groups/step (down from the base 8): a step needs all 8 rollouts of
-        # each of N groups graded, and grading the slow Claude rollouts dominates,
-        # so a smaller per-step batch lands steps sooner. dp_degree=16 still gets
-        # 4*group_size=32 rollouts to pack.
+        # 1 group/step on the full (sparse) R2E set: a step needs ALL rollouts of
+        # each selected group graded AND with non-zero reward std (soft filtering
+        # drops all-solve / all-fail groups). On full R2E most groups are
+        # all-fail, so requiring many surviving groups per step starves the
+        # trainer; 1 group/step lets a step land as soon as a single mixed group
+        # appears. group_size=16 gives that group enough samples to have a mix.
+        # See RECIPE.md (the full-R2E starvation finding -> pass-rate curriculum).
         num_groups_per_train_step=1,
         group_size=16,
         max_offpolicy_steps=max_offpolicy_steps,
@@ -298,17 +301,18 @@ def _scale_32b_multihost(
 
 
 def rl_grpo_qwen3_32b_swe_r2e_fsdp16() -> Controller.Config:
-    """Qwen3-32B SWE-R2E, multi-host async: TRUE FSDP-16 trainer + 3 TP-8 gens.
+    """Qwen3-32B SWE-R2E, multi-host async: TRUE FSDP-16 trainer + 5 TP-8 gens.
 
-    6 MAST hosts: 1 controller + 2 trainer (data_parallel_shard_degree=16, TP=1) +
-    3 generator (TP=8). Default fused QKV; PR #3807 made the fused init + checkpoint
+    8 MAST hosts: 1 controller + 2 trainer (data_parallel_shard_degree=16, TP=1) +
+    5 generator (TP=8). Default fused QKV; PR #3807 made the fused init + checkpoint
     hooks gather-to-Replicate before the per-kv-head reshape, so FSDP-16 (>
-    n_kv_heads=8) shards cleanly. fp32 master + FullAC + chunked loss. Rollout
-    collection overlaps training by up to ``max_offpolicy_steps=2``
+    n_kv_heads=8) shards cleanly. bf16 master + bf16 Adam (fused_opt_states_bf16) +
+    FullAC + chunked loss (fp32 master + fp32 Adam OOMs 32B at seq 24576 even on
+    FSDP-16). Rollout collection overlaps training by up to ``max_offpolicy_steps=2``
     (the trainer trains step N's batch while the generators collect step N+1's), so
     each train step is short (fwd/bwd + CPU-staged weight sync) instead of blocking
-    on the slow Claude Code rollouts. ``num_groups_per_train_step=8`` x
-    ``group_size=8`` = 64 rollouts per step.
+    on the slow Claude Code rollouts. ``num_groups_per_train_step=1`` x
+    ``group_size=16`` = 16 rollouts per step.
     """
     config = rl_grpo_qwen3_32b_swe_r2e()
     return _scale_32b_multihost(
@@ -321,11 +325,12 @@ def rl_grpo_qwen3_32b_swe_r2e_fsdp16() -> Controller.Config:
 
 
 def rl_grpo_qwen3_32b_swe_r2e_fsdp24() -> Controller.Config:
-    """Qwen3-32B SWE-R2E, multi-host async: TRUE FSDP-24 trainer + 3 TP-8 gens.
+    """Qwen3-32B SWE-R2E, multi-host async: TRUE FSDP-24 trainer + 5 TP-8 gens.
 
-    7 MAST hosts: 1 controller + 3 trainer (data_parallel_shard_degree=24, TP=1) +
-    3 generator (TP=8). Same fused-QKV (PR #3807) + fp32-master + async overlap as
-    ``_fsdp16`` with a wider trainer shard (more memory headroom / faster fwd-bwd).
+    9 MAST hosts: 1 controller + 3 trainer (data_parallel_shard_degree=24, TP=1) +
+    5 generator (TP=8). Same fused-QKV (PR #3807) + bf16-master (fused_opt_states_bf16)
+    + async overlap as ``_fsdp16`` with a wider trainer shard (more memory headroom /
+    faster fwd-bwd).
     """
     config = rl_grpo_qwen3_32b_swe_r2e()
     return _scale_32b_multihost(
