@@ -1224,8 +1224,6 @@ class VLLMGenerator(Actor, Configurable):
         """
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
-        # TODO(async-rl): use 2 version keys so trainer can push a new version
-        # without being blocked by a generator's ongoing pull.
         model_sd = self._get_model().model.state_dict()
         await ts.get_state_dict(
             "model_state_dict",

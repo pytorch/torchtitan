@@ -95,8 +95,15 @@ def compute_perf_ratio_metrics(
     wait_s = seconds.get("timing/step/wait_for_training_batch")
     fwd_bwd_s = seconds.get("timing/step/forward_backward")
     optim_s = seconds.get("timing/step/optim")
-    push_s = seconds.get("timing/step/push_model_state_dict")
-    pull_s = seconds.get("timing/step/pull_model_state_dict")
+
+    # How long the trainer waited for the background push/pull to finish.
+    # NOTE: **not** how long it took. We overlap push/pull with the next the step.
+    blocking_trainer_push_s = seconds.get(
+        "timing/step/blocking_trainer_push_model_state_dict"
+    )
+    blocking_generator_pull_s = seconds.get(
+        "timing/step/blocking_generator_pull_model_state_dict"
+    )
 
     if not step_s:  # no step wall-clock -> no denominator to derive ratios from
         return []
@@ -114,10 +121,16 @@ def compute_perf_ratio_metrics(
     # Each span's share of the step wall-clock (skip a span that was not recorded).
     if wait_s is not None:
         _add_metric("perf/trainer/step_time_ratio/batch", wait_s / step_s)
-    if push_s is not None:
-        _add_metric("perf/trainer/step_time_ratio/push_model", push_s / step_s)
-    if pull_s is not None:
-        _add_metric("perf/trainer/step_time_ratio/pull_model", pull_s / step_s)
+    if blocking_trainer_push_s is not None:
+        _add_metric(
+            "perf/trainer/step_time_ratio/blocking_trainer_push_model_state_dict",
+            blocking_trainer_push_s / step_s,
+        )
+    if blocking_generator_pull_s is not None:
+        _add_metric(
+            "perf/trainer/step_time_ratio/blocking_generator_pull_model_state_dict",
+            blocking_generator_pull_s / step_s,
+        )
 
     # Compute = forward/backward + optim: its share of the step, and its idle-free throughput.
     if fwd_bwd_s is not None and optim_s is not None:
@@ -130,8 +143,20 @@ def compute_perf_ratio_metrics(
             )
 
     # Step time the measured spans don't cover -- only when every span is present, else it misleads.
-    if None not in (wait_s, fwd_bwd_s, optim_s, push_s, pull_s):
-        accounted_s = wait_s + fwd_bwd_s + optim_s + push_s + pull_s
+    if None not in (
+        wait_s,
+        fwd_bwd_s,
+        optim_s,
+        blocking_trainer_push_s,
+        blocking_generator_pull_s,
+    ):
+        accounted_s = (
+            wait_s
+            + fwd_bwd_s
+            + optim_s
+            + blocking_trainer_push_s
+            + blocking_generator_pull_s
+        )
         _add_metric(
             "perf/trainer/step_time_ratio/unaccounted", (step_s - accounted_s) / step_s
         )
