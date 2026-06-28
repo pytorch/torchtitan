@@ -1228,6 +1228,49 @@ class TestTraceDTensor(unittest.TestCase):
             torch.testing.assert_close(actual, expected)
 
 
+class TestMetadataPropagationUnit(unittest.TestCase):
+    """CPU-only unit tests for _copy_fwd_metadata_to_bw_nodes."""
+
+    def test_bracketed_dangling_backward_seq_uses_next_forward_seq(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+
+        fwd_prev = graph.call_function(torch.ops.aten.add.Tensor, args=(x, x))
+        fwd_prev.meta["seq_nr"] = 10
+        fwd_prev.meta["custom"] = {"module_fqn": "prev"}
+
+        fwd_target = graph.call_function(torch.ops.aten.mul.Tensor, args=(fwd_prev, 2))
+        fwd_target.meta["seq_nr"] = 12
+        fwd_target.meta["custom"] = {"module_fqn": "loss"}
+        fwd_target.meta["nn_module_stack"] = {"loss": ("loss", "Loss")}
+        fwd_target.meta["stack_trace"] = "loss stack"
+
+        fwd_after = graph.call_function(torch.ops.aten.sub.Tensor, args=(fwd_target, 1))
+        fwd_after.meta["seq_nr"] = 13
+        fwd_after.meta["custom"] = {"module_fqn": "after"}
+
+        bwd_dangling = graph.call_function(torch.ops.aten.neg.default, args=(fwd_after,))
+        bwd_dangling.meta["seq_nr"] = 11
+        bwd_dangling.meta["autograd_backward"] = True
+
+        bwd_unbracketed = graph.call_function(torch.ops.aten.relu.default, args=(fwd_after,))
+        bwd_unbracketed.meta["seq_nr"] = 99
+        bwd_unbracketed.meta["autograd_backward"] = True
+
+        graph.output((bwd_dangling, bwd_unbracketed))
+        gm = torch.fx.GraphModule(nn.Module(), graph)
+
+        _copy_fwd_metadata_to_bw_nodes(gm)
+
+        self.assertEqual(bwd_dangling.meta["custom"]["module_fqn"], "loss")
+        self.assertEqual(
+            bwd_dangling.meta["nn_module_stack"],
+            {"loss": ("loss", "Loss")},
+        )
+        self.assertEqual(bwd_dangling.meta["stack_trace"], "loss stack")
+        self.assertNotIn("custom", bwd_unbracketed.meta)
+
+
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestMetadataPropagation(unittest.TestCase):
     """Tests for _copy_fwd_metadata_to_bw_nodes."""

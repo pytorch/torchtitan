@@ -183,6 +183,26 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
             if seq_nr not in seq_nr_to_fwd_node:
                 seq_nr_to_fwd_node[seq_nr] = node
 
+    fwd_seq_nrs = sorted(seq_nr_to_fwd_node)
+
+    def _find_fwd_node(seq_nr: int) -> torch.fx.Node | None:
+        fwd_node = seq_nr_to_fwd_node.get(seq_nr)
+        if fwd_node is not None:
+            return fwd_node
+
+        # DTensor custom decompositions can create a high-level autograd node
+        # whose backward seq_nr has no visible forward FX node. In that case the
+        # visible forward decomposition nodes may be traced under the next seq_nr.
+        has_lower_bound = False
+        for fwd_seq_nr in fwd_seq_nrs:
+            if fwd_seq_nr < seq_nr:
+                has_lower_bound = True
+                continue
+            if fwd_seq_nr > seq_nr and has_lower_bound:
+                return seq_nr_to_fwd_node[fwd_seq_nr]
+            return None
+        return None
+
     for submod in fx_g.modules():
         if not isinstance(submod, torch.fx.GraphModule):
             continue
@@ -193,7 +213,7 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
                 or not _is_backward(node)
             ):
                 continue
-            fwd_node = seq_nr_to_fwd_node.get(node.meta["seq_nr"])
+            fwd_node = _find_fwd_node(node.meta["seq_nr"])
             if fwd_node is None or fwd_node is node:
                 continue
 
