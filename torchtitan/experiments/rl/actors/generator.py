@@ -16,13 +16,11 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 import cloudpickle
-import spmd_types as spmd
 import torch
 import torch.distributed as dist
 import torchstore as ts
 from monarch.actor import Actor, Channel, current_rank, endpoint, Port, PortReceiver
-from torchstore.state_dict_utils import DELIM, flatten_state_dict, MAPPING
-from torchstore.transport.types import TensorSlice
+from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
 from torchtitan.distributed.utils import get_spmd_backend, set_batch_invariance
@@ -47,7 +45,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
-from torchtitan.protocols.sharding import SpmdLayout
+from torchtitan.protocols.sharding import resolve_placements, SpmdLayout
 from torchtitan.tools.logging import init_logger
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
@@ -63,7 +61,7 @@ logger = logging.getLogger(__name__)
 
 
 def _fqn_to_spmd_layout(model: torch.nn.Module) -> dict[str, SpmdLayout]:
-    """Return state-dict FQN -> SPMD layout for sliced generator weight pulls."""
+    """Return state-dict FQN -> SPMD layout for generator weight pulls."""
     layouts: dict[str, SpmdLayout] = {}
 
     for module_fqn, module in model.named_modules():
@@ -84,6 +82,18 @@ def _fqn_to_spmd_layout(model: torch.nn.Module) -> dict[str, SpmdLayout]:
                     layouts[f"{module_fqn}.{proj_name}.{state_name}"] = layout
 
     return layouts
+
+
+def _is_fused_qkv_state_key(name: str) -> bool:
+    parts = name.split(".")
+    return "attention" in parts and any(proj in parts for proj in ("wq", "wk", "wv"))
+
+
+def _tensor_debug_sample(tensor: torch.Tensor) -> str:
+    if tensor.numel() == 0:
+        return "empty"
+    flat = tensor.detach().flatten()
+    return f"first={flat[0].item()} last={flat[-1].item()}"
 
 
 @dataclass(kw_only=True, slots=True)
@@ -181,14 +191,13 @@ def _prepare_generation_request_metrics(
     ]
 
 
-# vLLM's chunked-prefill chunk size (max_num_batched_tokens). "FULL" /
-# "FULL_AND_PIECEWISE" also graph prefill, whose per-step token count is bounded
-# by this, so their capture sizes must reach it (else prefill falls back to
-# eager). The generator does not override max_num_batched_tokens, so this is
-# vLLM's default.
-# TODO: this value still needs discussion -- ideally read the engine's actual
-# max_num_batched_tokens rather than hardcoding the default.
-_VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
+# vLLM's default max_num_batched_tokens (vllm's per-step budget:
+# prefill + decode tokens summed over the batch). Used as the cudagraph capture
+# cap for "FULL" / "FULL_AND_PIECEWISE" (which graph prefill / mixed batches, so
+# capture sizes must reach the per-step budget or those batches fall back to
+# eager) when ``Config.max_num_batched_tokens`` is unset; when that field is set,
+# its value is used instead (and also drives the vLLM engine).
+_DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 
 
 @dataclass(kw_only=True, slots=True)
@@ -225,6 +234,11 @@ class VLLMCudagraphConfig:
       capture of mixed prefill+decode batches
     """
 
+    capture_sizes: list[int] | None = None
+    """Explicit cudagraph capture batch sizes. When ``None`` (default), sizes are
+    auto-derived: powers of 2 up to the cap, plus ``max_num_seqs`` and the cap as
+    exact sizes. When set, exactly these sizes are captured (deduped and sorted)."""
+
     # TODO: Validate CUDA graph capture with MoE / Expert Parallelism.
     # MoE routing produces dynamic shapes that may conflict with full
     # CUDA graph capture despite being torch.compile-compatible
@@ -235,19 +249,20 @@ class VLLMCudagraphConfig:
     # https://github.com/pytorch/torchtitan/issues/3175
 
     def get_vllm_compilation_config(
-        self, *, max_num_seqs: int
+        self, *, max_num_seqs: int, max_num_batched_tokens: int | None = None
     ) -> CompilationConfig | None:
         """Build a vLLM ``CompilationConfig`` for ``mode``, or return ``None``
         when CUDA graphs are disabled.
 
-        Capture sizes are powers of 2 up to the cap, plus ``max_num_seqs`` and the
-        cap itself as exact sizes so the largest capture size is always the cap
+        When ``capture_sizes`` is set, those exact sizes are captured. Otherwise
+        sizes are auto-derived: powers of 2 up to the cap, plus ``max_num_seqs`` and
+        the cap itself as exact sizes so the largest capture size is always the cap
         (even when it is not a power of 2). The cap is ``max_num_seqs`` for
         ``FULL_DECODE_ONLY`` (decode batch == num_seqs). ``FULL`` and
         ``FULL_AND_PIECEWISE`` also graph prefill, whose per-step token count is
-        bounded by vLLM's default ``max_num_batched_tokens``, so the cap extends to
-        ``_VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS`` -- otherwise prefill chunks larger
-        than the cap fall back to eager.
+        bounded by ``max_num_batched_tokens`` (the configured value, else
+        ``_DEFAULT_MAX_NUM_BATCHED_TOKENS``), so the cap extends to it
+        -- otherwise prefill chunks larger than the cap fall back to eager.
 
         All modes capture with ``mode=CompilationMode.NONE`` (no inductor compile).
         ``FULL_AND_PIECEWISE`` runs attention eager via vLLM's BREAKABLE
@@ -258,18 +273,30 @@ class VLLMCudagraphConfig:
             return None
         if max_num_seqs <= 0:
             raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}")
+        if max_num_batched_tokens is not None:
+            _max_cudagraph_capture_size = max_num_batched_tokens
+        else:
+            _max_cudagraph_capture_size = _DEFAULT_MAX_NUM_BATCHED_TOKENS
         cap = max_num_seqs
         if self.mode in ("FULL", "FULL_AND_PIECEWISE"):
-            cap = max(cap, _VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS)
-        sizes = [1 << i for i in range(int(math.log2(cap)) + 1)]
-        # Always include max_num_seqs (decode batch) and the cap (largest prefill
-        # chunk) as exact sizes so the largest capture size is the cap even when it
-        # is not a power of 2
-        if max_num_seqs not in sizes:
-            sizes.append(max_num_seqs)
-        if cap not in sizes:
-            sizes.append(cap)
-        sizes = sorted(sizes)
+            cap = max(cap, _max_cudagraph_capture_size)
+        if self.capture_sizes is not None:
+            if not self.capture_sizes or any(s <= 0 for s in self.capture_sizes):
+                raise ValueError(
+                    "cudagraph.capture_sizes must be a non-empty list of positive "
+                    f"ints, got {self.capture_sizes}"
+                )
+            sizes = sorted(set(self.capture_sizes))
+        else:
+            sizes = [1 << i for i in range(int(math.log2(cap)) + 1)]
+            # Always include max_num_seqs (decode batch) and the cap (largest
+            # prefill chunk) as exact sizes so the largest capture size is the cap
+            # even when it is not a power of 2
+            if max_num_seqs not in sizes:
+                sizes.append(max_num_seqs)
+            if cap not in sizes:
+                sizes.append(cap)
+            sizes = sorted(sizes)
 
         return CompilationConfig(
             cudagraph_mode=self.mode,
@@ -697,6 +724,11 @@ class VLLMGenerator(Actor, Configurable):
         gpu_memory_limit: float = 0.9
         """Fraction of GPU memory to use for the vLLM engine (0.0 to 1.0)."""
 
+        max_num_batched_tokens: int | None = None
+        """vLLM chunked-prefill chunk size: max tokens scheduled per engine step
+        (prefill + decode, summed over the batch). ``None`` (default) leaves
+        vLLM's own engine default in place."""
+
         cudagraph: VLLMCudagraphConfig = field(default_factory=VLLMCudagraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
@@ -858,6 +890,8 @@ class VLLMGenerator(Actor, Configurable):
         )
         engine_kwargs["max_model_len"] = model_spec.model.max_seq_len
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
+        if config.max_num_batched_tokens is not None:
+            engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens
         # Continuous batching requires FCFS scheduling: admission order must equal the
         # broadcast order on every rank
         engine_kwargs["scheduling_policy"] = "fcfs"
@@ -866,6 +900,7 @@ class VLLMGenerator(Actor, Configurable):
             engine_kwargs["block_size"] = 256
         vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
             max_num_seqs=self._max_num_seqs,
+            max_num_batched_tokens=config.max_num_batched_tokens,
         )
         if vllm_compilation_config is not None:
             engine_kwargs["compilation_config"] = vllm_compilation_config
@@ -1272,82 +1307,88 @@ class VLLMGenerator(Actor, Configurable):
     async def _get_spmd_state_dict(self, model_sd: dict, *, model) -> None:
         """Fetch trainer-pushed weights into a spmd_types generator state dict.
 
-        spmd_types generators hold plain local tensors, so TP-sharded tensors
-        need sliced reads that match the model sharding layout instead of
-        TorchStore's DTensor-aware state-dict copy path.
+        spmd_types generators hold plain local tensors, but TorchStore already
+        knows how to fill DTensor state-dict entries. Wrap each local tensor as
+        a DTensor using its declared SPMD layout, fetch through the normal
+        state-dict path, then put the local tensors back before load_state_dict.
         """
-        flat_model_sd, _ = flatten_state_dict(model_sd)
-        stored_mapping = await ts.get(f"model_state_dict{DELIM}{MAPPING}")
         layouts = _fqn_to_spmd_layout(model.model)
-
-        for name in stored_mapping:
-            target = flat_model_sd.get(name)
-            if target is None:
-                raise KeyError(f"{name} is missing from generator model state dict")
-            key = f"model_state_dict{DELIM}{name}"
-
-            if not isinstance(target, torch.Tensor):
-                raise TypeError(f"{name} is not a tensor in generator model state dict")
-
-            layout = layouts.get(name)
-            if layout is None:
-                raise KeyError(f"{name} is missing SPMD layout metadata")
-
-            if not any(
-                isinstance(axis_type, spmd.Shard)
-                for axis_type in layout.per_axis_spmd_types().values()
-            ):
-                await ts.get(key, inplace_tensor=target)
-                continue
-
-            await self._get_tensor_slice(
-                key=key,
-                target=target,
-                layout=layout,
-                model=model,
-            )
-
-    @staticmethod
-    async def _get_tensor_slice(
-        *,
-        key: str,
-        target: torch.Tensor,
-        layout: SpmdLayout,
-        model,
-    ) -> None:
-        """Read this rank's local state shard from a globally stored tensor."""
-        global_shape = list(target.shape)
-        offsets = [0] * target.ndim
-        mesh = model.parallel_dims.resolve_mesh(layout.axes())
-        if mesh is not None:
-            assert mesh.mesh_dim_names is not None
-            # This does not reconstruct shard order when multiple mesh axes
-            # shard the same tensor dim. Model params today are only EP- or
-            # TP-sharded, so each tensor dim has at most one active shard axis.
-            for axis_name, axis_type in layout.per_axis_spmd_types().items():
-                if not isinstance(axis_type, spmd.Shard):
-                    continue
-                axis = axis_name.value if hasattr(axis_name, "value") else axis_name
-                if axis not in mesh.mesh_dim_names:
-                    continue
-                axis_size = mesh.size(mesh.mesh_dim_names.index(axis))
-                if axis_size <= 1:
-                    continue
-                axis_rank = mesh.get_local_rank(axis)
-                dim = axis_type.dim
-                global_shape[dim] *= axis_size
-                offsets[dim] += axis_rank * target.shape[dim]
-        await ts.get(
-            key,
-            inplace_tensor=target,
-            tensor_slice_spec=TensorSlice(
-                offsets=tuple(offsets),
-                coordinates=(),
-                global_shape=tuple(global_shape),
-                local_shape=tuple(target.shape),
-                mesh_shape=(),
-            ),
+        fused_layout_keys = sorted(
+            name for name in layouts if _is_fused_qkv_state_key(name)
         )
+        print(
+            "[rl_weight_sync_debug] "
+            f"rank={self._rank} fused_qkv_layout_keys={len(fused_layout_keys)} "
+            f"sample={fused_layout_keys[:6]}",
+            flush=True,
+        )
+
+        dtensor_model_sd = dict(model_sd)
+        with torch.no_grad():
+            for name, target in model_sd.items():
+                if not isinstance(target, torch.Tensor):
+                    continue
+
+                layout = layouts.get(name)
+                if layout is None:
+                    # Backend-owned state such as vLLM attention scale buffers
+                    # is plain replicated state and has no ShardingConfig entry.
+                    # Leave it as a normal tensor for TorchStore to fill.
+                    continue
+
+                mesh = model.parallel_dims.resolve_mesh(layout.axes())
+                if mesh is None:
+                    continue
+
+                placements = resolve_placements(layout, mesh)
+                if _is_fused_qkv_state_key(name):
+                    print(
+                        "[rl_weight_sync_debug] "
+                        f"rank={self._rank} wrap_fused_qkv name={name} "
+                        f"local_shape={tuple(target.shape)} "
+                        f"mesh_axes={mesh.mesh_dim_names} placements={placements} "
+                        f"{_tensor_debug_sample(target)}",
+                        flush=True,
+                    )
+
+                dtensor_model_sd[name] = DTensor.from_local(
+                    target,
+                    mesh,
+                    placements,
+                    run_check=False,
+                )
+
+        fetched_model_sd = await ts.get_state_dict(
+            "model_state_dict",
+            user_state_dict=dtensor_model_sd,
+            strict=False,
+            direct_rdma=False,
+        )
+        fetched_fused_qkv_keys = sorted(
+            name for name in fetched_model_sd if _is_fused_qkv_state_key(name)
+        )
+        print(
+            "[rl_weight_sync_debug] "
+            f"rank={self._rank} fetched_fused_qkv_keys="
+            f"{len(fetched_fused_qkv_keys)} sample={fetched_fused_qkv_keys[:6]}",
+            flush=True,
+        )
+
+        with torch.no_grad():
+            for name, value in dtensor_model_sd.items():
+                if isinstance(value, DTensor):
+                    local_value = value.to_local()
+                    if _is_fused_qkv_state_key(name):
+                        print(
+                            "[rl_weight_sync_debug] "
+                            f"rank={self._rank} loaded_fused_qkv name={name} "
+                            f"local_shape={tuple(local_value.shape)} "
+                            f"mesh_axes={value.device_mesh.mesh_dim_names} "
+                            f"placements={value.placements} "
+                            f"{_tensor_debug_sample(local_value)}",
+                            flush=True,
+                        )
+                    model_sd[name] = local_value
 
     @endpoint
     async def close(self) -> None:

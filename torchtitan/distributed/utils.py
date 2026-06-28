@@ -546,9 +546,7 @@ def set_pg_timeouts(
         for mesh in parallel_dims.get_all_one_dimensional_meshes().values()
     ] + [None]
     for group in groups:
-        torch.distributed.distributed_c10d._set_pg_timeout(
-            timeout, group
-        )  # pyrefly: ignore[deprecated]
+        torch.distributed.set_timeout(timeout, group)
 
 
 @torch.no_grad()

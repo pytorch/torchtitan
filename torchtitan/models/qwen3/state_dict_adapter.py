@@ -120,6 +120,8 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                     continue
                 # pyrefly: ignore [missing-attribute]
                 if self.model_config.enable_weight_tying and key == "lm_head.weight":
+                    if self.fqn_to_index_mapping:
+                        self.fqn_to_index_mapping.pop("lm_head.weight", None)
                     continue
                 new_key = to_hf_map[key]
                 hf_state_dict[new_key] = value
