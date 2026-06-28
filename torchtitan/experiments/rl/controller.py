@@ -955,8 +955,9 @@ class Controller(Configurable):
         """
         for step in range(self.start_step + 1, num_training_steps + 1):
             sl.set_step(step)  # propagate the step counter to the actors
-            await self.trainer.sync_log_step.call(step)
-            await self.generator_router.fanout("sync_log_step", step)
+            with sl.log_trace_span("sync_log_step"):
+                await self.trainer.sync_log_step.call(step)
+                await self.generator_router.fanout("sync_log_step", step)
             step_timer = MetricsTimer()
 
             with sl.log_trace_span("train_step"), step_timer.record(
@@ -1038,31 +1039,32 @@ class Controller(Configurable):
             # TODO(metrics): See if metrics are being computed at the right place. E.g. should we put all
             # rollout related metrics here, or move all of them to the rollouter.
             time_metrics = step_timer.flush()
-            self.metrics_processor.log(
-                step=step,
-                is_validation=False,
-                metrics=[
-                    *packed.metrics,
-                    *[
-                        m.Metric(key, m.NoReduce(value))
-                        for key, value in fwd_bwd_metrics.items()
+            with sl.log_trace_span("metrics_log"):
+                self.metrics_processor.log(
+                    step=step,
+                    is_validation=False,
+                    metrics=[
+                        *packed.metrics,
+                        *[
+                            m.Metric(key, m.NoReduce(value))
+                            for key, value in fwd_bwd_metrics.items()
+                        ],
+                        *[
+                            m.Metric(key, m.NoReduce(value))
+                            for key, value in optim_result.metrics.items()
+                        ],
+                        *self._group_buffer.metrics(),
+                        *time_metrics,
+                        *policy_age_panel,
+                        # Background push/pull work time; the trainer's wait for it is timing/step/blocking_*.
+                        *push_metrics,
+                        *pull_metrics,
+                        *compute_perf_ratio_metrics(
+                            num_global_valid_tokens=packed.num_global_valid_tokens,
+                            time_metrics=time_metrics,
+                        ),
                     ],
-                    *[
-                        m.Metric(key, m.NoReduce(value))
-                        for key, value in optim_result.metrics.items()
-                    ],
-                    *self._group_buffer.metrics(),
-                    *time_metrics,
-                    *policy_age_panel,
-                    # Background push/pull work time; the trainer's wait for it is timing/step/blocking_*.
-                    *push_metrics,
-                    *pull_metrics,
-                    *compute_perf_ratio_metrics(
-                        num_global_valid_tokens=packed.num_global_valid_tokens,
-                        time_metrics=time_metrics,
-                    ),
-                ],
-            )
+                )
 
             # Save full training state for resume; CheckpointManager writes only on its interval
             # and the final step. After the divergence guard so a NaN step isn't checkpointed.
