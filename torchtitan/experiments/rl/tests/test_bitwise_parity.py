@@ -34,6 +34,7 @@ import gc
 import logging
 import os
 import unittest
+from packaging import version
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -45,7 +46,7 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 from torch.distributed.tensor import distribute_tensor, DTensor
-from torch.nn.attention.flex_attention import and_masks
+from torch.nn.attention.flex_attention import and_masks, create_block_mask
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig
 from vllm.sampling_params import RequestOutputKind
@@ -356,6 +357,12 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
 
     mask_mods = [get_causal_mask_mod(), get_document_mask_mod(positions)]
 
+    if inner_attn.mask_mod is not None:
+        mask_mods.append(inner_attn.mask_mod.build().get_mask_mod())
+    if version.parse(torch.__version__) >= version.parse("2.13.0"):
+        block_mask_kwargs["separate_full_blocks"] = not batch_invariant
+    else:
+        block_mask_kwargs = {}
     attention_masks = create_attention_mask(
         and_masks(*mask_mods),
         1,
@@ -363,7 +370,7 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
         positions.shape[1],
         positions.shape[1],
         BLOCK_SIZE=block_size,
-        separate_full_blocks=not batch_invariant,
+        **block_mask_kwargs,
     )
 
     logits = model(packed_ids, attention_masks=attention_masks, positions=positions)

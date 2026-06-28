@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
+from packaging import version
 from dataclasses import dataclass
 
 import torch
@@ -128,8 +129,7 @@ class Decoder(BaseModel):
             from torchtitan.trainer import Trainer
 
             assert hasattr(config, "parallelism"), (
-                "config passed to update_from_config must provide "
-                "a parallelism field."
+                "config passed to update_from_config must provide a parallelism field."
             )
             parallelism = config.parallelism
             assert isinstance(parallelism, ParallelismConfig), (
@@ -295,6 +295,15 @@ class Decoder(BaseModel):
         ]
         B = positions.shape[0]
         seq_len = positions.shape[1]
+        # when separate_full_blocks = True, kernel iterates through
+        # full blocks first (blocks where all elements are unmasked)
+        # but which blocks are "full" vs "partial" changes depending
+        # on the particular batch
+        # for batch invariance, we disable this optimization
+        if version.parse(torch.__version__) >= version.parse("2.13.0"):
+            kwargs = {"separate_full_blocks": not is_in_batch_invariant_mode()}
+        else:
+            kwargs = {}
         return create_attention_mask(
             and_masks(*mask_mods),
             B,
@@ -303,12 +312,7 @@ class Decoder(BaseModel):
             seq_len,
             device=positions.device,
             BLOCK_SIZE=attn_config.inner_attention.block_size,
-            # when separate_full_blocks = True, kernel iterates through
-            # full blocks first (blocks where all elements are unmasked)
-            # but which blocks are "full" vs "partial" changes depending
-            # on the particular batch
-            # for batch invariance, we disable this optimization
-            separate_full_blocks=not is_in_batch_invariant_mode(),
+            **kwargs,
         )
 
     def get_attention_masks(
