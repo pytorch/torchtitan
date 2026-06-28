@@ -856,6 +856,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
         }
+        if self.model_spec.metrics_fn is not None:
+            extra_metrics.update(
+                self.model_spec.metrics_fn(self.model_parts, parallel_dims)
+            )
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
