@@ -61,12 +61,12 @@ async def _noop():
     return None
 
 
-def _manager(*, trainer, router, buffer, groups_per_train_step=8):
+def _manager(*, trainer, router, buffer, num_groups_per_train_step=8):
     return WeightSyncManager(
         trainer=trainer,
         generator_router=router,
         group_buffer=buffer,
-        groups_per_train_step=groups_per_train_step,
+        num_groups_per_train_step=num_groups_per_train_step,
     )
 
 
@@ -87,8 +87,8 @@ def test_push_then_pull_then_buffer_release_in_order() -> None:
         )
 
         wsm.start_async_push_pull(version=7)
-        push_metrics = await wsm.wait_prev_trainer_weight_push()
-        pull_metrics = await wsm.wait_prev_generator_weight_pull()
+        push_metrics = await wsm.wait_prev_push()
+        pull_metrics = await wsm.wait_prev_pull()
 
         # The pull reads what the push wrote, and the buffer-slot release rides on the pull.
         assert events == ["push", "pull", "release"]
@@ -121,24 +121,24 @@ def test_start_async_push_pull_returns_before_work_runs() -> None:
         assert events == []  # push is gated -> nothing ran; start did not block
 
         gate.set()
-        await wsm.wait_prev_trainer_weight_push()
-        await wsm.wait_prev_generator_weight_pull()
+        await wsm.wait_prev_push()
+        await wsm.wait_prev_pull()
         assert events == ["push", "pull", "release"]
 
     asyncio.run(run())
 
 
-def test_buffer_release_uses_groups_per_train_step_and_trained_reason() -> None:
+def test_buffer_release_uses_num_groups_per_train_step_and_trained_reason() -> None:
     async def run() -> None:
         buffer = _FakeBuffer()
         wsm = _manager(
             trainer=_FakeTrainer(_noop),
             router=_FakeRouter(_noop),
             buffer=buffer,
-            groups_per_train_step=5,
+            num_groups_per_train_step=5,
         )
         wsm.start_async_push_pull(version=3)
-        await wsm.wait_prev_generator_weight_pull()
+        await wsm.wait_prev_pull()
         assert buffer.releases == [(5, "trained")]
 
     asyncio.run(run())
@@ -149,7 +149,7 @@ def test_pull_threads_the_started_version() -> None:
         router = _FakeRouter(_noop)
         wsm = _manager(trainer=_FakeTrainer(_noop), router=router, buffer=_FakeBuffer())
         wsm.start_async_push_pull(version=42)
-        await wsm.wait_prev_generator_weight_pull()
+        await wsm.wait_prev_pull()
         assert router.pulled_versions == [42]
 
     asyncio.run(run())
@@ -160,8 +160,8 @@ def test_wait_before_first_start_returns_zero_metrics() -> None:
         wsm = _manager(
             trainer=_FakeTrainer(_noop), router=_FakeRouter(_noop), buffer=_FakeBuffer()
         )
-        push_metrics = await wsm.wait_prev_trainer_weight_push()
-        pull_metrics = await wsm.wait_prev_generator_weight_pull()
+        push_metrics = await wsm.wait_prev_push()
+        pull_metrics = await wsm.wait_prev_pull()
         assert push_metrics[0].key == TRAINER_PUSH_KEY
         assert push_metrics[0].value.value == 0.0
         assert pull_metrics[0].value.value == 0.0
@@ -216,7 +216,7 @@ def test_push_exception_propagates_through_wait() -> None:
 
         raised = False
         try:
-            await wsm.wait_prev_trainer_weight_push()
+            await wsm.wait_prev_push()
         except RuntimeError:
             raised = True
         # The pull task also fails (it awaits the failed push); retrieve it so it is

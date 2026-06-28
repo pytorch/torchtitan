@@ -704,7 +704,7 @@ class Controller(Configurable):
             trainer=self.trainer,
             generator_router=self.generator_router,
             group_buffer=self._group_buffer,
-            groups_per_train_step=async_loop.num_groups_per_train_step,
+            num_groups_per_train_step=async_loop.num_groups_per_train_step,
         )
 
         # training_sample_builder
@@ -1018,9 +1018,7 @@ class Controller(Configurable):
                 ), step_timer.record(
                     "timing/step/blocking_trainer_push_model_state_dict"
                 ):
-                    push_metrics = (
-                        await self._weight_sync.wait_prev_trainer_weight_push()
-                    )
+                    push_metrics = await self._weight_sync.wait_prev_push()
 
                 with sl.log_trace_span("optim_step"), step_timer.record(
                     "timing/step/optim"
@@ -1036,9 +1034,7 @@ class Controller(Configurable):
                 ), step_timer.record(
                     "timing/step/blocking_generator_pull_model_state_dict"
                 ):
-                    pull_metrics = (
-                        await self._weight_sync.wait_prev_generator_weight_pull()
-                    )
+                    pull_metrics = await self._weight_sync.wait_prev_pull()
 
                 # Overlap this step's push -> pull -> buffer-slot release with the next step's fwd/bwd.
                 self._weight_sync.start_async_push_pull(
