@@ -19,6 +19,7 @@ from __future__ import annotations
 import dataclasses
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
@@ -88,9 +89,12 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 keep_latest_k=3,
             ),
             # DAPO-style clip-higher (asymmetric clip); no KL / reference model.
-            loss=DAPOLoss.Config(
-                ratio_clip_low=0.2,
-                ratio_clip_high=0.28,
+            loss=ChunkedLossWrapper.Config(
+                num_chunks=8,
+                loss_fn=DAPOLoss.Config(
+                    ratio_clip_low=0.2,
+                    ratio_clip_high=0.28,
+                ),
             ),
         ),
         generator=VLLMGenerator.Config(
