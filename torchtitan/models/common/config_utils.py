@@ -144,8 +144,10 @@ def _fused_qkv_param_init(
                 # does not divide n_kv_heads (e.g. dp_shard=8, n_kv_heads=4); no
                 # gather, since fused is already replicated.
                 if not isinstance(t, DTensor) and (tp_size := spmd_mesh_size("tp")) > 1:
-                    # spmd_types passes the local shard as a plain tensor, so
-                    # copy only this rank's TP slice of the fused global init.
+                    # RL generator init_weights() only needs non-persistent
+                    # buffers; weights come from trainer state dict. Until it has
+                    # a DTensor static state dict path, copy this TP shard here.
+                    # TODO: Remove once RL can init buffers without weight init.
                     mesh = current_spmd_mesh()
                     assert mesh is not None
                     tp_rank = mesh.get_local_rank("tp")

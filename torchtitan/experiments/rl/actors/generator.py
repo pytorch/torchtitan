@@ -60,30 +60,6 @@ logger = logging.getLogger(__name__)
 # TODO(async-rl): this file is large. Split a backend-agnostic BaseGenerator.
 
 
-def _fqn_to_spmd_layout(model: torch.nn.Module) -> dict[str, SpmdLayout]:
-    """Return state-dict FQN -> SPMD layout for generator weight pulls."""
-    layouts: dict[str, SpmdLayout] = {}
-
-    for module_fqn, module in model.named_modules():
-        sharding_config = getattr(module, "_sharding_config", None)
-        if sharding_config is not None:
-            for state_name, layout in sharding_config.state_shardings.items():
-                fqn = f"{module_fqn}.{state_name}" if module_fqn else state_name
-                layouts[fqn] = layout
-
-        if isinstance(module, FusedQKVLinear):
-            # FusedQKVLinear exposes split wq/wk/wv state-dict keys while the
-            # sharding layout lives on the fused wqkv parameter.
-            wqkv_sharding_config = getattr(module.wqkv, "_sharding_config", None)
-            if wqkv_sharding_config is None:
-                continue
-            for state_name, layout in wqkv_sharding_config.state_shardings.items():
-                for proj_name in ("wq", "wk", "wv"):
-                    layouts[f"{module_fqn}.{proj_name}.{state_name}"] = layout
-
-    return layouts
-
-
 @dataclass(kw_only=True, slots=True)
 class _RequestMetricsInputs:
     """Raw inputs needed to build a request's vLLM metrics. Used to pass
@@ -1300,6 +1276,37 @@ class VLLMGenerator(Actor, Configurable):
         a DTensor using its declared SPMD layout, fetch through the normal
         state-dict path, then put the local tensors back before load_state_dict.
         """
+
+        def _fqn_to_spmd_layout(model: torch.nn.Module) -> dict[str, SpmdLayout]:
+            layouts: dict[str, SpmdLayout] = {}
+
+            for module_fqn, module in model.named_modules():
+                sharding_config = getattr(module, "_sharding_config", None)
+                if sharding_config is not None:
+                    for state_name, layout in sharding_config.state_shardings.items():
+                        fqn = f"{module_fqn}.{state_name}" if module_fqn else state_name
+                        layouts[fqn] = layout
+
+                if isinstance(module, FusedQKVLinear):
+                    # FusedQKVLinear exposes split wq/wk/wv state-dict keys while
+                    # the sharding layout lives on the fused wqkv parameter.
+                    # TODO: This assumes fused and split QKV layouts stay
+                    # equivalent. The load hook all-gathers anyway, so replace
+                    # this with a less fragile fused-QKV state-dict path.
+                    wqkv_sharding_config = getattr(
+                        module.wqkv, "_sharding_config", None
+                    )
+                    if wqkv_sharding_config is None:
+                        continue
+                    for (
+                        state_name,
+                        layout,
+                    ) in wqkv_sharding_config.state_shardings.items():
+                        for proj_name in ("wq", "wk", "wv"):
+                            layouts[f"{module_fqn}.{proj_name}.{state_name}"] = layout
+
+            return layouts
+
         layouts = _fqn_to_spmd_layout(model.model)
 
         dtensor_model_sd = dict(model_sd)
@@ -1310,10 +1317,18 @@ class VLLMGenerator(Actor, Configurable):
 
                 layout = layouts.get(name)
                 if layout is None:
-                    # Backend-owned state such as vLLM attention scale buffers
-                    # is plain replicated state and has no ShardingConfig entry.
-                    # Leave it as a normal tensor for TorchStore to fill.
-                    continue
+                    if name.endswith(
+                        (
+                            ".vllm_attn._k_scale",
+                            ".vllm_attn._prob_scale",
+                            ".vllm_attn._q_scale",
+                            ".vllm_attn._v_scale",
+                        )
+                    ):
+                        # vLLM attention scale buffers are backend-owned plain
+                        # replicated state with no TorchTitan ShardingConfig.
+                        continue
+                    raise KeyError(f"{name} is missing SPMD layout metadata")
 
                 mesh = model.parallel_dims.resolve_mesh(layout.axes())
                 if mesh is None:
