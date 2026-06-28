@@ -20,9 +20,10 @@ import torch
 import torch.distributed as dist
 import torchstore as ts
 from monarch.actor import Actor, Channel, current_rank, endpoint, Port, PortReceiver
+from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
-from torchtitan.distributed.utils import set_batch_invariance
+from torchtitan.distributed.utils import get_spmd_backend, set_batch_invariance
 from torchtitan.experiments.rl.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
     patch_bmm_for_batch_invariance,
@@ -37,9 +38,14 @@ from torchtitan.experiments.rl.routing.intra_generator_router import (
     IntraGeneratorRouter,
 )
 from torchtitan.experiments.rl.types import Completion
-from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+from torchtitan.models.common.attention import (
+    FlexAttention,
+    FusedQKVLinear,
+    VarlenAttention,
+)
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.sharding import resolve_placements, SpmdLayout
 from torchtitan.tools.logging import init_logger
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
@@ -1224,20 +1230,24 @@ class VLLMGenerator(Actor, Configurable):
         """
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
-        model_sd = self._get_model().model.state_dict()
-        await ts.get_state_dict(
-            "model_state_dict",
-            user_state_dict=model_sd,
-            strict=False,
-            direct_rdma=False,
-        )
+        model = self._get_model()
+        model_sd = model.model.state_dict()
+        if get_spmd_backend() == "spmd_types":
+            await self._get_spmd_state_dict(model_sd, model=model)
+        else:
+            await ts.get_state_dict(
+                "model_state_dict",
+                user_state_dict=model_sd,
+                strict=False,
+                direct_rdma=False,
+            )
         # state_dict() returns hook-produced copies for fused modules (e.g.
         # FusedQKVLinear's wqkv -> wq/wk/wv), so the in-place fill above never
         # reaches the real param. Re-apply via load_state_dict to run the merge hook.
         # Non-fused params share storage with model_sd, so reloading them is a
         # harmless self-copy; only the fused wqkv is actually rebuilt.
         # TODO: investigate can we avoid the copy and properly load fused qkv weights
-        self._get_model().model.load_state_dict(model_sd, strict=False)
+        model.model.load_state_dict(model_sd, strict=False)
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:
             # TODO(async-rl): consider a `flush_kv_cache_every_n_steps` flag to force-flush every N steps
@@ -1255,6 +1265,100 @@ class VLLMGenerator(Actor, Configurable):
             self._pull_model_state_dict_future.set_result(version)
             self._pull_model_state_dict_future = None
             self._model_state_dict_pull_request = None
+
+    async def _get_spmd_state_dict(self, model_sd: dict, *, model) -> None:
+        """Fetch trainer-pushed weights into a spmd_types generator state dict.
+
+        spmd_types generators hold plain local tensors, but TorchStore already
+        knows how to fill DTensor state-dict entries. Wrap each local tensor as
+        a DTensor using its declared SPMD layout, fetch through the normal
+        state-dict path, then put the local tensors back before load_state_dict.
+        """
+
+        def _fqn_to_spmd_layout(model: torch.nn.Module) -> dict[str, SpmdLayout]:
+            layouts: dict[str, SpmdLayout] = {}
+
+            for module_fqn, module in model.named_modules():
+                sharding_config = getattr(module, "_sharding_config", None)
+                if sharding_config is not None:
+                    for state_name, layout in sharding_config.state_shardings.items():
+                        fqn = f"{module_fqn}.{state_name}" if module_fqn else state_name
+                        layouts[fqn] = layout
+
+                if isinstance(module, FusedQKVLinear):
+                    # FusedQKVLinear exposes split wq/wk/wv state-dict keys while
+                    # the sharding layout lives on the fused wqkv parameter.
+                    # TODO: This assumes fused and split QKV layouts stay
+                    # equivalent. The load hook all-gathers anyway, so replace
+                    # this with a less fragile fused-QKV state-dict path.
+                    wqkv_sharding_config = getattr(
+                        module.wqkv, "_sharding_config", None
+                    )
+                    if wqkv_sharding_config is None:
+                        continue
+                    for (
+                        state_name,
+                        layout,
+                    ) in wqkv_sharding_config.state_shardings.items():
+                        for proj_name in ("wq", "wk", "wv"):
+                            layouts[f"{module_fqn}.{proj_name}.{state_name}"] = layout
+
+            return layouts
+
+        layouts = _fqn_to_spmd_layout(model.model)
+
+        dtensor_model_sd = dict(model_sd)
+        with torch.no_grad():
+            for name, target in model_sd.items():
+                if not isinstance(target, torch.Tensor):
+                    continue
+
+                layout = layouts.get(name)
+                if layout is None:
+                    if name.endswith(
+                        (
+                            ".vllm_attn._k_scale",
+                            ".vllm_attn._prob_scale",
+                            ".vllm_attn._q_scale",
+                            ".vllm_attn._v_scale",
+                        )
+                    ):
+                        # vLLM attention scale buffers are backend-owned plain
+                        # replicated state with no TorchTitan ShardingConfig.
+                        continue
+                    raise KeyError(f"{name} is missing SPMD layout metadata")
+
+                mesh = model.parallel_dims.resolve_mesh(layout.axes())
+                if mesh is None:
+                    active_axes = [
+                        axis
+                        for axis in layout.axes()
+                        if model.parallel_dims.get_optional_mesh(axis) is not None
+                    ]
+                    if active_axes:
+                        raise RuntimeError(
+                            f"{name} has active SPMD layout axes but no resolved mesh"
+                        )
+                    continue
+
+                dtensor_model_sd[name] = DTensor.from_local(
+                    target,
+                    mesh,
+                    resolve_placements(layout, mesh),
+                    run_check=False,
+                )
+
+        await ts.get_state_dict(
+            "model_state_dict",
+            user_state_dict=dtensor_model_sd,
+            strict=False,
+            direct_rdma=False,
+        )
+
+        with torch.no_grad():
+            for name, value in dtensor_model_sd.items():
+                if isinstance(value, DTensor):
+                    model_sd[name] = value.to_local()
 
     @endpoint
     async def close(self) -> None:
