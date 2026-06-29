@@ -354,9 +354,11 @@ def rl_grpo_qwen3_30b_a3b_dense_search_r1_perf() -> Controller.Config:
                 data_parallel_degree=1,
                 tensor_parallel_degree=4,
             ),
-            # varlen attention -> FULL_AND_PIECEWISE (decode captured FULL, prefill
-            # piecewise).
-            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
+            # FULL_DECODE_ONLY (default): graph only pure-decode batches; run prefill /
+            # mixed batches eager. The known-good 1.7B/8B search_r1 configs use this;
+            # FULL_AND_PIECEWISE (also graphs prefill/mixed) corrupted generation here
+            # (gibberish output) -- see #3668. Match the small configs to derisk.
+            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_DECODE_ONLY"),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),
             override=OverrideConfig(imports=list(perf_imports)),
