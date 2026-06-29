@@ -152,26 +152,20 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
     return config
 
 
-def rl_grpo_qwen3_30b_a3b_hybridep_search_r1_perf() -> Controller.Config:
-    """GRPO Search-R1 for Qwen3-30B-A3B MoE with a HybridEP generator.
+def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
+    """GRPO Search-R1 for Qwen3-30B-A3B MoE with a DeepEP v2 cudagraph generator.
 
-    HybridEP requires the generator to sit within a single node (its all-to-all is
-    intra-node); the trainer may still span multiple nodes. Qwen3-30B-A3B has 4 KV
-    heads, so the generator TP must be <=4. Applies the same ``fused_swiglu`` +
-    ``helion_rope`` perf overrides (CUDA-only) as ``rl_grpo_qwen3_30b_a3b_varlen_perf``.
+    DeepEP v2 runs multi-node on H100 (NVLink intra-node + IB/RoCE inter-node), so unlike
+    a HybridEP generator (whose all-to-all is intra-node only) this generator may span
+    nodes. Qwen3-30B-A3B has 4 KV heads, so the generator TP must be <=4. The trainer
+    keeps the compact (host-synced, backward-able) DeepEP path; the generator applies the
+    ``deepep_inference`` override to switch its dispatchers to the cudagraph-able EXPAND
+    layout. Applies the same ``fused_swiglu`` + ``helion_rope`` perf overrides (CUDA-only)
+    as ``rl_grpo_qwen3_30b_a3b_varlen_perf``.
     """
     model_spec = model_registry(
-        "30B-A3B", attn_backend="varlen", moe_comm_backend="hybridep"
+        "30B-A3B", attn_backend="varlen", moe_comm_backend="deepep"
     )
-    # qwen3's model_registry does not expose non_blocking_capacity_factor (deepseek_v3
-    # does), so set it per MoE layer post-build: a fixed capacity makes the HybridEP
-    # all-to-all static-shape and thus cudagraph-capturable under FULL.
-    for layer in model_spec.model.layers:
-        moe = getattr(layer, "moe", None)
-        if moe is not None:
-            moe.experts.token_dispatcher.non_blocking_capacity_factor = (
-                0.0325  # TODO: TBD
-            )
 
     # Same opt-in throughput overrides as rl_grpo_qwen3_30b_a3b_varlen_perf, applied
     # independently to the trainer and generator actors.
@@ -180,7 +174,7 @@ def rl_grpo_qwen3_30b_a3b_hybridep_search_r1_perf() -> Controller.Config:
         "torchtitan.overrides.helion_rope",
     ]
 
-    return Controller.Config(
+    config = Controller.Config(
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-30B-A3B",
         num_generators=2,  # TODO: TBD -- number of generator proc meshes to spawn
@@ -233,82 +227,31 @@ def rl_grpo_qwen3_30b_a3b_hybridep_search_r1_perf() -> Controller.Config:
             cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),
-            override=OverrideConfig(imports=list(perf_imports)),
+            # Generator-only: the DeepEP cudagraph EXPAND override on top of the perf
+            # overrides; the trainer keeps the compact path.
+            override=OverrideConfig(
+                imports=[
+                    *perf_imports,
+                    "torchtitan.distributed.deepep.inference_override",
+                ]
+            ),
         ),
     )
-
-
-def rl_grpo_qwen3_235b_a22b_deepep_search_r1_perf() -> Controller.Config:
-    """GRPO Search-R1 for Qwen3-235B-A22B MoE with a DeepEP + FULL-cudagraph generator.
-
-    DeepEP runs multi-node on H100 (NVLink/IB), so unlike the HybridEP config the
-    generator may span nodes. Qwen3-235B-A22B has 4 KV heads, so the generator TP
-    must be <=4. Applies the same ``fused_swiglu`` + ``helion_rope`` perf overrides
-    (CUDA-only) as ``rl_grpo_qwen3_30b_a3b_varlen_perf``.
-    """
-    # DeepEP uses fixed-size low-latency buffers (no capacity-factor knob), so unlike
-    # HybridEP there is no per-layer non_blocking_capacity_factor to set here.
-    model_spec = model_registry(
-        "235B-A22B", attn_backend="varlen", moe_comm_backend="deepep"
+    # Two inference knobs to set per workload (no golden default; here EP=4):
+    #  * max_num_batched_tokens: vLLM's per-step token budget (default None -> vLLM's own
+    #    default of 2048). Decide it from your input/rollout sequence length.
+    #  * num_max_tokens_per_rank: per-rank EXPAND-dispatch capacity, REQUIRED by the
+    #    deepep_inference override. For a dropless model (highest memory) set it to
+    #    max_num_batched_tokens // ep; lower it gradually to save memory (trading off
+    #    dropped tokens).
+    config.generator.max_num_batched_tokens = 2048  # TODO: TBD
+    num_max_tokens_per_rank = (
+        config.generator.max_num_batched_tokens
+        // config.generator.parallelism.expert_parallel_degree
     )
-    # TODO: change DeepEP's Low lantency flag = True
-
-    perf_imports = [
-        "torchtitan.overrides.fused_swiglu",
-        "torchtitan.overrides.helion_rope",
-    ]
-
-    return Controller.Config(
-        model_spec=model_spec,
-        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-235B-A22B",
-        num_generators=4,  # TODO: TBD -- number of generator proc meshes to spawn
-        async_loop=AsyncLoopConfig(
-            num_training_steps=500,  # TODO: TBD
-            num_groups_per_train_step=32,  # TODO: TBD
-            group_size=8,  # TODO: TBD
-            validation=ValidationConfig(num_samples=500),
-            batcher=Batcher.Config(
-                # TODO: TBD local_batch_size, seq_len
-                batch=BatchConfig(local_batch_size=1, seq_len=4096),
-            ),
-        ),
-        compile=CompileConfig(enable=False),
-        rollouter=SearchR1Rollouter.Config(
-            advantage=AdvantageEstimator.Config(should_std_normalize=True),
-        ),
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),  # TODO: TBD
-        metrics=MetricsProcessor.Config(enable_wandb=True),
-        trainer=PolicyTrainer.Config(
-            optimizer=default_adamw(lr=1e-6),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2, decay_type="linear", min_lr_factor=1.0
-            ),
-            training=TrainingConfig(dtype="bfloat16"),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=32,  # TODO: TBD
-                tensor_parallel_degree=1,
-                expert_parallel_degree=32,  # TODO: TBD, optionally from 8 to 64
-            ),
-            checkpoint=CheckpointManager.Config(
-                enable=True,
-                initial_load_in_hf=True,
-                interval=50,
-                last_save_model_only=False,
-                keep_latest_k=3,
-            ),
-            loss=DAPOLoss.Config(ratio_clip_low=0.2, ratio_clip_high=0.28),
-            override=OverrideConfig(imports=list(perf_imports)),
-        ),
-        generator=VLLMGenerator.Config(
-            model_dtype="bfloat16",
-            parallelism=InferenceParallelismConfig(  # multi-node generator
-                data_parallel_degree=4,
-                tensor_parallel_degree=4,
-                expert_parallel_degree=16,
-            ),
-            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
-            checkpoint=CheckpointManager.Config(enable=False),
-            sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),  # TODO
-            override=OverrideConfig(imports=list(perf_imports)),
-        ),
-    )
+    for block in config.model_spec.model.layers:
+        moe = getattr(block, "moe", None)
+        if moe is None:
+            continue
+        moe.experts.token_dispatcher.num_max_tokens_per_rank = num_max_tokens_per_rank
+    return config
