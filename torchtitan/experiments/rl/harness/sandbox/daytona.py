@@ -37,19 +37,30 @@ def _eager_rebuild_daytona_models() -> None:
     """Resolve Daytona's Pydantic models at import (single-threaded) so concurrent
     sandbox creates never race their lazy rebuild.
 
-    ``CreateSandboxFromImageParams`` has a forward-ref field (``StrictStr``) that
-    Pydantic resolves lazily on first instantiation. Under a wide concurrent boot
-    fanout (e.g. rollout_concurrency=48 in one controller) many first-uses race the
-    rebuild and raise ``PydanticUserError: ... is not fully defined``. Calling
-    ``model_rebuild`` once here, before any rollout, makes every later create safe.
+    ``CreateSandboxFromImageParams`` has forward-ref fields Pydantic resolves
+    lazily on first instantiation. Under a wide concurrent boot fanout (e.g.
+    rollout_concurrency=48 in one controller) many first-uses race that rebuild
+    and raise ``PydanticUserError: ... is not fully defined`` -> every create
+    fails -> turns=0. Rebuild once here, before any rollout. The forward refs use
+    typing names (``Optional`` etc.) + ``StrictStr`` that are NOT in this module's
+    namespace, so pass an explicit ``_types_namespace`` (all of ``typing`` + the
+    SDK model's own module globals) and ``force`` a fresh resolve.
     Best-effort: a no-op if Daytona isn't installed (e.g. CPU-only environments).
     """
     try:
-        from pydantic import StrictStr  # noqa: F401 -- in scope for the rebuild
+        import sys
+        import typing
+
+        from pydantic import StrictStr
 
         from daytona import CreateSandboxFromImageParams  # type: ignore
 
-        CreateSandboxFromImageParams.model_rebuild()
+        ns = dict(vars(typing))
+        ns["StrictStr"] = StrictStr
+        sdk_mod = sys.modules.get(CreateSandboxFromImageParams.__module__)
+        if sdk_mod is not None:
+            ns.update(vars(sdk_mod))
+        CreateSandboxFromImageParams.model_rebuild(force=True, _types_namespace=ns)
     except Exception as e:  # noqa: BLE001 -- import/rebuild is best-effort
         logger.warning("[daytona] eager model_rebuild skipped: %s", e)
 
