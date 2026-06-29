@@ -27,133 +27,100 @@ from:
 - `torchtitan/experiments/rl/actors/generator.py` (generator)
 - `torchtitan/experiments/rl/generate.py` (standalone generation)
 
-Generator-only patches live in `torchtitan/experiments/rl/batch_invariance.py`
-(see "Generator-only mechanisms" below).
+## Sources of non-batch-invariance
 
-## Sources of non-determinism
+For the same input, the trainer and generator must run the same ops with the
+same accumulation order. Three groups of fixes make that hold.
 
-### 1. GEMM / linear layers (`mm`, `addmm`)
+**Shared op overrides** -- applied by `set_batch_invariance()`
+(`torchtitan/distributed/utils.py`), which both actors call:
 
-cuBLAS selects tile iteration orders that depend on the M dimension (batch x
-seq). Different batch sizes -> different tile schedules -> different
-accumulation order -> different rounding.
+- **`mm` / `addmm` / `_log_softmax` / `mean.dim`:** cuBLAS and the default
+  reduction kernels pick tile/block schedules from the input shape, so the
+  accumulation order (and rounding) changes with batch size. Overridden with the
+  upstream
+  [`batch_invariant_ops`](https://github.com/thinking-machines-lab/batch_invariant_ops)
+  Triton kernels, which use a fixed tile iteration order.
+- **Flash attention split-k:** FA3 picks `num_splits` from the sequence length,
+  changing the partial-sum reduction tree. Forced to `num_splits=1` when
+  `is_in_batch_invariant_mode()` is True
+  (`torchtitan/models/common/attention.py`, `VarlenAttention.forward`); FA2 is
+  already batch-invariant.
+- **NCCL collectives:** all-reduce may use ring/tree algorithms with varying
+  channel counts, reordering the cross-rank reduction. Forced to single-channel
+  tree (`NCCL_ALGO=allreduce:tree`, `NCCL_MIN/MAX_NCHANNELS=1`,
+  `NCCL_PROTO=Simple`, etc.) to match vLLM; must be set before
+  `dist.init_process_group`.
+- **Reduced-precision reductions and TF32:** disabled
+  (`allow_bf16/fp16_reduced_precision_reduction = False`,
+  `torch.backends.cuda.matmul.allow_tf32 = False`,
+  `torch.backends.cudnn.allow_tf32 = False`).
 
-**Fix:** `set_batch_invariance()` delegates to the upstream
-[`batch_invariant_ops`](https://github.com/thinking-machines-lab/batch_invariant_ops)
-package, which overrides these ATen ops with Triton kernels that use a fixed
-tile iteration order.
+**Generator-only patches** (`torchtitan/experiments/rl/batch_invariance.py`) --
+the generator runs the same model inside vLLM, whose fused kernels must be routed
+back to the trainer's ops:
 
-### 2. Log-softmax and reductions (`log_softmax`, `mean.dim`)
+- **Attention (Varlen / Flex / GPT-OSS):** the generator must run the same
+  attention kernel as the trainer for whichever backend the config uses.
+  - *Varlen* (Qwen3, the default): the generator runs torchtitan's own
+    `VarlenAttention` through vLLM's `CUSTOM` backend -- the same FA3 varlen
+    kernel as the trainer. The shared `num_splits=1` fix above removes the only
+    batch-dependent split-k, so the two match bitwise.
+  - *Flex* (Qwen3 flex): the generator runs vLLM's `FLEX_ATTENTION` backend.
+    `BatchInvariantFlexConverter` (a `ModelConfigConverter` wired in via
+    `converters=[BatchInvariantFlexConverter.Config()]`) pins
+    `BLOCK_M = BLOCK_N = 16` and `BACKEND = "TRITON"` on every `FlexAttention`
+    layer, so both sides use the same Triton tile size and avoid the
+    `flex_decode` kernel.
+  - *GPT-OSS* (varlen + per-layer sliding window + attention sinks): the same
+    `CUSTOM` varlen path and `num_splits=1` as Varlen, with the sliding-window
+    size baked into each layer's `VarlenAttention` config (identical on both
+    sides). The attention sinks are a post-softmax rescale
+    (`apply_attention_sink_rescale`, `sigmoid(lse - sinks)`); the vLLM wrapper's
+    `_inject_attention_sinks` installs that same rescale as the generator
+    attention's `out_transform`, so the sink math matches the trainer.
+- **`patch_bmm_for_batch_invariance`:** `batch_invariant_ops` overrides
+  `mm`/`addmm` but not `bmm`. The MoE router gate (3-D activation @ 2-D weight)
+  lowers to `aten::bmm` in the generator but `aten::mm` in the trainer, so the
+  gate scores drift and flip top-k expert routing. Installs vLLM's
+  batch-invariant `bmm`.
+- **`force_logprobs_fn_for_batch_invariance`:** vLLM's v2 GPU sampler computes
+  per-token logprobs with a fused Triton kernel that inlines
+  `log(softmax(logits))` and never calls PyTorch ops. Replaced with the trainer's
+  `compute_logprobs`, so both share one logprob code path.
 
-Default kernels choose block sizes based on input shape.
-
-**Fix:** Same as above -- `batch_invariant_ops` also overrides `_log_softmax`
-and `mean.dim`.
-
-### 3. Flash attention split-k (`num_splits`)
-
-FA3 may choose different split-k factors depending on sequence length, leading
-to different partial-sum reduction trees.
-
-**Fix:** Force `num_splits=1` when `is_in_batch_invariant_mode()` is True
-(`torchtitan/models/common/attention.py`, `VarlenAttention.forward`). FA2 is
-already batch-invariant, so this only matters for FA3.
-
-### 4. NCCL collectives
-
-NCCL all-reduce can use ring or tree algorithms with varying channel counts,
-changing the reduction order across ranks.
-
-**Fix:** `set_batch_invariance()` forces single-channel tree all-reduce and a
-deterministic protocol via environment variables (`NCCL_ALGO=allreduce:tree`,
-`NCCL_MIN/MAX_NCHANNELS=1`, `NCCL_PROTO=Simple`, etc.). These match vLLM's
-settings and must be set before `dist.init_process_group`.
-
-### 5. Reduced-precision reductions and TF32
-
-Reduced-precision accumulation and TF32 tensor cores introduce
-hardware-dependent rounding that can vary with operand shapes.
-
-**Fix:** `set_batch_invariance()` disables them:
-`allow_bf16/fp16_reduced_precision_reduction = False`,
-`torch.backends.cuda.matmul.allow_tf32 = False`, and
-`torch.backends.cudnn.allow_tf32 = False`.
-
-## Generator-only mechanisms
-
-The trainer runs torchtitan ops directly, but the generator runs the same model
-definition inside vLLM, which has its own fused kernels. These extra patches
-(`torchtitan/experiments/rl/batch_invariance.py`) route the generator back
-through the same ops as the trainer:
-
-- **FlexAttention kernel pinning** (`BatchInvariantFlexConverter`): a
-  `ModelConfigConverter` that pins `BLOCK_M = BLOCK_N = 16` and
-  `BACKEND = "TRITON"` on every `FlexAttention` layer, matching vLLM's default
-  tile size and avoiding the `flex_decode` kernel. Wired into a config via
-  `converters=[BatchInvariantFlexConverter.Config()]`.
-- **bmm override** (`patch_bmm_for_batch_invariance`): `batch_invariant_ops`
-  overrides `mm`/`addmm` but not `bmm`. The MoE router gate (3-D activation @
-  2-D weight) lowers to `aten::bmm` in the generator but `aten::mm` in the
-  trainer, so without this the gate scores drift and flip top-k expert routing.
-  This installs vLLM's batch-invariant `bmm` kernel.
-- **logprob kernel override** (`force_logprobs_fn_for_batch_invariance`): vLLM's
-  v2 GPU sampler computes per-token logprobs with a fused Triton kernel that
-  inlines `log(softmax(logits))` and never calls PyTorch ops. This replaces it
-  with the trainer's `compute_logprobs`, so both paths share one logprob code
-  path.
-
-## `freqs_cis` dtype and `cast_forward_inputs`
-
-The `freqs_cis` buffer is computed and stored in fp32. It is passed as a
-forward argument from `Decoder.forward` to each `TransformerBlock.forward`.
-FSDP2's `MixedPrecisionPolicy` has a `cast_forward_inputs` flag that, when
-`True`, casts **all** floating-point forward inputs to `param_dtype` (typically
-bf16) at each FSDP boundary.
-
-This creates a subtle numerics divergence for the cos/sin RoPE backend:
-
-- **With `cast_forward_inputs=True`:** `freqs_cis` is cast from fp32 -> bf16
-  at each transformer block. Inside `apply_rotary_emb_cos_sin`, `xq` and `xk`
-  are upcast to fp32, then multiplied with the bf16 `cos`/`sin` values. PyTorch
-  promotes the bf16 operand to fp32 for the multiply, but the bf16 rounding
-  has already lost precision.
-- **With `cast_forward_inputs=False`:** `freqs_cis` stays fp32 throughout.
-  The fp32 x fp32 multiply preserves full precision.
-
-torchtitan sets `cast_forward_inputs=False` in the canonical `apply_fsdp`
-(`torchtitan/distributed/fsdp.py`) to avoid this precision loss. This is safe
-for LLMs where all float inputs to FSDP-wrapped modules are already in
-`param_dtype`. Image models (Flux, VLM) that receive external fp32 inputs (e.g.
-pixel values) may still need `cast_forward_inputs=True`.
-
-For bitwise-identical numerics between different parallelism configurations
-(e.g. TP-only vs FSDP+TP), `freqs_cis` must remain fp32 in all code paths.
+**RoPE cache dtype (`freqs_cis`):** `freqs_cis` is stored in fp32 and passed as a
+forward input to each `TransformerBlock`. FSDP2's
+`MixedPrecisionPolicy(cast_forward_inputs=True)` would cast it to bf16 at each
+FSDP boundary, so the bf16 `cos`/`sin` in `apply_rotary_emb_cos_sin` lose
+precision (the multiply promotes back to fp32, but the bf16 rounding already
+happened). torchtitan sets `cast_forward_inputs=False` in the canonical
+`apply_fsdp` (`torchtitan/distributed/fsdp.py`) so `freqs_cis` stays fp32 in all
+paths -- required for bitwise-identical numerics across parallelism configs (e.g.
+TP-only vs FSDP+TP). Safe for LLMs whose float inputs are already `param_dtype`;
+image models (Flux, VLM) with external fp32 inputs (e.g. pixel values) may still
+need `cast_forward_inputs=True`.
 
 ## Precision requirements
 
 Batch-invariant mode requires bfloat16 computation in both trainer and
 generator so they operate at the same precision. The generator always runs in
 bfloat16 (`generator.model_dtype="bfloat16"`). The trainer reaches the same
-precision in one of two ways:
+precision with FSDP mixed precision (`training.mixed_precision_param="bfloat16"`,
+the default): it keeps fp32 master weights and FSDP's `MixedPrecisionPolicy`
+casts them to bf16 before the forward, so the forward is numerically identical to
+the generator's bf16 path. The trainer always wraps the model in FSDP
+(`parallelize_qwen3` applies `apply_fsdp_to_decoder` unconditionally for the
+trainer), so this cast happens even at `data_parallel_shard_degree=1`, where FSDP
+acts purely as a mixed-precision boundary (the degree-1 all-gather is a no-op but
+still casts to bf16). No extra GPUs are required relative to TP-only. With
+`data_parallel_shard_degree > 1` the same cast happens during the sharded
+all-gather.
 
-1. **Full bf16 training** (`training.dtype="bfloat16"`): weights are bf16, used
-   directly in the forward.
-2. **FSDP mixed precision** (`training.mixed_precision_param="bfloat16"`, the
-   default): the trainer keeps fp32 master weights and FSDP's
-   `MixedPrecisionPolicy` casts them to bf16 before the forward, so the forward
-   is numerically identical to the generator's bf16 path. The trainer always
-   wraps the model in FSDP (`parallelize_qwen3` applies `apply_fsdp_to_decoder`
-   unconditionally for the trainer), so this cast happens even at
-   `data_parallel_shard_degree=1`, where FSDP acts purely as a mixed-precision
-   boundary (the degree-1 all-gather is a no-op but still casts to bf16). No
-   extra GPUs are required relative to TP-only. With
-   `data_parallel_shard_degree > 1` the same cast happens during the sharded
-   all-gather.
-
-This is the default path for the batch-invariant configs: they keep fp32 master
-weights (`TrainingConfig()` with default `dtype="float32"`) and rely on FSDP
-mixed precision for the bf16 forward, so the optimizer updates fp32 weights while
-the forward stays bitwise identical to the generator.
+The batch-invariant configs keep fp32 master weights (`TrainingConfig()` with
+default `dtype="float32"`) and rely on FSDP mixed precision for the bf16 forward,
+so the optimizer updates fp32 weights while the forward stays bitwise identical
+to the generator.
 
 ## Current limitations
 
@@ -176,30 +143,3 @@ python -m torchtitan.experiments.rl.train \
 Batch-invariant configs in
 `torchtitan/experiments/rl/examples/alphabet_sort/config_registry.py` all use
 FSDP mixed precision (fp32 master weights, bf16-cast forward) on the trainer:
-
-- `rl_grpo_qwen3_0_6b_varlen_batch_invariant` -- dense, varlen attention; trainer
-  TP=2 (FSDP degree 1), generator TP=2.
-- `rl_grpo_qwen3_0_6b_flex_batch_invariant` -- dense, FlexAttention (uses
-  `BatchInvariantFlexConverter`); trainer TP=2 (FSDP degree 1), generator TP=2.
-- `rl_grpo_gpt_oss_debug_varlen_batch_invariant` -- GPT-OSS MoE debug model;
-  trainer TP=2 (FSDP degree 1), generator TP=2.
-- `rl_grpo_qwen3_moe_debug_varlen_batch_invariant` -- MoE; trainer FSDP2+TP2+EP4
-  matches generator DP2+TP2+EP4 bitwise (verified
-  `bit_wise/logprob_diff/max == 0`).
-
-The dense configs keep the original TP-only GPU footprint (FSDP degree 1 adds no
-GPUs); only the MoE config shards across `data_parallel_shard_degree=2`.
-
-Parity is verified by `torchtitan/experiments/rl/tests/test_bitwise_parity.py`
-(`test_trainer_vs_vllm_prefill` asserts `torch.equal` between trainer and vLLM
-logprobs) and the loss-comparison script in
-`torchtitan/experiments/rl/scripts/loss_compare.py`.
-
-The dense `varlen` and `flex` Qwen3-0.6B configs were verified bitwise-identical
-(`max_delta=0.0`) under FSDP mixed precision: trainer prefill (fp32 master ->
-bf16 all-gather) matches vLLM prefill, batch invariance holds across batch
-sizes, and vLLM decode matches prefill. The `test_batch_invariance` check (the
-batch-invariance guarantee itself) also passes for GPT-OSS under FSDP mixed
-precision. Note: GPT-OSS `test_trainer_vs_vllm_prefill` has a separate,
-pre-existing trainer-vs-vLLM mismatch that is present on TP-only bf16 as well, so
-it is unrelated to FSDP mixed precision.
