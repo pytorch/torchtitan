@@ -80,7 +80,7 @@ def kimi_k2_5_debugmodel() -> Trainer.Config:
     )
 
 
-def kimi_k2_5_moonlight_16b_a3b() -> Trainer.Config:
+def moonlight_16b_a3b() -> Trainer.Config:
     """Moonlight 16B-A3B: the text-only DeepSeekV3 sibling (no vision tower)."""
     model_spec = model_registry("moonlight-16B-A3B", attn_backend="flex")
     return Trainer.Config(
@@ -112,7 +112,7 @@ def kimi_k2_5_moonlight_16b_a3b() -> Trainer.Config:
     )
 
 
-def kimi_k2_5_kimi_vl_a3b() -> Trainer.Config:
+def kimi_vl_a3b() -> Trainer.Config:
     """Kimi-VL A3B: Moonlight text tower + 2D MoonViT vision (image-text)."""
     model_spec = model_registry("Kimi-VL-A3B", attn_backend="flex")
     return Trainer.Config(
@@ -122,7 +122,11 @@ def kimi_k2_5_kimi_vl_a3b() -> Trainer.Config:
             ),
         ),
         hf_assets_path="./assets/hf/Kimi-VL-A3B",
-        tokenizer=MultiModalTokenizer.Config(**KIMI_K2_5_SPECIAL_TOKENS),
+        # Kimi-VL-A3B names the vision-start token <|media_start|>, whereas the
+        # K2.5 family uses <|media_begin|>; override just that one entry.
+        tokenizer=MultiModalTokenizer.Config(
+            **{**KIMI_K2_5_SPECIAL_TOKENS, "vision_start_token": "<|media_start|>"}
+        ),
         model_spec=model_spec,
         dataloader=_mm_dataloader("cc12m"),
         optimizer=default_adamw(lr=3e-4),
@@ -145,18 +149,18 @@ def kimi_k2_5_kimi_vl_a3b() -> Trainer.Config:
     )
 
 
-def kimi_k2_5_1t_a32b() -> Trainer.Config:
+def kimi_k2_5() -> Trainer.Config:
     """Full Kimi K2.5 (~1T-total / ~32B-active)."""
     compile_config = CompileConfig(enable=True, components=["loss"])
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
     model_spec = model_registry(
-        "1T-A32B",
+        "Kimi-K2.5",
         attn_backend="flex",
         converters=[
             Float8LinearConverter.Config(
-                filter_fqns=["output", "router.gate"],
+                filter_fqns=["lm_head", "router.gate"],
                 model_compile_enabled=model_compile_enabled,
             ),
             Float8GroupedExpertsConverter.Config(

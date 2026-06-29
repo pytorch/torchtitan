@@ -462,5 +462,6 @@ class KimiK25VisionEncoder(Module):
         x = self.final_norm(x)
 
         # Temporal pool + spatial merge, then project to the LLM hidden size.
+        # pyrefly: ignore [bad-argument-type]
         merged = _tpool_patch_merger(x, grids, self.merge_kernel_size)
         return self.projector(merged)

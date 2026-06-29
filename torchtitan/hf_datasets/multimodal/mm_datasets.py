@@ -64,9 +64,10 @@ Workflow overview::
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Annotated, Any, Literal
 
 import torch
+import tyro
 from datasets import Dataset, load_dataset
 from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
@@ -524,12 +525,14 @@ class MMDataLoader(ParallelAwareDataloader):
         spatial_merge_size: int
         """Spatially merge visual tokens after encoder. e.g. 2 means 2x2=4 patches merged."""
 
-        patch_order: str = "block"
+        patch_order: Literal["block", "raster"] = "block"
         """Patch sequence layout the collator emits: ``"block"`` (each
         ``spatial_merge_size**2`` group contiguous, or ``"raster"`` (row-major).
         Must be ``"block"`` when ``build_mrope_positions`` is set."""
 
-        resize_fn: Callable[..., tuple[int, int, int, int]] = resize_to_pixel_budget
+        resize_fn: Annotated[
+            Callable[..., tuple[int, int, int, int]], tyro.conf.Suppress
+        ] = resize_to_pixel_budget
         """Image-resize strategy (a callable, like ``sample_processor``):
         ``resize_to_pixel_budget`` or ``resize_to_patch_budget`` (cap patches at
         ``max_patches``, pad to a ``patch_size * spatial_merge_size`` multiple).

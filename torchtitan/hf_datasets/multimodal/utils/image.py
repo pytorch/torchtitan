@@ -47,6 +47,50 @@ def _decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
         return TVF.pil_to_tensor(image)
 
 
+def smart_resize(
+    height: int,
+    width: int,
+    factor: int,
+    min_pixels: int,
+    max_pixels: int,
+) -> tuple[int, int]:
+    """Compute target (height, width) that satisfy per-frame pixel budget.
+
+    Both output dimensions are rounded to multiples of ``factor``.  The spatial
+    pixel count ``h * w`` is kept within [min_pixels, max_pixels].
+
+    Args:
+        height: Original height.
+        width: Original width.
+        factor: Spatial rounding factor (``patch_size * merge_size``).
+        min_pixels: Minimum spatial pixels per frame.
+        max_pixels: Maximum spatial pixels per frame.
+
+    Returns:
+        (resized_height, resized_width)
+    """
+    if max(height, width) / min(height, width) > 200:
+        raise ValueError(
+            f"Absolute aspect ratio must be smaller than 200, "
+            f"got {max(height, width) / min(height, width):.1f}"
+        )
+
+    # Round spatial dims to nearest multiple of factor
+    h_bar = max(round(height / factor) * factor, factor)
+    w_bar = max(round(width / factor) * factor, factor)
+
+    if h_bar * w_bar > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
+        h_bar = max(math.floor(height / beta / factor) * factor, factor)
+        w_bar = max(math.floor(width / beta / factor) * factor, factor)
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = math.ceil(height * beta / factor) * factor
+        w_bar = math.ceil(width * beta / factor) * factor
+
+    return h_bar, w_bar
+
+
 def resize_to_pixel_budget(
     height: int,
     width: int,

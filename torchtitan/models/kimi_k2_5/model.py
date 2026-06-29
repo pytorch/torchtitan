@@ -104,6 +104,9 @@ class KimiK25Model(DeepSeekV3Model):
         # runs stay modality-agnostic and this branch goes away.
         assert len(modalities) == 1, "mixed image+video batches not yet supported"
         pixels, grid = modalities[0]
+        # A non-empty modalities list means a multimodal run, so the vision
+        # encoder is present (text-only configs never populate pixels).
+        assert self.vision_encoder is not None
 
         placeholder_id = special_tokens["image_id"]
         assert placeholder_id == special_tokens["video_id"]

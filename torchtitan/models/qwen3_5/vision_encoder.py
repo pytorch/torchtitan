@@ -11,11 +11,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
-from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
-from torchtitan.models.common.rope import CosSinRoPE
+from torchtitan.models.common.rope import _maybe_wrap_positions, CosSinRoPE
 from torchtitan.models.common.vision_encoder import (
     compiled_create_block_mask,
     get_vision_block_mask_mod,
@@ -386,7 +385,7 @@ class Qwen35VisionEncoder(Module):
                 out_placements=(self._cached_freq_table.placements,),
             )(
                 self._cached_freq_table,
-                grid_thw,  # pyrefly: ignore [bad-argument-count]
+                grids,  # pyrefly: ignore [bad-argument-count]
                 max_num_patch,
                 self.spatial_merge_size,
                 head_dim,
@@ -394,7 +393,7 @@ class Qwen35VisionEncoder(Module):
         else:
             rope_cache = _compute_2d_rope_cache(
                 self._cached_freq_table,
-                grid_thw,
+                grids,
                 max_num_patch,
                 self.spatial_merge_size,
                 head_dim,

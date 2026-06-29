@@ -28,7 +28,7 @@ pip install av torchvision
 | debugmodel | 256 | 6 | 16 | 8 (top-3) | 256 | 4 | 4 |
 | moonlight-16B-A3B | 2048 | 27 | 16 | 64 (top-6) | — | — | — |
 | Kimi-VL-A3B | 2048 | 27 | 16 | 64 (top-6) | 1152 | 27 | 16 |
-| 1T-A32B | 7168 | 61 | 64 | 384 (top-8) | 1152 | 27 | 16 |
+| Kimi-K2.5 | 7168 | 61 | 64 | 384 (top-8) | 1152 | 27 | 16 |
 
 ## Supported Parallelisms
 
@@ -55,6 +55,7 @@ Test scripts:
 ## TODO
 
 - Add a video dataset training pipeline.
-- Add int4 (compressed-tensors) checkpoint loading for the K2.6 release (the
-  inherited DeepSeek-V3 adapter only dequantizes the fp8 block-scale format).
+- Add int4 (compressed-tensors) checkpoint loading. The released K2.5+ 1T weights
+  are int4 group-quantized; the inherited DeepSeek-V3 adapter only handles fp8
+  block-scale, so the 1T config trains from scratch but cannot load them yet.
 - Add Context Parallel (CP) support.

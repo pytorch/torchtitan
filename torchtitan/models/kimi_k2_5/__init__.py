@@ -370,7 +370,7 @@ def _kimi_vl_a3b(
     return config
 
 
-def _1t_a32b(
+def _kimi_k2_5(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
@@ -458,7 +458,7 @@ kimi_k2_5_configs = {
     "debugmodel": _debugmodel,
     "moonlight-16B-A3B": _moonlight_16b_a3b,
     "Kimi-VL-A3B": _kimi_vl_a3b,
-    "1T-A32B": _1t_a32b,
+    "Kimi-K2.5": _kimi_k2_5,
 }
 
 

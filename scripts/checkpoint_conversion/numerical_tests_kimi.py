@@ -86,6 +86,7 @@ def run_hf(hf_model_path, image_size, dtype, device):
         .reshape(image_size, image_size, 3)
         .to(torch.uint8)
     )
+    # pyrefly: ignore [not-callable]
     batch = proc(
         text=[_PROMPT], images=[Image.fromarray(raw_image.numpy())], return_tensors="pt"
     )
@@ -196,7 +197,7 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
     )
     # MoonViT3d consumes raster-order patches (matching the released processor).
     patches, grid = vision_to_patches(
-        img,
+        img,  # pyrefly: ignore [bad-argument-type]
         patch_size=_PATCH_SIZE,
         temporal_patch_size=1,
         merge_size=_MERGE_SIZE,
@@ -256,7 +257,7 @@ def compare(ref_logits, tt_logits):
     )
     print(
         "RESULT: PASS (KL < 1e-3 -- fp noise)."
-        if abs(kl) < 1e-3
+        if abs(kl) < 1e-3  # pyrefly: ignore [bad-argument-type]
         else "RESULT: FAIL (KL >= 1e-3)."
     )
 
