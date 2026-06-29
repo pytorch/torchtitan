@@ -298,8 +298,8 @@ def make_token_dispatcher_config(
     top_k: int,
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
-    hidden_dim: int = 0,
-    num_max_tokens_per_rank: int = 128,
+    hidden_dim: int | None = None,
+    num_max_tokens_per_rank: int | None = None,
     cudagraphable: bool = False,
 ) -> LocalTokenDispatcher.Config:
     """Build the appropriate token dispatcher config.
@@ -322,14 +322,15 @@ def make_token_dispatcher_config(
     # HybridEP non_blocking_capacity_factor vs DeepEP cudagraphable + num_max_tokens_per_rank.
     if comm_backend == "deepep":
         # DeepEP v2: a single ElasticBuffer handles training and inference. ``hidden_dim``
-        # (model dim) and ``num_max_tokens_per_rank`` size the buffer statically;
-        # wire_meshes creates it eagerly. ``num_max_tokens_per_rank`` MUST be >= the
-        # largest per-rank token count in any forward. ``cudagraphable`` selects the static,
-        # no-host-sync expand layout for cudagraph-capturable inference/decode.
+        # (model dim) sizes the buffer; wire_meshes creates it eagerly. ``cudagraphable``
+        # selects the static no-host-sync expand layout (set on the generator by the
+        # deepep_inference override). ``num_max_tokens_per_rank`` is the per-rank EXPAND
+        # capacity: training infers it (the compact path auto-sizes), inference must set it
+        # >= the largest per-rank token count for droplessness.
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
-            hidden=hidden_dim,
+            hidden_dim=hidden_dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             cudagraphable=cudagraphable,
         )
@@ -365,7 +366,7 @@ def make_experts_config(
     param_init: dict[str, Callable],
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
-    num_max_tokens_per_rank: int = 128,
+    num_max_tokens_per_rank: int | None = None,
     cudagraphable: bool = False,
 ) -> GroupedExperts.Config:
     """Build a fully-specified GroupedExperts.Config."""

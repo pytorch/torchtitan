@@ -450,7 +450,7 @@ def dispatch_tokens(
     num_experts: int,
     group: ProcessGroup,
     *,
-    num_max_tokens_per_rank: int,
+    num_max_tokens_per_rank: int | None,
     cudagraphable: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via DeepEP v2 ``ElasticBuffer``.
@@ -468,11 +468,12 @@ def dispatch_tokens(
         num_local_experts: Number of experts on this rank
         num_experts: Total number of experts across all ranks
         group: EP process group
-        num_max_tokens_per_rank: Per-rank dispatch capacity. Used only in expand mode
-            (cudagraphable=True): it fixes the static slab shape, and it is a CAPACITY --
-            tokens a rank sends beyond it are DROPPED (masked layout), so set it >= the
-            max per-rank token count to stay dropless. Compact mode (cudagraphable=False)
-            ignores it and auto-sizes from the per-rank token count (always dropless).
+        num_max_tokens_per_rank: Per-rank dispatch capacity. Required (non-None) only in
+            expand mode (cudagraphable=True): it fixes the static slab shape, and it is a
+            CAPACITY -- tokens a rank sends beyond it are DROPPED (masked layout), so set it
+            >= the max per-rank token count to stay dropless. Compact mode
+            (cudagraphable=False) ignores it (may be None) and auto-sizes from the per-rank
+            token count (always dropless).
         cudagraphable: If True, use the static, no-host-sync expand layout so the forward is
             cudagraph-capturable (inference only -- both prefill and decode -- no backward);
             note it is forced False whenever grad is enabled. If False, use the compact

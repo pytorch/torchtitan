@@ -585,19 +585,33 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     config.model_spec = model_registry(
         "debugmodel_moe", attn_backend="varlen", moe_comm_backend="deepep"
     )
-    # Generator-only override -> DeepEP expand (cudagraph-able) dispatch; trainer keeps compact.
+    # Generator-only override -> DeepEP cudagraph-able EXPAND dispatch; trainer keeps compact.
+    # FULL_AND_PIECEWISE: decode captured FULL (incl. the expand MoE), prefill breakable.
     config.generator.override = OverrideConfig(
-        imports=["torchtitan.overrides.deepep_inference"]
+        imports=["torchtitan.distributed.deepep.inference_override"]
     )
-    # Cap the per-step token budget so the worst-case per-rank expand count
-    # (max_num_batched_tokens / sp_size = 256 / 2 = 128) fits the dispatcher's default
-    # num_max_tokens_per_rank (128). Sizing that from the budget is a separate TODO.
-    config.generator.max_num_batched_tokens = 256
-    # DeepEP v2 expand dispatch is cudagraph-capturable, so enable generator capture
-    # (FULL_AND_PIECEWISE: decode captured FULL incl. the expand MoE; prefill breakable).
     config.generator.cudagraph = VLLMCudagraphConfig(
         enable=True, mode="FULL_AND_PIECEWISE"
     )
+    # Two inference knobs to set per workload (no golden default; here EP=4):
+    #  * max_num_batched_tokens: vLLM's per-step token budget. We expose the knob (default
+    #    None -> vLLM's own default of 2048). Decide it from your input/rollout sequence
+    #    length -- it is effectively the longest input sequence length the engine batches
+    #    (vLLM's 2048 default is just a stand-in for knowing that).
+    #  * num_max_tokens_per_rank: per-rank EXPAND-dispatch capacity, REQUIRED by the
+    #    deepep_inference override. For a dropless model (highest memory) set it to
+    #    longest_sequence_length // sp == max_num_batched_tokens // sp; lower it gradually to
+    #    save memory (trading off dropped tokens).
+    config.generator.max_num_batched_tokens = 2048
+    num_max_tokens_per_rank = (
+        config.generator.max_num_batched_tokens
+        // config.generator.parallelism.expert_parallel_degree
+    )
+    for block in config.model_spec.model.layers:
+        moe = getattr(block, "moe", None)
+        if moe is None:
+            continue
+        moe.experts.token_dispatcher.num_max_tokens_per_rank = num_max_tokens_per_rank
     return config
 
 
