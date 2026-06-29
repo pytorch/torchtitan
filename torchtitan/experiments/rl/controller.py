@@ -299,12 +299,20 @@ class Controller(Configurable):
                     )
                 if not self.trainer.debug.deterministic:
                     raise ValueError("batch_invariant requires deterministic=True")
-                # TODO: Replace trainer dtype constraint to use mixed
-                #  training enabled by FSDP.
-                if self.trainer.training.dtype != "bfloat16":
+                # The trainer forward must compute in bf16 to match the bf16
+                # generator, via FSDP mixed precision. The trainer always wraps
+                # the model in FSDP (even at data_parallel_shard_degree=1, where
+                # FSDP acts purely as a mixed-precision boundary), so
+                # mixed_precision_param == "bfloat16" casts the fp32 master
+                # weights to bf16 for the forward before any matmul.
+                if self.trainer.training.mixed_precision_param != "bfloat16":
                     raise ValueError(
-                        f"batch_invariant requires bfloat16 training dtype, "
-                        f"got {self.trainer.training.dtype!r}"
+                        "batch_invariant requires the trainer forward to compute "
+                        "in bfloat16 to match the generator. Set "
+                        "training.mixed_precision_param='bfloat16' (fp32 master "
+                        "weights, bf16-cast forward via FSDP mixed precision). "
+                        "Got mixed_precision_param="
+                        f"{self.trainer.training.mixed_precision_param!r}."
                     )
                 if self.generator.model_dtype != "bfloat16":
                     raise ValueError(
