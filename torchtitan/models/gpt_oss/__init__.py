@@ -64,8 +64,9 @@ def _output_linear_init(dim: int) -> dict[str, Callable]:
 
 
 def _depth_init(layer_id: int) -> dict[str, Callable]:
+    std = depth_scaled_std(0.02, layer_id)
     return {
-        "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "weight": partial(nn.init.trunc_normal_, std=std, a=-3 * std, b=3 * std),
         "bias": nn.init.zeros_,
     }
 
@@ -98,8 +99,11 @@ def _make_gptoss_attn_config(
             inner_attention, window_size=(sliding_window_size - 1, 0)
         )
 
+    sinks_std = depth_scaled_std(0.02, layer_id)
     sinks_init = {
-        "sinks": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id))
+        "sinks": partial(
+            nn.init.trunc_normal_, std=sinks_std, a=-3 * sinks_std, b=3 * sinks_std
+        )
     }
 
     if fuse_qkv:
@@ -163,10 +167,14 @@ def _make_gptoss_experts_config(
     """Build a fully-specified GptOssGroupedExperts.Config for a single layer."""
     std = depth_scaled_std(0.02, layer_id)
     experts_init = {
-        "mlp1_weight_EGD": partial(nn.init.trunc_normal_, std=std),
-        "mlp1_bias_EG": partial(nn.init.trunc_normal_, std=std),
-        "mlp2_weight_EDF": partial(nn.init.trunc_normal_, std=std),
-        "mlp2_bias_ED": partial(nn.init.trunc_normal_, std=std),
+        "mlp1_weight_EGD": partial(
+            nn.init.trunc_normal_, std=std, a=-3 * std, b=3 * std
+        ),
+        "mlp1_bias_EG": partial(nn.init.trunc_normal_, std=std, a=-3 * std, b=3 * std),
+        "mlp2_weight_EDF": partial(
+            nn.init.trunc_normal_, std=std, a=-3 * std, b=3 * std
+        ),
+        "mlp2_bias_ED": partial(nn.init.trunc_normal_, std=std, a=-3 * std, b=3 * std),
     }
     return GptOssGroupedExperts.Config(
         dim=dim,
