@@ -30,6 +30,8 @@ permissions:
 jobs:
   # Step 1: Dynamically compute the matrix based on conditions
   set-matrix:
+    # Skip scheduled runs on forks, where they would only fail and email the fork owner
+    if: github.repository_owner == 'pytorch' || github.event_name != 'schedule'
     uses: ./.github/workflows/set-matrix.yaml
 
   # Step 2: Use the dynamic matrix in the build-test job
@@ -67,9 +69,13 @@ jobs:
         fi
         python -m pip install --force-reinstall --pre \
           "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
-        if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
-          python -m pip install --pre torchcomms --index-url ${{ matrix.index-url }}
-        fi
+
+        # The torchcomms feature tests are currently disabled, so do not install
+        # torchcomms in the main feature job. Its wheel pins torch exactly and
+        # can force CI off the latest torch nightly.
+        # if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
+        #   python -m pip install --pre torchcomms --index-url ${{ matrix.index-url }}
+        # fi
         end=$(date +%s)
         echo "pip install torch took $((end - start)) seconds"
 
@@ -121,16 +127,18 @@ jobs:
         python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --import-result="${LOSS_FILE}" --assert-equal --steps=100
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
 
-        # MoE loss comparison: verify Qwen3 MoE FSDP8 deterministic losses match reference
+        # MoE loss comparison: verify Qwen3 MoE FSDP+TP+EP deterministic losses match reference
         if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
           MOE_LOSS_FILE="tests/assets/losses/qwen3_moe_cuda.txt"
         elif [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
           MOE_LOSS_FILE="tests/assets/losses/qwen3_moe_rocm_mi350x.txt"
         fi
 
-        echo "Checking Qwen3 MoE FSDP8 loss parity against reference"
+        echo "Checking Qwen3 MoE FSDP+TP+EP loss parity against reference"
         python3 scripts/loss_compare.py . . \
           --baseline-module=qwen3 --baseline-config=qwen3_moe_debug \
+          --baseline-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4" \
+          --test-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4" \
           --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/moe_loss_comparison" \
           --import-result="${MOE_LOSS_FILE}" --assert-equal --steps=100
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*

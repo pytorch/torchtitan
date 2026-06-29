@@ -10,6 +10,10 @@ from dataclasses import dataclass
 import torch
 from torch.nn.attention.flex_attention import and_masks
 
+from torchtitan.distributed.minimal_async_ep.api import (
+    maybe_update_minimal_async_ep_config,
+)
+
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -21,11 +25,13 @@ from torchtitan.models.common.attention import (
     get_efficient_causal_mask_mod_for_packed_document,
     VarlenAttention,
 )
+from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.nn_modules import Embedding, Linear, RMSNorm
+from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
+
 
 __all__ = ["Decoder", "TransformerBlock"]
 
@@ -136,6 +142,17 @@ class Decoder(BaseModel):
                     "Weight tying is not supported with Pipeline Parallel."
                 )
 
+            if parallelism.pipeline_parallel_degree > 1 and any(
+                layer.attention is not None
+                and isinstance(layer.attention.inner_attention, VarlenAttention.Config)
+                for layer in self.layers
+            ):
+                raise ValueError(
+                    "Pipeline Parallel is not compatible with VarlenAttention. "
+                    "Use a FlexAttention backend (attn_backend='flex' or "
+                    "'flex_flash') for pipelined models."
+                )
+
             tp = parallelism.tensor_parallel_degree
             attention = self.first_attention
             if tp > 1 and attention is not None:
@@ -176,6 +193,8 @@ class Decoder(BaseModel):
                             "(expert_parallel_degree > 1)."
                         )
 
+            maybe_update_minimal_async_ep_config(self, config)
+
             # NOTE: Inference-only callers such as the RL generator skip
             # training.seq_len sync. Generated sequence length is not known
             # ahead of time, so keep the RoPE cache at the model's max_seq_len.
@@ -201,7 +220,7 @@ class Decoder(BaseModel):
                             debug.moe_force_load_balance
                         )
 
-    # Set by the trainer when ChunkedCELoss is used, so lm_head is applied
+    # Set by the trainer when ChunkedLossWrapper is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().
     # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor
     # inputs (bool kwargs cause 'has no attribute requires_grad' errors).
@@ -269,13 +288,13 @@ class Decoder(BaseModel):
         positions: torch.Tensor,
         attn_config: BaseAttention.Config,
     ) -> AttentionMasksType:
+        assert isinstance(attn_config.inner_attention, FlexAttention.Config)
         mask_mods = [
             get_causal_mask_mod(),
             get_efficient_causal_mask_mod_for_packed_document(positions),
         ]
         B = positions.shape[0]
         seq_len = positions.shape[1]
-        assert isinstance(attn_config.inner_attention, FlexAttention.Config)
         return create_attention_mask(
             and_masks(*mask_mods),
             B,

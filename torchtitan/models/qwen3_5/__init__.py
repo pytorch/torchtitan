@@ -448,7 +448,6 @@ def _build_qwen35_moe_layers(
                         num_experts=num_experts,
                         top_k=top_k,
                         param_init=_depth_experts_init(layer_id),
-                        score_before_experts=False,
                         comm_backend=moe_comm_backend,
                         non_blocking_capacity_factor=non_blocking_capacity_factor,
                     ),
@@ -1098,7 +1097,7 @@ def model_registry(
     if converters is not None:
         validate_converter_order(converters)
         for c in converters:
-            c.build().convert(config)
+            config = c.build().convert(config)
 
     return ModelSpec(
         name="qwen3_5",

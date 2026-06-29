@@ -60,8 +60,8 @@ class AlphabetSortDataset(Configurable):
     class Config(Configurable.Config):
         seed: int = 1337420
 
-        max_turns: int = 1
-        """Turns per sample, drawn uniformly from [1, max_turns]. Leave at 1 for a single-turn controller."""
+        max_turns: int = 3
+        """Maximum turns per sample; each sample draws uniformly from [1, max_turns]."""
 
         max_names_per_turn: int = 5
         """Names introduced per turn are drawn uniformly from [1, max_names_per_turn]."""
@@ -145,9 +145,11 @@ class AlphabetSortDataset(Configurable):
             new_this_turn: set[_Author] = set(new_authors) if turn_idx > 0 else set()
             expected_names.append(
                 tuple(
-                    f"{author.display} // new name!"
-                    if author in new_this_turn
-                    else author.display
+                    (
+                        f"{author.display} // new name!"
+                        if author in new_this_turn
+                        else author.display
+                    )
                     for author in sorted(seen, key=name_sort_key)
                 )
             )

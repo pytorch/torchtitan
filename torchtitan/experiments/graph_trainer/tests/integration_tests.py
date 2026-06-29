@@ -243,13 +243,13 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--module graph_trainer.llama3",
                     "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode aot_fx_trace",
-                    "--compile.inductor_compilation full",
+                    "--compile.inductor_compilation regional",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "aot_fx_trace llama3 FSDP+TP+full_inductor",
-            "aot_fx_trace_llama3_fsdp_tp_full_inductor",
+            "aot_fx_trace llama3 FSDP+TP+regional_inductor",
+            "aot_fx_trace_llama3_fsdp_tp_regional_inductor",
             ngpu=8,
         ),
     ]
@@ -257,6 +257,52 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
 
 def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
     """DeepSeek-v3-based integration tests (require H100 machines)."""
+    ep_overlap_flex_tests = [
+        (
+            "regional",
+            "batch",
+            "layers.*",
+            "transformer_batch",
+        ),
+        (
+            "regional",
+            "batch",
+            "layers.*.moe",
+            "moe_batch",
+        ),
+        (
+            "regional",
+            "seq",
+            "layers.*.moe",
+            "moe_seq",
+        ),
+        (
+            "full",
+            "batch",
+            "layers.*",
+            "transformer_batch",
+        ),
+        (
+            "full",
+            "batch",
+            "layers.*.moe",
+            "moe_batch",
+        ),
+        (
+            "full",
+            "seq",
+            "layers.*.moe",
+            "moe_seq",
+        ),
+    ]
+
+    def ep_overlap_parallelism() -> list[str]:
+        return [
+            "--parallelism.data_parallel_shard_degree 8",
+            "--parallelism.tensor_parallel_degree 1",
+            "--parallelism.expert_parallel_degree 4",
+        ]
+
     return [
         # === JIT mode tests ===
         OverrideDefinitions(
@@ -357,16 +403,42 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                     "--module graph_trainer.deepseek_v3",
                     "--config graph_trainer_deepseek_v3_debugmodel",
                     "--compile.mode aot_fx_trace",
-                    "--compile.inductor_compilation full",
+                    "--compile.inductor_compilation regional",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
                 ],
             ],
-            "aot_fx_trace deepseek_v3 FSDP+TP+EP+full_inductor",
-            "aot_fx_trace_deepseek_v3_fsdp_tp_ep_full_inductor",
+            "aot_fx_trace deepseek_v3 FSDP+TP+EP+regional_inductor",
+            "aot_fx_trace_deepseek_v3_fsdp_tp_ep_regional_inductor",
             ngpu=8,
         ),
+        *[
+            OverrideDefinitions(
+                [
+                    [
+                        "--module graph_trainer.deepseek_v3",
+                        "--config graph_trainer_deepseek_v3_debugmodel",
+                        "--compile.mode aot_fx_trace",
+                        f"--compile.inductor_compilation {inductor_compilation}",
+                        "--compile.ep_overlap.enabled",
+                        "--compile.ep_overlap.strategy graph",
+                        f"--compile.ep_overlap.chunk_dim {mode}",
+                        f"--compile.ep_overlap.module_fqn {modules}",
+                        *(
+                            ["--compile.enable_fsdp_dense_region_overlap"]
+                            if modules == "layers.*.moe"
+                            else []
+                        ),
+                        *ep_overlap_parallelism(),
+                    ],
+                ],
+                f"aot_fx_trace deepseek_v3 FlexAttn {inductor_compilation}_inductor ep_overlap {variant}",
+                f"aot_fx_trace_deepseek_v3_flexattn_{inductor_compilation}_inductor_ep_overlap_{variant}",
+                ngpu=8,
+            )
+            for inductor_compilation, mode, modules, variant in ep_overlap_flex_tests
+        ],
         OverrideDefinitions(
             [
                 [
@@ -382,6 +454,23 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_deepseek_v3_hybridep",
             ngpu=4,
             disabled=True,
+        ),
+        # MinimalAsyncEP avoids the standard all-to-all load-balancing path and
+        # is expected to remain CUDA-graphable under its constrained topology.
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel_minimal_async_ep",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.memory_policy full",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.expert_parallel_degree 4",
+                ],
+            ],
+            "aot_fx_trace deepseek_v3 MinimalAsyncEP",
+            "aot_fx_trace_deepseek_v3_minimal_async_ep",
+            ngpu=4,
         ),
     ]
 
@@ -494,11 +583,17 @@ def _build_autoparallel_tests() -> list[OverrideDefinitions]:
         # positions before attention_masks.
         # TODO: re-test on FlexAttention once BlockMask survives AutoParallel
         # graph capture.
+        # TODO: Disabled due to upstream AutoParallel/PyTorch API skew. PyTorch
+        # #186754 (2026-06-24) removed propagate_single_input_strategy in favor
+        # of propagate_single_input_single_dim_strategy, but AutoParallel's
+        # convert_element_type_rule still imports the old name, so the sharding
+        # optimizer fails with ImportError. Re-enable once AutoParallel migrates.
+        # https://github.com/pytorch/torchtitan/issues/3699
         OverrideDefinitions(
             [
                 [
                     "--module graph_trainer.llama3",
-                    "--config graph_trainer_llama3_debugmodel_sdpa",
+                    "--config graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss",
                     "--compile.mode aot_fx_trace",
                     "--compile.enable_autoparallel",
                     "--parallelism.data_parallel_shard_degree 2",
@@ -508,6 +603,7 @@ def _build_autoparallel_tests() -> list[OverrideDefinitions]:
             "autoparallel llama3 FSDP+TP",
             "autoparallel_llama3_fsdp_tp",
             ngpu=4,
+            disabled=True,
         ),
     ]
 
@@ -527,7 +623,6 @@ def _build_autoparallel_h100_tests() -> list[OverrideDefinitions]:
                     "--compile.enable_autoparallel",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
-                    "--parallelism.disable_loss_parallel",
                 ],
             ],
             "autoparallel deepseek_v3 EFSDP+EP",

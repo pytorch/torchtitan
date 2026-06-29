@@ -9,10 +9,10 @@ Unified approach for running TorchTitan models with vLLM inference.
 
 To register TorchTitan models with vLLM:
     from torchtitan.components.checkpoint import CheckpointManager
-    from torchtitan.experiments.rl.models.vllm_registry import registry_to_vllm
+    from torchtitan.experiments.rl.models.vllm_registry import register_to_vllm
 
     # Standalone inference (loads HF weights):
-    registry_to_vllm(
+    register_to_vllm(
         model_spec,
         parallelism=parallelism_config,
         compile_config=compile_config,
@@ -24,7 +24,7 @@ To register TorchTitan models with vLLM:
     )
 
     # RL loop (skip HF loading, weights from TorchStore):
-    registry_to_vllm(
+    register_to_vllm(
         model_spec,
         parallelism=parallelism_config,
         compile_config=compile_config,
@@ -32,11 +32,26 @@ To register TorchTitan models with vLLM:
     )
 """
 
-from torchtitan.experiments.rl.models.vllm_registry import registry_to_vllm
+import os
+import sys
+import warnings
+
+# Avoid memory fragmentation and peak reserved memory increasing over time
+# To overwrite, set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
+if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+    if "torch" in sys.modules:
+        warnings.warn(
+            "The 'torch' module has already been imported. "
+            "Setting PYTORCH_CUDA_ALLOC_CONF may not have an effect."
+            "For best results, set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True before importing 'torch'."
+        )
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+from torchtitan.experiments.rl.models.vllm_registry import register_to_vllm
 from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
 
 
 __all__ = [
     "VLLMModelWrapper",
-    "registry_to_vllm",  # Export register function for manual use
+    "register_to_vllm",  # Export register function for manual use
 ]

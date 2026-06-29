@@ -4,27 +4,75 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import contextlib
 import math
 import os
 from abc import abstractmethod
 from collections.abc import Iterable
 from datetime import timedelta
-from typing import Protocol
+from typing import Protocol, TYPE_CHECKING
 
 import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
 import torch.distributed.tensor._random
 import torch.distributed.tensor.parallel
+from spmd_types.checker import typecheck as spmd_typecheck
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.placement_types import Placement, Shard
 
 from torchtitan.config import CommConfig, DebugConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
+
+if TYPE_CHECKING:
+    from torchtitan.distributed.parallel_dims import ParallelDims
+
+
+_spmd_backend = "default"
+
+
+def set_spmd_backend(spmd_backend: str) -> None:
+    """Set the active SPMD backend for distributed runtime helpers."""
+    global _spmd_backend
+    _spmd_backend = spmd_backend
+
+
+def get_spmd_backend() -> str:
+    """Return the active SPMD backend."""
+    return _spmd_backend
+
+
+def check_dtensor_placements_match(
+    actual: tuple[Placement, ...],
+    expected: tuple[Placement, ...],
+    tensor_ndim: int,
+) -> bool:
+    """Compare DTensor placements, normalizing negative Shard dims to tensor rank."""
+    if len(actual) != len(expected):
+        return False
+
+    def normalize_dim(dim: int, ndim: int) -> int:
+        return dim + ndim if dim < 0 else dim
+
+    for actual_placement, expected_placement in zip(actual, expected, strict=True):
+        if isinstance(actual_placement, Shard) and isinstance(
+            expected_placement, Shard
+        ):
+            if normalize_dim(actual_placement.dim, tensor_ndim) != normalize_dim(
+                expected_placement.dim, tensor_ndim
+            ):
+                return False
+            continue
+
+        if actual_placement != expected_placement:
+            return False
+
+    return True
 
 
 def _dist_reduce(
@@ -260,7 +308,6 @@ def set_batch_invariance(enable: bool) -> None:
 
     # Register batch-invariant ATen overrides via upstream package
     # https://github.com/thinking-machines-lab/batch_invariant_ops
-    # pyrefly: ignore[missing-import]
     from batch_invariant_ops import enable_batch_invariant_mode as _upstream_enable
 
     _upstream_enable()
@@ -314,18 +361,37 @@ def set_batch_invariance(enable: bool) -> None:
     )
 
 
-class TrainContext(Protocol):
+class SpmdContext(Protocol):
     @abstractmethod
     def __call__(self) -> contextlib.AbstractContextManager[None]:
         pass
 
 
-def get_train_context(enable_loss_parallel: bool) -> TrainContext:
+def get_spmd_context(
+    *,
+    parallel_dims: "ParallelDims | None" = None,
+    spmd_typechecking: bool = False,
+) -> SpmdContext:
     @contextlib.contextmanager
     def context():
         with contextlib.ExitStack() as stack:
-            if enable_loss_parallel:
-                stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
+            if parallel_dims is not None and parallel_dims.spmd_backend == "spmd_types":
+                if not parallel_dims._single_axis_meshes:
+                    parallel_dims.build_mesh()
+                from torchtitan.distributed.spmd_types import (
+                    set_current_spmd_mesh,
+                    set_spmd_meshes,
+                    spmd_dense_mesh,
+                )
+
+                set_spmd_meshes(
+                    dense_mesh=parallel_dims.spmd_dense_mesh(),
+                    sparse_mesh=parallel_dims.spmd_sparse_mesh(),
+                )
+
+                stack.enter_context(set_current_spmd_mesh(spmd_dense_mesh()))
+            if spmd_typechecking:
+                stack.enter_context(spmd_typecheck(local=False))
 
             yield
 
@@ -426,13 +492,12 @@ def init_distributed(
 
     # disable autograd multithreading, to enable TLS DeviceMesh stack for spmd_types backend.
     # this is needed for AC functionality; multi-threaded autograd means BWD threads performing recompute,
-    # cannot access PGs, e.g. current_mesh().get_group("tp") to perform the collectives they need.
+    # cannot access PGs, e.g. current_spmd_mesh().get_group("tp") to perform the collectives they need.
     torch.autograd.set_multithreading_enabled(False)
 
     device_id: torch.device | None = None
     if comm_config.mode == "torchcomms":
         try:
-            # pyrefly: ignore[missing-import]
             import torchcomms  # noqa: F401
         except ImportError as err:
             raise ImportError(
@@ -481,7 +546,7 @@ def set_pg_timeouts(
         for mesh in parallel_dims.get_all_one_dimensional_meshes().values()
     ] + [None]
     for group in groups:
-        torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+        torch.distributed.set_timeout(timeout, group)
 
 
 @torch.no_grad()

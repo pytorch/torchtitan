@@ -53,33 +53,6 @@ def validate_config(
             )
 
 
-def _get_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
-    """Build ``DataParallelMeshDims`` for dense (non-MoE) parameters.
-
-    ``dp_shard`` is always included (force-kept-alive in the dense storage mesh
-    even at size 1) so FSDP can pick the DP submesh out of the multi-axis
-    storage mesh inside ``DeviceMesh._concatenate([dp_mesh, tp_mesh])``.
-    """
-    assert parallel_dims.spmd_backend in (
-        "full_dtensor",
-        "spmd_types",
-    ), "_get_dp_mesh_axes is only meaningful under full_dtensor or spmd_types"
-    shard_axes: list[str] = ["dp_shard"]
-    if parallel_dims.cp_enabled:
-        shard_axes.append("cp")
-
-    if len(shard_axes) > 1:
-        shard: str | tuple[str, ...] | None = tuple(shard_axes)
-    elif shard_axes:
-        shard = shard_axes[0]
-    else:
-        shard = None
-
-    replicate = "dp_replicate" if parallel_dims.dp_replicate_enabled else None
-
-    return DataParallelMeshDims(shard=shard, replicate=replicate)
-
-
 _DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
 _SPARSE_STORAGE_AXES = ["dp_replicate", "efsdp", "ep"]
 
@@ -96,15 +69,41 @@ def _get_sparse_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDim
 
 def resolve_fsdp_mesh(
     parallel_dims: ParallelDims,
-) -> tuple[DeviceMesh, DataParallelMeshDims]:
-    """Select the dense storage mesh and DataParallelMeshDims."""
+) -> tuple[DeviceMesh, DataParallelMeshDims | None]:
+    """Select the dense storage mesh and DataParallelMeshDims.
+
+    ``dp_shard`` is always included (force-kept-alive in the dense storage mesh
+    even at size 1) so FSDP can pick the DP submesh out of the multi-axis
+    storage mesh inside ``DeviceMesh._concatenate([dp_mesh, tp_mesh])``.
+    """
     assert parallel_dims.spmd_backend in (
         "full_dtensor",
         "spmd_types",
     ), "resolve_fsdp_mesh is only meaningful under full_dtensor or spmd_types"
     storage_mesh = parallel_dims.get_activated_mesh(_DENSE_STORAGE_AXES)
     assert storage_mesh is not None
-    return storage_mesh, _get_dp_mesh_axes(parallel_dims)
+
+    if parallel_dims.spmd_backend == "spmd_types" and storage_mesh.size() == 1:
+        # Under spmd_types backend, assert_type filters out inactive size-1
+        # axes, so params get no annotations under a size-1 full mesh. That
+        # leaves fully_shard() with no SPMD annotations to translate to DTensor
+        # params, so do not pass a DataParallelMeshDims object to FSDP.
+        return storage_mesh, None
+
+    shard_axes: list[str] = ["dp_shard"]
+    if parallel_dims.cp_enabled:
+        shard_axes.append("cp")
+
+    if len(shard_axes) > 1:
+        shard: str | tuple[str, ...] | None = tuple(shard_axes)
+    elif shard_axes:
+        shard = shard_axes[0]
+    else:
+        shard = None
+
+    replicate = "dp_replicate" if parallel_dims.dp_replicate_enabled else None
+
+    return storage_mesh, DataParallelMeshDims(shard=shard, replicate=replicate)
 
 
 def resolve_sparse_fsdp_mesh(

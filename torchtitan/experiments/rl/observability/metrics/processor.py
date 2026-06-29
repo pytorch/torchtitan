@@ -53,17 +53,19 @@ class MetricsProcessor(Configurable):
 
         console_log_keys_train: list[str] | None = field(
             default_factory=lambda: [
+                # --- the perf/ panel: the 12 metrics that diagnose any bottleneck at a glance ---
+                # 7 trainer/buffer keys (everything under perf/); 5 generator keys below.
+                "perf/",
+                "generator/inflight_requests_at_completion/max",
+                "generator/inter_token_latency_ms/mean",
+                "generator/queue_time_ms/mean",
+                "generator/decode_time_ms/mean",
+                "generator/num_cached_tokens/mean",
+                # --- learning signals (not perf, but you want them in the same glance) ---
                 "loss/mean",
-                "loss/ratio/clipped_frac",
-                "bit_wise/logprob_diff/max",
-                "reward/_mean",
-                "reward/_max",
-                "reward/zero_std_frac",
-                "rollout/response_length/max",
+                "rollout_reward/_mean",
                 "train/grad_norm/mean",
                 "train/lr",
-                "perf/tokens_per_second",
-                "timing/step",
             ]
         )
         """Regex search patterns selecting console keys for train log lines.

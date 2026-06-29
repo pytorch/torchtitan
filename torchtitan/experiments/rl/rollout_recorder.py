@@ -9,15 +9,25 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
+from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.rollout import Rollout, RolloutGroup, RolloutTurn
 from torchtitan.observability import structured_logger as sl
 
-# TODO(recorders): if a second recorder appears (e.g. an episode recorder), generalize to a list of
+# TODO(recorders): if a second recorder appears (e.g. an training_sample recorder), generalize to a list of
 # recorders behind one interface, instead of bespoke per-type classes.
+
+
+def _json_default(value: Any) -> Any:
+    if is_dataclass(value) and not isinstance(value, type):
+        return asdict(value)
+    if isinstance(value, Enum):
+        return value.value
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 class KeepExtremeRewardsFilter(Configurable):
@@ -61,7 +71,7 @@ class RolloutSampleRecorder(Configurable):
     Example:
 
         recorder = RolloutSampleRecorder.Config().build(dump_dir="outputs/rl")
-        recorder.record(step=3, is_validation=False, rollout_groups=groups)
+        recorder.record(is_validation=False, rollout_groups=groups)
         # -> outputs/rl/rollout_samples.jsonl, one JSON line per recorded rollout
     """
 
@@ -87,20 +97,21 @@ class RolloutSampleRecorder(Configurable):
 
     @sl.log_trace_span("rollout_record")
     def record(
-        self, *, step: int, is_validation: bool, rollout_groups: list[RolloutGroup]
+        self,
+        *,
+        is_validation: bool,
+        rollout_groups: list[RolloutGroup],
     ) -> None:
         """Append the filtered rollouts to the JSONL, one JSON object per rollout."""
-        lines = [
-            json.dumps(
-                {
-                    "step": step,
-                    "is_validation": is_validation,
-                    **self._encode_rollout(rollout),
-                }
-            )
-            + "\n"
-            for rollout in self._filter(rollout_groups)
-        ]
+        lines = []
+        for rollout in self._filter(rollout_groups):
+            record = {
+                "is_validation": is_validation,
+                **self._encode_rollout(rollout),
+            }
+            # Rollout messages can hold objects json.dumps can't serialize
+            # natively, e.g. tool-calling results
+            lines.append(json.dumps(record, default=_json_default) + "\n")
         with self._path.open("a", encoding="utf-8") as file:
             file.write("".join(lines))
 
@@ -108,7 +119,7 @@ class RolloutSampleRecorder(Configurable):
         """One JSON object per rollout: its scalar fields + each turn (see `_encode_turn`)."""
         return {
             "group_id": rollout.group_id,
-            "sample_id": rollout.sample_id,
+            "rollout_id": rollout.rollout_id,
             "status": rollout.status,
             "reward": rollout.reward,
             "reward_breakdown": rollout.reward_breakdown,
@@ -120,7 +131,9 @@ class RolloutSampleRecorder(Configurable):
         """One JSON object per turn. The large token / logprob arrays are opt-in
         (`log_tensors` / `log_logprobs`)."""
         encoded = {
-            "policy_version": turn.policy_version,
+            "turn_id": turn.rollout_id.turn_id,
+            "min_policy_version": turn.min_policy_version,
+            "max_policy_version": turn.max_policy_version,
             "prompt_messages": turn.prompt_messages,
             "completion_message": turn.completion_message,
             "env_messages": turn.env_messages,

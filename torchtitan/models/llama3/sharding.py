@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 def set_llama3_sharding_config(
     config: "Llama3Model.Config",
     *,
-    loss_parallel: bool,
     enable_sp: bool,
 ) -> None:
     """Fill ``sharding_config`` on all Llama3 sub-configs.
@@ -36,11 +35,8 @@ def set_llama3_sharding_config(
     placements under FSDP-only) are skipped at parallelize time.
 
     ``enable_sp`` controls SequenceParallel (decoupled from TP).
-    ``loss_parallel`` controls whether the output projection is vocab-parallel.
     """
-    set_decoder_sharding_config(
-        config, loss_parallel=loss_parallel, enable_sp=enable_sp
-    )
+    set_decoder_sharding_config(config, enable_sp=enable_sp)
     for layer_cfg in config.layers:
         _set_llama3_layer_sharding(layer_cfg, enable_sp=enable_sp)
 
@@ -64,7 +60,7 @@ def _set_llama3_layer_sharding(
     attn_x_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.R)
+        else dense_activation_placement(tp=spmd.I)
     )
 
     set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)

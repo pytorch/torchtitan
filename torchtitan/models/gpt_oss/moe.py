@@ -9,14 +9,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_size
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.protocols.module import Module
 
 
+@spmd.register_autograd_function
 class ScaleBiasForward(torch.autograd.Function):
     """
     Custom autograd function that scales bias in forward pass but not in backward.
@@ -27,17 +31,37 @@ class ScaleBiasForward(torch.autograd.Function):
 
     @staticmethod
     # pyrefly: ignore [bad-override]
-    def forward(ctx, bias, tp_degree):
+    def forward(ctx, bias, tp_degree, dtype):
         ctx.tp_degree = tp_degree
         if tp_degree > 1:
-            return bias / tp_degree
-        return bias
+            bias = bias / tp_degree
+        return bias.to(dtype)
+
+    @staticmethod
+    def typecheck_forward(bias, tp_degree, dtype):
+        """
+        Typecheck for bias scaling, already interleaved to num tokens shape.
+        If EP enabled, V on all axes. If disabled, TP axis: R->V.
+        Technically R->P, but easier to mix in local region as V.
+        TODO(pianpwk): .to() dtype casts in LocalTokenDispatcher don't propagate Partial;
+        we would like a spmd_types API where callers are conscious of numerics loss.
+        """
+        enable_ep = spmd_mesh_size("ep") > 1
+        if enable_ep:
+            in_type = out_type = spmd.V
+        else:
+            in_type = {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R}
+            out_type = {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V}
+        spmd.assert_type(bias, in_type)
+        out = ScaleBiasForward.apply(bias, tp_degree, dtype)
+        spmd.assert_type(out, out_type)
+        return out
 
     @staticmethod
     # pyrefly: ignore [bad-override]
     def backward(ctx, grad_output):
         # Don't scale the gradient - pass it through as-is
-        return grad_output, None
+        return grad_output, None, None
 
 
 def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
@@ -47,7 +71,7 @@ def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
     x_linear = x_linear.clamp(min=-limit, max=limit)
     out_glu = x_glu * torch.sigmoid(alpha * x_glu)
     # Note we add an extra bias of 1 to the linear layer
-    return out_glu * (x_linear + 1)
+    return torch.addcmul(out_glu, out_glu, x_linear)
 
 
 class GptOssGroupedExperts(Module):
@@ -113,6 +137,14 @@ class GptOssGroupedExperts(Module):
                 tp_dim_idx = mesh_dim_names.index("tp")
                 tp_degree = self.mlp1_weight_EGD.device_mesh.size(tp_dim_idx)
 
+        if (
+            get_spmd_backend() == "spmd_types"
+            and spmd.is_type_checking()
+            and spmd_mesh_size("ep") == 1
+        ):
+            for axis in ("dp", "cp"):
+                spmd.mutate_type(num_tokens_per_expert_E, axis, src=spmd.P, dst=spmd.V)
+
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         # Pad num_tokens_per_expert_E with tail slack so that repeat_interleave
         # with output_size=x_RD.shape[0] directly produces a static-shaped output,
@@ -154,8 +186,8 @@ class GptOssGroupedExperts(Module):
         b2_RD = b2.repeat_interleave(
             num_tokens_per_expert_long, dim=0, output_size=x_RD.shape[0]
         )
-        b2_RD = ScaleBiasForward.apply(b2_RD, tp_degree)
-        return h_RD + b2_RD.to(h_RD.dtype)
+        b2_RD = ScaleBiasForward.apply(b2_RD, tp_degree, h_RD.dtype)
+        return h_RD + b2_RD
 
     def forward(
         self,
@@ -164,12 +196,13 @@ class GptOssGroupedExperts(Module):
         topk_expert_ids_BLK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
         *,
-        num_local_tokens_after_padding: int,
+        num_local_tokens_after_seq_dim_padding: int,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add."""
         B, L, D = x_BLD.shape
         K = topk_scores_BLK.size(-1)
         T = B * L
+        local_seq_len_after_padding = num_local_tokens_after_seq_dim_padding // B
         x_TD = x_BLD.view(T, D)
         topk_scores_TK = topk_scores_BLK.view(T, K)
         topk_expert_ids_TK = topk_expert_ids_BLK.view(T, K)
@@ -178,17 +211,22 @@ class GptOssGroupedExperts(Module):
             num_global_tokens_per_local_expert_e,
             metadata,
         ) = self.token_dispatcher.dispatch(
-            x_TD, topk_scores_TK, topk_expert_ids_TK, num_local_tokens_per_expert_E
+            x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
         )
-        routed_output_RD = self._experts_forward(
-            routed_input_RD, num_global_tokens_per_local_expert_e
-        )
+        with maybe_set_sparse_mesh():
+            routed_output_RD = self._experts_forward(
+                routed_input_RD, num_global_tokens_per_local_expert_e
+            )
 
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
             x_TD,
-            num_local_tokens_after_padding=num_local_tokens_after_padding,
+            num_local_tokens_after_padding=num_local_tokens_after_seq_dim_padding,
+            local_seq_len_after_padding=local_seq_len_after_padding,
         )
         # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
         # won't cause _StridedShard in the downstream view (e.g., CP is used).

@@ -14,9 +14,10 @@ from torch.optim import swap_in_optimizer_params_and_state
 from torch.testing._internal.common_fsdp import FSDPTest
 
 from torchtitan.experiments.graph_trainer.chunked_loss import (
-    ChunkedCELossWithParamGrads,
+    ChunkedLossWrapperWithParamGrads,
 )
 from torchtitan.experiments.graph_trainer.common_utils import (
+    _maybe_materialize_grad_for_param_layout,
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
@@ -116,7 +117,256 @@ class SimpleMLP(nn.Module):
         return self.fc2(torch.relu(self.fc1(self.embed(x))))
 
 
+class _TraceableWrapper(torch.Tensor):
+    elem: torch.Tensor
+
+    __slots__ = ["elem"]
+
+    @staticmethod
+    def __new__(cls, elem):
+        wrapper = torch.Tensor._make_wrapper_subclass(
+            cls,
+            elem.size(),
+            dtype=elem.dtype,
+            layout=elem.layout,
+            device=elem.device,
+            requires_grad=elem.requires_grad,
+            strides=elem.stride(),
+            storage_offset=elem.storage_offset(),
+        )
+        wrapper.elem = elem
+        return wrapper
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+        raise RuntimeError("Test wrapper should be rejected before tracing")
+
+    def __tensor_flatten__(self):
+        return ["elem"], None
+
+    @staticmethod
+    def __tensor_unflatten__(inner_tensors, metadata, outer_size, outer_stride):
+        return _TraceableWrapper(inner_tensors["elem"])
+
+
 class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
+    def _trace_mark_dynamic_value_range(self, *, min_value=None, max_value=None):
+        from torch._dynamo import mark_dynamic
+
+        def forward(x):
+            return x.sin()
+
+        kwargs = {}
+        if min_value is not None:
+            kwargs["min"] = min_value
+        if max_value is not None:
+            kwargs["max"] = max_value
+
+        x = torch.randn(4, 4)
+        mark_dynamic(x, 0, **kwargs)
+
+        traced = minimal_fx_tracer(forward)(x)
+        fake_x = next(
+            node.meta["val"]
+            for node in traced.gm.graph.nodes
+            if node.op == "placeholder"
+        )
+        sym = fake_x.shape[0].node.expr
+        return fake_x.shape[0].node.shape_env.var_to_range[sym]
+
+    def test_fakeify_input_copies_only_shape_annotations(self):
+        from torch._dynamo import mark_dynamic
+        from torch._subclasses import FakeTensorMode
+        from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+        from torchtitan.experiments.graph_trainer.dynamic_shapes import _fakeify_input
+
+        x = torch.randn(2, 4)
+        mark_dynamic(x, 0)
+        x._graph_trainer_unrelated_state = "must not be copied"
+
+        fake_mode = FakeTensorMode(shape_env=ShapeEnv(), static_shapes=False)
+        with fake_mode:
+            fake_x = _fakeify_input(fake_mode, x, input_name="x")
+
+        self.assertTrue(hasattr(fake_x, "_dynamo_dynamic_indices"))
+        self.assertTrue(hasattr(fake_x, "_dynamo_dynamic_range"))
+        self.assertFalse(hasattr(fake_x, "_graph_trainer_unrelated_state"))
+
+    def test_mark_dynamic_min_max_preserves_range(self):
+        value_range = self._trace_mark_dynamic_value_range(min_value=2, max_value=8)
+
+        self.assertEqual(value_range.lower, 2)
+        self.assertEqual(value_range.upper, 8)
+
+    def test_mark_dynamic_one_sided_ranges_preserve_bounds(self):
+        from torch.utils._sympy.numbers import int_oo
+
+        # ShapeEnv tightens dynamic tensor sizes to exclude 0/1, so a max-only
+        # user range is observed as [2, max] after fakeification.
+        cases = (
+            ("min_only", {"min_value": 2}, 2, int_oo),
+            ("max_only", {"max_value": 8}, 2, 8),
+        )
+        for name, kwargs, expected_lower, expected_upper in cases:
+            with self.subTest(name=name):
+                value_range = self._trace_mark_dynamic_value_range(**kwargs)
+
+                self.assertEqual(value_range.lower, expected_lower)
+                self.assertEqual(value_range.upper, expected_upper)
+
+    def test_mark_dynamic_wrapper_subclass_rejected(self):
+        from torch._dynamo import mark_dynamic
+
+        wrapper = _TraceableWrapper(torch.randn(2, 4))
+        mark_dynamic(wrapper, 0)
+
+        def forward(x):
+            return x
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "only supports marked dynamic dims on plain tensor inputs",
+        ):
+            minimal_fx_tracer(forward)(wrapper)
+
+    def test_nested_wrapper_subclass_marked_inner_rejected(self):
+        from torch._dynamo import mark_dynamic
+        from torch._dynamo.decorators import mark_unbacked
+
+        def forward(x):
+            return x
+
+        for marker in (mark_dynamic, mark_unbacked):
+            with self.subTest(marker=marker.__name__):
+                inner = torch.randn(2, 4)
+                marker(inner, 0)
+                wrapper = _TraceableWrapper(_TraceableWrapper(inner))
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "only supports marked dynamic dims on plain tensor inputs",
+                ):
+                    minimal_fx_tracer(forward)(wrapper)
+
+    def test_mark_dynamic_batch_and_seq_dims_with_rope(self):
+        from torch._dynamo import mark_dynamic
+
+        from torchtitan.models.common.rope import (
+            _reshape_for_broadcast,
+            ComplexRoPE,
+            CosSinRoPE,
+        )
+
+        def forward(x, xq, xk, freqs_cis, rope_cache, positions):
+            complex_cache = _reshape_for_broadcast(
+                freqs_cis, (*x.shape[:-1], x.shape[-1] // 2), positions
+            )
+            single, _ = ComplexRoPE.apply_rotary_emb(x, x, complex_cache)
+            cos_sin_cache = _reshape_for_broadcast(rope_cache, xq.shape, positions)
+            q, k = CosSinRoPE.apply_rotary_emb(xq, xk, cos_sin_cache)
+            return single + q + k
+
+        batch, seq, heads, head_dim = 2, 4, 1, 8
+        position_cases = {
+            "none": None,
+            "single": torch.arange(seq).unsqueeze(0),
+            "batched": torch.arange(seq).repeat(batch, 1),
+        }
+
+        for name, positions in position_cases.items():
+            with self.subTest(positions=name):
+                x = torch.randn(batch, seq, heads, head_dim)
+                xq = torch.randn(batch, seq, heads, head_dim)
+                xk = torch.randn(batch, seq, heads, head_dim)
+                freqs = torch.randn(seq * 2, head_dim // 2)
+                freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+                rope_cache = torch.randn(seq * 2, head_dim * 2)
+
+                for tensor in (x, xq, xk):
+                    mark_dynamic(tensor, 0)
+                    mark_dynamic(tensor, 1)
+                if positions is not None:
+                    mark_dynamic(positions, 1)
+                    if positions.shape[0] > 1:
+                        mark_dynamic(positions, 0)
+
+                traced = minimal_fx_tracer(forward)(
+                    x, xq, xk, freqs_cis, rope_cache, positions
+                )
+                self.assertTrue(
+                    torch.equal(
+                        forward(x, xq, xk, freqs_cis, rope_cache, positions),
+                        run_traced(traced)(x, xq, xk, freqs_cis, rope_cache, positions),
+                    )
+                )
+
+    def test_mark_unbacked_positions_batch_dim_with_rope(self):
+        from torch._dynamo.decorators import mark_unbacked
+
+        from torchtitan.models.common.rope import _reshape_for_broadcast, CosSinRoPE
+
+        def forward(xq, xk, rope_cache, positions):
+            cos_sin_cache = _reshape_for_broadcast(rope_cache, xq.shape, positions)
+            q, k = CosSinRoPE.apply_rotary_emb(xq, xk, cos_sin_cache)
+            return q + k
+
+        batch, seq, heads, head_dim = 4, 4, 1, 8
+        xq = torch.randn(batch, seq, heads, head_dim)
+        xk = torch.randn(batch, seq, heads, head_dim)
+        rope_cache = torch.randn(seq * 2, head_dim * 2)
+        positions = torch.arange(seq).repeat(batch, 1)
+        for tensor in (xq, xk, positions):
+            mark_unbacked(
+                tensor,
+                0,
+                hint_override=batch,
+                min=1,
+                max=batch,
+                shape_id="batch",
+            )
+
+        traced = minimal_fx_tracer(forward)(xq, xk, rope_cache, positions)
+
+        self.assertTrue(
+            torch.equal(
+                forward(xq, xk, rope_cache, positions),
+                run_traced(traced)(xq, xk, rope_cache, positions),
+            )
+        )
+
+    def test_rope_symbolic_positions_compile_fullgraph(self):
+        from torchtitan.models.common.rope import _reshape_for_broadcast
+
+        @torch.compile(backend="eager", fullgraph=True, dynamic=True)
+        def forward(xq, rope_cache, positions):
+            return _reshape_for_broadcast(rope_cache, xq.shape, positions)
+
+        seq, head_dim = 5, 8
+        xq = torch.randn(4, seq, 1, head_dim)
+        rope_cache = torch.randn(seq * 2, head_dim * 2)
+        positions = torch.arange(seq).repeat(xq.shape[0], 1)
+
+        self.assertTrue(
+            torch.equal(
+                forward(xq, rope_cache, positions),
+                _reshape_for_broadcast(rope_cache, xq.shape, positions),
+            )
+        )
+
+    def test_maybe_materialize_grad_for_param_layout_restores_param_strides(self):
+        param = torch.empty_strided((2, 3), (1, 2))
+        grad = torch.arange(6.0).reshape(2, 3)
+
+        materialized = _maybe_materialize_grad_for_param_layout(param, grad)
+
+        self.assertEqual(materialized.stride(), param.stride())
+        self.assertTrue(torch.equal(materialized, grad))
+        self.assertIs(
+            _maybe_materialize_grad_for_param_layout(param, materialized),
+            materialized,
+        )
+
     def test_mark_unbacked_mixed_with_static_input_replay(self):
         from torch._dynamo.decorators import mark_unbacked
 
@@ -188,6 +438,26 @@ class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
         self.assertEqual(fake_x.size(1), 4)
         self.assertTrue(torch.equal(forward(x_min), run_traced(traced)(x_min)))
         self.assertTrue(torch.equal(forward(x_max), run_traced(traced)(x_max)))
+
+    def test_mark_unbacked_input_symbol_is_not_pending_fresh(self):
+        from torch._dynamo.decorators import mark_unbacked
+
+        def forward(x):
+            return x.sin()
+
+        x = torch.randn(3, 4)
+        mark_unbacked(x, 0, min=2, max=5)
+
+        traced = minimal_fx_tracer(forward)(x)
+        fake_x = next(
+            node.meta["val"]
+            for node in traced.gm.graph.nodes
+            if node.op == "placeholder"
+        )
+        shape_env = fake_x.shape[0].node.shape_env
+
+        self.assertEqual(shape_env.pending_fresh_unbacked_symbols, [])
+        self.assertEqual(shape_env.ignorable_fresh_unbacked_symbols, [])
 
     def test_mark_unbacked_preserves_unbacked_placeholder_dim(self):
         from torch._dynamo.decorators import mark_unbacked
@@ -365,7 +635,7 @@ class TestTraceModule(unittest.TestCase):
         for gr, gt in zip(grads_ref, grads_tr, strict=True):
             self.assertTrue(torch.equal(gr, gt))
 
-    def test_chunked_ce_loss_train_step(self):
+    def test_chunked_loss_train_step(self):
         D, V, num_chunks = 32, 257, 4
         lm_head_ref = nn.Linear(D, V, bias=False).to(
             device=self.DEVICE, dtype=self.DTYPE
@@ -387,11 +657,11 @@ class TestTraceModule(unittest.TestCase):
         )
 
         def train_step(lm_head, hidden_states, labels):
-            loss_fn = ChunkedCELossWithParamGrads(
-                ChunkedCELossWithParamGrads.Config(num_chunks=num_chunks)
+            loss_fn = ChunkedLossWrapperWithParamGrads(
+                ChunkedLossWrapperWithParamGrads.Config(num_chunks=num_chunks)
             )
             loss_fn.set_lm_head(lm_head)
-            loss = loss_fn(hidden_states, labels)
+            loss, _ = loss_fn(hidden_states, labels)
             grads = torch.autograd.grad(loss, [hidden_states, *lm_head.parameters()])
             return [loss, *grads]
 
@@ -849,7 +1119,7 @@ class TestTraceDTensor(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "only supports mark_unbacked\\(\\) on plain tensor inputs",
+            "only supports marked dynamic dims on plain tensor inputs",
         ):
             minimal_fx_tracer(forward)(tokens_dt)
 
@@ -1447,7 +1717,9 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.gpt_oss import gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        config = gptoss_configs["debugmodel"](moe_comm_backend="standard")
+        config = gptoss_configs["debugmodel"](
+            moe_comm_backend="standard", attn_backend="flex"
+        )
         vocab_size = config.vocab_size
         model_ref = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         model_test = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
@@ -1496,7 +1768,9 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.gpt_oss import gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        config = gptoss_configs["debugmodel"](moe_comm_backend="standard")
+        config = gptoss_configs["debugmodel"](
+            moe_comm_backend="standard", attn_backend="flex"
+        )
         model = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         annotate_module_fqns(model)
 
@@ -1713,7 +1987,9 @@ class TestTraceFSDP(FSDPTest):
         from torchtitan.models.gpt_oss import gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        config = gptoss_configs["debugmodel"](moe_comm_backend="standard")
+        config = gptoss_configs["debugmodel"](
+            moe_comm_backend="standard", attn_backend="flex"
+        )
         seq_len = 128
         causal = get_causal_mask_mod()
         sw_size = config.layers[0].attention.sliding_window_size
@@ -1777,7 +2053,7 @@ class TestTraceContextParallel(FSDPTest):
                 config.parallelism.data_parallel_shard_degree = dp_shard_degree
                 config.parallelism.context_parallel_degree = context_parallel_degree
                 config.parallelism.tensor_parallel_degree = 1
-                config.activation_checkpoint.mode = "none"
+                config.activation_checkpoint = None
                 config.compile.enable = False
                 config.compile.enable_passes = False
                 config.debug.enable_structured_logging = False

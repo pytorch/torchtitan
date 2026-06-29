@@ -24,13 +24,9 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import LossFunction
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    CompileConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import ModuleDict, ModuleList
@@ -72,7 +68,7 @@ def pipeline_llm(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
+    ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
     device: torch.device,
     model_config: BaseModel.Config,
@@ -275,11 +271,17 @@ def _build_pipeline_schedule(
             "PipelineScheduleSingle is an abstract base class. "
             "Use a concrete single-stage schedule such as GPipe or 1F1B."
         )
+
+    # Pipeline schedules expect a bare scalar loss tensor.
+    def _scalar_loss_fn(*args: object, **kwargs: object) -> torch.Tensor:
+        loss, _ = loss_fn(*args, **kwargs)
+        return loss
+
     if looped_schedule:
         schedule = schedule_class(
             stages,  # pyrefly: ignore [bad-argument-type]
             n_microbatches=n_microbatches,
-            loss_fn=loss_fn,
+            loss_fn=_scalar_loss_fn,
             scale_grads=False,
             backward_requires_autograd=backward_requires_autograd,
         )
@@ -287,7 +289,7 @@ def _build_pipeline_schedule(
         schedule = schedule_class(
             stages[0],
             n_microbatches=n_microbatches,
-            loss_fn=loss_fn,
+            loss_fn=_scalar_loss_fn,
             scale_grads=False,
         )
     logger.info(

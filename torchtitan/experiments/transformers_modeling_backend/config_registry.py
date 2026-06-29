@@ -9,12 +9,8 @@ from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    DebugConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.transformers_modeling_backend.configs import (
     TransformersBackendConfig,
 )
@@ -25,12 +21,13 @@ from . import model_registry
 
 
 def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
+    model_spec = model_registry("debugmodel")
     return TransformersBackendConfig(
         loss=CrossEntropyLoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         hf_model="Qwen/Qwen3-4B-Instruct-2507",
         debug=DebugConfig(print_config=True),
-        model_spec=model_registry("debugmodel"),
+        model_spec=model_spec,
         profiler=Profiler.Config(profile_freq=5),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -51,18 +48,17 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )
 
 
 def transformers_modeling_backend_full() -> TransformersBackendConfig:
+    model_spec = model_registry("full")
     return TransformersBackendConfig(
         loss=CrossEntropyLoss.Config(),
         hf_model="Qwen/Qwen3-4B-Instruct-2507",
         debug=DebugConfig(print_config=True),
-        model_spec=model_registry("full"),
+        model_spec=model_spec,
         profiler=Profiler.Config(profile_freq=5),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -83,7 +79,5 @@ def transformers_modeling_backend_full() -> TransformersBackendConfig:
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
     )

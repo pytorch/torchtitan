@@ -13,26 +13,32 @@ TorchTitan models for vLLM.
 
 import dataclasses
 from dataclasses import dataclass
+from functools import partial
+
+import spmd_types as spmd
 
 import torch
-import torch._dynamo
 import torch.distributed as dist
-from torch.distributed._tensor import DTensor, Replicate
-
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import (
-    ActivationCheckpointConfig,
+    apply_overrides,
     CompileConfig,
+    OverrideConfig,
     ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.spmd_types import current_spmd_mesh
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
+from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
-from vllm.compilation import codegen as _codegen
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.logger import init_logger
 from vllm.utils import torch_utils as _torch_utils
 
@@ -58,31 +64,75 @@ def _dtensor_safe_weak_ref_tensor(tensor):
 _torch_utils.weak_ref_tensor = _dtensor_safe_weak_ref_tensor
 
 
-# NOTE: Monkeypatch vLLM's _node_ref to handle DTensor placement types
-# whose repr() uses unqualified class names not available in the generated
-# code's exec namespace (which only has `import torch`).
-_original_node_ref = _codegen._node_ref
+# Process-global: install the op swap at most once even if the generator is
+# re-initialized in the same process (re-wrapping would chain shims).
+_tp_all_reduce_patched = False
 
 
-# TODO: Followup with core vLLM fix
-# https://github.com/pytorch/torchtitan/issues/3067
-def _patched_node_ref(arg):
-    try:
-        from torch.distributed.tensor.placement_types import Partial, Placement
+def _patch_vllm_all_reduce() -> None:
+    """Route the generator's tensor-parallel all-reduce through vLLM's custom
+    one-shot/multimem AR instead of DTensor's NCCL ring redistribute (applied
+    when batch-invariant mode is off). Idempotent. Two changes:
 
-        if isinstance(arg, Placement):
-            cls = type(arg)
-            # Partial.__repr__ leaves reduce_op unquoted (e.g. "Partial(sum)")
-            # which would resolve to the builtin sum, not the string "sum".
-            if isinstance(arg, Partial):
-                return f"{cls.__module__}.{cls.__name__}({arg.reduce_op!r})"
-            return f"{cls.__module__}.{repr(arg)}"
-    except ImportError:
-        pass
-    return _original_node_ref(arg)
+    1. Swap torch.ops._c10d_functional.all_reduce (the op every DTensor
+       Partial -> Replicate redistribute calls) for
+       tensor_model_parallel_all_reduce, which reuses vLLM's TP GroupCoordinator
+       -- the same ranks, but the group that owns the custom-AR shared buffers.
+       DTensor wraps the synchronous result in an AsyncCollectiveTensor whose
+       wait_tensor is a no-op. Only sum reductions are routed (the custom AR is
+       sum-only); others fall through to the original op. No-op at world_size 1.
 
+    2. Force the custom AR onto its registered=False path so cudagraph capture
+       works. registered=True records graph buffers and calls cudaIpcGetMemHandle
+       on them, which fails for the expandable_segments (VMM) memory the RL stack
+       enables for Monarch RDMA. registered=False reduces via the init-time
+       buffer_ptrs (raw cudaMalloc, IPC-able), records no graph buffers, at the
+       cost of one staging copy per AR.
 
-_codegen._node_ref = _patched_node_ref
+    TODO: this is a stopgap to close the generator's TP all-reduce perf gap.
+    Improve our native (DTensor) all-reduce path and remove this patch.
+    """
+    global _tp_all_reduce_patched
+    if _tp_all_reduce_patched:
+        return
+
+    from vllm.distributed import get_tp_group
+
+    c10d = torch.ops._c10d_functional
+    # Op schema: all_reduce(Tensor input, str reduce_op, Any group_name) -> Tensor.
+    original_all_reduce = c10d.all_reduce
+
+    def all_reduce(input, reduce_op, group_name):
+        if reduce_op == "sum":
+            # Use vLLM's helper rather than the incoming group_name: the custom-AR
+            # kernel is bound to vLLM's TP GroupCoordinator and the shared buffers
+            # it registered, so the reduction must run on vLLM's TP group, not
+            # DTensor's TP mesh PG (a different PG over the same ranks -> rank-for-
+            # rank equivalent). The helper resolves that group, guards
+            # world_size==1, and on CUDA dispatches to torch.ops.vllm.all_reduce.
+            return tensor_model_parallel_all_reduce(input)
+        return original_all_reduce(input, reduce_op, group_name)
+
+    c10d.all_reduce = all_reduce
+
+    # Force vLLM's TP custom AR onto its registered=False path (see point 2).
+    device_comm = get_tp_group().device_communicator
+    ca = getattr(device_comm, "ca_comm", None) if device_comm is not None else None
+    if ca is not None and not ca.disabled:
+
+        def custom_all_reduce(input):
+            # Mirrors CustomAllreduce.custom_all_reduce but always registered=False.
+            if ca.disabled or not ca.should_custom_ar(input):
+                return None
+            return ca.all_reduce(input, registered=False)
+
+        ca.custom_all_reduce = custom_all_reduce
+
+    _tp_all_reduce_patched = True
+    logger.info(
+        "vllm_allreduce: routed _c10d_functional.all_reduce (TP sum reductions) "
+        "through vLLM custom all-reduce (registered=False, cudagraph-safe)"
+    )
 
 
 @support_torch_compile(
@@ -114,28 +164,16 @@ class VLLMModelWrapper(Module):
         self,
         *,
         model_spec: ModelSpec,
-        parallelism: ParallelismConfig,
+        parallelism: InferenceParallelismConfig,
         compile_config: CompileConfig,
         checkpoint_config: CheckpointManager.Config,
         vllm_config: VllmConfig,
         prefix: str = "",
+        override: OverrideConfig,
     ):
         super().__init__()
 
         assert vllm_config is not None, "vllm_config is required"
-
-        # PP and CP are not supported on this inference path. User-facing
-        # validation lives in Generator.Config.__post_init__; these are
-        # internal invariants — by the time we get here, parallelism has
-        # already been validated.
-        assert parallelism.pipeline_parallel_degree == 1, (
-            "vLLM wrapper requires pipeline_parallel_degree=1, "
-            f"got {parallelism.pipeline_parallel_degree}"
-        )
-        assert parallelism.context_parallel_degree == 1, (
-            "vLLM wrapper requires context_parallel_degree=1, "
-            f"got {parallelism.context_parallel_degree}"
-        )
 
         # Store components from model_spec
         self.state_dict_adapter = model_spec.state_dict_adapter
@@ -151,34 +189,49 @@ class VLLMModelWrapper(Module):
             if attn_config.head_dim is not None
             else model_config.dim // n_heads
         )
-        vllm_backend = VLLMAttentionWrapper.Config(
-            hidden_size=model_config.dim,
-            num_heads=n_heads,
-            num_kv_heads=n_kv_heads,
-            head_dim=head_dim,
-        )
-        new_layers = [
-            dataclasses.replace(
-                layer_cfg,
-                attention=dataclasses.replace(
-                    layer_cfg.attention, inner_attention=vllm_backend
+        new_layers = []
+        for layer_cfg in model_config.layers:
+            vllm_backend = VLLMAttentionWrapper.Config(
+                hidden_size=model_config.dim,
+                num_heads=n_heads,
+                num_kv_heads=n_kv_heads,
+                head_dim=head_dim,
+                sliding_window_size=getattr(
+                    layer_cfg.attention, "sliding_window_size", None
                 ),
             )
-            for layer_cfg in model_config.layers
-        ]
+            new_layers.append(
+                dataclasses.replace(
+                    layer_cfg,
+                    attention=dataclasses.replace(
+                        layer_cfg.attention, inner_attention=vllm_backend
+                    ),
+                )
+            )
         self.config = dataclasses.replace(model_config, layers=new_layers)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
-        # Build ParallelDims from the torchtitan ParallelismConfig (the
-        # controller's source of truth) rather than vLLM's parallel_config.
+        # Translate the inference parallelism into torchtitan's full
+        # ParallelismConfig that ParallelDims / parallelize_fn consume.
+        training_parallelism = parallelism.to_training()
+
+        # Build ParallelDims from the translated ParallelismConfig so TP/EP
+        # sharding sees the same mesh shape as vLLM. data_parallel_shard_degree
+        # carries vLLM's pure DP here (skip_dp=True below), not TorchTitan FSDP.
         self.parallel_dims = ParallelDims(
-            dp_replicate=parallelism.data_parallel_replicate_degree,
-            dp_shard=1,
-            cp=1,
-            tp=parallelism.tensor_parallel_degree,
-            pp=1,
-            ep=parallelism.expert_parallel_degree,
+            dp_replicate=training_parallelism.data_parallel_replicate_degree,
+            dp_shard=training_parallelism.data_parallel_shard_degree,
+            cp=training_parallelism.context_parallel_degree,
+            tp=training_parallelism.tensor_parallel_degree,
+            pp=training_parallelism.pipeline_parallel_degree,
+            ep=training_parallelism.expert_parallel_degree,
             world_size=dist.get_world_size(),
+            spmd_backend=training_parallelism.spmd_backend,
+        )
+        dist_utils.set_spmd_backend(training_parallelism.spmd_backend)
+        self.spmd_context = dist_utils.get_spmd_context(
+            parallel_dims=self.parallel_dims,
+            spmd_typechecking=False,
         )
 
         # Fill sharding configs on the config BEFORE build so every sub-module
@@ -191,39 +244,87 @@ class VLLMModelWrapper(Module):
         class _InferenceConfig:
             parallelism: ParallelismConfig
 
-        self.config.update_from_config(config=_InferenceConfig(parallelism=parallelism))
+        self.config.update_from_config(
+            config=_InferenceConfig(parallelism=training_parallelism)
+        )
 
-        # TODO: Check if it's possible to apply meta init
-        self.model = self.config.build()
+        # Apply config overrides (e.g. the fused gate+up SwiGLU) after
+        # update_from_config (which fills the sharding the override factories
+        # read) and before build
+        if override.imports:
+            apply_overrides(override, self.config)
 
-        # With TP, collectives may return AsyncCollectiveTensor (overlap
-        # path) or plain Tensor (sync path) depending on timing.  Dynamo
-        # specializes on tensor type, so each switch triggers a
-        # recompile.  Because of this, the default recompile_limit (8) is
-        # too low; exceeding it fails under
-        # fullgraph=True so set to 10 for now
-        if compile_config.enable:
-            torch._dynamo.config.recompile_limit = 10
+        # Build model on meta device to avoid allocating full model on every GPU
+        with torch.device("meta"):
+            self.model = self.config.build()
 
         self.model = self.parallelize_fn(
             model=self.model,
             parallel_dims=self.parallel_dims,
             training=TrainingConfig(),
-            parallelism=parallelism,
+            parallelism=training_parallelism,
             compile_config=compile_config,
-            ac_config=ActivationCheckpointConfig(mode="none"),
+            ac_config=None,
             dump_folder="",
+            # Generator inference replicates parameters across vLLM DP groups.
+            # Keep TP/EP sharding above, but do not translate dp_shard into
+            # TorchTitan FSDP/DDP here.
             skip_dp=True,
         )
 
         # Load initial weights based on checkpoint config.
         self._checkpoint_config = checkpoint_config
+
+        # Materialize model on GPU — only allocates local shards (not full
+        # model) thanks to EP/TP DTensor sharding applied above.
+        self.model.to_empty(device=vllm_config.device_config.device)
+        # HF checkpoints do not necessarily contain every TorchTitan buffer
+        # (for example MoE expert_bias_E).
+        # TODO: When checkpoint doesn't contains expert_bias_E, check the config
+        # should use loss based load balancing strategy.
+        with torch.no_grad():
+            # spmd_types parameter init needs the current mesh to materialize
+            # local shards for fused parameters, including the fused QKV linear
+            # used by model variants such as Qwen3.
+            # TODO: Consider an init_non_persistent_buffers contract on the
+            # Decoder / Model class so buffer-only init does not need this
+            # spmd context.
+            with self.spmd_context():
+                self.model.init_weights(buffer_device=None)
         self._maybe_initial_load_weights()
+
+        # Give each gpt-oss attention's vLLM backend its sink rescale.
+        # Need to do it here after parallelize + weight load so sinks are
+        # TP-sharded.
+        self._inject_attention_sinks()
+
+        # Route the TP all-reduce through vLLM's custom AR (off under
+        # batch-invariant mode, where its size-dependent algorithm breaks).
+        if self.parallel_dims.tp_enabled and not is_in_batch_invariant_mode():
+            _patch_vllm_all_reduce()
+
+    # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
+    def _inject_attention_sinks(self) -> None:
+        """Give each gpt-oss attention's vLLM backend its sink-rescale hook."""
+        from torchtitan.models.gpt_oss.model import (
+            apply_attention_sink_rescale,
+            Attention,
+        )
+
+        for module in self.model.modules():
+            if not isinstance(module, Attention):
+                continue
+            sinks = module.sinks
+            local_sinks = sinks._local_tensor if isinstance(sinks, DTensor) else sinks
+            module.inner_attention.vllm_attn.impl.out_transform = partial(
+                apply_attention_sink_rescale, sinks=local_sinks
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """vLLM required API.
         Convert input token IDs to embeddings."""
-        return self.model.tok_embeddings(input_ids)
+        with self.spmd_context():
+            return self.model.tok_embeddings(input_ids)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         """vLLM required API.
@@ -256,23 +357,26 @@ class VLLMModelWrapper(Module):
         if input_ids is None:
             raise ValueError("Either input_ids or inputs_embeds must be provided")
 
-        # Convert vLLM interface to TorchTitan interface
-        # vLLM: [total_tokens] → TorchTitan: [batch_size, seq_len]
-        tokens_2d = input_ids.unsqueeze(0)
+        with self.spmd_context():
+            # Convert vLLM interface to TorchTitan interface
+            # vLLM: [total_tokens] -> TorchTitan: [batch_size, seq_len]
+            tokens_2d = input_ids.unsqueeze(0)
 
-        # Get embeddings
-        h = self.model.tok_embeddings(tokens_2d)
+            # Get embeddings
+            h = self.model.tok_embeddings(tokens_2d)
 
-        positions = positions.unsqueeze(0)
+            positions = positions.unsqueeze(0)
 
-        # Pass through transformer layers
-        for layer in self.model.layers.values():
-            h = layer(h, attention_masks=None, positions=positions)
+            # Pass through transformer layers
+            for layer in self.model.layers.values():
+                h = layer(h, attention_masks=None, positions=positions)
 
-        h = self.model.norm(h)
-        # When parallelism is applied, get full tensor before return to vLLM Engine
+            h = self.model.norm(h)
+        # Inference disables sequence parallelism, so final hidden states should
+        # already be replicated before returning to vLLM.
         if isinstance(h, DTensor):
-            h = h.full_tensor()
+            assert all(isinstance(p, Replicate) for p in h.placements)
+            h = h._local_tensor
 
         # Convert to vLLM format: [total_tokens, hidden_size]
         if h.dim() == 3:
@@ -288,23 +392,45 @@ class VLLMModelWrapper(Module):
         """vLLM required API.
         Compute logits from hidden states."""
 
-        # When TP is applied, we return the full tensor (plain tensor) to vLLM engine
-        # at the end of VLLMModelWrapper.forward().
-        # We need to wrap the input from vLLM engine back to DTensor with Replicate() placement.
-        if self.parallel_dims.tp_enabled:
-            hidden_states = DTensor.from_local(
-                hidden_states,
-                device_mesh=self.parallel_dims.get_mesh("tp"),
-                placements=[
-                    Replicate(),
-                ],
-            )
+        with self.spmd_context():
+            # When TP is applied, forward() returns the full tensor back to vLLM.
+            # The DTensor path wraps that plain tensor before lm_head; spmd_types
+            # keeps tensors local and uses the module sharding contracts directly.
+            if (
+                self.parallel_dims.tp_enabled
+                and self.parallel_dims.spmd_backend != "spmd_types"
+            ):
+                hidden_states = DTensor.from_local(
+                    hidden_states,
+                    device_mesh=self.parallel_dims.get_mesh("tp"),
+                    placements=[
+                        Replicate(),
+                    ],
+                )
 
-        logits = self.model.lm_head(hidden_states)
+            logits = self.model.lm_head(hidden_states)
 
-        # Full DTensor path returns logits as DTensor; vLLM expects plain tensors.
-        if isinstance(logits, DTensor):
-            logits = logits.to_local()
+            # lm_head returns vocab-sharded logits under TP; gather to the
+            # full local logits tensor that vLLM expects.
+            if self.parallel_dims.tp_enabled:
+                if self.parallel_dims.spmd_backend == "spmd_types":
+                    mesh = current_spmd_mesh()
+                    assert mesh is not None
+                    logits = spmd.redistribute(
+                        logits,
+                        mesh.get_group("tp"),
+                        src=spmd.S(-1),
+                        dst=spmd.R,
+                        backward_options={"op_dtype": logits.dtype},
+                    )
+                elif isinstance(logits, DTensor):
+                    placements = tuple(
+                        Replicate()
+                        if isinstance(p, Shard) and p.dim in (-1, logits.ndim - 1)
+                        else p
+                        for p in logits.placements
+                    )
+                    logits = logits.redistribute(placements=placements).to_local()
 
         return logits
 

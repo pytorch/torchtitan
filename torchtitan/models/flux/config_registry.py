@@ -10,12 +10,8 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.quantization import MXFP8LinearConverter
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    CompileConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference, SamplingConfig
 from torchtitan.models.flux.flux_datasets import FluxDataLoader
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
@@ -55,7 +51,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
             img_size=256,
         ),
         parallelism=ParallelismConfig(context_parallel_degree=1),
-        activation_checkpoint=ActivationCheckpointConfig(mode="full"),
+        activation_checkpoint=FullAC.Config(),
         checkpoint=CheckpointManager.Config(
             interval=10,
             last_save_model_only=False,
@@ -69,7 +65,10 @@ def flux_debugmodel() -> FluxTrainer.Config:
                 denoising_steps=4,
             ),
             dataloader=FluxDataLoader.Config(
-                dataset="coco-validation",
+                # Validate on the local cc12m-test asset (no HF download) so CI
+                # does not flake on the network. Production flux_dev/flux_schnell
+                # still validate on the real coco-validation set.
+                dataset="cc12m-test",
                 prompt_dropout_prob=0.0,
                 img_size=256,
                 generate_timesteps=True,
@@ -113,7 +112,7 @@ def flux_dev() -> FluxTrainer.Config:
             prompt_dropout_prob=0.447,
             img_size=256,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(mode="full"),
+        activation_checkpoint=FullAC.Config(),
         checkpoint=CheckpointManager.Config(interval=1000),
         validator=FluxValidator.Config(
             freq=1000,
@@ -163,7 +162,7 @@ def flux_schnell() -> FluxTrainer.Config:
             prompt_dropout_prob=0.447,
             img_size=256,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(mode="full"),
+        activation_checkpoint=FullAC.Config(),
         checkpoint=CheckpointManager.Config(interval=1000),
         validator=FluxValidator.Config(
             freq=1000,

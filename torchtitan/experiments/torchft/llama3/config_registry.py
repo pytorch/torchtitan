@@ -9,20 +9,25 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.validate import Validator
-from torchtitan.config import ActivationCheckpointConfig, CommConfig, TrainingConfig
+from torchtitan.config import CommConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
 from torchtitan.experiments.torchft.trainer import FaultTolerantTrainer
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.tools.profiler import Profiler
 
 from . import model_registry
 
 
 def llama3_torchft_debugmodel() -> FaultTolerantTrainer.Config:
+    model_spec = model_registry("debugmodel")
     return FaultTolerantTrainer.Config(
-        loss=CrossEntropyLoss.Config(),
+        loss=CrossEntropyLoss.Config(
+            global_vocab_size=decoder_vocab_size(model_spec),
+        ),
         hf_assets_path="./tests/assets/tokenizer",
         profiler=Profiler.Config(
             enable_profiling=True,
@@ -31,7 +36,7 @@ def llama3_torchft_debugmodel() -> FaultTolerantTrainer.Config:
             profiler_warmup=0,
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel"),
+        model_spec=model_spec,
         optimizer=TorchFTOptimizersContainer.Config(
             param_groups=default_adamw(lr=8e-4).param_groups
         ),
@@ -51,9 +56,7 @@ def llama3_torchft_debugmodel() -> FaultTolerantTrainer.Config:
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-        ),
+        activation_checkpoint=SelectiveAC.Config(),
         comm=CommConfig(train_timeout_seconds=15),
         fault_tolerance=FaultTolerance(
             enable=True,

@@ -7,23 +7,28 @@
 import itertools
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
 )
+from torch.nn.attention.varlen import AuxRequest
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import warn_once
 from torchtitan.tools.utils import has_cuda_capability
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.model_executor.layers.attention import Attention
-from vllm.v1.attention.backend import AttentionType
+from vllm.model_executor.layers.attention.attention import get_attention_context
+from vllm.v1.attention.backend import AttentionCGSupport, AttentionType
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
     FlashAttentionImpl,
     FlashAttentionMetadata,
+    FlashAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 
@@ -53,6 +58,20 @@ class PyTorchVarlenAttentionBackend(FlashAttentionBackend):
     def get_impl_cls():
         return PyTorchVarlenAttentionImpl
 
+    @staticmethod
+    def get_builder_cls():
+        # Report UNIFORM_SINGLE_TOKEN_DECODE cudagraph support instead of the FA3
+        # builder's ALWAYS. Our varlen forward bakes per-step cu_seqlens /
+        # max_query_len into the captured graph, so a FULL graph over a mixed
+        # prefill+decode batch replays stale offsets -> NaN (#3709); only
+        # query_len==1 decode is safe to capture. This keeps FULL_DECODE_ONLY
+        # valid, auto-downgrades FULL to FULL_DECODE_ONLY (instead of capturing the
+        # broken mixed graph), and allows PIECEWISE (attention runs eager).
+        class PyTorchVarlenAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
+            _cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+
+        return PyTorchVarlenAttentionMetadataBuilder
+
 
 class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
     """
@@ -63,6 +82,10 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+
+        # optional post-attention epilogue transform (out, lse) -> out
+        # set by VLLMModelWrapper in vllm_wrapper.py
+        self.out_transform = None
 
         self.enable_gqa = self.num_heads > self.num_kv_heads
 
@@ -79,6 +102,10 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
 
     # Based on vLLM's FlashAttentionImpl.forward():
     # https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/flash_attn.py
+    #
+    # @eager_break_during_capture makes this forward a break point for vLLM's
+    # breakable cudagraph (VLLM_USE_BREAKABLE_CUDAGRAPH=1, cudagraph_mode=PIECEWISE)
+    @eager_break_during_capture
     def forward(
         self,
         layer: torch.nn.Module,
@@ -113,8 +140,15 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
                 "fused output quantization is not yet supported for FlashAttentionImpl"
             )
 
+        # Breakable cudagraph: under VLLM_USE_BREAKABLE_CUDAGRAPH the recorded
+        # forward closure pins capture-time args (attn_metadata None, varlen metadata
+        # absent). Re-read live per-layer metadata + kv_cache from the forward context
+        # (vLLM refreshes them before each replay) BEFORE the None check, else replay
+        # short-circuits to output.fill_(0) (zeroed attention). No-op outside capture.
+        attn_metadata, _, kv_cache, _ = get_attention_context(layer.layer_name)
+
         if attn_metadata is None:
-            # Profiling run.
+            # Profiling / cudagraph dummy-capture run (no real metadata yet).
             return output.fill_(0)
 
         attn_type = self.attn_type
@@ -152,10 +186,17 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
 
         assert self.dcp_world_size == 1, "DCP not supported yet."
 
-        if attn_metadata.causal:
+        if not attn_metadata.causal:
+            raise RuntimeError("Non-causal attention not supported yet.")
+
+        # vLLM assigns sliding_window_size = None to (-1, -1) w/ optional causal flag
+        # but varlen only encode with sliding window. so we need to convert vllm (-1, -1) to (-1, 0)
+        # for proper full causal attention instead of bidirectional
+        if self.sliding_window == (-1, -1):
             sliding_window_size = (-1, 0)
         else:
-            raise RuntimeError("Non-causal attention not supported yet.")
+            # by default vLLM sets attention type = DECODER, which will set (W-1, 0)
+            sliding_window_size = self.sliding_window
 
         assert self.alibi_slopes is None, "Alibi slopes not supported yet."
 
@@ -169,7 +210,7 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
                 num_seqs + 1, dtype=torch.int32, device=query.device
             )
             cu_seqlens_k[1:] = torch.cumsum(seqused_k, dim=0)
-        extra_kwargs = {}
+        extra_kwargs: dict[str, Any] = {}
 
         # TODO(pytorch/pytorch#179760): FA2's auto num_splits heuristic
         # produces NaN intermittently with paged KV (block_table). Force
@@ -184,7 +225,10 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
         if self.enable_gqa:
             extra_kwargs["enable_gqa"] = True
 
-        return torch.nn.attention.varlen.varlen_attn_out(
+        if self.out_transform is not None:
+            extra_kwargs["return_aux"] = AuxRequest(lse=True)
+
+        result = torch.nn.attention.varlen.varlen_attn_out(
             output[:num_actual_tokens],
             query[:num_actual_tokens],
             key_cache,
@@ -199,6 +243,13 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             seqused_k=seqused_k,
             **extra_kwargs,
         )
+        if self.out_transform is None:
+            return result
+
+        out, lse = result
+        out = self.out_transform(out, lse.transpose(0, 1))
+        output[:num_actual_tokens].copy_(out)
+        return output[:num_actual_tokens]
 
 
 class VLLMAttentionWrapper(Module):
@@ -226,6 +277,8 @@ class VLLMAttentionWrapper(Module):
         num_kv_heads: int
         head_dim: int
         scale: float | None = None
+        sliding_window_size: int | None = None
+        """Causal sliding-window size (``None`` => full attention)."""
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -278,14 +331,15 @@ class VLLMAttentionWrapper(Module):
             num_kv_heads=num_kv_heads,
             cache_config=cache_config,
             quant_config=None,
+            per_layer_sliding_window=config.sliding_window_size,
             prefix=f"model.layers.{layer_id}.attention.inner_attention",
         )
 
     def forward(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        q_BLNH: torch.Tensor,
+        k_BLNH: torch.Tensor,
+        v_BLNH: torch.Tensor,
         *,
         attention_masks: AttentionMasksType | None = None,
         **kwargs,
@@ -293,12 +347,12 @@ class VLLMAttentionWrapper(Module):
         """Run vLLM paged attention on local (non-DTensor) tensors.
 
         Args:
-            q: ``(batch, seq_len, num_heads, head_dim)``
-            k: ``(batch, seq_len, num_kv_heads, head_dim)``
-            v: ``(batch, seq_len, num_kv_heads, head_dim)``
+            q_BLNH: ``(batch, seq_len, num_heads, head_dim)``
+            k_BLNH: ``(batch, seq_len, num_kv_heads, head_dim)``
+            v_BLNH: ``(batch, seq_len, num_kv_heads, head_dim)``
 
         Returns:
-            ``(batch, seq_len, num_heads * head_dim)`` — ready for
+            ``(batch, seq_len, num_heads * head_dim)`` -- ready for
             ``output.view(bs, seqlen, -1)`` in GQAttention.forward
         """
         if attention_masks is not None:
@@ -307,22 +361,22 @@ class VLLMAttentionWrapper(Module):
                 "manages causal masking and the KV-cache internally."
             )
 
-        batch_size, seq_len, _, head_dim = q.shape
+        batch_size, seq_len, _, head_dim = q_BLNH.shape
 
-        # vllm attention expects (bs*seqlen, n_heads, head_dim)
+        # vllm attention expects (bs*seqlen, n_heads, head_dim) == (T, N, H)
         # (bs, seq, heads, dim) is contiguous, so reshape is zero-copy
-        q = q.reshape(batch_size * seq_len, -1, head_dim)
-        k = k.reshape(batch_size * seq_len, -1, head_dim)
-        v = v.reshape(batch_size * seq_len, -1, head_dim)
+        q_TNH = q_BLNH.reshape(batch_size * seq_len, -1, head_dim)
+        k_TNH = k_BLNH.reshape(batch_size * seq_len, -1, head_dim)
+        v_TNH = v_BLNH.reshape(batch_size * seq_len, -1, head_dim)
 
-        output_flat = self.vllm_attn(q, k, v)
+        out_TD = self.vllm_attn(q_TNH, k_TNH, v_TNH)
 
         # vLLM's flash attention backend may pad the token count (e.g.
         # round up to an even number), which introduces a new symbolic
         # shape under torch.compile.  Narrow to trim this padding.
-        output_flat = output_flat.narrow(0, 0, batch_size * seq_len)
+        out_TD = out_TD.narrow(0, 0, batch_size * seq_len)
 
-        # Reshape back to the format expected by GQAttention.forward()
-        output = output_flat.view(batch_size, seq_len, -1, head_dim)
+        # Reshape back to the (B, L, N, H) format expected by GQAttention.forward()
+        out_BLNH = out_TD.view(batch_size, seq_len, -1, head_dim)
 
-        return output
+        return out_BLNH

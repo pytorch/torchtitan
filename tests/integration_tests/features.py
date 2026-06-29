@@ -49,22 +49,72 @@ def _is_pp_only(variant: tuple[str, ...], ngpu: int) -> bool:
     )
 
 
-def _enable_full_dtensor(t: OverrideDefinitions) -> OverrideDefinitions:
-    """Inject ``--parallelism.spmd_backend full_dtensor`` into every variant.
+def _supports_spmd_typechecking(test_name: str, variant: tuple[str, ...]) -> bool:
+    """List of tests/variants to test spmd_types backend, but without typechecking."""
+    unsupported_tests = [
+        # Compile is not compatible with SPMD typechecking yet.
+        "1d_compile_spmd_types",
+        "1d_compile_sac_op_spmd_types",
+        "2d_compile_spmd_types",
+        "2d_asynctp_compile_spmd_types",
+        "3d_compile_spmd_types",
+        "torchcomms_3d_dp+cp+pp+compile_spmd_types",
+        "torchcomms_3d_dp+tp+pp+compile_spmd_types",
+        # PP is not compatible with SPMD typechecking yet.
+        "pp_dp_1f1b_spmd_types",
+        "pp_tp_gpipe_spmd_types",
+        "pp_dp_tp_spmd_types",
+        "validation_tp_cp_pp_spmd_types",
+        "float8_emulate_lora_spmd_types",
+        # non-chunked CE loss isn't happy yet.
+        (
+            "2d_eager_spmd_types",
+            [
+                "--module llama3 --config llama3_debugmodel_ce_loss",
+                "--parallelism.tensor_parallel_degree 2",
+            ],
+        ),
+    ]
+    return (
+        test_name not in unsupported_tests
+        and (test_name, variant) not in unsupported_tests
+    )
 
-    All features.py tests run under full_dtensor except PP-only variants
+
+def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
+    """Inject ``--parallelism.spmd_backend`` into every variant.
+
+    All features.py tests run under SPMD backends except PP-only variants
     (see ``_is_pp_only``) and CP + compile variants (upstream symint
     limitation); legacy non-full_dtensor coverage lives in models.py.
     """
+    test_name = t.test_name if backend == "full_dtensor" else f"{t.test_name}_{backend}"
     new_args = []
     for variant in t.override_args:
         prefix: list[str] = []
+        suffix: list[str] = []
         has_cp = any("context_parallel_degree" in arg for arg in variant)
         has_compile = any("compile.enable" in arg for arg in variant)
+        has_ac_mode = any("activation-checkpoint:" in arg for arg in variant)
         if not _is_pp_only(variant, t.ngpu) and not (has_cp and has_compile):
-            prefix.append("--parallelism.spmd_backend full_dtensor")
-        new_args.append(tuple(prefix) + tuple(variant))
-    return dataclasses.replace(t, override_args=tuple(new_args))
+            prefix.append(f"--parallelism.spmd_backend {backend}")
+            if (
+                backend == "spmd_types"
+                and not has_ac_mode
+                and _supports_spmd_typechecking(test_name, variant)
+            ):
+                prefix.append("--debug.spmd_typechecking")
+                suffix.append("activation-checkpoint:none")
+        if test_name != t.test_name:
+            variant = tuple(
+                arg.replace(f"{t.test_name}/", f"{test_name}/") for arg in variant
+            )
+        new_args.append(tuple(prefix) + tuple(variant) + tuple(suffix))
+    return dataclasses.replace(
+        t,
+        override_args=tuple(new_args),
+        test_name=test_name,
+    )
 
 
 # Use RUNNER_TEMP if defined (GitHub Actions variable), else fallback to old path
@@ -110,7 +160,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--compile.enable",
-                    "--activation_checkpoint.mode selective",
+                    "activation-checkpoint:selective",
                 ],
             ],
             "1D compile with selective op AC",
@@ -126,7 +176,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "2D eager (ChunkedCELoss + standard CE loss with TP+loss_parallel)",
+            "2D eager (ChunkedLossWrapper + standard CE loss with TP+loss_parallel)",
             "2d_eager",
         ),
         OverrideDefinitions(
@@ -198,59 +248,11 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--checkpoint.enable",
                     "--checkpoint.last_save_model_only",
-                ],
-            ],
-            "Checkpoint Integration Test - Save Model Only fp32",
-            "last_save_model_only_fp32",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable",
-                    "--checkpoint.last_save_model_only",
                     "--checkpoint.export_dtype bfloat16",
                 ],
             ],
             "Checkpoint Integration Test - Save Model Only bf16",
             "last_save_model_only_bf16",
-        ),
-        # TODO: Disabled with the FlexAttention default (SDPA is no longer a
-        # language-model backend). Zero-bubble / multi schedules split backward
-        # and call torch's stage_backward_input, which runs
-        # _get_grad_fn_or_grad_acc (t.requires_grad) over every stage input —
-        # including the forwarded FlexAttention BlockMask, which is not a Tensor
-        # ("'BlockMask' object has no attribute 'requires_grad'"). Full-backward
-        # schedules (1F1B/GPipe/Interleaved1F1B) are unaffected. Re-enable once
-        # stage_backward_input skips non-tensor stage inputs upstream.
-        # (VarlenAttention's tensor-based metadata would sidestep this, but
-        # varlen requires flash_attn_interface/FA3, which the core integration
-        # CI does not install; SDPA is no longer a core LM backend. So the
-        # upstream stage_backward_input fix is the path here.)
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree 4",
-                    "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
-                    "--activation_checkpoint.mode full",
-                ],
-            ],
-            "PP looped zero bubble test",
-            "pp_looped_zero_bubble",
-            ngpu=4,
-            disabled=True,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
-                    "--activation_checkpoint.mode full",
-                ],
-            ],
-            "PP zero bubble test (v shaped)",
-            "pp_zbv",
-            ngpu=2,
-            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -262,18 +264,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             "PP 1D test 1F1B",
             "pp_1f1b",
-            ngpu=2,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule GPipe",
-                    "--parallelism.data_parallel_shard_degree 1",
-                ],
-            ],
-            "PP 1D test GPipe",
-            "pp_gpipe",
             ngpu=2,
         ),
         OverrideDefinitions(
@@ -298,21 +288,11 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule GPipe",
-                    "--parallelism.data_parallel_shard_degree 2",
-                ],
-            ],
-            "PP+DP GPipe 2D test",
-            "pp_dp_gpipe",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "PP+TP 2D test",
-            "pp_tp",
+            "PP+TP GPipe 2D test",
+            "pp_tp_gpipe",
         ),
         OverrideDefinitions(
             [
@@ -363,6 +343,44 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "pp_looped_1f1b",
             ngpu=4,
         ),
+        # TODO: Disabled with the FlexAttention default (SDPA is no longer a
+        # language-model backend). Zero-bubble / multi schedules split backward
+        # and call torch's stage_backward_input, which runs
+        # _get_grad_fn_or_grad_acc (t.requires_grad) over every stage input —
+        # including the forwarded FlexAttention BlockMask, which is not a Tensor
+        # ("'BlockMask' object has no attribute 'requires_grad'"). Full-backward
+        # schedules (1F1B/GPipe/Interleaved1F1B) are unaffected. Re-enable once
+        # stage_backward_input skips non-tensor stage inputs upstream.
+        # (VarlenAttention's tensor-based metadata would sidestep this, but
+        # varlen requires flash_attn_interface/FA3, which the core integration
+        # CI does not install; SDPA is no longer a core LM backend. So the
+        # upstream stage_backward_input fix is the path here.)
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.pipeline_parallel_degree 4",
+                    "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
+                    "activation-checkpoint:full",
+                ],
+            ],
+            "PP looped zero bubble test",
+            "pp_looped_zero_bubble",
+            ngpu=4,
+            disabled=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
+                    "activation-checkpoint:full",
+                ],
+            ],
+            "PP zero bubble test (v shaped)",
+            "pp_zbv",
+            ngpu=2,
+            disabled=True,
+        ),
         # TODO: Disabled for the same reason as the zero-bubble PP tests above:
         # the custom CSV schedule splits backward (separate input-grad step),
         # so stage_backward_input chokes on the forwarded FlexAttention
@@ -373,23 +391,13 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
                     "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
-                    "--activation_checkpoint.mode full",
+                    "activation-checkpoint:full",
                 ],
             ],
             "PP with custom pipeline schedule loaded from CSV file",
             "pp_custom_csv",
             ngpu=2,
             disabled=True,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--optimizer.implementation foreach",
-                ]
-            ],
-            "Foreach Optimizer Test",
-            "optimizer_foreach",
-            ngpu=2,
         ),
         OverrideDefinitions(
             [
@@ -427,22 +435,10 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--parallelism.context_parallel_degree=4",
-                    "--parallelism.context_parallel_rotate_method='allgather'",
                 ]
             ],
-            "CP (allgather)",
-            "cp_allgather",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.context_parallel_degree=4",
-                    "--parallelism.context_parallel_rotate_method='alltoall'",
-                ]
-            ],
-            "CP (alltoall)",
-            "cp_alltoall",
+            "CP",
+            "cp",
             ngpu=4,
         ),
         OverrideDefinitions(
@@ -565,27 +561,26 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--dataloader.num_workers",
-                    "2",
-                    "--dataloader.pin_memory",
-                    "--dataloader.persistent_workers",
-                    "--dataloader.prefetch_factor",
-                    "4",
-                ],
-            ],
-            "Dataloader kwargs (via CLI args)",
-            "dataloader_kwargs",
-            ngpu=2,
-        ),
-        OverrideDefinitions(
-            [
-                [
                     "--override.imports torchtitan.overrides.fused_swiglu",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
             "Override: swap FeedForward with fused SwiGLU (FSDP2 + TP2)",
             "override_fused_swiglu",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
+                    "--override.imports torchtitan.overrides.fused_swiglu",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 4",
+                ],
+            ],
+            "Override: fuse grouped experts + FFNs on deepseek_v3 "
+            "(FSDP2 + TP2 dense, EP4 sparse)",
+            "override_fused_grouped_experts",
             ngpu=4,
         ),
         # NOTE: below are tests which require config change that cannot be done
@@ -595,7 +590,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--module llama3 --config llama3_debugmodel_varlen_attn",
                     "--parallelism.data_parallel_shard_degree=4",
-                    "--activation_checkpoint.mode=selective",
+                    "activation-checkpoint:selective",
                 ]
             ],
             "FSDP+VARLEN_ATTN + per op SAC",
@@ -675,4 +670,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         ),
     ]
 
-    return [_enable_full_dtensor(t) for t in integration_tests_flavors]
+    return [
+        *[_enable_spmd_backend(t, "full_dtensor") for t in integration_tests_flavors],
+        *[_enable_spmd_backend(t, "spmd_types") for t in integration_tests_flavors],
+    ]

@@ -40,6 +40,15 @@ When adding a new pass, put it in `performance_passes.py` if it changes
 numerics; otherwise put it in `passes.py` or a dedicated file like
 `remove_noop_passes.py`.
 
+## EP Overlap Trace Contract
+
+EP overlap graph chunking is intentionally coupled to tracing through the
+`ep_overlap` trace-input preparer. The preparer marks token-grid dimensions
+before `minimal_fx_tracer` fakeifies inputs; the chunk pass later uses those
+symbols as its source of truth. When changing EP-overlap input preparation,
+dynamic-shape handling, or graph chunking semantics, update the README contract
+and the trace/chunking tests together.
+
 ## Memory Policy Framework
 
 PyTorch's module-level `torch.utils.checkpoint` and eager SAC make

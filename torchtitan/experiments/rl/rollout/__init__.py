@@ -13,18 +13,10 @@ from torchtitan.experiments.rl.rollout.types import (
     RolloutStatus,
     RolloutTurn,
 )
-from torchtitan.experiments.rl.rollout.utils import (
-    last_completion_text,
-    prepare_rollout_metrics,
-    rollout_to_episode,
-)
 
 __all__ = [
     "Rollout",
     "RolloutGroup",
     "RolloutStatus",
     "RolloutTurn",
-    "last_completion_text",
-    "prepare_rollout_metrics",
-    "rollout_to_episode",
 ]

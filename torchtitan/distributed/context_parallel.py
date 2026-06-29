@@ -62,6 +62,12 @@ def apply_cp_to_forward(
                 pg_name = dist._get_process_group_name(mesh.get_group())
 
                 def cp_forward(q, k, v, **kwargs):
+                    if kwargs.get("score_mod") is not None:
+                        raise NotImplementedError(
+                            "FlexAttention score_mod is not supported with "
+                            "Context Parallel yet. It must be sharded before "
+                            "use with CP."
+                        )
                     k = k.contiguous()
                     v = v.contiguous()
                     global_k, global_v = flex_cp_allgather(k, v, 1, pg_name)
@@ -78,7 +84,7 @@ def apply_cp_to_forward(
             original_forward = mod.forward
 
             def _make_cp_forward(orig_fn, mesh):
-                placement = [Shard(2)]
+                placement = [Shard(1)]
 
                 def cp_forward(q, k, v, **kwargs):
                     if not isinstance(q, DTensor):

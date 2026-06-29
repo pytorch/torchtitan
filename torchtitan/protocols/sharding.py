@@ -15,7 +15,7 @@ meshes.
 from dataclasses import dataclass, field
 
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import Placement, Replicate, Shard
+from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
 from torchtitan.distributed.parallel_dims import MeshAxisName, SpmdLayout
 
@@ -47,14 +47,16 @@ class LocalMapConfig:
     (already aligned by ``_redistribute_inputs``); output placements from
     ``ShardingConfig.out_src_shardings``. ``LocalMapConfig`` only carries
     ``in_grad_placements`` since there's no equivalent slot on
-    ``ShardingConfig`` today.
+    ``ShardingConfig`` today. Set it to ``None`` to omit the local_map
+    argument when input gradients are irrelevant.
 
     Attributes:
         in_grad_placements: Per-input-gradient SpmdLayouts (positional,
-            ordered by ``forward`` args). Use ``None`` for non-tensor args.
+            ordered by ``forward`` args). Use ``None`` to omit
+            input-gradient placements or for non-tensor args.
     """
 
-    in_grad_placements: tuple[SpmdLayout | None, ...]
+    in_grad_placements: tuple[SpmdLayout | None, ...] | None
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}
@@ -96,7 +98,7 @@ class ShardingConfig:
             DTensor. When ``local_map`` is set this also tells ``local_map``
             what to wrap the local output back to. Accepts a single
             ``SpmdLayout`` (single-output case) or a tuple (multi-
-            output case, e.g. attention with ``return_lse=True``). ``None``
+            output case). ``None``
             means "infer from the output" (it's already a DTensor at the
             right placement, or there's no local_map to drive).
             e.g. ``{TP: Partial()}`` for the MoE wrapper.
@@ -131,13 +133,14 @@ def resolve_placements(
     it will be applied against. Missing declarations raise ``ValueError``;
     extra declarations (axes not in the mesh) are ignored.
 
-    ``Shard(d)`` on a size-1 mesh axis is normalized to ``Replicate()`` --
-    the two are operationally identical on a 1-rank axis, but DTensor's op
-    rules (placement-equality, view/reshape strict mode, ...) treat them
-    as distinct and reject ``Shard`` in places where ``Replicate`` would
-    work.
+    ``Shard(d)`` or ``Partial`` on a size-1 mesh axis is normalized to
+    ``Replicate()`` -- all three are operationally identical on a 1-rank axis
+    (no data is split, and a sum over a single rank is the identity), but
+    DTensor's op rules (placement-equality, view/reshape strict mode, ...)
+    treat them as distinct and reject ``Shard``/``Partial`` in places where
+    ``Replicate`` would work.
     """
-    # TODO(fegin): remove the ``Shard(d)`` on a size-1 mesh to ``Replicate()``
+    # TODO(fegin): remove the size-1 ``Shard(d)``/``Partial`` to ``Replicate()``
     # conversion once FlexShard replaces ``fully_shard``.
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
     placements = spmd_layout_to_dtensor_placements(layout)
@@ -152,7 +155,7 @@ def resolve_placements(
                 f"required: {list(mesh.mesh_dim_names)}."
             )
         p = placements[key]
-        if isinstance(p, Shard) and mesh.size(i) == 1:
+        if isinstance(p, (Shard, Partial)) and mesh.size(i) == 1:
             p = Replicate()
         result.append(p)
     return tuple(result)

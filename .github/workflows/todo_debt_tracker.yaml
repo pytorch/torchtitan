@@ -24,6 +24,8 @@ concurrency:
 jobs:
   check_todos:
     name: Generate Report
+    # Skip scheduled runs on forks, where they would only fail and email the fork owner
+    if: github.repository_owner == 'pytorch' || github.event_name != 'schedule'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -33,7 +35,7 @@ jobs:
       issues: write # for updating the issue body
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           # Fetch all history so git blame can identify authors correctly
           fetch-depth: 0

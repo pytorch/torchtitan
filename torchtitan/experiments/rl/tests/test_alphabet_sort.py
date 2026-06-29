@@ -22,6 +22,7 @@ from torchtitan.experiments.rl.examples.alphabet_sort import (
 from torchtitan.experiments.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.experiments.rl.examples.alphabet_sort.rubric import score_sorted_list
 from torchtitan.experiments.rl.rollout import Rollout, RolloutStatus, RolloutTurn
+from torchtitan.experiments.rl.types import RolloutTurnID
 
 
 _Author = alphabet_data._Author
@@ -44,18 +45,19 @@ def _patch_names(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _assistant_turn(content: str) -> RolloutTurn:
     return RolloutTurn(
+        rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=0),
         prompt_token_ids=[],
         completion_token_ids=[],
         completion_logprobs=[],
-        policy_version=0,
+        min_policy_version=0,
         completion_message={"role": "assistant", "content": content},
     )
 
 
 def _rollout(turns: list[RolloutTurn]) -> Rollout:
     return Rollout(
-        group_id="step=1/group=0",
-        sample_id="step=1/group=0/sample=0",
+        group_id=0,
+        rollout_id=0,
         status=RolloutStatus.COMPLETED,
         turns=turns,
     )
@@ -80,22 +82,24 @@ def test_dataset_is_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_state_dict_resumes_the_stream(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_names(monkeypatch)
-    dataset = AlphabetSortDataset(AlphabetSortDataset.Config(seed=3))
+    # Pin small bounds so the 8-author fixture can supply every turn (drawn without replacement).
+    config = AlphabetSortDataset.Config(seed=3, max_turns=2, max_names_per_turn=2)
+    dataset = AlphabetSortDataset(config)
     next(dataset)
     next(dataset)
     checkpoint = dataset.state_dict()
     expected_after = [next(dataset), next(dataset)]
 
-    resumed = AlphabetSortDataset(AlphabetSortDataset.Config(seed=3))
+    resumed = AlphabetSortDataset(config)
     resumed.load_state_dict(checkpoint)
     assert [next(resumed), next(resumed)] == expected_after
 
 
-def test_default_is_single_turn_sorted_by_first_or_last(
+def test_single_turn_sorted_by_first_or_last(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_names(monkeypatch)
-    dataset = AlphabetSortDataset(AlphabetSortDataset.Config(seed=0))  # max_turns=1
+    dataset = AlphabetSortDataset(AlphabetSortDataset.Config(seed=0, max_turns=1))
     seen_first = seen_last = False
     for _ in range(50):
         sample = next(dataset)
@@ -180,7 +184,7 @@ def test_ties_broken_by_other_name_part(monkeypatch: pytest.MonkeyPatch) -> None
     )
     monkeypatch.setattr(alphabet_data, "_load_authors", lambda *a, **k: pair)
     dataset = AlphabetSortDataset(
-        AlphabetSortDataset.Config(seed=0, max_names_per_turn=2)
+        AlphabetSortDataset.Config(seed=0, max_turns=1, max_names_per_turn=2)
     )
     checked_both = False
     for _ in range(50):

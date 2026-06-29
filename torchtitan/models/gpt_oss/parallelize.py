@@ -4,15 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import torch._dynamo
+
 from torchtitan.config import (
-    ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
+
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
@@ -24,6 +26,36 @@ from torchtitan.distributed.full_dtensor import (
 from torchtitan.models.gpt_oss.model import GptOssModel
 
 
+def _raise_dynamo_recompile_limit(
+    model: GptOssModel,
+) -> None:
+    # TP/EP sharding can compile a block before every DTensor local tensor has
+    # resolved from AsyncCollectiveTensor to a plain Tensor. Dynamo specializes
+    # on both states, and fullgraph=True turns the recompile cap into a hard
+    # failure instead of falling back. GPT-OSS needs a slightly higher cap
+    # because it alternates sliding-window and full-attention layers.
+    # TODO: remove once https://github.com/pytorch/pytorch/issues/187073 is fixed
+    min_recompile_limit = 12 if _has_sliding_window_attention(model) else 10
+    # PyTorch types this config as Literal[8], but runtime accepts larger ints.
+    # pyrefly: ignore [bad-assignment]
+    torch._dynamo.config.recompile_limit = max(
+        torch._dynamo.config.recompile_limit,
+        min_recompile_limit,
+    )
+
+
+def _has_sliding_window_attention(model: GptOssModel) -> bool:
+    for module in model.modules():
+        window_size = getattr(module, "window_size", None)
+        if (
+            isinstance(window_size, (tuple, list))
+            and len(window_size) > 0
+            and window_size[0] != -1
+        ):
+            return True
+    return False
+
+
 def parallelize_gptoss(
     model: GptOssModel,
     *,
@@ -31,21 +63,15 @@ def parallelize_gptoss(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
+    ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
+    skip_dp: bool = False,
 ):
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
-        Sequence length {training.seq_len} must be divisible by the product of TP degree
-        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
-        """
-
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
 
-    if parallelism.spmd_backend == "full_dtensor":
+    if parallelism.spmd_backend in ("full_dtensor", "spmd_types"):
         validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)
     else:
@@ -60,18 +86,22 @@ def parallelize_gptoss(
         if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
             model.parallelize(parallel_dims)
 
-    if ac_config.mode != "none":
-        apply_ac(
-            model,
-            ac_config,
-            model_compile_enabled=model_compile_enabled,
-        )
+    if ac_config is not None:
+        ac_config.build(dump_folder=dump_folder).apply(model)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
+        if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+            _raise_dynamo_recompile_limit(model)
         apply_compile(model, compile_config)
 
-    if parallelism.spmd_backend == "full_dtensor":
+    # Skip FSDP wrapper for inference. FSDP's forward hooks
+    # are incompatible with torch.inference_mode() used by vLLM.
+    # AC and compile are disabled via config (mode="none", enable=False).
+    if skip_dp:
+        return model
+
+    if parallelism.spmd_backend in ("full_dtensor", "spmd_types"):
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
         edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
     else:
