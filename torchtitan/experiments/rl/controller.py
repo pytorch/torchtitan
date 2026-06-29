@@ -143,12 +143,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass(kw_only=True, slots=True)
 class ValidationConfig:
-    """Held-out validation that runs at the start and end of training"""
-
-    # TODO: enable periodic validation with proper overlapping
+    """Held-out validation that runs at the start and end of training, and every
+    ``interval`` steps in between when ``interval > 0``."""
 
     num_samples: int = 20
     """Held-out prompts scored greedily (temp=0, n=1) per validation pass. 0 skips validation."""
+
+    interval: int = 0
+    """Run a validation pass every ``interval`` optimizer steps during training (in
+    addition to the pre/post passes). 0 (default) = only pre/post training. The pass
+    shares the generator engine with ongoing training rollouts (disjoint negative
+    request ids), so the trainer briefly waits on it -- keep ``interval`` large enough
+    that this overhead stays small."""
 
 
 @dataclass(kw_only=True, slots=True)
@@ -1085,6 +1091,16 @@ class Controller(Configurable):
                 await self.trainer.save_checkpoint.call(
                     step, last_step=(step == num_training_steps)
                 )
+
+            # Periodic held-out validation. Finish the in-flight weight sync first so the
+            # generators hold this step's policy, then run a validation pass on the shared
+            # engine (disjoint negative request ids keep it separate from training
+            # rollouts). The final step is covered by run()'s post-training pass.
+            val_interval = self.config.async_loop.validation.interval
+            if val_interval and step % val_interval == 0 and step != num_training_steps:
+                with sl.log_trace_span("periodic_validation"):
+                    await self._weight_sync.wait_inflight_push_pull()
+                    await self._validate_and_log(step=step)
 
         # Finish the last in-flight sync so generators hold the final weights for post-validation.
         await self._weight_sync.wait_inflight_push_pull()
