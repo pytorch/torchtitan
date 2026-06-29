@@ -12,14 +12,6 @@ from torch import nn, Tensor
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
-from torchtitan.models.flux.model.layers import (  # noqa: E402
-    DoubleStreamBlock,
-    EmbedND,
-    LastLayer,
-    MLPEmbedder,
-    SingleStreamBlock,
-    timestep_embedding,
-)
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.module import ModuleList
 
@@ -52,6 +44,16 @@ def local_concat_text_image_attention_states(
     image: torch.Tensor,
 ) -> torch.Tensor:
     return torch.cat((text, image), dim=1)
+
+
+from torchtitan.models.flux.model.layers import (  # noqa: E402
+    DoubleStreamBlock,
+    EmbedND,
+    LastLayer,
+    MLPEmbedder,
+    SingleStreamBlock,
+    timestep_embedding,
+)
 
 
 class FluxModel(BaseModel):
