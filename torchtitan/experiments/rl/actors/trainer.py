@@ -81,6 +81,7 @@ class PartialLogprobDrift:
     """Per-rank generator-vs-trainer logprob drift awaiting reduction across the loss-mesh."""
 
     logprob_diff_mean: torch.Tensor
+    logprob_diff_abs_mean: torch.Tensor
     logprob_diff_max: torch.Tensor
     ratio_tokens_different: torch.Tensor
 
@@ -110,12 +111,16 @@ def verify_logprob_identity(
 
     if ref_flat.numel() == 0:
         zero = torch.zeros((), dtype=torch.float32, device=generator_logprobs.device)
-        return PartialLogprobDrift(zero, zero, zero)
+        return PartialLogprobDrift(zero, zero, zero, zero)
 
     denom = max(num_global_valid_tokens, 1)
     diff = policy_flat - ref_flat
     return PartialLogprobDrift(
         logprob_diff_mean=diff.sum() / denom,
+        # abs_mean is the typical per-token drift magnitude (the signed mean
+        # cancels and hides it); pre-normalized by the global token count so a
+        # SUM-reduce across loss-mesh ranks reconstructs the global abs mean.
+        logprob_diff_abs_mean=diff.abs().sum() / denom,
         logprob_diff_max=diff.abs().max(),
         ratio_tokens_different=(diff.abs() > 1e-6).sum() / denom,
     )
@@ -476,6 +481,7 @@ class PolicyTrainer(Actor, Configurable):
         sum_reduced_metrics = {
             **loss_metrics,
             "bit_wise/logprob_diff/mean": verification.logprob_diff_mean,
+            "bit_wise/logprob_diff/abs_mean": verification.logprob_diff_abs_mean,
             "bit_wise/ratio_tokens_different/mean": verification.ratio_tokens_different,
         }
         max_reduced_metrics = {
