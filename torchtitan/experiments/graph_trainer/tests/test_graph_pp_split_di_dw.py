@@ -4,7 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import operator
 import unittest
+from types import SimpleNamespace
 
 import torch
 import torch.fx as fx
@@ -14,11 +16,26 @@ from torchtitan.experiments.graph_trainer.graph_pp import (
     partition_joint_graph,
     split_di_dw_graph,
 )
+from torchtitan.experiments.graph_trainer.graph_pp.split_di_dw import (
+    _collect_saved_values_for_dw,
+)
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     extract_module_state,
     minimal_fx_tracer,
 )
 from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
+
+
+def _mesh_op() -> object:
+    """Stand-in target for a single-output non-tensor op (e.g. mesh PG getter)."""
+
+
+def _mesh_consumer(_pg: object) -> object:
+    """Stand-in target for a direct (non-getitem) consumer of a mesh op."""
+
+
+def _multi_output_op() -> tuple:
+    """Stand-in target for a tuple-returning non-tensor op."""
 
 
 class _TinyStage(nn.Module):
@@ -133,6 +150,47 @@ class GraphPPSplitDiDwTest(unittest.TestCase):
         )
 
         self.assertIsNone(split)
+
+
+class GraphPPCollectSavedValuesForDwTest(unittest.TestCase):
+    """Directly exercise the non-tensor branch of _collect_saved_values_for_dw.
+
+    Under compile-on-one-rank, the backward graph carries non-tensor mesh/coor
+    nodes (no ``tensor_meta``, no fake-tensor ``val``) that cross the dI/dW
+    boundary. The function recomputes single-output ones in the dW graph and
+    saves the getitem results of tuple-returning ones. These cases need CooR to
+    appear end-to-end, so this test builds them synthetically on CPU.
+    """
+
+    @staticmethod
+    def _build_graphs():
+        # _collect_saved_values_for_dw only reads bw_gm.graph, so a SimpleNamespace
+        # with a .graph attribute avoids GraphModule codegen of the stub targets.
+        bw = fx.Graph()
+        mesh = bw.create_node("call_function", _mesh_op, name="single_mesh_op")
+        bw.create_node("call_function", _mesh_consumer, args=(mesh,), name="mesh_user")
+        multi = bw.create_node("call_function", _multi_output_op, name="multi_op")
+        gi0 = bw.create_node("call_function", operator.getitem, args=(multi, 0))
+        gi1 = bw.create_node("call_function", operator.getitem, args=(multi, 1))
+        bw.output((mesh, gi0, gi1))
+
+        # The dI graph references both producers, so both cross the boundary.
+        di = fx.Graph()
+        di.create_node("placeholder", "single_mesh_op", name="single_mesh_op")
+        di.create_node("placeholder", "multi_op", name="multi_op")
+        di.output(())
+        return SimpleNamespace(graph=bw), di, gi0.name, gi1.name
+
+    def test_single_output_node_is_recomputed_multi_output_is_saved(self) -> None:
+        bw, di, gi0_name, gi1_name = self._build_graphs()
+        saved_values, saved_sym_nodes = _collect_saved_values_for_dw(bw, di)
+        saved_names = {node.name for node in saved_values}
+
+        # The single-output mesh op is recomputed in the dW graph, not saved.
+        self.assertNotIn("single_mesh_op", saved_names)
+        # The tuple-returning op's getitem results are saved across the boundary.
+        self.assertEqual(saved_names, {gi0_name, gi1_name})
+        self.assertEqual(saved_sym_nodes, [])
 
 
 if __name__ == "__main__":

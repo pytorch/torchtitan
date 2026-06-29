@@ -123,11 +123,15 @@ def _collect_saved_values_for_dw(
             and not _is_fake_tensor_value(node)
         ):
             users = list(node.users)
-            if not all(user.target == operator.getitem for user in users):
-                raise ValueError(
-                    f"Non-tensor multi-output node {node.name} has unexpected users"
-                )
-            saved_values.extend(users)
+            if all(user.target == operator.getitem for user in users):
+                # Multi-output non-tensor node (e.g. a tuple-returning op): save
+                # its getitem results across the di/dW boundary.
+                saved_values.extend(users)
+            # Otherwise this is a single-output non-tensor node, e.g. a
+            # compile-on-one-rank device_mesh/coor op like
+            # mesh_get_process_group whose users consume it directly. Don't save
+            # it; the partitioner recomputes it in the dW graph, which is cheap,
+            # deterministic, and correct.
         else:
             dw_users = [user for user in node.users if user.name not in di_node_names]
             if "tensor_meta" in node.meta and all(
