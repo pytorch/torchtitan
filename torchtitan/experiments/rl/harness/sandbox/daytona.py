@@ -99,7 +99,12 @@ def _eager_rebuild_daytona_models() -> None:
             for obj in list(vars(mod).values()):
                 if isinstance(obj, type) and issubclass(obj, BaseModel):
                     try:
-                        obj.model_rebuild(force=True)
+                        # No force=True: force re-derives the schema and drops the
+                        # SDK's field DEFAULTS (e.g. SessionExecuteRequest then made
+                        # var_async/suppress_input_echo/additional_properties
+                        # required). A plain rebuild completes the (incomplete)
+                        # model via the SDK's own path with defaults intact.
+                        obj.model_rebuild()
                     except Exception:  # noqa: BLE001 -- unresolved refs: skip
                         pass
     except Exception as e:  # noqa: BLE001 -- import/rebuild is best-effort
