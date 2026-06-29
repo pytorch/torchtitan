@@ -4,18 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""CLI for the muP routine.
-
-  python -m torchtitan.experiments.mup grid <model>     # print the launch grid (the caller submits each)
-  python -m torchtitan.experiments.mup report <model>   # collect from reporterv2 -> transferred lr + predictor
-
-The launch grid is printed as plain MODULE/CONFIG/env lines so any launcher can wrap them; submission
-(cluster scheduling) is deliberately not this tool's job.
-"""
+"""CLI for the muP routine. `grid` prints the launch grid (the caller submits each line);
+`report` collects from reporterv2 and writes the transferred-lr report."""
 
 import sys
 
-from .routine import build_report, collect, fit_predictor, hp_table, grid
+from .routine import build_report, collect, grid, hp_table
 from .spec import SPECS
 
 
@@ -29,28 +23,24 @@ def main():
 
     if verb == "grid":
         n = len(spec.widths) * len(spec.lrs) * 2
-        print(f"# launch grid for {model}: {n} runs (standard + mup). submission is the caller's job.")
-        print("# wrap each line with your launcher, e.g. training/run.sh torchtitan/run_train.sh N=2 PARTITION=tbox2 ...")
+        print(
+            f"# launch grid for {model}: {n} runs (standard + mup). submission is the caller's job."
+        )
+        print(
+            "# wrap each line with your launcher, e.g. training/run.sh torchtitan/run_train.sh N=2 PARTITION=tbox2 ..."
+        )
         for g in grid(spec):
-            print(f"MODULE={spec.module} CONFIG={g['config']} {g['env']} REPORTERV2_TRAINING_ID={g['training_id']}")
+            print(
+                f"MODULE={spec.module} CONFIG={g['config']} "
+                f"REPORTERV2_TRAINING_ID={g['training_id']} {g['cli']}"
+            )
         return
 
     # verb == "report"
-    if not spec.ready:
-        print(f"note: {model} has no muP configs landed yet, so the sweep has nothing to collect.")
     results = collect(spec)
     url = build_report(spec, results=results)
     per_width, transferred = hp_table(spec, results)
     print(f"transferred muP lr = {transferred}")
-    basins = {w: per_width[w][1] for w in per_width}
-    if len(basins) >= 3:
-        popt, r2, predict = fit_predictor(basins)
-        linf, a, alpha = popt
-        top = max(basins)
-        print(
-            f"predictor: L_inf={linf:.3f} alpha={alpha:.3f} R2={r2:.3f}  "
-            f"basin w{int(top * 2)}={predict(top * 2):.3f} w{int(top * 4)}={predict(top * 4):.3f}"
-        )
     print(f"report -> {url}")
 
 
