@@ -218,10 +218,13 @@ def _dispatch_backward(
     if grad_recv_x is None:
         return None, None, None, None, None, None
 
+    buffer = _buffer
+    assert buffer is not None, "Buffer must be initialized before combine"
+
     handle = ctx.saved_handle
     assert handle is not None
 
-    grad_x, grad_scores, _event = _buffer.combine(
+    grad_x, grad_scores, _event = buffer.combine(
         grad_recv_x,
         handle=handle,
         topk_weights=grad_recv_scores.float() if grad_recv_scores is not None else None,
@@ -280,6 +283,9 @@ def _combine_backward(ctx, grad_combined):
     Returns grads for op inputs (x, handle_id, will_backward); only x is differentiable.
     """
     global _buffer
+    buffer = _buffer
+    assert buffer is not None, "Buffer must be initialized before dispatch"
+
     handle = ctx.saved_handle
     assert handle is not None, "Handle not found in combine backward"
 
@@ -287,7 +293,7 @@ def _combine_backward(ctx, grad_combined):
     # Pass num_sms from the handle: with a cached handle, dispatch's automatic
     # get_theoretical_num_sms(num_experts, ...) runs BEFORE num_experts is inferred from the
     # handle, so it would hit num_experts=None. handle.num_sms reuses the dispatch SM count.
-    grad_x, _idx, _scores, _handle, _event = _buffer.dispatch(
+    grad_x, _idx, _scores, _handle, _event = buffer.dispatch(
         grad_combined,
         handle=handle,
         num_sms=handle.num_sms,
@@ -502,6 +508,11 @@ def dispatch_tokens(
     # dropless inference).
     if not cudagraphable:
         num_max_tokens_per_rank = hidden_states.shape[0]
+    elif num_max_tokens_per_rank is None:
+        raise ValueError(
+            "num_max_tokens_per_rank is required in expand mode (cudagraphable=True): "
+            "it fixes the static dispatch-slab shape."
+        )
 
     selected_experts_indices = selected_experts_indices.contiguous()
     top_scores = top_scores.contiguous()
@@ -590,6 +601,7 @@ def combine_tokens(
     will_backward = torch.is_grad_enabled()
 
     if not state.cudagraphable:
+        assert state.permuted_indices is not None
         if state.permuted_scores is not None:
             hidden_states = hidden_states * state.permuted_scores.to(
                 hidden_states.dtype

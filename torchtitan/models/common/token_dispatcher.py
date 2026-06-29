@@ -266,6 +266,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         the count exchange independently from the true token-exchange
         scheduling markers.
         """
+        assert self.ep_mesh is not None
         if (
             torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing()
         ) and get_spmd_backend() != "spmd_types":
@@ -332,6 +333,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         input_splits: list[int],
     ) -> torch.Tensor:
         """Launch the dispatch all-to-all that moves routed tokens to experts."""
+        assert self.ep_mesh is not None
         if (
             torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing()
         ) and get_spmd_backend() != "spmd_types":
@@ -359,6 +361,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         output_splits: list[int],
     ) -> torch.Tensor:
         """Launch the combine all-to-all that returns expert outputs to tokens."""
+        assert self.ep_mesh is not None
         if (
             torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing()
         ) and get_spmd_backend() != "spmd_types":
@@ -806,6 +809,11 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
                 raise ValueError(
                     "DeepEP cudagraphable (expand) dispatch requires num_max_tokens_per_rank "
                     " but it is None."
+                )
+            if self.hidden_dim is None:
+                raise ValueError(
+                    "DeepEP cudagraphable (expand) dispatch requires hidden_dim, but it is "
+                    "None; the builder must thread it through the dispatcher config."
                 )
             from torchtitan.distributed.deepep.deepep import get_buffer
 
