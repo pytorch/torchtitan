@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from collections import Counter
 from urllib.request import urlopen
 
-from .spec import REPORTERV2_API_URL, TRAIN_LOSS_KEY
+from .spec import REPORTERV2_API_URL, SPECS, TRAIN_LOSS_KEY
 
 PALETTE = ["#636EFA", "#EF553B", "#00CC96", "#AB63FA", "#FFA15A"]  # per-width
 MODES = ("standard", "mup")
@@ -211,3 +212,39 @@ def build_report(spec, modes=MODES, results=None):
     with open(f"{spec.report_dir}/mutransfer.html", "w") as fh:
         fh.write(html)
     return spec.report_url
+
+
+def main():
+    if len(sys.argv) != 3 or sys.argv[1] not in ("grid", "report"):
+        sys.exit(
+            "usage: python -m torchtitan.experiments.mup.routine {grid|report} <model>"
+        )
+    verb, model = sys.argv[1], sys.argv[2]
+    if model not in SPECS:
+        sys.exit(f"unknown model {model!r}; known: {', '.join(SPECS)}")
+    spec = SPECS[model]
+
+    if verb == "grid":
+        n = len(spec.widths) * len(spec.lrs) * 2
+        print(
+            f"# launch grid for {model}: {n} runs (standard + mup). submission is the caller's job."
+        )
+        print(
+            "# wrap each line with your launcher, e.g. training/run.sh torchtitan/run_train.sh N=2 PARTITION=tbox2 ..."
+        )
+        for g in grid(spec):
+            print(
+                f"MODULE={spec.module} CONFIG={g['config']} "
+                f"REPORTERV2_TRAINING_ID={g['training_id']} {g['cli']}"
+            )
+        return
+
+    results = collect(spec)
+    url = build_report(spec, results=results)
+    _, transferred = hp_table(spec, results)
+    print(f"transferred muP lr = {transferred}")
+    print(f"report -> {url}")
+
+
+if __name__ == "__main__":
+    main()
