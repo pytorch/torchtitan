@@ -50,31 +50,71 @@ def _eager_rebuild_daytona_models() -> None:
     Best-effort: a no-op if Daytona isn't installed (e.g. CPU-only environments).
     """
     try:
+        import importlib
+        import pkgutil
         import sys
         import typing
 
         from pydantic import BaseModel, StrictStr
 
-        # Force the SDK submodules (and their model classes) to load before we walk.
-        import daytona  # type: ignore  # noqa: F401
-        from daytona import (  # type: ignore  # noqa: F401
-            CreateSandboxFromImageParams,
-            Resources,
-            SessionExecuteRequest,
-        )
+        import daytona  # type: ignore
 
-        base_ns = dict(vars(typing))
-        base_ns["StrictStr"] = StrictStr
-        for mod_name, mod in list(sys.modules.items()):
-            if not mod_name.startswith("daytona") or mod is None:
-                continue
+        # Force-load EVERY daytona submodule first. The model that fails depends on
+        # which ops run (CreateSandboxFromImageParams for create, SessionExecuteRequest
+        # in daytona.common.process for exec, ...) and only the already-imported
+        # submodules are in sys.modules at this point -- so walking sys.modules alone
+        # misses the not-yet-loaded ones (the bug: exec failed because its module
+        # had not loaded when the rebuild walk ran). walk_packages loads all of them.
+        try:
+            for info in pkgutil.walk_packages(daytona.__path__, daytona.__name__ + "."):
+                try:
+                    importlib.import_module(info.name)
+                except Exception:  # noqa: BLE001 -- skip unimportable submodules
+                    pass
+        except Exception:  # noqa: BLE001 -- pkgutil best-effort
+            pass
+
+        # The SDK models use `from __future__ import annotations` + TYPE_CHECKING
+        # typing imports, so their module globals lack Optional/Union/StrictStr/...
+        # at runtime -> rebuild raises "is not fully defined". Inject those names
+        # into every daytona module so the rebuild (and any later SDK-internal lazy
+        # rebuild) resolves the forward refs from the model's own namespace.
+        inject = {
+            name: getattr(typing, name)
+            for name in (
+                "Optional",
+                "Union",
+                "List",
+                "Dict",
+                "Any",
+                "Tuple",
+                "Sequence",
+                "Mapping",
+                "Set",
+                "FrozenSet",
+                "Type",
+                "Callable",
+                "Iterable",
+                "Annotated",
+            )
+            if hasattr(typing, name)
+        }
+        inject["StrictStr"] = StrictStr
+        daytona_mods = [
+            m
+            for n, m in list(sys.modules.items())
+            if n.startswith("daytona") and m is not None
+        ]
+        for mod in daytona_mods:
+            for key, val in inject.items():
+                if not hasattr(mod, key):
+                    setattr(mod, key, val)
+        for mod in daytona_mods:
             for obj in list(vars(mod).values()):
                 if isinstance(obj, type) and issubclass(obj, BaseModel):
                     try:
-                        obj.model_rebuild(
-                            force=True, _types_namespace={**vars(mod), **base_ns}
-                        )
-                    except Exception:  # noqa: BLE001 -- unresolved refs: skip that model
+                        obj.model_rebuild(force=True)
+                    except Exception:  # noqa: BLE001 -- unresolved refs: skip
                         pass
     except Exception as e:  # noqa: BLE001 -- import/rebuild is best-effort
         logger.warning("[daytona] eager model_rebuild skipped: %s", e)
