@@ -199,7 +199,6 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2, decay_type="linear", min_lr_factor=1.0
             ),
-            training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=8,  # TODO: TBD
                 tensor_parallel_degree=1,
