@@ -30,10 +30,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 
 from .attention import (
     Attention,
-    LiCompute,
-    SparseAttention_1,
-    SparseAttention_4,
-    SparseAttention_128,
+    DSAFlexAttention,
 )
 from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
 from .moe import DeepSeekV4MoE, DeepSeekV4Router
@@ -191,8 +188,6 @@ def _make_v4_attn_config(
     compressor_cfg = None
     indexer_cfg = None
     compressor_128_cfg = None
-    li_compute_cfg = None
-    li_loss_cfg = None
     from .compressor import Compressor, Indexer
 
     if compress_ratio == 4:
@@ -215,30 +210,11 @@ def _make_v4_attn_config(
             compress_ratio=compress_ratio, rotate=False,
             norm_eps=norm_eps, coff=coff, rope=rope,
         )
-    if compress_ratio == 1:
-        sparse_attn_cfg = SparseAttention_1.Config(
-            window_size=window_size,
-            compress_ratio=compress_ratio,
-            softmax_scale=softmax_scale,
-        )
-    elif compress_ratio == 4:
-        sparse_attn_cfg = SparseAttention_4.Config(
-            window_size=window_size,
-            compress_ratio=compress_ratio,
-            softmax_scale=softmax_scale,
-        )
-    elif compress_ratio == 128:
-        sparse_attn_cfg = SparseAttention_128.Config(
-            window_size=window_size,
-            compress_ratio=compress_ratio,
-            softmax_scale=softmax_scale,
-        )
-
-    if compress_ratio > 1 and indexer_cfg is not None:
-        li_compute_cfg = LiCompute.Config(
-            ratio=compress_ratio,
-            index_topk=index_topk,
-        )
+    sparse_attn_cfg = DSAFlexAttention.Config(
+        window_size=window_size,
+        compress_ratio=compress_ratio,
+        softmax_scale=softmax_scale,
+    )
 
     return Attention.Config(
         dim=dim,
@@ -297,7 +273,6 @@ def _make_v4_attn_config(
         compressor_128=compressor_128_cfg,
         indexer=indexer_cfg,
         sparse_attn=sparse_attn_cfg,
-        li_compute=li_compute_cfg,
     )
 
 
@@ -518,20 +493,19 @@ def _debugmodel(
     sinkhorn_iters = 20
     hc_eps = 1e-6
     dense_layers = set()
-    max_seq_len = 2048
-    seq_len = 2048
+    max_seq_len = 4096 * 4
     compress_rope_theta = 40000.0
     original_seq_len = 65536
 
     rope = ComplexRoPE.Config(
         dim=rope_head_dim,
-        max_seq_len=seq_len,
+        max_seq_len=max_seq_len,
         theta=10000.0,
         scaling="none",
     )
     rope_compress = ComplexRoPE.Config(
         dim=rope_head_dim,
-        max_seq_len=seq_len,
+        max_seq_len=max_seq_len,
         theta=compress_rope_theta,
         scaling="yarn",
         rope_factor=4.0,

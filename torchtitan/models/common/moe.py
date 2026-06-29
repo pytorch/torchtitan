@@ -387,7 +387,7 @@ class MoE(Module):
             persistent=False,
         )
 
-    def forward(self, x_BLD: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_BLD: torch.Tensor, **router_kwargs) -> torch.Tensor:
         """
         Args:
             x_BLD: Input ``(B, L, D)``.
@@ -443,7 +443,7 @@ class MoE(Module):
             topk_scores_BLK,
             topk_expert_ids_BLK,
             scores_BLE,
-        ) = self.router(x_BLD, self.expert_bias_E)
+        ) = self.router(x_BLD, self.expert_bias_E, **router_kwargs)
 
         # Build a one-hot routing map (B, L, E) marking the experts each token
         # is routed to. Under TP/SP the router outputs are DTensors sharded on

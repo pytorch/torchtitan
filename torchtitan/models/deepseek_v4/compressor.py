@@ -136,7 +136,10 @@ class Indexer(Module):
     def _init_self_buffers(self, *, buffer_device=None):
         if buffer_device is None:
             buffer_device = self.hadamard_mat.device
-        self.hadamard_mat = _make_hadamard_mat(self.head_dim, device=buffer_device)
+        with torch.device(buffer_device):
+            self.hadamard_mat = _make_hadamard_mat(
+                self.head_dim, device=buffer_device
+            )
 
     @staticmethod
     def _rotate_activation(x, hadamard_mat):
@@ -150,7 +153,16 @@ class Indexer(Module):
         out = F.linear(x, hadamard_mat) * (dim**-0.5)
         return out[..., :dim].reshape(*x_shape)
 
-    def forward(self, x, qr, positions=None):
+    def forward(
+        self,
+        x,
+        qr,
+        compress_causal_mask,
+        compress_causal_limit,
+        *,
+        positions=None,
+        offset: int,
+    ):
         bsz, seqlen, _ = x.size()
         rd = self.rope_head_dim
         q = self.wq_b(qr)
@@ -158,8 +170,21 @@ class Indexer(Module):
         q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)
         q_rope = self.rope(q_rope, q_rope, positions)[0]
         q = torch.cat([q_nope, q_rope], dim=-1)
-        q = self._rotate_activation(q, self.hadamard_mat.to(q.dtype))
+        hadamard_mat = self.hadamard_mat.to(device=q.device, dtype=q.dtype)
+        q = self._rotate_activation(q, hadamard_mat)
         k = self.compressor(x, positions=positions)
-        k = self._rotate_activation(k, self.hadamard_mat.to(q.dtype))
+        k = self._rotate_activation(k, hadamard_mat)
         weights = self.weights_proj(x) * (self.softmax_scale * self.num_index_heads**-0.5)
-        return q, k, weights
+        index_score = torch.einsum("bshd,btd->bsht", q, k)
+        index_score = index_score.relu_() * weights.unsqueeze(-1)
+        index_score = index_score.sum(dim=2)
+
+        index_score = index_score + torch.where(
+            compress_causal_mask, torch.finfo(q.dtype).min, 0
+        )
+        index_score, topk_idxs = index_score.topk(
+            min(self.index_topk, seqlen // self.compress_ratio), dim=-1
+        )
+        mask = topk_idxs >= compress_causal_limit
+        compress_topk_idxs = torch.where(mask, -1, topk_idxs + offset)
+        return compress_topk_idxs, index_score
