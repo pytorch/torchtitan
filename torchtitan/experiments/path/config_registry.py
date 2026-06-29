@@ -34,13 +34,6 @@ import torch.nn as nn
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.mup import (
-    hidden_std,
-    MuPSpec,
-    output_mult,
-    param_groups,
-    residual_std,
-)
 from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 from torchtitan.components.tokenizer import NoOpTokenizer
 from torchtitan.config import (
@@ -98,9 +91,6 @@ STEPS = 512
 MUP_PATTERN = (
     r"^(blocks\.\d+\.attention\.c_attn|blocks\.\d+\.attention\.c_proj"
     r"|blocks\.\d+\.mlp\.c_fc|blocks\.\d+\.mlp\.c_proj)\.weight$"
-)
-VIT_MUP = MuPSpec(
-    base_width=BASE_WIDTH, num_layers=NUM_LAYERS, hidden_pattern=MUP_PATTERN
 )
 
 
@@ -478,6 +468,10 @@ def _lin(in_f: int, out_f: int, *, std: float, bias: bool = True) -> Linear.Conf
     )
 
 
+def _hidden_std(fan_in: int, *, mup: bool) -> float:
+    return fan_in**-0.5 if mup else BASE_WIDTH**-0.5
+
+
 def _vit_attention(
     dim: int, *, n_head: int, mup: bool, qk_norm: bool = True
 ) -> PathSelfAttention.Config:
@@ -490,8 +484,10 @@ def _vit_attention(
         k_norm=LayerNorm.Config(normalized_shape=head_dim, param_init=_NORM_INIT)
         if qk_norm
         else None,
-        c_attn=_lin(dim, 3 * dim, std=hidden_std(dim, VIT_MUP, mup=mup)),
-        c_proj=_lin(dim, dim, std=residual_std(dim, VIT_MUP, mup=mup)),
+        c_attn=_lin(dim, 3 * dim, std=_hidden_std(dim, mup=mup)),
+        c_proj=_lin(
+            dim, dim, std=_hidden_std(dim, mup=mup) / math.sqrt(2 * NUM_LAYERS)
+        ),
         inner_attention=ScaledDotProductAttention.Config(),
         n_head=n_head,
         head_dim=head_dim,
@@ -504,8 +500,10 @@ def _vit_mlp(dim: int, *, mup: bool, mult: float = 4.0) -> PathMLP.Config:
     hidden = _hidden_dim(dim, mult)
     return PathMLP.Config(
         norm=LayerNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        c_fc=_lin(dim, hidden, std=hidden_std(dim, VIT_MUP, mup=mup)),
-        c_proj=_lin(hidden, dim, std=residual_std(hidden, VIT_MUP, mup=mup)),
+        c_fc=_lin(dim, hidden, std=_hidden_std(dim, mup=mup)),
+        c_proj=_lin(
+            hidden, dim, std=_hidden_std(hidden, mup=mup) / math.sqrt(2 * NUM_LAYERS)
+        ),
         act="gelu_tanh",
         dropout=0.0,
     )
@@ -521,7 +519,7 @@ def _vit_model_config(
     t, h, w = INPUT_SIZE
     num_patches = (t // pt) * (h // ph) * (w // pw)
     return PlanViT.Config(
-        output_mult=output_mult(dim, VIT_MUP, mup=mup),
+        output_mult=(BASE_WIDTH / dim) if mup else 1.0,
         mean=255 / 2,
         std=255 / 4,
         patch_embed=PatchEmbed.Config(
@@ -582,14 +580,26 @@ def _vit_optimizer_config(
 ) -> OptimizersContainer.Config:
     # base lr is carried on the container so --optimizer.lr can sweep every group
     # at once; muP scales the hidden matmuls down by lr_mult = 1/m (m = width ratio).
+    m = VIT_WIDTHS[flavor] / BASE_WIDTH
     common = {"betas": (0.9, 0.95), "eps": 1e-8, "weight_decay": wd}
-    groups = param_groups(
-        VIT_WIDTHS[flavor],
-        VIT_MUP,
-        mup=mup,
-        optimizer_name="AdamW",
-        optimizer_kwargs=common,
-    )
+    groups = [
+        ParamGroupConfig(
+            pattern=r".*",
+            optimizer_name="AdamW",
+            optimizer_kwargs={**common},
+        )
+    ]
+    if mup:
+        # first-match-wins: scale hidden matmuls by lr_mult = 1/m before the catch-all
+        groups.insert(
+            0,
+            ParamGroupConfig(
+                pattern=MUP_PATTERN,
+                optimizer_name="AdamW",
+                lr_mult=1.0 / m,
+                optimizer_kwargs={**common},
+            ),
+        )
     return OptimizersContainer.Config(
         implementation="fused_opt_states_bf16", lr=lr, param_groups=groups
     )
