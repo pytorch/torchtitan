@@ -8,11 +8,9 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
-from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 
 
 def _softplus_stable(x):
@@ -57,18 +55,35 @@ class DeepSeekV4Router(TokenChoiceTopKRouter):
 
     def _init_self_buffers(self, *, buffer_device=None):
         if self.hash:
-            if buffer_device is not None:
-                with torch.device(buffer_device):
-                    self.tid2eid = _build_hash_routing_table(
-                        self.vocab_size, self.num_experts, self.top_k,
-                        device=buffer_device,
-                    )
-            else:
+            if buffer_device is None:
+                buffer_device = self.tid2eid.device
+            with torch.device(buffer_device):
                 self.tid2eid = _build_hash_routing_table(
                     self.vocab_size, self.num_experts, self.top_k,
+                    device=buffer_device,
                 )
 
-    def forward(self, x_BLD, input_ids=None, expert_bias_E=None):
+    def _hash_lookup(self, input_ids, scores):
+        if isinstance(input_ids, DTensor):
+            input_ids = input_ids.to_local()
+
+        tid2eid = self.tid2eid
+        if isinstance(tid2eid, DTensor):
+            tid2eid = tid2eid.to_local()
+
+        selected_experts_indices = tid2eid.to(input_ids.device)[input_ids]
+        if isinstance(scores, DTensor):
+            selected_experts_indices = DTensor.from_local(
+                selected_experts_indices,
+                scores.device_mesh,
+                scores.placements,
+                run_check=False,
+            )
+        else:
+            selected_experts_indices = selected_experts_indices.to(scores.device)
+        return selected_experts_indices
+
+    def forward(self, x_BLD, expert_bias_E=None, *, input_ids=None):
         scores = self.gate(x_BLD)
         if self.score_func == "sigmoid":
             scores = torch.sigmoid(scores.to(torch.float32))
@@ -82,20 +97,7 @@ class DeepSeekV4Router(TokenChoiceTopKRouter):
         if self.hash:
             if input_ids is None:
                 raise ValueError("input_ids is required for DeepSeek V4 hash routing.")
-            if isinstance(input_ids, DTensor):
-                local_input_ids = input_ids.to_local()
-                local_indices = self.tid2eid.to(local_input_ids.device)[local_input_ids]
-                if isinstance(scores, DTensor):
-                    selected_experts_indices = DTensor.from_local(
-                        local_indices,
-                        scores.device_mesh,
-                        scores.placements,
-                        run_check=False,
-                    )
-                else:
-                    selected_experts_indices = local_indices.to(scores.device)
-            else:
-                selected_experts_indices = self.tid2eid.to(input_ids.device)[input_ids]
+            selected_experts_indices = self._hash_lookup(input_ids, scores)
         else:
             scores_for_choice = (
                 scores if expert_bias_E is None else scores + expert_bias_E
@@ -123,77 +125,4 @@ class DeepSeekV4MoE(MoE):
         pass
 
     def forward(self, x_BLD: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
-        B, L, D = x_BLD.shape
-        T = B * L
-        sp_size = getattr(self.experts.token_dispatcher, "sp_size", 1)
-        pad_tokens = (-T) % sp_size
-        num_local_tokens_after_padding = (T + pad_tokens) // sp_size
-
-        topk_scores_BLK, topk_expert_ids_BLK, scores_BLE = self.router(
-            x_BLD,
-            input_ids,
-            self.expert_bias_E,
-        )
-
-        def _generate_routing_map(
-            scores_BLE: torch.Tensor,
-            topk_expert_ids_BLK: torch.Tensor,
-        ) -> torch.Tensor:
-            return torch.zeros_like(scores_BLE, dtype=torch.bool).scatter_(
-                -1,
-                topk_expert_ids_BLK,
-                True,
-            )
-
-        if isinstance(topk_expert_ids_BLK, DTensor):
-            assert isinstance(
-                scores_BLE, DTensor
-            ), "scores_BLE and topk_expert_ids_BLK should both be DTensors"
-            generate_routing_map = local_map(
-                _generate_routing_map,
-                in_placements=(
-                    scores_BLE.placements,
-                    topk_expert_ids_BLK.placements,
-                ),
-                out_placements=(scores_BLE.placements,),
-                device_mesh=scores_BLE.device_mesh,
-            )
-        else:
-            generate_routing_map = _generate_routing_map
-
-        routing_map_BLE = generate_routing_map(
-            scores_BLE,
-            topk_expert_ids_BLK,
-        )
-        num_local_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
-
-        with torch.no_grad():
-            self.tokens_per_expert_E.add_(num_local_tokens_per_expert_E)
-
-        out_BLD = self.experts(
-            x_BLD,
-            topk_scores_BLK,
-            topk_expert_ids_BLK,
-            num_local_tokens_per_expert_E,
-            num_local_tokens_after_padding=num_local_tokens_after_padding,
-        )
-
-        shared_out_BLD = (
-            self.shared_experts(x_BLD) if self.shared_experts is not None else None
-        )
-
-        if (
-            isinstance(self.experts.token_dispatcher, DeepEPTokenDispatcher)
-            and self.experts.token_dispatcher.sp_size == 1
-        ):
-            from torchtitan.distributed.deepep.deepep import sync_combine
-
-            sync_combine()
-
-        if pad_tokens:
-            out_TD = out_BLD.view(-1, D)
-            out_BLD = out_TD[:T].view(B, L, D)
-
-        if shared_out_BLD is not None:
-            out_BLD = out_BLD + shared_out_BLD
-        return out_BLD
+        return super().forward(x_BLD, input_ids=input_ids)

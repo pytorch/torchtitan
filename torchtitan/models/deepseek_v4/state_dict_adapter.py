@@ -7,15 +7,17 @@ import re
 from typing import Any
 
 import torch
-from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor
 
+from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 from torchtitan.models.utils import MoEStateDictAdapter
 
 from .model import DeepSeekV4Model
 
 
 class DeepSeekV4StateDictAdapter(MoEStateDictAdapter):
+    get_hf_storage_reader = DeepSeekV3StateDictAdapter.get_hf_storage_reader
+
     def __init__(
         self,
         model_config: DeepSeekV4Model.Config,
@@ -106,21 +108,6 @@ class DeepSeekV4StateDictAdapter(MoEStateDictAdapter):
                         f"layers.{layer_id}.ffn.gate.tid2eid": f"layers.{layer_id}.moe.router.tid2eid",
                     }
                 )
-
-    def get_hf_storage_reader(
-        self, path: str, from_quantized: bool = False
-    ) -> HuggingFaceStorageReader:
-        if from_quantized:
-            from torch.distributed.checkpoint.quantized_hf_storage import (
-                QuantizedHuggingFaceStorageReader,
-            )
-            return QuantizedHuggingFaceStorageReader(
-                path=path,
-                target_dtype=torch.float32,
-                block_size=128,
-                thread_count=4,
-            )
-        return HuggingFaceStorageReader(path)
 
     @staticmethod
     def _abstract_key(key: str, count: int) -> str:
