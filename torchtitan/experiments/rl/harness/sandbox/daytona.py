@@ -33,6 +33,30 @@ logger = logging.getLogger(__name__)
 HARNESS_LABELS = {"owner": "titan_swe_r2e"}
 
 
+def _eager_rebuild_daytona_models() -> None:
+    """Resolve Daytona's Pydantic models at import (single-threaded) so concurrent
+    sandbox creates never race their lazy rebuild.
+
+    ``CreateSandboxFromImageParams`` has a forward-ref field (``StrictStr``) that
+    Pydantic resolves lazily on first instantiation. Under a wide concurrent boot
+    fanout (e.g. rollout_concurrency=48 in one controller) many first-uses race the
+    rebuild and raise ``PydanticUserError: ... is not fully defined``. Calling
+    ``model_rebuild`` once here, before any rollout, makes every later create safe.
+    Best-effort: a no-op if Daytona isn't installed (e.g. CPU-only environments).
+    """
+    try:
+        from pydantic import StrictStr  # noqa: F401 -- in scope for the rebuild
+
+        from daytona import CreateSandboxFromImageParams  # type: ignore
+
+        CreateSandboxFromImageParams.model_rebuild()
+    except Exception as e:  # noqa: BLE001 -- import/rebuild is best-effort
+        logger.warning("[daytona] eager model_rebuild skipped: %s", e)
+
+
+_eager_rebuild_daytona_models()
+
+
 # Process-wide AsyncDaytona client, shared by every sandbox in this worker: one
 # client = one pooled TLS session reused across all concurrent rollouts. A
 # per-sandbox client instead opens its own pool, and the handshake storm under a
