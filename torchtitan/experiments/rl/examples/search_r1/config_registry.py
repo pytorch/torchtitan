@@ -181,21 +181,16 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     config = Controller.Config(
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-30B-A3B",
-        # Generation is the async-loop bottleneck (multi-turn search + decode), so run
-        # several generators; the GeneratorRouter load-balances rollouts across them.
-        # Each generator is one host (TP=4/EP=4 = 4 GPUs); scale with capacity. The
-        # single retrieval server (controller) serves all of them, so it is the ceiling
-        # on very large generator counts.
+        # Generation is the async-loop bottleneck; run several generators (the
+        # GeneratorRouter load-balances rollouts). Each is one host (TP=4/EP=4); the
+        # single controller retrieval server caps how far this scales.
         num_generators=4,
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
             # Cold-start GRPO grouping: group_size=32 gives more diverse siblings per
-            # prompt -> fewer all-identical-reward (zero-std) groups; 8 groups/step keeps
-            # 8*32 == 256 rollouts/step. Keep zero-std groups so the train loop still
-            # steps at cold start, where most groups are all-wrong (zero-std) under pure
-            # exact-match -- the occasional nonzero group carries the gradient and reward
-            # rises. Once warm, raising drop_zero_std_reward_groups back to True drops the
-            # dead groups for efficiency.
+            # prompt -> fewer zero-std groups (256 rollouts/step). Keep zero-std groups
+            # (drop_zero_std=False) so a step still lands at cold start, where most groups
+            # are all-wrong under pure exact-match; the rare nonzero group drives gradient.
             num_groups_per_train_step=8,
             group_size=32,
             training_sample_builder=TrainingSampleBuilder.Config(
@@ -250,20 +245,17 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 tensor_parallel_degree=4,
                 expert_parallel_degree=4,
             ),
-            # FULL_DECODE_ONLY: graph pure-decode batches (the bulk of generation) and
-            # run prefill / mixed batches eager. FULL_AND_PIECEWISE (which also graphs
-            # prefill / mixed) corrupted the DeepEP EXPAND MoE forward here -> the model
-            # emitted garbage and never searched (0 reward). Decode-only graphing avoids
-            # that (the same #3668 fix the 1.7B/8B/dense search_r1 configs use) while
-            # keeping most of the cudagraph speedup over full eager.
+            # FULL_DECODE_ONLY: graph pure-decode batches, run prefill / mixed eager.
+            # FULL_AND_PIECEWISE (graphs prefill / mixed too) corrupted the DeepEP EXPAND
+            # MoE forward -> garbage output, no search, 0 reward. Decode-only graphing
+            # avoids it (#3668, as the 1.7B/8B/dense configs) and is far faster than eager.
             cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_DECODE_ONLY"),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),
-            # Generator override: helion_rope + the DeepEP EXPAND inference override.
-            # NOT fused_swiglu: its fused_grouped_experts claims `moe.experts` while
+            # Generator override: helion_rope + the DeepEP EXPAND inference override, but
+            # NOT fused_swiglu -- its fused_grouped_experts claims `moe.experts` while
             # deepep_inference claims the descendant `moe.experts.token_dispatcher`, a
-            # nested-override conflict (#3778). The trainer keeps fused_swiglu (compact
-            # path, no conflict there).
+            # nested-override conflict (#3778). The trainer keeps fused_swiglu.
             override=OverrideConfig(
                 imports=[
                     "torchtitan.overrides.helion_rope",
