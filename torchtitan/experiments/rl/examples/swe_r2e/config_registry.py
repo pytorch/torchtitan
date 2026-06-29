@@ -238,8 +238,11 @@ def rl_grpo_qwen3_32b_swe_r2e() -> Controller.Config:
     )
     config.generator = dataclasses.replace(
         config.generator,
-        # Coding-agent edits can be long; raise the per-turn generation cap.
-        sampling=dataclasses.replace(config.generator.sampling, max_tokens=4096),
+        # Per-turn generation cap. 4096 truncated ~41% of turns (finish=length ->
+        # broken/garbage tool calls); 8192 dropped that to ~0 and lifted the 32B
+        # solve rate from ~1% to ~7% (the adapter further caps it at the remaining
+        # context budget each turn, so this is an upper bound, not the typical len).
+        sampling=dataclasses.replace(config.generator.sampling, max_tokens=8192),
         parallelism=dataclasses.replace(
             config.generator.parallelism, tensor_parallel_degree=8
         ),
@@ -272,14 +275,14 @@ def _scale_32b_multihost(
     config.async_loop = dataclasses.replace(
         config.async_loop,
         num_training_steps=num_training_steps,
-        # 1 group/step on the full (sparse) R2E set: a step needs ALL rollouts of
-        # each selected group graded AND with non-zero reward std (soft filtering
-        # drops all-solve / all-fail groups). On full R2E most groups are
-        # all-fail, so requiring many surviving groups per step starves the
-        # trainer; 1 group/step lets a step land as soon as a single mixed group
-        # appears. group_size=16 gives that group enough samples to have a mix.
-        # See RECIPE.md (the full-R2E starvation finding -> pass-rate curriculum).
-        num_groups_per_train_step=1,
+        # 4 groups/step x group_size 16. The starvation that forced 1 group/step was
+        # an ARTIFACT of a broken rollout config (per-turn max_tokens=4096 truncated
+        # ~41% of turns -> ~1% solve -> almost every group all-fail). With the fixed
+        # rollout config (max_tokens=8192, lean tools, read-before-edit/locate system
+        # prompt) the 32B solves ~7% (pass@8) and ~18% of tasks are mixed, so multi-
+        # group steps fill normally without a pass-rate curriculum. Soft filtering
+        # still drops the residual all-solve / all-fail groups.
+        num_groups_per_train_step=4,
         group_size=16,
         max_offpolicy_steps=max_offpolicy_steps,
     )
