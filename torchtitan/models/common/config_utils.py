@@ -308,6 +308,7 @@ def make_token_dispatcher_config(
     top_k: int,
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    ll_buffer_hidden_size: int = 0,
 ) -> LocalTokenDispatcher.Config:
     """Build the appropriate token dispatcher config.
 
@@ -326,9 +327,16 @@ def make_token_dispatcher_config(
     - HYBRIDEP_NUM_SMS_COMBINE (default: 16)
     """
     if comm_backend == "deepep":
+        # One DeepEP backend; the dispatcher's ``low_latency`` flag selects HT (default,
+        # training + inference, not cudagraph-able) vs LL (masked, inference-only,
+        # cudagraph-able). ``ll_buffer_hidden_size`` (the model dim) sizes the LL buffer,
+        # which wire_meshes creates eagerly (before any cudagraph capture) when LL is enabled.
+        # A model flavor that targets LL inference sets ``low_latency=True`` plus the static
+        # per-rank dispatch capacity ``num_max_dispatch_tokens_per_rank`` at construction.
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
+            ll_buffer_hidden_size=ll_buffer_hidden_size,
         )
     elif comm_backend == "hybridep":
         return HybridEPTokenDispatcher.Config(
@@ -374,5 +382,6 @@ def make_experts_config(
             top_k=top_k,
             comm_backend=comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
+            ll_buffer_hidden_size=dim,
         ),
     )
