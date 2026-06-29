@@ -178,6 +178,7 @@ def _make_gptoss_experts_config(
             top_k=top_k,
             comm_backend=moe_comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
+            hidden_dim=dim,
         ),
     )
 

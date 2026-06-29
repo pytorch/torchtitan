@@ -482,6 +482,11 @@ class VLLMModelWrapper(Module):
             sd_adapter=sd_adapter,
         )
         checkpointer.load()
+        # Free the large transient allocations the HF load/from_hf conversion left in the
+        # caching allocator, so the later CUDA-graph capture (which needs its own private
+        # pool) has room. Without this, large models (e.g. 235B) OOM capture even though
+        # the live weights fit.
+        torch.cuda.empty_cache()
 
     def load_weights(self, weights_iter):
         """
