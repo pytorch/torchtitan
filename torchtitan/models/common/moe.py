@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
@@ -254,7 +255,37 @@ class TokenChoiceTopKRouter(Module):
             group_scores, k=self.num_limited_groups, dim=-1, sorted=False
         )
         group_mask = torch.ones_like(group_scores, dtype=torch.bool)
-        group_mask.scatter_(-1, group_idx, False)  # False = selected groups (keep)
+        # scatter_ does not support mixed local Tensor / DTensor arguments, and
+        # DTensor refuses in-place scatter_ that would require a placement change
+        # on the token-sharded (Shard(1)) input. Run the scatter on local tensors
+        # under local_map when inputs are DTensors so the group_mask placement
+        # (Shard(1) on the token dim) is preserved, matching the masked_fill below.
+        # TODO: Remove this local_map workaround once DTensor sharding propagation
+        # supports scatter with mixed Tensor / DTensor arguments.
+        def _mask_selected_groups(
+            group_mask: torch.Tensor,
+            group_idx: torch.Tensor,
+        ) -> torch.Tensor:
+            # False = selected groups (keep), True = masked-out groups.
+            return group_mask.scatter_(-1, group_idx, False)
+
+        if isinstance(group_mask, DTensor):
+            assert isinstance(
+                group_idx, DTensor
+            ), "group_mask and group_idx should both be DTensors"
+            mask_selected_groups = local_map(
+                _mask_selected_groups,
+                in_placements=(group_mask.placements, group_idx.placements),
+                out_placements=(group_mask.placements,),
+                device_mesh=group_mask.device_mesh,
+            )
+        else:
+            mask_selected_groups = _mask_selected_groups
+
+        group_mask = mask_selected_groups(
+            group_mask,
+            group_idx,  # pyrefly: ignore [bad-argument-count]
+        )
         # Mask out experts from non-selected groups
         scores_for_choice_BLE = scores_grouped.masked_fill(
             group_mask.unsqueeze(-1), float("-inf")
@@ -445,14 +476,43 @@ class MoE(Module):
             scores_BLE,
         ) = self.router(x_BLD, self.expert_bias_E)
 
-        # Build a one-hot routing map (B, L, E) marking the experts each token
-        # is routed to. Under TP/SP the router outputs are DTensors sharded on
-        # the token dim; scatter_ writes along the (replicated) expert dim, so
-        # DTensor runs it as a local op with no redistribution.
-        routing_map_BLE = torch.zeros_like(scores_BLE, dtype=torch.bool).scatter_(
-            -1,
-            topk_expert_ids_BLK,
-            True,
+        # Build routing map with scatter. scatter_ does not support mixed
+        # local Tensor / DTensor arguments, so run the scatter on local tensors
+        # under local_map when router outputs are DTensors. This keeps the
+        # scatter local on each token shard (Shard(1)), so the downstream
+        # sum(dim=(0, 1)) over the sharded token dim yields Partial(sum), which
+        # the GroupedExperts sharding contract expects.
+        # TODO: Remove this local_map workaround once DTensor sharding
+        # propagation supports scatter with mixed Tensor / DTensor arguments.
+        def _generate_routing_map(
+            scores_BLE: torch.Tensor,
+            topk_expert_ids_BLK: torch.Tensor,
+        ) -> torch.Tensor:
+            return torch.zeros_like(scores_BLE, dtype=torch.bool).scatter_(
+                -1,
+                topk_expert_ids_BLK,
+                True,
+            )
+
+        if isinstance(topk_expert_ids_BLK, DTensor):
+            assert isinstance(
+                scores_BLE, DTensor
+            ), "scores_BLE and topk_expert_ids_BLK should both be DTensors"
+            generate_routing_map = local_map(
+                _generate_routing_map,
+                in_placements=(
+                    scores_BLE.placements,
+                    topk_expert_ids_BLK.placements,
+                ),
+                out_placements=(scores_BLE.placements,),
+                device_mesh=scores_BLE.device_mesh,
+            )
+        else:
+            generate_routing_map = _generate_routing_map
+
+        routing_map_BLE = generate_routing_map(
+            scores_BLE,
+            topk_expert_ids_BLK,  # pyrefly: ignore [bad-argument-count]
         )
         num_local_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
 
