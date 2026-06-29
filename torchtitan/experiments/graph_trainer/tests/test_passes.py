@@ -78,6 +78,7 @@ from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     _FSDP_BUCKET_META,
     get_transformer_block_bucket_counts,
+    joint_transformer_block_bucketing_reordering_pass,
     reassign_collective_pgs_pass,
     schedule_fsdp_comms_to_dense_regions_pass,
 )
@@ -402,6 +403,99 @@ class TestReassignCollectivePgsPass(FSDPTest):
         self.assertNotEqual(fsdp_extra_pg, ep_extra_pg)
         self.assertEqual(self._count_ag_nodes_with_pg(gm, fsdp_extra_pg), 1)
         self.assertEqual(self._count_ep_a2a_nodes_with_pg(gm, ep_extra_pg), 1)
+
+
+class TestDDPAllReduceBucketing(FSDPTest):
+    """DDP replicate all-reduce bucketing: toy model + simple_fsdp replicate +
+    export_joint + joint_transformer_block_bucketing_reordering_pass."""
+
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    def _make_ddp_model(self, dim=16, n_layers=3):
+        """Toy model wrapped with simple_fsdp in replicate (DDP) mode, whose
+        backward emits a per-parameter all-reduce gradient sync."""
+        parallel_dims = ParallelDims(
+            dp_shard=1,
+            dp_replicate=self.world_size,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+        )
+        model = ToyModel(dim, n_layers).cuda()
+        dp_mesh = parallel_dims.get_mesh(["dp_replicate"])
+        model = data_parallel(model, device_mesh=dp_mesh, mode="replicate")
+        return model
+
+    def _export_and_get_bw_graph(self, model, inputs):
+        joint_with_descriptors, tracing_context = export_joint(model, (inputs,))
+        captured = {}
+
+        def capture_bw_compiler(gm, example_inputs):
+            captured["gm"] = gm
+            captured["example_inputs"] = example_inputs
+            return gm
+
+        with tracing(tracing_context):
+            aot_compile_joint_with_descriptors(
+                joint_with_descriptors,
+                bw_compiler=capture_bw_compiler,
+            )
+        return captured["gm"], captured["example_inputs"]
+
+    def _count_all_reduce(self, gm):
+        targets = (
+            torch.ops._c10d_functional.all_reduce.default,
+            torch.ops._c10d_functional.all_reduce_.default,
+        )
+        return sum(
+            1
+            for node in gm.graph.nodes
+            if node.op == "call_function" and node.target in targets
+        )
+
+    def test_replicate_all_reduce_is_bucketed(self):
+        model = self._make_ddp_model(n_layers=3)
+        inputs = torch.randn(4, 16).cuda()
+
+        bw_gm, _ = self._export_and_get_bw_graph(model, inputs)
+
+        # The DDP backward emits exactly one replicate all-reduce per parameter
+        # (per-layer weight + bias), so n_layers=3 gives 6 before bucketing.
+        num_params = sum(1 for _ in model.parameters())
+        before = self._count_all_reduce(bw_gm)
+        self.assertEqual(
+            before,
+            num_params,
+            "expected one per-parameter all_reduce per model parameter",
+        )
+
+        # export_joint does not carry module FQNs onto backward nodes, so tag
+        # every replicate all-reduce into one bucket plan (mirrors how
+        # TestFsdpDenseSchedulerPass hand-tags FX nodes). Before the fix the
+        # bucketer skipped all_reduce and this count would not change.
+        bucket_fqn = "block"
+        for node in bw_gm.graph.nodes:
+            if (
+                node.op == "call_function"
+                and node.target is torch.ops._c10d_functional.all_reduce.default
+            ):
+                node.meta["custom"] = {_MODULE_FQN: bucket_fqn}
+                node.meta["autograd_backward"] = True
+
+        joint_transformer_block_bucketing_reordering_pass(
+            bw_gm,
+            None,
+            module_bucket_plans=[bucket_fqn],
+        )
+        bw_gm.graph.lint()
+
+        # All replicate all-reduces collapse into a single bucketed all-reduce.
+        after = self._count_all_reduce(bw_gm)
+        self.assertEqual(after, 1)
 
 
 class TestFsdpDenseSchedulerPass(TestCase):
