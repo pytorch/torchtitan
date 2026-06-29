@@ -34,41 +34,54 @@ HARNESS_LABELS = {"owner": "titan_swe_r2e"}
 
 
 def _eager_rebuild_daytona_models() -> None:
-    """Warm the Daytona SDK's lazy Pydantic rebuild ONCE, single-threaded, at import.
+    """Make the Daytona SDK's Pydantic models resolvable in OUR import context.
 
-    The SDK's models (``CreateSandboxFromImageParams`` for create,
-    ``SessionExecuteRequest`` for exec) finish their Pydantic build lazily on first
-    instantiation. Under a wide concurrent boot fanout (rollout_concurrency=48 in one
-    controller) many first-uses race that lazy build and raise a misleading
-    ``PydanticUserError: ... is not fully defined`` -> every create/exec fails ->
-    turns=0. Fix: CONSTRUCT a throwaway of each model we build, here at import, so the
-    SDK runs its OWN build path once before any rollout; later concurrent constructs
-    then find the model already complete and never race.
+    The SDK models use ``from __future__ import annotations`` + TYPE_CHECKING typing
+    imports, so their module globals lack the forward-ref names (Optional, StrictStr,
+    ...) at runtime. When daytona is imported INSIDE the torchtitan/vllm/pydantic
+    import chain (the RL controller), pydantic cannot resolve those refs on first
+    construct -> ``PydanticUserError: ... is not fully defined`` -> every create/exec
+    fails -> turns=0. (In a clean process the refs happen to resolve, which is why the
+    curate worker booted sandboxes fine but the controller did not.) Fix: load every
+    daytona submodule and inject all typing + pydantic public names into each module's
+    globals, so the SDK's own lazy rebuild (triggered later at the construct sites)
+    resolves the refs.
 
-    Construct (not ``model_rebuild``) on purpose: calling ``model_rebuild`` ourselves
-    -- with force and/or an injected namespace -- re-derived the schema and DROPPED
-    the SDK's field defaults (it made ``SessionExecuteRequest.var_async`` /
-    ``suppress_input_echo`` / ``additional_properties`` required -> validation errors
-    on exec). The SDK's native construct path keeps the defaults.
-    Best-effort: a no-op if Daytona isn't installed (e.g. CPU-only environments).
+    We do NOT call ``model_rebuild`` (force or otherwise): it re-derives the schema and
+    DROPS the SDK's field defaults (made SessionExecuteRequest.var_async etc. required).
+    Defaults that this context still drops anyway are passed explicitly at the construct
+    sites (see ``exec``). Best-effort: a no-op if Daytona isn't installed.
     """
     try:
-        from daytona import (  # type: ignore
-            CreateSandboxFromImageParams,
-            Resources,
-            SessionExecuteRequest,
-        )
+        import importlib
+        import pkgutil
+        import sys
+        import typing
 
-        SessionExecuteRequest(command="true", run_async=True)
-        CreateSandboxFromImageParams(
-            image="warmup",
-            resources=Resources(cpu=1, memory=1, disk=1),
-            labels=HARNESS_LABELS,
-            auto_stop_interval=1,
-            auto_delete_interval=0,
+        import pydantic
+
+        import daytona  # type: ignore
+
+        try:
+            for info in pkgutil.walk_packages(daytona.__path__, daytona.__name__ + "."):
+                try:
+                    importlib.import_module(info.name)
+                except Exception:  # noqa: BLE001 -- skip unimportable submodules
+                    pass
+        except Exception:  # noqa: BLE001 -- pkgutil best-effort
+            pass
+
+        inject = {n: getattr(typing, n) for n in dir(typing) if not n.startswith("_")}
+        inject.update(
+            {n: getattr(pydantic, n) for n in dir(pydantic) if not n.startswith("_")}
         )
-    except Exception as e:  # noqa: BLE001 -- best-effort warmup
-        logger.warning("[daytona] model warmup skipped: %s", e)
+        for name, mod in list(sys.modules.items()):
+            if name.startswith("daytona") and mod is not None:
+                for key, val in inject.items():
+                    if not hasattr(mod, key):
+                        setattr(mod, key, val)
+    except Exception as e:  # noqa: BLE001 -- best-effort
+        logger.warning("[daytona] model namespace inject skipped: %s", e)
 
 
 _eager_rebuild_daytona_models()
@@ -251,9 +264,19 @@ class DaytonaSandbox:
             try:
                 sid = uuid.uuid4().hex
                 await self._sb.process.create_session(sid)
+                # Pass every optional field explicitly (= the SDK's own defaults).
+                # In the torchtitan/vllm import context the SDK rebuild drops these
+                # fields' defaults and makes them required, so omitting them raises
+                # "3 validation errors for SessionExecuteRequest".
                 resp = await self._sb.process.execute_session_command(
                     sid,
-                    SessionExecuteRequest(command=full, run_async=True),
+                    SessionExecuteRequest(
+                        command=full,
+                        run_async=True,
+                        var_async=None,
+                        suppress_input_echo=None,
+                        additional_properties={},
+                    ),
                     timeout=timeout,
                 )
                 cid = resp.cmd_id
