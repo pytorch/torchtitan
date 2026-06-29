@@ -72,7 +72,9 @@ _tp_all_reduce_patched = False
 def _patch_vllm_all_reduce() -> None:
     """Route the generator's tensor-parallel all-reduce through vLLM's custom
     one-shot/multimem AR instead of DTensor's NCCL ring redistribute (applied
-    when batch-invariant mode is off). Idempotent. Two changes:
+    when batch-invariant mode is off). Idempotent. Three changes (see numbered
+    comments below); changes 1-2 cover the default (DTensor) backend, change 3
+    additionally routes the spmd_types backend's redistribute through the same op:
 
     1. Swap torch.ops._c10d_functional.all_reduce (the op every DTensor
        Partial -> Replicate redistribute calls) for
@@ -127,6 +129,21 @@ def _patch_vllm_all_reduce() -> None:
             return ca.all_reduce(input, registered=False)
 
         ca.custom_all_reduce = custom_all_reduce
+
+    # 3. (spmd_types) spmd's redistribute issues an in-place dist.all_reduce that
+    #    step 1 can't see, so redirect its Partial->{R,I} reduce to the functional
+    #    collective. Guarded on no-grad: funcol's backward is wrong for this reduce,
+    #    so only redirect during inference (no backward); training is unaffected.
+    import torch.distributed._functional_collectives as funcol
+
+    original_redistribute = spmd.redistribute
+
+    def redistribute(x, group, *, src, dst, **kwargs):
+        if src == spmd.P and dst in (spmd.R, spmd.I) and not torch.is_grad_enabled():
+            return funcol.wait_tensor(funcol.all_reduce(x, reduceOp="sum", group=group))
+        return original_redistribute(x, group, src=src, dst=dst, **kwargs)
+
+    spmd.redistribute = redistribute
 
     _tp_all_reduce_patched = True
     logger.info(
