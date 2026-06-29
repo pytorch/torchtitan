@@ -496,15 +496,32 @@ class PolicyTrainer(Actor, Configurable):
         """
         state_dict = self.model.state_dict()
         if self._transfer_dtype is not None:
-            # torchstore only applies `transfer_dtype` on the RDMA path, so under direct_rdma=False
-            # cast to the generator dtype here (else the generator reads fp32 into its bf16 state dict).
-            # TODO(async-rl): remove this manual cast once torchstore applies transfer_dtype on the
-            #   CPU-staged path.
+            # CPU-staged sync: cast the fp32-master weights to the generator dtype
+            # (bf16) so the generator does not read fp32 into its bf16 state dict
+            # (-> get-side `bfloat16 != float32`). Cast only floating PARAMETERS;
+            # leave registered BUFFERS at their dtype -- the MoE keeps an fp32
+            # load-balance buffer (expert_bias_E, moe.py) that the bf16 generator
+            # also keeps fp32, so casting it to bf16 desyncs the get-side dtype check.
+            # named_buffers() FQNs carry module-wrapper segments (activation
+            # checkpoint's `._checkpoint_wrapped_module`, compile's `._orig_mod`) that
+            # state_dict() strips, so normalize both before matching, else a buffer is
+            # misclassified as a param and wrongly cast.
+            # (Don't pass transfer_dtype to put_state_dict: torchstore would re-cast
+            # those fp32 buffers to bf16 too.)
+            def _clean(n: str) -> str:
+                return n.replace("._checkpoint_wrapped_module", "").replace(
+                    "._orig_mod", ""
+                )
+
+            buffer_names = {_clean(name) for name, _ in self.model.named_buffers()}
             state_dict = {
-                name: tensor.to(self._transfer_dtype)
+                name: (
+                    tensor.to(self._transfer_dtype)
+                    if _clean(name) not in buffer_names and tensor.is_floating_point()
+                    else tensor
+                )
                 for name, tensor in state_dict.items()
             }
-
         await ts.put_state_dict(
             state_dict,
             "model_state_dict",
