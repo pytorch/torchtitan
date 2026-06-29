@@ -283,7 +283,14 @@ class VLLMModelWrapper(Module):
         # TODO: When checkpoint doesn't contains expert_bias_E, check the config
         # should use loss based load balancing strategy.
         with torch.no_grad():
-            self.model.init_weights(buffer_device=None)
+            # spmd_types parameter init needs the current mesh to materialize
+            # local shards for fused parameters, including the fused QKV linear
+            # used by model variants such as Qwen3.
+            # TODO: Consider an init_non_persistent_buffers contract on the
+            # Decoder / Model class so buffer-only init does not need this
+            # spmd context.
+            with self.spmd_context():
+                self.model.init_weights(buffer_device=None)
         self._maybe_initial_load_weights()
 
         # Give each gpt-oss attention's vLLM backend its sink rescale.
@@ -458,6 +465,11 @@ class VLLMModelWrapper(Module):
             sd_adapter=sd_adapter,
         )
         checkpointer.load()
+        # Free the large transient allocations the HF load/from_hf conversion left in the
+        # caching allocator, so the later CUDA-graph capture (which needs its own private
+        # pool) has room. Without this, large models (e.g. 235B) OOM capture even though
+        # the live weights fit.
+        torch.cuda.empty_cache()
 
     def load_weights(self, weights_iter):
         """
