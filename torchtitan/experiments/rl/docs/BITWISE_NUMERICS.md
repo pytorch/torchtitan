@@ -139,11 +139,21 @@ precision in one of two ways:
 1. **Full bf16 training** (`training.dtype="bfloat16"`): weights are bf16, used
    directly in the forward.
 2. **FSDP mixed precision** (`training.mixed_precision_param="bfloat16"`, the
-   default): with `data_parallel_shard_degree > 1`, FSDP all-gathers the full
-   params in bf16 before the forward, so the dense forward is numerically
-   identical to the generator's replicated bf16 dense path -- even when the
-   master weights are fp32. This is what lets an FSDP2+TP trainer match a
-   generator that uses pure DP+TP.
+   default): the trainer keeps fp32 master weights and FSDP's
+   `MixedPrecisionPolicy` casts them to bf16 before the forward, so the forward
+   is numerically identical to the generator's bf16 path. The trainer always
+   wraps the model in FSDP (`parallelize_qwen3` applies `apply_fsdp_to_decoder`
+   unconditionally for the trainer), so this cast happens even at
+   `data_parallel_shard_degree=1`, where FSDP acts purely as a mixed-precision
+   boundary (the degree-1 all-gather is a no-op but still casts to bf16). No
+   extra GPUs are required relative to TP-only. With
+   `data_parallel_shard_degree > 1` the same cast happens during the sharded
+   all-gather.
+
+This is the default path for the batch-invariant configs: they keep fp32 master
+weights (`TrainingConfig()` with default `dtype="float32"`) and rely on FSDP
+mixed precision for the bf16 forward, so the optimizer updates fp32 weights while
+the forward stays bitwise identical to the generator.
 
 ## Current limitations
 
@@ -164,15 +174,32 @@ python -m torchtitan.experiments.rl.train \
 ```
 
 Batch-invariant configs in
-`torchtitan/experiments/rl/examples/alphabet_sort/config_registry.py` include:
+`torchtitan/experiments/rl/examples/alphabet_sort/config_registry.py` all use
+FSDP mixed precision (fp32 master weights, bf16-cast forward) on the trainer:
 
-- `rl_grpo_qwen3_0_6b_varlen_batch_invariant` -- dense, varlen attention, TP-only.
+- `rl_grpo_qwen3_0_6b_varlen_batch_invariant` -- dense, varlen attention; trainer
+  TP=2 (FSDP degree 1), generator TP=2.
 - `rl_grpo_qwen3_0_6b_flex_batch_invariant` -- dense, FlexAttention (uses
-  `BatchInvariantFlexConverter`).
-- `rl_grpo_gpt_oss_debug_varlen_batch_invariant` -- GPT-OSS dense debug model.
+  `BatchInvariantFlexConverter`); trainer TP=2 (FSDP degree 1), generator TP=2.
+- `rl_grpo_gpt_oss_debug_varlen_batch_invariant` -- GPT-OSS MoE debug model;
+  trainer TP=2 (FSDP degree 1), generator TP=2.
 - `rl_grpo_qwen3_moe_debug_varlen_batch_invariant` -- MoE; trainer FSDP2+TP2+EP4
   matches generator DP2+TP2+EP4 bitwise (verified
   `bit_wise/logprob_diff/max == 0`).
 
+The dense configs keep the original TP-only GPU footprint (FSDP degree 1 adds no
+GPUs); only the MoE config shards across `data_parallel_shard_degree=2`.
+
 Parity is verified by `torchtitan/experiments/rl/tests/test_bitwise_parity.py`
-and the loss-comparison script in `torchtitan/experiments/rl/scripts/loss_compare.py`.
+(`test_trainer_vs_vllm_prefill` asserts `torch.equal` between trainer and vLLM
+logprobs) and the loss-comparison script in
+`torchtitan/experiments/rl/scripts/loss_compare.py`.
+
+The dense `varlen` and `flex` Qwen3-0.6B configs were verified bitwise-identical
+(`max_delta=0.0`) under FSDP mixed precision: trainer prefill (fp32 master ->
+bf16 all-gather) matches vLLM prefill, batch invariance holds across batch
+sizes, and vLLM decode matches prefill. The `test_batch_invariance` check (the
+batch-invariance guarantee itself) also passes for GPT-OSS under FSDP mixed
+precision. Note: GPT-OSS `test_trainer_vs_vllm_prefill` has a separate,
+pre-existing trainer-vs-vLLM mismatch that is present on TP-only bf16 as well, so
+it is unrelated to FSDP mixed precision.

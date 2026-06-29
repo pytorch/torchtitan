@@ -293,12 +293,28 @@ class Controller(Configurable):
                     )
                 if not self.trainer.debug.deterministic:
                     raise ValueError("batch_invariant requires deterministic=True")
-                # TODO: Replace trainer dtype constraint to use mixed
-                #  training enabled by FSDP.
-                if self.trainer.training.dtype != "bfloat16":
+                # The trainer forward must compute in bf16 to match the bf16
+                # generator. This holds either with full bf16 training
+                # (training.dtype == "bfloat16"), or with FSDP mixed precision
+                # (training.mixed_precision_param == "bfloat16"): the trainer
+                # always wraps the model in FSDP (even at
+                # data_parallel_shard_degree=1, where FSDP acts purely as a
+                # mixed-precision boundary), so the params are cast to bf16 for
+                # the forward before any matmul.
+                trainer_forward_in_bf16 = (
+                    self.trainer.training.dtype == "bfloat16"
+                    or self.trainer.training.mixed_precision_param == "bfloat16"
+                )
+                if not trainer_forward_in_bf16:
                     raise ValueError(
-                        f"batch_invariant requires bfloat16 training dtype, "
-                        f"got {self.trainer.training.dtype!r}"
+                        "batch_invariant requires the trainer forward to compute "
+                        "in bfloat16 to match the generator. Set "
+                        "training.dtype='bfloat16' (full bf16 training) or "
+                        "training.mixed_precision_param='bfloat16' (fp32 master "
+                        "weights, bf16-cast forward via FSDP mixed precision). "
+                        f"Got dtype={self.trainer.training.dtype!r}, "
+                        "mixed_precision_param="
+                        f"{self.trainer.training.mixed_precision_param!r}."
                     )
                 if self.generator.model_dtype != "bfloat16":
                     raise ValueError(
