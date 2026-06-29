@@ -11,7 +11,11 @@ import torch.nn as nn
 
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.distributed.utils import get_train_context
+from torchtitan.distributed.utils import get_spmd_context
+from torchtitan.experiments.graph_trainer.configs import (
+    EpOverlapConfig,
+    GraphTrainerCompileConfig,
+)
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.trainer import Trainer
 
@@ -24,6 +28,13 @@ def build_minimal_trainer(
     activation_checkpoint_mode: str = "none",
     compile_enable_passes: bool = True,
     compile_passes: list[str] | None = None,
+    compile_ep_overlap_enabled: bool = False,
+    compile_ep_overlap_chunk_dim: str = "batch",
+    compile_ep_overlap_chunk_strategy: str = "graph",
+    compile_ep_overlap_module_fqn: str = "layers.*",
+    compile_ep_overlap_disable_early_grad_accumulation: bool = False,
+    compile_inductor_compilation: str = "regional",
+    compile_disable_passes: list[str] | None = None,
     compile_numerics_changing_optim: bool = False,
     tokenizer=None,
     fsdp_reshard_after_forward: str = "default",
@@ -33,7 +44,7 @@ def build_minimal_trainer(
     trainer.model_parts = [model]
     trainer.loss_fn = CrossEntropyLoss.Config().build()
     trainer.parallel_dims = SimpleNamespace(pp_enabled=False, cp_enabled=False)
-    trainer.train_context = get_train_context()
+    trainer.train_context = get_spmd_context()
     trainer.model_config = model_config
     trainer.device = torch.device("cuda")
     trainer.tokenizer = tokenizer
@@ -41,20 +52,27 @@ def build_minimal_trainer(
 
     if trainer_cls is GraphTrainer:
         trainer.config = SimpleNamespace(
-            compile=SimpleNamespace(
+            compile=GraphTrainerCompileConfig(
+                enable=True,
                 mode="aot_fx_trace",
                 enable_passes=compile_enable_passes,
                 passes=[] if compile_passes is None else list(compile_passes),
-                precompile_artifact_dir="",
-                memory_policy="default",
-                pass_pipeline="default",
-                inductor_compilation="regional",
+                disable_passes=(
+                    []
+                    if compile_disable_passes is None
+                    else list(compile_disable_passes)
+                ),
+                inductor_compilation=compile_inductor_compilation,
                 numerics_changing_optim=compile_numerics_changing_optim,
-                disable_passes=[],
-                debug_graph_passes=False,
-                cpu_offload_prefetch_n_layers=1,
-                cpu_offload_defer_n_layers=1,
-                cpu_offload_budget_gb=100.0,
+                ep_overlap=EpOverlapConfig(
+                    enabled=compile_ep_overlap_enabled,
+                    chunk_dim=compile_ep_overlap_chunk_dim,
+                    strategy=compile_ep_overlap_chunk_strategy,
+                    module_fqn=compile_ep_overlap_module_fqn,
+                    disable_early_grad_accumulation=(
+                        compile_ep_overlap_disable_early_grad_accumulation
+                    ),
+                ),
             ),
             model_spec=SimpleNamespace(model=model_config),
             activation_checkpoint={

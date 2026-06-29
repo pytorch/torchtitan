@@ -20,9 +20,10 @@ import torch
 import torch.distributed as dist
 import torchstore as ts
 from monarch.actor import Actor, Channel, current_rank, endpoint, Port, PortReceiver
+from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
-from torchtitan.distributed.utils import set_batch_invariance
+from torchtitan.distributed.utils import get_spmd_backend, set_batch_invariance
 from torchtitan.experiments.rl.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
     patch_bmm_for_batch_invariance,
@@ -33,10 +34,18 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     TORCHTITAN_CONFIG_FORMAT,
 )
 from torchtitan.experiments.rl.observability import metrics as m
+from torchtitan.experiments.rl.routing.intra_generator_router import (
+    IntraGeneratorRouter,
+)
 from torchtitan.experiments.rl.types import Completion
-from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+from torchtitan.models.common.attention import (
+    FlexAttention,
+    FusedQKVLinear,
+    VarlenAttention,
+)
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.sharding import resolve_placements, SpmdLayout
 from torchtitan.tools.logging import init_logger
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
@@ -146,14 +155,13 @@ def _prepare_generation_request_metrics(
     ]
 
 
-# vLLM's chunked-prefill chunk size (max_num_batched_tokens). "FULL" /
-# "FULL_AND_PIECEWISE" also graph prefill, whose per-step token count is bounded
-# by this, so their capture sizes must reach it (else prefill falls back to
-# eager). The generator does not override max_num_batched_tokens, so this is
-# vLLM's default.
-# TODO: this value still needs discussion -- ideally read the engine's actual
-# max_num_batched_tokens rather than hardcoding the default.
-_VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
+# vLLM's default max_num_batched_tokens (vllm's per-step budget:
+# prefill + decode tokens summed over the batch). Used as the cudagraph capture
+# cap for "FULL" / "FULL_AND_PIECEWISE" (which graph prefill / mixed batches, so
+# capture sizes must reach the per-step budget or those batches fall back to
+# eager) when ``Config.max_num_batched_tokens`` is unset; when that field is set,
+# its value is used instead (and also drives the vLLM engine).
+_DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 
 
 @dataclass(kw_only=True, slots=True)
@@ -190,6 +198,11 @@ class VLLMCudagraphConfig:
       capture of mixed prefill+decode batches
     """
 
+    capture_sizes: list[int] | None = None
+    """Explicit cudagraph capture batch sizes. When ``None`` (default), sizes are
+    auto-derived: powers of 2 up to the cap, plus ``max_num_seqs`` and the cap as
+    exact sizes. When set, exactly these sizes are captured (deduped and sorted)."""
+
     # TODO: Validate CUDA graph capture with MoE / Expert Parallelism.
     # MoE routing produces dynamic shapes that may conflict with full
     # CUDA graph capture despite being torch.compile-compatible
@@ -200,19 +213,20 @@ class VLLMCudagraphConfig:
     # https://github.com/pytorch/torchtitan/issues/3175
 
     def get_vllm_compilation_config(
-        self, *, max_num_seqs: int
+        self, *, max_num_seqs: int, max_num_batched_tokens: int | None = None
     ) -> CompilationConfig | None:
         """Build a vLLM ``CompilationConfig`` for ``mode``, or return ``None``
         when CUDA graphs are disabled.
 
-        Capture sizes are powers of 2 up to the cap, plus ``max_num_seqs`` and the
-        cap itself as exact sizes so the largest capture size is always the cap
+        When ``capture_sizes`` is set, those exact sizes are captured. Otherwise
+        sizes are auto-derived: powers of 2 up to the cap, plus ``max_num_seqs`` and
+        the cap itself as exact sizes so the largest capture size is always the cap
         (even when it is not a power of 2). The cap is ``max_num_seqs`` for
         ``FULL_DECODE_ONLY`` (decode batch == num_seqs). ``FULL`` and
         ``FULL_AND_PIECEWISE`` also graph prefill, whose per-step token count is
-        bounded by vLLM's default ``max_num_batched_tokens``, so the cap extends to
-        ``_VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS`` -- otherwise prefill chunks larger
-        than the cap fall back to eager.
+        bounded by ``max_num_batched_tokens`` (the configured value, else
+        ``_DEFAULT_MAX_NUM_BATCHED_TOKENS``), so the cap extends to it
+        -- otherwise prefill chunks larger than the cap fall back to eager.
 
         All modes capture with ``mode=CompilationMode.NONE`` (no inductor compile).
         ``FULL_AND_PIECEWISE`` runs attention eager via vLLM's BREAKABLE
@@ -223,18 +237,30 @@ class VLLMCudagraphConfig:
             return None
         if max_num_seqs <= 0:
             raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}")
+        if max_num_batched_tokens is not None:
+            _max_cudagraph_capture_size = max_num_batched_tokens
+        else:
+            _max_cudagraph_capture_size = _DEFAULT_MAX_NUM_BATCHED_TOKENS
         cap = max_num_seqs
         if self.mode in ("FULL", "FULL_AND_PIECEWISE"):
-            cap = max(cap, _VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS)
-        sizes = [1 << i for i in range(int(math.log2(cap)) + 1)]
-        # Always include max_num_seqs (decode batch) and the cap (largest prefill
-        # chunk) as exact sizes so the largest capture size is the cap even when it
-        # is not a power of 2
-        if max_num_seqs not in sizes:
-            sizes.append(max_num_seqs)
-        if cap not in sizes:
-            sizes.append(cap)
-        sizes = sorted(sizes)
+            cap = max(cap, _max_cudagraph_capture_size)
+        if self.capture_sizes is not None:
+            if not self.capture_sizes or any(s <= 0 for s in self.capture_sizes):
+                raise ValueError(
+                    "cudagraph.capture_sizes must be a non-empty list of positive "
+                    f"ints, got {self.capture_sizes}"
+                )
+            sizes = sorted(set(self.capture_sizes))
+        else:
+            sizes = [1 << i for i in range(int(math.log2(cap)) + 1)]
+            # Always include max_num_seqs (decode batch) and the cap (largest
+            # prefill chunk) as exact sizes so the largest capture size is the cap
+            # even when it is not a power of 2
+            if max_num_seqs not in sizes:
+                sizes.append(max_num_seqs)
+            if cap not in sizes:
+                sizes.append(cap)
+            sizes = sorted(sizes)
 
         return CompilationConfig(
             cudagraph_mode=self.mode,
@@ -311,6 +337,7 @@ class RequestDispatcher:
         parallelism: InferenceParallelismConfig,
         broadcast_group: dist.ProcessGroup,
         vllm_parallel_config: ParallelConfig,
+        intra_generator_router: IntraGeneratorRouter.Config,
     ):
         self._rank = rank
         # Only DP and TP are supported, so ``tp_degree`` ranks make up one DP
@@ -351,6 +378,15 @@ class RequestDispatcher:
         self._rank0_result_receiver: PortReceiver | None = None
         self._rank0_drain_task: asyncio.Task | None = None
 
+        # --- DP routing ---
+        # RANK-0 DP routing: pick a DP rank per request, reserving its load until
+        # the completion resolves.
+        self._rank0_dp_router: IntraGeneratorRouter | None = (
+            intra_generator_router.build(dp_degree=self._dp_degree)
+            if self._rank == 0 and self._dp_degree > 1
+            else None
+        )
+
     def rank0_register_future(
         self, request_id: str, metrics_prefix: str
     ) -> asyncio.Future[Completion]:
@@ -377,16 +413,26 @@ class RequestDispatcher:
         """RANK 0: pick which DP rank serves each queued request.
 
         Returns a fixed-length (``dp_degree``) list; index == DP rank. Each rank
-        later admits only its own slice.
-
-        TODO: route across DP ranks via a real routing strategy (#3768). For now
-        all requests go to the highest DP rank, which exercises the result
-        fan-in when DP>1 (its TP rank 0 sends completions back to rank 0).
+        later admits only its own slice. With a single DP rank, everything goes
+        to DP rank 0; otherwise ``IntraGeneratorRouter`` reserves a DP rank per
+        request and that reservation is released when the request's completion
+        resolves.
         """
         requests_per_dp_rank: list[list[GenerationRequest]] = [
             [] for _ in range(self._dp_degree)
         ]
-        requests_per_dp_rank[-1] = requests
+        for request in requests:
+            if self._rank0_dp_router is None:
+                dp_rank = 0
+            else:
+                # Pick a DP rank for this request, and increment this DP rank's
+                # load by 1 (i.e. measured by request count).
+                dp_rank = self._rank0_dp_router.reserve(
+                    request.request_id,
+                    routing_session_id=request.routing_session_id,
+                )
+            requests_per_dp_rank[dp_rank].append(request)
+
         return requests_per_dp_rank
 
     def rank0_stamp_min_policy_version(
@@ -531,6 +577,10 @@ class RequestDispatcher:
             completion.metrics = metrics
 
             generation_future.future.set_result(completion)
+            # Free the request's reserved load on its DP rank so load-aware
+            # routing sees the accurate loads on DPs.
+            if self._rank0_dp_router is not None:
+                self._rank0_dp_router.release(request_id)
 
     async def _rank0_drain_results(self) -> None:
         """RANK 0 background task which receives and resolves completions pushed
@@ -617,6 +667,13 @@ class VLLMGenerator(Actor, Configurable):
         )
         """Parallelism configuration for the vLLM engine."""
 
+        intra_generator_router: IntraGeneratorRouter.Config = field(
+            default_factory=IntraGeneratorRouter.Config
+        )
+        """In-mesh DP routing config: how rank 0 partitions requests across the
+        engine's data-parallel ranks (no effect when data_parallel_degree == 1,
+        where there is a single DP rank)."""
+
         sampling: SamplingConfig = field(default_factory=SamplingConfig)
         """Default sampling parameters for generation."""
 
@@ -630,6 +687,11 @@ class VLLMGenerator(Actor, Configurable):
 
         gpu_memory_limit: float = 0.9
         """Fraction of GPU memory to use for the vLLM engine (0.0 to 1.0)."""
+
+        max_num_batched_tokens: int | None = None
+        """vLLM chunked-prefill chunk size: max tokens scheduled per engine step
+        (prefill + decode, summed over the batch). ``None`` (default) leaves
+        vLLM's own engine default in place."""
 
         cudagraph: VLLMCudagraphConfig = field(default_factory=VLLMCudagraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
@@ -792,6 +854,8 @@ class VLLMGenerator(Actor, Configurable):
         )
         engine_kwargs["max_model_len"] = model_spec.model.max_seq_len
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
+        if config.max_num_batched_tokens is not None:
+            engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens
         # Continuous batching requires FCFS scheduling: admission order must equal the
         # broadcast order on every rank
         engine_kwargs["scheduling_policy"] = "fcfs"
@@ -800,6 +864,7 @@ class VLLMGenerator(Actor, Configurable):
             engine_kwargs["block_size"] = 256
         vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
             max_num_seqs=self._max_num_seqs,
+            max_num_batched_tokens=config.max_num_batched_tokens,
         )
         if vllm_compilation_config is not None:
             engine_kwargs["compilation_config"] = vllm_compilation_config
@@ -831,6 +896,7 @@ class VLLMGenerator(Actor, Configurable):
             parallelism=config.parallelism,
             broadcast_group=self._broadcast_group,
             vllm_parallel_config=self._engine.vllm_config.parallel_config,
+            intra_generator_router=config.intra_generator_router,
         )
 
         # Engine-loop INBOX (rank 0): requests the controller submits; the loop reads them to decide.
@@ -881,6 +947,7 @@ class VLLMGenerator(Actor, Configurable):
         prompt_token_ids: list[int],
         *,
         request_id: str,
+        routing_session_id: str,
         sampling_config: SamplingConfig | None = None,
         metrics_prefix: str = "generator",
     ) -> Completion | None:
@@ -893,6 +960,7 @@ class VLLMGenerator(Actor, Configurable):
         Args:
             prompt_token_ids: One tokenized prompt `[token_ids]`.
             request_id: Unique id for this request, echoed on the `Completion`.
+            routing_session_id: Stable session key for in-mesh DP routing.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig.
             metrics_prefix: Namespace prepended to every metric key on the returned
@@ -933,6 +1001,7 @@ class VLLMGenerator(Actor, Configurable):
                     request_id=request_id,
                     prompt_token_ids=prompt_token_ids,
                     sampling=sampling,
+                    routing_session_id=routing_session_id,
                 )
             )
             # Wakes the engine loop only if it is idle in `_decide_next_action`.
@@ -1161,22 +1230,24 @@ class VLLMGenerator(Actor, Configurable):
         """
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
-        # TODO(async-rl): use 2 version keys so trainer can push a new version
-        # without being blocked by a generator's ongoing pull.
-        model_sd = self._get_model().model.state_dict()
-        await ts.get_state_dict(
-            "model_state_dict",
-            user_state_dict=model_sd,
-            strict=False,
-            direct_rdma=False,
-        )
+        model = self._get_model()
+        model_sd = model.model.state_dict()
+        if get_spmd_backend() == "spmd_types":
+            await self._get_spmd_state_dict(model_sd, model=model)
+        else:
+            await ts.get_state_dict(
+                "model_state_dict",
+                user_state_dict=model_sd,
+                strict=False,
+                direct_rdma=False,
+            )
         # state_dict() returns hook-produced copies for fused modules (e.g.
         # FusedQKVLinear's wqkv -> wq/wk/wv), so the in-place fill above never
         # reaches the real param. Re-apply via load_state_dict to run the merge hook.
         # Non-fused params share storage with model_sd, so reloading them is a
         # harmless self-copy; only the fused wqkv is actually rebuilt.
         # TODO: investigate can we avoid the copy and properly load fused qkv weights
-        self._get_model().model.load_state_dict(model_sd, strict=False)
+        model.model.load_state_dict(model_sd, strict=False)
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:
             # TODO(async-rl): consider a `flush_kv_cache_every_n_steps` flag to force-flush every N steps
@@ -1194,6 +1265,100 @@ class VLLMGenerator(Actor, Configurable):
             self._pull_model_state_dict_future.set_result(version)
             self._pull_model_state_dict_future = None
             self._model_state_dict_pull_request = None
+
+    async def _get_spmd_state_dict(self, model_sd: dict, *, model) -> None:
+        """Fetch trainer-pushed weights into a spmd_types generator state dict.
+
+        spmd_types generators hold plain local tensors, but TorchStore already
+        knows how to fill DTensor state-dict entries. Wrap each local tensor as
+        a DTensor using its declared SPMD layout, fetch through the normal
+        state-dict path, then put the local tensors back before load_state_dict.
+        """
+
+        def _fqn_to_spmd_layout(model: torch.nn.Module) -> dict[str, SpmdLayout]:
+            layouts: dict[str, SpmdLayout] = {}
+
+            for module_fqn, module in model.named_modules():
+                sharding_config = getattr(module, "_sharding_config", None)
+                if sharding_config is not None:
+                    for state_name, layout in sharding_config.state_shardings.items():
+                        fqn = f"{module_fqn}.{state_name}" if module_fqn else state_name
+                        layouts[fqn] = layout
+
+                if isinstance(module, FusedQKVLinear):
+                    # FusedQKVLinear exposes split wq/wk/wv state-dict keys while
+                    # the sharding layout lives on the fused wqkv parameter.
+                    # TODO: This assumes fused and split QKV layouts stay
+                    # equivalent. The load hook all-gathers anyway, so replace
+                    # this with a less fragile fused-QKV state-dict path.
+                    wqkv_sharding_config = getattr(
+                        module.wqkv, "_sharding_config", None
+                    )
+                    if wqkv_sharding_config is None:
+                        continue
+                    for (
+                        state_name,
+                        layout,
+                    ) in wqkv_sharding_config.state_shardings.items():
+                        for proj_name in ("wq", "wk", "wv"):
+                            layouts[f"{module_fqn}.{proj_name}.{state_name}"] = layout
+
+            return layouts
+
+        layouts = _fqn_to_spmd_layout(model.model)
+
+        dtensor_model_sd = dict(model_sd)
+        with torch.no_grad():
+            for name, target in model_sd.items():
+                if not isinstance(target, torch.Tensor):
+                    continue
+
+                layout = layouts.get(name)
+                if layout is None:
+                    if name.endswith(
+                        (
+                            ".vllm_attn._k_scale",
+                            ".vllm_attn._prob_scale",
+                            ".vllm_attn._q_scale",
+                            ".vllm_attn._v_scale",
+                        )
+                    ):
+                        # vLLM attention scale buffers are backend-owned plain
+                        # replicated state with no TorchTitan ShardingConfig.
+                        continue
+                    raise KeyError(f"{name} is missing SPMD layout metadata")
+
+                mesh = model.parallel_dims.resolve_mesh(layout.axes())
+                if mesh is None:
+                    active_axes = [
+                        axis
+                        for axis in layout.axes()
+                        if model.parallel_dims.get_optional_mesh(axis) is not None
+                    ]
+                    if active_axes:
+                        raise RuntimeError(
+                            f"{name} has active SPMD layout axes but no resolved mesh"
+                        )
+                    continue
+
+                dtensor_model_sd[name] = DTensor.from_local(
+                    target,
+                    mesh,
+                    resolve_placements(layout, mesh),
+                    run_check=False,
+                )
+
+        await ts.get_state_dict(
+            "model_state_dict",
+            user_state_dict=dtensor_model_sd,
+            strict=False,
+            direct_rdma=False,
+        )
+
+        with torch.no_grad():
+            for name, value in dtensor_model_sd.items():
+                if isinstance(value, DTensor):
+                    model_sd[name] = value.to_local()
 
     @endpoint
     async def close(self) -> None:
@@ -1252,6 +1417,7 @@ class GenerationRequest:
     request_id: str
     prompt_token_ids: list[int]  # [prompt_tokens]
     sampling: SamplingConfig
+    routing_session_id: str
 
 
 @dataclass(kw_only=True, slots=True)

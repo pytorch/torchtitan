@@ -4,20 +4,23 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torch.fx.traceback import annotate_fn
-
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
+    annotate_moe_ep_regions,
     apply_cp_to_attention,
     apply_simple_fsdp,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
+from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
     GraphTrainerDeepSeekV3Model,
+)
+from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
+    maybe_apply_ep_overlap_eager_chunking,
 )
 from torchtitan.tools.logging import logger
 
@@ -31,17 +34,7 @@ def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
       fully-qualified name for downstream passes (bucketing, SAC region
       boundaries, etc.).
     """
-    from torchtitan.models.common.moe import MoE
-    from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
-
-    LocalTokenDispatcher.dispatch = annotate_fn({"EP": "dispatch"})(
-        LocalTokenDispatcher.dispatch
-    )
-    LocalTokenDispatcher.combine = annotate_fn({"EP": "combine"})(
-        LocalTokenDispatcher.combine
-    )
-    MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
-
+    annotate_moe_ep_regions()
     annotate_module_fqns(model)
 
 
@@ -51,7 +44,7 @@ def parallelize_deepseekv3(
     parallel_dims: ParallelDims,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
+    compile_config: GraphTrainerCompileConfig,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
@@ -92,6 +85,7 @@ def parallelize_deepseekv3(
     # real backend (see ParallelDims._mesh_exist), even at degree 1, so that
     # MixedPrecisionPolicy's param_dtype cast still applies in single-GPU runs.
     model = apply_simple_fsdp(model, parallel_dims=parallel_dims, training=training)
+    maybe_apply_ep_overlap_eager_chunking(model, compile_config)
 
     # TODO: HybridEP applies to other sparse models (e.g. Qwen3). Refactor
     # the common HybridEP buffer init into a shared utility.

@@ -124,7 +124,6 @@ class Decoder(BaseModel):
             object with a ``ParallelismConfig`` in its ``parallelism``
             field; in that case the training/debug setup is skipped.
             """
-            from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
             from torchtitan.config import ParallelismConfig
             from torchtitan.trainer import Trainer
 
@@ -153,12 +152,6 @@ class Decoder(BaseModel):
                     "Use a FlexAttention backend (attn_backend='flex' or "
                     "'flex_flash') for pipelined models."
                 )
-
-            loss_config = getattr(config, "loss", None)
-            if isinstance(loss_config, (ChunkedCELoss.Config, CrossEntropyLoss.Config)):
-                # TODO(pianpwk): Move this into config_registry entries. This
-                # hook is for CLI overrides, while vocab size is model-defined.
-                loss_config.global_vocab_size = self.vocab_size
 
             tp = parallelism.tensor_parallel_degree
             attention = self.first_attention
@@ -227,7 +220,7 @@ class Decoder(BaseModel):
                             debug.moe_force_load_balance
                         )
 
-    # Set by the trainer when ChunkedCELoss is used, so lm_head is applied
+    # Set by the trainer when ChunkedLossWrapper is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().
     # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor
     # inputs (bool kwargs cause 'has no attribute requires_grad' errors).

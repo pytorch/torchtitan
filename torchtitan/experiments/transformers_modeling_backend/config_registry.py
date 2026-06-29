@@ -20,12 +20,13 @@ from . import model_registry
 
 
 def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
+    model_spec = model_registry("debugmodel")
     return TransformersBackendConfig(
         loss=CrossEntropyLoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         hf_model="Qwen/Qwen3-4B-Instruct-2507",
         debug=DebugConfig(print_config=True),
-        model_spec=model_registry("debugmodel"),
+        model_spec=model_spec,
         profiler=Profiler.Config(profile_freq=5),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -148,11 +149,12 @@ def transformers_modeling_backend_full_moe() -> TransformersBackendConfig:
 
 
 def transformers_modeling_backend_full() -> TransformersBackendConfig:
+    model_spec = model_registry("full")
     return TransformersBackendConfig(
         loss=CrossEntropyLoss.Config(),
         hf_model="Qwen/Qwen3-4B-Instruct-2507",
         debug=DebugConfig(print_config=True),
-        model_spec=model_registry("full"),
+        model_spec=model_spec,
         profiler=Profiler.Config(profile_freq=5),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(

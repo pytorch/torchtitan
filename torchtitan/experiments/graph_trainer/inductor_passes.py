@@ -54,7 +54,10 @@ def _node_metadata_key_filter_distributed(key: str) -> bool:
 
 
 def regional_inductor_pass(
-    gm: torch.fx.GraphModule, example_inputs: tuple, *, serializable: bool = False
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+    *,
+    serializable: bool = False,
 ) -> torch.fx.GraphModule:
     """Compile tagged graph regions with ``regional_inductor``.
 
@@ -242,7 +245,6 @@ def full_inductor_compilation_pass(
     pre_collapse_cudagraph_compatible = is_cudagraph_compatible(
         gm, skip_flex_attention_check=True
     )
-
     _migrate_cpu_get_attrs_to_cuda(gm)
     for module in gm.modules():
         if not isinstance(module, torch.fx.GraphModule):

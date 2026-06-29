@@ -14,6 +14,7 @@ Each function returns a complete ``Controller.Config``, discoverable by
 import dataclasses
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import (
@@ -37,16 +38,18 @@ from torchtitan.experiments.rl.controller import (
     ValidationConfig,
 )
 from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
-from torchtitan.experiments.rl.generator_router import (
-    GeneratorRouter,
-    LeastLoadedRoutingStrategy,
-    StickySessionRoutingStrategy,
-)
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
+from torchtitan.experiments.rl.routing.inter_generator_router import (
+    InterGeneratorRouter,
+)
+from torchtitan.experiments.rl.routing.strategies import (
+    LeastLoadedRoutingStrategy,
+    StickySessionRoutingStrategy,
+)
 from torchtitan.models.gpt_oss import model_registry as gpt_oss_model_registry
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.protocols.model import ModelConfigConverter
@@ -90,7 +93,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
-        generator_router=GeneratorRouter.Config(
+        generator_router=InterGeneratorRouter.Config(
             strategy=StickySessionRoutingStrategy.Config(
                 fallback_strategy=LeastLoadedRoutingStrategy.Config()
             )
@@ -113,7 +116,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
                 interval=10,
                 last_save_model_only=False,
             ),
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -167,7 +170,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
                 interval=10,
                 last_save_model_only=False,
             ),
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -235,7 +238,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
         renderer=RendererConfig(name="gpt_oss", enable_thinking=False),
-        generator_router=GeneratorRouter.Config(
+        generator_router=InterGeneratorRouter.Config(
             strategy=StickySessionRoutingStrategy.Config(
                 fallback_strategy=LeastLoadedRoutingStrategy.Config()
             )
@@ -258,7 +261,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
                 interval=10,
                 last_save_model_only=False,
             ),
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -310,7 +313,7 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
                 tensor_parallel_degree=2,
             ),
             checkpoint=CheckpointManager.Config(enable=False),
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -365,7 +368,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             debug=batch_invariant_config,
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -423,7 +426,7 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
                 interval=10,
                 last_save_model_only=False,
             ),
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -477,7 +480,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
                 interval=10,
                 last_save_model_only=False,
             ),
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -539,7 +542,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
                 interval=10,
                 last_save_model_only=False,
             ),
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             # Disable torch.compile + CUDA graph capture: the EP all-to-all
@@ -559,6 +562,57 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             ),
         ),
     )
+
+
+def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
+    """Debug MoE config on the DeepEP v2 backend with a cudagraph-capturable generator
+    (8 GPUs: 4 gen + 4 train).
+
+    Same EP/TP/DP layout as ``rl_grpo_qwen3_moe_debug_varlen`` (trainer FSDP=2/TP=2/EP=4,
+    generator DP=2/TP=2/EP=4), but the MoE uses the DeepEP v2 comm backend. Unlike the
+    standard all-to-all -- whose unpinned D2H split-size copy blocks CUDA graph capture, so
+    that config disables it -- DeepEP v2's inference dispatch is a static, host-sync-free
+    EXPAND layout, so this generator enables CUDA graph capture.
+
+    Per-role config from ONE shared model_spec: the trainer uses it as-is (compact,
+    host-synced, backward-able DeepEP path), while the generator applies the per-actor
+    ``deepep_inference`` override (``generator.override``) to its own copy, switching its
+    DeepEP dispatchers to the cudagraph-able EXPAND layout (``cudagraphable=True``). The
+    override touches only the generator's spec, so the trainer and weight sync are unaffected.
+    (This mirrors how converters are config-time/shared while overrides are per-actor.)
+    """
+    config = rl_grpo_qwen3_moe_debug_varlen()
+    config.model_spec = model_registry(
+        "debugmodel_moe", attn_backend="varlen", moe_comm_backend="deepep"
+    )
+    # Generator-only override -> DeepEP cudagraph-able EXPAND dispatch; trainer keeps compact.
+    # FULL_AND_PIECEWISE: decode captured FULL (incl. the expand MoE), prefill breakable.
+    config.generator.override = OverrideConfig(
+        imports=["torchtitan.distributed.deepep.inference_override"]
+    )
+    config.generator.cudagraph = VLLMCudagraphConfig(
+        enable=True, mode="FULL_AND_PIECEWISE"
+    )
+    # Two inference knobs to set per workload (no golden default; here EP=4):
+    #  * max_num_batched_tokens: vLLM's per-step token budget. We expose the knob (default
+    #    None -> vLLM's own default of 2048). Decide it from your input/rollout sequence
+    #    length -- it is effectively the longest input sequence length the engine batches
+    #    (vLLM's 2048 default is just a stand-in for knowing that).
+    #  * num_max_tokens_per_rank: per-rank EXPAND-dispatch capacity, REQUIRED by the
+    #    deepep_inference override. For a dropless model (highest memory) set it to
+    #    longest_sequence_length // sp == max_num_batched_tokens // sp; lower it gradually to
+    #    save memory (trading off dropped tokens).
+    config.generator.max_num_batched_tokens = 2048
+    num_max_tokens_per_rank = (
+        config.generator.max_num_batched_tokens
+        // config.generator.parallelism.expert_parallel_degree
+    )
+    for block in config.model_spec.model.layers:
+        moe = getattr(block, "moe", None)
+        if moe is None:
+            continue
+        moe.experts.token_dispatcher.num_max_tokens_per_rank = num_max_tokens_per_rank
+    return config
 
 
 def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
@@ -616,7 +670,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
                 last_save_model_only=False,
             ),
             debug=_BATCH_INVARIANT_DEBUG,
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -680,7 +734,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
                 interval=10,
                 last_save_model_only=False,
             ),
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -777,7 +831,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
                 last_save_model_only=False,
             ),
             debug=batch_invariant_config,
-            loss=GRPOLoss.Config(),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",

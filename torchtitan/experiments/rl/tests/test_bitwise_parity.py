@@ -52,14 +52,13 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.loss import compute_logprobs, IGNORE_INDEX
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
-from torchtitan.experiments.rl.actors.trainer import compute_logprobs
 from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_gpt_oss_debug_varlen_batch_invariant,
@@ -357,8 +356,6 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
 
     mask_mods = [get_causal_mask_mod(), get_document_mask_mod(positions)]
 
-    if inner_attn.mask_mod is not None:
-        mask_mods.append(inner_attn.mask_mod.build().get_mask_mod())
     attention_masks = create_attention_mask(
         and_masks(*mask_mods),
         1,

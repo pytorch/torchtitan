@@ -115,6 +115,7 @@ _TT_TO_HF_MAPPINGS = {
         "n_layers": "num_hidden_layers",
         "n_heads": "num_attention_heads",
         "n_kv_heads": "num_key_value_heads",
+        "vocab_size": "vocab_size",
         "norm_eps": "rms_norm_eps",
         "max_seq_len": "max_position_embeddings",
         "eos_id": "eos_token_id",
@@ -348,6 +349,13 @@ class HFTransformerModel(BaseModel):
                 self._tt_to_hf_attribute_map.update(_TT_TO_HF_MAPPINGS["moe"])
 
             for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
+                # Identity mappings (e.g. vocab_size -> vocab_size) need no
+                # property: the HF attribute is already reachable under the same
+                # name. Creating one would make the setter ``setattr(self,
+                # hf_name)`` recurse into itself. The map entry is still used by
+                # _initialize_attributes to copy the value from the titan config.
+                if titan_name == hf_name:
+                    continue
                 # Create getter/setter for attribute that don't already exist
                 if not hasattr(self.__class__, titan_name):
                     setattr(self.__class__, titan_name, _create_property(hf_name))

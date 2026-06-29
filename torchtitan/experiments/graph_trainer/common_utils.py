@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import fnmatch
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -21,6 +22,7 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
 )
+from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.tools.logging import logger
 
 
@@ -63,12 +65,44 @@ def build_decoder_config_for_backend(
     return config
 
 
+def _local_stride(tensor: torch.Tensor) -> tuple[int, ...]:
+    return (
+        tensor.to_local().stride() if isinstance(tensor, DTensor) else tensor.stride()
+    )
+
+
+def _maybe_materialize_grad_for_param_layout(
+    param: torch.Tensor, grad: torch.Tensor
+) -> torch.Tensor:
+    """Match eager autograd's ``param.grad`` layout contract after graph replay.
+
+    Graph replay assigns ``torch.autograd.grad`` outputs manually, bypassing
+    AccumulateGrad's normal stride materialization. Copying through
+    ``empty_like(param)`` restores the param's global and DTensor-local layout
+    when Inductor returns an equivalent but differently-strided grad.
+    """
+    if grad.stride() == param.stride() and _local_stride(grad) == _local_stride(param):
+        return grad
+
+    materialized_grad = torch.empty_like(param)
+    materialized_grad.copy_(grad)
+    return materialized_grad
+
+
 _MODULE_FQN = "module_fqn"
+_EP_TOKEN_COUNT_EXCHANGE = "EP_token_count_exchange"
+_EP_TOKEN_COUNT_SYNC = "EP_token_count_sync"
+_EP_TOKEN_EXCHANGE = "EP_token_exchange"
+_EP_TOKEN_EXCHANGE_WAIT = "EP_token_exchange_wait"
 _NOT_IN_LAYERS = -1
 
 
 def _is_backward_node(node: torch.fx.Node) -> bool:
     return node.meta.get("autograd_backward", False)
+
+
+def _get_module_fqn(node: torch.fx.Node) -> str:
+    return node.meta.get("custom", {}).get(_MODULE_FQN, "")
 
 
 def _get_layer_id(node: torch.fx.Node) -> int:
@@ -77,7 +111,7 @@ def _get_layer_id(node: torch.fx.Node) -> int:
     Nodes under ``layers.<N>`` return ``N``.
     All other nodes (tok_embeddings, norm, output) return ``_NOT_IN_LAYERS``.
     """
-    fqn = node.meta.get("custom", {}).get(_MODULE_FQN, "")
+    fqn = _get_module_fqn(node)
     parts = fqn.split(".")
     if parts[0] == "layers" and len(parts) >= 2:
         try:
@@ -99,6 +133,59 @@ def annotate_module_fqns(model: nn.Module) -> None:
     for fqn, submodule in model.named_modules():
         if fqn:  # skip root module
             submodule.forward = annotate_fn({_MODULE_FQN: fqn})(submodule.forward)
+
+
+def matches_module_fqn_pattern(pattern: str, fqn: str) -> bool:
+    """Match one module FQN against a component-wise fnmatch pattern."""
+    pattern_parts = pattern.split(".")
+    fqn_parts = fqn.split(".")
+    return len(pattern_parts) == len(fqn_parts) and all(
+        fnmatch.fnmatchcase(fqn_part, pattern_part)
+        for pattern_part, fqn_part in zip(pattern_parts, fqn_parts)
+    )
+
+
+_MOE_EP_REGIONS_ANNOTATED = False
+
+
+def annotate_moe_ep_regions() -> None:
+    """Annotate MoE EP compute, dispatch, and combine regions for FX passes."""
+    global _MOE_EP_REGIONS_ANNOTATED
+    if _MOE_EP_REGIONS_ANNOTATED:
+        return
+
+    from torchtitan.models.common.moe import MoE
+    from torchtitan.models.common.token_dispatcher import (
+        AllToAllTokenDispatcher,
+        LocalTokenDispatcher,
+    )
+
+    LocalTokenDispatcher.dispatch = annotate_fn({"EP": "dispatch"})(
+        LocalTokenDispatcher.dispatch
+    )
+    LocalTokenDispatcher.combine = annotate_fn({"EP": "combine"})(
+        LocalTokenDispatcher.combine
+    )
+    AllToAllTokenDispatcher.dispatch = annotate_fn({"EP": "dispatch"})(
+        AllToAllTokenDispatcher.dispatch
+    )
+    AllToAllTokenDispatcher.combine = annotate_fn({"EP": "combine"})(
+        AllToAllTokenDispatcher.combine
+    )
+    AllToAllTokenDispatcher._token_count_exchange = annotate_fn(
+        {_EP_TOKEN_COUNT_EXCHANGE: "dispatch"}
+    )(AllToAllTokenDispatcher._token_count_exchange)
+    AllToAllTokenDispatcher._sync_token_count_exchange = annotate_fn(
+        {_EP_TOKEN_COUNT_SYNC: "dispatch"}
+    )(AllToAllTokenDispatcher._sync_token_count_exchange)
+    AllToAllTokenDispatcher._dispatch_token_exchange = annotate_fn(
+        {_EP_TOKEN_EXCHANGE: "dispatch"}
+    )(AllToAllTokenDispatcher._dispatch_token_exchange)
+    AllToAllTokenDispatcher._combine_token_exchange = annotate_fn(
+        {_EP_TOKEN_EXCHANGE: "combine"}
+    )(AllToAllTokenDispatcher._combine_token_exchange)
+    MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
+    _MOE_EP_REGIONS_ANNOTATED = True
 
 
 def parallelize_inputs(parallel_dims, args, kwargs):
@@ -159,12 +246,31 @@ def get_default_transformer_block_buckets(
     n_layers: int,
     *,
     chunked_loss_enabled: bool = False,
+    moe_layer_ids: frozenset[int] = frozenset(),
+    split_moe_expert_buckets: bool = False,
 ) -> list[list[str] | str]:
     """Get default transformer block buckets for manual bucketing passes.
 
     Assumes the standard Decoder layout: tok_embeddings, layers.0..N-1,
     norm, and output (e.g., Llama3, DeepSeekV3, Qwen3).
     """
+    layer_buckets: list[list[str] | str] = []
+    for layer_id in range(n_layers):
+        if layer_id in moe_layer_ids and split_moe_expert_buckets:
+            layer_buckets.extend(
+                [
+                    [
+                        f"layers.{layer_id}.attention_norm",
+                        f"layers.{layer_id}.attention",
+                        f"layers.{layer_id}.ffn_norm",
+                        f"layers.{layer_id}.moe.router",
+                        f"layers.{layer_id}.moe.shared_experts",
+                    ],
+                    f"layers.{layer_id}.moe.experts",
+                ]
+            )
+        else:
+            layer_buckets.append(f"layers.{layer_id}")
     final_bucket = ["norm", "lm_head"]
     if chunked_loss_enabled:
         # Chunked loss moves the lm_head weight use under module_fqn "loss".
@@ -172,7 +278,7 @@ def get_default_transformer_block_buckets(
 
     return [
         "tok_embeddings",
-        *[f"layers.{i}" for i in range(n_layers)],
+        *layer_buckets,
         final_bucket,
     ]
 
@@ -249,7 +355,7 @@ def apply_simple_fsdp(
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
     )
 
-    if parallel_dims.ep_enabled and hasattr(model, "layers"):
+    if parallel_dims.ep_enabled and isinstance(model, Decoder):
         edp_mesh_names = (
             ["dp_replicate", "efsdp"]
             if parallel_dims.dp_replicate_enabled
@@ -259,18 +365,17 @@ def apply_simple_fsdp(
         assert edp_mesh is not None
 
         for _, transformer_block in model.layers.items():
-            if not getattr(transformer_block, "moe_enabled", False):
+            if not isinstance(transformer_block, TransformerBlock):
                 continue
-            assert hasattr(transformer_block, "moe")
+            moe = getattr(transformer_block, "moe", None)
+            if moe is None:
+                continue
             experts_shard_dim = 0
-            if (
-                edp_mesh["efsdp"].size() * parallel_dims.ep
-                > transformer_block.moe.experts.num_experts
-            ):
+            if edp_mesh["efsdp"].size() * parallel_dims.ep > moe.experts.num_experts:
                 experts_shard_dim = 1
 
-            transformer_block.moe.experts = data_parallel(
-                transformer_block.moe.experts,
+            moe.experts = data_parallel(
+                moe.experts,
                 edp_mesh,
                 dp_mode,
                 mp_policy=mp_policy,

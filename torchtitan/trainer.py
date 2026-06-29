@@ -21,7 +21,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
+from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
@@ -209,7 +209,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     # runtime utilities
     device: torch.device
     gc_handler: utils.GarbageCollection
-    train_context: dist_utils.TrainContext
+    train_context: dist_utils.SpmdContext
     gradient_accumulation_steps: int
     pp_has_first_stage: bool
     pp_has_last_stage: bool
@@ -435,16 +435,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
                 self.model_parts = [model]
 
-        # Set lm_head reference for ChunkedCELoss after model construction.
+        # Set lm_head reference for ChunkedLossWrapper after model construction.
         # Non-PP: single model part always has lm_head.
         # PP: only the last stage has lm_head; non-last stages skip this.
-        if isinstance(self.loss_fn, ChunkedCELoss):
+        if isinstance(self.loss_fn, ChunkedLossWrapper):
             if parallel_dims.pp_enabled:
                 if self.pp_has_last_stage:
                     lm_head = self.model_parts[-1].lm_head
                     assert (
                         lm_head is not None
-                    ), "Last PP stage must have lm_head for ChunkedCELoss"
+                    ), "Last PP stage must have lm_head for ChunkedLossWrapper"
                     self.loss_fn.set_lm_head(
                         lm_head  # pyrefly: ignore[bad-argument-type]
                     )
@@ -454,7 +454,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             else:
                 assert len(self.model_parts) == 1
                 lm_head = self.model_parts[0].lm_head
-                assert lm_head is not None, "Model must have lm_head for ChunkedCELoss"
+                assert (
+                    lm_head is not None
+                ), "Model must have lm_head for ChunkedLossWrapper"
                 self.loss_fn.set_lm_head(lm_head)  # pyrefly: ignore[bad-argument-type]
                 self.model_parts[0]._skip_lm_head = (
                     True  # pyrefly: ignore[bad-argument-type]
@@ -521,7 +523,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             base_folder=config.dump_folder,
         )
 
-        self.train_context = dist_utils.get_train_context(
+        self.train_context = dist_utils.get_spmd_context(
             parallel_dims=parallel_dims,
             spmd_typechecking=(
                 config.parallelism.spmd_backend == "spmd_types"
@@ -750,7 +752,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             assert len(model_parts) == 1
             with self.train_context():
                 pred = model_parts[0](inputs, **extra_kwargs)
-                loss = self.loss_fn(pred, labels, global_valid_tokens)
+                loss, _ = self.loss_fn(pred, labels, global_valid_tokens)
                 del pred
                 with spmd.no_typecheck():
                     # this propagates types through BWD, causing unnecessary conflicts
