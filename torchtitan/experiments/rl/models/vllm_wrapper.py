@@ -130,17 +130,17 @@ def _patch_vllm_all_reduce() -> None:
 
         ca.custom_all_reduce = custom_all_reduce
 
-    # 3. (spmd_types) spmd's redistribute issues an in-place dist.all_reduce that
-    #    step 1 can't see, so redirect its Partial->{R,I} reduce to the functional
-    #    collective. Guarded on no-grad: funcol's backward is wrong for this reduce,
-    #    so only redirect during inference (no backward); training is unaffected.
-    import torch.distributed._functional_collectives as funcol
-
+    # 3. (spmd_types) spmd's redistribute issues an in-place dist.all_reduce that the
+    #    step-1 swap can't see, so route its Partial->{R,I} reduce straight to the same
+    #    custom AR that step 1 targets (tensor_model_parallel_all_reduce on vLLM's TP
+    #    group). Guarded on no-grad: the generator is inference-only and the custom AR
+    #    is sum-only/forward-only; under grad we keep spmd.redistribute, whose
+    #    dst-dependent backward is correct (P->I is identity).
     original_redistribute = spmd.redistribute
 
     def redistribute(x, group, *, src, dst, **kwargs):
         if src == spmd.P and dst in (spmd.R, spmd.I) and not torch.is_grad_enabled():
-            return funcol.wait_tensor(funcol.all_reduce(x, reduceOp="sum", group=group))
+            return tensor_model_parallel_all_reduce(x)
         return original_redistribute(x, group, src=src, dst=dst, **kwargs)
 
     spmd.redistribute = redistribute
@@ -482,11 +482,6 @@ class VLLMModelWrapper(Module):
             sd_adapter=sd_adapter,
         )
         checkpointer.load()
-        # Free the large transient allocations the HF load/from_hf conversion left in the
-        # caching allocator, so the later CUDA-graph capture (which needs its own private
-        # pool) has room. Without this, large models (e.g. 235B) OOM capture even though
-        # the live weights fit.
-        torch.cuda.empty_cache()
 
     def load_weights(self, weights_iter):
         """

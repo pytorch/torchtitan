@@ -64,5 +64,5 @@ testpaths = ["tests"]
 
 [tool.pyrefly]
 project-excludes = ["torchtitan/experiments", "**/tests/**"]
-replace-imports-with-any = ["torchao.*", "torchft", "torchvision.*", "deep_ep.*", "jinja2.*", "fla.*", "helion", "helion.*", "batch_invariant_ops", "torchcomms"]  # optional dependencies
+replace-imports-with-any = ["torchao.*", "torchft", "torchvision.*", "deep_ep.*", "jinja2.*", "fla.*", "helion", "helion.*"]  # optional dependencies
 search-path = ["../pytorch"]  # local built pytorch
