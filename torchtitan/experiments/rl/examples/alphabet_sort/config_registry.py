@@ -287,12 +287,13 @@ def rl_grpo_qwen3_5_4b_varlen() -> RLTrainer.Config:
             # toolchains where that build is unavailable, force the triton path.
             vllm_additional_config={"gdn_prefill_backend": "triton"},
             # enforce_eager: the native model's CUDA-graph capture is not yet
-            # validated, and at TP>1 it trips vLLM's custom all-reduce.
+            # validated for the GDN path.
             cudagraph=VLLMCudagraphConfig(enable=False),
             model_dtype="bfloat16",
-            # TODO: TP>1 fails in vLLM's custom all-reduce ("invalid argument")
-            # under Monarch's external_launcher during CUDA-graph capture; a 4B
-            # model fits one GPU for inference, so keep TP=1 until that is fixed.
+            # Generator TP>1 works: the actor sets disable_custom_all_reduce
+            # because vLLM's custom CUDA-IPC all-reduce fails under Monarch's
+            # external_launcher (it falls back to pynccl). Kept at 1 here -- a 4B
+            # model fits one GPU for inference, so TP=1 avoids the all-reduce.
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=1,
                 tensor_parallel_degree=1,

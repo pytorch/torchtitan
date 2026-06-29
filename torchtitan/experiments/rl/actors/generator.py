@@ -456,6 +456,14 @@ class VLLMGenerator(Actor, Configurable):
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
         )
+        # vLLM's custom (CUDA-IPC) all-reduce fails with "invalid argument" under
+        # Monarch's external_launcher: the TP workers are spawned by Monarch's
+        # proc mesh, so the IPC peer-handle exchange across them does not set up.
+        # Disable it at TP>1 and fall back to the pynccl all-reduce
+        # (correctness-neutral, slightly slower). No-op at TP=1 (custom all-reduce
+        # is only constructed at world_size>1).
+        if config.parallelism.tensor_parallel_degree > 1:
+            engine_kwargs["disable_custom_all_reduce"] = True
         if native:
             # Let vLLM read config.json + resolve its native model class, and
             # forward any extra engine config (e.g. gdn_prefill_backend).
