@@ -324,7 +324,8 @@ class BaseLoss(ABC, Configurable):
         """Return the scaled loss and any metrics computed by the loss."""
         loss = self.fn(pred, labels)
         if global_valid_tokens is not None:
-            loss = loss / global_valid_tokens
+            with spmd.no_typecheck():
+                loss = loss / global_valid_tokens
         return loss, {}
 
 
@@ -349,7 +350,8 @@ class CrossEntropyLoss(BaseLoss):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         loss = self.fn(pred, labels, global_vocab_size=self.global_vocab_size)
         if global_valid_tokens is not None:
-            loss = loss / global_valid_tokens
+            with spmd.no_typecheck():
+                loss = loss / global_valid_tokens
         return loss, {}
 
 

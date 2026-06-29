@@ -6,12 +6,43 @@
 
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 from torch import nn, Tensor
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
-from torchtitan.models.flux.model.layers import (
+from torchtitan.protocols import BaseModel
+from torchtitan.protocols.module import ModuleList
+
+
+@spmd.local_map(out_types=spmd.PartitionSpec("dp", "cp", None))
+def local_concat_text_image(text: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+    return torch.cat((text, image), dim=1)
+
+
+@spmd.local_map(
+    out_types=(
+        spmd.PartitionSpec("dp", "cp", None),
+        spmd.PartitionSpec("dp", "cp", None),
+    )
+)
+def local_split_text_image(
+    combined: torch.Tensor,
+    text_seq_len: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return combined[:, :text_seq_len], combined[:, text_seq_len:]
+
+
+@spmd.local_map(out_types=spmd.PartitionSpec("dp", "cp", None, None))
+def local_concat_text_image_attention_states(
+    text: torch.Tensor,
+    image: torch.Tensor,
+) -> torch.Tensor:
+    return torch.cat((text, image), dim=1)
+
+
+from torchtitan.models.flux.model.layers import (  # noqa: E402
     DoubleStreamBlock,
     EmbedND,
     LastLayer,
@@ -19,8 +50,6 @@ from torchtitan.models.flux.model.layers import (
     SingleStreamBlock,
     timestep_embedding,
 )
-from torchtitan.protocols import BaseModel
-from torchtitan.protocols.module import ModuleList
 
 
 class FluxModel(BaseModel):
@@ -60,7 +89,9 @@ class FluxModel(BaseModel):
         single_blocks: list[SingleStreamBlock.Config]
 
         def update_from_config(self, *, config, **kwargs) -> None:
-            pass
+            from torchtitan.models.flux.sharding import set_flux_sharding_config
+
+            set_flux_sharding_config(self)
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -160,16 +191,16 @@ class FluxModel(BaseModel):
         vec = vec + self.vector_in(y)
         txt = self.txt_in(txt)
 
-        ids = torch.cat((txt_ids, img_ids), dim=1)
+        ids = local_concat_text_image(txt_ids, img_ids)
         pe = self.pe_embedder(ids)
 
         for block in self.double_blocks:
             img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
 
-        img = torch.cat((txt, img), 1)
+        img = local_concat_text_image(txt, img)
         for block in self.single_blocks:
             img = block(img, vec=vec, pe=pe)
-        img = img[:, txt.shape[1] :, ...]
+        _, img = local_split_text_image(img, txt.shape[1])
 
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
         return img
