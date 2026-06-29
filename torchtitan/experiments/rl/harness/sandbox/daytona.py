@@ -55,7 +55,8 @@ def _eager_rebuild_daytona_models() -> None:
         import sys
         import typing
 
-        from pydantic import BaseModel, StrictStr
+        import pydantic
+        from pydantic import BaseModel
 
         import daytona  # type: ignore
 
@@ -75,31 +76,16 @@ def _eager_rebuild_daytona_models() -> None:
             pass
 
         # The SDK models use `from __future__ import annotations` + TYPE_CHECKING
-        # typing imports, so their module globals lack Optional/Union/StrictStr/...
-        # at runtime -> rebuild raises "is not fully defined". Inject those names
-        # into every daytona module so the rebuild (and any later SDK-internal lazy
-        # rebuild) resolves the forward refs from the model's own namespace.
-        inject = {
-            name: getattr(typing, name)
-            for name in (
-                "Optional",
-                "Union",
-                "List",
-                "Dict",
-                "Any",
-                "Tuple",
-                "Sequence",
-                "Mapping",
-                "Set",
-                "FrozenSet",
-                "Type",
-                "Callable",
-                "Iterable",
-                "Annotated",
-            )
-            if hasattr(typing, name)
-        }
-        inject["StrictStr"] = StrictStr
+        # typing imports, so their module globals lack the forward-ref names at
+        # runtime (Optional, Union, StrictStr, StrictBool, ...) -> rebuild raises
+        # "is not fully defined". Inject EVERY typing + pydantic public name into
+        # each daytona module (no whack-a-mole on individual names) so the rebuild
+        # -- and any later SDK-internal lazy rebuild -- resolves from the model's
+        # own namespace.
+        inject = {n: getattr(typing, n) for n in dir(typing) if not n.startswith("_")}
+        inject.update(
+            {n: getattr(pydantic, n) for n in dir(pydantic) if not n.startswith("_")}
+        )
         daytona_mods = [
             m
             for n, m in list(sys.modules.items())
