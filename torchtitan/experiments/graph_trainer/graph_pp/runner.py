@@ -201,12 +201,20 @@ def _grad_input_leaves(
 def _example_inputs_from_placeholders(gm: fx.GraphModule) -> tuple[Any, ...]:
     example_inputs = []
     for node in gm.graph.find_nodes(op="placeholder"):
-        if "val" not in node.meta:
+        if "val" in node.meta:
+            example_inputs.append(node.meta["val"])
+            continue
+        # Non-tensor compile-on-one-rank inputs (TorchBind DeviceMesh/ProcessGroup
+        # lifted as graph inputs) carry no fake "val"/"tensor_meta". They are not
+        # part of any Inductor-compiled region, so a None stand-in is safe. A
+        # placeholder that looks like a tensor (has tensor_meta) but lacks val is
+        # a real error.
+        if "tensor_meta" in node.meta:
             raise ValueError(
                 "GraphPP cannot compile graph without placeholder metadata: "
                 f"{node.name}"
             )
-        example_inputs.append(node.meta["val"])
+        example_inputs.append(None)
     return tuple(example_inputs)
 
 
@@ -455,6 +463,7 @@ def _build_stage_graph_bundle(
     loss_kwargs: dict[str, Any],
     *,
     compile_callables: bool = True,
+    output_grads: Any = None,
 ) -> None:
     """Trace one stage-local train step and build its GraphPP graph bundle.
 
@@ -541,9 +550,13 @@ def _build_stage_graph_bundle(
         else:
             with torch.no_grad():
                 output_example = stage.submod(*args, **kwargs)
-            output_grads = _example_output_grads_from_stage_metadata(
-                stage, output_example
-            )
+            # output_grads is supplied directly by the single-process precompile
+            # producer (chained-forward tangents); otherwise it comes from the
+            # eager PP backward metadata populated by schedule._initialize_stages.
+            if output_grads is None:
+                output_grads = _example_output_grads_from_stage_metadata(
+                    stage, output_example
+                )
             _, fwd_output_spec = pytree.tree_flatten(output_example)
             trace_spec.output_spec = fwd_output_spec
             _, trace_spec.output_grad_spec = pytree.tree_flatten(output_grads)
@@ -1362,6 +1375,7 @@ def build_graph_pp_graph_bundles(
     *args: Any,
     target: Any = None,
     loss_kwargs: dict[str, Any] | None = None,
+    stage_bundle_loader: Callable[["GraphPipelineStage"], None] | None = None,
     **kwargs: Any,
 ) -> None:
     """Build all stage-local GraphPP callables before schedule execution.
@@ -1371,11 +1385,20 @@ def build_graph_pp_graph_bundles(
       GraphPP training. It runs before ``GraphPPRunner.step`` so the runner can
       remain a pure PP action execution engine.
 
+    When ``stage_bundle_loader`` is provided (precompile load path), each
+    stage's callables and metadata are installed from a saved artifact instead
+    of being traced/partitioned. The eager PP metadata inference
+    (``_initialize_stages``) still runs so the upstream P2P comm buffers are set
+    up. The loaded callables keep their saved compiled state, so the trailing
+    per-callable Inductor compile and the OVERLAP_F_B multiplex build are no-ops
+    at load (multiplexing is only used by unsupported overlap schedules); the
+    downstream call sequence is otherwise identical to tracing.
+
     Pseudocode:
       split the full batch with the upstream PP microbatch splitter
       normalize trace-reused BlockMask inputs
       run eager PP metadata inference on representative microbatch 0
-      build missing stage graph bundles
+      build missing stage graph bundles (trace, or load from artifact)
       build required multiplexed graphs for OVERLAP_F_B actions
     """
     graph_stages = [cast(GraphPipelineStage, stage) for stage in schedule._stages]
@@ -1421,6 +1444,9 @@ def build_graph_pp_graph_bundles(
 
     for stage in graph_stages:
         if stage.graph_callables is not None:
+            continue
+        if stage_bundle_loader is not None:
+            stage_bundle_loader(stage)
             continue
         stage_args = (
             tuple(arg_mbs[0])

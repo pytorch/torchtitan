@@ -25,6 +25,7 @@ from typing import Any, cast
 
 import torch
 import torch.distributed as dist
+import torch.utils._pytree as pytree
 
 from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
@@ -40,8 +41,14 @@ from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
 
-def _common_setup(config):
-    """Common setup for precompile: fake PG, CooR, model build."""
+def _common_setup(config, *, materialize_whole_model: bool = True):
+    """Common setup for precompile: fake PG, CooR, model build.
+
+    When ``materialize_whole_model`` is False (the GraphPP/PP save path), the
+    whole-model parallelize and materialize step is skipped and the raw model
+    is returned on the meta device. The PP producer then splits the model into
+    stages and parallelizes/materializes each stage submodule separately.
+    """
     compile_config = config.compile
 
     if not compile_config.precompile_artifact_dir:
@@ -125,32 +132,33 @@ def _common_setup(config):
 
     model.verify_module_protocol()
 
-    # For aot_fx_trace, apply_compile inside parallelize_fn is a no-op
-    # (returns model unchanged), so we pass the real compile_config.
-    model = model_spec.parallelize_fn(
-        model,
-        parallel_dims=parallel_dims,
-        training=config.training,
-        parallelism=parallelism,
-        compile_config=compile_config,
-        ac_config=config.activation_checkpoint,
-        dump_folder=config.dump_folder,
-    )
+    if materialize_whole_model:
+        # For aot_fx_trace, apply_compile inside parallelize_fn is a no-op
+        # (returns model unchanged), so we pass the real compile_config.
+        model = model_spec.parallelize_fn(
+            model,
+            parallel_dims=parallel_dims,
+            training=config.training,
+            parallelism=parallelism,
+            compile_config=compile_config,
+            ac_config=config.activation_checkpoint,
+            dump_folder=config.dump_folder,
+        )
 
-    # CooR must be disabled during init_weights because DTensor RNG ops
-    # (weight initialization seeding) raise NotImplementedError under
-    # compile_on_one_rank=True. Re-enable for the tracing phase after.
-    device_type = utils.device_type
-    model.to_empty(device=device_type)
-    dist_config.compile_on_one_rank = False
-    try:
-        with torch.no_grad():
-            model.init_weights(buffer_device=None)
-    finally:
-        dist_config.compile_on_one_rank = True
-    model.train()
+        # CooR must be disabled during init_weights because DTensor RNG ops
+        # (weight initialization seeding) raise NotImplementedError under
+        # compile_on_one_rank=True. Re-enable for the tracing phase after.
+        device_type = utils.device_type
+        model.to_empty(device=device_type)
+        dist_config.compile_on_one_rank = False
+        try:
+            with torch.no_grad():
+                model.init_weights(buffer_device=None)
+        finally:
+            dist_config.compile_on_one_rank = True
+        model.train()
 
-    logger.info("Model parallelized and materialized")
+        logger.info("Model parallelized and materialized")
 
     tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
@@ -213,14 +221,15 @@ def _precompile_aot_fx_trace(
     )
     # The trainer computes global_valid_tokens via dist_sum (an
     # all-reduce + .item()), which returns a Python float. Use the
-    # same type here so make_fx bakes it as a graph constant — not a
-    # graph input — identical to the non-precompile runtime trace.
-    global_batch_size = (
-        local_batch_size
-        * parallel_dims.dp_shard
-        * parallel_dims.dp_replicate
-        * parallel_dims.cp
-    )
+    # same type here so make_fx bakes it as a graph constant -- not a
+    # graph input -- identical to the non-precompile runtime trace. The
+    # value is the resolved global_batch_size (which folds in gradient
+    # accumulation) times seq_len, over the batch mesh (dp_replicate*dp_shard,
+    # excluding cp), matching Trainer's runtime reduction.
+    batch_degree = parallel_dims.dp_replicate * parallel_dims.dp_shard
+    global_batch_size = config.training.global_batch_size
+    if global_batch_size < 0:
+        global_batch_size = local_batch_size * batch_degree
     dummy_global_valid_tokens = float(global_batch_size * seq_len)
     extra_kwargs: dict[str, Any] = {}
 
@@ -306,6 +315,239 @@ def _precompile_aot_fx_trace(
     )
 
 
+def _precompile_graph_pp(
+    config,
+    model,
+    model_config,
+    model_spec,
+    compile_config,
+    parallel_dims,
+    device,
+):
+    """GraphPP precompile: build every stage in one process and serialize per PP rank.
+
+    Single-process CooR cannot reuse the live training build path, because eager
+    PP metadata inference (``schedule._initialize_stages``) needs real P2P shape
+    exchange between ranks. Instead we build *all* virtual stages in this one
+    process, run their forwards in stage order to chain representative
+    activations (so each non-first stage gets a real input without P2P), and
+    trace/partition/compile each stage with ``_build_stage_graph_bundle``
+    (Inductor kernels are baked in when ``--compile.enable``). The resulting
+    callables are grouped by PP rank and saved; each torchrun rank loads the
+    bundle for its own PP coordinate and runs it directly, with no
+    recompilation.
+    """
+    import torch.distributed.config as dist_config
+    from torch.distributed.pipelining.stage import _normalize_model_output_as_tuple
+
+    from torchtitan.distributed.pipeline_parallel import (
+        _build_get_mesh_callback,
+        _generate_llm_fqn_per_model_part,
+        _get_pipeline_metadata,
+        _get_pp_rank_to_stage_indices_mapping,
+        _split_module,
+    )
+    from torchtitan.distributed.utils import get_train_context
+    from torchtitan.experiments.graph_trainer.graph_pp.precompile import (
+        compute_graph_pp_fingerprint,
+        ensure_schedule_precompilable,
+        make_distributed_objects_deepcopy_safe,
+        save_graph_pp_rank_bundle,
+    )
+    from torchtitan.experiments.graph_trainer.graph_pp.runner import (
+        _build_stage_graph_bundle,
+        GraphPipelineStage,
+    )
+
+    parallelism = config.parallelism
+    pp_degree = parallelism.pipeline_parallel_degree
+    pp_schedule = parallelism.pipeline_parallel_schedule
+
+    ensure_schedule_precompilable(pp_schedule)
+    # CooR lifts TorchBind ProcessGroup/DeviceMesh constants into the traced
+    # graph; GraphPP partition deepcopies it, so make those singletons shareable.
+    make_distributed_objects_deepcopy_safe()
+
+    if parallel_dims.cp_enabled:
+        raise NotImplementedError(
+            "GraphPP precompile does not yet support context parallelism. "
+            "Set --parallelism.context_parallel_degree 1."
+        )
+
+    loss_fn = config.loss.build(compile_config=compile_config)
+
+    # Derive the module FQNs for every virtual stage across all PP ranks.
+    (
+        num_virtual_stages,
+        num_layers,
+        input_weight,
+        output_weight,
+    ) = _get_pipeline_metadata(parallel_dims, parallelism, model_config)
+    module_names_per_stage = parallelism.module_fqns_per_model_part
+    if module_names_per_stage is None:
+        module_names_per_stage = _generate_llm_fqn_per_model_part(
+            num_virtual_stages,
+            num_layers,
+            input_weight,
+            output_weight,
+        )
+    num_stages = len(module_names_per_stage)
+
+    pp_mesh = parallel_dims.get_mesh("pp")
+    get_mesh_cb = _build_get_mesh_callback(parallel_dims)
+    device_type = utils.device_type
+
+    # Build, parallelize, and materialize every stage submodule. CooR must be
+    # off during init_weights (DTensor RNG ops are unsupported under it) and on
+    # everywhere else so parallelization and tracing stay rank-agnostic.
+    stages: list[GraphPipelineStage] = []
+    for stage_idx in range(num_stages):
+        submod = _split_module(model, module_names_per_stage[stage_idx])
+        submod = model_spec.parallelize_fn(
+            submod,
+            parallel_dims=parallel_dims,
+            training=config.training,
+            parallelism=parallelism,
+            compile_config=compile_config,
+            ac_config=config.activation_checkpoint,
+            dump_folder=config.dump_folder,
+        )
+        submod.to_empty(device=device_type)
+        dist_config.compile_on_one_rank = False
+        try:
+            with torch.no_grad():
+                submod.init_weights(buffer_device=None)
+        finally:
+            dist_config.compile_on_one_rank = True
+        submod.train()
+        stages.append(
+            GraphPipelineStage(
+                submod,
+                stage_index=stage_idx,
+                num_stages=num_stages,
+                device=device,
+                loss_fn=loss_fn,
+                compile_config=compile_config,
+                model_config=model_config,
+                parallelism=parallelism,
+                group=pp_mesh.get_group("pp"),
+                get_mesh=get_mesh_cb,
+            )
+        )
+    logger.info("GraphPP precompile built %s stages on a single process", num_stages)
+
+    # Match Trainer's post-construction ChunkedCELoss wiring for the last stage:
+    # the last stage's forward skips lm_head and the chunked loss applies it.
+    # Without this the last-stage trace asserts on a missing lm_head.
+    _prepare_loss_for_precompile(stages[-1].submod, loss_fn)
+
+    # Representative microbatch matches the per-microbatch shape training traces
+    # with (the schedule splits the local batch by pipeline_parallel_microbatch_size).
+    seq_len = config.training.seq_len
+    microbatch_size = parallelism.pipeline_parallel_microbatch_size
+    vocab_size = model_config.vocab_size
+    dummy_inputs = torch.randint(
+        0, vocab_size, (microbatch_size, seq_len), device=device
+    )
+    dummy_labels = torch.randint(
+        0, vocab_size, (microbatch_size, seq_len), device=device
+    )
+
+    # global_valid_tokens is the full-batch token count baked as a graph constant
+    # (the last-stage loss divides by it per microbatch). It must equal the
+    # trainer's value: resolved global_batch_size (which folds in gradient
+    # accumulation) times seq_len, over the batch mesh (dp_replicate*dp_shard,
+    # excluding cp), so it matches regardless of grad-accum steps.
+    batch_degree = parallel_dims.dp_replicate * parallel_dims.dp_shard
+    global_batch_size = config.training.global_batch_size
+    if global_batch_size < 0:
+        global_batch_size = config.training.local_batch_size * batch_degree
+    dummy_global_valid_tokens = float(global_batch_size * seq_len)
+    loss_kwargs: dict[str, Any] = {"global_valid_tokens": dummy_global_valid_tokens}
+
+    # positions and attention_masks are forwarded to every stage, matching
+    # Trainer.post_dataloading_process (masks only for Flex/Varlen backends).
+    positions = torch.arange(0, seq_len, dtype=torch.int32, device=device).expand(
+        microbatch_size, seq_len
+    )
+    extra_kwargs: dict[str, Any] = {"positions": positions}
+    if isinstance(model_config, Decoder.Config):
+        inner_attention = getattr(model_config.first_attention, "inner_attention", None)
+        if isinstance(inner_attention, (FlexAttention.Config, VarlenAttention.Config)):
+            extra_kwargs["attention_masks"] = cast(
+                Decoder, stages[0].submod
+            ).get_attention_masks(positions=positions)
+
+    maybe_register_blockmask_pytree_node()
+
+    train_context = get_train_context(parallel_dims=parallel_dims)
+
+    # Chain forward in stage order so each stage traces with a real input; for
+    # non-last stages synthesize output-grad tangents (ones_like the forward
+    # output) instead of relying on eager PP backward metadata.
+    with train_context():
+        stage_args: tuple[Any, ...] = (dummy_inputs,)
+        for stage_idx, stage in enumerate(stages):
+            is_last = stage_idx == num_stages - 1
+            stage_target = dummy_labels if is_last else None
+            output_grads = None
+            next_args = None
+            if not is_last:
+                with torch.no_grad():
+                    output = stage.submod(*stage_args, **extra_kwargs)
+                output_grads = pytree.tree_map_only(
+                    torch.Tensor, torch.ones_like, output
+                )
+                next_args = _normalize_model_output_as_tuple(output)
+            # Build (and, when --compile.enable, Inductor-compile) each callable
+            # now so the saved bundle is in its final state and load needs no
+            # recompilation. With enable off the saved graphs are uncompiled FX.
+            _build_stage_graph_bundle(
+                stage,
+                stage_args,
+                extra_kwargs,
+                stage_target,
+                loss_kwargs,
+                compile_callables=True,
+                output_grads=output_grads,
+            )
+            if not is_last:
+                stage_args = next_args
+
+    # Group stages by PP rank and serialize one bundle per rank. Each rank's
+    # fingerprint covers only that rank's stage submodules, matching the load
+    # side, which only has its own rank's parts.
+    storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
+    for pp_rank in range(pp_degree):
+        stage_indices = _get_pp_rank_to_stage_indices_mapping(
+            pp_rank, pp_degree, pp_schedule, num_stages
+        )
+        rank_stages = [stages[i] for i in stage_indices]
+        config_fingerprint = compute_graph_pp_fingerprint(
+            [stage.submod for stage in rank_stages],
+            compile_config,
+            parallel_dims,
+            schedule_name=pp_schedule,
+            parallelism=parallelism,
+            training=config.training,
+            loss_config=config.loss,
+            debug_config=config.debug,
+        )
+        save_graph_pp_rank_bundle(
+            rank_stages,
+            storage,
+            pp_rank=pp_rank,
+            schedule_name=pp_schedule,
+            config_fingerprint=config_fingerprint,
+        )
+
+    logger.info(
+        "GraphPP precompile complete. Saved %s per-rank bundles to %s",
+        pp_degree,
+        compile_config.precompile_artifact_dir,
+    )
+
+
 def main():
     config_manager = ConfigManager()
     config = config_manager.parse_args()
@@ -317,6 +559,8 @@ def main():
             f"got '{mode}'."
         )
 
+    pp_enabled = config.parallelism.pipeline_parallel_degree > 1
+
     (
         model,
         model_config,
@@ -325,18 +569,29 @@ def main():
         parallel_dims,
         device,
         tokenizer,
-    ) = _common_setup(config)
+    ) = _common_setup(config, materialize_whole_model=not pp_enabled)
 
-    _precompile_aot_fx_trace(
-        config,
-        model,
-        model_config,
-        model_spec,
-        compile_config,
-        parallel_dims,
-        device,
-        tokenizer,
-    )
+    if pp_enabled:
+        _precompile_graph_pp(
+            config,
+            model,
+            model_config,
+            model_spec,
+            compile_config,
+            parallel_dims,
+            device,
+        )
+    else:
+        _precompile_aot_fx_trace(
+            config,
+            model,
+            model_config,
+            model_spec,
+            compile_config,
+            parallel_dims,
+            device,
+            tokenizer,
+        )
 
     dist.destroy_process_group()
 

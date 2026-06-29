@@ -40,11 +40,9 @@ def _validate_graph_pp_config(
 ) -> None:
     if compile_config.mode != "aot_fx_trace":
         raise ValueError("GraphPP requires --compile.mode aot_fx_trace")
-    if compile_config.precompile_artifact_dir:
-        raise ValueError(
-            "GraphPP does not support --compile.precompile_artifact_dir yet. "
-            "Trace and graph construction are stage-local runtime operations."
-        )
+    # precompile_artifact_dir is supported: graph_pp_llm always builds the
+    # stages; when the dir is set, the trainer installs saved per-stage bundles
+    # on the first step instead of tracing them (see _load_precompiled_graph_pp).
     if parallelism.fsdp_reshard_after_forward == "always":
         raise ValueError(
             "GraphPP assumes ZeRO-2 style FSDP with "

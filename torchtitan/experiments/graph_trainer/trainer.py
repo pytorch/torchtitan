@@ -108,6 +108,12 @@ class GraphTrainer(Trainer):
         # Lazy state for aot_fx_trace mode
         self._traced_step: TracedResult | None = None
 
+        # Lazy state for GraphPP precompile load. The stage bundle loader is
+        # built once on the first train step (when model_parts are materialized
+        # so the fingerprint can be computed) and reused thereafter.
+        self._graph_pp_stage_loader: Any = None
+        self._graph_pp_stage_loader_loaded: bool = False
+
         if self.config.compile.memory_policy == "sac_and_offload":
             from torch._functorch._activation_offloading.offload_ops import (
                 pinned_memory_pool,
@@ -182,6 +188,13 @@ class GraphTrainer(Trainer):
             build_graph_pp_graph_bundles,
         )
 
+        # When precompile is enabled, install saved stage bundles instead of
+        # tracing. build_graph_pp_graph_bundles still runs _initialize_stages
+        # (P2P comm setup); the loaded callables keep their saved compiled state,
+        # so the per-stage Inductor compile and (for the supported non-overlap
+        # schedules) the OVERLAP_F_B multiplex build are no-ops at load.
+        stage_bundle_loader = self._maybe_graph_pp_stage_loader()
+
         inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
         loss_kwargs = {"global_valid_tokens": global_valid_tokens}
         with self.train_context():
@@ -193,6 +206,7 @@ class GraphTrainer(Trainer):
                     **extra_kwargs,
                     target=targets,
                     loss_kwargs=loss_kwargs,
+                    stage_bundle_loader=stage_bundle_loader,
                 )
                 self.pp_schedule.step(
                     inputs,
@@ -208,6 +222,7 @@ class GraphTrainer(Trainer):
                     **extra_kwargs,
                     target=targets,
                     loss_kwargs=loss_kwargs,
+                    stage_bundle_loader=stage_bundle_loader,
                 )
                 self.pp_schedule.step(
                     **extra_kwargs,
@@ -221,6 +236,66 @@ class GraphTrainer(Trainer):
             assert losses is not None
             return torch.sum(torch.stack(losses)).to(self.device)
         return torch.tensor([-1.0], device=self.device)
+
+    def _maybe_graph_pp_stage_loader(self):
+        """Return a GraphPP stage-bundle loader when precompile is enabled.
+
+        Loads this PP rank's precompiled bundle once and caches the loader so
+        later steps reuse it. Returns None when no precompile artifact directory
+        is configured, in which case stage bundles are traced live.
+        """
+        if not self.config.compile.precompile_artifact_dir:
+            return None
+        if not self._graph_pp_stage_loader_loaded:
+            self._graph_pp_stage_loader = self._load_precompiled_graph_pp()
+            self._graph_pp_stage_loader_loaded = True
+        return self._graph_pp_stage_loader
+
+    def _load_precompiled_graph_pp(self):
+        """Load this PP rank's GraphPP bundle and build a stage loader closure.
+
+        The bundle is selected by this process's PP coordinate. The fingerprint
+        is computed over only this rank's stage submodules (matching the save
+        side, which fingerprints each rank's stages separately).
+        """
+        from torchtitan.experiments.graph_trainer.graph_pp.precompile import (
+            build_graph_pp_stage_loader,
+            compute_graph_pp_fingerprint,
+            ensure_schedule_precompilable,
+            graph_pp_rank_artifact_key,
+            load_graph_pp_rank_bundle,
+        )
+        from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+
+        compile_config = self.config.compile
+        schedule_name = self.config.parallelism.pipeline_parallel_schedule
+        ensure_schedule_precompilable(schedule_name)
+
+        storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
+        pp_rank = self.parallel_dims.get_mesh("pp").get_local_rank()
+
+        key = graph_pp_rank_artifact_key(pp_rank)
+        if not storage.exists(key):
+            raise ValueError(
+                f"GraphPP precompiled bundle not found for pp_rank {pp_rank} at "
+                f"'{compile_config.precompile_artifact_dir}/{key}'. Run "
+                f"precompile_main with --parallelism.pipeline_parallel_degree set."
+            )
+
+        fingerprint = compute_graph_pp_fingerprint(
+            self.model_parts,
+            compile_config,
+            self.parallel_dims,
+            schedule_name=schedule_name,
+            parallelism=self.config.parallelism,
+            training=self.config.training,
+            loss_config=self.config.loss,
+            debug_config=self.config.debug,
+        )
+        bundle = load_graph_pp_rank_bundle(
+            storage, pp_rank=pp_rank, expected_fingerprint=fingerprint
+        )
+        return build_graph_pp_stage_loader(bundle)
 
     def _load_precompiled_fx_trace(self, model: nn.Module) -> None:
         """Load a precompiled aot_fx_trace artifact from disk."""

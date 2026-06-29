@@ -105,7 +105,49 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
             ngpu=8,
             disabled=True,
         ),
+        # GraphPP precompile: save every stage on one process, load per PP rank.
+        # Validated bitwise-identical to live-trace for both supported V-shaped
+        # schedules. ep=1: EP precompile is rejected because the MoE all-to-all
+        # bakes an opaque ProcessGroup constant the GraphPickler cannot serialize.
+        # selective_activation_remat is disabled because CooR fragments the
+        # backward into many regions that pass rejects; remat is numerically
+        # neutral, so disabling it does not change the loss. SDPA backend: the
+        # FlexAttention default bakes an unpicklable BlockMask closure.
+        *_graph_pp_precompile_tests(),
     ]
+
+
+def _graph_pp_precompile_tests() -> list[PrecompileTestDefinition]:
+    tests = []
+    for schedule, slug in (
+        ("Interleaved1F1B", "interleaved_1f1b"),
+        ("ZBVZeroBubble", "zbv_zero_bubble"),
+    ):
+        artifact_dir = tempfile.mkdtemp(prefix=f"gpp_fx_trace_precompile_{slug}_")
+        args = [
+            "--module graph_trainer.deepseek_v3",
+            "--config graph_trainer_deepseek_v3_debugmodel_sdpa",
+            "--compile.mode aot_fx_trace",
+            f"--compile.precompile_artifact_dir {artifact_dir}",
+            "--compile.disable_passes selective_activation_remat_pass",
+            "--parallelism.pipeline_parallel_degree 2",
+            f"--parallelism.pipeline_parallel_schedule {schedule}",
+            "--parallelism.data_parallel_shard_degree 4",
+            "--parallelism.expert_parallel_degree 1",
+        ]
+        tests.append(
+            PrecompileTestDefinition(
+                precompile_command=(
+                    "python -m torchtitan.experiments.graph_trainer.precompile_main "
+                    + " ".join(args)
+                ),
+                override_args=args,
+                test_descr=f"aot_fx_trace deepseek_v3 GraphPP precompile {schedule}",
+                test_name=f"aot_fx_trace_deepseek_v3_graph_pp_precompile_{slug}",
+                ngpu=8,
+            )
+        )
+    return tests
 
 
 RUN_TRAIN_SCRIPT = "torchtitan/experiments/graph_trainer/run_train_precompile.sh"
@@ -113,6 +155,16 @@ RUN_TRAIN_SCRIPT = "torchtitan/experiments/graph_trainer/run_train_precompile.sh
 
 def run_precompile_tests(args):
     test_list = _build_precompile_tests()
+
+    # A --test_name that matches no known test (a typo, or CI drifting from a
+    # renamed slug) must fail loudly instead of silently running nothing and
+    # exiting 0, which would mask zero coverage as a green CI run.
+    known_names = {t.test_name for t in test_list}
+    if args.test_name != "all" and args.test_name not in known_names:
+        raise SystemExit(
+            f"--test_name {args.test_name!r} matched no precompile test. "
+            f"Available test names: {sorted(known_names)}"
+        )
 
     ran_any = False
     for test in test_list:
@@ -138,8 +190,9 @@ def run_precompile_tests(args):
             f"Precompile step for {test.test_descr}: "
             f"{test.precompile_command} ====="
         )
+        # _run_cmd inherits stdout/stderr so child output streams straight to
+        # the CI log; result.stdout is None and is not logged here.
         result = _run_cmd(test.precompile_command)
-        logger.info(result.stdout)
         if result.returncode != 0:
             raise Exception(
                 f"Precompile step failed for: {test.test_descr}, "
@@ -157,7 +210,6 @@ def run_precompile_tests(args):
             f"Training step for {test.test_descr}: {cmd} ====="
         )
         result = _run_cmd(cmd)
-        logger.info(result.stdout)
         if result.returncode != 0:
             raise Exception(
                 f"Training step failed for: {test.test_descr}, command: {cmd}"

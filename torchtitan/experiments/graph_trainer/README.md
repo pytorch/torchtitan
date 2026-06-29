@@ -98,9 +98,12 @@ live `param.grad`. Internal values remain flat because they never leave GraphPP
 graph execution: saved-for-backward tensors, unsharded FSDP params, raw grad
 leaves, reduce-grad inputs, and multiplexed intermediate outputs.
 
-Current limitations: GraphPP does not load precompile artifacts yet, CUDA graph
-capture should target the `GraphPPRunner` steady-state path in a future change,
-and EP-overlap annotations will be composed with GraphPP in a later PR.
+GraphPP supports precompile for non-overlap schedules (Interleaved1F1B,
+ZBVZeroBubble) -- see the Pre-compile section below. Current limitations:
+precompile does not yet cover OVERLAP_F_B schedules (DualPipeV), which
+multiplex uncompiled forward/backward graphs at runtime; CUDA graph capture
+should target the `GraphPPRunner` steady-state path in a future change; and
+EP-overlap annotations will be composed with GraphPP in a later PR.
 
 ### Compiler Optimizations
 
@@ -219,6 +222,48 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmo
     --parallelism.data_parallel_shard_degree 4 \
     --parallelism.tensor_parallel_degree 2 \
     --parallelism.expert_parallel_degree 4
+```
+
+#### GraphPP (pipeline parallelism)
+
+> **Status.** Validated bitwise (loss and grad_norm) for non-overlap schedules
+> (Interleaved1F1B, ZBVZeroBubble) without expert parallelism. Requirements and
+> limitations: pass `--compile.disable_passes selective_activation_remat_pass`
+> (CooR fragments the backward into many regions; remat is numerically neutral);
+> needs a companion pytorch fix so `free_symbols` ignores `torch.device`
+> metadata from CooR. Not yet supported: expert parallelism (`ep>1`, opaque
+> all-to-all ProcessGroup constant -- rejected with a clear error), DualPipeV
+> (OVERLAP_F_B multiplex), and FlexAttention (use the `_sdpa` configs).
+
+For pipeline parallelism the precompile step builds *every* virtual stage in
+one process (chaining each stage's forward to feed the next), compiles each
+stage's graphs, and saves one bundle per PP rank (`graph_pp_pp{rank}.bin`).
+Each torchrun rank loads the bundle for its own PP coordinate.
+
+```bash
+# Step 1: precompile every stage on a single process (needs only 1 GPU)
+python -m torchtitan.experiments.graph_trainer.precompile_main \
+    --module graph_trainer.deepseek_v3 \
+    --config graph_trainer_deepseek_v3_debugmodel_sdpa \
+    --compile.mode aot_fx_trace \
+    --compile.precompile_artifact_dir /tmp/gpp_artifacts \
+    --compile.disable_passes selective_activation_remat_pass \
+    --parallelism.pipeline_parallel_degree 2 \
+    --parallelism.pipeline_parallel_schedule Interleaved1F1B \
+    --parallelism.data_parallel_shard_degree 4 \
+    --parallelism.expert_parallel_degree 1
+
+# Step 2: load and train with torchrun (uses all GPUs)
+NGPU=8 MODULE=graph_trainer.deepseek_v3 \
+    CONFIG=graph_trainer_deepseek_v3_debugmodel_sdpa \
+    ./torchtitan/experiments/graph_trainer/run_train_precompile.sh \
+    --compile.mode aot_fx_trace \
+    --compile.precompile_artifact_dir /tmp/gpp_artifacts \
+    --compile.disable_passes selective_activation_remat_pass \
+    --parallelism.pipeline_parallel_degree 2 \
+    --parallelism.pipeline_parallel_schedule Interleaved1F1B \
+    --parallelism.data_parallel_shard_degree 4 \
+    --parallelism.expert_parallel_degree 1
 ```
 
 <details>
