@@ -298,7 +298,7 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
             ),
             training_sample_builder=TrainingSampleBuilder.Config(
                 drop_zero_std_reward_groups=False,
-            )
+            ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
@@ -354,7 +354,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             ),
             training_sample_builder=TrainingSampleBuilder.Config(
                 drop_zero_std_reward_groups=False,
-            )
+            ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
@@ -528,7 +528,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             ),
             training_sample_builder=TrainingSampleBuilder.Config(
                 drop_zero_std_reward_groups=False,
-            )
+            ),
         ),
         # MoE EP all-to-all path issues unpinned D2H copies that block
         # torch.compile and CUDA graph capture; disable both.
@@ -657,7 +657,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
             ),
             training_sample_builder=TrainingSampleBuilder.Config(
                 drop_zero_std_reward_groups=False,
-            )
+            ),
         ),
         # MoE EP all-to-all path issues unpinned D2H copies that block
         # torch.compile and CUDA graph capture; disable both.
