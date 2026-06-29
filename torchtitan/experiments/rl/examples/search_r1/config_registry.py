@@ -156,17 +156,16 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
 
 
 def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
-    """GRPO Search-R1 for Qwen3-30B-A3B MoE with a DeepEP v2 generator (run eager).
+    """GRPO Search-R1 for Qwen3-30B-A3B MoE with a DeepEP v2 cudagraph generator.
 
     DeepEP v2 runs multi-node on H100 (NVLink intra-node + IB/RoCE inter-node), so unlike
     a HybridEP generator (whose all-to-all is intra-node only) this generator may span
     nodes. Qwen3-30B-A3B has 4 KV heads, so the generator TP must be <=4. The trainer
     keeps the compact (host-synced, backward-able) DeepEP path; the generator applies the
-    ``deepep_inference`` override to switch its dispatchers to the EXPAND layout. Applies
-    the same ``fused_swiglu`` + ``helion_rope`` perf overrides (CUDA-only) as
-    ``rl_grpo_qwen3_30b_a3b_varlen_perf``. The EXPAND layout is cudagraph-able, but the
-    generator currently runs eager because the EXPAND cudagraph capture corrupts the MoE
-    forward (see the ``cudagraph`` knob below).
+    ``deepep_inference`` override to switch its dispatchers to the cudagraph-able EXPAND
+    layout. Applies the same ``fused_swiglu`` + ``helion_rope`` perf overrides (CUDA-only)
+    as ``rl_grpo_qwen3_30b_a3b_varlen_perf``. The generator graphs pure-decode batches
+    (FULL_DECODE_ONLY) and runs prefill / mixed batches eager (see the ``cudagraph`` knob).
     """
     model_spec = model_registry(
         "30B-A3B", attn_backend="varlen", moe_comm_backend="deepep"
@@ -182,7 +181,12 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     config = Controller.Config(
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-30B-A3B",
-        num_generators=2,  # TODO: TBD -- number of generator proc meshes to spawn
+        # Generation is the async-loop bottleneck (multi-turn search + decode), so run
+        # several generators; the GeneratorRouter load-balances rollouts across them.
+        # Each generator is one host (TP=4/EP=4 = 4 GPUs); scale with capacity. The
+        # single retrieval server (controller) serves all of them, so it is the ceiling
+        # on very large generator counts.
+        num_generators=4,
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
             # Cold-start GRPO grouping: group_size=32 gives more diverse siblings per
@@ -246,21 +250,23 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 tensor_parallel_degree=4,
                 expert_parallel_degree=4,
             ),
-            # WORKAROUND (eager): the DeepEP EXPAND cudagraph generator corrupts the MoE
-            # forward -> the model emits coherent-but-garbage text, never calls the search
-            # tool, and scores 0 reward. Running the generator eager (cudagraph OFF, DeepEP
-            # EXPAND kept) restores correctness (the model searches, gives terse entity
-            # answers, reward rises) at a large throughput cost. TODO: fix the DeepEP
-            # EXPAND cudagraph capture, then restore
-            # cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_AND_PIECEWISE").
-            cudagraph=VLLMCudagraphConfig(enable=False),
+            # FULL_DECODE_ONLY: graph pure-decode batches (the bulk of generation) and
+            # run prefill / mixed batches eager. FULL_AND_PIECEWISE (which also graphs
+            # prefill / mixed) corrupted the DeepEP EXPAND MoE forward here -> the model
+            # emitted garbage and never searched (0 reward). Decode-only graphing avoids
+            # that (the same #3668 fix the 1.7B/8B/dense search_r1 configs use) while
+            # keeping most of the cudagraph speedup over full eager.
+            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_DECODE_ONLY"),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),
-            # Generator-only: the DeepEP EXPAND override on top of the perf overrides
-            # (run eager, see cudagraph above); the trainer keeps the compact path.
+            # Generator override: helion_rope + the DeepEP EXPAND inference override.
+            # NOT fused_swiglu: its fused_grouped_experts claims `moe.experts` while
+            # deepep_inference claims the descendant `moe.experts.token_dispatcher`, a
+            # nested-override conflict (#3778). The trainer keeps fused_swiglu (compact
+            # path, no conflict there).
             override=OverrideConfig(
                 imports=[
-                    *perf_imports,
+                    "torchtitan.overrides.helion_rope",
                     "torchtitan.distributed.deepep.inference_override",
                 ]
             ),
