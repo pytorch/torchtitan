@@ -37,30 +37,45 @@ def _eager_rebuild_daytona_models() -> None:
     """Resolve Daytona's Pydantic models at import (single-threaded) so concurrent
     sandbox creates never race their lazy rebuild.
 
-    ``CreateSandboxFromImageParams`` has forward-ref fields Pydantic resolves
-    lazily on first instantiation. Under a wide concurrent boot fanout (e.g.
-    rollout_concurrency=48 in one controller) many first-uses race that rebuild
-    and raise ``PydanticUserError: ... is not fully defined`` -> every create
-    fails -> turns=0. Rebuild once here, before any rollout. The forward refs use
-    typing names (``Optional`` etc.) + ``StrictStr`` that are NOT in this module's
-    namespace, so pass an explicit ``_types_namespace`` (all of ``typing`` + the
-    SDK model's own module globals) and ``force`` a fresh resolve.
+    Several Daytona SDK models (``CreateSandboxFromImageParams`` for create,
+    ``SessionExecuteRequest`` for exec, ...) have forward-ref fields Pydantic
+    resolves lazily on first instantiation. Under a wide concurrent boot fanout
+    (e.g. rollout_concurrency=48 in one controller) many first-uses race that
+    rebuild and raise ``PydanticUserError: ... is not fully defined`` -> every
+    create/exec fails -> turns=0. Rebuild ALL Daytona pydantic models once here,
+    before any rollout. The forward refs use typing names (``Optional`` etc.) +
+    ``StrictStr`` that are NOT in this module's namespace, so pass an explicit
+    ``_types_namespace`` (each model's own module globals + all of ``typing``) and
+    ``force`` a fresh resolve.
     Best-effort: a no-op if Daytona isn't installed (e.g. CPU-only environments).
     """
     try:
         import sys
         import typing
 
-        from pydantic import StrictStr
+        from pydantic import BaseModel, StrictStr
 
-        from daytona import CreateSandboxFromImageParams  # type: ignore
+        # Force the SDK submodules (and their model classes) to load before we walk.
+        import daytona  # type: ignore  # noqa: F401
+        from daytona import (  # type: ignore  # noqa: F401
+            CreateSandboxFromImageParams,
+            Resources,
+            SessionExecuteRequest,
+        )
 
-        ns = dict(vars(typing))
-        ns["StrictStr"] = StrictStr
-        sdk_mod = sys.modules.get(CreateSandboxFromImageParams.__module__)
-        if sdk_mod is not None:
-            ns.update(vars(sdk_mod))
-        CreateSandboxFromImageParams.model_rebuild(force=True, _types_namespace=ns)
+        base_ns = dict(vars(typing))
+        base_ns["StrictStr"] = StrictStr
+        for mod_name, mod in list(sys.modules.items()):
+            if not mod_name.startswith("daytona") or mod is None:
+                continue
+            for obj in list(vars(mod).values()):
+                if isinstance(obj, type) and issubclass(obj, BaseModel):
+                    try:
+                        obj.model_rebuild(
+                            force=True, _types_namespace={**vars(mod), **base_ns}
+                        )
+                    except Exception:  # noqa: BLE001 -- unresolved refs: skip that model
+                        pass
     except Exception as e:  # noqa: BLE001 -- import/rebuild is best-effort
         logger.warning("[daytona] eager model_rebuild skipped: %s", e)
 
