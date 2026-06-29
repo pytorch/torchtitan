@@ -149,6 +149,10 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
             config.generator.parallelism, tensor_parallel_degree=2
         ),
     )
+    # Load the QA parquets from the local copy instead of downloading from HF.
+    local_data = "/home/jessicazhong/torchtitan/datasets/search_r1"
+    config.rollouter.train_dataset.data_path = f"{local_data}/train.parquet"
+    config.rollouter.validation_dataset.data_path = f"{local_data}/test.parquet"
     return config
 
 
