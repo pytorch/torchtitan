@@ -4,21 +4,26 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""State dict adapter for HF ↔ titan MoE checkpoint conversion.
+"""State dict adapters for the HF transformers backend.
 
-After the MoE replacement, the model's state dict has titan keys for MoE
-layers (``mlp.experts.<colwise_name>``, ``mlp.router.gate.weight``) while HF
-checkpoints use HF keys (``mlp.experts.gate_up_proj``, ``mlp.gate.weight``).
-Non-MoE layers (attention, norms, embeddings) share the same keys.
+Two complementary pieces live here:
 
-The key transformation is the fused ``gate_up_proj`` ↔ separate gate/up
-split, plus key renames for the router and shared experts.
+- ``HFTransformerStateDictAdapter`` -- the ``StateDictAdapter`` plugged into the
+  ModelSpec. HFTransformerModel wraps an HF ForCausalLM as ``self.model``, so the
+  only difference between TorchTitan FQNs and HF safetensors keys is a ``model.``
+  prefix (plus tied-embedding handling). Used by the checkpoint system.
 
-Parameter names (e.g. ``w1`` vs ``w1_EFD``) are discovered dynamically from
-``GroupedExperts`` so this adapter stays compatible across naming conventions.
+- ``hf_to_titan_moe_state_dict`` / ``titan_to_hf_moe_state_dict`` -- functions
+  that convert MoE expert weights between HF and titan layouts after the native
+  MoE replacement (fused ``gate_up_proj`` <-> separate gate/up split, plus router
+  and shared-expert key renames). Non-MoE keys pass through. Used by the
+  numerical-equivalence and round-trip tests. Parameter names (e.g. ``w1`` vs
+  ``w1_EFD``) are discovered dynamically from ``GroupedExperts`` so this stays
+  compatible across naming conventions.
 """
 
 import re
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -26,16 +31,60 @@ import torch
 from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
     _get_expert_param_info,
 )
+from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+
+from .model import HFTransformerModel
 
 # Keys that had transposed gate_up_proj layout (E, H, 2*I) instead of
 # (E, 2*I, H). Populated by ``hf_to_titan_moe_state_dict`` so
 # ``titan_to_hf_moe_state_dict`` can reverse the transpose.
 _TRANSPOSED_GATE_UP_PROJ_KEYS: set[str] = set()
 
-# Mapping from titan key → original HF key for keys where the reverse
+# Mapping from titan key -> original HF key for keys where the reverse
 # regex would produce a different result than the original (e.g. Llama4's
 # ``router.weight`` vs the default ``gate.weight``).
 _TITAN_TO_ORIGINAL_HF_KEY: dict[str, str] = {}
+
+
+class HFTransformerStateDictAdapter(StateDictAdapter):
+    """State dict adapter for HFTransformerModel.
+
+    Since HFTransformerModel wraps an HF ForCausalLM as self.model, the only
+    difference between TorchTitan FQNs and HF safetensors keys is a "model."
+    prefix. No weight reshaping or renaming is needed.
+
+    Handles weight tying: when tie_word_embeddings is True, some HF checkpoints
+    omit lm_head.weight from safetensors (it shares storage with embed_tokens).
+    """
+
+    def __init__(
+        self,
+        model_config: HFTransformerModel.Config,
+        hf_assets_path: str | None,
+    ):
+        super().__init__(model_config, hf_assets_path)
+        self._tie_word_embeddings = getattr(model_config, "tie_word_embeddings", False)
+
+    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        hf_state_dict = {k.removeprefix("model."): v for k, v in state_dict.items()}
+        # When weights are tied, lm_head.weight may not exist in the
+        # safetensors file. Exclude it so DCP doesn't fail on missing key.
+        if (
+            self._tie_word_embeddings
+            and "lm_head.weight" in hf_state_dict
+            and "model.embed_tokens.weight" in hf_state_dict
+        ):
+            del hf_state_dict["lm_head.weight"]
+        return hf_state_dict
+
+    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+        # Reconstruct lm_head.weight from embed_tokens if it was excluded
+        if (
+            "lm_head.weight" not in hf_state_dict
+            and "model.embed_tokens.weight" in hf_state_dict
+        ):
+            hf_state_dict["lm_head.weight"] = hf_state_dict["model.embed_tokens.weight"]
+        return {"model." + k: v for k, v in hf_state_dict.items()}
 
 
 def _expert_names() -> tuple[str, str, str]:
@@ -117,7 +166,7 @@ def hf_to_titan_moe_state_dict(
 ) -> dict[str, torch.Tensor]:
     """Convert HF MoE state dict keys/values to titan format.
 
-    Handles fused ``gate_up_proj`` → gate/up split, router and shared
+    Handles fused ``gate_up_proj`` -> gate/up split, router and shared
     expert key renames, and expert bias mapping. Non-MoE keys pass through.
 
     Args:
@@ -131,7 +180,7 @@ def hf_to_titan_moe_state_dict(
     titan_state_dict = {}
 
     for key, value in hf_state_dict.items():
-        # Handle fused gate_up_proj → gate + up
+        # Handle fused gate_up_proj -> gate + up
         if key.endswith("experts.gate_up_proj"):
             prefix = key[: -len("experts.gate_up_proj")]
             down_key = f"{prefix}experts.down_proj"

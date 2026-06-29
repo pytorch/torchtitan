@@ -217,7 +217,30 @@ def apply_fsdp(
         reshard_after_forward_policy, pp_enabled
     )
 
-    if model.tok_embeddings is not None:
+    # When input/output embeddings are tied (e.g. Qwen3), tok_embeddings and
+    # lm_head share one parameter. FSDP2 forbids a parameter being managed by
+    # two FSDP groups, so they must be grouped into a single unit.
+    tok_emb_weight = getattr(model.tok_embeddings, "weight", None)
+    lm_head_weight = getattr(model.lm_head, "weight", None)
+    # Detect tying by parameter identity (the exact thing FSDP2 checks); this
+    # also skips PP nn.Identity placeholders, which have no `.weight`.
+    tie_word_embeddings = (
+        tok_emb_weight is not None
+        and lm_head_weight is not None
+        and tok_emb_weight is lm_head_weight
+    )
+
+    if tie_word_embeddings:
+        fully_shard(
+            [
+                m
+                for m in (model.tok_embeddings, model.norm, model.lm_head)
+                if m is not None
+            ],
+            **fsdp_config,
+            reshard_after_forward=reshard_after_forward_policy == "always",
+        )
+    elif model.tok_embeddings is not None:
         fully_shard(
             model.tok_embeddings,
             **fsdp_config,
@@ -288,8 +311,9 @@ def apply_fsdp(
             )
 
     # As an optimization, do not reshard_after_forward the last layers by default
-    # since FSDP would prefetch them immediately after the forward pass
-    if model.norm is not None and model.lm_head is not None:
+    # since FSDP would prefetch them immediately after the forward pass. When
+    # weights are tied, norm/lm_head are already grouped with tok_embeddings above.
+    if not tie_word_embeddings and model.norm is not None and model.lm_head is not None:
         fully_shard(
             [model.norm, model.lm_head],
             **fsdp_config,

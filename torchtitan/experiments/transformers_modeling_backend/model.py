@@ -443,7 +443,17 @@ class HFTransformerModel(BaseModel):
             self.use_cache = False
             self.initializer_range = 1.0  # use as std for normal init in embedding
 
-            if not getattr(self, "is_moe", False) and not hasattr(self, "inter_dim"):
+            # When dim is explicitly overridden (e.g. debugmodel), derive the
+            # dependent sizes from it. Otherwise keep what AutoConfig loaded from
+            # the HF config -- models like Qwen3 decouple head_dim and
+            # intermediate_size from hidden_size/num_heads, so deriving them here
+            # would silently build the wrong architecture.
+            dim_overridden = self._titan_injected_model_args.get("dim") is not None
+            if (
+                dim_overridden
+                and not getattr(self, "is_moe", False)
+                and not hasattr(self, "inter_dim")
+            ):
                 ffn_hidden_size = 4 * self.dim
                 ffn_hidden_size = int(2 * ffn_hidden_size / 3)
                 if self.ffn_dim_multiplier is not None:
@@ -455,7 +465,7 @@ class HFTransformerModel(BaseModel):
             # MLA models (DeepSeek V3, GLM-5) set head_dim = qk_rope_head_dim
             # in the HF config for RoPE; don't clobber it with the standard
             # computation. Also force num_key_value_heads = num_attention_heads
-            # because MLA has no GQA — the KV LoRA path always produces
+            # because MLA has no GQA -- the KV LoRA path always produces
             # num_attention_heads heads.
             if hasattr(self, "qk_rope_head_dim"):
                 self.num_key_value_heads = self.num_attention_heads
@@ -463,7 +473,11 @@ class HFTransformerModel(BaseModel):
                 # may not compute it in __post_init__.
                 if not getattr(self, "head_dim", None):
                     self.head_dim = self.qk_rope_head_dim
-            else:
+            elif dim_overridden:
+                # dim explicitly overridden: derive head_dim from it.
+                self.head_dim = self.dim // self.num_attention_heads
+            elif not getattr(self, "head_dim", None):
+                # HF config did not provide head_dim; use the standard derivation.
                 self.head_dim = self.dim // self.num_attention_heads
 
             # Ensure expert groups are consistent with (possibly overridden)
@@ -1055,6 +1069,21 @@ class HFTransformerModel(BaseModel):
                 logger.info("Skipping nn.Identity module during weight initialization.")
 
         self.model.apply(selective_init)
+
+        # HF rotary embeddings compute their `inv_freq` buffer in __init__, not in
+        # `_init_weights`. With meta-device init + `to_empty()`, that buffer is
+        # left uninitialized (zeros), which silently disables RoPE (no positional
+        # information -> near-random outputs). Recompute it from each rotary
+        # module's `rope_init_fn` so positions work after materialization.
+        for module in self.model.modules():
+            rope_init_fn = getattr(module, "rope_init_fn", None)
+            if rope_init_fn is not None and hasattr(module, "inv_freq"):
+                device = module.inv_freq.device
+                inv_freq, attention_scaling = rope_init_fn(module.config, device)
+                module.inv_freq.copy_(
+                    inv_freq.to(device=device, dtype=module.inv_freq.dtype)
+                )
+                module.attention_scaling = attention_scaling
 
         # TODO(3outeille): For pipeline parallel, only tie weights if both input and output embeddings are on the same device
         # Maybe better way of handling this?
