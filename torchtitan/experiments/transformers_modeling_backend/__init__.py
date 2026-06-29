@@ -62,9 +62,9 @@ class TitanMoeModelConfig(TitanModelConfig):
     None or 0 disables MTP.
     """
 
-    experts_implementation: Literal["grouped_mm", "batched_mm", "eager", "native"] = (
-        "grouped_mm"
-    )
+    experts_implementation: Literal[
+        "grouped_mm", "batched_mm", "eager", "native"
+    ] = "grouped_mm"
     """
     Selects the HF experts forward kernel via `PretrainedConfig._experts_implementation`.
     "grouped_mm" is the fused fast path; "eager" is HF's original for-loop

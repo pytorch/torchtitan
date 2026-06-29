@@ -448,9 +448,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     self.loss_fn.set_lm_head(
                         lm_head  # pyrefly: ignore[bad-argument-type]
                     )
-                    self.model_parts[-1]._skip_lm_head = (
-                        True  # pyrefly: ignore[bad-argument-type]
-                    )
+                    self.model_parts[
+                        -1
+                    ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
             else:
                 assert len(self.model_parts) == 1
                 lm_head = self.model_parts[0].lm_head
@@ -458,9 +458,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     lm_head is not None
                 ), "Model must have lm_head for ChunkedLossWrapper"
                 self.loss_fn.set_lm_head(lm_head)  # pyrefly: ignore[bad-argument-type]
-                self.model_parts[0]._skip_lm_head = (
-                    True  # pyrefly: ignore[bad-argument-type]
-                )
+                self.model_parts[
+                    0
+                ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor

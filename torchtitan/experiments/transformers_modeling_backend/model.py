@@ -311,14 +311,14 @@ class HFTransformerModel(BaseModel):
             """
             if use_flex:
                 attn_implementation = "flex_torchtitan"
-                AttentionInterface._global_mapping[attn_implementation] = (
-                    _flex_attention_torchtitan
-                )
+                AttentionInterface._global_mapping[
+                    attn_implementation
+                ] = _flex_attention_torchtitan
             else:
                 # NOTE:(3outeille):This will force create_causal_mask to return None
-                AttentionInterface._global_mapping[attn_implementation] = (
-                    sdpa_attention_forward
-                )
+                AttentionInterface._global_mapping[
+                    attn_implementation
+                ] = sdpa_attention_forward
             self._titan_injected_model_args["attn_implementation"] = attn_implementation
             self.attn_implementation = attn_implementation
             # HF selects the attention function from ``config._attn_implementation``.
