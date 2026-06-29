@@ -40,6 +40,7 @@ from torchtitan.tools.logging import logger
 
 
 def annotate_dp_cp_params_as_r(model: nn.Module, parallel_dims: ParallelDims) -> None:
+    # TODO(pianpwk): Infer these from the active SPMD mesh instead.
     with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
         for param in model.parameters():
             spmd.assert_type(param, spmd.R)
@@ -224,6 +225,7 @@ def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
         # pyrefly: ignore [missing-attribute]
         attention_modules.append(single_block.inner_attention)
 
+    # Apply CP using direct forward wrapping (always uses SDPA for Flux)
     apply_cp_to_forward(attention_modules, cp_mesh)
 
 
