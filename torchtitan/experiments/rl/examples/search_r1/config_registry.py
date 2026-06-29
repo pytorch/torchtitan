@@ -35,6 +35,9 @@ from torchtitan.experiments.rl.actors.generator import (
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
+from torchtitan.experiments.rl.components.training_sample_builder import (
+    TrainingSampleBuilder,
+)
 from torchtitan.experiments.rl.controller import (
     AsyncLoopConfig,
     Controller,
@@ -153,15 +156,17 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
 
 
 def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
-    """GRPO Search-R1 for Qwen3-30B-A3B MoE with a DeepEP v2 cudagraph generator.
+    """GRPO Search-R1 for Qwen3-30B-A3B MoE with a DeepEP v2 generator (run eager).
 
     DeepEP v2 runs multi-node on H100 (NVLink intra-node + IB/RoCE inter-node), so unlike
     a HybridEP generator (whose all-to-all is intra-node only) this generator may span
     nodes. Qwen3-30B-A3B has 4 KV heads, so the generator TP must be <=4. The trainer
     keeps the compact (host-synced, backward-able) DeepEP path; the generator applies the
-    ``deepep_inference`` override to switch its dispatchers to the cudagraph-able EXPAND
-    layout. Applies the same ``fused_swiglu`` + ``helion_rope`` perf overrides (CUDA-only)
-    as ``rl_grpo_qwen3_30b_a3b_varlen_perf``.
+    ``deepep_inference`` override to switch its dispatchers to the EXPAND layout. Applies
+    the same ``fused_swiglu`` + ``helion_rope`` perf overrides (CUDA-only) as
+    ``rl_grpo_qwen3_30b_a3b_varlen_perf``. The EXPAND layout is cudagraph-able, but the
+    generator currently runs eager because the EXPAND cudagraph capture corrupts the MoE
+    forward (see the ``cudagraph`` knob below).
     """
     model_spec = model_registry(
         "30B-A3B", attn_backend="varlen", moe_comm_backend="deepep"
@@ -180,8 +185,18 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
         num_generators=2,  # TODO: TBD -- number of generator proc meshes to spawn
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
-            num_groups_per_train_step=32,  # TODO: TBD
-            group_size=8,  # TODO: TBD
+            # Cold-start GRPO grouping: group_size=32 gives more diverse siblings per
+            # prompt -> fewer all-identical-reward (zero-std) groups; 8 groups/step keeps
+            # 8*32 == 256 rollouts/step. Keep zero-std groups so the train loop still
+            # steps at cold start, where most groups are all-wrong (zero-std) under pure
+            # exact-match -- the occasional nonzero group carries the gradient and reward
+            # rises. Once warm, raising drop_zero_std_reward_groups back to True drops the
+            # dead groups for efficiency.
+            num_groups_per_train_step=8,
+            group_size=32,
+            training_sample_builder=TrainingSampleBuilder.Config(
+                drop_zero_std_reward_groups=False
+            ),
             validation=ValidationConfig(num_samples=500),
             batcher=Batcher.Config(
                 # TODO: TBD local_batch_size, seq_len
@@ -199,10 +214,14 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2, decay_type="linear", min_lr_factor=1.0
             ),
+            # FSDP=16/EP=16 (two H100 hosts): FSDP=8/EP=8 sits at the 80GB edge and a
+            # step-2 forward/backward tripped a CUDA "unspecified launch failure" there;
+            # sharding across 16 ranks (128 experts -> 8 per rank; DeepEP all-to-all goes
+            # inter-node over IB/RoCE) roughly halves per-GPU memory.
             parallelism=ParallelismConfig(
-                data_parallel_shard_degree=8,  # TODO: TBD
+                data_parallel_shard_degree=16,
                 tensor_parallel_degree=1,
-                expert_parallel_degree=8,
+                expert_parallel_degree=16,
             ),
             checkpoint=CheckpointManager.Config(
                 enable=True,
@@ -211,7 +230,13 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 last_save_model_only=False,
                 keep_latest_k=3,
             ),
-            loss=DAPOLoss.Config(ratio_clip_low=0.2, ratio_clip_high=0.28),
+            # Chunked loss: a bare DAPOLoss materializes the full-vocab (151936) x seq_len
+            # logits/logprobs in one shot -> forward_backward OOMs on 80GB. Slicing into
+            # num_chunks bounds that transient (same DAPO clip params).
+            loss=ChunkedLossWrapper.Config(
+                num_chunks=16,
+                loss_fn=DAPOLoss.Config(ratio_clip_low=0.2, ratio_clip_high=0.28),
+            ),
             override=OverrideConfig(imports=list(perf_imports)),
         ),
         generator=VLLMGenerator.Config(
@@ -221,13 +246,18 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 tensor_parallel_degree=4,
                 expert_parallel_degree=4,
             ),
-            # varlen attention -> FULL_AND_PIECEWISE (decode captured FULL, prefill
-            # piecewise).
-            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
+            # WORKAROUND (eager): the DeepEP EXPAND cudagraph generator corrupts the MoE
+            # forward -> the model emits coherent-but-garbage text, never calls the search
+            # tool, and scores 0 reward. Running the generator eager (cudagraph OFF, DeepEP
+            # EXPAND kept) restores correctness (the model searches, gives terse entity
+            # answers, reward rises) at a large throughput cost. TODO: fix the DeepEP
+            # EXPAND cudagraph capture, then restore
+            # cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_AND_PIECEWISE").
+            cudagraph=VLLMCudagraphConfig(enable=False),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),
-            # Generator-only: the DeepEP cudagraph EXPAND override on top of the perf
-            # overrides; the trainer keeps the compact path.
+            # Generator-only: the DeepEP EXPAND override on top of the perf overrides
+            # (run eager, see cudagraph above); the trainer keeps the compact path.
             override=OverrideConfig(
                 imports=[
                     *perf_imports,
@@ -254,3 +284,81 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             continue
         moe.experts.token_dispatcher.num_max_tokens_per_rank = num_max_tokens_per_rank
     return config
+
+
+def rl_grpo_qwen3_30b_a3b_dense_search_r1_perf() -> Controller.Config:
+    """GRPO Search-R1 for Qwen3-30B-A3B MoE without expert parallelism (dense FSDP).
+
+    Same model and Search-R1 recipe as ``rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf``,
+    but the MoE experts are sharded by FSDP only -- no expert parallelism and the
+    "standard" (non-DeepEP) token dispatch on both the trainer and the vLLM generator.
+    This trades replicated expert compute for sidestepping the DeepEP build/runtime setup.
+    The trainer runs FSDP=16 (two H100 hosts); with no EP every expert shards across all
+    16 ranks, so this is more memory-comfortable than the FSDP=8 + EP=8 DeepEP config.
+    The generator keeps DP=1/TP=4 (Qwen3-30B-A3B has 4 KV heads, so generator TP <=4).
+    Mixed precision (fp32 master + bf16 compute) comes from the TrainingConfig defaults,
+    matching the DeepEP config. Applies the same ``fused_swiglu`` + ``helion_rope`` perf
+    overrides (CUDA-only).
+    """
+    # Default "standard" MoE comm backend (no DeepEP); experts shard under FSDP.
+    model_spec = model_registry("30B-A3B", attn_backend="varlen")
+
+    perf_imports = [
+        "torchtitan.overrides.fused_swiglu",
+        "torchtitan.overrides.helion_rope",
+    ]
+
+    return Controller.Config(
+        model_spec=model_spec,
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-30B-A3B",
+        num_generators=2,  # TODO: TBD -- number of generator proc meshes to spawn
+        async_loop=AsyncLoopConfig(
+            num_training_steps=500,
+            num_groups_per_train_step=32,  # TODO: TBD
+            group_size=8,  # TODO: TBD
+            validation=ValidationConfig(num_samples=500),
+            batcher=Batcher.Config(
+                # TODO: TBD local_batch_size, seq_len
+                batch=BatchConfig(local_batch_size=1, seq_len=4096),
+            ),
+        ),
+        compile=CompileConfig(enable=False),
+        rollouter=SearchR1Rollouter.Config(
+            advantage=AdvantageEstimator.Config(should_std_normalize=True),
+        ),
+        renderer=RendererConfig(name="qwen3", enable_thinking=False),  # TODO: TBD
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=1e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2, decay_type="linear", min_lr_factor=1.0
+            ),
+            parallelism=ParallelismConfig(
+                # FSDP=16, no EP -> dense and expert params both shard under FSDP.
+                data_parallel_shard_degree=16,  # TODO: TBD
+                tensor_parallel_degree=1,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=50,
+                last_save_model_only=False,
+                keep_latest_k=3,
+            ),
+            loss=DAPOLoss.Config(ratio_clip_low=0.2, ratio_clip_high=0.28),
+            override=OverrideConfig(imports=list(perf_imports)),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            parallelism=InferenceParallelismConfig(  # single node generator, no EP
+                data_parallel_degree=1,
+                tensor_parallel_degree=4,
+            ),
+            # varlen attention -> FULL_AND_PIECEWISE (decode captured FULL, prefill
+            # piecewise).
+            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),
+            override=OverrideConfig(imports=list(perf_imports)),
+        ),
+    )
