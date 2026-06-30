@@ -13,6 +13,7 @@ in order, and the pass registries.  Individual passes live in dedicated modules:
 - ``memory_policy.py`` — SAC tagging and memory policy dispatch
 - ``inductor_passes.py`` — regional and full Inductor compilation
 - ``cudagraph.py`` — cudagraph wrapping and kernel annotations
+- ``xpugraph.py`` —  xpugraph wrapping
 - ``fsdp_passes.py`` — FSDP bucketing and resharding
 - ``remove_noop_passes.py`` — graph cleanup bundled as ``canonicalize_graph_pass``
   (detach, identity view/slice, back-to-back transpose, view→reshape normalization)
@@ -25,6 +26,7 @@ in order, and the pass registries.  Individual passes live in dedicated modules:
 from __future__ import annotations
 
 import functools
+from logging import config
 import time
 import warnings
 from collections.abc import Callable
@@ -36,6 +38,8 @@ from torchtitan.experiments.graph_trainer.configs import (
     validate_ep_overlap_config,
 )
 
+from torch._logging import trace_structured
+from torchtitan.experiments.graph_trainer.xpugraph import xpugraph_pass
 from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_pass
 from torchtitan.experiments.graph_trainer.cudagraph import (
     cudagraph_pass,
@@ -356,12 +360,25 @@ def construct_default_graph_passes(
     """Build the pass list for the aot_fx_trace path.
 
     When ``precompile_artifact_dir`` is unset, returns the full list: cleanup,
-    FlexAttention annotation, regional_inductor, and cudagraph.
+    FlexAttention annotation, regional_inductor, and graph capture.
 
     When ``precompile_artifact_dir`` is set, the artifact has graph
-    transformed during precompile phase, so only cudagraph is returned.
+    transformed during precompile phase, so only graph capture is returned.
     """
-    want_cudagraph = "cudagraph_pass" not in config.compile.disable_passes
+    want_xpugraph = (
+        config.compile.enable_xpugraph
+        and "xpugraph_pass" not in config.compile.disable_passes
+    )
+    want_cudagraph = (
+        config.compile.enable_cudagraph
+        and "cudagraph_pass" not in config.compile.disable_passes
+    )
+
+    if want_xpugraph and want_cudagraph:
+        raise ValueError(
+            "Only one graph capture backend can be enabled. "
+            "Set either compile.enable_xpugraph or compile.enable_cudagraph, not both."
+        )
 
     has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
 
@@ -376,15 +393,25 @@ def construct_default_graph_passes(
             )
         )
 
-    if want_cudagraph:
+    if want_xpugraph:
+        graph_capture_pass = xpugraph_pass
+    elif want_cudagraph:
+        graph_capture_pass = cudagraph_pass
+    else:
+        graph_capture_pass = None
+
+    # Graph capture should be the last pass.
+    if graph_capture_pass is not None:
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
             functools.partial(
-                cudagraph_pass,
+                graph_capture_pass,
+                is_forward=True,
                 static_input_indices=static_input_indices,
                 tensor_input_indices=traced_result.tensor_input_indices,
             )
         )
+
     return passes
 
 
