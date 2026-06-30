@@ -39,7 +39,6 @@ from .utils import (
     foreach_copy_,
     pack_tensors_into_flat_buffer,
     pack_tensors_into_flat_buffer_with_scratch,
-    _to_dist_reduce_op,
 )
 
 if TYPE_CHECKING:
@@ -407,7 +406,7 @@ class RaggedShard(Placement):
             dist.reduce_scatter_tensor(
                 output=recv_buf,
                 input=send_buf,
-                op=_to_dist_reduce_op(state.gradient_reduce_op),
+                op=state.gradient_reduce_op,
                 group=state.pg,
             )
 
@@ -914,7 +913,7 @@ class GroupedRaggedShard(RaggedShard):
             dist.reduce_scatter_tensor(
                 output=recv_buf,
                 input=send_buf,
-                op=_to_dist_reduce_op(state.gradient_reduce_op),
+                op=state.gradient_reduce_op,
                 group=state.pg,
             )
 

@@ -39,7 +39,6 @@ from ..flex_shard.utils import (
 )
 from .utils import (
     pack_segments_into_flat_buffer_triton_if_supported,
-    _to_dist_reduce_op,
 )
 
 if TYPE_CHECKING:
@@ -1229,7 +1228,7 @@ class GroupedOwned(Placement):
                 dist.reduce_scatter_tensor(
                     output=recv,
                     input=send,
-                    op=_to_dist_reduce_op(state.gradient_reduce_op),
+                    op=state.gradient_reduce_op,
                     group=state.pg,
                 )
             finally:

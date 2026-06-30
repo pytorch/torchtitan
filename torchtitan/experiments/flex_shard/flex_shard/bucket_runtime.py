@@ -155,7 +155,6 @@ class BucketCommContext:
     )
     reduce_grad_callback_queued: bool = False
     raf_saved_unshard_cache: dict[int, list[torch.Tensor]] = field(default_factory=dict)
-    raf_saved_unshard_cache_limit: int = 2
     raf_saved_unshard_cache_callback_queued: bool = False
     _forward_bucket_indices: dict[int, int] | None = None
     _recompute_prefetch_buckets: list[BucketRuntime] | None = None
@@ -345,11 +344,9 @@ class BucketCommContext:
         bucket_id: int,
         full_params: list[torch.Tensor],
     ) -> None:
-        """Cache RAF recomputes while bounding gathered-buffer lifetime."""
+        """Cache RAF recomputes until explicit release or end-of-backward cleanup."""
         self.raf_saved_unshard_cache.pop(bucket_id, None)
         self.raf_saved_unshard_cache[bucket_id] = full_params
-        while len(self.raf_saved_unshard_cache) > self.raf_saved_unshard_cache_limit:
-            self.raf_saved_unshard_cache.pop(next(iter(self.raf_saved_unshard_cache)))
         self.queue_raf_saved_unshard_cache_clear()
 
     def release_raf_saved_unshard_cache(self, bucket_id: int) -> None:
