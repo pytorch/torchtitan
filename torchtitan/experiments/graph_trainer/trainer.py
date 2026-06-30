@@ -33,6 +33,13 @@ from torchtitan.experiments.graph_trainer.registry import (
     POST_INIT_HOOKS,
     PRE_TRAIN_STEP_HOOKS,
 )
+from torchtitan.experiments.graph_trainer.runtime_estimator import (
+    BENCHMARK,
+    compare_node_breakdown,
+    COST_MODEL,
+    INTERPRETER,
+    RuntimeEstimator,
+)
 from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
 
@@ -208,19 +215,91 @@ class GraphTrainer(Trainer):
                         extra_kwargs,
                     )
 
+            def measure_time(
+                _traced_step: TracedResult,
+                model: nn.Module,
+                inputs: torch.Tensor,
+                labels: torch.Tensor,
+                global_valid_tokens: float,
+                extra_kwargs: dict[str, Any],
+            ):
+                # Compare the three runtime-estimation modes on this graph:
+                #   cost-model  -> static roofline (sum of per-op analytic times)
+                #   benchmark   -> per-op kernel time on real random tensors (sum)
+                #   interpreter -> real run: end-to-end total (overlap-aware) AND a
+                #                  serialized per-op sum (fwd+bwd)
+                # cost-model/benchmark totals are sums of per-op times, so the
+                # apples-to-apples reference is the interpreter's per-op sum
+                # (fwd+bwd); its end-to-end total is the real wall-clock (overlap).
+                # cudagraph must be disabled for benchmark/interpreter.
+                with self.train_context():
+                    cm = RuntimeEstimator()(COST_MODEL).estimate(self._traced_step)
+                    bm = RuntimeEstimator()(BENCHMARK).estimate(self._traced_step)
+                    it = RuntimeEstimator()(INTERPRETER).estimate(
+                        self._traced_step,
+                        model,
+                        inputs,
+                        labels,
+                        global_valid_tokens,
+                        extra_kwargs,
+                    )
+                it_sum = (
+                    it.fwd_runtime_ms + it.bwd_runtime_ms
+                )  # per-op sum (serialized)
+                logger.info(
+                    "[runtime-estimation] per-op-sum (ms): cost-model=%.3f  benchmark=%.3f  "
+                    "interpreter=%.3f | interpreter end-to-end=%.3f (overlap) | "
+                    "closeness vs benchmark: cost-model=%.3f interpreter=%.3f | "
+                    "vs interpreter end-to-end: cost-model=%.3f benchmark=%.3f",
+                    cm.total_runtime_ms,
+                    bm.total_runtime_ms,
+                    it_sum,
+                    it.total_runtime_ms,
+                    (
+                        cm.total_runtime_ms / bm.total_runtime_ms
+                        if bm.total_runtime_ms
+                        else float("nan")
+                    ),
+                    (
+                        it_sum / bm.total_runtime_ms
+                        if bm.total_runtime_ms
+                        else float("nan")
+                    ),
+                    (
+                        cm.total_runtime_ms / it.total_runtime_ms
+                        if it.total_runtime_ms
+                        else float("nan")
+                    ),
+                    (
+                        bm.total_runtime_ms / it.total_runtime_ms
+                        if it.total_runtime_ms
+                        else float("nan")
+                    ),
+                )
+                compare_node_breakdown(cm, bm, it, self._traced_step.gm)
+
             if self.config.compile.enable_passes:
                 pipeline_fn = PASS_PIPELINE_REGISTRY.get(
                     self.config.compile.pass_pipeline,
                     construct_default_graph_passes,
                 )
                 passes = pipeline_fn(self._traced_step, self.config)
-
                 self._traced_step.gm = apply_graph_passes(
                     self._traced_step.gm,
                     self._traced_step.example_inputs,
                     passes,
                     compile_config=self.config.compile,
                 )
+            print("============== After regional inductor pass: ==============")
+            # Runtime estimation on the final (post-regional-inductor) graph.
+            measure_time(
+                _traced_step=self._traced_step,
+                model=model,
+                inputs=inputs,
+                labels=labels,
+                global_valid_tokens=global_valid_tokens,
+                extra_kwargs=extra_kwargs,
+            )
         with self.train_context():
             outputs = run_traced(self._traced_step, module=model)(
                 inputs,
