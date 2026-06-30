@@ -38,6 +38,7 @@ from ..flex_shard.utils import (
     _record_view_out_if_eager,
 )
 from .utils import (
+    make_segment_pack_descriptor_triton_if_supported,
     pack_tensors_into_flat_buffer,
     pack_tensors_into_flat_buffer_with_scratch,
     pack_segments_into_flat_buffer_triton_if_supported,
@@ -686,6 +687,7 @@ class GroupedOwned(Placement):
         self._hash_key = tuple(
             (fqn, segments) for fqn, segments in sorted(normalized.items())
         )
+        self._segment_pack_descriptor_cache: dict[tuple[Any, ...], Any] = {}
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, GroupedOwned):
@@ -1152,6 +1154,38 @@ class GroupedOwned(Placement):
             return None
         return flat_storage_span, offsets
 
+    def _get_segment_pack_descriptor(
+        self,
+        *,
+        tensor_indices: list[int],
+        src_offsets: list[int],
+        numels: list[int],
+        dst_offsets: list[int],
+        device: torch.device,
+    ) -> Any | None:
+        if torch.compiler.is_compiling():
+            return None
+        key = (
+            device.type,
+            device.index,
+            tuple(tensor_indices),
+            tuple(src_offsets),
+            tuple(numels),
+            tuple(dst_offsets),
+        )
+        descriptor = self._segment_pack_descriptor_cache.get(key)
+        if descriptor is None:
+            descriptor = make_segment_pack_descriptor_triton_if_supported(
+                tensor_indices,
+                src_offsets,
+                numels,
+                dst_offsets,
+                device,
+            )
+            if descriptor is not None:
+                self._segment_pack_descriptor_cache[key] = descriptor
+        return descriptor
+
     def _pack_unshard_send_triton(
         self,
         send: torch.Tensor,
@@ -1204,6 +1238,18 @@ class GroupedOwned(Placement):
 
         if not tensor_indices:
             return []
+        descriptor = self._get_segment_pack_descriptor(
+            tensor_indices=tensor_indices,
+            src_offsets=src_offsets,
+            numels=numels,
+            dst_offsets=dst_offsets,
+            device=send.device,
+        )
+        if descriptor is None:
+            raise AssertionError(
+                "GroupedOwned Triton unshard copy-in requires a cached segment "
+                "pack descriptor."
+            )
         pack_scratch = pack_segments_into_flat_buffer_triton_if_supported(
             inputs,
             tensor_indices,
@@ -1211,6 +1257,7 @@ class GroupedOwned(Placement):
             numels,
             dst_offsets,
             send,
+            descriptor=descriptor,
         )
         if pack_scratch is None:
             raise AssertionError(
@@ -1266,6 +1313,18 @@ class GroupedOwned(Placement):
                     + segment.rank_offset
                 )
 
+        descriptor = self._get_segment_pack_descriptor(
+            tensor_indices=tensor_indices,
+            src_offsets=src_offsets,
+            numels=numels,
+            dst_offsets=dst_offsets,
+            device=send_by_owner.device,
+        )
+        if descriptor is None:
+            raise AssertionError(
+                "GroupedOwned Triton reduce copy-in requires a cached segment "
+                "pack descriptor."
+            )
         pack_scratch = pack_segments_into_flat_buffer_triton_if_supported(
             inputs,
             tensor_indices,
@@ -1273,6 +1332,7 @@ class GroupedOwned(Placement):
             numels,
             dst_offsets,
             send_by_owner.reshape(-1),
+            descriptor=descriptor,
         )
         if pack_scratch is None:
             raise AssertionError(

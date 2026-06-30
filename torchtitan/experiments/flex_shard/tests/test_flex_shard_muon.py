@@ -437,6 +437,7 @@ class TestCommFreeMuonHelpers(TestCase):
             CheckpointPolicy,
             create_selective_checkpoint_contexts,
         )
+        from torch.utils._python_dispatch import _get_current_dispatch_mode_stack
 
         from torchtitan.experiments.flex_shard.flex_shard.ops import UNSHARD_BUCKET_OP
         from torchtitan.experiments.flex_shard.flex_shard.reshard_after_forward import (
@@ -450,12 +451,14 @@ class TestCommFreeMuonHelpers(TestCase):
 
             return create_selective_checkpoint_contexts(user_policy)
 
+        bucket_id = 1
+        recompute_state = _ReshardAfterForwardRecomputeState()
         merged_context_fn = _compose_with_ac_policy(
             user_context_fn,
-            _ReshardAfterForwardRecomputeState(),
-            frozenset({1}),
+            recompute_state,
+            frozenset({bucket_id}),
         )
-        forward_ctx, _ = merged_context_fn()
+        forward_ctx, recompute_ctx = merged_context_fn()
         self.assertEqual(
             forward_ctx.policy_fn(None, UNSHARD_BUCKET_OP),
             CheckpointPolicy.MUST_RECOMPUTE,
@@ -469,8 +472,18 @@ class TestCommFreeMuonHelpers(TestCase):
                 forward_ctx.policy_fn(None, op),
                 CheckpointPolicy.PREFER_SAVE,
             )
+        before_depth = len(_get_current_dispatch_mode_stack())
+        with recompute_ctx:
+            self.assertTrue(recompute_state.is_recomputing(bucket_id))
+            self.assertEqual(
+                len(_get_current_dispatch_mode_stack()),
+                before_depth + 1,
+            )
+        self.assertEqual(len(_get_current_dispatch_mode_stack()), before_depth)
 
     def test_full_ac_recompute_context_marks_raf_recompute(self) -> None:
+        from torch.utils._python_dispatch import _get_current_dispatch_mode_stack
+
         from torchtitan.experiments.flex_shard.flex_shard.reshard_after_forward import (
             _make_full_ac_recompute_context_fn,
             _ReshardAfterForwardRecomputeState,
@@ -486,9 +499,12 @@ class TestCommFreeMuonHelpers(TestCase):
 
         with forward_ctx:
             self.assertFalse(recompute_state.is_recomputing(bucket_id))
+        before_depth = len(_get_current_dispatch_mode_stack())
         with recompute_ctx:
             self.assertTrue(recompute_state.is_recomputing(bucket_id))
+            self.assertEqual(len(_get_current_dispatch_mode_stack()), before_depth)
         self.assertFalse(recompute_state.is_recomputing(bucket_id))
+        self.assertEqual(len(_get_current_dispatch_mode_stack()), before_depth)
 
     def test_grouped_muon_matches_per_expert_torch_muon(self) -> None:
         # GroupedMuon on a (num_experts, m, n) stack must equal running

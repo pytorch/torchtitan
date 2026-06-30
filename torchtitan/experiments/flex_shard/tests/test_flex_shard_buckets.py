@@ -603,6 +603,76 @@ class TestBucketPlacementValidation(TestCase):
                 ),
             )
 
+    def test_grouped_owned_reuses_triton_segment_pack_descriptors(self):
+        """GroupedOwned caches static Triton segment-pack descriptors."""
+        if importlib.util.find_spec("triton") is None:
+            self.skipTest("Triton is required for GroupedOwned CUDA segment packing.")
+
+        from torchtitan.experiments.flex_shard.example import owned as owned_module
+
+        with single_rank_cuda_mesh() as mesh:
+            placement = GroupedOwned(
+                {
+                    "a": [GroupedOwnedSegmentSpec("a#0", "a", 0, 4, 0)],
+                    "b": [GroupedOwnedSegmentSpec("b#0", "b", 0, 3, 0)],
+                }
+            )
+            tensors = [
+                torch.arange(4, dtype=torch.float32, device="cuda").view(2, 2),
+                torch.arange(3, dtype=torch.float32, device="cuda").add(10),
+            ]
+            infos = [
+                ParamInfo(
+                    fqn="a",
+                    global_shape=tensors[0].shape,
+                    global_stride=tuple(tensors[0].stride()),
+                    dtype=torch.float32,
+                    param_dtype=torch.bfloat16,
+                    requires_grad=True,
+                    placements=(placement,),
+                    local_shape=tensors[0].shape,
+                    local_numel=tensors[0].numel(),
+                    global_numel=tensors[0].numel(),
+                ),
+                ParamInfo(
+                    fqn="b",
+                    global_shape=tensors[1].shape,
+                    global_stride=tuple(tensors[1].stride()),
+                    dtype=torch.float32,
+                    param_dtype=torch.bfloat16,
+                    requires_grad=True,
+                    placements=(placement,),
+                    local_shape=tensors[1].shape,
+                    local_numel=tensors[1].numel(),
+                    global_numel=tensors[1].numel(),
+                ),
+            ]
+
+            with mock.patch.object(
+                owned_module,
+                "make_segment_pack_descriptor_triton_if_supported",
+                wraps=owned_module.make_segment_pack_descriptor_triton_if_supported,
+            ) as make_descriptor:
+                for _ in range(2):
+                    prepared_unshard = placement.prepare_unshard_bucket(
+                        tensors,
+                        infos,
+                        mesh,
+                        None,
+                    )
+                    torch.cuda.synchronize()
+                    prepared = placement.prepare_reduce_grad(
+                        tensors,
+                        infos,
+                        mesh,
+                        None,
+                    )
+                    placement.reduce_prepared_grad(prepared)
+                    torch.cuda.synchronize()
+
+            self.assertEqual(make_descriptor.call_count, 1)
+            self.assertEqual(prepared_unshard.buffers[0].dtype, torch.bfloat16)
+
     def test_rejects_shard_dim_out_of_range(self):
         """Placement layout validation happens during bucket storage planning."""
 
