@@ -56,13 +56,20 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
     server on the spare GPUs. Requires a running retrieval server and the QA parquet
     data; see ``README.md``.
     """
+    perf_imports = [
+        "torchtitan.overrides.fused_swiglu",
+        "torchtitan.overrides.helion_rope",
+    ]
+
     return Controller.Config(
         model_spec=model_registry("1.7B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
+        num_generators=2,
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
             num_groups_per_train_step=8,
-            group_size=8,
+            group_size=32,
+            max_offpolicy_steps=0,
             validation=ValidationConfig(num_samples=500),
             batcher=Batcher.Config(
                 batch=BatchConfig(local_batch_size=1, seq_len=4096),
@@ -101,6 +108,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                     ratio_clip_high=0.28,
                 ),
             ),
+            override=OverrideConfig(imports=list(perf_imports)),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -116,6 +124,11 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 temperature=1.0,
                 top_p=1.0,
                 max_tokens=512,
+            ),
+            override=OverrideConfig(
+                imports=[
+                    *perf_imports,
+                ]
             ),
         ),
     )
