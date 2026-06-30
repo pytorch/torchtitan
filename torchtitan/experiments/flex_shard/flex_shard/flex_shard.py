@@ -12,7 +12,12 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from .bucket_runtime import _create_unsharded_param_slots, _install_bucket_unshard_hooks
+from .bucket_runtime import (
+    _create_unsharded_param_slots,
+    _EAGER_COMM_CONTEXTS_ATTR,
+    _install_bucket_unshard_hooks,
+    _MAX_PENDING_REDUCE_GRADS_ATTR,
+)
 from .bucket_storage import (
     _assign_params_to_buckets,
     BucketParamFQNsByIndex,
@@ -75,6 +80,41 @@ class FlexShardModule:
                 continue
             for bucket_storage in bucket_storages:
                 bucket_storage.set_gradient_reduce_op(op)
+
+    def set_max_pending_reduce_grads(
+        self,
+        max_pending_reduce_grads: int,
+        *,
+        recurse: bool = True,
+    ) -> None:
+        """Set the number of in-flight reduce-grad results retained by FlexShard."""
+        if not isinstance(max_pending_reduce_grads, int) or isinstance(
+            max_pending_reduce_grads, bool
+        ):
+            raise ValueError(
+                "max_pending_reduce_grads must be a non-negative int, "
+                f"got {type(max_pending_reduce_grads).__name__}."
+            )
+        if max_pending_reduce_grads < 0:
+            raise ValueError(
+                "max_pending_reduce_grads must be non-negative, "
+                f"got {max_pending_reduce_grads}."
+            )
+
+        modules = self.modules() if recurse else [self]
+        for module in modules:
+            if not isinstance(module, FlexShardModule):
+                continue
+            setattr(
+                module,
+                _MAX_PENDING_REDUCE_GRADS_ATTR,
+                max_pending_reduce_grads,
+            )
+            contexts = getattr(module, _EAGER_COMM_CONTEXTS_ATTR, None)
+            if contexts is None:
+                continue
+            for context in contexts.values():
+                context.max_pending_reduce_grads = max_pending_reduce_grads
 
 
 def flex_shard(
