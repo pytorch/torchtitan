@@ -328,6 +328,44 @@ def qwen3_moe_debug() -> Trainer.Config:
     )
 
 
+def qwen3_moe_deepep() -> Trainer.Config:
+    """Qwen3 debug MoE pretraining with the DeepEP v2 backend (compact training path), EP=4.
+
+    The MoE expert dispatch uses the DeepEP v2 ElasticBuffer all-to-all; under autograd it
+    takes the compact, host-synced, backward-able path. EP=4 (4 GPUs) so the dispatch is
+    actually exercised (EP=1 falls back to local); the compact path auto-sizes its buffer from
+    the per-rank token count. Numerics match the standard all-to-all backend (step-1 bitwise,
+    reduction-order drift thereafter). Needs deep_ep v2 (ElasticBuffer) in the env.
+
+    Local devgpu (no RDMA NIC) needs these env vars so the ElasticBuffer inits NVLink-only:
+      - EP_DISABLE_GIN=1            skip the NCCL GIN / RDMA requirement (no RDMA NIC)
+      - EP_REUSE_NCCL_COMM=0        avoid the ElasticBuffer null-device-comm segfault
+      - NVSHMEM_REMOTE_TRANSPORT=none + NVSHMEM_DISABLE_MNNVL=1   intra-node NVLink only
+      - LD_LIBRARY_PATH must include the deep_ep wheels' nvshmem + nccl lib dirs
+    Then launch with NGPU=4 ./run_train.sh (none of this is needed on RDMA/RoCE hosts).
+    """
+    model_spec = model_registry("debugmodel_moe", moe_comm_backend="deepep")
+    return Trainer.Config(
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
+        hf_assets_path="./tests/assets/tokenizer",
+        metrics=MetricsProcessor.Config(log_freq=1),
+        model_spec=model_spec,
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        optimizer=default_adamw(lr=3e-4),
+        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
+        training=TrainingConfig(local_batch_size=2, seq_len=512, steps=10),
+        parallelism=ParallelismConfig(expert_parallel_degree=4),
+        checkpoint=CheckpointManager.Config(
+            interval=1000, last_save_model_only=False, export_dtype="float16"
+        ),
+        activation_checkpoint=SelectiveAC.Config(),
+    )
+
+
 def sft_qwen3_8b_math() -> Trainer.Config:
     """Qwen3-8B SFT on GSM8K math dataset."""
 
