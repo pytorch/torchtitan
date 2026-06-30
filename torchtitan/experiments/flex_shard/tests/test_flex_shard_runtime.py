@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import torch
@@ -15,6 +16,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard import is_flex_shard_param
+from torchtitan.experiments.flex_shard.flex_shard.bucket_comm import AsyncUnshardResult
 from torchtitan.experiments.flex_shard.flex_shard.bucket_runtime import (
     _accumulate_sharded_grads,
     _BucketUnshard,
@@ -23,8 +25,13 @@ from torchtitan.experiments.flex_shard.flex_shard.bucket_runtime import (
     _MAX_PENDING_REDUCE_GRADS_ATTR,
     BucketCommContext,
     ParamOwnerRef,
+    PendingReduceGrad,
 )
 from torchtitan.experiments.flex_shard.flex_shard.flex_shard import FlexShardModule
+from torchtitan.experiments.flex_shard.flex_shard.placement_contract import (
+    PlacementPreparedUnshard,
+    PlacementUnshardResult,
+)
 from torchtitan.experiments.flex_shard.flex_shard.unsharded_param_getters import (
     _RafSavedTensorContext,
 )
@@ -100,6 +107,109 @@ class TestRafSavedTensorContext(TestCase):
 
 
 class TestFlexShardEagerRuntime(TestCase):
+    class _FakeDeviceHandle:
+        def stream(self, stream):
+            return nullcontext()
+
+    class _FakeReduceGradResult:
+        def __init__(self) -> None:
+            self.wait_count = 0
+            self.synchronize_count = 0
+            self.release_count = 0
+
+        def wait(self) -> None:
+            self.wait_count += 1
+
+        def synchronize(self) -> None:
+            self.synchronize_count += 1
+
+        def release_buffers(self, release_sharded_grads: bool) -> None:
+            self.release_count += 1
+            self.released_sharded_grads = release_sharded_grads
+
+    def test_async_unshard_finish_materializes_only_when_consumed(self):
+        class _Placement:
+            def __init__(self) -> None:
+                self.finish_count = 0
+                self.full_params = [torch.ones(1)]
+
+            def finish_prepared_unshard(self, prepared):
+                self.finish_count += 1
+                return PlacementUnshardResult(self.full_params, prepared.buffers)
+
+        placement = _Placement()
+        prepared = PlacementPreparedUnshard(
+            placement=placement,
+            buffers=[],
+            placement_state=None,
+        )
+        result = AsyncUnshardResult(
+            prepared=prepared,
+            event=None,
+            device_handle=self._FakeDeviceHandle(),
+        )
+
+        self.assertEqual(placement.finish_count, 0)
+        result.release_buffers()
+        self.assertEqual(placement.finish_count, 0)
+
+        self.assertIs(result.finish(), placement.full_params)
+        self.assertEqual(placement.finish_count, 1)
+        self.assertIs(result.finish(), placement.full_params)
+        self.assertEqual(placement.finish_count, 1)
+
+    def test_reduce_grad_final_wait_uses_stream_waits_not_host_synchronize(self):
+        active = self._FakeReduceGradResult()
+        retired = self._FakeReduceGradResult()
+        context = BucketCommContext(
+            device_handle=self._FakeDeviceHandle(),
+            unshard_stream=object(),
+            reduce_grad_stream=object(),
+            reduce_grad_release_stream=object(),
+            max_pending_reduce_grads=2,
+            reduce_grad_states=[PendingReduceGrad(active)],
+            retired_reduce_grad_states=[PendingReduceGrad(retired)],
+        )
+
+        context.wait_and_clear_reduce_grad_states(debug_fqn=None)
+
+        self.assertEqual(retired.wait_count, 1)
+        self.assertEqual(retired.release_count, 0)
+        self.assertEqual(retired.synchronize_count, 0)
+        self.assertEqual(active.wait_count, 2)
+        self.assertEqual(active.release_count, 1)
+        self.assertTrue(active.released_sharded_grads)
+        self.assertEqual(active.synchronize_count, 0)
+        self.assertEqual(context.reduce_grad_states, [])
+        self.assertEqual(context.retired_reduce_grad_states, [])
+
+    def test_reduce_grad_retention_releases_buffers_without_final_stream_wait(self):
+        result = self._FakeReduceGradResult()
+        context = BucketCommContext(
+            device_handle=self._FakeDeviceHandle(),
+            unshard_stream=object(),
+            reduce_grad_stream=object(),
+            reduce_grad_release_stream=object(),
+            reduce_grad_states=[PendingReduceGrad(result)],
+            max_pending_reduce_grads=1,
+        )
+
+        context.drain_reduce_grad_states_if_needed(debug_fqn=None)
+
+        self.assertEqual(result.wait_count, 1)
+        self.assertEqual(result.release_count, 1)
+        self.assertTrue(result.released_sharded_grads)
+        self.assertEqual(result.synchronize_count, 0)
+        self.assertEqual(context.reduce_grad_states, [])
+        self.assertEqual(len(context.retired_reduce_grad_states), 1)
+
+        context.wait_and_clear_reduce_grad_states(debug_fqn=None)
+
+        self.assertEqual(result.wait_count, 2)
+        self.assertEqual(result.release_count, 1)
+        self.assertEqual(result.synchronize_count, 0)
+        self.assertEqual(context.retired_reduce_grad_states, [])
+
     def test_set_max_pending_reduce_grads_updates_existing_contexts(self):
         class _Module(FlexShardModule, nn.Module):
             pass
@@ -124,12 +234,19 @@ class TestFlexShardEagerRuntime(TestCase):
         self.assertEqual(getattr(root, _MAX_PENDING_REDUCE_GRADS_ATTR), 3)
         self.assertEqual(getattr(child, _MAX_PENDING_REDUCE_GRADS_ATTR), 3)
 
+        root.set_max_pending_reduce_grads()
+
+        self.assertEqual(root_context.max_pending_reduce_grads, 2)
+        self.assertEqual(child_context.max_pending_reduce_grads, 2)
+        self.assertEqual(getattr(root, _MAX_PENDING_REDUCE_GRADS_ATTR), 2)
+        self.assertEqual(getattr(child, _MAX_PENDING_REDUCE_GRADS_ATTR), 2)
+
         root.set_max_pending_reduce_grads(0, recurse=False)
 
         self.assertEqual(root_context.max_pending_reduce_grads, 0)
-        self.assertEqual(child_context.max_pending_reduce_grads, 3)
+        self.assertEqual(child_context.max_pending_reduce_grads, 2)
         self.assertEqual(getattr(root, _MAX_PENDING_REDUCE_GRADS_ATTR), 0)
-        self.assertEqual(getattr(child, _MAX_PENDING_REDUCE_GRADS_ATTR), 3)
+        self.assertEqual(getattr(child, _MAX_PENDING_REDUCE_GRADS_ATTR), 2)
 
         with self.assertRaisesRegex(ValueError, "non-negative"):
             root.set_max_pending_reduce_grads(-1)
