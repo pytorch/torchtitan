@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn as nn
+from torch.distributed.tensor import DTensor
 
 from .bucket_runtime import (
     _create_unsharded_param_slots,
@@ -460,11 +461,6 @@ def _unwrap_dtensor_params_to_local(module: nn.Module) -> None:
     shard; FlexShard should bucket-shard the local EP payload, not the global
     pre-EP tensor.
     """
-    try:
-        from torch.distributed.tensor import DTensor
-    except ImportError:
-        return
-
     for fqn, param in list(module.named_parameters(remove_duplicate=False)):
         if not isinstance(param, DTensor):
             continue
