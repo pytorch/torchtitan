@@ -19,7 +19,15 @@ import cloudpickle
 import torch
 import torch.distributed as dist
 import torchstore as ts
-from monarch.actor import Actor, Channel, current_rank, endpoint, Port, PortReceiver
+from monarch.actor import (
+    Actor,
+    Channel,
+    concurrent_endpoint,
+    current_rank,
+    endpoint,
+    Port,
+    PortReceiver,
+)
 from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
@@ -940,7 +948,7 @@ class VLLMGenerator(Actor, Configurable):
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
 
-    @endpoint
+    @concurrent_endpoint
     @sl.log_trace_span("generate")
     async def generate(
         self,
