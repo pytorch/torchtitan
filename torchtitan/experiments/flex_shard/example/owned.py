@@ -207,13 +207,6 @@ class _ReduceScratchPool:
 
 def _grouped_owned_reduce_scratch_slots() -> int:
     raw = os.environ.get("FLEX_SHARD_GROUPED_OWNED_SCRATCH_SLOTS")
-    if raw is not None:
-        try:
-            return max(1, int(raw))
-        except ValueError:
-            return 1
-
-    raw = os.environ.get("FLEX_SHARD_MAX_PENDING_REDUCE_GRADS")
     if raw is None:
         return 1
     try:
