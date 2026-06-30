@@ -6,6 +6,7 @@
 
 from typing import Any
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -13,7 +14,12 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+from torch.distributed.fsdp import (
+    CPUOffloadPolicy,
+    DataParallelMeshDims,
+    fully_shard,
+    MixedPrecisionPolicy,
+)
 
 from torchtitan.config import (
     CompileConfig,
@@ -28,11 +34,22 @@ from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     enable_fsdp_symm_mem,
 )
+from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
+from torchtitan.models.flux.model.model import FluxModel
 from torchtitan.tools.logging import logger
 
 
+def annotate_dp_cp_params_as_r(model: nn.Module, parallel_dims: ParallelDims) -> None:
+    # TODO(pianpwk): Infer these from the active SPMD mesh instead.
+    with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
+        for param in model.parameters():
+            spmd.assert_type(param, spmd.R)
+
+
 def parallelize_flux(
-    model: nn.Module,
+    model: FluxModel,
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
@@ -44,14 +61,22 @@ def parallelize_flux(
     if ac_config is not None:
         apply_ac(model)
 
-    if parallel_dims.cp_enabled:
+    if parallelism.spmd_backend == "spmd_types":
+        model.parallelize(parallel_dims)
+    elif parallel_dims.cp_enabled:
         apply_cp(model, parallel_dims.get_mesh("cp"))
 
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
 
-    dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
-    assert dp_mesh is not None
+    if parallelism.spmd_backend == "spmd_types":
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+    else:
+        dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
+        dp_mesh_dims = None
+        assert dp_mesh is not None
+    if parallelism.spmd_backend == "spmd_types":
+        annotate_dp_cp_params_as_r(model, parallel_dims)
     apply_fsdp(
         model,
         dp_mesh,
@@ -59,6 +84,7 @@ def parallelize_flux(
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         cpu_offload=training.enable_cpu_offload,
         enable_symm_mem=parallelism.enable_fsdp_symm_mem,
+        dp_mesh_dims=dp_mesh_dims,
     )
 
     logger.info("Applied fully_shard to the model")
@@ -73,6 +99,7 @@ def apply_fsdp(
     reduce_dtype: torch.dtype,
     cpu_offload: bool = False,
     enable_symm_mem: bool = False,
+    dp_mesh_dims: DataParallelMeshDims | None = None,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -87,6 +114,8 @@ def apply_fsdp(
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if dp_mesh_dims is not None:
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
@@ -203,8 +232,8 @@ def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
 
 
 def parallelize_encoders(
-    t5_model: nn.Module,
-    clip_model: nn.Module,
+    t5_model: FluxEmbedder,
+    clip_model: FluxEmbedder,
     parallel_dims: ParallelDims,
     *,
     training: TrainingConfig,
@@ -215,30 +244,40 @@ def parallelize_encoders(
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
     )
 
-    dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
-    assert dp_mesh is not None
+    if parallel_dims.spmd_backend == "spmd_types":
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+    else:
+        dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
+        dp_mesh_dims = None
+        assert dp_mesh is not None
     fsdp_config: dict[str, Any] = {
         "mesh": dp_mesh,
         "mp_policy": mp_policy,
     }
+    if dp_mesh_dims is not None:
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if training.enable_cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
     # NOTE: only apply FSDP to the T5 encoder, not the CLIP text encoder.
     # CLIP Text encoder has low computation / communication ratio, so it's not necessary to apply FSDP to it.
+    hf_module = t5_model.hf_module
+    assert isinstance(hf_module, nn.Module)
+    if parallel_dims.spmd_backend == "spmd_types":
+        annotate_dp_cp_params_as_r(hf_module, parallel_dims)
     # pyrefly: ignore [missing-attribute]
-    for block in t5_model.hf_module.encoder.block:
+    for block in hf_module.encoder.block:
         fully_shard(block, **fsdp_config)
     # pyrefly: ignore [no-matching-overload]
-    fully_shard(t5_model.hf_module, **fsdp_config)
+    fully_shard(hf_module, **fsdp_config)
 
     if enable_symm_mem:
         # pyrefly: ignore [bad-argument-type]
-        enable_fsdp_symm_mem(t5_model.hf_module)
+        enable_fsdp_symm_mem(hf_module)
 
     # Disable FSDP's automatic gradient division for all FSDP modules
     # pyrefly: ignore [bad-argument-type]
-    disable_fsdp_gradient_division(t5_model.hf_module)
+    disable_fsdp_gradient_division(hf_module)
 
     logger.info("Applied fully_shard to the T5 encoder model")
 
