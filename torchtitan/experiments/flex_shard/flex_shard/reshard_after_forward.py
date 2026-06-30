@@ -12,7 +12,6 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from torch.utils._python_dispatch import TorchDispatchMode
 
 from .bucket_storage import ShardedBucketStorage
 from .ops import is_unshard_bucket_op
@@ -112,7 +111,7 @@ def _compose_with_ac_policy(
 
             ctx.policy_fn = merged_policy
         forward_ctx, recompute_ctx = contexts
-        return forward_ctx, _MarkRecomputeTorchDispatchMode(
+        return forward_ctx, _MarkRecomputeContext(
             recompute_ctx,
             recompute_state,
             recompute_bucket_ids,
@@ -126,7 +125,7 @@ def _make_full_ac_recompute_context_fn(
     recompute_bucket_ids: frozenset[int],
 ):
     def full_ac_recompute_context_fn():
-        return nullcontext(), _MarkRecomputeTorchDispatchMode(
+        return nullcontext(), _MarkRecomputeContext(
             nullcontext(),
             recompute_state,
             recompute_bucket_ids,
@@ -135,14 +134,8 @@ def _make_full_ac_recompute_context_fn(
     return full_ac_recompute_context_fn
 
 
-class _MarkRecomputeTorchDispatchMode(TorchDispatchMode):
-    """Context wrapper that marks bucket-specific recomputation during tracing."""
-
-    supports_higher_order_operators = True
-
-    @classmethod
-    def ignore_compile_internals(cls) -> bool:
-        return True
+class _MarkRecomputeContext:
+    """Context wrapper that marks bucket-specific recomputation."""
 
     def __init__(
         self,
@@ -156,26 +149,17 @@ class _MarkRecomputeTorchDispatchMode(TorchDispatchMode):
         self.recompute_bucket_ids = recompute_bucket_ids
         self._token: Any | None = None
 
-    def __enter__(self) -> _MarkRecomputeTorchDispatchMode:
+    def __enter__(self) -> _MarkRecomputeContext:
         self.ctx.__enter__()
         self._token = self.recompute_state.enter_recompute(self.recompute_bucket_ids)
-        return super().__enter__()
+        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        suppress = False
-        try:
-            suppress = bool(super().__exit__(exc_type, exc_val, exc_tb))
-        finally:
-            token = self._token
-            self._token = None
-            if token is not None:
-                self.recompute_state.exit_recompute(token)
-            suppress = bool(self.ctx.__exit__(exc_type, exc_val, exc_tb)) or suppress
-        return suppress
-
-    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-        kwargs = {} if kwargs is None else kwargs
-        return func(*args, **kwargs)
+        token = self._token
+        self._token = None
+        if token is not None:
+            self.recompute_state.exit_recompute(token)
+        return self.ctx.__exit__(exc_type, exc_val, exc_tb)
 
 
 def _wrap_module(
