@@ -259,15 +259,12 @@ def parallelize_encoders(
     # pyrefly: ignore [missing-attribute]
     for block in hf_module.encoder.block:
         fully_shard(block, **fsdp_config)
-    # pyrefly: ignore [no-matching-overload]
     fully_shard(hf_module, **fsdp_config)
 
     if enable_symm_mem:
-        # pyrefly: ignore [bad-argument-type]
         enable_fsdp_symm_mem(hf_module)
 
     # Disable FSDP's automatic gradient division for all FSDP modules
-    # pyrefly: ignore [bad-argument-type]
     disable_fsdp_gradient_division(hf_module)
 
     logger.info("Applied fully_shard to the T5 encoder model")

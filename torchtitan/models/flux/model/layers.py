@@ -264,7 +264,7 @@ class DoubleStreamBlock(Module):
         ),
         out_types=spmd.PartitionSpec("dp", "cp", None, None),
     )
-    def local_concat_text_image_attention_states(
+    def _local_concat_text_image_attention_states(
         text: torch.Tensor,
         image: torch.Tensor,
     ) -> torch.Tensor:
@@ -297,9 +297,9 @@ class DoubleStreamBlock(Module):
         txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
         # run actual attention
-        q = self.local_concat_text_image_attention_states(txt_q, img_q)
-        k = self.local_concat_text_image_attention_states(txt_k, img_k)
-        v = self.local_concat_text_image_attention_states(txt_v, img_v)
+        q = self._local_concat_text_image_attention_states(txt_q, img_q)
+        k = self._local_concat_text_image_attention_states(txt_k, img_k)
+        v = self._local_concat_text_image_attention_states(txt_v, img_v)
 
         q, k = apply_rope(q, k, pe)
         attn = self.inner_attention(q, k, v, is_causal=False)

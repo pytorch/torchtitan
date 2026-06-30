@@ -12,18 +12,18 @@ from torch import nn, Tensor
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
-from torchtitan.protocols import BaseModel
-from torchtitan.protocols.module import ModuleList
 
 from torchtitan.models.flux.model.layers import (
     DoubleStreamBlock,
     EmbedND,
     LastLayer,
+    local_split_text_image,
     MLPEmbedder,
     SingleStreamBlock,
-    local_split_text_image,
     timestep_embedding,
 )
+from torchtitan.protocols import BaseModel
+from torchtitan.protocols.module import ModuleList
 
 
 class FluxModel(BaseModel):
