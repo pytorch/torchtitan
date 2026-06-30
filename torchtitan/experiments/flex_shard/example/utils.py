@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 from collections.abc import Sequence
+from typing import Any
 
 import torch
 
@@ -129,6 +130,8 @@ def pack_segments_into_flat_buffer_triton_if_supported(
     numels: Sequence[int],
     dst_offsets: Sequence[int],
     out: torch.Tensor,
+    *,
+    descriptor: Any,
 ) -> list[torch.Tensor] | None:
     """Use Triton descriptor packing for supported inputs.
 
@@ -151,6 +154,33 @@ def pack_segments_into_flat_buffer_triton_if_supported(
         numels,
         dst_offsets,
         out,
+        descriptor=descriptor,
+    )
+
+
+def make_segment_pack_descriptor_triton_if_supported(
+    tensor_indices: Sequence[int],
+    src_offsets: Sequence[int],
+    numels: Sequence[int],
+    dst_offsets: Sequence[int],
+    device: torch.device | str,
+) -> Any | None:
+    """Create reusable Triton segment-pack descriptors on ``device``."""
+    if torch.compiler.is_compiling():
+        return None
+    if importlib.util.find_spec("triton") is None:
+        raise AssertionError(
+            "GroupedOwned Triton segment packing requires the triton package."
+        )
+
+    from ._copy_kernels import make_segment_pack_descriptor
+
+    return make_segment_pack_descriptor(
+        tensor_indices,
+        src_offsets,
+        numels,
+        dst_offsets,
+        device,
     )
 
 
@@ -158,6 +188,7 @@ __all__ = [
     "copy_tensor_to_dtype",
     "copy_tensors_into_flat_buffer",
     "foreach_copy_",
+    "make_segment_pack_descriptor_triton_if_supported",
     "pack_segments_into_flat_buffer_triton_if_supported",
     "pack_tensors_into_flat_buffer",
     "pack_tensors_into_flat_buffer_with_scratch",
