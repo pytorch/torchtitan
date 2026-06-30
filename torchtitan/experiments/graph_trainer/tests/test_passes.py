@@ -20,6 +20,7 @@ from torch.cuda._graph_annotations import _is_tools_id_unavailable
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.fx.traceback import preserve_node_meta
+from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_fsdp import FSDPTest
 from torch.testing._internal.common_utils import TestCase
 from torch.utils.checkpoint import checkpoint, CheckpointPolicy
@@ -559,6 +560,109 @@ class TestDDPAllReduceBucketing(FSDPTest):
         # All replicate all-reduces collapse into a single bucketed all-reduce.
         after = self._count_all_reduce(bw_gm)
         self.assertEqual(after, 1)
+
+
+class TestHSDPBucketing(FSDPTest):
+    """HSDP (shard x replicate) bucketing: simple_fsdp hybrid_shard backward emits
+    BOTH a per-parameter reduce_scatter (shard axis) and a per-parameter
+    all_reduce (replicate axis); the bucketing pass collapses each collective type
+    into one per bucket.
+    """
+
+    @property
+    def world_size(self) -> int:
+        # HSDP needs both axes > 1; on 4 GPUs that is shard=2 x replicate=2.
+        return 4
+
+    def _make_hsdp_model(self, dim=16, n_layers=3):
+        parallel_dims = ParallelDims(
+            dp_shard=2,
+            dp_replicate=2,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+        )
+        model = ToyModel(dim, n_layers).cuda()
+        dp_mesh = parallel_dims.get_mesh(["dp_replicate", "fsdp"])
+        model = data_parallel(model, device_mesh=dp_mesh, mode="hybrid_shard")
+        return model
+
+    def _export_and_get_bw_graph(self, model, inputs):
+        joint_with_descriptors, tracing_context = export_joint(model, (inputs,))
+        captured = {}
+
+        def capture_bw_compiler(gm, example_inputs):
+            captured["gm"] = gm
+            captured["example_inputs"] = example_inputs
+            return gm
+
+        with tracing(tracing_context):
+            aot_compile_joint_with_descriptors(
+                joint_with_descriptors,
+                bw_compiler=capture_bw_compiler,
+            )
+        return captured["gm"], captured["example_inputs"]
+
+    @staticmethod
+    def _count_collective(gm, keyword):
+        """Count actual collective launches of a kind (excludes the bucketing
+        ``_pre_bucket_*`` helper ops). ``all_reduce`` and ``reduce_scatter`` are
+        distinct substrings so they don't cross-match."""
+        n = 0
+        for node in gm.graph.nodes:
+            if node.op != "call_function":
+                continue
+            target = str(node.target)
+            if "_pre_bucket" in target:
+                continue
+            if keyword == "all_reduce" and "all_reduce" in target:
+                n += 1
+            elif keyword == "reduce_scatter" and "reduce_scatter" in target:
+                n += 1
+        return n
+
+    @skip_if_lt_x_gpu(4)
+    def test_hsdp_reduce_scatter_and_all_reduce_are_bucketed(self):
+        model = self._make_hsdp_model(n_layers=3)
+        inputs = torch.randn(4, 16).cuda()
+
+        bw_gm, _ = self._export_and_get_bw_graph(model, inputs)
+
+        # Backward emits one reduce_scatter (shard axis) and one all_reduce
+        # (replicate axis) per parameter, so there are several of each before
+        # bucketing.
+        ar_before = self._count_collective(bw_gm, "all_reduce")
+        rs_before = self._count_collective(bw_gm, "reduce_scatter")
+        self.assertGreater(ar_before, 1, "expected multiple per-param all_reduces")
+        self.assertGreater(rs_before, 1, "expected multiple per-param reduce_scatters")
+
+        # export_joint drops module FQNs on backward nodes, so tag every backward
+        # gradient-reduction collective (both RS and AR) into one bucket plan.
+        # The bucketer groups per collective type, so this yields one RS and one
+        # AR bucket. Before the all_reduce-bucketing fix, the AR count would be
+        # unchanged.
+        bucket_fqn = "block"
+        coll_targets = (
+            torch.ops._c10d_functional.all_reduce.default,
+            torch.ops._c10d_functional.reduce_scatter_tensor.default,
+        )
+        for node in bw_gm.graph.nodes:
+            if node.op == "call_function" and node.target in coll_targets:
+                node.meta["custom"] = {_MODULE_FQN: bucket_fqn}
+                node.meta["autograd_backward"] = True
+
+        joint_transformer_block_bucketing_reordering_pass(
+            bw_gm,
+            None,
+            module_bucket_plans=[bucket_fqn],
+        )
+        bw_gm.graph.lint()
+
+        # Each collective type collapses into a single bucketed launch.
+        self.assertEqual(self._count_collective(bw_gm, "all_reduce"), 1)
+        self.assertEqual(self._count_collective(bw_gm, "reduce_scatter"), 1)
 
 
 class TestFsdpDenseSchedulerPass(TestCase):
