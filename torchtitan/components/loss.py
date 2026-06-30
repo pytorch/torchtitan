@@ -395,7 +395,8 @@ def compute_logprobs(
             logits,
             mesh.get_group("tp"),
             src=spmd.S(-1),
-            dst=spmd.I,
+            dst=spmd.R,
+            backward_options={"op_dtype": logits.dtype},
         )
 
     B, L, V = logits.shape
