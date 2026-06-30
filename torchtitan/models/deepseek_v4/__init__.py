@@ -30,6 +30,8 @@ from torchtitan.protocols.model_spec import ModelSpec
 
 from .attention import (
     Attention,
+    collect_dsa_indexer_loss_metrics,
+    DSAIndexerAuxLoss,
     DSAFlexAttention,
 )
 from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
@@ -179,6 +181,7 @@ def _make_v4_attn_config(
     index_topk: int,
     n_layers: int,
     rope: RoPE.Config,
+    enable_indexer_loss: bool = True,
 ) -> Attention.Config:
     hd = head_dim
     per_group_in = (n_heads * hd) // n_groups
@@ -187,6 +190,7 @@ def _make_v4_attn_config(
     # Conditionally build compressor/indexer configs.
     compressor_cfg = None
     indexer_cfg = None
+    indexer_aux_loss_cfg = None
     compressor_128_cfg = None
     from .compressor import Compressor, Indexer
 
@@ -203,6 +207,12 @@ def _make_v4_attn_config(
             rope_head_dim=rope_head_dim, q_lora_rank=q_lora_rank,
             compress_ratio=compress_ratio, norm_eps=norm_eps, rope=rope,
         )
+        if enable_indexer_loss:
+            indexer_aux_loss_cfg = DSAIndexerAuxLoss.Config(
+                num_heads=n_heads,
+                softmax_scale=softmax_scale,
+                window_size=window_size,
+            )
     elif compress_ratio > 1:
         coff = 1  # no overlap
         compressor_128_cfg = _make_compressor_config(
@@ -210,10 +220,11 @@ def _make_v4_attn_config(
             compress_ratio=compress_ratio, rotate=False,
             norm_eps=norm_eps, coff=coff, rope=rope,
         )
-    sparse_attn_cfg = DSAFlexAttention.Config(
+    inner_attention_cfg = DSAFlexAttention.Config(
         window_size=window_size,
         compress_ratio=compress_ratio,
         softmax_scale=softmax_scale,
+        return_lse=indexer_aux_loss_cfg is not None,
     )
 
     return Attention.Config(
@@ -232,7 +243,7 @@ def _make_v4_attn_config(
         index_topk=index_topk,
         n_layers=n_layers,
         layer_id=layer_id,
-        inner_attention=sparse_attn_cfg,
+        inner_attention=inner_attention_cfg,
         rope=dataclasses.replace(rope),
         wq_a=Linear.Config(
             in_features=dim, out_features=q_lora_rank, bias=False,
@@ -272,7 +283,7 @@ def _make_v4_attn_config(
         compressor=compressor_cfg,
         compressor_128=compressor_128_cfg,
         indexer=indexer_cfg,
-        sparse_attn=sparse_attn_cfg,
+        indexer_aux_loss=indexer_aux_loss_cfg,
     )
 
 
@@ -291,7 +302,6 @@ def _make_v4_moe_config(
     load_balance_coeff: float,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
-    score_before_experts: bool = False,
 ):
     return DeepSeekV4MoE.Config(
         num_experts=num_experts,
@@ -317,7 +327,6 @@ def _make_v4_moe_config(
             num_experts=num_experts,
             top_k=top_k,
             param_init=_depth_experts_init(layer_id),
-            score_before_experts=score_before_experts,
             comm_backend=moe_comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         ),
@@ -331,7 +340,7 @@ def _make_v4_moe_config(
             if num_shared_experts > 0
             else None
         ),
-        load_balance_coeff=load_balance_coeff if layer_id >= n_hash_layers else None,
+        load_balance_coeff=load_balance_coeff,
     )
 
 
@@ -378,12 +387,12 @@ def _build_v4_layers(
     non_blocking_capacity_factor: float | None,
     rope: RoPE.Config,
     rope_compress: RoPE.Config,
-    score_before_experts: bool = False,
     hc_mult: int = 4,
     sinkhorn_iters: int = 20,
     hc_eps: float = 1e-6,
     dense_hidden_dim: int | None = None,
     dense_layers: set[int] | None = None,
+    enable_indexer_loss: bool = True,
 ) -> list[DeepSeekV4TransformerBlock.Config]:
     if dense_layers is None:
         dense_layers = set()
@@ -411,6 +420,7 @@ def _build_v4_layers(
             index_topk=index_topk,
             n_layers=n_layers,
             rope=rope_compress if cr > 1 else rope,
+            enable_indexer_loss=enable_indexer_loss,
         )
 
         if layer_id in dense_layers:
@@ -436,7 +446,6 @@ def _build_v4_layers(
                 load_balance_coeff=load_balance_coeff,
                 moe_comm_backend=moe_comm_backend,
                 non_blocking_capacity_factor=non_blocking_capacity_factor,
-                score_before_experts=score_before_experts,
             )
 
         layers.append(
@@ -465,6 +474,7 @@ def _build_v4_layers(
 def _debugmodel(
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
+    enable_indexer_loss: bool = True,
 ) -> DeepSeekV4Model.Config:
     dim = 256
     n_layers = 4
@@ -542,11 +552,11 @@ def _debugmodel(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=rope,
         rope_compress=rope_compress,
-        score_before_experts=False,
         hc_mult=hc_mult,
         sinkhorn_iters=sinkhorn_iters,
         hc_eps=hc_eps,
         dense_layers=dense_layers,
+        enable_indexer_loss=enable_indexer_loss,
     )
 
     return DeepSeekV4Model.Config(
@@ -580,6 +590,7 @@ def model_registry(
     flavor: str,
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
+    enable_indexer_loss: bool = True,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     if flavor not in deepseek_v4_configs:
@@ -590,11 +601,12 @@ def model_registry(
     config = deepseek_v4_configs[flavor](
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
+        enable_indexer_loss=enable_indexer_loss,
     )
     if converters is not None:
         validate_converter_order(converters)
         for converter_cfg in converters:
-            converter_cfg.build().convert(config)
+            config = converter_cfg.build().convert(config)
     return ModelSpec(
         name="deepseek_v4",
         flavor=flavor,
@@ -602,5 +614,6 @@ def model_registry(
         parallelize_fn=parallelize_deepseek_v4,
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
+        metrics_fn=collect_dsa_indexer_loss_metrics,
         state_dict_adapter=DeepSeekV4StateDictAdapter,
     )
